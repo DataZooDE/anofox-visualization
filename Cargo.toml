@@ -5,6 +5,9 @@ edition = "2021"
 description = "SQL-defined dashboards: Shaper-style column roles rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
 license = "MIT"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
 ggplot-rs = { path = "../ggplot-rs", default-features = false }

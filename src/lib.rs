@@ -135,6 +135,31 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         .map_err(|e| format!("render failed: {e:?}"))
 }
 
+// ── C ABI (for the DuckDB extension side-module) ───────────────────────────
+use std::ffi::CString;
+use std::os::raw::c_char;
+
+/// C-ABI smoke test: render a fixed bar chart and return a heap SVG string
+/// (free it with [`duckplot_free`]). Exercises the whole render path through FFI
+/// — the shape the DuckDB extension entrypoint will use.
+#[no_mangle]
+pub extern "C" fn duckplot_smoke() -> *mut c_char {
+    let cols = vec![
+        Column::new("x", Role::X, vec![Value::Str("a".into()), Value::Str("b".into())]),
+        Column::new("n", Role::Value(Kind::Bar), vec![Value::Float(3.0), Value::Float(7.0)]),
+    ];
+    let svg = render(&cols, 300, 200).unwrap_or_default();
+    CString::new(svg).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+/// Free a string returned by the C ABI.
+#[no_mangle]
+pub extern "C" fn duckplot_free(p: *mut c_char) {
+    if !p.is_null() {
+        unsafe { drop(CString::from_raw(p)) };
+    }
+}
+
 /// A minimal SVG heading (for a `::LABEL`-only result).
 fn heading_svg(text: &str, width: u32) -> String {
     let esc = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
