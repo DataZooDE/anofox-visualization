@@ -12,10 +12,13 @@ use ffi::*;
 use std::ffi::CString;
 use std::ptr;
 
-/// The DuckDB API table, populated at load time.
-static mut API: *const duckdb_ext_api_v1 = ptr::null();
+/// The DuckDB API table — **copied by value** at load time (the pointer from
+/// `get_api` is only valid during init, so we own a copy, like the C macro's
+/// `duckdb_ext_api = *res`).
+static mut API: Option<duckdb_ext_api_v1> = None;
 unsafe fn api() -> &'static duckdb_ext_api_v1 {
-    &*API
+    #[allow(static_mut_refs)]
+    API.as_ref().unwrap()
 }
 
 fn smoke_svg() -> CString {
@@ -61,7 +64,7 @@ pub unsafe extern "C" fn ggplot_init_c_api(
     if api_ptr.is_null() {
         return false;
     }
-    API = api_ptr;
+    API = Some(*api_ptr); // own a copy — the pointer is only valid during init
 
     let Some(get_db) = access.get_database else { return false };
     let db = *get_db(info); // get_database returns *mut duckdb_database
