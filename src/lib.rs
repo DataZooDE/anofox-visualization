@@ -19,6 +19,10 @@
 
 use ggplot_rs::prelude::*;
 
+pub mod sql;
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 /// The kind of chart, taken from the cast on the *value* column (Shaper's
 /// `count()::BARCHART` etc.).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

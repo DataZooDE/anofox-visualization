@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>duckplot — SQL dashboards in the browser</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--ink:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#2a9d8f}
+*{box-sizing:border-box}
+body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0}
+header{padding:1.1rem 1.4rem;border-bottom:1px solid var(--line);background:var(--card);display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
+header h1{font-size:1.15rem;font-weight:650;margin:0;letter-spacing:-.01em}
+header .tag{color:var(--muted);font-size:.82rem}
+header .status{margin-left:auto;font-size:.8rem;color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:0;min-height:calc(100vh - 56px)}
+.editor{border-right:1px solid var(--line);background:var(--card);display:flex;flex-direction:column}
+.editor .bar{padding:.6rem .8rem;border-bottom:1px solid var(--line);display:flex;gap:.5rem;align-items:center}
+.editor textarea{flex:1;border:0;outline:0;resize:none;padding:1rem;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);tab-size:2}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.5rem .9rem;font-weight:600;font-size:.85rem;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-size:.82rem;background:var(--card)}
+.dash{padding:1.4rem;overflow:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:1.1rem}
+.panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
+.panel svg{max-width:100%;height:auto;display:block}
+.err{color:#b42318;background:#fef3f2;border:1px solid #fecdca;border-radius:10px;padding:.7rem .9rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}
+.dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s,transform .09s;z-index:20;white-space:nowrap}
+.dp-tip.show{opacity:1;transform:translateY(0)}
+.dp-hit{transition:filter .1s}.dp-hit:hover{filter:brightness(1.09) saturate(1.05)}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.editor{border-right:0;border-bottom:1px solid var(--line)}.editor textarea{min-height:220px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>duckplot</h1>
+  <span class="tag">SQL dashboards in the browser — DuckDB-Wasm + ggplot-rs, no server</span>
+  <span class="status" id="status">booting…</span>
+</header>
+<div class="layout">
+  <div class="editor">
+    <div class="bar">
+      <button id="run" disabled>Run ▸</button>
+      <select id="samples" title="load a sample"></select>
+    </div>
+    <textarea id="sql" spellcheck="false"></textarea>
+  </div>
+  <div class="dash">
+    <div class="grid" id="grid"></div>
+  </div>
+</div>
+<div id="dp-tip" class="dp-tip"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -6,3 +6,5 @@ Cargo.lock
 *.so
 duckext/duckdb.h
 duckext/duckdb_extension.h
+
+/web/pkg

@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
 ggplot-rs = { path = "../ggplot-rs", default-features = false }
 serde_json = "1"
+wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
 default = []
+# Browser build (DuckDB-Wasm + duckplot renderer). `wasm-pack build --features wasm`.
+wasm = ["dep:wasm-bindgen", "ggplot-rs/wasm"]
