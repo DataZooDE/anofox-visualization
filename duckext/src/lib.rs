@@ -15,8 +15,8 @@ use std::ptr;
 /// The DuckDB API table — **copied by value** at load time (the pointer from
 /// `get_api` is only valid during init, so we own a copy, like the C macro's
 /// `duckdb_ext_api = *res`).
-static mut API: Option<duckdb_ext_api_v1> = None;
-unsafe fn api() -> &'static duckdb_ext_api_v1 {
+static mut API: Option<duckdb_ext_api_v0> = None;
+unsafe fn api() -> &'static duckdb_ext_api_v0 {
     #[allow(static_mut_refs)]
     API.as_ref().unwrap()
 }
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn ggplot_init_c_api(
 ) -> bool {
     let access = &*access;
     let Some(get_api) = access.get_api else { return false };
-    let api_ptr = get_api(info, c"v1.0.0".as_ptr()) as *const duckdb_ext_api_v1;
+    let api_ptr = get_api(info, c"v1.0.0".as_ptr()) as *const duckdb_ext_api_v0;
     if api_ptr.is_null() {
         return false;
     }
