@@ -74,6 +74,25 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 Edit the SQL, press **Run**, hover the marks. Load your own data with DuckDB’s
 readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
 
+### b2) Serve the UI on a live DuckDB — explore existing data
+
+`duckplot serve` starts a tiny local HTTP server that serves the same builder UI
+plus a `/query` endpoint backed by a **live** DuckDB — so the UI operates on your
+real tables (big data stays in DuckDB), and opens the browser for you:
+
+```sh
+wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+cargo build --bin serve --features serve
+./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080
+#   --port N     choose the port
+#   --no-open    don't launch a browser
+```
+
+The UI **auto-detects**: if a `/query` bridge answers it uses live DuckDB,
+otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
+*(Next: `CALL duckplot_serve()` to launch this from inside a DuckDB session — see
+the roadmap.)*
+
 ### c) DuckDB extension (native works; wasm ~99%)
 
 Packages the renderer *inside* DuckDB so `SELECT ggplot(...)` returns an SVG.

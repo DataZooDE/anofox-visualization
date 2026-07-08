@@ -36,18 +36,40 @@ FROM range(0, 137) t(i) GROUP BY ALL ORDER BY 1;`,
 const $ = (id) => document.getElementById(id);
 const status = (t) => ($("status").textContent = t);
 
+let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
 
+// Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
+async function runSql(sql) {
+  if (backend === "live") {
+    const r = await fetch("/query", { method: "POST", body: sql });
+    if (!r.ok) throw new Error(await r.text());
+    return (await r.text()) || "[]";
+  }
+  const res = await conn.query(sql);
+  const rows = res.toArray().map((row) => row.toJSON());
+  return JSON.stringify(rows, (_, v) => (typeof v === "bigint" ? Number(v) : v));
+}
+
 async function boot() {
-  await init(); // duckplot wasm
-  const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm");
-  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
-  const workerUrl = URL.createObjectURL(
-    new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
-  );
-  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
-  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-  conn = await db.connect();
+  await init(); // duckplot wasm (plan + render_panel — used in both modes)
+
+  // Prefer a live DuckDB bridge (served by `duckplot serve`); else DuckDB-Wasm.
+  try {
+    const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
+    if (r.ok) backend = "live";
+  } catch (_) {}
+
+  if (backend !== "live") {
+    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm");
+    const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+    const workerUrl = URL.createObjectURL(
+      new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+    );
+    const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    conn = await db.connect();
+  }
 
   // samples dropdown
   const sel = $("samples");
@@ -61,7 +83,7 @@ async function boot() {
 
   $("run").disabled = false;
   $("run").onclick = run;
-  status("ready — press Run");
+  status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
 }
 
@@ -79,13 +101,10 @@ async function run() {
   for (const s of stmts) {
     try {
       if (s.setup) {
-        await conn.query(s.sql);
+        await runSql(s.sql);
         continue;
       }
-      const res = await conn.query(s.sql);
-      const rows = res.toArray().map((r) => r.toJSON());
-      const rowsJson = JSON.stringify(rows, (_, v) => (typeof v === "bigint" ? Number(v) : v));
-      console.log("PANEL "+JSON.stringify(s.roles)+" ROWS "+rowsJson.slice(0,160));
+      const rowsJson = await runSql(s.sql);
       const svg = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
       const fig = document.createElement("figure");
       fig.className = "panel";

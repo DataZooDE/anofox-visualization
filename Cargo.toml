@@ -13,8 +13,19 @@ crate-type = ["cdylib", "rlib"]
 ggplot-rs = { path = "../ggplot-rs", default-features = false }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
+# `serve` feature (native only): local HTTP server that launches the browser UI
+# against a live DuckDB, incl. from the extension later.
+tiny_http = { version = "0.12", optional = true }
+include_dir = { version = "0.7", optional = true }
+open = { version = "5", optional = true }
 
 [features]
 default = []
 # Browser build (DuckDB-Wasm + duckplot renderer). `wasm-pack build --features wasm`.
 wasm = ["dep:wasm-bindgen", "ggplot-rs/wasm"]
+# `duckplot serve <db>` — serve the builder UI wired to a live DuckDB.
+serve = ["dep:tiny_http", "dep:include_dir", "dep:open"]
+
+[[bin]]
+name = "serve"
+required-features = ["serve"]
