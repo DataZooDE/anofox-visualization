@@ -53,3 +53,19 @@ built with emscripten `'latest'` (unpinned at the 1.29.0 build); mine is 3.1.57,
 whose libc `pread` signature differs. Fix: build with the exact emscripten the eh
 bundle used (or stub/avoid the `pread` import). The COI bundle *does* pin 3.1.57
 but is threaded (shared-memory) → different side-module memory model.
+
+## WASM — final ABI findings (extension-ci-tools route)
+- extension-ci-tools pins **emscripten 3.1.71** (matched it). DuckDB-Wasm 1.29's
+  eh bundle was built with emscripten `'latest'` at 2024-10-07.
+- The blocker is that **Rust's std links libc file-I/O syscalls** (`pread`,
+  `pwrite`, `preadv`, `pwritev`, `ftruncate`, `lseek`) whose emscripten **i64
+  legalization** doesn't match DuckDB-Wasm's host imports. `panic=abort` drops a
+  couple; `WASM_BIGINT` doesn't help.
+- **Defining them as local stubs (`#[no_mangle]`) stops them being imported** and
+  advances the loader: pread→preadv→ftruncate→lseek all resolve, and the module
+  **links and instantiates**. It then hits a runtime `function signature
+  mismatch` — an i64-legalization difference at an indirect call site.
+- Next: match emscripten's exact i64 legalization at those call sites (legalized
+  i32-pair signatures for the stubs), or eliminate the file-I/O linkage entirely
+  (a `no_std`-ish render path / custom target), or build the Rust extension
+  through extension-ci-tools' own Rust pipeline. This is the last ~1%.

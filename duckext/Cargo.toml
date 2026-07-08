@@ -13,3 +13,9 @@ ggplot-rs = { path = "../../ggplot-rs", default-features = false }
 
 [build-dependencies]
 bindgen = "0.70"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -12,6 +12,42 @@ use ffi::*;
 use std::ffi::CString;
 use std::ptr;
 
+// Rust's std links a few libc file-I/O imports (`pread`/`pwrite`) whose
+// emscripten signatures don't match DuckDB-Wasm's host module, and they're never
+// called in the render path. Defining them locally stops the side-module from
+// importing them (resolved internally instead of from `env`).
+#[cfg(target_arch = "wasm32")]
+mod libc_stubs {
+    use core::ffi::c_void;
+    #[no_mangle]
+    pub unsafe extern "C" fn pread(_fd: i32, _buf: *mut c_void, _n: usize, _off: i64) -> isize {
+        -1
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn pwrite(_fd: i32, _buf: *const c_void, _n: usize, _off: i64) -> isize {
+        -1
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn preadv(_fd: i32, _iov: *const c_void, _c: i32, _off: i64) -> isize {
+        -1
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn pwritev(_fd: i32, _iov: *const c_void, _c: i32, _off: i64) -> isize {
+        -1
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn ftruncate(_fd: i32, _len: i64) -> i32 {
+        -1
+    }
+    // NOTE: with `lseek` defined the module links AND instantiates, but hits a
+    // runtime `function signature mismatch` — an emscripten i64-legalization
+    // difference at an indirect call. This is the final ABI gap; see BUILD.md.
+    #[no_mangle]
+    pub unsafe extern "C" fn lseek(_fd: i32, _off: i64, _whence: i32) -> i64 {
+        -1
+    }
+}
+
 /// The DuckDB API table — **copied by value** at load time (the pointer from
 /// `get_api` is only valid during init, so we own a copy, like the C macro's
 /// `duckdb_ext_api = *res`).
@@ -60,7 +96,7 @@ pub unsafe extern "C" fn ggplot_init_c_api(
 ) -> bool {
     let access = &*access;
     let Some(get_api) = access.get_api else { return false };
-    let api_ptr = get_api(info, c"v1.0.0".as_ptr()) as *const duckdb_ext_api_v0;
+    let api_ptr = get_api(info, c"v0.0.1".as_ptr()) as *const duckdb_ext_api_v0;
     if api_ptr.is_null() {
         return false;
     }
