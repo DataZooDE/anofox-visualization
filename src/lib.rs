@@ -84,6 +84,32 @@ fn value_str(v: &Value) -> String {
     }
 }
 
+/// The DataZoo palette — duckplot's default categorical + single-series colours.
+pub const DZ_COLORS: [(u8, u8, u8); 5] = [
+    (0x45, 0x64, 0x81), // steel blue
+    (0xe8, 0x64, 0x33), // orange
+    (0xE8, 0x33, 0x5D), // pink
+    (0xef, 0xc9, 0x4c), // yellow
+    (0x21, 0x21, 0x21), // near-black
+];
+
+fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
+    let (r, g, b) = DZ_COLORS[i % DZ_COLORS.len()];
+    ggplot_rs::scale::color::RGBAColor::new(r, g, b)
+}
+
+/// Distinct category labels in first-seen order (the manual-scale keys).
+fn distinct_labels(col: &Column) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for v in &col.values {
+        let s = value_str(v);
+        if !seen.iter().any(|x| x == &s) {
+            seen.push(s);
+        }
+    }
+    seen
+}
+
 /// Render an annotated result set to an SVG dashboard element.
 ///
 /// Recognises one `X` column, an optional `Category` column, an optional `Label`
@@ -129,17 +155,16 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Area => plot.geom_area(),
         Kind::Point => plot.geom_point(),
     };
-    if category.is_some() {
-        // Dark2 — a calmer, more distinct categorical palette than Set1.
-        plot = if by_colour {
-            plot.scale_color_brewer(PaletteName::Dark2)
-        } else {
-            plot.scale_fill_brewer(PaletteName::Dark2)
-        };
+    if let Some(cat) = category {
+        // Map the distinct series to the DataZoo palette (by first-seen order).
+        let levels = distinct_labels(cat);
+        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
+            levels.iter().enumerate().map(|(i, s)| (s.as_str(), dz_color(i))).collect();
+        plot = if by_colour { plot.scale_color_manual(pairs) } else { plot.scale_fill_manual(pairs) };
     }
-    // A modern teal for single-series marks (matches Dark2's first hue). Set the
-    // primary AFTER the theme preset — presets replace the whole theme.
-    plot = plot.theme_minimal().primary_color((0x2A, 0x9D, 0x8F));
+    // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
+    // preset — presets replace the whole theme.
+    plot = plot.theme_minimal().primary_color(DZ_COLORS[0]);
     if let Some(t) = &title {
         plot = plot.title(t);
     }
