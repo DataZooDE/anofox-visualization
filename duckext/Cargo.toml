@@ -1,0 +1,15 @@
+[package]
+name = "duckplot-duckext"
+version = "0.1.0"
+edition = "2021"
+description = "DuckDB C-API extension: SELECT ggplot(...) → SVG, rendered by ggplot-rs via duckplot. Wasm side-module compatible (no libduckdb linking)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+duckplot = { path = ".." }
+ggplot-rs = { path = "../../ggplot-rs", default-features = false }
+
+[build-dependencies]
+bindgen = "0.70"

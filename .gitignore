@@ -1,2 +1,8 @@
 /target
 Cargo.lock
+
+/duckext/target
+*.duckdb_extension
+*.so
+duckext/duckdb.h
+duckext/duckdb_extension.h
