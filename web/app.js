@@ -126,15 +126,33 @@ function showError(grid, msg) {
   grid.appendChild(d);
 }
 
-// Styled hover tooltips over any mark that carries an SVG <title>.
+// Styled hover tooltips + click-to-highlight LINKING across all panels.
+// Every mark carrying a `<title>` ("series: value") becomes hoverable; its series
+// (the part before ": ") is stored on the element. Clicking a mark highlights
+// that series everywhere and dims the rest; click again (or the background) clears.
+let dpSelected = null;
+
 function attachHover() {
   const tip = $("dp-tip");
-  document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon").forEach((el) => {
+  const marks = [...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon")].filter(
+    (el) => el.querySelector("title") && el.querySelector("title").textContent.trim()
+  );
+
+  const apply = () => {
+    for (const el of marks) {
+      const s = el.getAttribute("data-series");
+      el.style.opacity = !dpSelected || s === dpSelected ? "" : "0.15";
+    }
+  };
+
+  marks.forEach((el) => {
     const t = el.querySelector("title");
-    if (!t || !t.textContent.trim()) return;
     const txt = t.textContent;
+    const series = txt.includes(": ") ? txt.slice(0, txt.lastIndexOf(": ")) : txt;
     el.removeChild(t);
+    el.setAttribute("data-series", series);
     el.classList.add("dp-hit");
+    el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
       tip.textContent = txt;
       tip.classList.add("show");
@@ -144,7 +162,21 @@ function attachHover() {
       tip.style.top = e.clientY + 14 + "px";
     });
     el.addEventListener("mouseleave", () => tip.classList.remove("show"));
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dpSelected = dpSelected === series ? null : series;
+      apply();
+    });
   });
+  apply();
 }
+
+// Click empty space to clear the linked selection.
+document.addEventListener("click", () => {
+  if (dpSelected !== null) {
+    dpSelected = null;
+    document.querySelectorAll(".dp-hit").forEach((el) => (el.style.opacity = ""));
+  }
+});
 
 boot().catch((e) => status("boot failed: " + e));

@@ -151,8 +151,10 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     plot = match kind {
         Kind::Bar => plot.geom_col().position(PositionDodge),
         Kind::BarStacked => plot.geom_col().position(PositionStack),
-        Kind::Line => plot.geom_line(),
-        Kind::Area => plot.geom_area(),
+        // Lines/areas also get point markers — they carry the per-point `<title>`
+        // so every chart is hoverable (and clickable for linking).
+        Kind::Line => plot.geom_line().geom_point(),
+        Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
     };
     if let Some(cat) = category {
