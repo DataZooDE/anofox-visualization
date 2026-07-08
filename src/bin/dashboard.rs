@@ -7,7 +7,7 @@
 //! The SQL parsing (`::ROLE` casts, comments, statement splitting) lives in
 //! `duckplot::sql`, shared with the wasm browser build.
 
-use duckplot::{render, sql};
+use duckplot::{render, sql, Role};
 use std::process::Command;
 
 fn main() {
@@ -30,9 +30,20 @@ fn main() {
             run(&db, &p.sql, false); // DDL/insert — run for effect
             continue;
         }
+        // Dropdowns are interactive — they need the browser builder / `serve`.
+        if p.roles.iter().any(|(_, r)| matches!(r, Role::Input)) {
+            continue;
+        }
         let json = run(&db, &p.sql, true);
         let rows: Vec<serde_json::Map<String, serde_json::Value>> =
             serde_json::from_str(json.trim()).unwrap_or_default();
+        // A label-only panel is a spanning section heading, not a card.
+        if p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label) {
+            let text = rows.first().and_then(|r| r.values().next()).and_then(|v| v.as_str()).unwrap_or("");
+            let esc = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            panels.push_str(&format!("<h2 class=\"section\">{esc}</h2>"));
+            continue;
+        }
         let cols = sql::columns_from_rows(&rows, &p.roles);
         let svg = render(&cols, 460, 300).unwrap_or_else(|e| format!("<pre>error: {e}</pre>"));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
@@ -74,7 +85,8 @@ const STYLE: &str = r#":root{--bg:#f4f6f9;--card:#fff;--ink:#1f2937;--muted:#6b7
 body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:2rem}
 h1{font-size:1.35rem;font-weight:650;letter-spacing:-.01em;margin:0 0 .25rem}
 .src{color:var(--muted);font-size:.85rem;margin-bottom:1.5rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem;align-content:start}
+.section{grid-column:1/-1;margin:.6rem 0 -.4rem;font-size:1.1rem;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
 .panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
 .panel svg{max-width:100%;height:auto;display:block}
 .dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s,transform .09s;z-index:20;white-space:nowrap}

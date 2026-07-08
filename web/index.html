@@ -20,7 +20,11 @@ button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.5
 button:disabled{opacity:.5;cursor:default}
 select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-size:.82rem;background:var(--card)}
 .dash{padding:1.4rem;overflow:auto}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:1.1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:1.1rem;align-content:start}
+.section{grid-column:1/-1;margin:.6rem 0 -.4rem;font-size:1.1rem;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
+.controls{grid-column:1/-1;display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.7rem 1rem}
+.control{font-size:.82rem;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:.45rem}
+.control select{border:1px solid var(--line);border-radius:8px;padding:.4rem .5rem;font-size:.85rem;background:var(--card);color:var(--ink);font-weight:500}
 .panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
 .panel svg{max-width:100%;height:auto;display:block}
 .err{color:#b42318;background:#fef3f2;border:1px solid #fecdca;border-radius:10px;padding:.7rem .9rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}

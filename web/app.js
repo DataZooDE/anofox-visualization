@@ -31,6 +31,23 @@ FROM range(0, 40) t(i);
 
 SELECT (i % 5)::XAXIS, count(*)::BARCHART
 FROM range(0, 137) t(i) GROUP BY ALL ORDER BY 1;`,
+
+  "Dropdown filter": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
+  ('W1','app',30),('W1','web',22),('W1','api',12),
+  ('W2','app',41),('W2','web',28),('W2','api',15),
+  ('W3','app',26),('W3','web',33),('W3','api', 9),
+  ('W4','app',48),('W4','web',30),('W4','api',18)
+) t(week, channel, n);
+
+-- A dropdown: the column's values become options and its name ('channel')
+-- becomes a DuckDB variable. Referenced below via getvariable('channel').
+SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
+
+SELECT 'Sessions for the selected channel'::LABEL;
+
+SELECT week::XAXIS, sum(n)::BARCHART
+FROM sessions WHERE channel = getvariable('channel')
+GROUP BY ALL ORDER BY week;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -87,6 +104,10 @@ async function boot() {
   run();
 }
 
+const isDropdown = (s) => s.roles.some((r) => r[1] === "DROPDOWN");
+const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
+let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
+
 async function run() {
   const grid = $("grid");
   grid.innerHTML = "";
@@ -97,26 +118,78 @@ async function run() {
   } catch (e) {
     return showError(grid, String(e));
   }
-  let panels = 0;
+
+  // Pass 1: setup + inputs — set DuckDB variables before any chart runs.
+  const controls = [];
   for (const s of stmts) {
     try {
       if (s.setup) {
         await runSql(s.sql);
-        continue;
+      } else if (isDropdown(s)) {
+        const rows = JSON.parse(await runSql(s.sql));
+        if (!rows.length) continue;
+        const varname = Object.keys(rows[0])[0];
+        const options = rows.map((r) => String(r[varname]));
+        if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
+        await runSql(`SET VARIABLE ${varname} = '${dpVars[varname].replace(/'/g, "''")}'`);
+        controls.push({ varname, options });
       }
+    } catch (e) {
+      showError(grid, `${s.sql}\n\n${e}`);
+    }
+  }
+  if (controls.length) renderControls(grid, controls);
+
+  // Pass 2: headings + charts.
+  let panels = 0;
+  for (const s of stmts) {
+    if (s.setup || isDropdown(s)) continue;
+    try {
       const rowsJson = await runSql(s.sql);
-      const svg = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
-      const fig = document.createElement("figure");
-      fig.className = "panel";
-      fig.innerHTML = svg;
-      grid.appendChild(fig);
-      panels++;
+      if (isHeading(s)) {
+        const rows = JSON.parse(rowsJson);
+        const h = document.createElement("h2");
+        h.className = "section";
+        h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
+        grid.appendChild(h);
+      } else {
+        const fig = document.createElement("figure");
+        fig.className = "panel";
+        fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
+        grid.appendChild(fig);
+        panels++;
+      }
     } catch (e) {
       showError(grid, `${s.sql}\n\n${e}`);
     }
   }
   attachHover();
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
+}
+
+// Build a filter bar of <select> controls; changing one re-runs the dashboard.
+function renderControls(grid, controls) {
+  const bar = document.createElement("div");
+  bar.className = "controls";
+  for (const c of controls) {
+    const wrap = document.createElement("label");
+    wrap.className = "control";
+    wrap.textContent = c.varname + ":";
+    const sel = document.createElement("select");
+    for (const o of c.options) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = o;
+      if (o === dpVars[c.varname]) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onchange = () => {
+      dpVars[c.varname] = sel.value;
+      run();
+    };
+    wrap.appendChild(sel);
+    bar.appendChild(wrap);
+  }
+  grid.appendChild(bar);
 }
 
 function showError(grid, msg) {

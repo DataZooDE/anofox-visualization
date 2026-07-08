@@ -67,7 +67,7 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
 const ROLES: &[&str] = &[
     "XAXIS", "X", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART", "BAR",
     "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
-    "SCATTER", "POINT", "SCATTERCHART",
+    "SCATTER", "POINT", "SCATTERCHART", "DROPDOWN", "OPTIONS", "SELECT_INPUT",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -138,6 +138,9 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                 // numbers (DuckDB-Wasm otherwise serialises HUGEINT as a string).
                 let item = match role {
                     Role::Value(_) => format!("CAST({expr} AS DOUBLE) AS c{i}"),
+                    // Inputs keep the original column name — it becomes the
+                    // DuckDB variable name the browser binds the control to.
+                    Role::Input => expr.to_string(),
                     _ => format!("{expr} AS c{i}"),
                 };
                 roles.push((i, role));

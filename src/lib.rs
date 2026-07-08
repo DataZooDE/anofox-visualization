@@ -45,6 +45,9 @@ pub enum Role {
     Label,
     /// The measured value, carrying the chart kind (`count()::BARCHART`).
     Value(Kind),
+    /// A control input (`::DROPDOWN`) — the query's values become options; the
+    /// output column name is a DuckDB variable, usable via `getvariable('name')`.
+    Input,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -72,6 +75,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "LINECHART" | "LINE" => Some(Role::Value(Kind::Line)),
         "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
+        "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input),
         _ => None,
     }
 }

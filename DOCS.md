@@ -28,10 +28,35 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::LINECHART` (`::LINE`) | line chart (measure) |
 | `::AREACHART` (`::AREA`) | area chart (measure) |
 | `::SCATTER` (`::POINT`) | scatter (measure) |
+| `::DROPDOWN` (`::OPTIONS`) | an input control (the column's values become options) |
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
-and colour it; `LABEL` alone makes a heading. Measures are cast to `DOUBLE`
-automatically (so `sum()`/`BIGINT`/`HUGEINT` render numerically everywhere).
+and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).
+Measures are cast to `DOUBLE` automatically (so `sum()`/`BIGINT`/`HUGEINT` render
+numerically everywhere).
+
+### Inputs & parameters (dropdowns from SQL)
+
+A `SELECT … ::DROPDOWN` becomes a dropdown control: the query's values are the
+options, and the **output column name is a DuckDB variable** you read elsewhere
+with `getvariable('name')`. Changing the control re-runs the dashboard.
+
+```sql
+SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;  -- variable `channel`
+
+SELECT week::XAXIS, sum(n)::BARCHART
+FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
+```
+
+Inputs work in the **browser builder** and **`serve`** (they re-query on change);
+the static CLI runner skips them.
+
+### Interactivity
+
+Every chart is hoverable (bars/points/areas carry per-mark tooltips; lines get
+point markers). **Linked highlighting**: click any series/bar to highlight it
+across all panels and dim the rest — click empty space (or the mark again) to
+clear. Pure client-side, no re-query.
 
 ### Example
 
