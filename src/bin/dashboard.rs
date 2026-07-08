@@ -52,16 +52,32 @@ fn main() {
     }
     let _ = std::fs::remove_file(&db);
 
+    let style = r#":root{--bg:#f4f6f9;--card:#fff;--ink:#1f2937;--muted:#6b7280;--line:#e5e7eb}
+body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:2rem}
+h1{font-size:1.35rem;font-weight:650;letter-spacing:-.01em;margin:0 0 .25rem}
+.src{color:var(--muted);font-size:.85rem;margin-bottom:1.5rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem}
+.panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
+.panel svg{max-width:100%;height:auto;display:block}
+.dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s,transform .09s;z-index:20;white-space:nowrap}
+.dp-tip.show{opacity:1;transform:translateY(0)}
+.dp-hit{transition:filter .1s}.dp-hit:hover{filter:brightness(1.09) saturate(1.05)}"#;
+    let script = r#"(function(){
+  var tip=document.getElementById('dp-tip');
+  document.querySelectorAll('.panel svg rect,.panel svg circle,.panel svg polygon').forEach(function(el){
+    var t=el.querySelector('title'); if(!t||!t.textContent.trim())return;
+    var txt=t.textContent; el.removeChild(t); el.classList.add('dp-hit');
+    el.addEventListener('mouseenter',function(){tip.textContent=txt;tip.classList.add('show');});
+    el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
+    el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
+  });
+})();"#;
     let html = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
-<title>duckplot dashboard</title><style>\
-body{{font:15px/1.5 system-ui,-apple-system,sans-serif;background:#f7f8fa;color:#1f2430;margin:0;padding:2rem}}\
-h1{{font-size:1.3rem}} .src{{color:#6b7280;font-size:.85rem;margin-bottom:1.5rem}}\
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:1rem}}\
-.panel{{margin:0;background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:1rem;box-shadow:0 1px 3px rgba(16,24,40,.06)}}\
-.panel svg{{max-width:100%;height:auto;display:block}}</style></head>\
+<title>duckplot dashboard</title><style>{style}</style></head>\
 <body><h1>duckplot dashboard</h1><div class=\"src\">rendered from <code>{path}</code> · {n} panels</div>\
-<div class=\"grid\">{panels}</div></body></html>"
+<div class=\"grid\">{panels}</div><div id=\"dp-tip\" class=\"dp-tip\"></div>\
+<script>{script}</script></body></html>"
     );
     std::fs::write(&out, &html).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");

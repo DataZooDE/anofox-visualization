@@ -111,6 +111,11 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         data.push(("cat".to_string(), cat.values.clone()));
         aes = if by_colour { aes.color("cat") } else { aes.fill("cat") };
     }
+    // Richer hover: label each mark with its series (or x). The geom appends the
+    // value, so a stacked-bar segment reads e.g. "web: 22". Tooltip-only — not drawn.
+    let label_vals = category.map(|c| c.values.clone()).unwrap_or_else(|| x.values.clone());
+    data.push(("label".to_string(), label_vals));
+    aes = aes.label("label");
 
     let mut plot = GGPlot::new(data).aes(aes);
     plot = match kind {
@@ -121,13 +126,16 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Point => plot.geom_point(),
     };
     if category.is_some() {
+        // Dark2 — a calmer, more distinct categorical palette than Set1.
         plot = if by_colour {
-            plot.scale_color_brewer(PaletteName::Set1)
+            plot.scale_color_brewer(PaletteName::Dark2)
         } else {
-            plot.scale_fill_brewer(PaletteName::Set1)
+            plot.scale_fill_brewer(PaletteName::Dark2)
         };
     }
-    plot = plot.theme_minimal();
+    // A modern teal for single-series marks (matches Dark2's first hue). Set the
+    // primary AFTER the theme preset — presets replace the whole theme.
+    plot = plot.theme_minimal().primary_color((0x2A, 0x9D, 0x8F));
     if let Some(t) = &title {
         plot = plot.title(t);
     }
