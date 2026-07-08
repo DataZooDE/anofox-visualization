@@ -21,3 +21,30 @@ FROM sessions GROUP BY ALL ORDER BY ALL;
    side-module loaded by DuckDB-Wasm) is the stretch goal.
 
 Status: core implemented + tested. Extension packaging in progress.
+
+## Build and see a dashboard
+
+Write a `.sql` file where result columns are annotated with `::ROLE` casts
+(Shaper-style). Statements without a role are setup; annotated `SELECT`s become
+panels. Then:
+
+```sh
+cargo run --bin dashboard -- dashboards/sessions.sql   # writes dashboard.html
+xdg-open dashboard.html                                # open in a browser
+```
+
+Roles: `::XAXIS`, `::CATEGORY`, `::LABEL` (heading), and a chart kind on the
+measure — `::BARCHART`, `::BARCHART_STACKED`, `::LINECHART`, `::AREACHART`,
+`::SCATTER`. Example (`dashboards/sessions.sql`):
+
+```sql
+CREATE TABLE sessions AS SELECT * FROM (VALUES ('W1','app',30), ...) t(week,channel,n);
+
+SELECT 'Weekly sessions'::LABEL;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED FROM sessions GROUP BY ALL;
+SELECT week::XAXIS, sum(n)::LINECHART FROM sessions GROUP BY ALL ORDER BY week;
+```
+
+The runner shells out to the `duckdb` CLI, so no bundled DuckDB compile. (Known
+quirk: a `BARCHART` *with* a `CATEGORY` currently stacks rather than dodges —
+use `BARCHART_STACKED`, or a `BARCHART` without a category, for now.)
