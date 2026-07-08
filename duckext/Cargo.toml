@@ -10,6 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 duckplot = { path = ".." }
 ggplot-rs = { path = "../../ggplot-rs", default-features = false }
+# duckplot_serve(): embed the browser UI + serve it on the live session.
+tiny_http = "0.12"
+include_dir = "0.7"
+serde_json = "1"
+open = "5"
 
 [build-dependencies]
 bindgen = "0.70"

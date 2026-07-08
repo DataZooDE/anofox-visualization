@@ -93,13 +93,21 @@ otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
 *(Next: `CALL duckplot_serve()` to launch this from inside a DuckDB session — see
 the roadmap.)*
 
-### c) DuckDB extension (native works; wasm ~99%)
+### c) DuckDB extension — launch the UI *from a DuckDB session*
 
-Packages the renderer *inside* DuckDB so `SELECT ggplot(...)` returns an SVG.
-See `duckext/BUILD.md`. Native works today; the wasm side-module links and
-instantiates in DuckDB-Wasm with one emscripten ABI detail remaining. For
-browser use, **(b) is the recommended path** — it avoids the extension ABI
-entirely.
+The `duckext` C-API extension adds `duckplot_serve(port)`: start the browser
+builder wired to the **current** session, from inside DuckDB.
+
+```sql
+LOAD 'ggplot.duckdb_extension';        -- (duckdb -unsigned; see duckext/BUILD.md)
+SELECT duckplot_serve(8080);           -- serves http://127.0.0.1:8080 + opens the browser
+```
+
+The extension embeds the same UI and answers `/query` on a live connection
+(reused serially), so panels render your **actual session tables** — big data
+stays in DuckDB. `SELECT ggplot_smoke()` also returns an SVG directly. Native
+works today; the wasm side-module links + instantiates in DuckDB-Wasm with one
+emscripten ABI detail remaining (browsers use **(b)/(b2)** instead).
 
 ---
 

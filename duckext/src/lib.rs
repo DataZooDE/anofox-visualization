@@ -5,12 +5,16 @@
 //! side-module.
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
 
-mod ffi {
+pub(crate) mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 use ffi::*;
 use std::ffi::CString;
 use std::ptr;
+
+// Live-session HTTP server for `SELECT duckplot_serve(port)` (native only).
+#[cfg(not(target_arch = "wasm32"))]
+mod serve;
 
 // Rust's std links a few libc file-I/O imports (`pread`/`pwrite`) whose
 // emscripten signatures don't match DuckDB-Wasm's host module, and they're never
@@ -51,10 +55,28 @@ mod libc_stubs {
 /// The DuckDB API table — **copied by value** at load time (the pointer from
 /// `get_api` is only valid during init, so we own a copy, like the C macro's
 /// `duckdb_ext_api = *res`).
-static mut API: Option<duckdb_ext_api_v0> = None;
-unsafe fn api() -> &'static duckdb_ext_api_v0 {
+static mut API: Option<duckdb_ext_api_v1> = None;
+pub(crate) unsafe fn api() -> &'static duckdb_ext_api_v1 {
     #[allow(static_mut_refs)]
     API.as_ref().unwrap()
+}
+
+/// `SELECT duckplot_serve(port)` → start the browser builder on the live session.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe extern "C" fn duckplot_serve_fn(
+    _info: duckdb_function_info,
+    input: duckdb_data_chunk,
+    output: duckdb_vector,
+) {
+    let n = (api().duckdb_data_chunk_get_size.unwrap())(input);
+    let vec = (api().duckdb_data_chunk_get_vector.unwrap())(input, 0);
+    let data = (api().duckdb_vector_get_data.unwrap())(vec) as *const i32;
+    let port = if data.is_null() || n == 0 { 8080 } else { (*data).max(0) as u16 };
+    let port = if port == 0 { 8080 } else { port };
+    let msg = CString::new(serve::start(port)).unwrap_or_default();
+    for i in 0..n {
+        (api().duckdb_vector_assign_string_element.unwrap())(output, i, msg.as_ptr());
+    }
 }
 
 fn smoke_svg() -> CString {
@@ -96,7 +118,7 @@ pub unsafe extern "C" fn ggplot_init_c_api(
 ) -> bool {
     let access = &*access;
     let Some(get_api) = access.get_api else { return false };
-    let api_ptr = get_api(info, c"v0.0.1".as_ptr()) as *const duckdb_ext_api_v0;
+    let api_ptr = get_api(info, c"v1.2.0".as_ptr()) as *const duckdb_ext_api_v1;
     if api_ptr.is_null() {
         return false;
     }
@@ -109,16 +131,43 @@ pub unsafe extern "C" fn ggplot_init_c_api(
         return false;
     }
 
+    // ggplot_smoke() -> VARCHAR
     let f = (api().duckdb_create_scalar_function.unwrap())();
     (api().duckdb_scalar_function_set_name.unwrap())(f, c"ggplot_smoke".as_ptr());
     let mut vtype = (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
     (api().duckdb_scalar_function_set_return_type.unwrap())(f, vtype);
     (api().duckdb_scalar_function_set_function.unwrap())(f, Some(ggplot_smoke_fn));
-    let ok = (api().duckdb_register_scalar_function.unwrap())(conn, f) == duckdb_state::DuckDBSuccess;
-
+    let mut ok = (api().duckdb_register_scalar_function.unwrap())(conn, f) == duckdb_state::DuckDBSuccess;
     (api().duckdb_destroy_logical_type.unwrap())(&mut vtype);
     let mut fm = f;
     (api().duckdb_destroy_scalar_function.unwrap())(&mut fm);
+
+    // duckplot_serve(INTEGER port) -> VARCHAR  (native only)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let sf = (api().duckdb_create_scalar_function.unwrap())();
+        (api().duckdb_scalar_function_set_name.unwrap())(sf, c"duckplot_serve".as_ptr());
+        let mut itype =
+            (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_INTEGER);
+        (api().duckdb_scalar_function_add_parameter.unwrap())(sf, itype);
+        let mut rtype =
+            (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
+        (api().duckdb_scalar_function_set_return_type.unwrap())(sf, rtype);
+        (api().duckdb_scalar_function_set_function.unwrap())(sf, Some(duckplot_serve_fn));
+        ok = ok
+            && (api().duckdb_register_scalar_function.unwrap())(conn, sf)
+                == duckdb_state::DuckDBSuccess;
+        (api().duckdb_destroy_logical_type.unwrap())(&mut itype);
+        (api().duckdb_destroy_logical_type.unwrap())(&mut rtype);
+        let mut sfm = sf;
+        (api().duckdb_destroy_scalar_function.unwrap())(&mut sfm);
+    }
+
+    // Native: keep this connection alive for the /query bridge (reused serially
+    // by the server thread). Wasm: no server — release it.
+    #[cfg(not(target_arch = "wasm32"))]
+    serve::set_conn(conn);
+    #[cfg(target_arch = "wasm32")]
     (api().duckdb_disconnect.unwrap())(&mut conn);
     ok
 }
