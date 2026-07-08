@@ -1,0 +1,13 @@
+[package]
+name = "duckplot"
+version = "0.1.0"
+edition = "2021"
+description = "SQL-defined dashboards: Shaper-style column roles rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
+license = "MIT"
+
+[dependencies]
+# The rendering engine. No polars — keep the core small and wasm-compatible.
+ggplot-rs = { path = "../ggplot-rs", default-features = false }
+
+[features]
+default = []
