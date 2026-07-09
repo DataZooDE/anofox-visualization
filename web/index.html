@@ -12,10 +12,12 @@ body.dark{--bg:#0f172a;--ink:#e6edf6;--muted:#93a4bd;--line:#2c3a52}
 body.dark header,body.dark .editor,body.dark .editor textarea{background:#161f31}
 body.dark .editor textarea{color:#e6edf6}
 body.dark .btn2{background:#243247;color:#e6edf6}
-header{padding:1.1rem 1.4rem;border-bottom:1px solid var(--line);background:var(--card);display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
+header{padding:.7rem 1.4rem;border-bottom:1px solid var(--line);background:var(--card);display:flex;align-items:center;gap:.8rem;flex-wrap:wrap}
 header h1{font-size:1.15rem;font-weight:650;margin:0;letter-spacing:-.01em}
 header .tag{color:var(--muted);font-size:.82rem}
-header .status{margin-left:auto;font-size:.8rem;color:var(--muted)}
+header .actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
+header .actions select{border:1px solid var(--line);border-radius:8px;padding:.4rem .5rem;font-size:.82rem;background:var(--card);color:var(--ink)}
+header .status{font-size:.8rem;color:var(--muted);min-width:56px;text-align:right}
 .layout{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:0;min-height:calc(100vh - 56px)}
 .editor{border-right:1px solid var(--line);background:var(--card);display:flex;flex-direction:column}
 .editor .bar{padding:.6rem .8rem;border-bottom:1px solid var(--line);display:flex;gap:.5rem;align-items:center}
@@ -68,6 +70,17 @@ select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-
 <header>
   <h1>duckplot</h1>
   <span class="tag">SQL dashboards — live DuckDB or DuckDB-Wasm, rendered by ggplot-rs</span>
+  <div class="actions">
+    <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
+    <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
+    <select id="refresh" title="auto-refresh interval">
+      <option value="0">No refresh</option>
+      <option value="5">5s</option>
+      <option value="30">30s</option>
+      <option value="60">60s</option>
+    </select>
+    <button id="dark" class="btn2" title="toggle dark mode">🌙</button>
+  </div>
   <span class="status" id="status">booting…</span>
 </header>
 <div class="layout">
@@ -81,15 +94,6 @@ select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-
         <option value="2">2 columns</option>
         <option value="3">3 columns</option>
       </select>
-      <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
-      <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
-      <select id="refresh" title="auto-refresh interval">
-        <option value="0">No refresh</option>
-        <option value="5">5s</option>
-        <option value="30">30s</option>
-        <option value="60">60s</option>
-      </select>
-      <button id="dark" class="btn2" title="toggle dark mode">🌙</button>
     </div>
     <textarea id="sql" spellcheck="false"></textarea>
   </div>
