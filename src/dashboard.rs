@@ -308,7 +308,7 @@ fn table_svg(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], w: f64, h: 
     let top = if title.is_some() { 30.0 } else { 10.0 };
     let col_w = (w - 20.0) / ncol as f64;
     let row_h = 22.0;
-    let max_rows = (((h - top - 24.0) / row_h).floor() as usize).min(nrow).max(0);
+    let max_rows = (((h - top - 24.0) / row_h).floor().max(0.0) as usize).min(nrow);
 
     let mut s = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\" \
