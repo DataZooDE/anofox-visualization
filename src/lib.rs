@@ -32,6 +32,8 @@ pub enum Kind {
     Line,
     Area,
     Point,
+    /// A pie/donut — slices by `CATEGORY`, sized by the measure (`::PIE`).
+    Pie,
 }
 
 /// The role a result column plays in the visualization.
@@ -56,6 +58,10 @@ pub enum Role {
     GroupEnd,
     /// Layout: `::SPAN` makes the *next* panel span N grid columns (the value).
     Span,
+    /// A data table (`::TABLE`) — the whole result set as an HTML table.
+    Table,
+    /// A single big-number KPI (`::METRIC`); an optional `::LABEL` is the caption.
+    Metric,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -83,6 +89,9 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "LINECHART" | "LINE" => Some(Role::Value(Kind::Line)),
         "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
+        "PIE" | "DONUT" | "PIECHART" => Some(Role::Value(Kind::Pie)),
+        "TABLE" | "GRID" => Some(Role::Table),
+        "METRIC" | "KPI" | "BIGNUMBER" | "NUMBER" => Some(Role::Metric),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input),
         "COLUMNS" | "COLS" => Some(Role::Columns),
         "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
@@ -146,6 +155,9 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         return Ok(heading_svg(title.as_deref().unwrap_or(""), width));
     };
     let Role::Value(kind) = value.role else { unreachable!() };
+    if kind == Kind::Pie {
+        return render_pie(value, cols, title.as_deref(), width, height);
+    }
     let x = cols.iter().find(|c| c.role == Role::X).ok_or("no XAXIS column")?;
     let category = cols.iter().find(|c| c.role == Role::Category);
 
@@ -189,6 +201,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Line => plot.geom_line().geom_point(),
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
+        Kind::Pie => unreachable!("pie handled above"),
     };
     if let Some(levels) = &color_levels {
         // Map the distinct series to the DataZoo palette (stable/sorted order, so
@@ -204,6 +217,40 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // preset — presets replace the whole theme.
     plot = plot.theme_minimal().primary_color(DZ_COLORS[0]);
     if let Some(t) = &title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
+/// and coloured by `CATEGORY`.
+fn render_pie(
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let category = cols.iter().find(|c| c.role == Role::Category).ok_or("pie needs a CATEGORY column")?;
+    let n = value.values.len();
+    let data: Vec<(String, Vec<Value>)> = vec![
+        ("x".to_string(), vec![Value::Str(String::new()); n]),
+        ("y".to_string(), value.values.clone()),
+        ("cat".to_string(), category.values.clone()),
+        ("label".to_string(), category.values.clone()),
+    ];
+    let levels = distinct_labels(category);
+    let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
+        levels.iter().enumerate().map(|(i, s)| (s.as_str(), dz_color(i))).collect();
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
+        .geom_col()
+        .position(PositionStack)
+        .scale_fill_manual(pairs)
+        .coord_polar_with(ggplot_rs::coord::polar::CoordPolar::new().theta("y"))
+        .theme_void();
+    if let Some(t) = title {
         plot = plot.title(t);
     }
     plot.render_svg_native_with_size(width, height)

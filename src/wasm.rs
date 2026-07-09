@@ -50,10 +50,13 @@ fn role_str(r: &Role) -> &'static str {
         Role::Value(Kind::Line) => "LINECHART",
         Role::Value(Kind::Area) => "AREACHART",
         Role::Value(Kind::Point) => "SCATTER",
+        Role::Value(Kind::Pie) => "PIE",
         Role::Input => "DROPDOWN",
         Role::Columns => "COLUMNS",
         Role::GroupStart => "GROUP",
         Role::GroupEnd => "ENDGROUP",
         Role::Span => "SPAN",
+        Role::Table => "TABLE",
+        Role::Metric => "METRIC",
     }
 }

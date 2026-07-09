@@ -106,6 +106,28 @@ SELECT 6::COL;
 SELECT channel::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE getvariable('selected') IN ('', channel)
 GROUP BY ALL ORDER BY channel;`,
+
+  "KPIs, pie & table": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
+  ('W1','app',30),('W1','web',22),('W1','api',12),
+  ('W2','app',41),('W2','web',28),('W2','api',15),
+  ('W3','app',26),('W3','web',33),('W3','api', 9),
+  ('W4','app',48),('W4','web',30),('W4','api',18)
+) t(week, channel, n);
+
+SELECT 'Overview'::LABEL;
+
+-- KPI cards (big numbers), 4 columns each
+SELECT 4::COL; SELECT sum(n)::METRIC,   'Total sessions'::LABEL FROM sessions;
+SELECT 4::COL; SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions;
+SELECT 4::COL; SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions;
+
+-- a pie by channel + a data table, side by side
+SELECT 6::COL;
+SELECT channel::CATEGORY, sum(n)::PIE FROM sessions GROUP BY ALL;
+
+SELECT 6::COL;
+SELECT week, channel, sum(n) AS sessions ::TABLE
+FROM sessions GROUP BY ALL ORDER BY week, channel;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -264,16 +286,37 @@ async function run() {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === grid));
       } else {
         const rowsJson = await runSql(s.sql);
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const mkPanel = () => {
+          const fig = document.createElement("figure");
+          fig.className = "panel";
+          if (container === grid) fig.style.gridColumn = `span ${span}`;
+          return fig;
+        };
         if (isHeading(s)) {
           const rows = JSON.parse(rowsJson);
           const h = document.createElement("h2");
           h.className = "section";
           h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
           container.appendChild(h);
+        } else if (role(s, "TABLE")) {
+          const fig = mkPanel();
+          fig.appendChild(renderTable(JSON.parse(rowsJson)));
+          container.appendChild(fig);
+          panels++;
+        } else if (role(s, "METRIC")) {
+          const r0 = JSON.parse(rowsJson)[0] || {};
+          const mi = s.roles.find((r) => r[1] === "METRIC")[0];
+          const lr = s.roles.find((r) => r[1] === "LABEL");
+          const fig = mkPanel();
+          fig.classList.add("metric");
+          fig.innerHTML =
+            `<div class="metric-value">${fmtNum(r0["c" + mi])}</div>` +
+            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
+          container.appendChild(fig);
+          panels++;
         } else {
-          const fig = document.createElement("figure");
-          fig.className = "panel";
-          if (container === grid) fig.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
+          const fig = mkPanel();
           fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
           container.appendChild(fig);
           panels++;
@@ -311,6 +354,45 @@ function makeControl(meta, bar) {
   box.className = "controls";
   box.appendChild(wrap);
   return box;
+}
+
+// A ::TABLE result → an HTML table (original column names, first 500 rows).
+function renderTable(rows) {
+  const t = document.createElement("table");
+  t.className = "dp-table";
+  if (!rows.length) {
+    t.textContent = "(no rows)";
+    return t;
+  }
+  const cols = Object.keys(rows[0]);
+  const hr = t.createTHead().insertRow();
+  for (const c of cols) {
+    const th = document.createElement("th");
+    th.textContent = c;
+    hr.appendChild(th);
+  }
+  const tb = t.createTBody();
+  for (const r of rows.slice(0, 500)) {
+    const tr = tb.insertRow();
+    for (const c of cols) {
+      let v = r[c];
+      // DuckDB-Wasm serialises HUGEINT/DECIMAL as a quote-wrapped string.
+      if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
+      tr.insertCell().textContent = v == null ? "" : v;
+    }
+  }
+  return t;
+}
+
+// Format a KPI value with thousands separators.
+function fmtNum(v) {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (v == null) return "–";
+  return Number.isNaN(n) ? String(v) : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 }
 
 function showError(grid, msg) {

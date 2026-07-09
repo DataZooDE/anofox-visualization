@@ -67,8 +67,9 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
 const ROLES: &[&str] = &[
     "XAXIS", "X", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART", "BAR",
     "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
-    "SCATTER", "POINT", "SCATTERCHART", "DROPDOWN", "OPTIONS", "SELECT_INPUT", "COLUMNS", "COLS",
-    "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
+    "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "TABLE", "GRID", "METRIC", "KPI",
+    "BIGNUMBER", "NUMBER", "DROPDOWN", "OPTIONS", "SELECT_INPUT", "COLUMNS", "COLS", "GROUP", "BOX",
+    "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -128,17 +129,31 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
     };
     let list_end = top_level_kw(&stmt[sel..], "FROM").map(|o| sel + o).unwrap_or(stmt.len());
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
+    let split = split_top_commas(list);
+
+    // A ::TABLE panel keeps every column and its name — strip only that cast.
+    let is_table = |it: &str| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)) == Some(Role::Table);
+    if split.iter().any(|it| is_table(it)) {
+        let items: Vec<String> = split
+            .iter()
+            .map(|it| match trailing_role(it.trim()) {
+                Some((expr, r)) if parse_role(r) == Some(Role::Table) => expr.to_string(),
+                _ => it.trim().to_string(),
+            })
+            .collect();
+        return (format!("{head} {} {tail}", items.join(", ")), vec![(0, Role::Table)]);
+    }
 
     let mut roles = Vec::new();
     let mut items = Vec::new();
-    for (i, item) in split_top_commas(list).into_iter().enumerate() {
+    for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
         if let Some((expr, role_str)) = trailing_role(item) {
             if let Some(role) = parse_role(role_str) {
-                // Cast measures to DOUBLE so sum()/BIGINT/HUGEINT come back as real
-                // numbers (DuckDB-Wasm otherwise serialises HUGEINT as a string).
+                // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
+                // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
                 let item = match role {
-                    Role::Value(_) => format!("CAST({expr} AS DOUBLE) AS c{i}"),
+                    Role::Value(_) | Role::Metric => format!("CAST({expr} AS DOUBLE) AS c{i}"),
                     // Inputs keep the original column name — it becomes the
                     // DuckDB variable name the browser binds the control to.
                     Role::Input => expr.to_string(),
