@@ -215,17 +215,18 @@ the roadmap.)*
 
 ### c) DuckDB extension — launch the UI *from a DuckDB session*
 
-The `duckext` C-API extension adds `duckplot_serve(port)`: start the browser
-builder wired to the **current** session, from inside DuckDB.
+The `anofox-visualization` C-API extension (in `duckext/`) adds
+`duckplot_serve(port)`: start the browser builder wired to the **current**
+session, from inside DuckDB.
 
 ```sql
-LOAD 'ggplot.duckdb_extension';        -- (duckdb -unsigned; see duckext/BUILD.md)
-SELECT duckplot_serve(8080);           -- serves http://127.0.0.1:8080 + opens the browser
+LOAD 'anofox_visualization.duckdb_extension';  -- (duckdb -unsigned; see duckext/BUILD.md)
+SELECT duckplot_serve(8080);                    -- serves http://127.0.0.1:8080 + opens the browser
 ```
 
 The extension embeds the same UI and answers `/query` on a live connection
 (reused serially), so panels render your **actual session tables** — big data
-stays in DuckDB. `SELECT ggplot_smoke()` also returns an SVG directly. Native
+stays in DuckDB. `SELECT anofox_render()` also returns an SVG directly. Native
 works today; the wasm side-module links + instantiates in DuckDB-Wasm with one
 emscripten ABI detail remaining (browsers use **(b)/(b2)** instead).
 

@@ -1,5 +1,6 @@
-//! DuckDB C-API extension: `SELECT ggplot_smoke()` → an SVG rendered by
-//! ggplot-rs (via the duckplot core). Uses the C Extension API — the DuckDB
+//! anofox-visualization — a DuckDB C-API extension: `SELECT anofox_render()` →
+//! an SVG rendered by ggplot-rs (via the duckplot core). Uses the C Extension
+//! API — the DuckDB
 //! functions are resolved at load time through the `access` struct, so nothing
 //! links against libduckdb. That's what lets the same crate become a DuckDB-Wasm
 //! side-module.
@@ -97,8 +98,8 @@ fn smoke_svg() -> CString {
     CString::new(render(&cols, 320, 220).unwrap_or_default()).unwrap_or_default()
 }
 
-/// `SELECT ggplot_smoke()` → one SVG string per input row.
-unsafe extern "C" fn ggplot_smoke_fn(
+/// `SELECT anofox_render()` → one SVG string per input row.
+unsafe extern "C" fn anofox_render_fn(
     _info: duckdb_function_info,
     input: duckdb_data_chunk,
     output: duckdb_vector,
@@ -112,7 +113,7 @@ unsafe extern "C" fn ggplot_smoke_fn(
 
 /// DuckDB calls `<extension_name>_init_c_api` on LOAD.
 #[no_mangle]
-pub unsafe extern "C" fn ggplot_init_c_api(
+pub unsafe extern "C" fn anofox_visualization_init_c_api(
     info: duckdb_extension_info,
     access: *const duckdb_extension_access,
 ) -> bool {
@@ -131,12 +132,12 @@ pub unsafe extern "C" fn ggplot_init_c_api(
         return false;
     }
 
-    // ggplot_smoke() -> VARCHAR
+    // anofox_render() -> VARCHAR
     let f = (api().duckdb_create_scalar_function.unwrap())();
-    (api().duckdb_scalar_function_set_name.unwrap())(f, c"ggplot_smoke".as_ptr());
+    (api().duckdb_scalar_function_set_name.unwrap())(f, c"anofox_render".as_ptr());
     let mut vtype = (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
     (api().duckdb_scalar_function_set_return_type.unwrap())(f, vtype);
-    (api().duckdb_scalar_function_set_function.unwrap())(f, Some(ggplot_smoke_fn));
+    (api().duckdb_scalar_function_set_function.unwrap())(f, Some(anofox_render_fn));
     let mut ok = (api().duckdb_register_scalar_function.unwrap())(conn, f) == duckdb_state::DuckDBSuccess;
     (api().duckdb_destroy_logical_type.unwrap())(&mut vtype);
     let mut fm = f;

@@ -1,10 +1,11 @@
 [package]
-name = "duckplot-duckext"
+name = "anofox-visualization"
 version = "0.1.0"
 edition = "2021"
-description = "DuckDB C-API extension: SELECT ggplot(...) → SVG, rendered by ggplot-rs via duckplot. Wasm side-module compatible (no libduckdb linking)."
+description = "anofox-visualization: a DuckDB C-API extension — SELECT anofox_render(...) → SVG, rendered by ggplot-rs via duckplot. Wasm side-module compatible (no libduckdb linking)."
 
 [lib]
+name = "anofox_visualization"
 crate-type = ["cdylib"]
 
 [dependencies]
