@@ -88,14 +88,14 @@ h1{font-size:1.35rem;font-weight:650;letter-spacing:-.01em;margin:0 0 .25rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem;align-content:start}
 .section{grid-column:1/-1;margin:.6rem 0 -.4rem;font-size:1.1rem;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
 .panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
-.panel svg{max-width:100%;height:auto;display:block}
+.panel svg{width:100%;height:auto;display:block}
 .dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s,transform .09s;z-index:20;white-space:nowrap}
 .dp-tip.show{opacity:1;transform:translateY(0)}
 .dp-hit{transition:filter .1s}.dp-hit:hover{filter:brightness(1.09) saturate(1.05)}"#;
 
 const SCRIPT: &str = r#"(function(){
   var tip=document.getElementById('dp-tip'), selected=null;
-  var marks=[].slice.call(document.querySelectorAll('.panel svg rect,.panel svg circle,.panel svg polygon'))
+  var marks=[].slice.call(document.querySelectorAll('.panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline'))
     .filter(function(el){var t=el.querySelector('title');return t&&t.textContent.trim();});
   function apply(){marks.forEach(function(el){
     var s=el.getAttribute('data-series'); el.style.opacity=(!selected||s===selected)?'':'0.15';});}

@@ -214,9 +214,9 @@ let dpSelected = null;
 
 function attachHover() {
   const tip = $("dp-tip");
-  const marks = [...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon")].filter(
-    (el) => el.querySelector("title") && el.querySelector("title").textContent.trim()
-  );
+  const marks = [
+    ...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline"),
+  ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
 
   const apply = () => {
     for (const el of marks) {

@@ -142,11 +142,26 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         ("y".to_string(), value.values.clone()),
     ];
     let by_colour = matches!(kind, Kind::Line | Kind::Point);
+    let bar = matches!(kind, Kind::Bar | Kind::BarStacked);
+    let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
     let mut aes = Aes::new().x("x").y("y");
-    if let Some(cat) = category {
+
+    // Colour dimension: an explicit CATEGORY, or — for a bar chart with no
+    // category — the (discrete) X itself, so a "total per channel" bar matches
+    // the same channel's colour in the other charts. `color_levels` are the
+    // stable palette keys; `x_coloured` suppresses the then-redundant legend.
+    let mut x_coloured = false;
+    let color_levels: Option<Vec<String>> = if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = if by_colour { aes.color("cat") } else { aes.fill("cat") };
-    }
+        Some(distinct_labels(cat))
+    } else if bar && x_discrete {
+        aes = aes.fill("x");
+        x_coloured = true;
+        Some(distinct_labels(x))
+    } else {
+        None
+    };
     // Richer hover: label each mark with its series (or x). The geom appends the
     // value, so a stacked-bar segment reads e.g. "web: 22". Tooltip-only — not drawn.
     let label_vals = category.map(|c| c.values.clone()).unwrap_or_else(|| x.values.clone());
@@ -163,12 +178,15 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
     };
-    if let Some(cat) = category {
-        // Map the distinct series to the DataZoo palette (by first-seen order).
-        let levels = distinct_labels(cat);
+    if let Some(levels) = &color_levels {
+        // Map the distinct series to the DataZoo palette (stable/sorted order, so
+        // a given series is the same colour in every chart).
         let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
             levels.iter().enumerate().map(|(i, s)| (s.as_str(), dz_color(i))).collect();
         plot = if by_colour { plot.scale_color_manual(pairs) } else { plot.scale_fill_manual(pairs) };
+    }
+    if x_coloured {
+        plot = plot.show_legend(false); // the x axis already labels the colours
     }
     // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
     // preset — presets replace the whole theme.
