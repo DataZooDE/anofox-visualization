@@ -165,6 +165,8 @@ pub enum Role {
     Geometry,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
+    /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
+    SubTab,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -236,6 +238,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "MULTISELECT" | "MULTI" => Some(Role::Input(InputKind::Multiselect)),
         "DATERANGE" | "DATE_RANGE" => Some(Role::Input(InputKind::DateRange)),
         "TAB" | "PAGE" => Some(Role::Tab),
+        "SUBTAB" | "SUB_TAB" => Some(Role::SubTab),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
         "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),
         "DATE" | "DATEPICKER" => Some(Role::Input(InputKind::Date)),

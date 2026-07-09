@@ -109,6 +109,8 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
 | `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
+| `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
+| KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 
 ```sql
 SELECT 'Filters'::GROUP;                 -- two dropdowns together in one box

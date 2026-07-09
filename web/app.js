@@ -452,6 +452,38 @@ SELECT
   ((i * 37) % 1000) AS score,
   ((i * 91) % 100)  AS load_pct ::PAGED
 FROM range(1, 100001) t(i);`,
+
+  "Grouped KPIs & nested tabs": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1','app','EU',30,1200.0),('W1','web','EU',22,900.0),('W1','app','US',18,700.0),('W1','web','US',12,500.0),
+  ('W2','app','EU',41,1600.0),('W2','web','EU',28,1100.0),('W2','app','US',20,820.0),('W2','web','US',15,560.0),
+  ('W3','app','EU',26,980.0),('W3','web','EU',33,1300.0),('W3','app','US',14,640.0),('W3','web','US',19,720.0),
+  ('W4','app','EU',48,2000.0),('W4','web','EU',30,1250.0),('W4','app','US',22,900.0),('W4','web','US',17,680.0)
+) t(week, channel, region, n, revenue);
+
+-- Put the KPIs in ONE box (::GROUP) → they render as a compact strip with
+-- dividers instead of three big cards beside the charts.
+SELECT 'Key metrics'::GROUP;
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales;
+SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sales;
+SELECT count(DISTINCT week)::METRIC, 'Weeks'::LABEL FROM sales;
+SELECT 1::ENDGROUP;
+
+SELECT 1::COLUMNS;  -- following charts span the full tab
+
+-- top-level ::TAB, each with nested ::SUBTAB
+SELECT 'Revenue'::TAB;
+SELECT 'By week'::SUBTAB;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'By region'::SUBTAB;
+SELECT region::XAXIS, sum(revenue)::BARCHART, 'Revenue by region'::TITLE FROM sales GROUP BY ALL ORDER BY region;
+
+SELECT 'Sessions'::TAB;
+SELECT 'Trend'::SUBTAB;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions trend'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Share'::SUBTAB;
+SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP BY ALL;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -664,7 +696,7 @@ const isInput = (s) => !!inputKind(s);
 const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB", "PLACEHOLDER"].find((d) => role(s, d));
+const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB", "SUBTAB", "PLACEHOLDER"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -672,6 +704,7 @@ let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<
 let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
 let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
 let dpTab = null; // the active tab name (preserved across re-runs)
+let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
 let dpTimer = null; // auto-refresh interval handle
 
 async function run() {
@@ -763,9 +796,13 @@ async function run() {
   // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
   // grid columns; ::SPAN widens the next panel.
   let container = newGrid;
-  let curGrid = newGrid; // the active surface (the main grid, or the current tab pane)
+  let curGrid = newGrid; // the active surface (main grid / tab pane / sub-tab pane)
   let tabBar = null;
   let tabWrap = null;
+  let curPane = null; // the current top-level ::TAB pane (nesting host for ::SUBTAB)
+  let curTopName = null;
+  let subBar = null;
+  let subWrap = null;
   let nextSpan = 0;
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
@@ -819,7 +856,8 @@ async function run() {
         const btn = document.createElement("button");
         btn.className = "tab-btn";
         btn.textContent = name;
-        btn.onclick = () => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
           dpTab = name; // remember, so a cross-filter re-run keeps this tab
           tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
           tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
@@ -833,6 +871,44 @@ async function run() {
         }
         curGrid = pane;
         container = pane;
+        curPane = pane; // nesting host for ::SUBTAB
+        curTopName = name;
+        subBar = null; // start fresh sub-tabs for this top tab
+        subWrap = null;
+      } else if (d === "SUBTAB") {
+        const name = String((await firstValue(s)) ?? "Tab");
+        const host = curPane || curGrid; // nest inside the current top-level tab
+        if (!subBar) {
+          subBar = document.createElement("div");
+          subBar.className = "subtabbar";
+          subWrap = document.createElement("div");
+          subWrap.className = "subtabwrap";
+          host.append(subBar, subWrap);
+        }
+        const spane = document.createElement("div");
+        spane.className = "grid subtabpane";
+        spane.style.display = "none";
+        subWrap.appendChild(spane);
+        const sbtn = document.createElement("button");
+        sbtn.className = "tab-btn subtab-btn";
+        sbtn.textContent = name;
+        const topName = curTopName || "";
+        sbtn.onclick = (e) => {
+          e.stopPropagation();
+          dpSubTab[topName] = name;
+          subWrap.querySelectorAll(".subtabpane").forEach((p) => (p.style.display = "none"));
+          subBar.querySelectorAll(".subtab-btn").forEach((b) => b.classList.remove("active"));
+          spane.style.display = "";
+          sbtn.classList.add("active");
+        };
+        subBar.appendChild(sbtn);
+        const activeSub = dpSubTab[topName];
+        if (activeSub === name || (activeSub == null && subBar.children.length === 1)) {
+          spane.style.display = "";
+          sbtn.classList.add("active");
+        }
+        curGrid = spane;
+        container = spane;
       } else if (d === "PLACEHOLDER") {
         const span = Math.min(12, nextSpan || defaultSpan);
         const ph = document.createElement("div");

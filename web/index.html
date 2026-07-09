@@ -65,6 +65,11 @@ header .actions select{padding:.42rem .5rem}
 .group-body .panel{flex:1 1 340px;border:0;border-radius:0;padding:0;box-shadow:none}
 .group-body .panel:hover{transform:none;box-shadow:none}
 .group-body .control{margin:0}
+/* KPIs grouped into one box render as a compact strip with dividers */
+.group-body .metric{flex:1 1 120px;min-width:110px;padding:.1rem .4rem 0.1rem 1.2rem;border-left:1px solid var(--line)}
+.group-body .metric:first-child{border-left:0;padding-left:.2rem}
+.group-body .metric .metric-value{font-size:1.9rem}
+.group-body .metric .metric-cap{font-size:.78rem}
 .panel{position:relative;margin:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:1.1rem 1.2rem;box-shadow:var(--shadow);transition:box-shadow .2s ease,border-color .2s ease}
 .panel:hover{box-shadow:var(--shadow-hi);border-color:#dfe4ee}
 .panel svg{width:100%;height:auto;display:block}
@@ -145,6 +150,12 @@ header .actions select{padding:.42rem .5rem}
 .tab-btn:hover{color:var(--ink);background:rgba(42,157,143,.06);transform:none;filter:none}
 .tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
 .tabpane{margin-bottom:1rem}
+/* nested tabs (::SUBTAB) — a lighter pill bar inside a tab pane */
+.subtabbar{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 1rem;padding:.25rem;background:var(--bg);border-radius:10px}
+.subtab-btn{border-radius:8px;border-bottom:0;padding:.4rem .85rem;font-size:.83rem}
+.subtab-btn:hover{background:rgba(42,157,143,.08)}
+.subtab-btn.active{color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-bottom:0}
+.subtabwrap{grid-column:1/-1}
 .err{grid-column:1/-1;color:#b42318;background:#fef3f2;border:1px solid #fecdca;border-radius:12px;padding:.8rem 1rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}
 .dp-tip{position:fixed;pointer-events:none;background:rgba(17,24,39,.95);backdrop-filter:blur(4px);color:#fff;padding:.4rem .6rem;border-radius:9px;font-size:.8rem;font-weight:500;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;transform:translateY(3px) scale(.96);transition:opacity .1s,transform .1s;z-index:50;white-space:nowrap}
 .dp-tip.show{opacity:1;transform:none}

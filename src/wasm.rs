@@ -103,5 +103,6 @@ fn role_str(r: &Role) -> &'static str {
         Role::Metric(crate::MetricFmt::Percent) => "PERCENT",
         Role::Metric(crate::MetricFmt::Compact) => "COMPACT",
         Role::Tab => "TAB",
+        Role::SubTab => "SUBTAB",
     }
 }
