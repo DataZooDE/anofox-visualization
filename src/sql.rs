@@ -2,7 +2,7 @@
 //! casts off the SELECT list. Shared by the native `dashboard` bin and the wasm
 //! binding so the browser and CLI behave identically.
 
-use crate::{parse_role, Column, InputKind, Role};
+use crate::{parse_role, Column, InputKind, Kind, Role};
 use ggplot_rs::prelude::Value;
 
 /// A planned statement: either setup (run for effect) or a panel (rewritten SQL
@@ -82,6 +82,7 @@ const ROLES: &[&str] = &[
     "TREND", "HINT", "TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE", "PLACEHOLDER", "HEADER_IMAGE",
     "HEADERIMAGE", "FOOTER_LINK", "FOOTERLINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_EXCEL",
     "DOWNLOAD_PDF", "RELOAD", "REFRESH", "RANGE", "LABELS", "COLORS", "COLOURS",
+    "COLORSCALE", "COLOURSCALE", "HEAT", "GRADIENT", "BADGE", "STATUS", "PILL",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -160,12 +161,19 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
             .enumerate()
             .map(|(idx, it)| match trailing_role(it.trim()) {
                 Some((expr, r)) => {
-                    match parse_role(r) {
-                        // A title bar, or a trend-arrow table column: record by
-                        // output position so the browser can render them.
-                        Some(Role::Title) => roles.push((idx, Role::Title)),
-                        Some(Role::Trend) => roles.push((idx, Role::Trend)),
-                        _ => {}
+                    // Record per-column table formatting (title bar, trend arrow,
+                    // number format, colour scale, badge, sparkline) by output
+                    // position so the browser can render each.
+                    if let Some(
+                        rr @ (Role::Title
+                        | Role::Trend
+                        | Role::Metric(_)
+                        | Role::Value(Kind::Sparkline)
+                        | Role::ColorScale
+                        | Role::Badge),
+                    ) = parse_role(r)
+                    {
+                        roles.push((idx, rr));
                     }
                     expr.to_string()
                 }

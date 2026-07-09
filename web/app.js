@@ -401,6 +401,33 @@ FROM sales
 WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
   AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'))
 GROUP BY month ORDER BY month;`,
+
+  "Formatted table": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
+  ('SKU-A',12400, 4.2,'on track',  8.5),
+  ('SKU-B', 7300,11.8,'at risk',  -3.1),
+  ('SKU-C',21850, 6.5,'on track',  2.7),
+  ('SKU-D', 4200,23.4,'breach',  -12.0)
+) t(sku, forecast, mape, status, growth);
+
+-- monthly history per SKU (for the in-cell sparkline)
+CREATE OR REPLACE TABLE hist AS SELECT * FROM (VALUES
+  ('SKU-A',1,100),('SKU-A',2,108),('SKU-A',3,104),('SKU-A',4,120),('SKU-A',5,126),
+  ('SKU-B',1, 90),('SKU-B',2, 85),('SKU-B',3, 70),('SKU-B',4, 72),('SKU-B',5, 66),
+  ('SKU-C',1,200),('SKU-C',2,205),('SKU-C',3,210),('SKU-C',4,208),('SKU-C',5,215),
+  ('SKU-D',1, 60),('SKU-D',2, 52),('SKU-D',3, 48),('SKU-D',4, 40),('SKU-D',5, 35)
+) t(sku, m, sales);
+
+SELECT 'Forecast summary — per-column formatting'::LABEL;
+
+-- ::MONEY / ::COLORSCALE / ::BADGE / ::TREND / ::SPARKLINE format each column
+SELECT 12::COL;
+SELECT sku::TABLE,
+       forecast::MONEY,
+       mape AS "MAPE %" ::COLORSCALE,
+       status::BADGE,
+       growth AS "growth %" ::TREND,
+       (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE
+FROM fc ORDER BY forecast DESC;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -420,17 +447,22 @@ async function runSql(sql) {
   // DuckDB-Wasm returns DATE/TIMESTAMP as epoch numbers; convert those columns
   // back to ISO strings so date variables and date axes read as YYYY-MM-DD.
   const dateCols = new Map(); // name -> "date" | "time"
+  const decCols = new Map(); // name -> scale (DECIMAL comes back as the unscaled mantissa)
   try {
     for (const f of res.schema.fields) {
       const t = String(f.type);
       if (/date/i.test(t)) dateCols.set(f.name, "date");
       else if (/timestamp/i.test(t)) dateCols.set(f.name, "time");
+      else if (/decimal/i.test(t)) decCols.set(f.name, Number(f.type.scale) || 0);
     }
   } catch (_) {}
   const rows = res.toArray().map((row) => {
     const o = row.toJSON();
     for (const [c, kind] of dateCols) {
       if (o[c] != null) o[c] = toIso(o[c], kind === "date");
+    }
+    for (const [c, scale] of decCols) {
+      if (o[c] != null && scale > 0) o[c] = Number(o[c]) / 10 ** scale;
     }
     return o;
   });
@@ -752,8 +784,13 @@ async function run() {
             const tv = Object.values(rows[0])[skip];
             if (tv != null) fig.appendChild(mkTitle(String(tv).replace(/^"|"$/g, "")));
           }
-          const trendIdx = s.roles.filter((r) => r[1] === "TREND").map((r) => r[0]);
-          fig.appendChild(renderTable(rows, skip, trendIdx));
+          // Per-column formatting (::MONEY/::PERCENT/::COMPACT/::METRIC number
+          // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
+          // ::SPARKLINE mini charts), keyed by output column index.
+          const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE"];
+          const fmtByIdx = {};
+          for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
+          fig.appendChild(renderTable(rows, skip, fmtByIdx));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -929,8 +966,9 @@ const cleanNum = (v) => {
   return isNaN(n) ? null : n;
 };
 
-// A ::TABLE result → a sortable HTML table with in-cell bars on numeric columns.
-function renderTable(rows, skip = -1, trendIdx = []) {
+// A ::TABLE result → a sortable HTML table with in-cell bars + per-column
+// formatting (fmtByIdx maps an output column index to a format role).
+function renderTable(rows, skip = -1, fmtByIdx = {}) {
   const t = document.createElement("table");
   t.className = "dp-table";
   if (!rows.length) {
@@ -938,14 +976,21 @@ function renderTable(rows, skip = -1, trendIdx = []) {
     return t;
   }
   const allKeys = Object.keys(rows[0]);
-  const trendKeys = new Set(trendIdx.map((i) => allKeys[i]));
+  const colFmt = {}; // column key -> format role
+  for (const [idx, f] of Object.entries(fmtByIdx)) colFmt[allKeys[idx]] = f;
   const cols = allKeys.filter((_, i) => i !== skip);
   const numeric = {};
   const maxAbs = {};
+  const colMin = {};
+  const colMax = {};
   for (const c of cols) {
     const nums = rows.map((r) => cleanNum(r[c]));
-    numeric[c] = nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v));
+    const numFmt = ["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE", "TREND"].includes(colFmt[c]);
+    numeric[c] = numFmt || (nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v)));
     maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
+    const fin = nums.filter((v) => v != null);
+    colMin[c] = fin.length ? Math.min(...fin) : 0;
+    colMax[c] = fin.length ? Math.max(...fin) : 1;
   }
   let sortCol = null;
   let dir = 1;
@@ -999,14 +1044,35 @@ function renderTable(rows, skip = -1, trendIdx = []) {
         const td = tr.insertCell();
         let v = r[c];
         if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
-        if (trendKeys.has(c)) {
+        const f = colFmt[c];
+        if (f === "SPARKLINE") {
+          td.className = "spark-cell";
+          td.innerHTML = cellSpark(v);
+          continue;
+        }
+        if (f === "BADGE") {
+          td.innerHTML = v == null ? "" : badgeHtml(unq(v));
+          continue;
+        }
+        if (f === "TREND") {
           const n = cleanNum(v);
           td.style.textAlign = "right";
           if (n != null) {
-            const up = n >= 0;
             td.innerHTML =
-              `<span class="trend ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
+              `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
               `${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>`;
+          }
+          continue;
+        }
+        if (["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE"].includes(f)) {
+          const n = cleanNum(v);
+          td.style.textAlign = "right";
+          td.style.fontVariantNumeric = "tabular-nums";
+          td.textContent =
+            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : fmtNum(n, f);
+          if (f === "COLORSCALE" && n != null) {
+            td.style.background = heatColor((n - colMin[c]) / (colMax[c] - colMin[c] || 1));
+            td.style.fontWeight = "600";
           }
           continue;
         }
@@ -1026,6 +1092,53 @@ function renderTable(rows, skip = -1, trendIdx = []) {
   head();
   body();
   return t;
+}
+
+// ::COLORSCALE cell background — light → steel by normalized value t∈[0,1].
+function heatColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  const a = [0xed, 0xf1, 0xf7];
+  const b = [0x45, 0x64, 0x81];
+  const m = (i) => Math.round(a[i] + (b[i] - a[i]) * t);
+  return `rgb(${m(0)},${m(1)},${m(2)})`;
+}
+
+// ::BADGE — a coloured status pill; colour inferred from common status words.
+function badgeHtml(text) {
+  const t = text.toLowerCase();
+  let cls = "badge-neutral";
+  if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low)\b/.test(t)) cls = "badge-good";
+  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch)\b/.test(t)) cls = "badge-warn";
+  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach)\b/.test(t)) cls = "badge-bad";
+  return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
+}
+
+// ::SPARKLINE cell — a tiny inline trend line from a numeric array (DuckDB list()).
+function cellSpark(v) {
+  let arr = Array.isArray(v) ? v : null;
+  if (!arr && typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) arr = p;
+    } catch (_) {}
+  }
+  const nums = (arr || []).map(Number).filter((x) => isFinite(x));
+  if (nums.length < 2) return "";
+  const w = 84;
+  const h = 22;
+  const pad = 2;
+  const mn = Math.min(...nums);
+  const rng = Math.max(...nums) - mn || 1;
+  const xs = (i) => pad + (i * (w - 2 * pad)) / (nums.length - 1);
+  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
+  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
+  const lx = xs(nums.length - 1).toFixed(1);
+  const ly = ys(nums[nums.length - 1]).toFixed(1);
+  return (
+    `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    `<polyline points="${pts}" fill="none" stroke="#456481" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${lx}" cy="${ly}" r="2.1" fill="#E8335D"/></svg>`
+  );
 }
 
 // Format a KPI value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.

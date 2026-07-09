@@ -134,6 +134,10 @@ pub enum Role {
     BandUpper,
     /// A trend arrow rendered inside a table cell (`::TREND`).
     Trend,
+    /// Heatmap-colour a table column's cells by value (`::COLORSCALE`).
+    ColorScale,
+    /// Render a table column's text as coloured status pills (`::BADGE`).
+    Badge,
     /// A count/metadata hint shown next to a dropdown option (`::HINT`).
     Hint,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -202,6 +206,8 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "BAND_LOWER" | "BANDLOWER" => Some(Role::BandLower),
         "BAND_UPPER" | "BANDUPPER" => Some(Role::BandUpper),
         "TREND" => Some(Role::Trend),
+        "COLORSCALE" | "COLOURSCALE" | "HEAT" | "GRADIENT" => Some(Role::ColorScale),
+        "BADGE" | "STATUS" | "PILL" => Some(Role::Badge),
         "HINT" => Some(Role::Hint),
         "TEXT_SMALL" => Some(Role::Text(TextSize::Small)),
         "TEXT_MEDIUM" => Some(Role::Text(TextSize::Medium)),

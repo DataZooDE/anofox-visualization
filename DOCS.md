@@ -46,8 +46,12 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
 | `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
 | `::TEXT_SMALL`, `::TEXT_MEDIUM`, `::TEXT_LARGE` | a single-value text card at the chosen size |
-| `::TABLE` | data table — sortable headers, in-cell bars; `::TITLE` for a heading, `::TREND` for an arrow column |
-| `::TREND` | a coloured ▲/▼ arrow rendered inside a table cell |
+| `::TABLE` | data table — sortable headers, in-cell bars, clickable rows (cross-filter). Per-column formatting below. |
+| `::TREND` | table column: a coloured ▲/▼ arrow (by sign) |
+| `::MONEY` / `::PERCENT` / `::COMPACT` | table column: number format (also KPI formats) |
+| `::COLORSCALE` (`::HEAT`) | table column: heatmap-colour the cells light→steel by value |
+| `::BADGE` (`::STATUS`) | table column: render text as coloured status pills (good/warn/bad by keyword) |
+| `::SPARKLINE` | table column: a mini inline trend line from a numeric array (`list(x ORDER BY y)`) |
 | `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options); add a `::HINT` column for per-option hints |
 | `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
 | `::MULTISELECT` | multi-value picker → a DuckDB list; filter with `list_contains(getvariable('name'), col)` |
