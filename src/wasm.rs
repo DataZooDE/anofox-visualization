@@ -99,6 +99,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::GaugeLabels => "LABELS",
         Role::GaugeColors => "COLORS",
         Role::Geometry => "MAP",
+        Role::Basemap => "BASEMAP",
         Role::Input(IK::Dropdown) => "DROPDOWN",
         Role::Input(IK::Number) => "NUMBER",
         Role::Input(IK::Date) => "DATE",

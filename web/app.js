@@ -114,13 +114,29 @@ SELECT 'Combo & sparkline'::TAB;
 SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
 SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;
 
+-- Maps read real GeoJSON in the browser via DuckDB's spatial extension
+-- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
 SELECT 'Map'::TAB;
+
+SELECT 'World'::SUBTAB;
 SELECT 12::COL;
-SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value (WKT choropleth)'::TITLE FROM (VALUES
-  ('North','POLYGON((0 2, 4 2, 4 4, 0 4, 0 2))', 40),
-  ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
-  ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
-) r(name, geom, value);`,
+SELECT ST_AsText(geom) ::MAP,
+       ln(POP_EST + 1) ::BARCHART,          -- fill = log population
+       NAME ::LABEL,                        -- hover tooltip
+       'World population by country — Natural Earth'::TITLE
+FROM ST_Read('countries.geojson')
+WHERE NAME <> 'Antarctica';
+
+SELECT 'Earthquakes'::SUBTAB;
+SELECT 12::COL;
+-- Quake points coloured by magnitude, over a grey country basemap. The two
+-- layers ride in disjoint rows: quakes fill ::MAP, countries fill ::BASEMAP.
+SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, NULL ::BASEMAP,
+       'USGS earthquakes (M≥2.5, past 30 days) — colour = magnitude'::TITLE
+FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
+UNION ALL
+SELECT NULL, NULL, NULL, ST_AsText(geom), NULL
+FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';`,
     },
   },
 
@@ -324,9 +340,41 @@ function syncHL() {
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
+let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
+
+// The map examples read remote GeoJSON with DuckDB's `spatial` extension. Load
+// it and register the two datasets on first use (memoised), so `ST_Read(...)`
+// works from plain example SQL without a server.
+let geoReady = null;
+async function ensureGeo() {
+  if (backend === "live") return; // the live backend brings its own spatial setup
+  if (!db) throw new Error("in-browser DuckDB not ready");
+  if (!geoReady) {
+    geoReady = (async () => {
+      await conn.query("INSTALL spatial; LOAD spatial;");
+      const reg = async (name, url) => {
+        const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+        await db.registerFileBuffer(name, bytes);
+      };
+      await reg(
+        "countries.geojson",
+        "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_admin_0_countries.geojson"
+      );
+      await reg(
+        "quakes.geojson",
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_month.geojson"
+      );
+    })().catch((e) => {
+      geoReady = null; // let a later run retry after a transient network failure
+      throw e;
+    });
+  }
+  return geoReady;
+}
 
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
 async function runSql(sql) {
+  if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
     if (!r.ok) throw new Error(await r.text());
@@ -390,7 +438,7 @@ async function boot() {
     const workerUrl = URL.createObjectURL(
       new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
     );
-    const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
+    db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
     conn = await db.connect();
   }

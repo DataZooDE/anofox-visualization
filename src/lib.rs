@@ -168,6 +168,9 @@ pub enum Role {
     GaugeColors,
     /// A WKT geometry column for a map choropleth (`::MAP`); coloured by the measure.
     Geometry,
+    /// A second WKT geometry column drawn as a faint grey backdrop under the
+    /// `::MAP` layer (`::BASEMAP`) — e.g. country outlines behind quake points.
+    Basemap,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -234,6 +237,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "LABELS" => Some(Role::GaugeLabels),
         "COLORS" | "COLOURS" => Some(Role::GaugeColors),
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
+        "BASEMAP" | "MAPBASE" | "BACKDROP" => Some(Role::Basemap),
         "TABLE" | "GRID" => Some(Role::Table),
         "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
@@ -688,6 +692,7 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     let geom = cols.iter().find(|c| c.role == Role::Geometry).ok_or("map needs a ::MAP column")?;
     let fill = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let label = cols.iter().find(|c| c.role == Role::Label);
+    let base = cols.iter().find(|c| c.role == Role::Basemap);
     let mut data: Vec<(String, Vec<Value>)> = vec![("geometry".to_string(), geom.values.clone())];
     let mut aes = Aes::new();
     if let Some(f) = fill {
@@ -699,12 +704,30 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
         data.push(("label".to_string(), lv));
         aes = aes.label("label");
     }
-    let mut plot = GGPlot::new(data).aes(aes).geom_sf().coord_sf().theme_void();
+    let mut plot = GGPlot::new(data).aes(aes);
+    // Optional grey basemap (e.g. country outlines) drawn first, behind the data
+    // layer — a separate no-fill geom_sf layer that shares the map's scales.
+    if let Some(b) = base {
+        let mut base_geom = ggplot_rs::geom::sf::GeomSf::default();
+        base_geom.fill = (228, 230, 233);
+        base_geom.color = (198, 201, 206);
+        plot = plot
+            .geom_sf_with(base_geom)
+            .layer_data(vec![("geometry".to_string(), b.values.clone())])
+            .layer_aes(Aes::new());
+    }
+    let mut plot = plot.geom_sf().coord_sf().theme_void();
     if fill.is_some() {
-        plot = plot.scale_fill_gradient(
-            ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-            ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
-        );
+        // Viridis gives points/regions strong contrast over the grey basemap;
+        // a plain choropleth keeps the on-brand light→primary gradient.
+        plot = if base.is_some() {
+            plot.scale_fill_viridis_c()
+        } else {
+            plot.scale_fill_gradient(
+                ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
+                ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
+            )
+        };
     }
     plot.render_svg_native_with_size(width, height)
         .map_err(|e| format!("render failed: {e:?}"))
