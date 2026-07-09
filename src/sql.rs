@@ -69,7 +69,7 @@ const ROLES: &[&str] = &[
     "BAR", "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
     "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
     "BOX_PLOT", "HEATMAP", "TILE", "TILES", "SPARKLINE", "SPARK", "REFLINE", "TARGET", "GOAL", "MAP",
-    "GEOMETRY", "GEO", "CHOROPLETH", "TABLE", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
+    "GEOMETRY", "GEO", "CHOROPLETH", "TABLE", "PAGED", "TABLE_PAGED", "PAGINATED", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
     "OPTIONS", "SELECT_INPUT", "NUMBER", "SLIDER", "NUMERIC", "DATE", "DATEPICKER", "TEXT", "SEARCH",
     "STRING", "MULTISELECT", "MULTI", "DATERANGE", "DATE_RANGE", "MONEY", "DOLLAR", "CURRENCY",
     "PERCENT", "PCT", "COMPACT",
@@ -146,8 +146,12 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
 
     // ::TABLE, ::DATERANGE and ::DOWNLOAD_* keep every column and its name — the
     // whole result is the payload; strip only the casts.
-    let keep_intact =
-        |r: Role| matches!(r, Role::Table | Role::Input(InputKind::DateRange) | Role::Download(_));
+    let keep_intact = |r: Role| {
+        matches!(
+            r,
+            Role::Table | Role::PagedTable | Role::Input(InputKind::DateRange) | Role::Download(_)
+        )
+    };
     let intact = split
         .iter()
         .find_map(|it| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)).filter(|r| keep_intact(*r)));

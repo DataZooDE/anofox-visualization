@@ -119,6 +119,9 @@ pub enum Role {
     Span,
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
+    /// A SQL-paginated table (`::PAGED`) — the browser pages it with
+    /// `LIMIT`/`OFFSET` + `COUNT(*)`, holding one page at a time.
+    PagedTable,
     /// A single big-number KPI (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`); an
     /// optional `::LABEL` is the caption.
     Metric(MetricFmt),
@@ -224,6 +227,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "COLORS" | "COLOURS" => Some(Role::GaugeColors),
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "TABLE" | "GRID" => Some(Role::Table),
+        "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
         "MONEY" | "DOLLAR" | "CURRENCY" => Some(Role::Metric(MetricFmt::Money)),
         "PERCENT" | "PCT" => Some(Role::Metric(MetricFmt::Percent)),

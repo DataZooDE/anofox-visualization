@@ -439,6 +439,19 @@ SELECT
   ((i * 37) % 100) AS score,
   ((i * 7) % 500)  AS events ::TABLE
 FROM range(1, 1001) t(i) ORDER BY i;`,
+
+  "SQL-paged table (100k)": `-- ::PAGED runs LIMIT/OFFSET + COUNT(*) in DuckDB and fetches ONE page at a
+-- time, so this 100,000-row table stays instant (the browser never holds it
+-- all). Sorting a header re-queries server-side. Works the same over a large
+-- parquet in S3/MotherDuck — the engine does the paging, not the browser.
+SELECT '100,000 rows — paged by DuckDB (LIMIT/OFFSET), not the browser'::LABEL;
+SELECT 12::COL;
+SELECT
+  'ID-' || lpad(i::VARCHAR, 6, '0') AS id,
+  ['app','web','api','cli'][(i % 4) + 1] AS channel,
+  ((i * 37) % 1000) AS score,
+  ((i * 91) % 100)  AS load_pct ::PAGED
+FROM range(1, 100001) t(i);`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -561,6 +574,8 @@ let dpVars = {}; // DuckDB variable name -> selected value (persists across runs
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
+let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
+let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpTimer = null; // auto-refresh interval handle
 
@@ -732,6 +747,78 @@ async function run() {
         nextSpan = 0;
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
+      } else if (role(s, "PAGED")) {
+        // SQL-driven pagination: only ONE page (+ a COUNT) is fetched, so the
+        // browser never holds the whole table. LIMIT/OFFSET + ORDER BY run in
+        // DuckDB — the same over a huge parquet in S3 or MotherDuck.
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const fig = document.createElement("figure");
+        fig.className = "panel";
+        if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+        const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE"];
+        const fmtByIdx = {};
+        for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
+        const titleRole = s.roles.find((r) => r[1] === "TITLE");
+        const titleIdx = titleRole ? titleRole[0] : -1;
+        const base = s.sql;
+        const pageSize = 50;
+        const idx = i;
+        const titleHolder = document.createElement("div");
+        const holder = document.createElement("div");
+        fig.append(titleHolder, holder);
+        const qident = (c) => `"${String(c).replace(/"/g, '""')}"`;
+        let cachedTotal = null;
+        const load = async () => {
+          const page = dpPage[idx] || 0;
+          const sort = dpSort[idx];
+          if (cachedTotal == null) {
+            try {
+              const c = JSON.parse(await runSql(`SELECT count(*) AS n FROM (${base}) _dp`));
+              cachedTotal = Number(c[0] && c[0].n) || 0;
+            } catch (_) {
+              cachedTotal = 0;
+            }
+          }
+          const order = sort && sort.col ? ` ORDER BY ${qident(sort.col)} ${sort.dir > 0 ? "ASC" : "DESC"}` : "";
+          let rows = [];
+          try {
+            rows = JSON.parse(await runSql(`SELECT * FROM (${base}) _dp${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`));
+          } catch (e) {
+            holder.innerHTML = "";
+            showError(holder, String(e));
+            return;
+          }
+          titleHolder.innerHTML = "";
+          holder.innerHTML = "";
+          let sk = -1;
+          if (titleIdx >= 0 && rows.length) {
+            const tv = Object.values(rows[0])[titleIdx];
+            if (tv != null) titleHolder.appendChild(mkTitle(String(tv).replace(/^"|"$/g, "")));
+            sk = titleIdx;
+          }
+          const server = {
+            total: cachedTotal,
+            page,
+            pageSize,
+            sortCol: sort ? sort.col : null,
+            sortDir: sort ? sort.dir : 1,
+            onPage: (p) => {
+              dpPage[idx] = Math.max(0, p);
+              load();
+            },
+            onSort: (col) => {
+              const cur = dpSort[idx];
+              dpSort[idx] = { col, dir: cur && cur.col === col ? -cur.dir : 1 };
+              dpPage[idx] = 0;
+              load();
+            },
+          };
+          holder.appendChild(renderTable(rows, sk, fmtByIdx, server));
+        };
+        await load();
+        container.appendChild(fig);
+        panels++;
+        nextSpan = 0;
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
@@ -978,8 +1065,10 @@ const cleanNum = (v) => {
 };
 
 // A ::TABLE result → a sortable HTML table with in-cell bars + per-column
-// formatting (fmtByIdx maps an output column index to a format role).
-function renderTable(rows, skip = -1, fmtByIdx = {}) {
+// formatting (fmtByIdx maps an output column index to a format role). Pass
+// `server` = {total, page, pageSize, onPage, onSort, sortCol, sortDir} for
+// SQL-driven pagination/sorting (::PAGED); otherwise it paginates client-side.
+function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   const t = document.createElement("table");
   t.className = "dp-table";
   if (!rows.length) {
@@ -1003,13 +1092,18 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
     colMin[c] = fin.length ? Math.min(...fin) : 0;
     colMax[c] = fin.length ? Math.max(...fin) : 1;
   }
-  let sortCol = null;
-  let dir = 1;
+  let sortCol = server ? server.sortCol : null;
+  let dir = server ? server.sortDir || 1 : 1;
   const hr = t.createTHead().insertRow();
   cols.forEach((c) => {
     const th = document.createElement("th");
     th.style.cursor = "pointer";
-    th.onclick = () => {
+    th.onclick = (e) => {
+      if (server) {
+        e.stopPropagation();
+        server.onSort(c); // server re-queries with ORDER BY + reloads this panel
+        return;
+      }
       dir = sortCol === c ? -dir : 1;
       sortCol = c;
       head();
@@ -1019,8 +1113,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
   });
   const tb = t.createTBody();
   let page = 0;
-  const pageSize = 50;
+  const pageSize = server ? server.pageSize : 50;
   const sortedRows = () => {
+    if (server) return rows; // already sorted + paged server-side
     const data = rows.slice();
     if (sortCol) {
       const num = numeric[sortCol];
@@ -1036,10 +1131,15 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
   const body = () => {
     tb.innerHTML = "";
     const data = sortedRows();
-    const pages = Math.max(1, Math.ceil(data.length / pageSize));
-    page = Math.min(page, pages - 1);
-    updateFoot(data.length, pages);
-    for (const r of data.slice(page * pageSize, (page + 1) * pageSize)) {
+    if (server) {
+      updateFoot(server.total, Math.max(1, Math.ceil(server.total / pageSize)));
+    } else {
+      const pages = Math.max(1, Math.ceil(data.length / pageSize));
+      page = Math.min(page, pages - 1);
+      updateFoot(data.length, pages);
+    }
+    const pageRows = server ? data : data.slice(page * pageSize, (page + 1) * pageSize);
+    for (const r of pageRows) {
       const tr = tb.insertRow();
       // A categorical first column makes the row a cross-filter source. Clicking
       // sets BOTH the generic getvariable('selected') AND a NAMED cross-filter
@@ -1127,8 +1227,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
     }
     foot.style.display = "";
     foot.innerHTML = "";
-    const from = page * pageSize + 1;
-    const to = Math.min(total, (page + 1) * pageSize);
+    const cur = server ? server.page : page;
+    const from = cur * pageSize + 1;
+    const to = Math.min(total, (cur + 1) * pageSize);
     const mk = (label, disabled, fn) => {
       const btn = document.createElement("button");
       btn.className = "page-btn";
@@ -1136,8 +1237,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
       btn.disabled = disabled;
       btn.onclick = (e) => {
         e.stopPropagation();
-        fn();
-        body();
+        if (server) {
+          fn(); // server.onPage handles the re-query + re-render
+        } else {
+          fn();
+          body();
+        }
       };
       return btn;
     };
@@ -1145,9 +1250,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
     info.className = "table-info";
     info.textContent = `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`;
     foot.append(
-      mk("◀", page === 0, () => (page = Math.max(0, page - 1))),
+      mk("◀", cur === 0, () => (server ? server.onPage(cur - 1) : (page = Math.max(0, page - 1)))),
       info,
-      mk("▶", page >= pages - 1, () => (page = Math.min(pages - 1, page + 1)))
+      mk("▶", cur >= pages - 1, () => (server ? server.onPage(cur + 1) : (page = Math.min(pages - 1, page + 1))))
     );
   }
   head();

@@ -46,7 +46,8 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
 | `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
 | `::TEXT_SMALL`, `::TEXT_MEDIUM`, `::TEXT_LARGE` | a single-value text card at the chosen size |
-| `::TABLE` | data table — sortable headers, in-cell bars, clickable rows (cross-filter). Per-column formatting below. |
+| `::TABLE` | data table — sortable headers, in-cell bars, clickable rows (cross-filter), paginated 50/page client-side. Per-column formatting below. |
+| `::PAGED` (`::PAGINATED`) | like `::TABLE` but paged in SQL (`LIMIT`/`OFFSET`+`COUNT(*)`, server-side sort) — fetches one page at a time, for huge results (e.g. a large parquet in S3/MotherDuck) |
 | `::TREND` | table column: a coloured ▲/▼ arrow (by sign) |
 | `::MONEY` / `::PERCENT` / `::COMPACT` | table column: number format (also KPI formats) |
 | `::COLORSCALE` (`::HEAT`) | table column: heatmap-colour the cells light→steel by value |
