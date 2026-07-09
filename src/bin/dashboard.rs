@@ -30,8 +30,14 @@ fn main() {
             run(&db, &p.sql, false); // DDL/insert — run for effect
             continue;
         }
-        // Dropdowns are interactive — they need the browser builder / `serve`.
-        if p.roles.iter().any(|(_, r)| matches!(r, Role::Input)) {
+        // Inputs + layout directives are interactive — the browser builder /
+        // `serve` handle them; the static CLI output skips them.
+        if p.roles.iter().any(|(_, r)| {
+            matches!(
+                r,
+                Role::Input | Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span
+            )
+        }) {
             continue;
         }
         let json = run(&db, &p.sql, true);

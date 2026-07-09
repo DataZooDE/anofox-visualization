@@ -67,7 +67,8 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
 const ROLES: &[&str] = &[
     "XAXIS", "X", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART", "BAR",
     "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
-    "SCATTER", "POINT", "SCATTERCHART", "DROPDOWN", "OPTIONS", "SELECT_INPUT",
+    "SCATTER", "POINT", "SCATTERCHART", "DROPDOWN", "OPTIONS", "SELECT_INPUT", "COLUMNS", "COLS",
+    "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).

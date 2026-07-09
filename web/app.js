@@ -49,6 +49,35 @@ SELECT 'Sessions for the selected channel'::LABEL;
 SELECT week::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE channel = getvariable('channel')
 GROUP BY ALL ORDER BY week;`,
+
+  "Layout & filters": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
+  ('W1','app','EU',30),('W1','web','EU',22),('W1','app','US',18),('W1','web','US',12),
+  ('W2','app','EU',41),('W2','web','EU',28),('W2','app','US',20),('W2','web','US',15),
+  ('W3','app','EU',26),('W3','web','EU',33),('W3','app','US',14),('W3','web','US',19),
+  ('W4','app','EU',48),('W4','web','EU',30),('W4','app','US',22),('W4','web','US',17)
+) t(week, channel, region, n);
+
+SELECT 2::COLUMNS;                       -- a 2-column grid
+
+SELECT 'Filters'::GROUP;                 -- put both dropdowns in one box
+SELECT DISTINCT region::DROPDOWN  FROM sessions ORDER BY region;
+SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
+SELECT 1::ENDGROUP;
+
+SELECT 'Weekly sessions (filtered)'::LABEL;
+
+SELECT 2::SPAN;                          -- next chart spans both columns
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
+FROM sessions WHERE region = getvariable('region')
+GROUP BY ALL ORDER BY week, channel;
+
+SELECT week::XAXIS, sum(n)::LINECHART
+FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
+GROUP BY ALL ORDER BY week;
+
+SELECT channel::XAXIS, sum(n)::BARCHART
+FROM sessions WHERE region = getvariable('region')
+GROUP BY ALL ORDER BY sum(n) DESC;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -111,8 +140,10 @@ async function boot() {
   run();
 }
 
-const isDropdown = (s) => s.roles.some((r) => r[1] === "DROPDOWN");
+const role = (s, name) => s.roles.some((r) => r[1] === name);
+const isDropdown = (s) => role(s, "DROPDOWN");
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
+const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 
 async function run() {
@@ -126,9 +157,11 @@ async function run() {
     return showError(grid, String(e));
   }
 
-  // Pass 1: setup + inputs — set DuckDB variables before any chart runs.
-  const controls = [];
-  for (const s of stmts) {
+  // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
+  // caching options for the render pass by statement index.
+  const dd = {};
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
     try {
       if (s.setup) {
         await runSql(s.sql);
@@ -139,64 +172,102 @@ async function run() {
         const options = rows.map((r) => String(r[varname]));
         if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
         await runSql(`SET VARIABLE ${varname} = '${dpVars[varname].replace(/'/g, "''")}'`);
-        controls.push({ varname, options });
+        dd[i] = { varname, options };
       }
     } catch (e) {
       showError(grid, `${s.sql}\n\n${e}`);
     }
   }
-  if (controls.length) renderControls(grid, controls);
 
-  // Pass 2: headings + charts.
+  // Render pass: place controls / headings / charts in document order into the
+  // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
+  // grid columns; ::SPAN widens the next panel.
+  let container = grid;
+  let nextSpan = 0;
   let panels = 0;
-  for (const s of stmts) {
-    if (s.setup || isDropdown(s)) continue;
+  const firstValue = async (s) => {
+    const rows = JSON.parse(await runSql(s.sql));
+    return rows[0] ? Object.values(rows[0])[0] : null;
+  };
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
+    if (s.setup) continue;
+    const d = directive(s);
     try {
-      const rowsJson = await runSql(s.sql);
-      if (isHeading(s)) {
-        const rows = JSON.parse(rowsJson);
-        const h = document.createElement("h2");
-        h.className = "section";
-        h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
-        grid.appendChild(h);
+      if (d === "COLUMNS") {
+        const n = parseInt(await firstValue(s));
+        if (n > 0) grid.style.gridTemplateColumns = `repeat(${n}, minmax(0, 1fr))`;
+        $("cols").value = n > 0 && n <= 3 ? String(n) : "auto";
+      } else if (d === "GROUP") {
+        const title = await firstValue(s);
+        const box = document.createElement("section");
+        box.className = "group";
+        if (title) {
+          const t = document.createElement("div");
+          t.className = "group-title";
+          t.textContent = title;
+          box.appendChild(t);
+        }
+        const body = document.createElement("div");
+        body.className = "group-body";
+        box.appendChild(body);
+        grid.appendChild(box);
+        container = body;
+      } else if (d === "ENDGROUP") {
+        container = grid;
+      } else if (d === "SPAN") {
+        nextSpan = parseInt(await firstValue(s)) || 0;
+      } else if (isDropdown(s)) {
+        if (dd[i]) container.appendChild(makeControl(dd[i], container === grid));
       } else {
-        const fig = document.createElement("figure");
-        fig.className = "panel";
-        fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
-        grid.appendChild(fig);
-        panels++;
+        const rowsJson = await runSql(s.sql);
+        if (isHeading(s)) {
+          const rows = JSON.parse(rowsJson);
+          const h = document.createElement("h2");
+          h.className = "section";
+          h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
+          container.appendChild(h);
+        } else {
+          const fig = document.createElement("figure");
+          fig.className = "panel";
+          if (nextSpan > 1 && container === grid) fig.style.gridColumn = `span ${nextSpan}`;
+          fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
+          container.appendChild(fig);
+          panels++;
+        }
+        nextSpan = 0;
       }
     } catch (e) {
-      showError(grid, `${s.sql}\n\n${e}`);
+      showError(container, `${s.sql}\n\n${e}`);
     }
   }
   attachHover();
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
 }
 
-// Build a filter bar of <select> controls; changing one re-runs the dashboard.
-function renderControls(grid, controls) {
-  const bar = document.createElement("div");
-  bar.className = "controls";
-  for (const c of controls) {
-    const wrap = document.createElement("label");
-    wrap.className = "control";
-    wrap.textContent = c.varname + ":";
-    const sel = document.createElement("select");
-    for (const o of c.options) {
-      const opt = document.createElement("option");
-      opt.value = opt.textContent = o;
-      if (o === dpVars[c.varname]) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    sel.onchange = () => {
-      dpVars[c.varname] = sel.value;
-      run();
-    };
-    wrap.appendChild(sel);
-    bar.appendChild(wrap);
+// A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
+// stand-alone control in its own spanning row (grouped ones sit inline).
+function makeControl(meta, bar) {
+  const wrap = document.createElement("label");
+  wrap.className = "control";
+  wrap.textContent = meta.varname + ":";
+  const sel = document.createElement("select");
+  for (const o of meta.options) {
+    const opt = document.createElement("option");
+    opt.value = opt.textContent = o;
+    if (o === dpVars[meta.varname]) opt.selected = true;
+    sel.appendChild(opt);
   }
-  grid.appendChild(bar);
+  sel.onchange = () => {
+    dpVars[meta.varname] = sel.value;
+    run();
+  };
+  wrap.appendChild(sel);
+  if (!bar) return wrap;
+  const box = document.createElement("div");
+  box.className = "controls";
+  box.appendChild(wrap);
+  return box;
 }
 
 function showError(grid, msg) {

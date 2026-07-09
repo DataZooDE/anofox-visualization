@@ -48,6 +48,14 @@ pub enum Role {
     /// A control input (`::DROPDOWN`) — the query's values become options; the
     /// output column name is a DuckDB variable, usable via `getvariable('name')`.
     Input,
+    /// Layout: `::COLUMNS` sets the grid column count (the value is the number).
+    Columns,
+    /// Layout: `::GROUP` opens a box; enclosed panels/controls sit together in it.
+    GroupStart,
+    /// Layout: `::ENDGROUP` closes the current box.
+    GroupEnd,
+    /// Layout: `::SPAN` makes the *next* panel span N grid columns (the value).
+    Span,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -76,6 +84,10 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input),
+        "COLUMNS" | "COLS" => Some(Role::Columns),
+        "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
+        "ENDGROUP" | "ENDBOX" | "ENDROW" => Some(Role::GroupEnd),
+        "SPAN" | "WIDTH" => Some(Role::Span),
         _ => None,
     }
 }
