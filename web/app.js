@@ -115,20 +115,24 @@ GROUP BY ALL ORDER BY channel;`,
   ('W4','app',48),('W4','web',30),('W4','api',18)
 ) t(week, channel, n);
 
-SELECT 'Overview'::LABEL;
+SELECT 'Overview — click a pie slice or table row to filter the KPIs'::LABEL;
 
--- KPI cards (big numbers), 4 columns each
-SELECT 4::COL; SELECT sum(n)::METRIC,   'Total sessions'::LABEL FROM sessions;
-SELECT 4::COL; SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions;
-SELECT 4::COL; SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions;
+-- KPI cards (big numbers), 4 cols each. They opt into the cross-filter, so
+-- clicking a channel (pie slice / table row) re-computes them.
+SELECT 4::COL; SELECT sum(n)::METRIC, 'Total sessions'::LABEL
+FROM sessions WHERE getvariable('selected') IN ('', channel);
+SELECT 4::COL; SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL
+FROM sessions WHERE getvariable('selected') IN ('', channel);
+SELECT 4::COL; SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL
+FROM sessions WHERE getvariable('selected') IN ('', channel);
 
 -- a pie by channel + a data table, side by side (both titled via ::TITLE)
 SELECT 6::COL;
 SELECT channel::CATEGORY, sum(n)::PIE, 'Share by channel'::TITLE FROM sessions GROUP BY ALL;
 
 SELECT 6::COL;
-SELECT 'Sessions detail'::TITLE, week, channel, sum(n) AS sessions ::TABLE
-FROM sessions GROUP BY ALL ORDER BY week, channel;`,
+SELECT 'Sessions detail'::TITLE, channel, week, sum(n) AS sessions ::TABLE
+FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
   "More charts & inputs": `CREATE OR REPLACE TABLE m AS
 SELECT i AS id,
@@ -292,11 +296,12 @@ SELECT 6::COL;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED_PERCENT, 'Channel mix'::TITLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
 
--- LINECHART with a confidence band (BAND_LOWER / BAND_UPPER)
+-- LINECHART with a confidence band (BAND_LOWER / BAND_UPPER). Opts into the
+-- cross-filter, so clicking a channel in the donut/bars re-computes it.
 SELECT 6::COL;
 SELECT week::XAXIS, sum(revenue)::LINECHART,
        sum(revenue)*0.85::BAND_LOWER, sum(revenue)*1.15::BAND_UPPER, 'Revenue ± band'::TITLE
-FROM sales GROUP BY ALL ORDER BY week;
+FROM sales WHERE getvariable('selected') IN ('', channel) GROUP BY ALL ORDER BY week;
 
 -- a table with a TREND arrow column
 SELECT 8::COL;
@@ -310,6 +315,30 @@ SELECT week, channel, n, revenue ::DOWNLOAD_CSV FROM sales;
 
 SELECT 'https://taleshape.com/shaper/docs/dashboard-sql-reference/'::FOOTER_LINK,
        'Compare with the Shaper SQL reference';`,
+
+  "Date-range filter": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
+  (DATE '2024-01-03','app',30),(DATE '2024-01-10','web',22),(DATE '2024-01-18','app',41),
+  (DATE '2024-01-27','api',28),(DATE '2024-02-04','web',26),(DATE '2024-02-13','app',33),
+  (DATE '2024-02-21','api',48),(DATE '2024-02-28','web',30),(DATE '2024-03-07','app',37)
+) t(day, channel, n);
+
+-- a from→to date range: the query returns two DATE columns → two variables
+-- (from_day / to_day), each bound to a date picker (defaults = min/max).
+SELECT 'Date range'::GROUP;
+SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;
+SELECT 1::ENDGROUP;
+
+SELECT 'Sessions in the selected range'::LABEL;
+
+SELECT 4::COL;
+SELECT sum(n)::METRIC, 'Total sessions'::LABEL FROM events
+WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE;
+
+SELECT 8::COL;
+SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'By day'::TITLE
+FROM events
+WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
+GROUP BY ALL ORDER BY day, channel;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -326,8 +355,41 @@ async function runSql(sql) {
     return (await r.text()) || "[]";
   }
   const res = await conn.query(sql);
-  const rows = res.toArray().map((row) => row.toJSON());
+  // DuckDB-Wasm returns DATE/TIMESTAMP as epoch numbers; convert those columns
+  // back to ISO strings so date variables and date axes read as YYYY-MM-DD.
+  const dateCols = new Map(); // name -> "date" | "time"
+  try {
+    for (const f of res.schema.fields) {
+      const t = String(f.type);
+      if (/date/i.test(t)) dateCols.set(f.name, "date");
+      else if (/timestamp/i.test(t)) dateCols.set(f.name, "time");
+    }
+  } catch (_) {}
+  const rows = res.toArray().map((row) => {
+    const o = row.toJSON();
+    for (const [c, kind] of dateCols) {
+      if (o[c] != null) o[c] = toIso(o[c], kind === "date");
+    }
+    return o;
+  });
   return JSON.stringify(rows, (_, v) => (typeof v === "bigint" ? Number(v) : v));
+}
+
+// Normalise a DuckDB-Wasm date/time value (Date, or epoch as days/ms/µs) to an
+// ISO string — YYYY-MM-DD for dates, "YYYY-MM-DD HH:MM:SS" for timestamps.
+function toIso(v, dateOnly) {
+  let d;
+  if (v instanceof Date) d = v;
+  else {
+    let n = Number(v);
+    if (!isFinite(n)) return String(v);
+    if (Math.abs(n) < 1e11) n *= 86400000; // days -> ms
+    else if (Math.abs(n) > 1e14) n = Math.round(n / 1000); // µs -> ms
+    d = new Date(n);
+  }
+  if (isNaN(d.getTime())) return String(v);
+  const iso = d.toISOString();
+  return dateOnly ? iso.slice(0, 10) : iso.replace("T", " ").slice(0, 19);
 }
 
 async function boot() {
@@ -651,10 +713,16 @@ async function run() {
           panels++;
         } else {
           const fig = mkPanel();
-          const ph = role(s, "SPARKLINE") ? 90 : 300; // sparklines are short
           const t = titleOf(s, rowsJson);
           if (t) fig.appendChild(mkTitle(t));
-          fig.insertAdjacentHTML("beforeend", render_panel(rowsJson, JSON.stringify(s.roles), 460, ph));
+          // A selection that filters everything out renders a clean note, not a
+          // broken/empty chart box.
+          if (!JSON.parse(rowsJson).length) {
+            fig.appendChild(mkNoData());
+          } else {
+            const ph = role(s, "SPARKLINE") ? 90 : 300; // sparklines are short
+            fig.insertAdjacentHTML("beforeend", render_panel(rowsJson, JSON.stringify(s.roles), 460, ph));
+          }
           container.appendChild(fig);
           panels++;
         }
@@ -707,8 +775,8 @@ function makeControl(meta, bar) {
     };
     wrap.appendChild(mk(meta.varnames[0]));
     const arrow = document.createElement("span");
-    arrow.textContent = " → ";
-    arrow.style.margin = "0 .35rem";
+    arrow.textContent = "→";
+    arrow.className = "daterange-arrow";
     wrap.appendChild(arrow);
     wrap.appendChild(mk(meta.varnames[1]));
     return finalizeControl(wrap, bar);
@@ -775,6 +843,13 @@ function mkTitle(text) {
   c.className = "panel-title";
   c.textContent = text;
   return c;
+}
+
+function mkNoData() {
+  const d = document.createElement("div");
+  d.className = "nodata";
+  d.textContent = "No data for this selection";
+  return d;
 }
 
 const cleanNum = (v) => {

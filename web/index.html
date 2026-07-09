@@ -29,6 +29,10 @@ header .status{font-size:.78rem;color:var(--muted);min-width:58px;text-align:rig
 .layout{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:0;min-height:calc(100vh - 57px)}
 .editor{border-right:1px solid var(--line);background:rgba(255,255,255,.6);display:flex;flex-direction:column;backdrop-filter:blur(6px)}
 .editor .bar{padding:.6rem .8rem;border-bottom:1px solid var(--line);display:flex;gap:.5rem;align-items:center}
+.bar select,.actions select{font:inherit;font-size:.83rem;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:9px;padding:.4rem 1.9rem .4rem .7rem;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right .6rem center;transition:border-color .15s,box-shadow .15s}
+.bar select:hover,.actions select:hover{border-color:#c7cede}
+.bar select:focus,.actions select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
+body.dark .actions select{background:#16223e;color:#e8eef8;border-color:#2b3a58}
 .editor textarea{flex:1;border:0;outline:0;resize:none;padding:1rem;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);tab-size:2;background:transparent}
 button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:9px;padding:.5rem .95rem;font-weight:600;font-size:.85rem;cursor:pointer;box-shadow:0 6px 16px -6px rgba(31,140,166,.5);transition:transform .12s ease,box-shadow .12s ease,filter .12s ease}
 button:hover{transform:translateY(-1px);filter:brightness(1.06);box-shadow:0 10px 22px -8px rgba(31,140,166,.6)}
@@ -47,8 +51,14 @@ header .actions select{padding:.42rem .5rem}
 @media(max-width:760px){.grid>.panel{grid-column:1/-1 !important}}
 .section{grid-column:1/-1;margin:.7rem 0 -.5rem;font-size:1.15rem;font-weight:700;letter-spacing:-.02em;color:var(--ink)}
 .controls{grid-column:1/-1;display:flex;gap:1.3rem;flex-wrap:wrap;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:.75rem 1.1rem;box-shadow:var(--shadow)}
-.control{font-size:.82rem;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:.45rem}
-.control select{font-size:.85rem;color:var(--ink);font-weight:500}
+.control{font-size:.82rem;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:.5rem}
+.control select,.control input{font:inherit;font-size:.85rem;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:10px;padding:.5rem .8rem;min-width:130px;transition:border-color .15s,box-shadow .15s;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.control input{cursor:text}
+.control select:not([multiple]){cursor:pointer;appearance:none;-webkit-appearance:none;padding-right:2rem;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right .7rem center}
+.control select:hover,.control input:hover{border-color:#c7cede}
+.control select:focus,.control input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
+.control input[type=date]{min-width:150px}
+.control input[type=number]{min-width:100px}
 .group{grid-column:1/-1;margin:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:1.1rem 1.2rem;box-shadow:var(--shadow)}
 .group-title{font-weight:700;letter-spacing:-.01em;margin-bottom:.7rem}
 .group-body{display:flex;flex-wrap:wrap;gap:1.3rem;align-items:center}
@@ -81,6 +91,8 @@ header .actions select{padding:.42rem .5rem}
 .dp-table tbody tr:hover td{background-color:rgba(42,157,143,.05)}
 .trend{font-weight:700;font-variant-numeric:tabular-nums}
 .trend.up{color:#0ca678}.trend.down{color:#e03131}
+/* Empty result under a selection */
+.nodata{color:var(--muted);font-size:.85rem;text-align:center;padding:2.6rem 0;font-weight:500}
 /* Placeholder (::PLACEHOLDER) — reserved empty grid cell */
 .placeholder{background:transparent;border:1px dashed var(--line);box-shadow:none;min-height:80px}
 .placeholder:hover{box-shadow:none;border-color:var(--line)}
@@ -92,7 +104,11 @@ header .actions select{padding:.42rem .5rem}
 .download-row{justify-content:flex-start}
 .dl-btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:10px;padding:.55rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
 @media print{.editor,header .actions,#loadbar,.dl{display:none !important}.layout{display:block !important}body{background:#fff}}
-.control select[multiple]{padding:.25rem;min-width:110px;border-radius:9px}
+.control select[multiple]{padding:.3rem;min-width:130px;cursor:default}
+.control select[multiple] option{padding:.35rem .55rem;border-radius:7px;margin:1px 0;font-weight:600}
+.control select[multiple] option:checked{background:linear-gradient(0deg,var(--accent),var(--accent));color:#fff}
+.control select[multiple]:focus option:checked{background:linear-gradient(0deg,var(--accent),var(--accent))}
+.control .daterange-arrow{margin:0 .1rem;color:var(--muted)}
 .tabbar{grid-column:1/-1;display:flex;gap:.25rem;border-bottom:1px solid var(--line);margin:.2rem 0 1.15rem}
 .tab-btn{background:none;color:var(--muted);border:0;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;padding:.55rem 1rem;font-weight:600;font-size:.9rem;cursor:pointer;box-shadow:none;transition:color .12s,background .12s,border-color .12s}
 .tab-btn:hover{color:var(--ink);background:rgba(42,157,143,.06);transform:none;filter:none}

@@ -258,8 +258,10 @@ fn top_level_kw(s: &str, kw: &str) -> Option<usize> {
             '(' if !in_str => depth += 1,
             ')' if !in_str => depth -= 1,
             _ if !in_str && depth == 0 && up[i..].starts_with(kw) => {
-                let before = up[..i].chars().next_back().is_none_or(|p| !p.is_ascii_alphanumeric());
-                let after = up[i + kw.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+                // `_` is an identifier char, so `from_day` must NOT match `FROM`.
+                let ident = |c: char| c.is_alphanumeric() || c == '_';
+                let before = up[..i].chars().next_back().is_none_or(|p| !ident(p));
+                let after = up[i + kw.len()..].chars().next().is_none_or(|c| !ident(c));
                 if before && after {
                     return Some(i);
                 }
