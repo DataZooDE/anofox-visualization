@@ -262,6 +262,7 @@ const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB"].find((d
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
+let dpTab = null; // the active tab name (preserved across re-runs)
 
 async function run() {
   const grid = $("grid");
@@ -379,13 +380,14 @@ async function run() {
         btn.className = "tab-btn";
         btn.textContent = name;
         btn.onclick = () => {
+          dpTab = name; // remember, so a cross-filter re-run keeps this tab
           tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
           tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
           pane.style.display = "";
           btn.classList.add("active");
         };
         tabBar.appendChild(btn);
-        if (tabBar.children.length === 1) {
+        if (dpTab === name || (dpTab === null && tabBar.children.length === 1)) {
           pane.style.display = "";
           btn.classList.add("active");
         }
@@ -435,6 +437,11 @@ async function run() {
     } catch (e) {
       showError(container, `${s.sql}\n\n${e}`);
     }
+  }
+  // If the remembered tab no longer exists, fall back to the first.
+  if (tabBar && !tabBar.querySelector(".tab-btn.active")) {
+    tabWrap.querySelector(".tabpane").style.display = "";
+    tabBar.querySelector(".tab-btn").classList.add("active");
   }
   attachHover();
   addExportButtons();
