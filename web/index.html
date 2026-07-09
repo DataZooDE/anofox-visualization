@@ -29,7 +29,7 @@ header .status{font-size:.78rem;color:var(--muted);min-width:58px;text-align:rig
 /* embed mode (?embed=1): dashboard only — no header, sidebar, or toolbar */
 body.embed header,body.embed .sidebar,body.embed .toolbar,body.embed #loadbar{display:none !important}
 body.embed .shell{min-height:100vh}
-body.embed .editor{display:none}
+body.embed .editor,body.embed .splitter{display:none}
 body.embed .workspace{grid-template-columns:1fr}
 body.embed .dash{padding:1rem 1.2rem}
 /* ---- app shell: sidebar + main (toolbar over workspace/explore) ---- */
@@ -42,6 +42,8 @@ body.side-collapsed .sidebar{display:none}
 .side-section-toggle{display:flex;align-items:center;gap:.3rem;cursor:pointer;user-select:none;border-radius:6px;padding:.15rem .4rem}
 .side-section-toggle:hover{color:var(--ink);background:rgba(42,157,143,.06)}
 .side-section-toggle .ex-caret{font-size:.6rem}
+.side-master{border-top:1px solid var(--line);margin-top:.7rem;padding-top:.7rem;font-weight:800;color:var(--ink)}
+.side-sub{padding-left:.7rem}
 .side-item{display:flex;align-items:center;gap:.4rem;padding:.44rem .55rem;border-radius:9px;font-size:.85rem;font-weight:600;color:var(--ink);cursor:pointer;border:0;background:none;text-align:left;width:100%;box-shadow:none}
 .side-item:hover{background:rgba(42,157,143,.08);transform:none;filter:none}
 .side-item.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
@@ -72,8 +74,10 @@ body.side-collapsed .sidebar{display:none}
 .seg{background:none;color:var(--muted);box-shadow:none;padding:.35rem .75rem;font-size:.82rem;border-radius:8px}
 .seg:hover{background:rgba(42,157,143,.08);transform:none;filter:none;color:var(--ink)}
 .seg.active{background:#fff;color:var(--accent);box-shadow:0 1px 3px rgba(16,24,40,.12)}
-.workspace{display:grid;grid-template-columns:minmax(300px,400px) 1fr;flex:1;min-height:0}
-body.mode-view .editor{display:none}
+.workspace{display:grid;grid-template-columns:var(--editor-w,400px) 6px 1fr;flex:1;min-height:0}
+.splitter{background:var(--line);cursor:col-resize;transition:background .12s}
+.splitter:hover,.splitter.dragging{background:var(--accent)}
+body.mode-view .editor,body.mode-view .splitter{display:none}
 body.mode-view .workspace{grid-template-columns:1fr}
 body.mode-explore .workspace{display:none}
 body.mode-explore .explore{display:flex}
@@ -116,7 +120,16 @@ body.dark .dash-name{background:#16223e;color:#e8eef8;border-color:#2b3a58}
 .bar select:hover,.actions select:hover{border-color:#c7cede}
 .bar select:focus,.actions select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
 body.dark .actions select{background:#16223e;color:#e8eef8;border-color:#2b3a58}
-.editor textarea{flex:1;border:0;outline:0;resize:none;padding:1rem;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);tab-size:2;background:transparent}
+/* SQL editor with a syntax-highlight overlay (transparent textarea over a <pre>) */
+.code{position:relative;flex:1;min-height:0;overflow:hidden}
+.hl,.code textarea{position:absolute;inset:0;margin:0;padding:1rem;border:0;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2;white-space:pre-wrap;overflow-wrap:break-word;overflow:auto}
+.code textarea{color:transparent;background:transparent;caret-color:var(--ink);resize:none;outline:0;z-index:1}
+.hl{color:var(--ink);z-index:0;pointer-events:none;user-select:none}
+.hl .kw{color:#1f8ca6;font-weight:600}
+.hl .str{color:#0a7a54}
+.hl .com{color:#9aa3b2;font-style:italic}
+.hl .role{color:#c2410c;font-weight:700}
+.hl .num{color:#9333ea}
 button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:9px;padding:.5rem .95rem;font-weight:600;font-size:.85rem;cursor:pointer;box-shadow:0 6px 16px -6px rgba(31,140,166,.5);transition:transform .12s ease,box-shadow .12s ease,filter .12s ease}
 button:hover{transform:translateY(-1px);filter:brightness(1.06);box-shadow:0 10px 22px -8px rgba(31,140,166,.6)}
 button:active{transform:translateY(0)}
@@ -251,7 +264,9 @@ body.dark{--bg:#0b1226;--ink:#e8eef8;--muted:#9fb0c9;--line:#242f49;
   background:radial-gradient(1100px 560px at 92% -10%,#182a4f 0%,transparent 55%),linear-gradient(180deg,#0d142b,#0a1124);background-attachment:fixed}
 body.dark header{background:rgba(13,20,43,.72);border-color:#232f4a}
 body.dark .editor{background:rgba(17,24,46,.55)}
-body.dark .editor textarea{color:#e8eef8}
+body.dark .code textarea{caret-color:#e8eef8}
+body.dark .hl{color:#cdd6e6}
+body.dark .hl .kw{color:#5fd0e0}body.dark .hl .str{color:#7fe3b0}body.dark .hl .role{color:#f6a56a}body.dark .hl .num{color:#c9a4ff}
 body.dark .btn2{background:#1c2942;color:#e8eef8;border-color:#2b3a58}
 body.dark .btn2:hover{background:#243456}
 body.dark select,body.dark header .actions select{background:#1c2942;color:#e8eef8;border-color:#2b3a58}
@@ -325,7 +340,13 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
       </div>
     </div>
     <div class="workspace">
-      <div class="editor"><textarea id="sql" spellcheck="false"></textarea></div>
+      <div class="editor">
+        <div class="code">
+          <pre class="hl" id="hl" aria-hidden="true"></pre>
+          <textarea id="sql" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        </div>
+      </div>
+      <div class="splitter" id="splitter" title="drag to resize"></div>
       <div class="dash"><div class="grid" id="grid"></div></div>
     </div>
     <div class="explore" id="explore" hidden>

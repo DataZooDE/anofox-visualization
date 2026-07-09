@@ -295,6 +295,33 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 const $ = (id) => document.getElementById(id);
 const status = (t) => ($("status").textContent = t);
 
+// SQL syntax highlighting for the editor overlay (no dependency).
+const SQL_KW =
+  /^(SELECT|FROM|WHERE|GROUP|ORDER|BY|HAVING|LIMIT|OFFSET|AS|AND|OR|NOT|IN|IS|NULL|LIKE|ILIKE|BETWEEN|CASE|WHEN|THEN|ELSE|END|JOIN|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|ON|USING|UNION|EXCEPT|INTERSECT|ALL|DISTINCT|CREATE|REPLACE|TEMP|TEMPORARY|TABLE|VIEW|IF|EXISTS|INSERT|INTO|VALUES|UPDATE|DELETE|SET|VARIABLE|WITH|DESC|ASC|OVER|PARTITION|FILTER|CAST|COALESCE|NULLIF|COUNT|SUM|AVG|MIN|MAX|ROUND|ABS|FLOOR|CEIL|LENGTH|LOWER|UPPER|SUBSTR|LPAD|LIST|RANGE|GETVARIABLE|LIST_CONTAINS|INSTALL|LOAD|ATTACH|PRAGMA|SUMMARIZE|DESCRIBE|SHOW|CALL)$/i;
+function highlightSQL(code) {
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  const token = /--[^\n]*|'(?:[^']|'')*'|::\w+|\b\d+(?:\.\d+)?\b|[A-Za-z_]\w*|\s+|[^\sA-Za-z0-9_']+/g;
+  let out = "",
+    m;
+  while ((m = token.exec(code))) {
+    const t = m[0];
+    if (t.startsWith("--")) out += `<span class="com">${esc(t)}</span>`;
+    else if (t[0] === "'") out += `<span class="str">${esc(t)}</span>`;
+    else if (t.startsWith("::")) out += `<span class="role">${esc(t)}</span>`;
+    else if (/^\d/.test(t)) out += `<span class="num">${esc(t)}</span>`;
+    else if (SQL_KW.test(t)) out += `<span class="kw">${esc(t)}</span>`;
+    else out += esc(t);
+  }
+  return out + "\n";
+}
+function syncHL() {
+  const hl = $("hl");
+  if (!hl) return;
+  hl.innerHTML = highlightSQL($("sql").value);
+  hl.scrollTop = $("sql").scrollTop;
+  hl.scrollLeft = $("sql").scrollLeft;
+}
+
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
 
@@ -446,6 +473,36 @@ async function boot() {
 
   $("run").disabled = false;
   $("run").onclick = () => run();
+
+  // SQL editor: highlight overlay + scroll sync
+  $("sql").addEventListener("input", syncHL);
+  $("sql").addEventListener("scroll", () => {
+    $("hl").scrollTop = $("sql").scrollTop;
+    $("hl").scrollLeft = $("sql").scrollLeft;
+  });
+  syncHL();
+  // Movable editor / dashboard boundary (persisted)
+  let ew = parseInt(localStorage.getItem("dp_editor_w") || "400");
+  document.documentElement.style.setProperty("--editor-w", ew + "px");
+  $("splitter").addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    $("splitter").classList.add("dragging");
+    const startX = e.clientX,
+      startW = ew;
+    const move = (ev) => {
+      ew = Math.max(260, Math.min(920, startW + ev.clientX - startX));
+      document.documentElement.style.setProperty("--editor-w", ew + "px");
+    };
+    const up = () => {
+      $("splitter").classList.remove("dragging");
+      localStorage.setItem("dp_editor_w", ew);
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
 }
@@ -524,19 +581,32 @@ function renderSidebar() {
   }
   for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, true));
 
+  // Examples — visually separated from your dashboards, collectively collapsible.
   const exc = exCollapsed();
-  for (const g of SAMPLE_GROUPS) {
-    const hdr = document.createElement("div");
-    hdr.className = "side-section side-section-toggle";
-    const caret = document.createElement("span");
-    caret.className = "ex-caret";
-    caret.textContent = exc[g.group] ? "▸" : "▾";
-    const lbl = document.createElement("span");
-    lbl.textContent = g.group;
-    hdr.append(caret, lbl);
-    hdr.onclick = () => toggleEx(g.group);
-    nav.appendChild(hdr);
-    if (!exc[g.group]) for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+  const master = document.createElement("div");
+  master.className = "side-section side-section-toggle side-master";
+  const mc = document.createElement("span");
+  mc.className = "ex-caret";
+  mc.textContent = exc.__all__ ? "▸" : "▾";
+  const ml = document.createElement("span");
+  ml.textContent = "Examples";
+  master.append(mc, ml);
+  master.onclick = () => toggleEx("__all__");
+  nav.appendChild(master);
+  if (!exc.__all__) {
+    for (const g of SAMPLE_GROUPS) {
+      const hdr = document.createElement("div");
+      hdr.className = "side-section side-section-toggle side-sub";
+      const caret = document.createElement("span");
+      caret.className = "ex-caret";
+      caret.textContent = exc[g.group] ? "▸" : "▾";
+      const lbl = document.createElement("span");
+      lbl.textContent = g.group;
+      hdr.append(caret, lbl);
+      hdr.onclick = () => toggleEx(g.group);
+      nav.appendChild(hdr);
+      if (!exc[g.group]) for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+    }
   }
   markActive();
 }
@@ -686,6 +756,7 @@ function loadDash(name, sql) {
   dpSort = {};
   $("sql").value = sql;
   $("dash-name").value = name || "";
+  syncHL();
   if (bodyMode() === "explore") setMode("edit");
   markActive();
   run();
