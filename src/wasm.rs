@@ -41,8 +41,10 @@ pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32) 
 }
 
 fn role_str(r: &Role) -> &'static str {
+    use crate::InputKind as IK;
     match r {
         Role::X => "XAXIS",
+        Role::Y => "YAXIS",
         Role::Category => "CATEGORY",
         Role::Label => "LABEL",
         Role::Value(Kind::Bar) => "BARCHART",
@@ -51,7 +53,13 @@ fn role_str(r: &Role) -> &'static str {
         Role::Value(Kind::Area) => "AREACHART",
         Role::Value(Kind::Point) => "SCATTER",
         Role::Value(Kind::Pie) => "PIE",
-        Role::Input => "DROPDOWN",
+        Role::Value(Kind::Histogram) => "HISTOGRAM",
+        Role::Value(Kind::Boxplot) => "BOXPLOT",
+        Role::Value(Kind::Heatmap) => "HEATMAP",
+        Role::Input(IK::Dropdown) => "DROPDOWN",
+        Role::Input(IK::Number) => "NUMBER",
+        Role::Input(IK::Date) => "DATE",
+        Role::Input(IK::Text) => "TEXT",
         Role::Columns => "COLUMNS",
         Role::GroupStart => "GROUP",
         Role::GroupEnd => "ENDGROUP",

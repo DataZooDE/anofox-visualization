@@ -29,9 +29,13 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::AREACHART` (`::AREA`) | area chart (measure) |
 | `::SCATTER` (`::POINT`) | scatter (measure) |
 | `::PIE` (`::DONUT`) | pie/donut — slices by `CATEGORY`, sized by the measure |
+| `::HISTOGRAM` | histogram of the measure column (binned + counted) |
+| `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
+| `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
 | `::METRIC` (`::KPI`) | a single big-number KPI (add a `::LABEL` for the caption) |
 | `::TABLE` | render the whole result set as a data table |
-| `::DROPDOWN` (`::OPTIONS`) | an input control (the column's values become options) |
+| `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options) |
+| `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).

@@ -128,6 +128,35 @@ SELECT channel::CATEGORY, sum(n)::PIE FROM sessions GROUP BY ALL;
 SELECT 6::COL;
 SELECT week, channel, sum(n) AS sessions ::TABLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;`,
+
+  "More charts & inputs": `CREATE OR REPLACE TABLE m AS
+SELECT i AS id,
+       (i * 7 % 13) + 5              AS value,
+       ['app','web','api'][(i % 3) + 1] AS channel,
+       'W' || ((i % 4) + 1)          AS week
+FROM range(0, 120) t(i);
+
+-- inputs: a number box + a dropdown, together
+SELECT 'Controls'::GROUP;
+SELECT 5 AS min_value ::NUMBER;
+SELECT DISTINCT channel::DROPDOWN FROM m ORDER BY channel;
+SELECT 1::ENDGROUP;
+
+SELECT 'Distributions (value ≥ the number input)'::LABEL;
+
+-- histogram of a numeric column
+SELECT 6::COL;
+SELECT value::HISTOGRAM FROM m WHERE value >= getvariable('min_value');
+
+-- box plot of value by channel
+SELECT 6::COL;
+SELECT channel::XAXIS, value::BOXPLOT
+FROM m WHERE value >= getvariable('min_value');
+
+-- heatmap: week × channel coloured by average value
+SELECT 12::COL;
+SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP
+FROM m GROUP BY ALL ORDER BY week, channel;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -192,7 +221,9 @@ async function boot() {
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
-const isDropdown = (s) => role(s, "DROPDOWN");
+const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT"];
+const inputKind = (s) => INPUTS.find((k) => role(s, k));
+const isInput = (s) => !!inputKind(s);
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
@@ -226,14 +257,24 @@ async function run() {
     try {
       if (s.setup) {
         await runSql(s.sql);
-      } else if (isDropdown(s)) {
+      } else if (isInput(s)) {
+        const kind = inputKind(s);
         const rows = JSON.parse(await runSql(s.sql));
         if (!rows.length) continue;
         const varname = Object.keys(rows[0])[0];
-        const options = rows.map((r) => String(r[varname]));
-        if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-        await runSql(`SET VARIABLE ${varname} = '${dpVars[varname].replace(/'/g, "''")}'`);
-        dd[i] = { varname, options };
+        if (kind === "DROPDOWN") {
+          const options = rows.map((r) => String(r[varname]));
+          if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
+          dd[i] = { kind, varname, options };
+        } else {
+          // number / date / text: the query's value is the default
+          if (dpVars[varname] === undefined) dpVars[varname] = String(rows[0][varname] ?? "");
+          dd[i] = { kind, varname };
+        }
+        // numbers unquoted (so getvariable() is numeric); others quoted
+        const v = String(dpVars[varname]);
+        const lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`;
+        await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
       showError(grid, `${s.sql}\n\n${e}`);
@@ -282,7 +323,7 @@ async function run() {
         container = grid;
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
-      } else if (isDropdown(s)) {
+      } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === grid));
       } else {
         const rowsJson = await runSql(s.sql);
@@ -337,18 +378,25 @@ function makeControl(meta, bar) {
   const wrap = document.createElement("label");
   wrap.className = "control";
   wrap.textContent = meta.varname + ":";
-  const sel = document.createElement("select");
-  for (const o of meta.options) {
-    const opt = document.createElement("option");
-    opt.value = opt.textContent = o;
-    if (o === dpVars[meta.varname]) opt.selected = true;
-    sel.appendChild(opt);
+  let input;
+  if (meta.kind === "DROPDOWN") {
+    input = document.createElement("select");
+    for (const o of meta.options) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = o;
+      if (o === dpVars[meta.varname]) opt.selected = true;
+      input.appendChild(opt);
+    }
+  } else {
+    input = document.createElement("input");
+    input.type = meta.kind === "NUMBER" ? "number" : meta.kind === "DATE" ? "date" : "text";
+    input.value = dpVars[meta.varname] ?? "";
   }
-  sel.onchange = () => {
-    dpVars[meta.varname] = sel.value;
+  input.onchange = () => {
+    dpVars[meta.varname] = input.value;
     run();
   };
-  wrap.appendChild(sel);
+  wrap.appendChild(input);
   if (!bar) return wrap;
   const box = document.createElement("div");
   box.className = "controls";

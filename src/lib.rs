@@ -34,6 +34,21 @@ pub enum Kind {
     Point,
     /// A pie/donut — slices by `CATEGORY`, sized by the measure (`::PIE`).
     Pie,
+    /// A histogram of the measure column (`::HISTOGRAM`).
+    Histogram,
+    /// A box plot — `x` groups, `y` = the measure (`::BOXPLOT`).
+    Boxplot,
+    /// A heatmap — `x` × `y` tiles coloured by the measure (`::HEATMAP`).
+    Heatmap,
+}
+
+/// The kind of control an `::` input renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    Dropdown,
+    Number,
+    Date,
+    Text,
 }
 
 /// The role a result column plays in the visualization.
@@ -41,15 +56,17 @@ pub enum Kind {
 pub enum Role {
     /// The x position (`::XAXIS`).
     X,
+    /// The y position, for a heatmap's second axis (`::YAXIS`).
+    Y,
     /// A grouping / colour series (`::CATEGORY`).
     Category,
     /// A section heading (`::LABEL`) — becomes the chart title.
     Label,
     /// The measured value, carrying the chart kind (`count()::BARCHART`).
     Value(Kind),
-    /// A control input (`::DROPDOWN`) — the query's values become options; the
-    /// output column name is a DuckDB variable, usable via `getvariable('name')`.
-    Input,
+    /// A control input (`::DROPDOWN`/`::NUMBER`/`::DATE`/`::TEXT`) — the output
+    /// column name is a DuckDB variable, usable via `getvariable('name')`.
+    Input(InputKind),
     /// Layout: `::COLUMNS` sets the grid column count (the value is the number).
     Columns,
     /// Layout: `::GROUP` opens a box; enclosed panels/controls sit together in it.
@@ -82,6 +99,7 @@ impl Column {
 pub fn parse_role(annotation: &str) -> Option<Role> {
     match annotation.trim().to_ascii_uppercase().as_str() {
         "XAXIS" | "X" => Some(Role::X),
+        "YAXIS" | "Y" => Some(Role::Y),
         "CATEGORY" | "SERIES" | "COLOR" | "COLOUR" => Some(Role::Category),
         "LABEL" | "TITLE" => Some(Role::Label),
         "BARCHART" | "BAR" => Some(Role::Value(Kind::Bar)),
@@ -90,9 +108,15 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
         "PIE" | "DONUT" | "PIECHART" => Some(Role::Value(Kind::Pie)),
+        "HISTOGRAM" | "HIST" => Some(Role::Value(Kind::Histogram)),
+        "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
+        "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
         "TABLE" | "GRID" => Some(Role::Table),
-        "METRIC" | "KPI" | "BIGNUMBER" | "NUMBER" => Some(Role::Metric),
-        "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input),
+        "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric),
+        "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
+        "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),
+        "DATE" | "DATEPICKER" => Some(Role::Input(InputKind::Date)),
+        "TEXT" | "SEARCH" | "STRING" => Some(Role::Input(InputKind::Text)),
         "COLUMNS" | "COLS" => Some(Role::Columns),
         "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
         "ENDGROUP" | "ENDBOX" | "ENDROW" => Some(Role::GroupEnd),
@@ -155,8 +179,11 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         return Ok(heading_svg(title.as_deref().unwrap_or(""), width));
     };
     let Role::Value(kind) = value.role else { unreachable!() };
-    if kind == Kind::Pie {
-        return render_pie(value, cols, title.as_deref(), width, height);
+    match kind {
+        Kind::Pie => return render_pie(value, cols, title.as_deref(), width, height),
+        Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
+        Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
+        _ => {}
     }
     let x = cols.iter().find(|c| c.role == Role::X).ok_or("no XAXIS column")?;
     let category = cols.iter().find(|c| c.role == Role::Category);
@@ -201,7 +228,8 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Line => plot.geom_line().geom_point(),
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
-        Kind::Pie => unreachable!("pie handled above"),
+        Kind::Boxplot => plot.geom_boxplot(),
+        Kind::Pie | Kind::Histogram | Kind::Heatmap => unreachable!("handled above"),
     };
     if let Some(levels) = &color_levels {
         // Map the distinct series to the DataZoo palette (stable/sorted order, so
@@ -217,6 +245,52 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // preset — presets replace the whole theme.
     plot = plot.theme_minimal().primary_color(DZ_COLORS[0]);
     if let Some(t) = &title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A histogram of the measure column (ggplot bins + counts).
+fn render_histogram(value: &Column, title: Option<&str>, width: u32, height: u32) -> Result<String, String> {
+    let data = vec![("x".to_string(), value.values.clone())];
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x"))
+        .geom_histogram()
+        .theme_minimal()
+        .primary_color(DZ_COLORS[0]);
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A heatmap: `x` × `y` tiles coloured by the measure (light → steel blue).
+fn render_heatmap(
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let x = cols.iter().find(|c| c.role == Role::X).ok_or("heatmap needs an XAXIS column")?;
+    let y = cols.iter().find(|c| c.role == Role::Y).ok_or("heatmap needs a YAXIS column")?;
+    let data = vec![
+        ("x".to_string(), x.values.clone()),
+        ("y".to_string(), y.values.clone()),
+        ("fill".to_string(), value.values.clone()),
+        ("label".to_string(), value.values.clone()),
+    ];
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").y("y").fill("fill").label("label"))
+        .geom_tile()
+        .scale_fill_gradient(
+            ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
+            ggplot_rs::scale::color::RGBAColor::new(DZ_COLORS[0].0, DZ_COLORS[0].1, DZ_COLORS[0].2),
+        )
+        .theme_minimal();
+    if let Some(t) = title {
         plot = plot.title(t);
     }
     plot.render_svg_native_with_size(width, height)

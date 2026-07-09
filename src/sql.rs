@@ -65,11 +65,13 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
 }
 
 const ROLES: &[&str] = &[
-    "XAXIS", "X", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART", "BAR",
-    "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
-    "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "TABLE", "GRID", "METRIC", "KPI",
-    "BIGNUMBER", "NUMBER", "DROPDOWN", "OPTIONS", "SELECT_INPUT", "COLUMNS", "COLS", "GROUP", "BOX",
-    "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
+    "XAXIS", "X", "YAXIS", "Y", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART",
+    "BAR", "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
+    "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
+    "BOX_PLOT", "HEATMAP", "TILE", "TILES", "TABLE", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
+    "OPTIONS", "SELECT_INPUT", "NUMBER", "SLIDER", "NUMERIC", "DATE", "DATEPICKER", "TEXT", "SEARCH",
+    "STRING", "COLUMNS", "COLS", "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN",
+    "WIDTH", "COL",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -156,7 +158,7 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                     Role::Value(_) | Role::Metric => format!("CAST({expr} AS DOUBLE) AS c{i}"),
                     // Inputs keep the original column name — it becomes the
                     // DuckDB variable name the browser binds the control to.
-                    Role::Input => expr.to_string(),
+                    Role::Input(_) => expr.to_string(),
                     _ => format!("{expr} AS c{i}"),
                 };
                 roles.push((i, role));
