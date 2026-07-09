@@ -1094,12 +1094,21 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
   return t;
 }
 
-// ::COLORSCALE cell background — light → steel by normalized value t∈[0,1].
+// ::COLORSCALE cell background — a diverging green→amber→red scale by the
+// normalized value t∈[0,1] (low = green, high = red). Soft tones keep the cell
+// text readable.
 function heatColor(t) {
   t = Math.max(0, Math.min(1, t));
-  const a = [0xed, 0xf1, 0xf7];
-  const b = [0x45, 0x64, 0x81];
-  const m = (i) => Math.round(a[i] + (b[i] - a[i]) * t);
+  const stops = [
+    [0x63, 0xc9, 0x7f], // green
+    [0xff, 0xe0, 0x8a], // amber
+    [0xff, 0x8a, 0x8a], // red
+  ];
+  const seg = t < 0.5 ? 0 : 1;
+  const u = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5;
+  const a = stops[seg];
+  const b = stops[seg + 1];
+  const m = (i) => Math.round(a[i] + (b[i] - a[i]) * u);
   return `rgb(${m(0)},${m(1)},${m(2)})`;
 }
 
@@ -1136,8 +1145,8 @@ function cellSpark(v) {
   const ly = ys(nums[nums.length - 1]).toFixed(1);
   return (
     `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
-    `<polyline points="${pts}" fill="none" stroke="#456481" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>` +
-    `<circle cx="${lx}" cy="${ly}" r="2.1" fill="#E8335D"/></svg>`
+    `<polyline points="${pts}" fill="none" stroke="#456481" stroke-width="0.9" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${lx}" cy="${ly}" r="1.8" fill="#E8335D"/></svg>`
   );
 }
 
