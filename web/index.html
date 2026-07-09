@@ -17,6 +17,11 @@ header .status{margin-left:auto;font-size:.8rem;color:var(--muted)}
 .editor .bar{padding:.6rem .8rem;border-bottom:1px solid var(--line);display:flex;gap:.5rem;align-items:center}
 .editor textarea{flex:1;border:0;outline:0;resize:none;padding:1rem;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);tab-size:2}
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.5rem .9rem;font-weight:600;font-size:.85rem;cursor:pointer}
+.btn2{background:#eef1f5;color:var(--ink);border:1px solid var(--line)}
+.btn2:hover{background:#e4e8ee}
+.dl{position:absolute;top:.55rem;right:.6rem;width:26px;height:26px;padding:0;background:#fff;border:1px solid var(--line);border-radius:7px;color:var(--muted);font-size:.95rem;line-height:1;opacity:0;transition:opacity .12s}
+.panel:hover .dl{opacity:1}
+.dl:hover{color:var(--accent);border-color:var(--accent)}
 button:disabled{opacity:.5;cursor:default}
 select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-size:.82rem;background:var(--card)}
 .dash{padding:1.4rem;overflow:auto}
@@ -69,6 +74,8 @@ select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-
         <option value="2">2 columns</option>
         <option value="3">3 columns</option>
       </select>
+      <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
+      <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
     </div>
     <textarea id="sql" spellcheck="false"></textarea>
   </div>

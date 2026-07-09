@@ -234,7 +234,9 @@ async function boot() {
     sel.appendChild(o);
   }
   sel.onchange = () => ($("sql").value = SAMPLES[sel.value]);
-  $("sql").value = SAMPLES[Object.keys(SAMPLES)[0]];
+  $("sql").value = decodeHashSql() || SAMPLES[Object.keys(SAMPLES)[0]];
+  $("share").onclick = shareLink;
+  $("dlhtml").onclick = downloadHtml;
 
   // layout: default columns-per-row (12-col bootstrap grid; panels span 12/cols)
   $("cols").onchange = () => {
@@ -435,6 +437,7 @@ async function run() {
     }
   }
   attachHover();
+  addExportButtons();
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
 }
 
@@ -515,6 +518,113 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 }
 
+// ---------- export & share ----------
+function download(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function csvOf(table) {
+  return [...table.rows]
+    .map((r) => [...r.cells].map((c) => `"${c.textContent.replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+}
+
+// Rasterise a chart's SVG to a PNG (white background, 2× for crispness).
+function svgToPng(svg, name) {
+  const vb = svg.viewBox.baseVal;
+  const w = vb.width || svg.clientWidth || 460;
+  const h = vb.height || svg.clientHeight || 300;
+  const xml = new XMLSerializer().serializeToString(svg);
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement("canvas");
+    c.width = w * 2;
+    c.height = h * 2;
+    const ctx = c.getContext("2d");
+    ctx.scale(2, 2);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    c.toBlob((b) => download(b, name + ".png"));
+  };
+  img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+}
+
+// A hover download button on every chart (PNG) / table (CSV) panel.
+function addExportButtons() {
+  document.querySelectorAll(".panel").forEach((fig) => {
+    if (fig.querySelector(".dl")) return;
+    const svg = fig.querySelector("svg");
+    const table = fig.querySelector(".dp-table");
+    if (!svg && !table) return;
+    fig.style.position = "relative";
+    const btn = document.createElement("button");
+    btn.className = "dl";
+    btn.textContent = "⤓";
+    btn.title = table ? "download CSV" : "download PNG";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      if (table) download(new Blob([csvOf(table)], { type: "text/csv" }), "data.csv");
+      else svgToPng(svg, "chart");
+    };
+    fig.appendChild(btn);
+  });
+}
+
+// Share: encode the SQL in the URL hash (no server needed).
+const encodeSql = (sql) => btoa(unescape(encodeURIComponent(sql)));
+function decodeHashSql() {
+  const m = location.hash.match(/sql=([^&]+)/);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(escape(atob(m[1])));
+  } catch (e) {
+    return null;
+  }
+}
+function shareLink() {
+  location.hash = "sql=" + encodeSql($("sql").value);
+  navigator.clipboard.writeText(location.href).then(
+    () => status("link copied ✓"),
+    () => status("URL updated — copy it from the address bar")
+  );
+}
+
+// Download the current dashboard as a standalone, self-contained HTML file.
+function downloadHtml() {
+  const style = document.querySelector("style").textContent;
+  const content = document.querySelector(".dash").innerHTML;
+  const html =
+    `<!doctype html><html><head><meta charset="utf-8"><title>duckplot dashboard</title>` +
+    `<style>${style}</style></head><body style="background:#f4f6f9;padding:1.5rem">` +
+    `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
+    `<script>${SNAPSHOT_JS}<\/script></body></html>`;
+  download(new Blob([html], { type: "text/html" }), "dashboard.html");
+}
+
+// Self-contained hover + tab switching for the exported snapshot.
+const SNAPSHOT_JS = `(function(){
+  var tip=document.getElementById('dp-tip');
+  document.querySelectorAll('.dp-hit').forEach(function(el){
+    var t=el.getAttribute('data-tip'); if(!t)return;
+    el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
+    el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
+    el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
+  });
+  var wrap=document.querySelector('.tabwrap');
+  document.querySelectorAll('.tab-btn').forEach(function(btn,i){
+    btn.addEventListener('click',function(){
+      wrap.querySelectorAll('.tabpane').forEach(function(p){p.style.display='none';});
+      document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active');});
+      wrap.querySelectorAll('.tabpane')[i].style.display=''; btn.classList.add('active');
+    });
+  });
+})();`;
+
 function showError(grid, msg) {
   const d = document.createElement("div");
   d.className = "err";
@@ -547,6 +657,7 @@ function attachHover() {
     const series = txt.includes(": ") ? txt.slice(0, txt.lastIndexOf(": ")) : txt;
     el.removeChild(t);
     el.setAttribute("data-series", series);
+    el.setAttribute("data-tip", txt);
     el.classList.add("dp-hit");
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {

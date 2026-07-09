@@ -59,6 +59,15 @@ FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
 
+### Export & share
+
+- Every chart/table panel has a hover **⤓** button — charts download as **PNG**,
+  tables as **CSV**.
+- **Share** copies a link with the whole dashboard SQL encoded in the URL hash
+  (no server) — open it to reproduce the dashboard.
+- **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
+  file (interactive hover + tabs, no server).
+
 ### Layout (from SQL)
 
 The grid is a **12-column bootstrap grid**; panel widths are spans out of 12.

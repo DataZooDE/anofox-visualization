@@ -338,6 +338,8 @@ fn render_pie(
         .geom_col()
         .position(PositionStack)
         .scale_fill_manual(pairs)
+        // No y-axis padding, so the stack maps to a full 360° (closes the pie).
+        .scale_y_continuous(ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0))
         .coord_polar_with(ggplot_rs::coord::polar::CoordPolar::new().theta("y"))
         .theme_void();
     if let Some(t) = title {
