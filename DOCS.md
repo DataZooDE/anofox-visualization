@@ -87,7 +87,21 @@ Every chart is hoverable (bars/points/areas carry per-mark tooltips; lines get
 point markers and dim as whole lines). **Linked highlighting**: click any
 series/bar to highlight it across all panels and dim the rest — click empty
 space (or the mark again) to clear. Series colours are **consistent across
-charts**. Pure client-side, no re-query.
+charts**.
+
+**Cross-filter**: a click also sets a DuckDB variable `selected` to the clicked
+value and re-runs the dashboard. Panels *opt in* by referencing it — filtered
+panels re-query, the rest just highlight:
+
+```sql
+SELECT week::XAXIS, sum(n)::LINECHART
+FROM sessions
+WHERE getvariable('selected') IN ('', channel)   -- '' (nothing clicked) = all
+GROUP BY ALL ORDER BY week;
+```
+
+Clicking a channel narrows those panels to that channel; clicking empty space
+clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
 
 ### Example
 

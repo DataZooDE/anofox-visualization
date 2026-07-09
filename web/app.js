@@ -81,6 +81,31 @@ SELECT 4::COL;                           -- 4 of 12 (one-third), sits beside it
 SELECT week::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
 GROUP BY ALL ORDER BY week;`,
+
+  "Cross-filter": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
+  ('W1','app',30),('W1','web',22),('W1','api',12),
+  ('W2','app',41),('W2','web',28),('W2','api',15),
+  ('W3','app',26),('W3','web',33),('W3','api', 9),
+  ('W4','app',48),('W4','web',30),('W4','api',18)
+) t(week, channel, n);
+
+SELECT 'Click a channel to filter the charts below (click empty space to clear)'::LABEL;
+
+-- source: click a segment -> sets the cross-filter getvariable('selected')
+SELECT 12::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
+FROM sessions GROUP BY ALL ORDER BY week, channel;
+
+-- these opt in: show ONLY the clicked channel (all channels when nothing clicked)
+SELECT 6::COL;
+SELECT week::XAXIS, sum(n)::LINECHART
+FROM sessions WHERE getvariable('selected') IN ('', channel)
+GROUP BY ALL ORDER BY week;
+
+SELECT 6::COL;
+SELECT channel::XAXIS, sum(n)::BARCHART
+FROM sessions WHERE getvariable('selected') IN ('', channel)
+GROUP BY ALL ORDER BY channel;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -150,6 +175,7 @@ const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
+let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
 
 async function run() {
   const grid = $("grid");
@@ -160,6 +186,14 @@ async function run() {
     stmts = JSON.parse(plan($("sql").value));
   } catch (e) {
     return showError(grid, String(e));
+  }
+
+  // Cross-filter value (from the last click) — available to every query as
+  // getvariable('selected'); e.g. `WHERE getvariable('selected') IN ('', channel)`.
+  try {
+    await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
+  } catch (e) {
+    /* ignore */
   }
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
@@ -324,18 +358,22 @@ function attachHover() {
     el.addEventListener("mouseleave", () => tip.classList.remove("show"));
     el.addEventListener("click", (e) => {
       e.stopPropagation();
-      dpSelected = dpSelected === series ? null : series;
-      apply();
+      // Cross-filter: toggle `selected` to this value and re-query. Queries that
+      // opt in (getvariable('selected')) filter; the rest just highlight it.
+      dpFilter = dpFilter === series ? "" : series;
+      dpSelected = dpFilter || null;
+      run();
     });
   });
   apply();
 }
 
-// Click empty space to clear the linked selection.
-document.addEventListener("click", () => {
-  if (dpSelected !== null) {
+// Click empty dashboard space to clear the cross-filter / selection.
+document.querySelector(".dash").addEventListener("click", () => {
+  if (dpFilter || dpSelected !== null) {
+    dpFilter = "";
     dpSelected = null;
-    document.querySelectorAll(".dp-hit").forEach((el) => (el.style.opacity = ""));
+    run();
   }
 });
 
