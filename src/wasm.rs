@@ -157,6 +157,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::Geometry => "MAP",
         Role::Basemap => "BASEMAP",
         Role::Flip => "FLIP",
+        Role::Alpha => "ALPHA",
         Role::Input(IK::Dropdown) => "DROPDOWN",
         Role::Input(IK::Number) => "NUMBER",
         Role::Input(IK::Date) => "DATE",

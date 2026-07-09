@@ -139,49 +139,53 @@ WHERE NAME <> 'Antarctica';
 
 SELECT 'Earthquakes'::SUBTAB;
 SELECT 12::COL;
--- Quake points coloured by magnitude, over a grey country basemap. The two
--- layers ride in disjoint rows: quakes fill ::MAP, countries fill ::BASEMAP.
-SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, NULL ::BASEMAP,
+-- Quake points coloured by magnitude, semi-transparent (::ALPHA) so overlaps
+-- read as density, over a grey country basemap. The two layers ride in disjoint
+-- rows: quakes fill ::MAP, countries fill ::BASEMAP.
+SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'USGS earthquakes (M≥2.5, past 30 days) — colour = magnitude'::TITLE
 FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
 UNION ALL
-SELECT NULL, NULL, NULL, ST_AsText(geom), NULL
+SELECT NULL, NULL, NULL, 0.6, ST_AsText(geom), NULL
 FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';`,
 
       "Linked maps": `-- Two maps that talk to each other: click a country on the left and the right
--- map filters to earthquakes inside that country's bounding box. Clicking sets
--- getvariable('selected') = the country name; click empty space to clear.
--- (IF NOT EXISTS keeps the spatial reads out of the per-click re-run.)
-CREATE TABLE IF NOT EXISTS cbox AS
-SELECT NAME AS country, ST_AsText(geom) AS wkt,
-       ST_XMin(geom) AS x0, ST_XMax(geom) AS x1,
-       ST_YMin(geom) AS y0, ST_YMax(geom) AS y1
+-- map filters to earthquakes INSIDE that country (true point-in-polygon, so no
+-- neighbours leak in). Clicking sets getvariable('selected') = the country name;
+-- click empty space to clear. (IF NOT EXISTS keeps the spatial reads and the
+-- one-off point-in-polygon join out of the per-click re-run.)
+CREATE TABLE IF NOT EXISTS cgeo AS
+SELECT NAME AS country, ST_AsText(geom) AS wkt, geom,
+       ST_XMin(geom) AS x0, ST_XMax(geom) AS x1, ST_YMin(geom) AS y0, ST_YMax(geom) AS y1
 FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';
 
-CREATE TABLE IF NOT EXISTS quake AS
-SELECT ST_AsText(geom) AS wkt, ST_X(geom) AS lon, ST_Y(geom) AS lat, mag, place
-FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL;
+-- Tag each quake with the country that CONTAINS it (offshore → NULL). The bbox
+-- test short-circuits before the exact ST_Contains, so the join stays quick.
+CREATE TABLE IF NOT EXISTS qcty AS
+SELECT ST_AsText(q.geom) AS wkt, q.mag, q.place, c.country
+FROM ST_Read('quakes.geojson') q
+LEFT JOIN cgeo c
+  ON ST_X(q.geom) BETWEEN c.x0 AND c.x1 AND ST_Y(q.geom) BETWEEN c.y0 AND c.y1
+     AND ST_Contains(c.geom, ST_Point(ST_X(q.geom), ST_Y(q.geom)))
+WHERE q.mag IS NOT NULL;
 
 SELECT 'Linked maps — click a country to filter the quakes'::LABEL;
 
--- LEFT: world, filled by quakes-in-bbox count. Click a country.
+-- LEFT: world, filled by onshore-quake count per country. Click a country.
 SELECT 6::COL;
-SELECT c.wkt ::MAP, count(q.mag) ::BARCHART, c.country ::LABEL,
+SELECT c.wkt ::MAP, count(q.country) ::BARCHART, c.country ::LABEL,
        'Quakes per country — click one'::TITLE
-FROM cbox c
-LEFT JOIN quake q ON q.lon BETWEEN c.x0 AND c.x1 AND q.lat BETWEEN c.y0 AND c.y1
+FROM cgeo c LEFT JOIN qcty q ON q.country = c.country
 GROUP BY c.wkt, c.country;
 
--- RIGHT: quakes in the selected country's bbox, over a grey basemap.
+-- RIGHT: quakes inside the selected country (exact), semi-transparent, on a basemap.
 SELECT 6::COL;
-SELECT q.wkt ::MAP, q.mag ::BARCHART, q.place ::LABEL, NULL ::BASEMAP,
+SELECT q.wkt ::MAP, q.mag ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'Earthquakes in selection'::TITLE
-FROM quake q
-WHERE getvariable('selected') = '' OR EXISTS (
-  SELECT 1 FROM cbox c WHERE c.country = getvariable('selected')
-    AND q.lon BETWEEN c.x0 AND c.x1 AND q.lat BETWEEN c.y0 AND c.y1)
+FROM qcty q
+WHERE getvariable('selected') = '' OR q.country = getvariable('selected')
 UNION ALL
-SELECT NULL, NULL, NULL, wkt, NULL FROM cbox;`,
+SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
     },
   },
 

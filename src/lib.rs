@@ -178,6 +178,9 @@ pub enum Role {
     /// Flip the panel's x/y axes — a horizontal bar chart etc. (`::FLIP`). A
     /// marker column; its values are ignored.
     Flip,
+    /// Layer opacity 0..1 for a `::MAP` (`::ALPHA`) — e.g. semi-transparent
+    /// earthquake points so overlaps read as density. Read from the first value.
+    Alpha,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -248,6 +251,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "BASEMAP" | "MAPBASE" | "BACKDROP" => Some(Role::Basemap),
         "FLIP" | "COORD_FLIP" | "HORIZONTAL" => Some(Role::Flip),
+        "ALPHA" | "OPACITY" => Some(Role::Alpha),
         "TABLE" | "GRID" => Some(Role::Table),
         "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
@@ -783,6 +787,14 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     let fill = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let label = cols.iter().find(|c| c.role == Role::Label);
     let base = cols.iter().find(|c| c.role == Role::Basemap);
+    // Optional layer opacity (`::ALPHA`) — e.g. overlapping quake points reading
+    // as density. Clamp to a valid 0..1; default fully opaque.
+    let alpha = cols
+        .iter()
+        .find(|c| c.role == Role::Alpha)
+        .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
+        .map(|a| a.clamp(0.05, 1.0))
+        .unwrap_or(1.0);
     let mut data: Vec<(String, Vec<Value>)> = vec![("geometry".to_string(), geom.values.clone())];
     let mut aes = Aes::new();
     if let Some(f) = fill {
@@ -810,7 +822,7 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     }
     // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
     // otherwise fit the whole geometry with an equal aspect ratio.
-    let plot = plot.geom_sf();
+    let plot = plot.geom_sf_with(ggplot_rs::geom::sf::GeomSf { alpha, ..Default::default() });
     let mut plot = match map_zoom() {
         Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
         None => plot.coord_sf(),
