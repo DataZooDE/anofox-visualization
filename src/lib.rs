@@ -117,6 +117,8 @@ pub enum Role {
     GroupEnd,
     /// Layout: `::SPAN` makes the *next* panel span N grid columns (the value).
     Span,
+    /// Layout: `::HEIGHT` sets the *next* panel's height in pixels (the value).
+    Height,
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
     /// A SQL-paginated table (`::PAGED`) — the browser pages it with
@@ -247,6 +249,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
         "ENDGROUP" | "ENDBOX" | "ENDROW" => Some(Role::GroupEnd),
         "SPAN" | "WIDTH" | "COL" => Some(Role::Span),
+        "HEIGHT" | "TALL" => Some(Role::Height),
         _ => None,
     }
 }
@@ -434,7 +437,10 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     }
     // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
     // preset — presets replace the whole theme.
-    plot = plot.theme_minimal().primary_color(DZ_COLORS[0]);
+    plot = plot
+        .theme_minimal()
+        .primary_color(DZ_COLORS[0])
+        .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
     }
@@ -718,7 +724,8 @@ fn render_pie(
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
         .scale_y_continuous(ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0))
         .coord_polar_with(ggplot_rs::coord::polar::CoordPolar::new().theta("y").inner_radius(inner))
-        .theme_void();
+        .theme_void()
+        .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = title {
         plot = plot.title(t);
     }

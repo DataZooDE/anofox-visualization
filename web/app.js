@@ -1132,7 +1132,8 @@ const isInput = (s) => !!inputKind(s);
 const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB", "SUBTAB", "PLACEHOLDER"].find((d) => role(s, d));
+const directive = (s) =>
+  ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -1240,6 +1241,7 @@ async function run() {
   let subBar = null;
   let subWrap = null;
   let nextSpan = 0;
+  let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   const firstValue = async (s) => {
@@ -1276,6 +1278,8 @@ async function run() {
         container = curGrid;
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
+      } else if (d === "HEIGHT") {
+        nextHeight = parseInt(await firstValue(s)) || 0;
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
         if (!tabBar) {
@@ -1357,6 +1361,7 @@ async function run() {
         if (container === curGrid) ph.style.gridColumn = `span ${span}`;
         container.appendChild(ph);
         nextSpan = 0;
+        nextHeight = 0;
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else if (role(s, "PAGED")) {
@@ -1431,13 +1436,16 @@ async function run() {
         container.appendChild(fig);
         panels++;
         nextSpan = 0;
+        nextHeight = 0;
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
+        const boxH = nextHeight;
         const mkPanel = () => {
           const fig = document.createElement("figure");
           fig.className = "panel";
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+          if (boxH) fig.style.minHeight = boxH + "px";
           return fig;
         };
         const firstCell = () => {
@@ -1537,13 +1545,14 @@ async function run() {
           if (!JSON.parse(rowsJson).length) {
             fig.appendChild(mkNoData());
           } else {
-            const ph = role(s, "SPARKLINE") ? 90 : 300; // sparklines are short
+            const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
             fig.insertAdjacentHTML("beforeend", render_panel(rowsJson, JSON.stringify(s.roles), 460, ph));
           }
           container.appendChild(fig);
           panels++;
         }
         nextSpan = 0;
+        nextHeight = 0;
       }
     } catch (e) {
       showError(container, `${s.sql}\n\n${e}`);

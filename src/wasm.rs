@@ -96,6 +96,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::GroupStart => "GROUP",
         Role::GroupEnd => "ENDGROUP",
         Role::Span => "SPAN",
+        Role::Height => "HEIGHT",
         Role::Table => "TABLE",
         Role::PagedTable => "PAGED",
         Role::Metric(crate::MetricFmt::Plain) => "METRIC",
