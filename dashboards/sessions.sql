@@ -16,9 +16,9 @@ SELECT 'Weekly sessions'::LABEL;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
--- line: total sessions per week
-SELECT week::XAXIS, sum(n)::LINECHART
-FROM sessions GROUP BY ALL ORDER BY week;
+-- one line per channel (colours match the stacked bar)
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
+FROM sessions GROUP BY ALL ORDER BY week, channel;
 
 -- bar: total sessions per channel
 SELECT channel::XAXIS, sum(n)::BARCHART

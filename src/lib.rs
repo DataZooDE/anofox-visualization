@@ -102,7 +102,8 @@ fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
     ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
 
-/// Distinct category labels in first-seen order (the manual-scale keys).
+/// Distinct category labels in a **stable (sorted) order**, so a given series
+/// gets the same DataZoo colour in every chart that contains it.
 fn distinct_labels(col: &Column) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for v in &col.values {
@@ -111,6 +112,7 @@ fn distinct_labels(col: &Column) -> Vec<String> {
             seen.push(s);
         }
     }
+    seen.sort();
     seen
 }
 

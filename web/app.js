@@ -18,8 +18,9 @@ SELECT 'Weekly sessions'::LABEL;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
-SELECT week::XAXIS, sum(n)::LINECHART
-FROM sessions GROUP BY ALL ORDER BY week;
+-- one line per channel — colours match the bars; click a series to highlight it
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
+FROM sessions GROUP BY ALL ORDER BY week, channel;
 
 SELECT channel::XAXIS, sum(n)::BARCHART
 FROM sessions GROUP BY ALL ORDER BY sum(n) DESC;`,
@@ -97,6 +98,12 @@ async function boot() {
   }
   sel.onchange = () => ($("sql").value = SAMPLES[sel.value]);
   $("sql").value = SAMPLES[Object.keys(SAMPLES)[0]];
+
+  // layout: columns selector (CSS grid-template-columns)
+  $("cols").onchange = () => {
+    const v = $("cols").value;
+    $("grid").style.gridTemplateColumns = v === "auto" ? "" : `repeat(${v}, minmax(0, 1fr))`;
+  };
 
   $("run").disabled = false;
   $("run").onclick = run;
