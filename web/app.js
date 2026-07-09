@@ -206,25 +206,32 @@ SELECT 'Filter'::GROUP;
 SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
 SELECT 1::ENDGROUP;
 
--- KPIs with a trend arrow: METRIC value + a DELTA (comparison) value
+-- KPIs with a trend arrow: METRIC value + a DELTA (comparison) value.
+-- Two filters combine: the multiselect (getvariable('channel')) AND the
+-- cross-filter click (getvariable('selected')) — so these update both when you
+-- change the dropdown and when you click a channel in the chart or table.
 SELECT 4::COL;
 SELECT sum(revenue) FILTER (WHERE week='W4')::MONEY,
        sum(revenue) FILTER (WHERE week='W3')::DELTA,
        'Revenue (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel);
+FROM sales WHERE list_contains(getvariable('channel'), channel)
+  AND getvariable('selected') IN ('', channel);
 
 SELECT 4::COL;
 SELECT sum(n) FILTER (WHERE week='W4')::METRIC,
        sum(n) FILTER (WHERE week='W3')::DELTA,
        'Sessions (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel);
+FROM sales WHERE list_contains(getvariable('channel'), channel)
+  AND getvariable('selected') IN ('', channel);
 
 SELECT 4::COL;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
 FROM sales WHERE list_contains(getvariable('channel'), channel)
 GROUP BY ALL ORDER BY week, channel;
 
--- sortable table with in-cell bars (click a header)
+-- sortable table with in-cell bars — click a header to sort, click a row to
+-- cross-filter the KPIs by that channel (a categorical first column makes rows
+-- clickable). It stays showing the multiselect set, so you can pick any row.
 SELECT 12::COL;
 SELECT channel, sum(n) AS sessions, sum(revenue) AS revenue ::TABLE
 FROM sales WHERE list_contains(getvariable('channel'), channel)
@@ -823,6 +830,21 @@ function renderTable(rows, skip = -1, trendIdx = []) {
     }
     for (const r of data.slice(0, 500)) {
       const tr = tb.insertRow();
+      // A categorical first column makes the row a cross-filter source: click it
+      // to set getvariable('selected') (like clicking a chart mark); click again
+      // or the background to clear. The active row gets an accent bar.
+      const key = cols[0];
+      if (!numeric[key]) {
+        const keyVal = String(r[key] ?? "").replace(/^"|"$/g, "");
+        tr.style.cursor = "pointer";
+        if (dpSelected && keyVal === dpSelected) tr.classList.add("row-sel");
+        tr.onclick = (e) => {
+          e.stopPropagation();
+          dpFilter = dpFilter === keyVal ? "" : keyVal;
+          dpSelected = dpFilter || null;
+          run();
+        };
+      }
       for (const c of cols) {
         const td = tr.insertCell();
         let v = r[c];
