@@ -83,6 +83,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::Trend => "TREND",
         Role::ColorScale => "COLORSCALE",
         Role::Badge => "BADGE",
+        Role::Plain => "PLAIN",
         Role::Hint => "HINT",
         Role::Text(crate::TextSize::Small) => "TEXT_SMALL",
         Role::Text(crate::TextSize::Medium) => "TEXT_MEDIUM",

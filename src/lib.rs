@@ -144,6 +144,8 @@ pub enum Role {
     ColorScale,
     /// Render a table column's text as coloured status pills (`::BADGE`).
     Badge,
+    /// A plain table column with no in-cell bar (`::PLAIN`/`::NOBAR`).
+    Plain,
     /// A count/metadata hint shown next to a dropdown option (`::HINT`).
     Hint,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -216,6 +218,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "TREND" => Some(Role::Trend),
         "COLORSCALE" | "COLOURSCALE" | "HEAT" | "GRADIENT" => Some(Role::ColorScale),
         "BADGE" | "STATUS" | "PILL" => Some(Role::Badge),
+        "PLAIN" | "NOBAR" => Some(Role::Plain),
         "HINT" => Some(Role::Hint),
         "TEXT_SMALL" => Some(Role::Text(TextSize::Small)),
         "TEXT_MEDIUM" => Some(Role::Text(TextSize::Medium)),

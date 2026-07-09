@@ -25,13 +25,14 @@ const SAMPLE_GROUPS = [
 -- (this CREATE) are setup; annotated SELECTs become panels.
 ${SESSIONS}
 
-SELECT 'Overview'::LABEL;
+SELECT 'Overview — click a pie slice or a table row to filter the KPIs'::LABEL;
 
--- KPIs in a ::GROUP render as a compact strip
+-- KPIs in a ::GROUP render as a compact strip. They opt into the cross-filter
+-- (getvariable('selected')), so clicking a channel re-computes them.
 SELECT 'Key metrics'::GROUP;
-SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sessions;
-SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions;
-SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions;
+SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sessions WHERE getvariable('selected') IN ('', channel);
+SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions WHERE getvariable('selected') IN ('', channel);
+SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions WHERE getvariable('selected') IN ('', channel);
 SELECT 1::ENDGROUP;
 
 SELECT 6::COL;
@@ -49,26 +50,39 @@ SELECT 6::COL;
 SELECT 'Detail'::TITLE, channel, week, sum(n) AS n ::TABLE
 FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
-      "Signal explorer": `-- No table needed: generate data on the fly with range().
-SELECT 'Signal explorer — data generated with range()'::LABEL;
+      "Signal explorer": `-- Everything below is generated on the fly with range() — no table needed.
+SELECT 'Signal explorer — generated with range()'::LABEL;
+
+SELECT 'Signal stats'::GROUP;
+SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL FROM range(0,120) t(i);
+SELECT round(max(sin(i/6.0)*40+50),1)::METRIC, 'Peak'::LABEL FROM range(0,120) t(i);
+SELECT round(stddev(sin(i/6.0)*40+50),1)::METRIC, 'Std dev'::LABEL FROM range(0,120) t(i);
+SELECT 1::ENDGROUP;
 
 SELECT 8::COL;
 SELECT i::XAXIS,
-       (50 + i*0.5 + sin(i/6.0)*22)::LINECHART,
-       (50 + i*0.5 + sin(i/6.0)*22 - 10)::BAND_LOWER,
-       (50 + i*0.5 + sin(i/6.0)*22 + 10)::BAND_UPPER,
-       'Trend + seasonality'::TITLE
-FROM range(0, 60) t(i);
+       (50 + i*0.4 + sin(i/6.0)*22)::LINECHART,
+       (50 + i*0.4 + sin(i/6.0)*22 - 10)::BAND_LOWER,
+       (50 + i*0.4 + sin(i/6.0)*22 + 10)::BAND_UPPER,
+       'Trend + seasonality (± band)'::TITLE
+FROM range(0, 80) t(i);
 
 SELECT 4::COL;
-SELECT round(avg((i*7) % 100), 1)::METRIC, 'Avg value'::LABEL FROM range(0, 500) t(i);
+SELECT round(100.0*count(*) FILTER (WHERE sin(i/6.0) > 0)/count(*),0)::GAUGE, '0,100'::RANGE,
+       '#e03131,#efc94c,#0ca678'::COLORS, 'Time above mean'::TITLE
+FROM range(0,120) t(i);
 
-SELECT 4::COL;
-SELECT ((i * 7) % 100)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500) t(i);
+SELECT 6::COL;
+SELECT i::XAXIS, (sin(i/5.0)*25 + 50 + ((i*13) % 20))::SCATTER, 'Noisy samples'::TITLE
+FROM range(0, 120) t(i);
 
-SELECT 8::COL;
-SELECT (i % 7)::XAXIS, count(*)::BARCHART, 'Rows per bucket'::TITLE
-FROM range(0, 300) t(i) GROUP BY ALL ORDER BY 1;`,
+SELECT 6::COL;
+SELECT ((i*7) % 100)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500) t(i);
+
+SELECT 12::COL;
+SELECT (i % 12)::XAXIS, floor(i/12.0)::YAXIS,
+       round(avg(sin(i/6.0)*cos(floor(i/12.0)/3.0)*40 + 50),0)::HEATMAP, 'sin · cos surface'::TITLE
+FROM range(0, 96) t(i) GROUP BY 1,2 ORDER BY 1,2;`,
     },
   },
 
@@ -98,11 +112,11 @@ SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP
 
 SELECT 'Combo & sparkline'::TAB;
 SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
-SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;`,
+SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;
 
-      "Choropleth map": `SELECT 'Choropleth map (WKT geometry, coloured by a measure)'::LABEL;
+SELECT 'Map'::TAB;
 SELECT 12::COL;
-SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (VALUES
+SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value (WKT choropleth)'::TITLE FROM (VALUES
   ('North','POLYGON((0 2, 4 2, 4 4, 0 4, 0 2))', 40),
   ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
   ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
@@ -113,29 +127,47 @@ SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (
   {
     group: "Interactivity",
     items: {
-      "Filters & inputs": `${SALES}
+      "Filters & inputs": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
+  (DATE '2024-01-05','app','EU','launch',30),(DATE '2024-01-12','web','EU','promo',22),(DATE '2024-01-20','api','US','launch',12),
+  (DATE '2024-02-03','app','US','promo',41),(DATE '2024-02-14','web','EU','launch',28),(DATE '2024-02-22','api','EU','promo',15),
+  (DATE '2024-03-02','app','EU','promo',26),(DATE '2024-03-11','web','US','launch',33),(DATE '2024-03-19','api','US','promo', 9),
+  (DATE '2024-03-28','app','US','launch',48)
+) t(day, channel, region, note, n);
 
-SELECT 'Filters & inputs'::LABEL;
+SELECT 'Filters & inputs — every input type'::LABEL;
 
--- a multi-select (a list variable) + a number input, in one box
-SELECT 'Controls'::GROUP;
-SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
-SELECT 5 AS min_n ::NUMBER;
+-- the output COLUMN NAME becomes the DuckDB variable (getvariable('name'))
+SELECT 'Filters'::GROUP;
+SELECT DISTINCT region::DROPDOWN FROM events ORDER BY region;      -- single-select
+SELECT DISTINCT channel::MULTISELECT FROM events ORDER BY channel; -- multi-select (a list)
+SELECT 5 AS min_n ::NUMBER;                                        -- number
+SELECT '' AS note ::TEXT;                                          -- free text (try 'promo')
+SELECT DATE '2024-01-01' AS since ::DATE;                          -- single date
 SELECT 1::ENDGROUP;
 
--- KPIs with a DELTA trend arrow, filtered by the multiselect
-SELECT 6::COL;
-SELECT sum(revenue) FILTER (WHERE week='W4')::MONEY, sum(revenue) FILTER (WHERE week='W3')::DELTA, 'Revenue (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel);
-SELECT 6::COL;
-SELECT sum(n) FILTER (WHERE week='W4')::METRIC, sum(n) FILTER (WHERE week='W3')::DELTA, 'Sessions (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel);
+SELECT 'Date range'::GROUP;
+SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;  -- from → to
+SELECT 1::ENDGROUP;
 
-SELECT 12::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (filtered)'::TITLE
-FROM sales
-WHERE list_contains(getvariable('channel'), channel) AND n >= getvariable('min_n')
-GROUP BY ALL ORDER BY week, channel;`,
+SELECT 4::COL;
+SELECT sum(n)::METRIC, 'Sessions (filtered)'::LABEL FROM events
+WHERE region = getvariable('region')
+  AND list_contains(getvariable('channel'), channel)
+  AND n >= getvariable('min_n')
+  AND day >= getvariable('since')::DATE
+  AND day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
+  AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%');
+
+SELECT 8::COL;
+SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (all filters applied)'::TITLE
+FROM events
+WHERE region = getvariable('region')
+  AND list_contains(getvariable('channel'), channel)
+  AND n >= getvariable('min_n')
+  AND day >= getvariable('since')::DATE
+  AND day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
+  AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%')
+GROUP BY ALL ORDER BY day, channel;`,
 
       "Cross-filter & drill-down": `-- Two tables, two INDEPENDENT named cross-filters. Each table emits a variable
 -- named after its first column (sku / region); the panels filter by both.
@@ -492,11 +524,35 @@ function renderSidebar() {
   }
   for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, true));
 
+  const exc = exCollapsed();
   for (const g of SAMPLE_GROUPS) {
-    nav.appendChild(sideSection(g.group));
-    for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+    const hdr = document.createElement("div");
+    hdr.className = "side-section side-section-toggle";
+    const caret = document.createElement("span");
+    caret.className = "ex-caret";
+    caret.textContent = exc[g.group] ? "▸" : "▾";
+    const lbl = document.createElement("span");
+    lbl.textContent = g.group;
+    hdr.append(caret, lbl);
+    hdr.onclick = () => toggleEx(g.group);
+    nav.appendChild(hdr);
+    if (!exc[g.group]) for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
   }
   markActive();
+}
+const EXC_KEY = "dp_ex_collapsed";
+function exCollapsed() {
+  try {
+    return JSON.parse(localStorage.getItem(EXC_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+function toggleEx(group) {
+  const c = exCollapsed();
+  c[group] = !c[group];
+  localStorage.setItem(EXC_KEY, JSON.stringify(c));
+  renderSidebar();
 }
 function sideSection(t) {
   const d = document.createElement("div");
@@ -1157,7 +1213,7 @@ async function run() {
         const fig = document.createElement("figure");
         fig.className = "panel";
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
-        const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE"];
+        const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
         const fmtByIdx = {};
         for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
         const titleRole = s.roles.find((r) => r[1] === "TITLE");
@@ -1290,7 +1346,7 @@ async function run() {
           // Per-column formatting (::MONEY/::PERCENT/::COMPACT/::METRIC number
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
-          const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE"];
+          const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           fig.appendChild(renderTable(rows, skip, fmtByIdx));
@@ -1505,7 +1561,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   const colMax = {};
   for (const c of cols) {
     const nums = rows.map((r) => cleanNum(r[c]));
-    const numFmt = ["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE", "TREND"].includes(colFmt[c]);
+    const numFmt = ["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
     numeric[c] = numFmt || (nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v)));
     maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
     const fin = nums.filter((v) => v != null);
@@ -1604,6 +1660,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
               `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
               `${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>`;
           }
+          continue;
+        }
+        if (f === "PLAIN") {
+          // a numeric column with NO in-cell bar (::PLAIN / ::NOBAR)
+          td.textContent = v == null ? "" : v;
+          td.style.textAlign = "right";
+          td.style.fontVariantNumeric = "tabular-nums";
           continue;
         }
         if (["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE"].includes(f)) {

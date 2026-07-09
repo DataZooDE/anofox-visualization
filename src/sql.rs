@@ -82,7 +82,7 @@ const ROLES: &[&str] = &[
     "TREND", "HINT", "TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE", "PLACEHOLDER", "HEADER_IMAGE",
     "HEADERIMAGE", "FOOTER_LINK", "FOOTERLINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_EXCEL",
     "DOWNLOAD_PDF", "RELOAD", "REFRESH", "RANGE", "LABELS", "COLORS", "COLOURS",
-    "COLORSCALE", "COLOURSCALE", "HEAT", "GRADIENT", "BADGE", "STATUS", "PILL",
+    "COLORSCALE", "COLOURSCALE", "HEAT", "GRADIENT", "BADGE", "STATUS", "PILL", "PLAIN", "NOBAR",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -174,7 +174,8 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                         | Role::Metric(_)
                         | Role::Value(Kind::Sparkline)
                         | Role::ColorScale
-                        | Role::Badge),
+                        | Role::Badge
+                        | Role::Plain),
                     ) = parse_role(r)
                     {
                         roles.push((idx, rr));
