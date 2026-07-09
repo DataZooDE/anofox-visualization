@@ -8,6 +8,10 @@
 :root{--bg:#f4f6f9;--card:#fff;--ink:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#2a9d8f}
 *{box-sizing:border-box}
 body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0}
+body.dark{--bg:#0f172a;--ink:#e6edf6;--muted:#93a4bd;--line:#2c3a52}
+body.dark header,body.dark .editor,body.dark .editor textarea{background:#161f31}
+body.dark .editor textarea{color:#e6edf6}
+body.dark .btn2{background:#243247;color:#e6edf6}
 header{padding:1.1rem 1.4rem;border-bottom:1px solid var(--line);background:var(--card);display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
 header h1{font-size:1.15rem;font-weight:650;margin:0;letter-spacing:-.01em}
 header .tag{color:var(--muted);font-size:.82rem}
@@ -79,6 +83,13 @@ select{border:1px solid var(--line);border-radius:8px;padding:.45rem .5rem;font-
       </select>
       <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
       <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
+      <select id="refresh" title="auto-refresh interval">
+        <option value="0">No refresh</option>
+        <option value="5">5s</option>
+        <option value="30">30s</option>
+        <option value="60">60s</option>
+      </select>
+      <button id="dark" class="btn2" title="toggle dark mode">🌙</button>
     </div>
     <textarea id="sql" spellcheck="false"></textarea>
   </div>

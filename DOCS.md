@@ -32,12 +32,16 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::HISTOGRAM` | histogram of the measure column (binned + counted) |
 | `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
 | `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
+| `::SPARKLINE` | a minimal inline trend line (no axes) |
+| `::MAP` (`::GEOMETRY`) | choropleth from a WKT geometry column, coloured by a measure |
+| `::REFLINE` (`::TARGET`) | a horizontal reference/target line on a chart |
 | `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
 | `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
 | `::TABLE` | data table — sortable headers, in-cell bars on numeric columns |
 | `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options) |
 | `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
 | `::MULTISELECT` | multi-value picker → a DuckDB list; filter with `list_contains(getvariable('name'), col)` |
+| `::DATERANGE` | a from→to date pair (query returns two columns → two variables) |
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).
@@ -59,6 +63,12 @@ FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
+
+### Combo charts, auto-refresh, dark mode
+
+A panel with **multiple measure columns** overlays them as combo layers, e.g.
+`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. The toolbar also has
+an **auto-refresh** interval and a **dark-mode** toggle.
 
 ### Export & share
 

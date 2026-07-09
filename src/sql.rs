@@ -2,7 +2,7 @@
 //! casts off the SELECT list. Shared by the native `dashboard` bin and the wasm
 //! binding so the browser and CLI behave identically.
 
-use crate::{parse_role, Column, Role};
+use crate::{parse_role, Column, InputKind, Role};
 use ggplot_rs::prelude::Value;
 
 /// A planned statement: either setup (run for effect) or a panel (rewritten SQL
@@ -68,9 +68,11 @@ const ROLES: &[&str] = &[
     "XAXIS", "X", "YAXIS", "Y", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART",
     "BAR", "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
     "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
-    "BOX_PLOT", "HEATMAP", "TILE", "TILES", "TABLE", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
+    "BOX_PLOT", "HEATMAP", "TILE", "TILES", "SPARKLINE", "SPARK", "REFLINE", "TARGET", "GOAL", "MAP",
+    "GEOMETRY", "GEO", "CHOROPLETH", "TABLE", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
     "OPTIONS", "SELECT_INPUT", "NUMBER", "SLIDER", "NUMERIC", "DATE", "DATEPICKER", "TEXT", "SEARCH",
-    "STRING", "MULTISELECT", "MULTI", "MONEY", "DOLLAR", "CURRENCY", "PERCENT", "PCT", "COMPACT",
+    "STRING", "MULTISELECT", "MULTI", "DATERANGE", "DATE_RANGE", "MONEY", "DOLLAR", "CURRENCY",
+    "PERCENT", "PCT", "COMPACT",
     "DELTA", "COMPARE", "PREVIOUS", "TAB", "PAGE", "COLUMNS",
     "COLS", "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
 ];
@@ -134,17 +136,20 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
     let split = split_top_commas(list);
 
-    // A ::TABLE panel keeps every column and its name — strip only that cast.
-    let is_table = |it: &str| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)) == Some(Role::Table);
-    if split.iter().any(|it| is_table(it)) {
+    // ::TABLE and ::DATERANGE keep every column and its name — strip only the cast.
+    let keep_intact = |r: Role| matches!(r, Role::Table | Role::Input(InputKind::DateRange));
+    let intact = split
+        .iter()
+        .find_map(|it| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)).filter(|r| keep_intact(*r)));
+    if let Some(role) = intact {
         let items: Vec<String> = split
             .iter()
             .map(|it| match trailing_role(it.trim()) {
-                Some((expr, r)) if parse_role(r) == Some(Role::Table) => expr.to_string(),
+                Some((expr, r)) if parse_role(r) == Some(role) => expr.to_string(),
                 _ => it.trim().to_string(),
             })
             .collect();
-        return (format!("{head} {} {tail}", items.join(", ")), vec![(0, Role::Table)]);
+        return (format!("{head} {} {tail}", items.join(", ")), vec![(0, role)]);
     }
 
     let mut roles = Vec::new();
@@ -156,7 +161,7 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                 // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
                 // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
                 let item = match role {
-                    Role::Value(_) | Role::Metric(_) | Role::Delta => {
+                    Role::Value(_) | Role::Metric(_) | Role::Delta | Role::RefLine => {
                         format!("CAST({expr} AS DOUBLE) AS c{i}")
                     }
                     // Inputs keep the original column name — it becomes the

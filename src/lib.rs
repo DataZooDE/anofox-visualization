@@ -40,6 +40,8 @@ pub enum Kind {
     Boxplot,
     /// A heatmap — `x` × `y` tiles coloured by the measure (`::HEATMAP`).
     Heatmap,
+    /// A minimal inline trend line, no axes (`::SPARKLINE`).
+    Sparkline,
 }
 
 /// The kind of control an `::` input renders.
@@ -50,6 +52,7 @@ pub enum InputKind {
     Date,
     Text,
     Multiselect,
+    DateRange,
 }
 
 /// How a KPI value is formatted.
@@ -92,6 +95,10 @@ pub enum Role {
     Metric(MetricFmt),
     /// A comparison value for a KPI (`::DELTA`) — shows the trend arrow + % change.
     Delta,
+    /// A horizontal reference/target line on a chart (`::REFLINE`).
+    RefLine,
+    /// A WKT geometry column for a map choropleth (`::MAP`); coloured by the measure.
+    Geometry,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
 }
@@ -126,6 +133,9 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "HISTOGRAM" | "HIST" => Some(Role::Value(Kind::Histogram)),
         "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
+        "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
+        "REFLINE" | "TARGET" | "GOAL" => Some(Role::RefLine),
+        "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "TABLE" | "GRID" => Some(Role::Table),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
         "MONEY" | "DOLLAR" | "CURRENCY" => Some(Role::Metric(MetricFmt::Money)),
@@ -133,6 +143,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "COMPACT" => Some(Role::Metric(MetricFmt::Compact)),
         "DELTA" | "COMPARE" | "PREVIOUS" => Some(Role::Delta),
         "MULTISELECT" | "MULTI" => Some(Role::Input(InputKind::Multiselect)),
+        "DATERANGE" | "DATE_RANGE" => Some(Role::Input(InputKind::DateRange)),
         "TAB" | "PAGE" => Some(Role::Tab),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
         "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),
@@ -194,6 +205,10 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         .and_then(|c| c.values.first())
         .map(value_str);
 
+    // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
+    if cols.iter().any(|c| c.role == Role::Geometry) {
+        return render_map(cols, title.as_deref(), width, height);
+    }
     let value = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let Some(value) = value else {
         // Label-only → a heading element.
@@ -204,6 +219,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Pie => return render_pie(value, cols, title.as_deref(), width, height),
         Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
+        Kind::Sparkline => return render_sparkline(value, width, height),
         _ => {}
     }
     let x = cols.iter().find(|c| c.role == Role::X).ok_or("no XAXIS column")?;
@@ -213,6 +229,11 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         ("x".to_string(), x.values.clone()),
         ("y".to_string(), value.values.clone()),
     ];
+    // Extra measure columns → additional overlaid layers (combo charts).
+    let extras: Vec<&Column> = cols.iter().filter(|c| matches!(c.role, Role::Value(_))).skip(1).collect();
+    for (k, ev) in extras.iter().enumerate() {
+        data.push((format!("y{}", k + 2), ev.values.clone()));
+    }
     let by_colour = matches!(kind, Kind::Line | Kind::Point);
     let bar = matches!(kind, Kind::Bar | Kind::BarStacked);
     let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
@@ -250,8 +271,27 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
         Kind::Boxplot => plot.geom_boxplot(),
-        Kind::Pie | Kind::Histogram | Kind::Heatmap => unreachable!("handled above"),
+        Kind::Pie | Kind::Histogram | Kind::Heatmap | Kind::Sparkline => unreachable!("handled above"),
     };
+    // Combo layers: overlay each extra measure with its own geom + y column.
+    for (k, ev) in extras.iter().enumerate() {
+        if let Role::Value(ekind) = ev.role {
+            let yk = format!("y{}", k + 2);
+            plot = match ekind {
+                Kind::Line => plot.geom_line(),
+                Kind::Area => plot.geom_area(),
+                Kind::Point => plot.geom_point(),
+                _ => plot.geom_col(),
+            }
+            .layer_aes(Aes::new().x("x").y(&yk));
+        }
+    }
+    // Reference / target line.
+    if let Some(rl) = cols.iter().find(|c| c.role == Role::RefLine) {
+        if let Some(v) = rl.values.iter().find_map(|x| x.as_f64()) {
+            plot = plot.geom_hline(v);
+        }
+    }
     if let Some(levels) = &color_levels {
         // Map the distinct series to the DataZoo palette (stable/sorted order, so
         // a given series is the same colour in every chart).
@@ -313,6 +353,51 @@ fn render_heatmap(
         .theme_minimal();
     if let Some(t) = title {
         plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A minimal inline trend line (no axes) — a sparkline over the row order.
+fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, String> {
+    let n = value.values.len();
+    let data = vec![
+        ("x".to_string(), (0..n).map(|i| Value::Float(i as f64)).collect()),
+        ("y".to_string(), value.values.clone()),
+    ];
+    GGPlot::new(data)
+        .aes(Aes::new().x("x").y("y"))
+        .geom_area()
+        .geom_line()
+        .theme_void()
+        .primary_color(DZ_COLORS[0])
+        .render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A choropleth map from a WKT `::MAP` geometry column, optionally coloured by a
+/// measure (light → steel blue).
+fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) -> Result<String, String> {
+    let geom = cols.iter().find(|c| c.role == Role::Geometry).ok_or("map needs a ::MAP column")?;
+    let fill = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
+    let label = cols.iter().find(|c| c.role == Role::Label);
+    let mut data: Vec<(String, Vec<Value>)> = vec![("geometry".to_string(), geom.values.clone())];
+    let mut aes = Aes::new();
+    if let Some(f) = fill {
+        data.push(("fill".to_string(), f.values.clone()));
+        aes = aes.fill("fill");
+    }
+    let lab = label.map(|l| l.values.clone()).or_else(|| fill.map(|f| f.values.clone()));
+    if let Some(lv) = lab {
+        data.push(("label".to_string(), lv));
+        aes = aes.label("label");
+    }
+    let mut plot = GGPlot::new(data).aes(aes).geom_sf().coord_sf().theme_void();
+    if fill.is_some() {
+        plot = plot.scale_fill_gradient(
+            ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
+            ggplot_rs::scale::color::RGBAColor::new(DZ_COLORS[0].0, DZ_COLORS[0].1, DZ_COLORS[0].2),
+        );
     }
     plot.render_svg_native_with_size(width, height)
         .map_err(|e| format!("render failed: {e:?}"))

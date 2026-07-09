@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
-ggplot-rs = { path = "../ggplot-rs", default-features = false }
+ggplot-rs = { path = "../ggplot-rs", default-features = false, features = ["sf"] }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

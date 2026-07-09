@@ -222,6 +222,30 @@ SELECT 12::COL;
 SELECT channel, sum(n) AS sessions, sum(revenue) AS revenue ::TABLE
 FROM sales WHERE list_contains(getvariable('channel'), channel)
 GROUP BY ALL ORDER BY revenue DESC;`,
+
+  "Combo, spark & map": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1',30,1200.0),('W2',41,1600.0),('W3',26,980.0),('W4',48,2000.0)
+) t(week, sessions, revenue);
+
+SELECT 'Combo chart + sparkline'::LABEL;
+
+-- combo: bars (sessions) + line (revenue/50) + a target REFLINE at 35
+SELECT 8::COL;
+SELECT week::XAXIS, sessions::BARCHART, revenue/50::LINECHART, 35::REFLINE
+FROM sales ORDER BY week;
+
+-- a sparkline (minimal inline trend, no axes)
+SELECT 4::COL;
+SELECT sessions::SPARKLINE FROM sales ORDER BY week;
+
+-- choropleth map from WKT geometry, coloured by a measure
+SELECT 'Choropleth map'::LABEL;
+SELECT 12::COL;
+SELECT geom::MAP, value::BARCHART, name::LABEL FROM (VALUES
+  ('North','POLYGON((0 2, 4 2, 4 4, 0 4, 0 2))', 40),
+  ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
+  ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
+) r(name, geom, value);`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -273,6 +297,12 @@ async function boot() {
   $("sql").value = decodeHashSql() || SAMPLES[Object.keys(SAMPLES)[0]];
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
+  $("dark").onclick = () => document.body.classList.toggle("dark");
+  $("refresh").onchange = () => {
+    clearInterval(dpTimer);
+    const s = parseInt($("refresh").value);
+    if (s > 0) dpTimer = setInterval(run, s * 1000);
+  };
 
   // layout: default columns-per-row (12-col bootstrap grid; panels span 12/cols)
   $("cols").onchange = () => {
@@ -288,7 +318,7 @@ async function boot() {
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
-const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT"];
+const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
 const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
@@ -299,6 +329,7 @@ let dpVars = {}; // DuckDB variable name -> selected value (persists across runs
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
 let dpTab = null; // the active tab name (preserved across re-runs)
+let dpTimer = null; // auto-refresh interval handle
 
 async function run() {
   const grid = $("grid");
@@ -332,6 +363,17 @@ async function run() {
         const kind = inputKind(s);
         const rows = JSON.parse(await runSql(s.sql));
         if (!rows.length) continue;
+        if (kind === "DATERANGE") {
+          const keys = Object.keys(rows[0]);
+          const fk = keys[0];
+          const tk = keys[1] || keys[0];
+          if (dpVars[fk] === undefined) dpVars[fk] = String(rows[0][fk] ?? "");
+          if (dpVars[tk] === undefined) dpVars[tk] = String(rows[0][tk] ?? "");
+          dd[i] = { kind, varnames: [fk, tk] };
+          await runSql(`SET VARIABLE ${fk} = '${String(dpVars[fk]).replace(/'/g, "''")}'`);
+          await runSql(`SET VARIABLE ${tk} = '${String(dpVars[tk]).replace(/'/g, "''")}'`);
+          continue;
+        }
         const varname = Object.keys(rows[0])[0];
         let lit;
         if (kind === "DROPDOWN") {
@@ -485,7 +527,8 @@ async function run() {
           panels++;
         } else {
           const fig = mkPanel();
-          fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
+          const ph = role(s, "SPARKLINE") ? 90 : 300; // sparklines are short
+          fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph);
           container.appendChild(fig);
           panels++;
         }
@@ -507,10 +550,37 @@ async function run() {
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
 // stand-alone control in its own spanning row (grouped ones sit inline).
+function finalizeControl(wrap, bar) {
+  if (!bar) return wrap;
+  const box = document.createElement("div");
+  box.className = "controls";
+  box.appendChild(wrap);
+  return box;
+}
+
 function makeControl(meta, bar) {
   const wrap = document.createElement("label");
   wrap.className = "control";
-  wrap.textContent = meta.varname + ":";
+  wrap.textContent = (meta.varname || "date") + ":";
+  if (meta.kind === "DATERANGE") {
+    const mk = (k) => {
+      const inp = document.createElement("input");
+      inp.type = "date";
+      inp.value = dpVars[k] || "";
+      inp.onchange = () => {
+        dpVars[k] = inp.value;
+        run();
+      };
+      return inp;
+    };
+    wrap.appendChild(mk(meta.varnames[0]));
+    const arrow = document.createElement("span");
+    arrow.textContent = " → ";
+    arrow.style.margin = "0 .35rem";
+    wrap.appendChild(arrow);
+    wrap.appendChild(mk(meta.varnames[1]));
+    return finalizeControl(wrap, bar);
+  }
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
@@ -549,11 +619,7 @@ function makeControl(meta, bar) {
     };
   }
   wrap.appendChild(input);
-  if (!bar) return wrap;
-  const box = document.createElement("div");
-  box.className = "controls";
-  box.appendChild(wrap);
-  return box;
+  return finalizeControl(wrap, bar);
 }
 
 const cleanNum = (v) => {
