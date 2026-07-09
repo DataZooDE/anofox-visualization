@@ -308,6 +308,22 @@ fn brand() -> (u8, u8, u8) {
     BRAND.with(|b| b.get()).unwrap_or(DZ_COLORS[0])
 }
 
+/// A map zoom window: `((x0, x1), (y0, y1))` in geometry (lon/lat) coordinates.
+pub type ZoomWindow = ((f64, f64), (f64, f64));
+
+thread_local! {
+    /// Per-render map zoom window. `None` = the default equal-aspect `coord_sf` fit.
+    static MAP_ZOOM: std::cell::Cell<Option<ZoomWindow>> = const { std::cell::Cell::new(None) };
+}
+/// Set the map zoom window for the next `render()` (a `::MAP` panel). `None`
+/// restores the auto-fit view.
+pub fn set_map_zoom(window: Option<ZoomWindow>) {
+    MAP_ZOOM.with(|z| z.set(window));
+}
+fn map_zoom() -> Option<ZoomWindow> {
+    MAP_ZOOM.with(|z| z.get())
+}
+
 /// Distinct category labels in a **stable (sorted) order**, so a given series
 /// gets the same DataZoo colour in every chart that contains it.
 fn distinct_labels(col: &Column) -> Vec<String> {
@@ -792,7 +808,14 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
             .layer_data(vec![("geometry".to_string(), b.values.clone())])
             .layer_aes(Aes::new());
     }
-    let mut plot = plot.geom_sf().coord_sf().theme_void();
+    // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
+    // otherwise fit the whole geometry with an equal aspect ratio.
+    let plot = plot.geom_sf();
+    let mut plot = match map_zoom() {
+        Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
+        None => plot.coord_sf(),
+    };
+    plot = plot.theme_void();
     if fill.is_some() {
         // Viridis gives points/regions strong contrast over the grey basemap;
         // a plain choropleth keeps the on-brand light→primary gradient.

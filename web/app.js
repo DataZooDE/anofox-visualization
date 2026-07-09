@@ -1,7 +1,7 @@
 // Browser dashboard builder — 100% client-side.
 //   DuckDB-Wasm runs the SQL, duckplot (wasm) plans the ::ROLE annotations and
 //   renders each panel to SVG. No server, no DuckDB extension.
-import init, { plan, render_panel } from "./pkg/duckplot.js";
+import init, { plan, render_panel, map_bounds } from "./pkg/duckplot.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -1552,10 +1552,13 @@ async function run() {
             fig.appendChild(mkNoData());
           } else {
             const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
-            fig.insertAdjacentHTML(
-              "beforeend",
-              render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "")
-            );
+            const isMap = s.roles.some((r) => r[1] === "MAP");
+            const holder = document.createElement("div");
+            holder.className = "panel-svg";
+            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "", "");
+            fig.appendChild(holder);
+            // Maps are scroll-to-zoom / drag-to-pan (double-click resets).
+            if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
           }
           container.appendChild(fig);
           panels++;
@@ -2135,6 +2138,109 @@ function showError(grid, msg) {
   d.className = "err";
   d.textContent = msg;
   grid.appendChild(d);
+}
+
+// Scroll-to-zoom / drag-to-pan for a map panel. Re-renders the panel's SVG with
+// a lon/lat zoom window (double-click resets to auto-fit). The initial view is
+// seeded from the geometry bounds, padded to the panel's aspect so the first
+// zoom step doesn't jump.
+function attachMapZoom(holder, rowsJson, roles, ph) {
+  const W = 460,
+    aspect = W / ph;
+  let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
+  let raf = 0;
+
+  const fit = () => {
+    let b;
+    try {
+      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles)));
+    } catch (_) {
+      b = [];
+    }
+    if (b.length !== 4) return { x0: -180, x1: 180, y0: -90, y1: 90 };
+    let [x0, x1, y0, y1] = b;
+    const w = x1 - x0,
+      h = y1 - y0;
+    if (w / h < aspect) {
+      const nw = h * aspect,
+        c = (x0 + x1) / 2;
+      x0 = c - nw / 2;
+      x1 = c + nw / 2;
+    } else {
+      const nh = w / aspect,
+        c = (y0 + y1) / 2;
+      y0 = c - nh / 2;
+      y1 = c + nh / 2;
+    }
+    return { x0, x1, y0, y1 };
+  };
+
+  const draw = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
+      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, dpPrimary || "", zoom);
+      attachHover(); // re-wire hover + cross-filter clicks on the fresh marks
+    });
+  };
+
+  holder.style.cursor = "grab";
+  holder.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      if (!view) view = fit();
+      const r = holder.getBoundingClientRect();
+      const px = view.x0 + ((e.clientX - r.left) / r.width) * (view.x1 - view.x0);
+      const py = view.y1 - ((e.clientY - r.top) / r.height) * (view.y1 - view.y0);
+      const k = e.deltaY < 0 ? 0.85 : 1 / 0.85;
+      view = {
+        x0: px + (view.x0 - px) * k,
+        x1: px + (view.x1 - px) * k,
+        y0: py + (view.y0 - py) * k,
+        y1: py + (view.y1 - py) * k,
+      };
+      draw();
+    },
+    { passive: false }
+  );
+
+  let drag = null;
+  holder.addEventListener("mousedown", (e) => {
+    if (!view) view = fit();
+    drag = { x: e.clientX, y: e.clientY, v: { ...view }, moved: false };
+    holder.style.cursor = "grabbing";
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) drag.moved = true;
+    const r = holder.getBoundingClientRect();
+    const dx = ((e.clientX - drag.x) / r.width) * (drag.v.x1 - drag.v.x0);
+    const dy = ((e.clientY - drag.y) / r.height) * (drag.v.y1 - drag.v.y0);
+    view = { x0: drag.v.x0 - dx, x1: drag.v.x1 - dx, y0: drag.v.y0 + dy, y1: drag.v.y1 + dy };
+    draw();
+  });
+  window.addEventListener("mouseup", () => {
+    if (drag && drag.moved) holder._panned = true; // suppress the trailing click
+    if (drag) holder.style.cursor = "grab";
+    drag = null;
+  });
+  // A drag-pan ends with a click event — swallow it so it doesn't cross-filter.
+  holder.addEventListener(
+    "click",
+    (e) => {
+      if (holder._panned) {
+        holder._panned = false;
+        e.stopPropagation();
+      }
+    },
+    true
+  );
+  holder.addEventListener("dblclick", () => {
+    view = null;
+    draw();
+  });
 }
 
 // Styled hover tooltips + click-to-highlight LINKING across all panels.

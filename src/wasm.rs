@@ -28,7 +28,14 @@ pub fn plan(script: &str) -> String {
 /// Render one panel to SVG. `rows_json` = `[{ "c0": …, "c1": … }, …]` (a panel
 /// query's `-json` result); `roles_json` = the panel's `roles` from [`plan`].
 #[wasm_bindgen]
-pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32, primary: &str) -> String {
+pub fn render_panel(
+    rows_json: &str,
+    roles_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+    zoom_json: &str,
+) -> String {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(rows_json).unwrap_or_default();
     let roles: Vec<(usize, Role)> = serde_json::from_str::<Vec<(usize, String)>>(roles_json)
@@ -38,9 +45,56 @@ pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32, 
         .collect();
     let cols = sql::columns_from_rows(&rows, &roles);
     crate::set_brand(parse_primary(primary));
+    // Optional map zoom window `[x0, x1, y0, y1]` (lon/lat). Empty = auto-fit.
+    crate::set_map_zoom(parse_zoom(zoom_json));
     let svg = render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
+    crate::set_map_zoom(None);
     crate::set_brand(None);
     svg
+}
+
+/// Bounds `[x0, x1, y0, y1]` of a map panel's geometry (the `MAP` + `BASEMAP`
+/// columns), in lon/lat — the UI uses these to seed an aspect-correct zoom view.
+#[wasm_bindgen]
+pub fn map_bounds(rows_json: &str, roles_json: &str) -> String {
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(rows_json).unwrap_or_default();
+    let roles: Vec<(usize, String)> = serde_json::from_str(roles_json).unwrap_or_default();
+    let geo_cols: Vec<String> = roles
+        .iter()
+        .filter(|(_, r)| r == "MAP" || r == "BASEMAP")
+        .map(|(i, _)| format!("c{i}"))
+        .collect();
+    let (mut x0, mut y0, mut x1, mut y1) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for row in &rows {
+        for key in &geo_cols {
+            if let Some(b) = row
+                .get(key)
+                .and_then(|v| v.as_str())
+                .and_then(ggplot_rs::spatial::parse_wkt)
+                .and_then(|g| g.bounds())
+            {
+                x0 = x0.min(b.0);
+                y0 = y0.min(b.1);
+                x1 = x1.max(b.2);
+                y1 = y1.max(b.3);
+            }
+        }
+    }
+    if !x0.is_finite() {
+        return "[]".into();
+    }
+    format!("[{x0},{x1},{y0},{y1}]")
+}
+
+/// Parse a `[x0, x1, y0, y1]` zoom window (empty / invalid → `None`).
+fn parse_zoom(s: &str) -> Option<crate::ZoomWindow> {
+    let v: Vec<f64> = serde_json::from_str(s).ok()?;
+    match v.as_slice() {
+        [x0, x1, y0, y1] => Some(((*x0, *x1), (*y0, *y1))),
+        _ => None,
+    }
 }
 
 /// Parse a `RRGGBB` / `#rrggbb` brand colour (empty / invalid → default).
