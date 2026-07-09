@@ -75,13 +75,13 @@ header .actions select{padding:.42rem .5rem}
 .dp-table td{padding:.42rem .6rem;border-bottom:1px solid var(--line);white-space:nowrap}
 .dp-table tbody tr{transition:background .1s}
 .dp-table tbody tr:hover{background:#f5f8fd}
-.metric{justify-content:center;overflow:hidden}
+.metric{display:flex;flex-direction:column;justify-content:center;align-items:flex-start;overflow:hidden}
 .metric-value{font-size:2.5rem;font-weight:800;letter-spacing:-.03em;line-height:1.05;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .metric-cap{color:var(--muted);font-size:.85rem;font-weight:600;margin-top:.3rem}
 .metric-delta{font-size:.85rem;font-weight:700;margin-top:.2rem;display:inline-flex;align-items:center;gap:.2rem}
 .metric-delta.up{color:#0ca678}.metric-delta.down{color:#e03131}
 /* Text cards (::TEXT_SMALL/_MEDIUM/_LARGE) */
-.textcard{justify-content:center}
+.textcard{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:.4rem;min-height:150px}
 .text-value{font-weight:700;letter-spacing:-.02em;color:var(--ink);line-height:1.25}
 .text-small .text-value{font-size:1rem}
 .text-medium .text-value{font-size:1.5rem}

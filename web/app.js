@@ -1136,9 +1136,24 @@ function attachHover() {
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
 
   const apply = () => {
+    if (!dpSelected) {
+      for (const el of marks) el.style.opacity = "";
+      return;
+    }
+    // Dim non-selected marks, but only inside a panel that actually contains the
+    // selected series. A panel keyed by a different dimension (e.g. a line
+    // filtered to one channel, keyed by week) has no matching mark, so it stays
+    // fully visible instead of every point dimming away.
+    const byPanel = new Map();
     for (const el of marks) {
-      const s = el.getAttribute("data-series");
-      el.style.opacity = !dpSelected || s === dpSelected ? "" : "0.15";
+      const fig = el.closest(".panel") || document.body;
+      (byPanel.get(fig) || byPanel.set(fig, []).get(fig)).push(el);
+    }
+    for (const els of byPanel.values()) {
+      const hasSel = els.some((el) => el.getAttribute("data-series") === dpSelected);
+      for (const el of els) {
+        el.style.opacity = !hasSel || el.getAttribute("data-series") === dpSelected ? "" : "0.15";
+      }
     }
   };
 

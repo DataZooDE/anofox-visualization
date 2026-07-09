@@ -546,64 +546,88 @@ fn render_gauge(value: &Column, cols: &[Column], title: Option<&str>, width: u32
         .map(|s| s.split(',').filter_map(parse_hex).collect())
         .unwrap_or_default();
 
-    // Geometry: a 270° arc (135° … 405°), centred, in the lower-middle.
+    // Geometry: a 270° arc (135° … 405°), opening downward, centred.
     let w = width as f64;
     let h = height as f64;
     let cx = w / 2.0;
-    let cy = h * 0.60;
-    let r = (w.min(h * 1.6) * 0.36).max(20.0);
+    let title_pad = if title.is_some() { 12.0 } else { 0.0 };
+    let cy = h * 0.55 + title_pad;
+    let r = (w * 0.30).min(h * 0.42).max(20.0);
+    let thick = r * 0.16;
     let start = 135.0_f64.to_radians();
     let sweep = 270.0_f64.to_radians();
-    let pt = |frac: f64| {
+    let pt = |frac: f64, rad: f64| {
         let a = start + sweep * frac;
-        (cx + r * a.cos(), cy + r * a.sin())
+        (cx + rad * a.cos(), cy + rad * a.sin())
     };
     let arc = |f0: f64, f1: f64, col: &str, wdt: f64| {
-        let (x0, y0) = pt(f0);
-        let (x1, y1) = pt(f1);
+        let (x0, y0) = pt(f0, r);
+        let (x1, y1) = pt(f1, r);
         let large = if (f1 - f0) * 270.0 > 180.0 { 1 } else { 0 };
         format!(
             "<path d=\"M {x0:.1} {y0:.1} A {r:.1} {r:.1} 0 {large} 1 {x1:.1} {y1:.1}\" \
              fill=\"none\" stroke=\"{col}\" stroke-width=\"{wdt:.1}\" stroke-linecap=\"round\"/>"
         )
     };
+    // The value arc takes the colour of the zone the value falls into (a
+    // traffic-light gauge); a single steel arc when no ::COLORS are given.
     let (sr, sg, sb) = DZ_COLORS[0];
-    let (tr, tg, tb) = lighten(DZ_COLORS[0], 0.85);
-    let track = format!("rgb({tr},{tg},{tb})");
-    let mut body = String::new();
-    // Track.
-    body.push_str(&arc(0.0, 1.0, &track, r * 0.16));
-    // Value arc: zone colours if given, else steel.
-    if zone_cols.is_empty() {
-        body.push_str(&arc(0.0, frac, &format!("rgb({sr},{sg},{sb})"), r * 0.16));
+    let vcol = if zone_cols.is_empty() {
+        format!("rgb({sr},{sg},{sb})")
     } else {
-        let step = 1.0 / zone_cols.len() as f64;
-        for (i, c) in zone_cols.iter().enumerate() {
-            let f0 = i as f64 * step;
-            let f1 = ((i + 1) as f64 * step).min(frac);
-            if f1 > f0 {
-                body.push_str(&arc(f0, f1, &format!("rgb({},{},{})", c.r, c.g, c.b), r * 0.16));
-            }
+        let zi = ((frac * zone_cols.len() as f64).floor() as usize).min(zone_cols.len() - 1);
+        let c = zone_cols[zi];
+        format!("rgb({},{},{})", c.r, c.g, c.b)
+    };
+    let (tr, tg, tb) = lighten(DZ_COLORS[0], 0.87);
+    let track = format!("rgb({tr},{tg},{tb})");
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+    let mut body = String::new();
+    // Light full-arc track, then the value arc on top.
+    body.push_str(&arc(0.0, 1.0, &track, thick));
+    body.push_str(&arc(0.0, frac.max(0.001), &vcol, thick));
+    // Zone-boundary ticks across the arc.
+    if zone_cols.len() > 1 {
+        for i in 1..zone_cols.len() {
+            let f = i as f64 / zone_cols.len() as f64;
+            let (x0, y0) = pt(f, r - thick * 0.75);
+            let (x1, y1) = pt(f, r + thick * 0.75);
+            body.push_str(&format!(
+                "<line x1=\"{x0:.1}\" y1=\"{y0:.1}\" x2=\"{x1:.1}\" y2=\"{y1:.1}\" stroke=\"#fff\" stroke-width=\"2\"/>"
+            ));
         }
     }
-    // The value number + optional title.
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+    // A marker dot at the current value.
+    let (dx, dy) = pt(frac, r);
+    body.push_str(&format!(
+        "<circle cx=\"{dx:.1}\" cy=\"{dy:.1}\" r=\"{:.1}\" fill=\"{vcol}\" stroke=\"#fff\" stroke-width=\"2.5\"/>",
+        thick * 0.6
+    ));
+    // Big value + "of max" caption.
     let num = if (val - val.round()).abs() < 1e-9 { format!("{}", val.round() as i64) } else { format!("{val:.1}") };
     body.push_str(&format!(
         "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" \
          font-size=\"{:.0}\" font-weight=\"800\" fill=\"#1f2937\">{num}</text>",
-        cy - r * 0.05,
-        r * 0.62
+        cy - r * 0.02,
+        r * 0.5
     ));
     body.push_str(&format!(
-        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#8a93a6\">{}</text>\
-         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#8a93a6\">{}</text>",
-        pt(0.0).0, pt(0.0).1 + 16.0, esc(&fmt_g(min)),
-        pt(1.0).0, pt(1.0).1 + 16.0, esc(&fmt_g(max)),
+        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" font-weight=\"600\" fill=\"#8a93a6\">of {}</text>",
+        cy + r * 0.24,
+        esc(&fmt_g(max))
+    ));
+    // Min / max labels at the arc ends.
+    let (minx, miny) = pt(0.0, r);
+    let (maxx, maxy) = pt(1.0, r);
+    body.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>\
+         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>",
+        minx, miny + 15.0, esc(&fmt_g(min)),
+        maxx, maxy + 15.0, esc(&fmt_g(max)),
     ));
     if let Some(t) = title {
         body.push_str(&format!(
-            "<text x=\"{cx:.1}\" y=\"22\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
+            "<text x=\"{cx:.1}\" y=\"20\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
             esc(t)
         ));
     }
