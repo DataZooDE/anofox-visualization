@@ -46,7 +46,13 @@ pub fn columns_from_rows(
         .map(|(i, role)| {
             let key = format!("c{i}");
             let numeric = matches!(role, Role::Value(_));
-            let values = rows.iter().map(|r| jval(r.get(&key), numeric)).collect();
+            let mut values: Vec<Value> = rows.iter().map(|r| jval(r.get(&key), numeric)).collect();
+            // An X axis whose values are all ISO dates/timestamps becomes a
+            // continuous datetime scale, so ggplot-rs picks sensible (e.g. yearly)
+            // breaks instead of drawing one overlapping label per value.
+            if matches!(role, Role::X) {
+                values = maybe_datetime(values);
+            }
             Column::new(key, *role, values)
         })
         .collect()
@@ -62,6 +68,69 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
         _ => Value::Na,
     }
+}
+
+/// If every non-null value is an ISO date/timestamp string, reinterpret the
+/// column as [`Value::DateTime`] (epoch seconds); otherwise leave it unchanged.
+fn maybe_datetime(vals: Vec<Value>) -> Vec<Value> {
+    let mut saw_date = false;
+    for v in &vals {
+        match v {
+            Value::Str(s) => match parse_iso_epoch(s) {
+                Some(_) => saw_date = true,
+                None => return vals, // a non-date string → keep it discrete
+            },
+            Value::Na => {}
+            _ => return vals, // already numeric/datetime/etc.
+        }
+    }
+    if !saw_date {
+        return vals;
+    }
+    vals.into_iter()
+        .map(|v| match v {
+            Value::Str(s) => parse_iso_epoch(&s).map(Value::DateTime).unwrap_or(Value::Na),
+            other => other,
+        })
+        .collect()
+}
+
+/// Parse `YYYY-MM-DD` or `YYYY-MM-DD[ T]HH:MM:SS` into seconds since the Unix
+/// epoch (UTC). Returns `None` for anything that isn't that exact shape.
+fn parse_iso_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut secs = days_from_civil(y, mo, d) * 86_400;
+    if b.len() >= 19 && (b[10] == b' ' || b[10] == b'T') {
+        let hh: i64 = s.get(11..13)?.parse().ok()?;
+        let mi: i64 = s.get(14..16)?.parse().ok()?;
+        let ss: i64 = s.get(17..19)?.parse().ok()?;
+        if hh > 23 || mi > 59 || ss > 60 {
+            return None;
+        }
+        secs += hh * 3600 + mi * 60 + ss;
+    }
+    Some(secs)
+}
+
+/// Days since 1970-01-01 for a civil (Y, M, D) date — Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 const ROLES: &[&str] = &[
