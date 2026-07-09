@@ -166,11 +166,17 @@ FROM m GROUP BY ALL ORDER BY week, channel;`,
   ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
 ) t(week, channel, n, revenue);
 
--- header KPIs (above the tabs) with value formats:
-SELECT 4::COL; SELECT sum(revenue)::MONEY,  'Revenue'::LABEL  FROM sales;
-SELECT 4::COL; SELECT sum(n)::COMPACT,      'Sessions'::LABEL FROM sales;
-SELECT 4::COL; SELECT round(100.0*sum(n) FILTER (WHERE channel='app')/sum(n),0)::PERCENT,
-                      'App share'::LABEL FROM sales;
+-- header KPIs (above the tabs) with value formats. They opt into the
+-- cross-filter by referencing getvariable('selected'), so clicking a channel
+-- in any chart below re-computes them (click empty space to clear).
+SELECT 'Click a channel in a chart to filter the KPIs'::LABEL;
+
+SELECT 4::COL; SELECT sum(revenue)::MONEY, 'Revenue'::LABEL
+FROM sales WHERE getvariable('selected') IN ('', channel);
+SELECT 4::COL; SELECT sum(n)::COMPACT, 'Sessions'::LABEL
+FROM sales WHERE getvariable('selected') IN ('', channel);
+SELECT 4::COL; SELECT round(100.0*sum(n)/(SELECT sum(n) FROM sales),0)::PERCENT, 'Share of sessions'::LABEL
+FROM sales WHERE getvariable('selected') IN ('', channel);
 
 SELECT 'Revenue'::TAB;
 SELECT 12::COL;
@@ -258,11 +264,12 @@ SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (
 
 SELECT 'Shaper-parity showcase'::LABEL;
 
--- GAUGE: a value's progress through a RANGE, with COLORS zones
+-- GAUGE: a value's progress through a RANGE, with COLORS zones. It opts into
+-- the cross-filter, so clicking a channel in the donut/bars re-computes it.
 SELECT 4::COL;
 SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE,
        '#e03131,#efc94c,#0ca678'::COLORS, 'Sessions (W4)'::TITLE
-FROM sales;
+FROM sales WHERE getvariable('selected') IN ('', channel);
 
 -- DONUTCHART: a pie with a centre hole
 SELECT 4::COL;
