@@ -70,6 +70,26 @@ header .actions select{padding:.42rem .5rem}
 .metric-cap{color:var(--muted);font-size:.85rem;font-weight:600;margin-top:.3rem}
 .metric-delta{font-size:.85rem;font-weight:700;margin-top:.2rem;display:inline-flex;align-items:center;gap:.2rem}
 .metric-delta.up{color:#0ca678}.metric-delta.down{color:#e03131}
+/* Text cards (::TEXT_SMALL/_MEDIUM/_LARGE) */
+.textcard{justify-content:center}
+.text-value{font-weight:700;letter-spacing:-.02em;color:var(--ink);line-height:1.25}
+.text-small .text-value{font-size:1rem}
+.text-medium .text-value{font-size:1.5rem}
+.text-large .text-value{font-size:2.2rem;font-weight:800;letter-spacing:-.03em}
+/* Trend arrow inside a table cell (::TREND) */
+.trend{font-weight:700;font-variant-numeric:tabular-nums}
+.trend.up{color:#0ca678}.trend.down{color:#e03131}
+/* Placeholder (::PLACEHOLDER) — reserved empty grid cell */
+.placeholder{background:transparent;border:1px dashed var(--line);box-shadow:none;min-height:80px}
+.placeholder:hover{box-shadow:none;border-color:var(--line)}
+/* Header image / footer link */
+.header-image{grid-column:1/-1;max-width:100%;max-height:140px;object-fit:contain;border-radius:12px;justify-self:start}
+.footer-link{grid-column:1/-1;justify-self:center;color:var(--accent);font-weight:600;font-size:.9rem;text-decoration:none;padding:.4rem 0}
+.footer-link:hover{text-decoration:underline}
+/* Download button (::DOWNLOAD_*) */
+.download-row{justify-content:flex-start}
+.dl-btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:10px;padding:.55rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
+@media print{.editor,header .actions,#loadbar,.dl{display:none !important}.layout{display:block !important}body{background:#fff}}
 .control select[multiple]{padding:.25rem;min-width:110px;border-radius:9px}
 .tabbar{grid-column:1/-1;display:flex;gap:.25rem;border-bottom:1px solid var(--line);margin:.2rem 0 1.15rem}
 .tab-btn{background:none;color:var(--muted);border:0;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;padding:.55rem 1rem;font-weight:600;font-size:.9rem;cursor:pointer;box-shadow:none;transition:color .12s,background .12s,border-color .12s}

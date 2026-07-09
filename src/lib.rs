@@ -29,11 +29,19 @@ pub mod wasm;
 pub enum Kind {
     Bar,
     BarStacked,
+    /// Dodged bars with a percent-formatted y-axis (`::BARCHART_PERCENT`).
+    BarPercent,
+    /// Bars normalised to 100% per x (`::BARCHART_STACKED_PERCENT`).
+    BarStackedPercent,
     Line,
+    /// A line with a percent-formatted y-axis (`::LINECHART_PERCENT`).
+    LinePercent,
     Area,
     Point,
-    /// A pie/donut — slices by `CATEGORY`, sized by the measure (`::PIE`).
+    /// A pie — slices by `CATEGORY`, sized by the measure (`::PIE`).
     Pie,
+    /// A donut (pie with a centre hole) (`::DONUTCHART`).
+    Donut,
     /// A histogram of the measure column (`::HISTOGRAM`).
     Histogram,
     /// A box plot — `x` groups, `y` = the measure (`::BOXPLOT`).
@@ -42,6 +50,24 @@ pub enum Kind {
     Heatmap,
     /// A minimal inline trend line, no axes (`::SPARKLINE`).
     Sparkline,
+    /// A single value as a gauge/progress arc toward a `::RANGE` (`::GAUGE`).
+    Gauge,
+}
+
+/// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSize {
+    Small,
+    Medium,
+    Large,
+}
+
+/// The file format a `::DOWNLOAD_*` button produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadFmt {
+    Csv,
+    Xlsx,
+    Pdf,
 }
 
 /// The kind of control an `::` input renders.
@@ -98,8 +124,36 @@ pub enum Role {
     Metric(MetricFmt),
     /// A comparison value for a KPI (`::DELTA`) — shows the trend arrow + % change.
     Delta,
-    /// A horizontal reference/target line on a chart (`::REFLINE`).
+    /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`).
     RefLine,
+    /// A vertical reference line at an x-position (`::XLINE`).
+    VLine,
+    /// Lower edge of a confidence band around a line (`::BAND_LOWER`).
+    BandLower,
+    /// Upper edge of a confidence band around a line (`::BAND_UPPER`).
+    BandUpper,
+    /// A trend arrow rendered inside a table cell (`::TREND`).
+    Trend,
+    /// A count/metadata hint shown next to a dropdown option (`::HINT`).
+    Hint,
+    /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
+    Text(TextSize),
+    /// Layout: reserve an empty grid cell (`::PLACEHOLDER`).
+    Placeholder,
+    /// A banner image at the top of the dashboard (`::HEADER_IMAGE`).
+    HeaderImage,
+    /// A link shown at the bottom of the dashboard (`::FOOTER_LINK`).
+    FooterLink,
+    /// A download button for the query result (`::DOWNLOAD_CSV`/`_XLSX`/`_PDF`).
+    Download(DownloadFmt),
+    /// Auto-refresh interval in seconds (`::RELOAD`).
+    Reload,
+    /// A gauge's numeric range `min,max` (`::RANGE`).
+    Range,
+    /// Gauge zone labels, comma-separated (`::LABELS`).
+    GaugeLabels,
+    /// Gauge zone colours, comma-separated hex (`::COLORS`).
+    GaugeColors,
     /// A WKT geometry column for a map choropleth (`::MAP`); coloured by the measure.
     Geometry,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
@@ -130,15 +184,38 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "TITLE" | "HEADING" => Some(Role::Title),
         "BARCHART" | "BAR" => Some(Role::Value(Kind::Bar)),
         "BARCHART_STACKED" | "BAR_STACKED" | "STACKED_BAR" => Some(Role::Value(Kind::BarStacked)),
+        "BARCHART_PERCENT" | "BAR_PERCENT" => Some(Role::Value(Kind::BarPercent)),
+        "BARCHART_STACKED_PERCENT" | "BAR_STACKED_PERCENT" => Some(Role::Value(Kind::BarStackedPercent)),
         "LINECHART" | "LINE" => Some(Role::Value(Kind::Line)),
+        "LINECHART_PERCENT" | "LINE_PERCENT" => Some(Role::Value(Kind::LinePercent)),
         "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
-        "PIE" | "DONUT" | "PIECHART" => Some(Role::Value(Kind::Pie)),
+        "PIE" | "PIECHART" | "PIECHART_PERCENT" => Some(Role::Value(Kind::Pie)),
+        "DONUT" | "DONUTCHART" | "DONUTCHART_PERCENT" => Some(Role::Value(Kind::Donut)),
+        "GAUGE" | "GAUGE_PERCENT" => Some(Role::Value(Kind::Gauge)),
         "HISTOGRAM" | "HIST" => Some(Role::Value(Kind::Histogram)),
         "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
         "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
-        "REFLINE" | "TARGET" | "GOAL" => Some(Role::RefLine),
+        "REFLINE" | "TARGET" | "GOAL" | "YLINE" => Some(Role::RefLine),
+        "XLINE" => Some(Role::VLine),
+        "BAND_LOWER" | "BANDLOWER" => Some(Role::BandLower),
+        "BAND_UPPER" | "BANDUPPER" => Some(Role::BandUpper),
+        "TREND" => Some(Role::Trend),
+        "HINT" => Some(Role::Hint),
+        "TEXT_SMALL" => Some(Role::Text(TextSize::Small)),
+        "TEXT_MEDIUM" => Some(Role::Text(TextSize::Medium)),
+        "TEXT_LARGE" => Some(Role::Text(TextSize::Large)),
+        "PLACEHOLDER" => Some(Role::Placeholder),
+        "HEADER_IMAGE" | "HEADERIMAGE" => Some(Role::HeaderImage),
+        "FOOTER_LINK" | "FOOTERLINK" => Some(Role::FooterLink),
+        "DOWNLOAD_CSV" => Some(Role::Download(DownloadFmt::Csv)),
+        "DOWNLOAD_XLSX" | "DOWNLOAD_EXCEL" => Some(Role::Download(DownloadFmt::Xlsx)),
+        "DOWNLOAD_PDF" => Some(Role::Download(DownloadFmt::Pdf)),
+        "RELOAD" | "REFRESH" => Some(Role::Reload),
+        "RANGE" => Some(Role::Range),
+        "LABELS" => Some(Role::GaugeLabels),
+        "COLORS" | "COLOURS" => Some(Role::GaugeColors),
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "TABLE" | "GRID" => Some(Role::Table),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
@@ -220,7 +297,9 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     };
     let Role::Value(kind) = value.role else { unreachable!() };
     match kind {
-        Kind::Pie => return render_pie(value, cols, title.as_deref(), width, height),
+        Kind::Pie => return render_pie(value, cols, title.as_deref(), 0.0, width, height),
+        Kind::Donut => return render_pie(value, cols, title.as_deref(), 0.55, width, height),
+        Kind::Gauge => return render_gauge(value, cols, title.as_deref(), width, height),
         Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(value, width, height),
@@ -238,9 +317,18 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     for (k, ev) in extras.iter().enumerate() {
         data.push((format!("y{}", k + 2), ev.values.clone()));
     }
-    let by_colour = matches!(kind, Kind::Line | Kind::Point);
-    let bar = matches!(kind, Kind::Bar | Kind::BarStacked);
+    let by_colour = matches!(kind, Kind::Line | Kind::LinePercent | Kind::Point);
+    let bar = matches!(kind, Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent);
+    let percent = matches!(kind, Kind::BarPercent | Kind::BarStackedPercent | Kind::LinePercent);
     let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
+
+    // Optional confidence band around a line (`::BAND_LOWER`/`::BAND_UPPER`).
+    let band_lo = cols.iter().find(|c| c.role == Role::BandLower);
+    let band_hi = cols.iter().find(|c| c.role == Role::BandUpper);
+    if let (Some(lo), Some(hi)) = (band_lo, band_hi) {
+        data.push(("bandlo".to_string(), lo.values.clone()));
+        data.push(("bandhi".to_string(), hi.values.clone()));
+    }
     let mut aes = Aes::new().x("x").y("y");
 
     // Colour dimension: an explicit CATEGORY, or — for a bar chart with no
@@ -266,16 +354,25 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     aes = aes.label("label");
 
     let mut plot = GGPlot::new(data).aes(aes);
+    // The band is drawn first so the line sits on top of it.
+    if band_lo.is_some() && band_hi.is_some() {
+        plot = plot
+            .geom_ribbon_with(GeomRibbon { fill: lighten(DZ_COLORS[0], 0.5), alpha: 0.4 })
+            .layer_aes(Aes::new().x("x").ymin("bandlo").ymax("bandhi"));
+    }
     plot = match kind {
-        Kind::Bar => plot.geom_col().position(PositionDodge),
+        Kind::Bar | Kind::BarPercent => plot.geom_col().position(PositionDodge),
         Kind::BarStacked => plot.geom_col().position(PositionStack),
+        Kind::BarStackedPercent => plot.geom_col().position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
-        Kind::Line => plot.geom_line().geom_point(),
+        Kind::Line | Kind::LinePercent => plot.geom_line().geom_point(),
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
         Kind::Boxplot => plot.geom_boxplot(),
-        Kind::Pie | Kind::Histogram | Kind::Heatmap | Kind::Sparkline => unreachable!("handled above"),
+        Kind::Pie | Kind::Donut | Kind::Gauge | Kind::Histogram | Kind::Heatmap | Kind::Sparkline => {
+            unreachable!("handled above")
+        }
     };
     // Combo layers: overlay each extra measure with its own geom + y column.
     for (k, ev) in extras.iter().enumerate() {
@@ -290,21 +387,37 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             .layer_aes(Aes::new().x("x").y(&yk));
         }
     }
-    // Reference / target line.
+    // Horizontal reference/target line (`::REFLINE`/`::YLINE`).
     if let Some(rl) = cols.iter().find(|c| c.role == Role::RefLine) {
         if let Some(v) = rl.values.iter().find_map(|x| x.as_f64()) {
             plot = plot.geom_hline(v);
         }
     }
+    // Vertical reference line (`::XLINE`) — only meaningful on a continuous x.
+    if let Some(vl) = cols.iter().find(|c| c.role == Role::VLine) {
+        if let Some(v) = vl.values.iter().find_map(|x| x.as_f64()) {
+            plot = plot.geom_vline(v);
+        }
+    }
     if let Some(levels) = &color_levels {
-        // Map the distinct series to the DataZoo palette (stable/sorted order, so
-        // a given series is the same colour in every chart).
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
-            levels.iter().enumerate().map(|(i, s)| (s.as_str(), dz_color(i))).collect();
+        // Explicit hex values (`#rrggbb`) are used verbatim; otherwise the levels
+        // map to the DataZoo palette in stable/sorted order so a given series is
+        // the same colour in every chart.
+        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
+            .collect();
         plot = if by_colour { plot.scale_color_manual(pairs) } else { plot.scale_fill_manual(pairs) };
     }
     if x_coloured {
         plot = plot.show_legend(false); // the x axis already labels the colours
+    }
+    if percent {
+        plot = plot.scale_y_continuous(
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_label_formatter(ggplot_rs::scale::format::label_percent),
+        );
     }
     // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
     // preset — presets replace the whole theme.
@@ -396,6 +509,118 @@ fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     (f(r), f(g), f(b))
 }
 
+/// Parse a `#rrggbb` / `rrggbb` string into an RGBA colour (`None` otherwise).
+fn parse_hex(s: &str) -> Option<ggplot_rs::scale::color::RGBAColor> {
+    let h = s.trim().strip_prefix('#').unwrap_or(s.trim());
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let p = |a, b| u8::from_str_radix(&h[a..b], 16).ok();
+    Some(ggplot_rs::scale::color::RGBAColor::new(p(0, 2)?, p(2, 4)?, p(4, 6)?))
+}
+
+/// A gauge: a 270° arc showing a single value's progress through a `min,max`
+/// `::RANGE` (default `0,100`). Optional `::COLORS` paints threshold zones.
+fn render_gauge(value: &Column, cols: &[Column], title: Option<&str>, width: u32, height: u32) -> Result<String, String> {
+    let val = value.values.iter().find_map(|v| v.as_f64()).unwrap_or(0.0);
+    // Range "min,max" (default 0..100).
+    let (min, max) = cols
+        .iter()
+        .find(|c| c.role == Role::Range)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .and_then(|s| {
+            let p: Vec<f64> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            (p.len() == 2).then_some((p[0], p[1]))
+        })
+        .unwrap_or((0.0, 100.0));
+    let span = if (max - min).abs() < 1e-9 { 1.0 } else { max - min };
+    let frac = ((val - min) / span).clamp(0.0, 1.0);
+
+    // Optional zone colours (comma-separated hex); default single steel arc.
+    let zone_cols: Vec<ggplot_rs::scale::color::RGBAColor> = cols
+        .iter()
+        .find(|c| c.role == Role::GaugeColors)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .map(|s| s.split(',').filter_map(parse_hex).collect())
+        .unwrap_or_default();
+
+    // Geometry: a 270° arc (135° … 405°), centred, in the lower-middle.
+    let w = width as f64;
+    let h = height as f64;
+    let cx = w / 2.0;
+    let cy = h * 0.60;
+    let r = (w.min(h * 1.6) * 0.36).max(20.0);
+    let start = 135.0_f64.to_radians();
+    let sweep = 270.0_f64.to_radians();
+    let pt = |frac: f64| {
+        let a = start + sweep * frac;
+        (cx + r * a.cos(), cy + r * a.sin())
+    };
+    let arc = |f0: f64, f1: f64, col: &str, wdt: f64| {
+        let (x0, y0) = pt(f0);
+        let (x1, y1) = pt(f1);
+        let large = if (f1 - f0) * 270.0 > 180.0 { 1 } else { 0 };
+        format!(
+            "<path d=\"M {x0:.1} {y0:.1} A {r:.1} {r:.1} 0 {large} 1 {x1:.1} {y1:.1}\" \
+             fill=\"none\" stroke=\"{col}\" stroke-width=\"{wdt:.1}\" stroke-linecap=\"round\"/>"
+        )
+    };
+    let (sr, sg, sb) = DZ_COLORS[0];
+    let (tr, tg, tb) = lighten(DZ_COLORS[0], 0.85);
+    let track = format!("rgb({tr},{tg},{tb})");
+    let mut body = String::new();
+    // Track.
+    body.push_str(&arc(0.0, 1.0, &track, r * 0.16));
+    // Value arc: zone colours if given, else steel.
+    if zone_cols.is_empty() {
+        body.push_str(&arc(0.0, frac, &format!("rgb({sr},{sg},{sb})"), r * 0.16));
+    } else {
+        let step = 1.0 / zone_cols.len() as f64;
+        for (i, c) in zone_cols.iter().enumerate() {
+            let f0 = i as f64 * step;
+            let f1 = ((i + 1) as f64 * step).min(frac);
+            if f1 > f0 {
+                body.push_str(&arc(f0, f1, &format!("rgb({},{},{})", c.r, c.g, c.b), r * 0.16));
+            }
+        }
+    }
+    // The value number + optional title.
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+    let num = if (val - val.round()).abs() < 1e-9 { format!("{}", val.round() as i64) } else { format!("{val:.1}") };
+    body.push_str(&format!(
+        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" \
+         font-size=\"{:.0}\" font-weight=\"800\" fill=\"#1f2937\">{num}</text>",
+        cy - r * 0.05,
+        r * 0.62
+    ));
+    body.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#8a93a6\">{}</text>\
+         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#8a93a6\">{}</text>",
+        pt(0.0).0, pt(0.0).1 + 16.0, esc(&fmt_g(min)),
+        pt(1.0).0, pt(1.0).1 + 16.0, esc(&fmt_g(max)),
+    ));
+    if let Some(t) = title {
+        body.push_str(&format!(
+            "<text x=\"{cx:.1}\" y=\"22\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
+            esc(t)
+        ));
+    }
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
+    ))
+}
+
+/// Compact number formatting for gauge range labels.
+fn fmt_g(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
 /// A choropleth map from a WKT `::MAP` geometry column, optionally coloured by a
 /// measure (light → steel blue).
 fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) -> Result<String, String> {
@@ -430,6 +655,7 @@ fn render_pie(
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
+    inner: f64,
     width: u32,
     height: u32,
 ) -> Result<String, String> {
@@ -442,8 +668,11 @@ fn render_pie(
         ("label".to_string(), category.values.clone()),
     ];
     let levels = distinct_labels(category);
-    let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
-        levels.iter().enumerate().map(|(i, s)| (s.as_str(), dz_color(i))).collect();
+    let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
+        .collect();
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
         .geom_col()
@@ -451,7 +680,7 @@ fn render_pie(
         .scale_fill_manual(pairs)
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
         .scale_y_continuous(ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0))
-        .coord_polar_with(ggplot_rs::coord::polar::CoordPolar::new().theta("y"))
+        .coord_polar_with(ggplot_rs::coord::polar::CoordPolar::new().theta("y").inner_radius(inner))
         .theme_void();
     if let Some(t) = title {
         plot = plot.title(t);
@@ -479,6 +708,7 @@ pub extern "C" fn duckplot_smoke() -> *mut c_char {
 
 /// Free a string returned by the C ABI.
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn duckplot_free(p: *mut c_char) {
     if !p.is_null() {
         unsafe { drop(CString::from_raw(p)) };

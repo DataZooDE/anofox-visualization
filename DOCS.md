@@ -22,26 +22,40 @@ A dashboard is a `.sql` script. Two kinds of statement:
 |------|---------|
 | `::XAXIS` (`::X`) | x position |
 | `::CATEGORY` (`::SERIES`, `::COLOR`) | grouping / colour series |
-| `::LABEL` (`::TITLE`) | a section heading (renders as a title-only panel) |
+| `::LABEL` | a section heading (title-only panel); or a per-mark/feature label on a chart/map |
+| `::TITLE` (`::HEADING`) | a title bar above a single panel (chart, table, gauge, …) |
 | `::BARCHART` (`::BAR`) | bar chart (measure) |
 | `::BARCHART_STACKED` | stacked bar (measure) |
+| `::BARCHART_PERCENT` | dodged bars with a percent-formatted y-axis |
+| `::BARCHART_STACKED_PERCENT` | bars normalised to 100% per x |
 | `::LINECHART` (`::LINE`) | line chart (measure) |
+| `::LINECHART_PERCENT` | line chart with a percent-formatted y-axis |
 | `::AREACHART` (`::AREA`) | area chart (measure) |
 | `::SCATTER` (`::POINT`) | scatter (measure) |
-| `::PIE` (`::DONUT`) | pie/donut — slices by `CATEGORY`, sized by the measure |
+| `::PIE` (`::PIECHART`) | pie — slices by `CATEGORY`, sized by the measure |
+| `::DONUTCHART` (`::DONUT`) | donut (pie with a centre hole) |
+| `::GAUGE` | single value as a progress arc toward a `::RANGE` (`min,max`); optional `::COLORS` zones |
 | `::HISTOGRAM` | histogram of the measure column (binned + counted) |
 | `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
 | `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
-| `::SPARKLINE` | a minimal inline trend line (no axes) |
+| `::SPARKLINE` | a minimal inline trend line (no axes), dot on the latest value |
 | `::MAP` (`::GEOMETRY`) | choropleth from a WKT geometry column, coloured by a measure |
-| `::REFLINE` (`::TARGET`) | a horizontal reference/target line on a chart |
+| `::REFLINE` (`::YLINE`, `::TARGET`) | a horizontal reference/target line on a chart |
+| `::XLINE` | a vertical reference line at an x-position |
+| `::BAND_LOWER` / `::BAND_UPPER` | a shaded confidence band around a line |
 | `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
 | `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
-| `::TABLE` | data table — sortable headers, in-cell bars on numeric columns |
-| `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options) |
+| `::TEXT_SMALL`, `::TEXT_MEDIUM`, `::TEXT_LARGE` | a single-value text card at the chosen size |
+| `::TABLE` | data table — sortable headers, in-cell bars; `::TITLE` for a heading, `::TREND` for an arrow column |
+| `::TREND` | a coloured ▲/▼ arrow rendered inside a table cell |
+| `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options); add a `::HINT` column for per-option hints |
 | `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
 | `::MULTISELECT` | multi-value picker → a DuckDB list; filter with `list_contains(getvariable('name'), col)` |
 | `::DATERANGE` | a from→to date pair (query returns two columns → two variables) |
+| `::DOWNLOAD_CSV`, `::DOWNLOAD_XLSX`, `::DOWNLOAD_PDF` | an export button (CSV / Excel of the rows; PDF prints the dashboard) |
+| `::HEADER_IMAGE` / `::FOOTER_LINK` | a banner image at the top / a link at the bottom |
+| `::PLACEHOLDER` | reserve an empty grid cell |
+| `::RELOAD` (`::REFRESH`) | auto-refresh the dashboard every N seconds (the value) |
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).

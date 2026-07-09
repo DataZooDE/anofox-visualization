@@ -248,6 +248,54 @@ SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (
   ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
   ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
 ) r(name, geom, value);`,
+
+  "Gauge, donut & more": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
+  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
+  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
+  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
+) t(week, channel, n, revenue);
+
+SELECT 'Shaper-parity showcase'::LABEL;
+
+-- GAUGE: a value's progress through a RANGE, with COLORS zones
+SELECT 4::COL;
+SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE,
+       '#e03131,#efc94c,#0ca678'::COLORS, 'Sessions (W4)'::TITLE
+FROM sales;
+
+-- DONUTCHART: a pie with a centre hole
+SELECT 4::COL;
+SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Revenue share'::TITLE
+FROM sales GROUP BY ALL;
+
+-- a sized text card (TEXT_SMALL / _MEDIUM / _LARGE)
+SELECT 4::COL;
+SELECT 'All systems nominal'::TEXT_MEDIUM, 'Status'::LABEL;
+
+-- BARCHART_STACKED_PERCENT: composition normalised to 100%
+SELECT 6::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED_PERCENT, 'Channel mix'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+
+-- LINECHART with a confidence band (BAND_LOWER / BAND_UPPER)
+SELECT 6::COL;
+SELECT week::XAXIS, sum(revenue)::LINECHART,
+       sum(revenue)*0.85::BAND_LOWER, sum(revenue)*1.15::BAND_UPPER, 'Revenue ± band'::TITLE
+FROM sales GROUP BY ALL ORDER BY week;
+
+-- a table with a TREND arrow column
+SELECT 8::COL;
+SELECT channel::TABLE, sum(n) AS sessions,
+       (sum(n) FILTER (WHERE week='W4') - sum(n) FILTER (WHERE week='W3')) AS "Δ vs W3" ::TREND
+FROM sales GROUP BY ALL ORDER BY sessions DESC;
+
+-- DOWNLOAD_CSV / _XLSX / _PDF export buttons (cast the last SELECT column)
+SELECT 4::COL;
+SELECT week, channel, n, revenue ::DOWNLOAD_CSV FROM sales;
+
+SELECT 'https://taleshape.com/shaper/docs/dashboard-sql-reference/'::FOOTER_LINK,
+       'Compare with the Shaper SQL reference';`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -327,7 +375,7 @@ const isInput = (s) => !!inputKind(s);
 const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB"].find((d) => role(s, d));
+const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB", "PLACEHOLDER"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
@@ -387,7 +435,10 @@ async function run() {
         if (kind === "DROPDOWN") {
           const options = rows.map((r) => String(r[varname]));
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-          dd[i] = { kind, varname, options };
+          // Optional ::HINT column → a hint shown next to each option.
+          const hr = s.roles.find((r) => r[1] === "HINT");
+          const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
+          dd[i] = { kind, varname, options, hints };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "MULTISELECT") {
           const options = rows.map((r) => String(r[varname]));
@@ -483,6 +534,13 @@ async function run() {
         }
         curGrid = pane;
         container = pane;
+      } else if (d === "PLACEHOLDER") {
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const ph = document.createElement("div");
+        ph.className = "panel placeholder";
+        if (container === curGrid) ph.style.gridColumn = `span ${span}`;
+        container.appendChild(ph);
+        nextSpan = 0;
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else {
@@ -494,12 +552,50 @@ async function run() {
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           return fig;
         };
+        const firstCell = () => {
+          const r = JSON.parse(rowsJson)[0];
+          return r ? String(Object.values(r)[0] ?? "").replace(/^"|"$/g, "") : "";
+        };
         if (isHeading(s)) {
           const rows = JSON.parse(rowsJson);
           const h = document.createElement("h2");
           h.className = "section";
           h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
           container.appendChild(h);
+        } else if (role(s, "RELOAD")) {
+          // Auto-refresh every N seconds, driven from SQL.
+          const secs = parseFloat(firstCell()) || 0;
+          clearInterval(dpTimer);
+          if (secs > 0) dpTimer = setInterval(run, secs * 1000);
+          if ($("refresh")) $("refresh").value = [0, 5, 15, 30, 60].includes(secs) ? String(secs) : "0";
+        } else if (role(s, "HEADER_IMAGE")) {
+          const img = document.createElement("img");
+          img.className = "header-image";
+          img.src = firstCell();
+          container.appendChild(img);
+        } else if (role(s, "FOOTER_LINK")) {
+          const rows = JSON.parse(rowsJson);
+          const vals = rows[0] ? Object.values(rows[0]).map((v) => String(v ?? "")) : [""];
+          const a = document.createElement("a");
+          a.className = "footer-link";
+          a.href = vals[0];
+          a.textContent = (vals[1] || vals[0]).replace(/^"|"$/g, "");
+          a.target = "_blank";
+          a.rel = "noopener";
+          container.appendChild(a);
+        } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF")) {
+          const rows = JSON.parse(rowsJson);
+          container.appendChild(mkDownload(s, rows));
+        } else if (textSizeOf(s)) {
+          const fig = mkPanel();
+          fig.classList.add("textcard", "text-" + textSizeOf(s));
+          const lr = s.roles.find((r) => r[1] === "LABEL");
+          const r0 = JSON.parse(rowsJson)[0] || {};
+          fig.innerHTML =
+            `<div class="text-value">${escapeHtml(firstCell())}</div>` +
+            (lr ? `<div class="metric-cap">${escapeHtml(r0["c" + lr[0]])}</div>` : "");
+          container.appendChild(fig);
+          panels++;
         } else if (role(s, "TABLE")) {
           const rows = JSON.parse(rowsJson);
           const fig = mkPanel();
@@ -510,7 +606,8 @@ async function run() {
             const tv = Object.values(rows[0])[skip];
             if (tv != null) fig.appendChild(mkTitle(String(tv).replace(/^"|"$/g, "")));
           }
-          fig.appendChild(renderTable(rows, skip));
+          const trendIdx = s.roles.filter((r) => r[1] === "TREND").map((r) => r[0]);
+          fig.appendChild(renderTable(rows, skip, trendIdx));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -605,12 +702,14 @@ function makeControl(meta, bar) {
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
-    for (const o of meta.options) {
+    meta.options.forEach((o, k) => {
       const opt = document.createElement("option");
-      opt.value = opt.textContent = o;
+      opt.value = o;
+      const hint = meta.hints && meta.hints[k];
+      opt.textContent = hint ? `${o} — ${hint}` : o;
       if (o === dpVars[meta.varname]) opt.selected = true;
       input.appendChild(opt);
-    }
+    });
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
       run();
@@ -672,14 +771,16 @@ const cleanNum = (v) => {
 };
 
 // A ::TABLE result → a sortable HTML table with in-cell bars on numeric columns.
-function renderTable(rows, skip = -1) {
+function renderTable(rows, skip = -1, trendIdx = []) {
   const t = document.createElement("table");
   t.className = "dp-table";
   if (!rows.length) {
     t.textContent = "(no rows)";
     return t;
   }
-  const cols = Object.keys(rows[0]).filter((_, i) => i !== skip);
+  const allKeys = Object.keys(rows[0]);
+  const trendKeys = new Set(trendIdx.map((i) => allKeys[i]));
+  const cols = allKeys.filter((_, i) => i !== skip);
   const numeric = {};
   const maxAbs = {};
   for (const c of cols) {
@@ -719,6 +820,17 @@ function renderTable(rows, skip = -1) {
         const td = tr.insertCell();
         let v = r[c];
         if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
+        if (trendKeys.has(c)) {
+          const n = cleanNum(v);
+          td.style.textAlign = "right";
+          if (n != null) {
+            const up = n >= 0;
+            td.innerHTML =
+              `<span class="trend ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
+              `${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>`;
+          }
+          continue;
+        }
         td.textContent = v == null ? "" : v;
         if (numeric[c]) {
           const n = cleanNum(v);
@@ -767,6 +879,45 @@ function csvOf(table) {
   return [...table.rows]
     .map((r) => [...r.cells].map((c) => `"${c.textContent.replace(/"/g, '""')}"`).join(","))
     .join("\n");
+}
+
+// ::TEXT_SMALL/_MEDIUM/_LARGE → "small" | "medium" | "large" (or null).
+function textSizeOf(s) {
+  const t = s.roles.find((r) => ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"].includes(r[1]));
+  return t ? t[1].split("_")[1].toLowerCase() : null;
+}
+
+const unq = (v) => String(v ?? "").replace(/^"|"$/g, "");
+
+// CSV / .xls (HTML-table Excel) directly from JSON result rows.
+function csvOfRows(rows, cols) {
+  const esc = (v) => `"${unq(v).replace(/"/g, '""')}"`;
+  return [cols.map(esc).join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
+}
+function xlsOfRows(rows, cols) {
+  const cell = (v) => escapeHtml(unq(v));
+  const head = "<tr>" + cols.map((c) => `<th>${cell(c)}</th>`).join("") + "</tr>";
+  const body = rows.map((r) => "<tr>" + cols.map((c) => `<td>${cell(r[c])}</td>`).join("") + "</tr>").join("");
+  return `<html><head><meta charset="utf-8"></head><body><table>${head}${body}</table></body></html>`;
+}
+
+// A ::DOWNLOAD_CSV/_XLSX/_PDF button. CSV/XLSX export the query rows; PDF prints.
+function mkDownload(s, rows) {
+  const fmt = role(s, "DOWNLOAD_XLSX") ? "xlsx" : role(s, "DOWNLOAD_PDF") ? "pdf" : "csv";
+  const label = { csv: "Download CSV", xlsx: "Download Excel", pdf: "Download PDF" }[fmt];
+  const wrap = document.createElement("div");
+  wrap.className = "controls download-row";
+  const btn = document.createElement("button");
+  btn.className = "dl-btn";
+  btn.textContent = "⤓ " + label;
+  btn.onclick = () => {
+    if (fmt === "pdf") return window.print();
+    const cols = rows.length ? Object.keys(rows[0]) : [];
+    if (fmt === "xlsx") download(new Blob([xlsOfRows(rows, cols)], { type: "application/vnd.ms-excel" }), "data.xls");
+    else download(new Blob([csvOfRows(rows, cols)], { type: "text/csv" }), "data.csv");
+  };
+  wrap.appendChild(btn);
+  return wrap;
 }
 
 // Rasterise a chart's SVG to a PNG (white background, 2× for crispness).

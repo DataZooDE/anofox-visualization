@@ -75,6 +75,13 @@ const ROLES: &[&str] = &[
     "PERCENT", "PCT", "COMPACT",
     "DELTA", "COMPARE", "PREVIOUS", "TAB", "PAGE", "COLUMNS",
     "COLS", "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
+    // Shaper-parity additions:
+    "BARCHART_PERCENT", "BAR_PERCENT", "BARCHART_STACKED_PERCENT", "BAR_STACKED_PERCENT",
+    "LINECHART_PERCENT", "LINE_PERCENT", "DONUTCHART", "DONUTCHART_PERCENT", "PIECHART_PERCENT",
+    "GAUGE", "GAUGE_PERCENT", "YLINE", "XLINE", "BAND_LOWER", "BANDLOWER", "BAND_UPPER", "BANDUPPER",
+    "TREND", "HINT", "TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE", "PLACEHOLDER", "HEADER_IMAGE",
+    "HEADERIMAGE", "FOOTER_LINK", "FOOTERLINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_EXCEL",
+    "DOWNLOAD_PDF", "RELOAD", "REFRESH", "RANGE", "LABELS", "COLORS", "COLOURS",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -136,8 +143,10 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
     let split = split_top_commas(list);
 
-    // ::TABLE and ::DATERANGE keep every column and its name — strip only the cast.
-    let keep_intact = |r: Role| matches!(r, Role::Table | Role::Input(InputKind::DateRange));
+    // ::TABLE, ::DATERANGE and ::DOWNLOAD_* keep every column and its name — the
+    // whole result is the payload; strip only the casts.
+    let keep_intact =
+        |r: Role| matches!(r, Role::Table | Role::Input(InputKind::DateRange) | Role::Download(_));
     let intact = split
         .iter()
         .find_map(|it| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)).filter(|r| keep_intact(*r)));
@@ -151,8 +160,12 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
             .enumerate()
             .map(|(idx, it)| match trailing_role(it.trim()) {
                 Some((expr, r)) => {
-                    if parse_role(r) == Some(Role::Title) {
-                        roles.push((idx, Role::Title));
+                    match parse_role(r) {
+                        // A title bar, or a trend-arrow table column: record by
+                        // output position so the browser can render them.
+                        Some(Role::Title) => roles.push((idx, Role::Title)),
+                        Some(Role::Trend) => roles.push((idx, Role::Trend)),
+                        _ => {}
                     }
                     expr.to_string()
                 }
@@ -171,7 +184,15 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                 // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
                 // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
                 let item = match role {
-                    Role::Value(_) | Role::Metric(_) | Role::Delta | Role::RefLine => {
+                    Role::Value(_)
+                    | Role::Metric(_)
+                    | Role::Delta
+                    | Role::RefLine
+                    | Role::VLine
+                    | Role::BandLower
+                    | Role::BandUpper
+                    | Role::Trend
+                    | Role::Reload => {
                         format!("CAST({expr} AS DOUBLE) AS c{i}")
                     }
                     // Inputs keep the original column name — it becomes the
@@ -226,17 +247,19 @@ fn split_top_commas(s: &str) -> Vec<String> {
 }
 
 fn top_level_kw(s: &str, kw: &str) -> Option<usize> {
+    // `to_ascii_uppercase` preserves byte length, so indices map back to `s`.
+    // Iterate by char boundaries so multibyte UTF-8 (e.g. `Δ`, `±`) never panics
+    // a `&up[i..]` slice.
     let up = s.to_ascii_uppercase();
     let (mut depth, mut in_str) = (0i32, false);
-    let b = up.as_bytes();
-    for i in 0..b.len() {
-        match b[i] as char {
+    for (i, c) in up.char_indices() {
+        match c {
             '\'' => in_str = !in_str,
             '(' if !in_str => depth += 1,
             ')' if !in_str => depth -= 1,
             _ if !in_str && depth == 0 && up[i..].starts_with(kw) => {
-                let before = i == 0 || !b[i - 1].is_ascii_alphanumeric();
-                let after = up[i + kw.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+                let before = up[..i].chars().next_back().is_none_or(|p| !p.is_ascii_alphanumeric());
+                let after = up[i + kw.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
                 if before && after {
                     return Some(i);
                 }
