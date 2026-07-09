@@ -428,6 +428,17 @@ SELECT sku::TABLE,
        growth AS "growth %" ::TREND,
        (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE
 FROM fc ORDER BY forecast DESC;`,
+
+  "Big table (pagination)": `-- 1,000 rows → paginated 50/page. Sorting works across ALL rows and the CSV
+-- download (hover the panel) exports the full result, not just the page.
+SELECT 'A 1,000-row table — paginated'::LABEL;
+SELECT 12::COL;
+SELECT
+  'ID-' || lpad(i::VARCHAR, 4, '0') AS id,
+  ['app','web','api','cli'][(i % 4) + 1]  AS channel,
+  ((i * 37) % 100) AS score,
+  ((i * 7) % 500)  AS events ::TABLE
+FROM range(1, 1001) t(i) ORDER BY i;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -1007,18 +1018,28 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
     hr.appendChild(th);
   });
   const tb = t.createTBody();
+  let page = 0;
+  const pageSize = 50;
+  const sortedRows = () => {
+    const data = rows.slice();
+    if (sortCol) {
+      const num = numeric[sortCol];
+      data.sort((a, b) =>
+        num
+          ? ((cleanNum(a[sortCol]) || 0) - (cleanNum(b[sortCol]) || 0)) * dir
+          : String(a[sortCol]).localeCompare(String(b[sortCol])) * dir
+      );
+    }
+    return data;
+  };
   const head = () => cols.forEach((c, i) => (hr.cells[i].textContent = c + (c === sortCol ? (dir > 0 ? " ▲" : " ▼") : "")));
   const body = () => {
     tb.innerHTML = "";
-    let data = rows.slice();
-    if (sortCol) {
-      const num = numeric[sortCol];
-      data.sort((a, b) => {
-        if (num) return ((cleanNum(a[sortCol]) || 0) - (cleanNum(b[sortCol]) || 0)) * dir;
-        return String(a[sortCol]).localeCompare(String(b[sortCol])) * dir;
-      });
-    }
-    for (const r of data.slice(0, 500)) {
+    const data = sortedRows();
+    const pages = Math.max(1, Math.ceil(data.length / pageSize));
+    page = Math.min(page, pages - 1);
+    updateFoot(data.length, pages);
+    for (const r of data.slice(page * pageSize, (page + 1) * pageSize)) {
       const tr = tb.insertRow();
       // A categorical first column makes the row a cross-filter source. Clicking
       // sets BOTH the generic getvariable('selected') AND a NAMED cross-filter
@@ -1089,9 +1110,49 @@ function renderTable(rows, skip = -1, fmtByIdx = {}) {
       }
     }
   };
+  // Client-side pagination (50/page) so thousands of rows stay responsive; the
+  // full result is kept for sorting and CSV export.
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  wrap.appendChild(t);
+  t._rows = rows;
+  t._cols = cols;
+  const foot = document.createElement("div");
+  foot.className = "table-foot";
+  wrap.appendChild(foot);
+  function updateFoot(total, pages) {
+    if (total <= pageSize) {
+      foot.style.display = "none";
+      return;
+    }
+    foot.style.display = "";
+    foot.innerHTML = "";
+    const from = page * pageSize + 1;
+    const to = Math.min(total, (page + 1) * pageSize);
+    const mk = (label, disabled, fn) => {
+      const btn = document.createElement("button");
+      btn.className = "page-btn";
+      btn.textContent = label;
+      btn.disabled = disabled;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        fn();
+        body();
+      };
+      return btn;
+    };
+    const info = document.createElement("span");
+    info.className = "table-info";
+    info.textContent = `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`;
+    foot.append(
+      mk("◀", page === 0, () => (page = Math.max(0, page - 1))),
+      info,
+      mk("▶", page >= pages - 1, () => (page = Math.min(pages - 1, page + 1)))
+    );
+  }
   head();
   body();
-  return t;
+  return wrap;
 }
 
 // ::COLORSCALE cell background — a diverging green→amber→red scale by the
@@ -1177,6 +1238,8 @@ function download(blob, name) {
 }
 
 function csvOf(table) {
+  // Export the FULL result (all pages), not just the rendered page.
+  if (table._rows && table._cols) return csvOfRows(table._rows, table._cols);
   return [...table.rows]
     .map((r) => [...r.cells].map((c) => `"${c.textContent.replace(/"/g, '""')}"`).join(","))
     .join("\n");
