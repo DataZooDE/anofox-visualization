@@ -192,7 +192,7 @@ SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
   {
     group: "Forecasting",
     items: {
-      "M5 SeasonalES forecast": `-- 12-month SeasonalES forecast on the M5 dataset. The forecast was produced by
+      "M5 forecast (precomputed)": `-- 12-month SeasonalES forecast on the M5 dataset. The forecast was produced by
 -- the anofox-forecast DuckDB extension (native, so it can't run in this in-browser
 -- demo) — its output is inlined below. On a native backend you'd compute it live:
 --
@@ -244,6 +244,62 @@ SELECT ds, 'Forecast', actual, actual, actual, '' FROM series
   WHERE actual IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS') AND ds=(SELECT max(ds) FROM series WHERE actual IS NOT NULL)
 UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM series WHERE yhat IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS')
+ORDER BY 1;`,
+      "M5 forecast (live extension)": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
+-- anofox-forecast COMMUNITY extension entirely client-side. The app registers the
+-- parquet and does the equivalent of, on a v1.5.x engine:
+--
+--   SET custom_extension_repository='https://community-extensions.duckdb.org';
+--   INSTALL anofox_forecast; LOAD anofox_forecast;
+--
+-- WARNING: the extension's wasm build currently fails to LOAD in the browser
+-- (DataZooDE/anofox-forecast#239). Until it's fixed this errors here — use
+-- "M5 forecast (precomputed)" or a native backend meanwhile. The parquet itself
+-- loads fine, so read_parquet('m5_monthly.parquet') is queryable.
+
+CREATE OR REPLACE TABLE m AS SELECT series, ds, y FROM read_parquet('m5_monthly.parquet');
+
+CREATE OR REPLACE TABLE fc AS
+  SELECT series, ds, round(yhat,0) AS yhat, round(yhat_lower,0) AS lo, round(yhat_upper,0) AS hi
+  FROM ts_forecast_by('m', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
+
+CREATE OR REPLACE TABLE series AS
+  SELECT series AS category, ds, y AS actual, NULL::DOUBLE AS yhat, NULL::DOUBLE AS lo, NULL::DOUBLE AS hi FROM m
+  UNION ALL SELECT series, ds, NULL, yhat, lo, hi FROM fc;
+
+CREATE OR REPLACE TABLE summary AS
+  SELECT h.category, h.last_actual, c.next_fc, c.fc_total,
+         round(100.0*(c.fc_total-h.actual_12)/h.actual_12,1) AS growth
+  FROM (SELECT category, arg_max(actual,ds) AS last_actual,
+               sum(actual) FILTER (WHERE ds > (SELECT max(ds) FROM series WHERE actual IS NOT NULL)-INTERVAL 12 MONTH) AS actual_12
+        FROM series WHERE actual IS NOT NULL GROUP BY 1) h
+  JOIN (SELECT category, sum(yhat) AS fc_total, arg_min(yhat,ds) AS next_fc
+        FROM series WHERE yhat IS NOT NULL GROUP BY 1) c USING(category);
+
+SELECT 'M5 — live in-browser SeasonalES forecast (click a series row)'::LABEL;
+
+SELECT 12::COL;
+SELECT category    AS "Series"          ::TABLE,
+       last_actual AS "Last actual"     ::COMPACT,
+       next_fc     AS "Next month"      ::COMPACT,
+       fc_total    AS "12-mo forecast"  ::COMPACT,
+       growth      AS "vs prior 12mo %" ::TREND,
+       'SeasonalES' AS "Method"         ::BADGE
+FROM summary ORDER BY fc_total DESC;
+
+SELECT 12::COL;
+SELECT ds       ::XAXIS,
+       'Actual' ::CATEGORY,
+       actual   ::LINECHART,
+       actual   ::BAND_LOWER,
+       actual   ::BAND_UPPER,
+       'History + 12-month SeasonalES forecast (shaded = 95% interval)'::TITLE
+FROM series WHERE actual IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS · CA')
+UNION ALL
+SELECT ds, 'Forecast', actual, actual, actual, '' FROM series
+  WHERE actual IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS · CA') AND ds=(SELECT max(ds) FROM series WHERE actual IS NOT NULL)
+UNION ALL
+SELECT ds, 'Forecast', yhat, lo, hi, '' FROM series WHERE yhat IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS · CA')
 ORDER BY 1;`,
     },
   },
@@ -486,9 +542,60 @@ async function ensureGeo() {
   return geoReady;
 }
 
+// Forecast example: load a small M5 parquet into the browser DB, and (for
+// statements that need it) INSTALL/LOAD the anofox-forecast COMMUNITY extension
+// so ts_forecast_by() runs client-side. Needs a v1.5.x DuckDB-Wasm engine
+// (matches the community wasm build). The parquet always loads; the extension
+// step is separate because its wasm build currently fails to LOAD in the browser
+// (DataZooDE/anofox-forecast#239) — we surface that clearly instead of a
+// cryptic "function does not exist".
+let fcParquet = null;
+let fcExt = null;
+async function ensureForecast(sql) {
+  if (backend === "live") return; // native backend resolves paths + extension itself
+  if (!db) throw new Error("in-browser DuckDB not ready");
+  // 1. Register the parquet (memoised) — this is the "load the data" step.
+  if (!fcParquet) {
+    fcParquet = (async () => {
+      const bytes = new Uint8Array(await (await fetch("m5_monthly.parquet")).arrayBuffer());
+      await db.registerFileBuffer("m5_monthly.parquet", bytes);
+    })().catch((e) => {
+      fcParquet = null;
+      throw e;
+    });
+  }
+  await fcParquet;
+  // 2. Load the community extension only for statements that use it (memoised;
+  //    a failure is remembered so we don't re-hammer the CDN each panel).
+  if (/\bts_forecast_by\b|\banofox_forecast\b/i.test(sql)) {
+    if (!fcExt) {
+      fcExt = (async () => {
+        await conn.query("SET custom_extension_repository='https://community-extensions.duckdb.org';");
+        try {
+          await conn.query("INSTALL anofox_forecast;");
+        } catch (_) {
+          /* the FROM-community JS quirk; INSTALL still fetches */
+        }
+        await conn.query("LOAD anofox_forecast;");
+      })().catch((e) => {
+        throw new Error(
+          "The anofox_forecast WASM extension failed to LOAD in DuckDB-Wasm " +
+            "(tracked in DataZooDE/anofox-forecast#239 — its wasm build imports DuckDB " +
+            "C++ symbols the browser runtime doesn't provide). The parquet is loaded and " +
+            "queryable, but ts_forecast_by() is unavailable here: run this on a native " +
+            "backend, or use “M5 forecast (precomputed)”. Underlying error: " +
+            (e.message || e)
+        );
+      });
+    }
+    await fcExt;
+  }
+}
+
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
 async function runSql(sql) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
+  if (/m5_monthly|\bts_forecast_by\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
     if (!r.ok) throw new Error(await r.text());
@@ -547,7 +654,7 @@ async function boot() {
   } catch (_) {}
 
   if (backend !== "live") {
-    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm");
+    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm");
     const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
     const workerUrl = URL.createObjectURL(
       new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
