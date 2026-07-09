@@ -32,11 +32,12 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::HISTOGRAM` | histogram of the measure column (binned + counted) |
 | `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
 | `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
-| `::METRIC` (`::KPI`) | a single big-number KPI (add a `::LABEL` for the caption) |
+| `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
 | `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
-| `::TABLE` | render the whole result set as a data table |
+| `::TABLE` | data table — sortable headers, in-cell bars on numeric columns |
 | `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options) |
 | `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
+| `::MULTISELECT` | multi-value picker → a DuckDB list; filter with `list_contains(getvariable('name'), col)` |
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).

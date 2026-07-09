@@ -49,6 +49,7 @@ pub enum InputKind {
     Number,
     Date,
     Text,
+    Multiselect,
 }
 
 /// How a KPI value is formatted.
@@ -89,6 +90,8 @@ pub enum Role {
     /// A single big-number KPI (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`); an
     /// optional `::LABEL` is the caption.
     Metric(MetricFmt),
+    /// A comparison value for a KPI (`::DELTA`) — shows the trend arrow + % change.
+    Delta,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
 }
@@ -128,6 +131,8 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "MONEY" | "DOLLAR" | "CURRENCY" => Some(Role::Metric(MetricFmt::Money)),
         "PERCENT" | "PCT" => Some(Role::Metric(MetricFmt::Percent)),
         "COMPACT" => Some(Role::Metric(MetricFmt::Compact)),
+        "DELTA" | "COMPARE" | "PREVIOUS" => Some(Role::Delta),
+        "MULTISELECT" | "MULTI" => Some(Role::Input(InputKind::Multiselect)),
         "TAB" | "PAGE" => Some(Role::Tab),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
         "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),

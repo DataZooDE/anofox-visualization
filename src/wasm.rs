@@ -60,6 +60,8 @@ fn role_str(r: &Role) -> &'static str {
         Role::Input(IK::Number) => "NUMBER",
         Role::Input(IK::Date) => "DATE",
         Role::Input(IK::Text) => "TEXT",
+        Role::Input(IK::Multiselect) => "MULTISELECT",
+        Role::Delta => "DELTA",
         Role::Columns => "COLUMNS",
         Role::GroupStart => "GROUP",
         Role::GroupEnd => "ENDGROUP",

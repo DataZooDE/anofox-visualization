@@ -70,7 +70,8 @@ const ROLES: &[&str] = &[
     "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
     "BOX_PLOT", "HEATMAP", "TILE", "TILES", "TABLE", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
     "OPTIONS", "SELECT_INPUT", "NUMBER", "SLIDER", "NUMERIC", "DATE", "DATEPICKER", "TEXT", "SEARCH",
-    "STRING", "MONEY", "DOLLAR", "CURRENCY", "PERCENT", "PCT", "COMPACT", "TAB", "PAGE", "COLUMNS",
+    "STRING", "MULTISELECT", "MULTI", "MONEY", "DOLLAR", "CURRENCY", "PERCENT", "PCT", "COMPACT",
+    "DELTA", "COMPARE", "PREVIOUS", "TAB", "PAGE", "COLUMNS",
     "COLS", "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
 ];
 
@@ -155,7 +156,9 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                 // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
                 // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
                 let item = match role {
-                    Role::Value(_) | Role::Metric(_) => format!("CAST({expr} AS DOUBLE) AS c{i}"),
+                    Role::Value(_) | Role::Metric(_) | Role::Delta => {
+                        format!("CAST({expr} AS DOUBLE) AS c{i}")
+                    }
                     // Inputs keep the original column name — it becomes the
                     // DuckDB variable name the browser binds the control to.
                     Role::Input(_) => expr.to_string(),

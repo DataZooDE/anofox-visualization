@@ -186,6 +186,42 @@ SELECT channel::CATEGORY, sum(n)::PIE FROM sales GROUP BY ALL;
 SELECT 'Data'::TAB;
 SELECT 12::COL;
 SELECT week, channel, n, revenue ::TABLE FROM sales ORDER BY week, channel;`,
+
+  "Analyst essentials": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
+  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
+  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
+  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
+) t(week, channel, n, revenue);
+
+-- multi-select filter (pick several channels): variable 'channel' (a list)
+SELECT 'Filter'::GROUP;
+SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
+SELECT 1::ENDGROUP;
+
+-- KPIs with a trend arrow: METRIC value + a DELTA (comparison) value
+SELECT 4::COL;
+SELECT sum(revenue) FILTER (WHERE week='W4')::MONEY,
+       sum(revenue) FILTER (WHERE week='W3')::DELTA,
+       'Revenue (W4 vs W3)'::LABEL
+FROM sales WHERE list_contains(getvariable('channel'), channel);
+
+SELECT 4::COL;
+SELECT sum(n) FILTER (WHERE week='W4')::METRIC,
+       sum(n) FILTER (WHERE week='W3')::DELTA,
+       'Sessions (W4 vs W3)'::LABEL
+FROM sales WHERE list_contains(getvariable('channel'), channel);
+
+SELECT 4::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
+FROM sales WHERE list_contains(getvariable('channel'), channel)
+GROUP BY ALL ORDER BY week, channel;
+
+-- sortable table with in-cell bars (click a header)
+SELECT 12::COL;
+SELECT channel, sum(n) AS sessions, sum(revenue) AS revenue ::TABLE
+FROM sales WHERE list_contains(getvariable('channel'), channel)
+GROUP BY ALL ORDER BY revenue DESC;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -252,7 +288,7 @@ async function boot() {
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
-const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT"];
+const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT"];
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
 const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
@@ -297,18 +333,25 @@ async function run() {
         const rows = JSON.parse(await runSql(s.sql));
         if (!rows.length) continue;
         const varname = Object.keys(rows[0])[0];
+        let lit;
         if (kind === "DROPDOWN") {
           const options = rows.map((r) => String(r[varname]));
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
           dd[i] = { kind, varname, options };
+          lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
+        } else if (kind === "MULTISELECT") {
+          const options = rows.map((r) => String(r[varname]));
+          if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
+          dpVars[varname] = dpVars[varname].filter((v) => options.includes(v));
+          dd[i] = { kind, varname, options };
+          lit = "[" + dpVars[varname].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(",") + "]";
         } else {
           // number / date / text: the query's value is the default
           if (dpVars[varname] === undefined) dpVars[varname] = String(rows[0][varname] ?? "");
           dd[i] = { kind, varname };
+          const v = String(dpVars[varname]);
+          lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`; // number unquoted
         }
-        // numbers unquoted (so getvariable() is numeric); others quoted
-        const v = String(dpVars[varname]);
-        const lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`;
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
@@ -419,10 +462,24 @@ async function run() {
           const r0 = JSON.parse(rowsJson)[0] || {};
           const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
+          const dr = s.roles.find((r) => r[1] === "DELTA");
           const fig = mkPanel();
           fig.classList.add("metric");
+          let deltaHtml = "";
+          if (dr) {
+            const cur = parseFloat(r0["c" + mr[0]]);
+            const prev = parseFloat(r0["c" + dr[0]]);
+            if (!isNaN(cur) && !isNaN(prev) && prev !== 0) {
+              const pct = ((cur - prev) / Math.abs(prev)) * 100;
+              const up = pct >= 0;
+              deltaHtml =
+                `<div class="metric-delta ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
+                `${Math.abs(pct).toLocaleString(undefined, { maximumFractionDigits: 1 })}%</div>`;
+            }
+          }
           fig.innerHTML =
             `<div class="metric-value">${fmtNum(r0["c" + mr[0]], mr[1])}</div>` +
+            deltaHtml +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
           container.appendChild(fig);
           panels++;
@@ -463,15 +520,34 @@ function makeControl(meta, bar) {
       if (o === dpVars[meta.varname]) opt.selected = true;
       input.appendChild(opt);
     }
+    input.onchange = () => {
+      dpVars[meta.varname] = input.value;
+      run();
+    };
+  } else if (meta.kind === "MULTISELECT") {
+    input = document.createElement("select");
+    input.multiple = true;
+    input.size = Math.min(4, Math.max(2, meta.options.length));
+    const sel = new Set(dpVars[meta.varname] || []);
+    for (const o of meta.options) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = o;
+      if (sel.has(o)) opt.selected = true;
+      input.appendChild(opt);
+    }
+    input.onchange = () => {
+      dpVars[meta.varname] = [...input.selectedOptions].map((o) => o.value);
+      run();
+    };
   } else {
     input = document.createElement("input");
     input.type = meta.kind === "NUMBER" ? "number" : meta.kind === "DATE" ? "date" : "text";
     input.value = dpVars[meta.varname] ?? "";
+    input.onchange = () => {
+      dpVars[meta.varname] = input.value;
+      run();
+    };
   }
-  input.onchange = () => {
-    dpVars[meta.varname] = input.value;
-    run();
-  };
   wrap.appendChild(input);
   if (!bar) return wrap;
   const box = document.createElement("div");
@@ -480,7 +556,14 @@ function makeControl(meta, bar) {
   return box;
 }
 
-// A ::TABLE result → an HTML table (original column names, first 500 rows).
+const cleanNum = (v) => {
+  if (v == null) return null;
+  if (typeof v === "number") return v;
+  const n = parseFloat(String(v).replace(/^"|"$/g, ""));
+  return isNaN(n) ? null : n;
+};
+
+// A ::TABLE result → a sortable HTML table with in-cell bars on numeric columns.
 function renderTable(rows) {
   const t = document.createElement("table");
   t.className = "dp-table";
@@ -489,22 +572,60 @@ function renderTable(rows) {
     return t;
   }
   const cols = Object.keys(rows[0]);
-  const hr = t.createTHead().insertRow();
+  const numeric = {};
+  const maxAbs = {};
   for (const c of cols) {
+    const nums = rows.map((r) => cleanNum(r[c]));
+    numeric[c] = nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v));
+    maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
+  }
+  let sortCol = null;
+  let dir = 1;
+  const hr = t.createTHead().insertRow();
+  cols.forEach((c) => {
     const th = document.createElement("th");
-    th.textContent = c;
+    th.style.cursor = "pointer";
+    th.onclick = () => {
+      dir = sortCol === c ? -dir : 1;
+      sortCol = c;
+      head();
+      body();
+    };
     hr.appendChild(th);
-  }
+  });
   const tb = t.createTBody();
-  for (const r of rows.slice(0, 500)) {
-    const tr = tb.insertRow();
-    for (const c of cols) {
-      let v = r[c];
-      // DuckDB-Wasm serialises HUGEINT/DECIMAL as a quote-wrapped string.
-      if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
-      tr.insertCell().textContent = v == null ? "" : v;
+  const head = () => cols.forEach((c, i) => (hr.cells[i].textContent = c + (c === sortCol ? (dir > 0 ? " ▲" : " ▼") : "")));
+  const body = () => {
+    tb.innerHTML = "";
+    let data = rows.slice();
+    if (sortCol) {
+      const num = numeric[sortCol];
+      data.sort((a, b) => {
+        if (num) return ((cleanNum(a[sortCol]) || 0) - (cleanNum(b[sortCol]) || 0)) * dir;
+        return String(a[sortCol]).localeCompare(String(b[sortCol])) * dir;
+      });
     }
-  }
+    for (const r of data.slice(0, 500)) {
+      const tr = tb.insertRow();
+      for (const c of cols) {
+        const td = tr.insertCell();
+        let v = r[c];
+        if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
+        td.textContent = v == null ? "" : v;
+        if (numeric[c]) {
+          const n = cleanNum(v);
+          td.style.textAlign = "right";
+          td.style.fontVariantNumeric = "tabular-nums";
+          if (n != null) {
+            const pct = (Math.abs(n) / maxAbs[c]) * 100;
+            td.style.background = `linear-gradient(90deg, rgba(69,100,129,.13) ${pct}%, transparent ${pct}%)`;
+          }
+        }
+      }
+    }
+  };
+  head();
+  body();
   return t;
 }
 
