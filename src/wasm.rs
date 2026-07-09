@@ -47,6 +47,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::Y => "YAXIS",
         Role::Category => "CATEGORY",
         Role::Label => "LABEL",
+        Role::Title => "TITLE",
         Role::Value(Kind::Bar) => "BARCHART",
         Role::Value(Kind::BarStacked) => "BARCHART_STACKED",
         Role::Value(Kind::Line) => "LINECHART",

@@ -73,8 +73,11 @@ pub enum Role {
     Y,
     /// A grouping / colour series (`::CATEGORY`).
     Category,
-    /// A section heading (`::LABEL`) — becomes the chart title.
+    /// A section heading (`::LABEL`) when alone; a per-mark / per-feature label
+    /// (tooltips, map features) when it accompanies a chart.
     Label,
+    /// A per-box title bar (`::TITLE`/`::HEADING`) drawn above a single panel.
+    Title,
     /// The measured value, carrying the chart kind (`count()::BARCHART`).
     Value(Kind),
     /// A control input (`::DROPDOWN`/`::NUMBER`/`::DATE`/`::TEXT`) — the output
@@ -123,7 +126,8 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "XAXIS" | "X" => Some(Role::X),
         "YAXIS" | "Y" => Some(Role::Y),
         "CATEGORY" | "SERIES" | "COLOR" | "COLOUR" => Some(Role::Category),
-        "LABEL" | "TITLE" => Some(Role::Label),
+        "LABEL" => Some(Role::Label),
+        "TITLE" | "HEADING" => Some(Role::Title),
         "BARCHART" | "BAR" => Some(Role::Value(Kind::Bar)),
         "BARCHART_STACKED" | "BAR_STACKED" | "STACKED_BAR" => Some(Role::Value(Kind::BarStacked)),
         "LINECHART" | "LINE" => Some(Role::Value(Kind::Line)),
@@ -358,21 +362,38 @@ fn render_heatmap(
         .map_err(|e| format!("render failed: {e:?}"))
 }
 
-/// A minimal inline trend line (no axes) — a sparkline over the row order.
+/// A minimal inline trend line (no axes) — a sparkline over the row order: a
+/// light steel area under a crisp line, with a marker on the latest value.
 fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, String> {
     let n = value.values.len();
-    let data = vec![
-        ("x".to_string(), (0..n).map(|i| Value::Float(i as f64)).collect()),
-        ("y".to_string(), value.values.clone()),
+    let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
+    let data = vec![("x".to_string(), xs), ("y".to_string(), value.values.clone())];
+
+    let steel = DZ_COLORS[0];
+    let fill = lighten(steel, 0.72); // pale wash under the line
+    let last = n.saturating_sub(1);
+    // A single-point layer marking the most recent value (the eye-catching dot).
+    let end = vec![
+        ("x".to_string(), vec![Value::Float(last as f64)]),
+        ("y".to_string(), vec![value.values.get(last).cloned().unwrap_or(Value::Na)]),
     ];
+
     GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
-        .geom_area()
-        .geom_line()
+        .geom_area_with(GeomArea { fill, color: fill, alpha: 0.5, line_width: 0.0 })
+        .geom_line_with(GeomLine { color: steel, width: 2.0, alpha: 1.0 })
+        .geom_point_with(GeomPoint { size: 3.2, color: DZ_COLORS[2], alpha: 1.0 })
+        .layer_data(end) // restrict the point layer to just the endpoint
+        .scale_y_continuous(ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0))
         .theme_void()
-        .primary_color(DZ_COLORS[0])
         .render_svg_native_with_size(width, height)
         .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// Blend a colour toward white by `t` (0 = unchanged, 1 = white).
+fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
+    (f(r), f(g), f(b))
 }
 
 /// A choropleth map from a WKT `::MAP` geometry column, optionally coloured by a

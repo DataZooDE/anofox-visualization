@@ -15,14 +15,15 @@ CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
 
 SELECT 'Weekly sessions'::LABEL;
 
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
+-- ::TITLE gives a panel its own title bar
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions by channel'::TITLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
 -- one line per channel — colours match the bars; click a series to highlight it
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Weekly trend'::TITLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
-SELECT channel::XAXIS, sum(n)::BARCHART
+SELECT channel::XAXIS, sum(n)::BARCHART, 'Totals by channel'::TITLE
 FROM sessions GROUP BY ALL ORDER BY sum(n) DESC;`,
 
   "Generated series": `SELECT 'Signal explorer'::LABEL;
@@ -121,12 +122,12 @@ SELECT 4::COL; SELECT sum(n)::METRIC,   'Total sessions'::LABEL FROM sessions;
 SELECT 4::COL; SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions;
 SELECT 4::COL; SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions;
 
--- a pie by channel + a data table, side by side
+-- a pie by channel + a data table, side by side (both titled via ::TITLE)
 SELECT 6::COL;
-SELECT channel::CATEGORY, sum(n)::PIE FROM sessions GROUP BY ALL;
+SELECT channel::CATEGORY, sum(n)::PIE, 'Share by channel'::TITLE FROM sessions GROUP BY ALL;
 
 SELECT 6::COL;
-SELECT week, channel, sum(n) AS sessions ::TABLE
+SELECT 'Sessions detail'::TITLE, week, channel, sum(n) AS sessions ::TABLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;`,
 
   "More charts & inputs": `CREATE OR REPLACE TABLE m AS
@@ -231,17 +232,18 @@ SELECT 'Combo chart + sparkline'::LABEL;
 
 -- combo: bars (sessions) + line (revenue/50) + a target REFLINE at 35
 SELECT 8::COL;
-SELECT week::XAXIS, sessions::BARCHART, revenue/50::LINECHART, 35::REFLINE
+SELECT week::XAXIS, sessions::BARCHART, revenue/50::LINECHART, 35::REFLINE,
+       'Sessions vs revenue'::TITLE
 FROM sales ORDER BY week;
 
--- a sparkline (minimal inline trend, no axes)
+-- a sparkline (minimal inline trend, no axes) — dot marks the latest value
 SELECT 4::COL;
-SELECT sessions::SPARKLINE FROM sales ORDER BY week;
+SELECT sessions::SPARKLINE, 'Sessions trend'::TITLE FROM sales ORDER BY week;
 
 -- choropleth map from WKT geometry, coloured by a measure
 SELECT 'Choropleth map'::LABEL;
 SELECT 12::COL;
-SELECT geom::MAP, value::BARCHART, name::LABEL FROM (VALUES
+SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (VALUES
   ('North','POLYGON((0 2, 4 2, 4 4, 0 4, 0 2))', 40),
   ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
   ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
@@ -312,10 +314,10 @@ async function boot() {
   };
 
   $("run").disabled = false;
-  $("run").onclick = () => run(true);
-  $("samples").addEventListener("change", () => run(true));
+  $("run").onclick = () => run();
+  $("samples").addEventListener("change", () => run());
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
-  run(true);
+  run();
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
@@ -332,7 +334,7 @@ let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('s
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpTimer = null; // auto-refresh interval handle
 
-async function run(animate = false) {
+async function run() {
   const grid = $("grid");
   document.body.classList.add("loading");
   status("running…");
@@ -488,9 +490,8 @@ async function run(animate = false) {
         const span = Math.min(12, nextSpan || defaultSpan);
         const mkPanel = () => {
           const fig = document.createElement("figure");
-          fig.className = animate ? "panel enter" : "panel";
+          fig.className = "panel";
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
-          if (animate) fig.style.animationDelay = panels * 0.05 + "s";
           return fig;
         };
         if (isHeading(s)) {
@@ -500,8 +501,16 @@ async function run(animate = false) {
           h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
           container.appendChild(h);
         } else if (role(s, "TABLE")) {
+          const rows = JSON.parse(rowsJson);
           const fig = mkPanel();
-          fig.appendChild(renderTable(JSON.parse(rowsJson)));
+          const tr = s.roles.find((r) => r[1] === "TITLE");
+          let skip = -1;
+          if (tr && rows.length) {
+            skip = tr[0];
+            const tv = Object.values(rows[0])[skip];
+            if (tv != null) fig.appendChild(mkTitle(String(tv).replace(/^"|"$/g, "")));
+          }
+          fig.appendChild(renderTable(rows, skip));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -532,7 +541,9 @@ async function run(animate = false) {
         } else {
           const fig = mkPanel();
           const ph = role(s, "SPARKLINE") ? 90 : 300; // sparklines are short
-          fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph);
+          const t = titleOf(s, rowsJson);
+          if (t) fig.appendChild(mkTitle(t));
+          fig.insertAdjacentHTML("beforeend", render_panel(rowsJson, JSON.stringify(s.roles), 460, ph));
           container.appendChild(fig);
           panels++;
         }
@@ -632,6 +643,27 @@ function makeControl(meta, bar) {
   return finalizeControl(wrap, bar);
 }
 
+// A per-panel title bar from a ::TITLE column (constant across the result).
+function titleOf(s, rowsJson) {
+  const tr = s.roles.find((r) => r[1] === "TITLE");
+  if (!tr) return null;
+  let rows;
+  try {
+    rows = JSON.parse(rowsJson);
+  } catch (_) {
+    return null;
+  }
+  const v = rows[0] ? rows[0]["c" + tr[0]] : null;
+  return v == null ? null : String(v).replace(/^"|"$/g, "");
+}
+
+function mkTitle(text) {
+  const c = document.createElement("figcaption");
+  c.className = "panel-title";
+  c.textContent = text;
+  return c;
+}
+
 const cleanNum = (v) => {
   if (v == null) return null;
   if (typeof v === "number") return v;
@@ -640,14 +672,14 @@ const cleanNum = (v) => {
 };
 
 // A ::TABLE result → a sortable HTML table with in-cell bars on numeric columns.
-function renderTable(rows) {
+function renderTable(rows, skip = -1) {
   const t = document.createElement("table");
   t.className = "dp-table";
   if (!rows.length) {
     t.textContent = "(no rows)";
     return t;
   }
-  const cols = Object.keys(rows[0]);
+  const cols = Object.keys(rows[0]).filter((_, i) => i !== skip);
   const numeric = {};
   const maxAbs = {};
   for (const c of cols) {

@@ -65,7 +65,7 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
 }
 
 const ROLES: &[&str] = &[
-    "XAXIS", "X", "YAXIS", "Y", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART",
+    "XAXIS", "X", "YAXIS", "Y", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "HEADING", "BARCHART",
     "BAR", "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
     "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
     "BOX_PLOT", "HEATMAP", "TILE", "TILES", "SPARKLINE", "SPARK", "REFLINE", "TARGET", "GOAL", "MAP",
@@ -142,14 +142,24 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
         .iter()
         .find_map(|it| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)).filter(|r| keep_intact(*r)));
     if let Some(role) = intact {
+        // Keep every column and its name; strip the recognised casts. A ::TITLE
+        // column is recorded by its output position so the panel shows a title
+        // bar (the browser drops that column from a table's cells).
+        let mut roles = vec![(0, role)];
         let items: Vec<String> = split
             .iter()
-            .map(|it| match trailing_role(it.trim()) {
-                Some((expr, r)) if parse_role(r) == Some(role) => expr.to_string(),
+            .enumerate()
+            .map(|(idx, it)| match trailing_role(it.trim()) {
+                Some((expr, r)) => {
+                    if parse_role(r) == Some(Role::Title) {
+                        roles.push((idx, Role::Title));
+                    }
+                    expr.to_string()
+                }
                 _ => it.trim().to_string(),
             })
             .collect();
-        return (format!("{head} {} {tail}", items.join(", ")), vec![(0, role)]);
+        return (format!("{head} {} {tail}", items.join(", ")), roles);
     }
 
     let mut roles = Vec::new();
