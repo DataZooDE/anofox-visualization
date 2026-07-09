@@ -333,13 +333,17 @@ let dpTimer = null; // auto-refresh interval handle
 
 async function run() {
   const grid = $("grid");
-  grid.innerHTML = "";
-  document.querySelector(".dash").querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
   status("running…");
+  // Double-buffer: build the whole dashboard off-screen, then swap it in at the
+  // end. The old dashboard stays visible during the (async) rebuild, so a
+  // cross-filter re-run updates in place instead of blinking empty.
+  const newGrid = document.createElement("div");
+  newGrid.className = "grid";
   let stmts;
   try {
     stmts = JSON.parse(plan($("sql").value));
   } catch (e) {
+    grid.replaceChildren();
     return showError(grid, String(e));
   }
 
@@ -397,15 +401,15 @@ async function run() {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      showError(grid, `${s.sql}\n\n${e}`);
+      showError(newGrid, `${s.sql}\n\n${e}`);
     }
   }
 
   // Render pass: place controls / headings / charts in document order into the
   // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
   // grid columns; ::SPAN widens the next panel.
-  let container = grid;
-  let curGrid = grid; // the active surface (the main grid, or the current tab pane)
+  let container = newGrid;
+  let curGrid = newGrid; // the active surface (the main grid, or the current tab pane)
   let tabBar = null;
   let tabWrap = null;
   let nextSpan = 0;
@@ -449,13 +453,10 @@ async function run() {
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
         if (!tabBar) {
-          const dash = document.querySelector(".dash");
           tabBar = document.createElement("div");
           tabBar.className = "tabbar";
           tabWrap = document.createElement("div");
           tabWrap.className = "tabwrap";
-          dash.appendChild(tabBar);
-          dash.appendChild(tabWrap);
         }
         const pane = document.createElement("div");
         pane.className = "grid tabpane";
@@ -543,6 +544,11 @@ async function run() {
     tabWrap.querySelector(".tabpane").style.display = "";
     tabBar.querySelector(".tab-btn").classList.add("active");
   }
+  // Atomic swap: replace the visible content in one synchronous step (no flash).
+  grid.replaceChildren(...newGrid.childNodes);
+  const dash = document.querySelector(".dash");
+  dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
+  if (tabBar) dash.append(tabBar, tabWrap);
   attachHover();
   addExportButtons();
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
