@@ -1820,7 +1820,7 @@ function downloadHtml() {
   const style = document.querySelector("style").textContent;
   const content = document.querySelector(".dash").innerHTML;
   const html =
-    `<!doctype html><html><head><meta charset="utf-8"><title>duckplot dashboard</title>` +
+    `<!doctype html><html><head><meta charset="utf-8"><title>anofox-visualization dashboard</title>` +
     `<style>${style}</style></head><body style="background:#f4f6f9;padding:1.5rem">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
     `<script>${SNAPSHOT_JS}<\/script></body></html>`;
