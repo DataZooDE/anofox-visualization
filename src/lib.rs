@@ -87,7 +87,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "COLUMNS" | "COLS" => Some(Role::Columns),
         "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
         "ENDGROUP" | "ENDBOX" | "ENDROW" => Some(Role::GroupEnd),
-        "SPAN" | "WIDTH" => Some(Role::Span),
+        "SPAN" | "WIDTH" | "COL" => Some(Role::Span),
         _ => None,
     }
 }

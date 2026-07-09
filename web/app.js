@@ -66,17 +66,18 @@ SELECT 1::ENDGROUP;
 
 SELECT 'Weekly sessions (filtered)'::LABEL;
 
-SELECT 2::SPAN;                          -- next chart spans both columns
+-- widths are bootstrap-style, out of 12 columns:
+SELECT 12::COL;                          -- full width
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
 FROM sessions WHERE region = getvariable('region')
 GROUP BY ALL ORDER BY week, channel;
 
--- one line per channel (colours match the bars), filtered by region
+SELECT 8::COL;                           -- 8 of 12 (two-thirds)
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
 FROM sessions WHERE region = getvariable('region')
 GROUP BY ALL ORDER BY week, channel;
 
--- the selected channel only (uses both dropdowns)
+SELECT 4::COL;                           -- 4 of 12 (one-third), sits beside it
 SELECT week::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
 GROUP BY ALL ORDER BY week;`,
@@ -130,10 +131,11 @@ async function boot() {
   sel.onchange = () => ($("sql").value = SAMPLES[sel.value]);
   $("sql").value = SAMPLES[Object.keys(SAMPLES)[0]];
 
-  // layout: columns selector (CSS grid-template-columns)
+  // layout: default columns-per-row (12-col bootstrap grid; panels span 12/cols)
   $("cols").onchange = () => {
     const v = $("cols").value;
-    $("grid").style.gridTemplateColumns = v === "auto" ? "" : `repeat(${v}, minmax(0, 1fr))`;
+    dpCols = v === "auto" ? 2 : parseInt(v);
+    run();
   };
 
   $("run").disabled = false;
@@ -147,6 +149,7 @@ const isDropdown = (s) => role(s, "DROPDOWN");
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
+let dpCols = 2; // default panels-per-row on the 12-column grid
 
 async function run() {
   const grid = $("grid");
@@ -186,6 +189,7 @@ async function run() {
   // grid columns; ::SPAN widens the next panel.
   let container = grid;
   let nextSpan = 0;
+  let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   const firstValue = async (s) => {
     const rows = JSON.parse(await runSql(s.sql));
@@ -198,7 +202,10 @@ async function run() {
     try {
       if (d === "COLUMNS") {
         const n = parseInt(await firstValue(s));
-        if (n > 0) grid.style.gridTemplateColumns = `repeat(${n}, minmax(0, 1fr))`;
+        if (n > 0) {
+          dpCols = n;
+          defaultSpan = Math.max(1, Math.round(12 / n));
+        }
         $("cols").value = n > 0 && n <= 3 ? String(n) : "auto";
       } else if (d === "GROUP") {
         const title = await firstValue(s);
@@ -232,7 +239,7 @@ async function run() {
         } else {
           const fig = document.createElement("figure");
           fig.className = "panel";
-          if (nextSpan > 1 && container === grid) fig.style.gridColumn = `span ${nextSpan}`;
+          if (container === grid) fig.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
           fig.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, 300);
           container.appendChild(fig);
           panels++;

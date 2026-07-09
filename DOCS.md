@@ -53,25 +53,30 @@ the static CLI runner skips them.
 
 ### Layout (from SQL)
 
-Directive statements shape the grid (browser builder / `serve`; the CLI skips them):
+The grid is a **12-column bootstrap grid**; panel widths are spans out of 12.
+Directives (browser builder / `serve`; the CLI skips them):
 
 | Directive | Effect |
 |-----------|--------|
-| `SELECT n::COLUMNS;` | set the grid to `n` columns |
+| `SELECT n::COL;` (`::SPAN`, `::WIDTH`) | the **next** panel's width — `n` of 12 (`12`=full, `6`=half, `4`=third) |
+| `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
-| `SELECT n::SPAN;` | the **next** panel spans `n` columns (e.g. a full-width chart) |
 
 ```sql
-SELECT 2::COLUMNS;                       -- 2-column grid
-
 SELECT 'Filters'::GROUP;                 -- two dropdowns together in one box
 SELECT DISTINCT region::DROPDOWN  FROM sessions ORDER BY region;
 SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
 SELECT 1::ENDGROUP;
 
-SELECT 2::SPAN;                          -- next chart spans both columns
+SELECT 12::COL;                          -- full-width chart
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED FROM sessions …;
+
+SELECT 8::COL;   SELECT … ::LINECHART …; -- 8/12, beside…
+SELECT 4::COL;   SELECT … ::BARCHART  …; -- …a 4/12 chart (8+4 = one row)
 ```
+
+Panels wrap to a new row when their spans exceed 12, and collapse to full-width
+on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.

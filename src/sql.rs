@@ -68,7 +68,7 @@ const ROLES: &[&str] = &[
     "XAXIS", "X", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "BARCHART", "BAR",
     "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
     "SCATTER", "POINT", "SCATTERCHART", "DROPDOWN", "OPTIONS", "SELECT_INPUT", "COLUMNS", "COLS",
-    "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH",
+    "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
