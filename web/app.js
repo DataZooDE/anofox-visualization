@@ -1286,11 +1286,17 @@ async function run() {
         sbtn.className = "tab-btn subtab-btn";
         sbtn.textContent = name;
         const topName = curTopName || "";
+        // Capture THIS sub-tab's bar/wrap — `subBar`/`subWrap` are shared loop
+        // variables that get reassigned for later top tabs, so the closure must
+        // not read them directly (that made a sub-tab operate on the last tab's
+        // bar: siblings stayed active + other tabs went blank).
+        const myBar = subBar;
+        const myWrap = subWrap;
         sbtn.onclick = (e) => {
           e.stopPropagation();
           dpSubTab[topName] = name;
-          subWrap.querySelectorAll(".subtabpane").forEach((p) => (p.style.display = "none"));
-          subBar.querySelectorAll(".subtab-btn").forEach((b) => b.classList.remove("active"));
+          myWrap.querySelectorAll(".subtabpane").forEach((p) => (p.style.display = "none"));
+          myBar.querySelectorAll(".subtab-btn").forEach((b) => b.classList.remove("active"));
           spane.style.display = "";
           sbtn.classList.add("active");
         };
