@@ -26,6 +26,12 @@ header h1::before{content:"";width:11px;height:11px;border-radius:50%;background
 header .tag{color:var(--muted);font-size:.82rem}
 header .actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
 header .status{font-size:.78rem;color:var(--muted);min-width:58px;text-align:right;font-weight:600}
+/* embed mode (?embed=1): dashboard only — no header, sidebar, or toolbar */
+body.embed header,body.embed .sidebar,body.embed .toolbar,body.embed #loadbar{display:none !important}
+body.embed .shell{min-height:100vh}
+body.embed .editor{display:none}
+body.embed .workspace{grid-template-columns:1fr}
+body.embed .dash{padding:1rem 1.2rem}
 /* ---- app shell: sidebar + main (toolbar over workspace/explore) ---- */
 .shell{display:flex;min-height:calc(100vh - 57px)}
 .sidebar{width:238px;flex:none;border-right:1px solid var(--line);background:rgba(255,255,255,.55);backdrop-filter:blur(8px);display:flex;flex-direction:column;padding:.8rem .7rem;gap:.55rem;overflow-y:auto}

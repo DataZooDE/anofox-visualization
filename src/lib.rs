@@ -276,6 +276,20 @@ fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
     ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
 
+thread_local! {
+    /// Per-render brand/primary colour override (e.g. `?primary=` in the UI, or a
+    /// theme from an embedding host). `None` = the DataZoo default.
+    static BRAND: std::cell::Cell<Option<(u8, u8, u8)>> = const { std::cell::Cell::new(None) };
+}
+/// Set the brand/primary colour for subsequent `render()` calls on this thread.
+pub fn set_brand(color: Option<(u8, u8, u8)>) {
+    BRAND.with(|b| b.set(color));
+}
+/// The active brand/primary colour (DataZoo steel by default).
+fn brand() -> (u8, u8, u8) {
+    BRAND.with(|b| b.get()).unwrap_or(DZ_COLORS[0])
+}
+
 /// Distinct category labels in a **stable (sorted) order**, so a given series
 /// gets the same DataZoo colour in every chart that contains it.
 fn distinct_labels(col: &Column) -> Vec<String> {
@@ -373,7 +387,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
-            .geom_ribbon_with(GeomRibbon { fill: lighten(DZ_COLORS[0], 0.5), alpha: 0.4 })
+            .geom_ribbon_with(GeomRibbon { fill: lighten(brand(), 0.5), alpha: 0.4 })
             .layer_aes(Aes::new().x("x").ymin("bandlo").ymax("bandhi"));
     }
     plot = match kind {
@@ -439,7 +453,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // preset — presets replace the whole theme.
     plot = plot
         .theme_minimal()
-        .primary_color(DZ_COLORS[0])
+        .primary_color(brand())
         .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
@@ -455,7 +469,7 @@ fn render_histogram(value: &Column, title: Option<&str>, width: u32, height: u32
         .aes(Aes::new().x("x"))
         .geom_histogram()
         .theme_minimal()
-        .primary_color(DZ_COLORS[0]);
+        .primary_color(brand());
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -484,7 +498,7 @@ fn render_heatmap(
         .geom_tile()
         .scale_fill_gradient(
             ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-            ggplot_rs::scale::color::RGBAColor::new(DZ_COLORS[0].0, DZ_COLORS[0].1, DZ_COLORS[0].2),
+            ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
         )
         .theme_minimal();
     if let Some(t) = title {
@@ -501,7 +515,7 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
     let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
     let data = vec![("x".to_string(), xs), ("y".to_string(), value.values.clone())];
 
-    let steel = DZ_COLORS[0];
+    let steel = brand();
     let fill = lighten(steel, 0.72); // pale wash under the line
     let last = n.saturating_sub(1);
     // A single-point layer marking the most recent value (the eye-catching dot).
@@ -590,7 +604,7 @@ fn render_gauge(value: &Column, cols: &[Column], title: Option<&str>, width: u32
     };
     // The value arc takes the colour of the zone the value falls into (a
     // traffic-light gauge); a single steel arc when no ::COLORS are given.
-    let (sr, sg, sb) = DZ_COLORS[0];
+    let (sr, sg, sb) = brand();
     let vcol = if zone_cols.is_empty() {
         format!("rgb({sr},{sg},{sb})")
     } else {
@@ -598,7 +612,7 @@ fn render_gauge(value: &Column, cols: &[Column], title: Option<&str>, width: u32
         let c = zone_cols[zi];
         format!("rgb({},{},{})", c.r, c.g, c.b)
     };
-    let (tr, tg, tb) = lighten(DZ_COLORS[0], 0.87);
+    let (tr, tg, tb) = lighten(brand(), 0.87);
     let track = format!("rgb({tr},{tg},{tb})");
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
     let mut body = String::new();
@@ -685,7 +699,7 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     if fill.is_some() {
         plot = plot.scale_fill_gradient(
             ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-            ggplot_rs::scale::color::RGBAColor::new(DZ_COLORS[0].0, DZ_COLORS[0].1, DZ_COLORS[0].2),
+            ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
         );
     }
     plot.render_svg_native_with_size(width, height)

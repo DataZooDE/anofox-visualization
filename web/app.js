@@ -288,7 +288,7 @@ SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (
   ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
 ) t(week, channel, n, revenue);
 
-SELECT 'Shaper-parity showcase'::LABEL;
+SELECT 'Chart & widget showcase'::LABEL;
 
 -- GAUGE: a value's progress through a RANGE, with COLORS zones. It opts into
 -- the cross-filter, so clicking a channel in the donut/bars re-computes it.
@@ -328,8 +328,8 @@ FROM sales GROUP BY ALL ORDER BY sessions DESC;
 SELECT 4::COL;
 SELECT week, channel, n, revenue ::DOWNLOAD_CSV FROM sales;
 
-SELECT 'https://taleshape.com/shaper/docs/dashboard-sql-reference/'::FOOTER_LINK,
-       'Compare with the Shaper SQL reference';`,
+-- FOOTER_LINK: a link at the bottom of the dashboard
+SELECT 'https://github.com/DataZooDE'::FOOTER_LINK, 'anofox-visualization';`,
 
   "Date-range filter": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
   (DATE '2024-01-03','app',30),(DATE '2024-01-10','web',22),(DATE '2024-01-18','app',41),
@@ -594,10 +594,33 @@ async function boot() {
       runExplore();
     }
   });
+  // URL params — for embedding / theming:
+  //   ?embed=1        hide the header + sidebar + toolbar (dashboard only)
+  //   ?primary=RRGGBB brand accent colour (UI + chart primary)
+  //   ?dashboard=Name load a saved/example dashboard by name
+  //   #sql=<base64>   inline SQL (from Share)
+  const params = new URLSearchParams(location.search);
+  const primary = params.get("primary");
+  if (primary && /^#?[0-9a-fA-F]{6}$/.test(primary)) {
+    const hex = primary.replace(/^#/, "");
+    document.documentElement.style.setProperty("--accent", "#" + hex);
+    document.documentElement.style.setProperty("--accent2", "#" + hex);
+    dpPrimary = hex; // chart primary colour (passed to the wasm renderer)
+  }
+  if (params.get("embed") === "1" || params.has("embed")) {
+    document.body.classList.add("embed");
+  }
   const hashSql = decodeHashSql();
+  const wantDash = params.get("dashboard");
+  const savedItems = dashStore().items;
   if (hashSql) {
     $("sql").value = hashSql;
     $("dash-name").value = "Shared";
+  } else if (wantDash && (SAMPLES[wantDash] || savedItems[wantDash])) {
+    curDash = wantDash;
+    $("sql").value = SAMPLES[wantDash] || savedItems[wantDash].sql;
+    $("dash-name").value = wantDash;
+    markActive();
   } else {
     const first = Object.keys(SAMPLES)[0];
     curDash = first;
@@ -1143,6 +1166,7 @@ let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side s
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
 let dpTimer = null; // auto-refresh interval handle
+let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 
 async function run() {
   const grid = $("grid");
@@ -1546,7 +1570,10 @@ async function run() {
             fig.appendChild(mkNoData());
           } else {
             const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
-            fig.insertAdjacentHTML("beforeend", render_panel(rowsJson, JSON.stringify(s.roles), 460, ph));
+            fig.insertAdjacentHTML(
+              "beforeend",
+              render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "")
+            );
           }
           container.appendChild(fig);
           panels++;

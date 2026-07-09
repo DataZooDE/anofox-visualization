@@ -28,7 +28,7 @@ pub fn plan(script: &str) -> String {
 /// Render one panel to SVG. `rows_json` = `[{ "c0": …, "c1": … }, …]` (a panel
 /// query's `-json` result); `roles_json` = the panel's `roles` from [`plan`].
 #[wasm_bindgen]
-pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32) -> String {
+pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32, primary: &str) -> String {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(rows_json).unwrap_or_default();
     let roles: Vec<(usize, Role)> = serde_json::from_str::<Vec<(usize, String)>>(roles_json)
@@ -37,7 +37,20 @@ pub fn render_panel(rows_json: &str, roles_json: &str, width: u32, height: u32) 
         .filter_map(|(i, s)| parse_role(&s).map(|r| (i, r)))
         .collect();
     let cols = sql::columns_from_rows(&rows, &roles);
-    render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"))
+    crate::set_brand(parse_primary(primary));
+    let svg = render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
+    crate::set_brand(None);
+    svg
+}
+
+/// Parse a `RRGGBB` / `#rrggbb` brand colour (empty / invalid → default).
+fn parse_primary(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let p = |a, b| u8::from_str_radix(&h[a..b], 16).ok();
+    Some((p(0, 2)?, p(2, 4)?, p(4, 6)?))
 }
 
 fn role_str(r: &Role) -> &'static str {
