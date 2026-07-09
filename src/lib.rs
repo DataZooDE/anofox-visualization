@@ -47,6 +47,10 @@ pub enum Kind {
     Histogram,
     /// A box plot — `x` groups, `y` = the measure (`::BOXPLOT`).
     Boxplot,
+    /// A violin plot — `x` groups, `y` = the measure (`::VIOLIN`).
+    Violin,
+    /// A kernel-density curve of the measure column (`::DENSITY`).
+    Density,
     /// A heatmap — `x` × `y` tiles coloured by the measure (`::HEATMAP`).
     Heatmap,
     /// A minimal inline trend line, no axes (`::SPARKLINE`).
@@ -171,6 +175,9 @@ pub enum Role {
     /// A second WKT geometry column drawn as a faint grey backdrop under the
     /// `::MAP` layer (`::BASEMAP`) — e.g. country outlines behind quake points.
     Basemap,
+    /// Flip the panel's x/y axes — a horizontal bar chart etc. (`::FLIP`). A
+    /// marker column; its values are ignored.
+    Flip,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -212,6 +219,8 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "GAUGE" | "GAUGE_PERCENT" => Some(Role::Value(Kind::Gauge)),
         "HISTOGRAM" | "HIST" => Some(Role::Value(Kind::Histogram)),
         "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
+        "VIOLIN" | "VIOLINPLOT" => Some(Role::Value(Kind::Violin)),
+        "DENSITY" | "KDE" => Some(Role::Value(Kind::Density)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
         "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
         "REFLINE" | "TARGET" | "GOAL" | "YLINE" => Some(Role::RefLine),
@@ -238,6 +247,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "COLORS" | "COLOURS" => Some(Role::GaugeColors),
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "BASEMAP" | "MAPBASE" | "BACKDROP" => Some(Role::Basemap),
+        "FLIP" | "COORD_FLIP" | "HORIZONTAL" => Some(Role::Flip),
         "TABLE" | "GRID" => Some(Role::Table),
         "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
         "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
@@ -339,6 +349,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Donut => return render_pie(value, cols, title.as_deref(), 0.55, width, height),
         Kind::Gauge => return render_gauge(value, cols, title.as_deref(), width, height),
         Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
+        Kind::Density => return render_density(value, cols, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(value, width, height),
         _ => {}
@@ -407,8 +418,22 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Line | Kind::LinePercent => plot.geom_line().geom_point(),
         Kind::Area => plot.geom_area().geom_point(),
         Kind::Point => plot.geom_point(),
-        Kind::Boxplot => plot.geom_boxplot(),
-        Kind::Pie | Kind::Donut | Kind::Gauge | Kind::Histogram | Kind::Heatmap | Kind::Sparkline => {
+        // Box plots are unfilled by default (white box, dark whiskers/outline) —
+        // the ggplot idiom; a CATEGORY still colours the outline via the border.
+        Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
+            fill: (255, 255, 255),
+            color: (60, 60, 60),
+            width: 0.6,
+            alpha: 1.0,
+        }),
+        Kind::Violin => plot.geom_violin(),
+        Kind::Pie
+        | Kind::Donut
+        | Kind::Gauge
+        | Kind::Histogram
+        | Kind::Density
+        | Kind::Heatmap
+        | Kind::Sparkline => {
             unreachable!("handled above")
         }
     };
@@ -457,12 +482,18 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
                 .with_label_formatter(ggplot_rs::scale::format::label_percent),
         );
     }
+    // `::FLIP` swaps the axes — e.g. a horizontal bar chart.
+    if cols.iter().any(|c| c.role == Role::Flip) {
+        plot = plot.coord_flip();
+    }
     // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
-    // preset — presets replace the whole theme.
-    plot = plot
-        .theme_minimal()
-        .primary_color(brand())
-        .legend_position(ggplot_rs::theme::LegendPosition::Top);
+    // preset — presets replace the whole theme. Box plots opt out so they stay
+    // unfilled (primary would re-colour the box fill).
+    plot = plot.theme_minimal();
+    if !matches!(kind, Kind::Boxplot) {
+        plot = plot.primary_color(brand());
+    }
+    plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
     }
@@ -478,6 +509,49 @@ fn render_histogram(value: &Column, title: Option<&str>, width: u32, height: u32
         .geom_histogram()
         .theme_minimal()
         .primary_color(brand());
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A kernel-density curve of the measure column. An optional `CATEGORY` splits
+/// it into one filled curve per group (overlaid, semi-transparent).
+fn render_density(
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let category = cols.iter().find(|c| c.role == Role::Category);
+    let mut data: Vec<(String, Vec<Value>)> = vec![("x".to_string(), value.values.clone())];
+    let mut aes = Aes::new().x("x");
+    let mut plot;
+    if let Some(cat) = category {
+        data.push(("cat".to_string(), cat.values.clone()));
+        aes = aes.fill("cat").color("cat");
+        let levels = distinct_labels(cat);
+        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
+            .collect();
+        plot = GGPlot::new(data)
+            .aes(aes)
+            .geom_density_with(GeomDensity { alpha: 0.4, ..Default::default() })
+            .scale_fill_manual(pairs.clone())
+            .scale_color_manual(pairs)
+            .theme_minimal()
+            .legend_position(ggplot_rs::theme::LegendPosition::Top);
+    } else {
+        plot = GGPlot::new(data)
+            .aes(aes)
+            .geom_density()
+            .theme_minimal()
+            .primary_color(brand());
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -708,9 +782,11 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     // Optional grey basemap (e.g. country outlines) drawn first, behind the data
     // layer — a separate no-fill geom_sf layer that shares the map's scales.
     if let Some(b) = base {
-        let mut base_geom = ggplot_rs::geom::sf::GeomSf::default();
-        base_geom.fill = (228, 230, 233);
-        base_geom.color = (198, 201, 206);
+        let base_geom = ggplot_rs::geom::sf::GeomSf {
+            fill: (228, 230, 233),
+            color: (198, 201, 206),
+            ..Default::default()
+        };
         plot = plot
             .geom_sf_with(base_geom)
             .layer_data(vec![("geometry".to_string(), b.values.clone())])

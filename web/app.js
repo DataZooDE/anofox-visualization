@@ -91,14 +91,22 @@ FROM range(0, 96) t(i) GROUP BY 1,2 ORDER BY 1,2;`,
     items: {
       "Chart gallery": `${SALES}
 CREATE OR REPLACE TABLE m AS
-SELECT i AS id, (i * 7 % 13) + 5 AS value, ['app','web','api'][(i % 3) + 1] AS channel, 'W' || ((i % 4) + 1) AS week
-FROM range(0, 120) t(i);
+SELECT i AS id,
+       ['app','web','api'][(i % 3) + 1] AS channel,
+       'W' || ((i % 4) + 1) AS week,
+       -- approximately normal (sum of 6 uniforms → central-limit bell),
+       -- shifted per channel so the box/violin plots show real spread
+       round((random()+random()+random()+random()+random()+random() - 3) * 18
+             + 100 + (i % 3) * 12, 1) AS value
+FROM range(0, 600) t(i);
 
 SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bar & line'::TAB;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+-- ::FLIP swaps the axes → a horizontal bar chart
+SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (coord flip)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
 
 SELECT 'Pie / donut / gauge'::TAB;
 SELECT 4::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
@@ -107,7 +115,9 @@ SELECT 4::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#
 
 SELECT 'Distributions'::TAB;
 SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
-SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot'::TITLE FROM m;
+SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
+SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
+SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
 SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
 
 SELECT 'Combo & sparkline'::TAB;
@@ -137,6 +147,41 @@ FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
 UNION ALL
 SELECT NULL, NULL, NULL, ST_AsText(geom), NULL
 FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';`,
+
+      "Linked maps": `-- Two maps that talk to each other: click a country on the left and the right
+-- map filters to earthquakes inside that country's bounding box. Clicking sets
+-- getvariable('selected') = the country name; click empty space to clear.
+-- (IF NOT EXISTS keeps the spatial reads out of the per-click re-run.)
+CREATE TABLE IF NOT EXISTS cbox AS
+SELECT NAME AS country, ST_AsText(geom) AS wkt,
+       ST_XMin(geom) AS x0, ST_XMax(geom) AS x1,
+       ST_YMin(geom) AS y0, ST_YMax(geom) AS y1
+FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';
+
+CREATE TABLE IF NOT EXISTS quake AS
+SELECT ST_AsText(geom) AS wkt, ST_X(geom) AS lon, ST_Y(geom) AS lat, mag, place
+FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL;
+
+SELECT 'Linked maps — click a country to filter the quakes'::LABEL;
+
+-- LEFT: world, filled by quakes-in-bbox count. Click a country.
+SELECT 6::COL;
+SELECT c.wkt ::MAP, count(q.mag) ::BARCHART, c.country ::LABEL,
+       'Quakes per country — click one'::TITLE
+FROM cbox c
+LEFT JOIN quake q ON q.lon BETWEEN c.x0 AND c.x1 AND q.lat BETWEEN c.y0 AND c.y1
+GROUP BY c.wkt, c.country;
+
+-- RIGHT: quakes in the selected country's bbox, over a grey basemap.
+SELECT 6::COL;
+SELECT q.wkt ::MAP, q.mag ::BARCHART, q.place ::LABEL, NULL ::BASEMAP,
+       'Earthquakes in selection'::TITLE
+FROM quake q
+WHERE getvariable('selected') = '' OR EXISTS (
+  SELECT 1 FROM cbox c WHERE c.country = getvariable('selected')
+    AND q.lon BETWEEN c.x0 AND c.x1 AND q.lat BETWEEN c.y0 AND c.y1)
+UNION ALL
+SELECT NULL, NULL, NULL, wkt, NULL FROM cbox;`,
     },
   },
 
@@ -165,14 +210,17 @@ SELECT 'Date range'::GROUP;
 SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;  -- from → to
 SELECT 1::ENDGROUP;
 
+-- KPI: honours every input AND the click cross-filter (click a bar segment
+-- below to drill the number to that channel; click empty space to clear).
 SELECT 4::COL;
-SELECT sum(n)::METRIC, 'Sessions (filtered)'::LABEL FROM events
+SELECT sum(n)::METRIC, 'Sessions (inputs + click)'::LABEL FROM events
 WHERE region = getvariable('region')
   AND list_contains(getvariable('channel'), channel)
   AND n >= getvariable('min_n')
   AND day >= getvariable('since')::DATE
   AND day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
-  AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%');
+  AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%')
+  AND (getvariable('selected') = '' OR channel = getvariable('selected'));
 
 SELECT 8::COL;
 SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (all filters applied)'::TITLE
@@ -279,11 +327,14 @@ FROM range(1, 100001) t(i);`,
     items: {
       "Groups, tabs & height": `${SALES}
 
--- KPIs in a ::GROUP box (compact strip)
-SELECT 'Key metrics'::GROUP;
-SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales;
-SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sales;
-SELECT count(DISTINCT week)::METRIC, 'Weeks'::LABEL FROM sales;
+-- KPIs in a ::GROUP box (compact strip). They react to plot clicks: clicking a
+-- channel segment/bar below sets getvariable('selected'), and each KPI filters
+-- by it ( IN ('', channel) → all when nothing is selected ). Click empty space
+-- to clear.
+SELECT 'Key metrics — click a bar to filter by channel'::GROUP;
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales WHERE getvariable('selected') IN ('', channel);
+SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sales WHERE getvariable('selected') IN ('', channel);
+SELECT round(avg(n),1)::METRIC, 'Avg / week'::LABEL FROM sales WHERE getvariable('selected') IN ('', channel);
 SELECT 1::ENDGROUP;
 
 SELECT 1::COLUMNS;
@@ -642,18 +693,13 @@ function renderSidebar() {
   master.onclick = () => toggleEx("__all__");
   nav.appendChild(master);
   if (!exc.__all__) {
+    // Group headers are static labels — only the master "Examples" collapses.
     for (const g of SAMPLE_GROUPS) {
       const hdr = document.createElement("div");
-      hdr.className = "side-section side-section-toggle side-sub";
-      const caret = document.createElement("span");
-      caret.className = "ex-caret";
-      caret.textContent = exc[g.group] ? "▸" : "▾";
-      const lbl = document.createElement("span");
-      lbl.textContent = g.group;
-      hdr.append(caret, lbl);
-      hdr.onclick = () => toggleEx(g.group);
+      hdr.className = "side-section side-sub";
+      hdr.textContent = g.group;
       nav.appendChild(hdr);
-      if (!exc[g.group]) for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+      for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
     }
   }
   markActive();
