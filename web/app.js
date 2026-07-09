@@ -312,9 +312,10 @@ async function boot() {
   };
 
   $("run").disabled = false;
-  $("run").onclick = run;
+  $("run").onclick = () => run(true);
+  $("samples").addEventListener("change", () => run(true));
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
-  run();
+  run(true);
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
@@ -331,8 +332,9 @@ let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('s
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpTimer = null; // auto-refresh interval handle
 
-async function run() {
+async function run(animate = false) {
   const grid = $("grid");
+  document.body.classList.add("loading");
   status("running…");
   // Double-buffer: build the whole dashboard off-screen, then swap it in at the
   // end. The old dashboard stays visible during the (async) rebuild, so a
@@ -486,8 +488,9 @@ async function run() {
         const span = Math.min(12, nextSpan || defaultSpan);
         const mkPanel = () => {
           const fig = document.createElement("figure");
-          fig.className = "panel";
+          fig.className = animate ? "panel enter" : "panel";
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+          if (animate) fig.style.animationDelay = panels * 0.05 + "s";
           return fig;
         };
         if (isHeading(s)) {
@@ -552,6 +555,7 @@ async function run() {
   attachHover();
   addExportButtons();
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
+  document.body.classList.remove("loading");
 }
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
