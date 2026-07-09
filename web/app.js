@@ -364,10 +364,43 @@ SELECT sku, total, avg_sales, peak, low ::TABLE FROM stats ORDER BY total DESC;
 
 -- detail: the selected SKU's line (defaults to the top SKU until you click one)
 SELECT 7::COL;
+-- clicking the table sets getvariable('sku') (named after its first column)
 SELECT month::XAXIS, sales::LINECHART, 'Monthly sales — selected SKU'::TITLE
 FROM ts
-WHERE sku = COALESCE(NULLIF(getvariable('selected'),''), (SELECT sku FROM stats ORDER BY total DESC LIMIT 1))
+WHERE sku = COALESCE(NULLIF(getvariable('sku'),''), (SELECT sku FROM stats ORDER BY total DESC LIMIT 1))
 ORDER BY month;`,
+
+  "Two independent filters": `-- Two tables, two INDEPENDENT named cross-filters. Each table emits a variable
+-- named after its first column (sku / region); the detail panels filter by both.
+CREATE OR REPLACE TABLE sales AS
+SELECT sku, region, month, (abs(hash(sku || region || month)) % 80 + 40) AS amount
+FROM (VALUES ('SKU-A'),('SKU-B'),('SKU-C')) a(sku),
+     (VALUES ('EU'),('US')) b(region),
+     (VALUES ('2024-01'),('2024-02'),('2024-03'),('2024-04'),('2024-05'),('2024-06')) c(month);
+
+SELECT 'Pick a SKU and a region — the chart filters by both (click empty to clear)'::LABEL;
+
+-- filter 1 → getvariable('sku')
+SELECT 4::COL;
+SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku ORDER BY total DESC;
+
+-- filter 2 → getvariable('region')
+SELECT 4::COL;
+SELECT region, sum(amount) AS total ::TABLE FROM sales GROUP BY region ORDER BY total DESC;
+
+-- a KPI honoring both (COALESCE(...,'') so an unset filter matches everything)
+SELECT 4::COL;
+SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales
+WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+  AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'));
+
+-- the detail line, filtered by SKU AND region independently
+SELECT 12::COL;
+SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly sales (by SKU & region)'::TITLE
+FROM sales
+WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+  AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'))
+GROUP BY month ORDER BY month;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -483,7 +516,8 @@ const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB", "PLACEHOLDER"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
-let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
+let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
+let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpTimer = null; // auto-refresh interval handle
 
@@ -504,10 +538,17 @@ async function run() {
     return showError(grid, String(e));
   }
 
-  // Cross-filter value (from the last click) — available to every query as
-  // getvariable('selected'); e.g. `WHERE getvariable('selected') IN ('', channel)`.
+  // Cross-filter values — the generic `selected` (last click) plus any NAMED
+  // cross-filters (each table emits getvariable('<its first column>') so two
+  // tables give two independent live selections). Unset named vars read as NULL,
+  // so targets guard with COALESCE(getvariable('name'),'').
   try {
     await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
+    for (const [k, v] of Object.entries(dpXf)) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+        await runSql(`SET VARIABLE ${k} = '${String(v).replace(/'/g, "''")}'`);
+      }
+    }
   } catch (e) {
     /* ignore */
   }
@@ -934,17 +975,22 @@ function renderTable(rows, skip = -1, trendIdx = []) {
     }
     for (const r of data.slice(0, 500)) {
       const tr = tb.insertRow();
-      // A categorical first column makes the row a cross-filter source: click it
-      // to set getvariable('selected') (like clicking a chart mark); click again
-      // or the background to clear. The active row gets an accent bar.
+      // A categorical first column makes the row a cross-filter source. Clicking
+      // sets BOTH the generic getvariable('selected') AND a NAMED cross-filter
+      // getvariable('<first column name>') — so two tables with different first
+      // columns drive two independent live selections. Click again / the
+      // background to clear. Each table highlights its OWN named selection.
       const key = cols[0];
       if (!numeric[key]) {
         const keyVal = String(r[key] ?? "").replace(/^"|"$/g, "");
         tr.style.cursor = "pointer";
-        if (dpSelected && keyVal === dpSelected) tr.classList.add("row-sel");
+        const own = dpXf[key] !== undefined ? dpXf[key] : dpSelected;
+        if (own && keyVal === own) tr.classList.add("row-sel");
         tr.onclick = (e) => {
           e.stopPropagation();
-          dpFilter = dpFilter === keyVal ? "" : keyVal;
+          const on = (dpXf[key] ?? "") !== keyVal;
+          dpXf[key] = on ? keyVal : "";
+          dpFilter = on ? keyVal : "";
           dpSelected = dpFilter || null;
           run();
         };
@@ -1216,11 +1262,13 @@ function attachHover() {
   apply();
 }
 
-// Click empty dashboard space to clear the cross-filter / selection.
+// Click empty dashboard space to clear all cross-filters / selections.
 document.querySelector(".dash").addEventListener("click", () => {
-  if (dpFilter || dpSelected !== null) {
+  const anyNamed = Object.values(dpXf).some((v) => v);
+  if (dpFilter || dpSelected !== null || anyNamed) {
     dpFilter = "";
     dpSelected = null;
+    for (const k in dpXf) dpXf[k] = "";
     run();
   }
 });
