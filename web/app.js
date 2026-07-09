@@ -675,6 +675,14 @@ function markActive() {
 }
 function loadDash(name, sql) {
   curDash = name || null;
+  // A different dashboard starts clean — don't carry tab/filter/page state over.
+  dpTab = null;
+  dpSubTab = {};
+  dpFilter = "";
+  dpSelected = null;
+  dpXf = {};
+  dpPage = {};
+  dpSort = {};
   $("sql").value = sql;
   $("dash-name").value = name || "";
   if (bodyMode() === "explore") setMode("edit");
@@ -1306,6 +1314,17 @@ async function run() {
     tabWrap.querySelector(".tabpane").style.display = "";
     tabBar.querySelector(".tab-btn").classList.add("active");
   }
+  // Same fallback for nested sub-tabs: a remembered sub-tab that no longer
+  // exists (edited SQL, or a stale name carried from another dashboard) would
+  // otherwise leave the sub-pane blank. Activate the first sub-tab in that case.
+  (tabWrap || newGrid).querySelectorAll(".subtabbar").forEach((bar) => {
+    if (bar.querySelector(".subtab-btn.active")) return;
+    const firstBtn = bar.querySelector(".subtab-btn");
+    const wrap = bar.nextElementSibling; // subtabwrap follows subtabbar
+    const firstPane = wrap && wrap.querySelector(".subtabpane");
+    if (firstBtn) firstBtn.classList.add("active");
+    if (firstPane) firstPane.style.display = "";
+  });
   // Atomic swap: replace the visible content in one synchronous step (no flash).
   grid.replaceChildren(...newGrid.childNodes);
   const dash = document.querySelector(".dash");
