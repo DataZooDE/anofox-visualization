@@ -3,33 +3,55 @@
 //   renders each panel to SVG. No server, no DuckDB extension.
 import init, { plan, render_panel } from "./pkg/duckplot.js";
 
-const SAMPLES = {
-  "Weekly sessions": `-- Annotate result columns with ::ROLE casts. Statements without a role
--- (this CREATE) are setup; annotated SELECTs become panels.
-CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
+// Examples, grouped for the sidebar. Each entry is a full dashboard script.
+const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
   ('W1','app',30),('W1','web',22),('W1','api',12),
   ('W2','app',41),('W2','web',28),('W2','api',15),
   ('W3','app',26),('W3','web',33),('W3','api', 9),
   ('W4','app',48),('W4','web',30),('W4','api',18)
-) t(week, channel, n);
+) t(week, channel, n);`;
+const SALES = `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
+  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
+  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
+  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
+) t(week, channel, n, revenue);`;
 
-SELECT 'Weekly sessions'::LABEL;
+const SAMPLE_GROUPS = [
+  {
+    group: "Start here",
+    items: {
+      Overview: `-- Annotate result columns with ::ROLE casts. Un-annotated statements
+-- (this CREATE) are setup; annotated SELECTs become panels.
+${SESSIONS}
 
--- ::TITLE gives a panel its own title bar
+SELECT 'Overview'::LABEL;
+
+-- KPIs in a ::GROUP render as a compact strip
+SELECT 'Key metrics'::GROUP;
+SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sessions;
+SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL FROM sessions;
+SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL FROM sessions;
+SELECT 1::ENDGROUP;
+
+SELECT 6::COL;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions by channel'::TITLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
--- one line per channel — colours match the bars; click a series to highlight it
+SELECT 6::COL;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Weekly trend'::TITLE
 FROM sessions GROUP BY ALL ORDER BY week, channel;
 
-SELECT channel::XAXIS, sum(n)::BARCHART, 'Totals by channel'::TITLE
-FROM sessions GROUP BY ALL ORDER BY sum(n) DESC;`,
+SELECT 6::COL;
+SELECT channel::CATEGORY, sum(n)::PIE, 'Share'::TITLE FROM sessions GROUP BY ALL;
 
-  "Signal explorer": `-- No table needed: generate data on the fly with range().
+SELECT 6::COL;
+SELECT 'Detail'::TITLE, channel, week, sum(n) AS n ::TABLE
+FROM sessions GROUP BY ALL ORDER BY channel, week;`,
+
+      "Signal explorer": `-- No table needed: generate data on the fly with range().
 SELECT 'Signal explorer — data generated with range()'::LABEL;
 
--- trend + seasonality, as an area with a ± band
 SELECT 8::COL;
 SELECT i::XAXIS,
        (50 + i*0.5 + sin(i/6.0)*22)::LINECHART,
@@ -38,7 +60,6 @@ SELECT i::XAXIS,
        'Trend + seasonality'::TITLE
 FROM range(0, 60) t(i);
 
--- a quick KPI + a histogram of a derived value
 SELECT 4::COL;
 SELECT round(avg((i*7) % 100), 1)::METRIC, 'Avg value'::LABEL FROM range(0, 500) t(i);
 
@@ -48,383 +69,128 @@ SELECT ((i * 7) % 100)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500
 SELECT 8::COL;
 SELECT (i % 7)::XAXIS, count(*)::BARCHART, 'Rows per bucket'::TITLE
 FROM range(0, 300) t(i) GROUP BY ALL ORDER BY 1;`,
+    },
+  },
 
-  "Dropdown filter": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
-  ('W1','app',30),('W1','web',22),('W1','api',12),
-  ('W2','app',41),('W2','web',28),('W2','api',15),
-  ('W3','app',26),('W3','web',33),('W3','api', 9),
-  ('W4','app',48),('W4','web',30),('W4','api',18)
-) t(week, channel, n);
-
--- A dropdown: the column's values become options and its name ('channel')
--- becomes a DuckDB variable. Referenced below via getvariable('channel').
-SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
-
-SELECT 'Sessions for the selected channel'::LABEL;
-
-SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly sessions'::TITLE
-FROM sessions WHERE channel = getvariable('channel')
-GROUP BY ALL ORDER BY week;`,
-
-  "Layout & filters": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
-  ('W1','app','EU',30),('W1','web','EU',22),('W1','app','US',18),('W1','web','US',12),
-  ('W2','app','EU',41),('W2','web','EU',28),('W2','app','US',20),('W2','web','US',15),
-  ('W3','app','EU',26),('W3','web','EU',33),('W3','app','US',14),('W3','web','US',19),
-  ('W4','app','EU',48),('W4','web','EU',30),('W4','app','US',22),('W4','web','US',17)
-) t(week, channel, region, n);
-
-SELECT 2::COLUMNS;                       -- a 2-column grid
-
-SELECT 'Filters'::GROUP;                 -- put both dropdowns in one box
-SELECT DISTINCT region::DROPDOWN  FROM sessions ORDER BY region;
-SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
-SELECT 1::ENDGROUP;
-
-SELECT 'Weekly sessions (filtered)'::LABEL;
-
--- widths are bootstrap-style, out of 12 columns:
-SELECT 12::COL;                          -- full width
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
-FROM sessions WHERE region = getvariable('region')
-GROUP BY ALL ORDER BY week, channel;
-
-SELECT 8::COL;                           -- 8 of 12 (two-thirds)
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
-FROM sessions WHERE region = getvariable('region')
-GROUP BY ALL ORDER BY week, channel;
-
-SELECT 4::COL;                           -- 4 of 12 (one-third), sits beside it
-SELECT week::XAXIS, sum(n)::BARCHART
-FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
-GROUP BY ALL ORDER BY week;`,
-
-  "Cross-filter": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
-  ('W1','app',30),('W1','web',22),('W1','api',12),
-  ('W2','app',41),('W2','web',28),('W2','api',15),
-  ('W3','app',26),('W3','web',33),('W3','api', 9),
-  ('W4','app',48),('W4','web',30),('W4','api',18)
-) t(week, channel, n);
-
-SELECT 'Click a channel to filter the charts below (click empty space to clear)'::LABEL;
-
--- source: click a segment -> sets the cross-filter getvariable('selected')
-SELECT 12::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
-FROM sessions GROUP BY ALL ORDER BY week, channel;
-
--- these opt in: show ONLY the clicked channel (all channels when nothing clicked)
-SELECT 6::COL;
-SELECT week::XAXIS, sum(n)::LINECHART
-FROM sessions WHERE getvariable('selected') IN ('', channel)
-GROUP BY ALL ORDER BY week;
-
-SELECT 6::COL;
-SELECT channel::XAXIS, sum(n)::BARCHART
-FROM sessions WHERE getvariable('selected') IN ('', channel)
-GROUP BY ALL ORDER BY channel;`,
-
-  "KPIs, pie & table": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
-  ('W1','app',30),('W1','web',22),('W1','api',12),
-  ('W2','app',41),('W2','web',28),('W2','api',15),
-  ('W3','app',26),('W3','web',33),('W3','api', 9),
-  ('W4','app',48),('W4','web',30),('W4','api',18)
-) t(week, channel, n);
-
-SELECT 'Overview — click a pie slice or table row to filter the KPIs'::LABEL;
-
--- KPI cards (big numbers), 4 cols each. They opt into the cross-filter, so
--- clicking a channel (pie slice / table row) re-computes them.
-SELECT 4::COL; SELECT sum(n)::METRIC, 'Total sessions'::LABEL
-FROM sessions WHERE getvariable('selected') IN ('', channel);
-SELECT 4::COL; SELECT count(DISTINCT channel)::METRIC, 'Channels'::LABEL
-FROM sessions WHERE getvariable('selected') IN ('', channel);
-SELECT 4::COL; SELECT round(avg(n),1)::METRIC, 'Avg / cell'::LABEL
-FROM sessions WHERE getvariable('selected') IN ('', channel);
-
--- a pie by channel + a data table, side by side (both titled via ::TITLE)
-SELECT 6::COL;
-SELECT channel::CATEGORY, sum(n)::PIE, 'Share by channel'::TITLE FROM sessions GROUP BY ALL;
-
-SELECT 6::COL;
-SELECT 'Sessions detail'::TITLE, channel, week, sum(n) AS sessions ::TABLE
-FROM sessions GROUP BY ALL ORDER BY channel, week;`,
-
-  "More charts & inputs": `CREATE OR REPLACE TABLE m AS
-SELECT i AS id,
-       (i * 7 % 13) + 5              AS value,
-       ['app','web','api'][(i % 3) + 1] AS channel,
-       'W' || ((i % 4) + 1)          AS week
+  {
+    group: "Charts",
+    items: {
+      "Chart gallery": `${SALES}
+CREATE OR REPLACE TABLE m AS
+SELECT i AS id, (i * 7 % 13) + 5 AS value, ['app','web','api'][(i % 3) + 1] AS channel, 'W' || ((i % 4) + 1) AS week
 FROM range(0, 120) t(i);
 
--- inputs: a number box + a dropdown, together
-SELECT 'Controls'::GROUP;
-SELECT 5 AS min_value ::NUMBER;
-SELECT DISTINCT channel::DROPDOWN FROM m ORDER BY channel;
-SELECT 1::ENDGROUP;
+SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
-SELECT 'Distributions (value ≥ the number input)'::LABEL;
+SELECT 'Bar & line'::TAB;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 
--- histogram of a numeric column
-SELECT 6::COL;
-SELECT value::HISTOGRAM FROM m WHERE value >= getvariable('min_value');
+SELECT 'Pie / donut / gauge'::TAB;
+SELECT 4::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
+SELECT 4::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
+SELECT 4::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
 
--- box plot of value by channel
-SELECT 6::COL;
-SELECT channel::XAXIS, value::BOXPLOT
-FROM m WHERE value >= getvariable('min_value');
+SELECT 'Distributions'::TAB;
+SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
+SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot'::TITLE FROM m;
+SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
 
--- heatmap: week × channel coloured by average value
-SELECT 12::COL;
-SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP
-FROM m GROUP BY ALL ORDER BY week, channel;`,
+SELECT 'Combo & sparkline'::TAB;
+SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
+SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;`,
 
-  "Tabs & formats": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
-  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
-  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
-  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
-  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
-) t(week, channel, n, revenue);
-
--- header KPIs (above the tabs) with value formats. They opt into the
--- cross-filter by referencing getvariable('selected'), so clicking a channel
--- in any chart below re-computes them (click empty space to clear).
-SELECT 'Click a channel in a chart to filter the KPIs'::LABEL;
-
-SELECT 4::COL; SELECT sum(revenue)::MONEY, 'Revenue'::LABEL
-FROM sales WHERE getvariable('selected') IN ('', channel);
-SELECT 4::COL; SELECT sum(n)::COMPACT, 'Sessions'::LABEL
-FROM sales WHERE getvariable('selected') IN ('', channel);
-SELECT 4::COL; SELECT round(100.0*sum(n)/(SELECT sum(n) FROM sales),0)::PERCENT, 'Share of sessions'::LABEL
-FROM sales WHERE getvariable('selected') IN ('', channel);
-
-SELECT 'Revenue'::TAB;
-SELECT 12::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
-FROM sales GROUP BY ALL ORDER BY week, channel;
-
-SELECT 'Sessions'::TAB;
-SELECT 6::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
-FROM sales GROUP BY ALL ORDER BY week, channel;
-SELECT 6::COL;
-SELECT channel::CATEGORY, sum(n)::PIE FROM sales GROUP BY ALL;
-
-SELECT 'Data'::TAB;
-SELECT 12::COL;
-SELECT week, channel, n, revenue ::TABLE FROM sales ORDER BY week, channel;`,
-
-  "Analyst essentials": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
-  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
-  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
-  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
-  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
-) t(week, channel, n, revenue);
-
--- multi-select filter (pick several channels): variable 'channel' (a list)
-SELECT 'Filter'::GROUP;
-SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
-SELECT 1::ENDGROUP;
-
--- KPIs with a trend arrow: METRIC value + a DELTA (comparison) value.
--- Two filters combine: the multiselect (getvariable('channel')) AND the
--- cross-filter click (getvariable('selected')) — so these update both when you
--- change the dropdown and when you click a channel in the chart or table.
-SELECT 4::COL;
-SELECT sum(revenue) FILTER (WHERE week='W4')::MONEY,
-       sum(revenue) FILTER (WHERE week='W3')::DELTA,
-       'Revenue (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel)
-  AND getvariable('selected') IN ('', channel);
-
-SELECT 4::COL;
-SELECT sum(n) FILTER (WHERE week='W4')::METRIC,
-       sum(n) FILTER (WHERE week='W3')::DELTA,
-       'Sessions (W4 vs W3)'::LABEL
-FROM sales WHERE list_contains(getvariable('channel'), channel)
-  AND getvariable('selected') IN ('', channel);
-
-SELECT 4::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
-FROM sales WHERE list_contains(getvariable('channel'), channel)
-GROUP BY ALL ORDER BY week, channel;
-
--- sortable table with in-cell bars — click a header to sort, click a row to
--- cross-filter the KPIs by that channel (a categorical first column makes rows
--- clickable). It stays showing the multiselect set, so you can pick any row.
-SELECT 12::COL;
-SELECT channel, sum(n) AS sessions, sum(revenue) AS revenue ::TABLE
-FROM sales WHERE list_contains(getvariable('channel'), channel)
-GROUP BY ALL ORDER BY revenue DESC;`,
-
-  "Combo, spark & map": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
-  ('W1',30,1200.0),('W2',41,1600.0),('W3',26,980.0),('W4',48,2000.0)
-) t(week, sessions, revenue);
-
-SELECT 'Combo chart + sparkline'::LABEL;
-
--- combo: bars (sessions) + line (revenue/50) + a target REFLINE at 35
-SELECT 8::COL;
-SELECT week::XAXIS, sessions::BARCHART, revenue/50::LINECHART, 35::REFLINE,
-       'Sessions vs revenue'::TITLE
-FROM sales ORDER BY week;
-
--- a sparkline (minimal inline trend, no axes) — dot marks the latest value
-SELECT 4::COL;
-SELECT sessions::SPARKLINE, 'Sessions trend'::TITLE FROM sales ORDER BY week;
-
--- choropleth map from WKT geometry, coloured by a measure
-SELECT 'Choropleth map'::LABEL;
+      "Choropleth map": `SELECT 'Choropleth map (WKT geometry, coloured by a measure)'::LABEL;
 SELECT 12::COL;
 SELECT geom::MAP, value::BARCHART, name::LABEL, 'Regions by value'::TITLE FROM (VALUES
   ('North','POLYGON((0 2, 4 2, 4 4, 0 4, 0 2))', 40),
   ('South-west','POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))', 75),
   ('South-east','POLYGON((2 0, 4 0, 4 2, 2 2, 2 0))', 20)
 ) r(name, geom, value);`,
+    },
+  },
 
-  "Gauge, donut & more": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
-  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
-  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
-  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
-  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
-) t(week, channel, n, revenue);
+  {
+    group: "Interactivity",
+    items: {
+      "Filters & inputs": `${SALES}
 
-SELECT 'Chart & widget showcase'::LABEL;
+SELECT 'Filters & inputs'::LABEL;
 
--- GAUGE: a value's progress through a RANGE, with COLORS zones. It opts into
--- the cross-filter, so clicking a channel in the donut/bars re-computes it.
-SELECT 4::COL;
-SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE,
-       '#e03131,#efc94c,#0ca678'::COLORS, 'Sessions (W4)'::TITLE
-FROM sales WHERE getvariable('selected') IN ('', channel);
-
--- DONUTCHART: a pie with a centre hole
-SELECT 4::COL;
-SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Revenue share'::TITLE
-FROM sales GROUP BY ALL;
-
--- a sized text card (TEXT_SMALL / _MEDIUM / _LARGE)
-SELECT 4::COL;
-SELECT 'All systems nominal'::TEXT_MEDIUM, 'Status'::LABEL;
-
--- BARCHART_STACKED_PERCENT: composition normalised to 100%
-SELECT 6::COL;
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED_PERCENT, 'Channel mix'::TITLE
-FROM sales GROUP BY ALL ORDER BY week, channel;
-
--- LINECHART with a confidence band (BAND_LOWER / BAND_UPPER). Opts into the
--- cross-filter, so clicking a channel in the donut/bars re-computes it.
-SELECT 6::COL;
-SELECT week::XAXIS, sum(revenue)::LINECHART,
-       sum(revenue)*0.85::BAND_LOWER, sum(revenue)*1.15::BAND_UPPER, 'Revenue ± band'::TITLE
-FROM sales WHERE getvariable('selected') IN ('', channel) GROUP BY ALL ORDER BY week;
-
--- a table with a TREND arrow column
-SELECT 8::COL;
-SELECT channel::TABLE, sum(n) AS sessions,
-       (sum(n) FILTER (WHERE week='W4') - sum(n) FILTER (WHERE week='W3')) AS "Δ vs W3" ::TREND
-FROM sales GROUP BY ALL ORDER BY sessions DESC;
-
--- DOWNLOAD_CSV / _XLSX / _PDF export buttons (cast the last SELECT column)
-SELECT 4::COL;
-SELECT week, channel, n, revenue ::DOWNLOAD_CSV FROM sales;
-
--- FOOTER_LINK: a link at the bottom of the dashboard
-SELECT 'https://github.com/DataZooDE'::FOOTER_LINK, 'anofox-visualization';`,
-
-  "Date-range filter": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
-  (DATE '2024-01-03','app',30),(DATE '2024-01-10','web',22),(DATE '2024-01-18','app',41),
-  (DATE '2024-01-27','api',28),(DATE '2024-02-04','web',26),(DATE '2024-02-13','app',33),
-  (DATE '2024-02-21','api',48),(DATE '2024-02-28','web',30),(DATE '2024-03-07','app',37)
-) t(day, channel, n);
-
--- a from→to date range: the query returns two DATE columns → two variables
--- (from_day / to_day), each bound to a date picker (defaults = min/max).
-SELECT 'Date range'::GROUP;
-SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;
+-- a multi-select (a list variable) + a number input, in one box
+SELECT 'Controls'::GROUP;
+SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
+SELECT 5 AS min_n ::NUMBER;
 SELECT 1::ENDGROUP;
 
-SELECT 'Sessions in the selected range'::LABEL;
+-- KPIs with a DELTA trend arrow, filtered by the multiselect
+SELECT 6::COL;
+SELECT sum(revenue) FILTER (WHERE week='W4')::MONEY, sum(revenue) FILTER (WHERE week='W3')::DELTA, 'Revenue (W4 vs W3)'::LABEL
+FROM sales WHERE list_contains(getvariable('channel'), channel);
+SELECT 6::COL;
+SELECT sum(n) FILTER (WHERE week='W4')::METRIC, sum(n) FILTER (WHERE week='W3')::DELTA, 'Sessions (W4 vs W3)'::LABEL
+FROM sales WHERE list_contains(getvariable('channel'), channel);
 
-SELECT 4::COL;
-SELECT sum(n)::METRIC, 'Total sessions'::LABEL FROM events
-WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE;
+SELECT 12::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (filtered)'::TITLE
+FROM sales
+WHERE list_contains(getvariable('channel'), channel) AND n >= getvariable('min_n')
+GROUP BY ALL ORDER BY week, channel;`,
 
-SELECT 8::COL;
-SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'By day'::TITLE
-FROM events
-WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
-GROUP BY ALL ORDER BY day, channel;`,
-
-  "Master–detail (SKU)": `-- Two tables linked by an id (sku), no JOIN needed: the summary table is the
--- cross-filter SOURCE, the line chart is the detail. Clicking a SKU row sets
--- getvariable('selected'); the chart plots that SKU's monthly series.
-
--- 1) a monthly time series, several SKUs
-CREATE OR REPLACE TABLE ts AS SELECT * FROM (VALUES
-  ('SKU-A','2024-01',120),('SKU-A','2024-02',135),('SKU-A','2024-03',128),('SKU-A','2024-04',150),('SKU-A','2024-05',162),('SKU-A','2024-06',158),
-  ('SKU-B','2024-01', 80),('SKU-B','2024-02', 72),('SKU-B','2024-03', 95),('SKU-B','2024-04', 88),('SKU-B','2024-05',101),('SKU-B','2024-06',110),
-  ('SKU-C','2024-01',210),('SKU-C','2024-02',198),('SKU-C','2024-03',205),('SKU-C','2024-04',180),('SKU-C','2024-05',176),('SKU-C','2024-06',165)
-) t(sku, month, sales);
-
--- 2) summary statistics, one row per SKU (the second table)
-CREATE OR REPLACE TABLE stats AS
-SELECT sku, sum(sales) AS total, round(avg(sales),0) AS avg_sales, max(sales) AS peak, min(sales) AS low
-FROM ts GROUP BY sku;
-
-SELECT 'Click a SKU row to plot its monthly series'::LABEL;
-
--- summary table: sku is the FIRST column, so its rows are the click source
-SELECT 5::COL;
-SELECT sku, total, avg_sales, peak, low ::TABLE FROM stats ORDER BY total DESC;
-
--- detail: the selected SKU's line (defaults to the top SKU until you click one)
-SELECT 7::COL;
--- clicking the table sets getvariable('sku') (named after its first column)
-SELECT month::XAXIS, sales::LINECHART, 'Monthly sales — selected SKU'::TITLE
-FROM ts
-WHERE sku = COALESCE(NULLIF(getvariable('sku'),''), (SELECT sku FROM stats ORDER BY total DESC LIMIT 1))
-ORDER BY month;`,
-
-  "Two independent filters": `-- Two tables, two INDEPENDENT named cross-filters. Each table emits a variable
--- named after its first column (sku / region); the detail panels filter by both.
-CREATE OR REPLACE TABLE sales AS
+      "Cross-filter & drill-down": `-- Two tables, two INDEPENDENT named cross-filters. Each table emits a variable
+-- named after its first column (sku / region); the panels filter by both.
+CREATE OR REPLACE TABLE sales2 AS
 SELECT sku, region, month, (abs(hash(sku || region || month)) % 80 + 40) AS amount
 FROM (VALUES ('SKU-A'),('SKU-B'),('SKU-C')) a(sku),
      (VALUES ('EU'),('US')) b(region),
      (VALUES ('2024-01'),('2024-02'),('2024-03'),('2024-04'),('2024-05'),('2024-06')) c(month);
 
-SELECT 'Pick a SKU and a region — the chart filters by both (click empty to clear)'::LABEL;
+SELECT 'Click a SKU and a region — the KPI and chart filter by both'::LABEL;
 
--- filter 1 → getvariable('sku')
-SELECT 4::COL;
-SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku ORDER BY total DESC;
+SELECT 4::COL; SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
+SELECT 4::COL; SELECT region, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
 
--- filter 2 → getvariable('region')
 SELECT 4::COL;
-SELECT region, sum(amount) AS total ::TABLE FROM sales GROUP BY region ORDER BY total DESC;
-
--- a KPI honoring both (COALESCE(...,'') so an unset filter matches everything)
-SELECT 4::COL;
-SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales
+SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales2
 WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
   AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'));
 
--- the detail line, filtered by SKU AND region independently
 SELECT 12::COL;
-SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly sales (by SKU & region)'::TITLE
-FROM sales
+SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & region)'::TITLE FROM sales2
 WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
   AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'))
 GROUP BY month ORDER BY month;`,
 
-  "Formatted table": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
+      "Date range": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
+  (DATE '2024-01-03','app',30),(DATE '2024-01-10','web',22),(DATE '2024-01-18','app',41),
+  (DATE '2024-01-27','api',28),(DATE '2024-02-04','web',26),(DATE '2024-02-13','app',33),
+  (DATE '2024-02-21','api',48),(DATE '2024-02-28','web',30),(DATE '2024-03-07','app',37)
+) t(day, channel, n);
+
+SELECT 'Date range'::GROUP;
+SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;
+SELECT 1::ENDGROUP;
+
+SELECT 'Sessions in the selected range'::LABEL;
+SELECT 4::COL;
+SELECT sum(n)::METRIC, 'Total sessions'::LABEL FROM events
+WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE;
+SELECT 8::COL;
+SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'By day'::TITLE FROM events
+WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
+GROUP BY ALL ORDER BY day, channel;`,
+    },
+  },
+
+  {
+    group: "Tables",
+    items: {
+      "Formatted table": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
   ('SKU-A',12400, 4.2,'on track',  8.5),
   ('SKU-B', 7300,11.8,'at risk',  -3.1),
   ('SKU-C',21850, 6.5,'on track',  2.7),
   ('SKU-D', 4200,23.4,'breach',  -12.0)
 ) t(sku, forecast, mape, status, growth);
-
--- monthly history per SKU (for the in-cell sparkline)
 CREATE OR REPLACE TABLE hist AS SELECT * FROM (VALUES
   ('SKU-A',1,100),('SKU-A',2,108),('SKU-A',3,104),('SKU-A',4,120),('SKU-A',5,126),
   ('SKU-B',1, 90),('SKU-B',2, 85),('SKU-B',3, 70),('SKU-B',4, 72),('SKU-B',5, 66),
@@ -432,9 +198,7 @@ CREATE OR REPLACE TABLE hist AS SELECT * FROM (VALUES
   ('SKU-D',1, 60),('SKU-D',2, 52),('SKU-D',3, 48),('SKU-D',4, 40),('SKU-D',5, 35)
 ) t(sku, m, sales);
 
-SELECT 'Forecast summary — per-column formatting'::LABEL;
-
--- ::MONEY / ::COLORSCALE / ::BADGE / ::TREND / ::SPARKLINE format each column
+SELECT 'Per-column formatting: MONEY / COLORSCALE / BADGE / TREND / SPARKLINE'::LABEL;
 SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
@@ -444,62 +208,57 @@ SELECT sku::TABLE,
        (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE
 FROM fc ORDER BY forecast DESC;`,
 
-  "Big table (pagination)": `-- 1,000 rows → paginated 50/page. Sorting works across ALL rows and the CSV
--- download (hover the panel) exports the full result, not just the page.
-SELECT 'A 1,000-row table — paginated'::LABEL;
-SELECT 12::COL;
-SELECT
-  'ID-' || lpad(i::VARCHAR, 4, '0') AS id,
-  ['app','web','api','cli'][(i % 4) + 1]  AS channel,
-  ((i * 37) % 100) AS score,
-  ((i * 7) % 500)  AS events ::TABLE
-FROM range(1, 1001) t(i) ORDER BY i;`,
+      "Large tables": `SELECT 'Large tables — client pagination vs SQL-paged (in tabs)'::LABEL;
 
-  "SQL-paged table (100k)": `-- ::PAGED runs LIMIT/OFFSET + COUNT(*) in DuckDB and fetches ONE page at a
--- time, so this 100,000-row table stays instant (the browser never holds it
--- all). Sorting a header re-queries server-side. Works the same over a large
--- parquet in S3/MotherDuck — the engine does the paging, not the browser.
-SELECT '100,000 rows — paged by DuckDB (LIMIT/OFFSET), not the browser'::LABEL;
+SELECT '1,000 rows (client)'::TAB;
 SELECT 12::COL;
-SELECT
-  'ID-' || lpad(i::VARCHAR, 6, '0') AS id,
-  ['app','web','api','cli'][(i % 4) + 1] AS channel,
-  ((i * 37) % 1000) AS score,
-  ((i * 91) % 100)  AS load_pct ::PAGED
+SELECT 'ID-' || lpad(i::VARCHAR, 4, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
+       ((i * 37) % 100) AS score, ((i * 7) % 500) AS events ::TABLE
+FROM range(1, 1001) t(i) ORDER BY i;
+
+SELECT '100,000 rows (::PAGED)'::TAB;
+SELECT 12::COL;
+-- ::PAGED runs LIMIT/OFFSET + COUNT in DuckDB — one page at a time, so it scales
+-- to huge / remote tables (parquet in S3, MotherDuck). Sorting is server-side.
+SELECT 'ID-' || lpad(i::VARCHAR, 6, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
+       ((i * 37) % 1000) AS score, ((i * 91) % 100) AS load_pct ::PAGED
 FROM range(1, 100001) t(i);`,
+    },
+  },
 
-  "Grouped KPIs & nested tabs": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
-  ('W1','app','EU',30,1200.0),('W1','web','EU',22,900.0),('W1','app','US',18,700.0),('W1','web','US',12,500.0),
-  ('W2','app','EU',41,1600.0),('W2','web','EU',28,1100.0),('W2','app','US',20,820.0),('W2','web','US',15,560.0),
-  ('W3','app','EU',26,980.0),('W3','web','EU',33,1300.0),('W3','app','US',14,640.0),('W3','web','US',19,720.0),
-  ('W4','app','EU',48,2000.0),('W4','web','EU',30,1250.0),('W4','app','US',22,900.0),('W4','web','US',17,680.0)
-) t(week, channel, region, n, revenue);
+  {
+    group: "Layout",
+    items: {
+      "Groups, tabs & height": `${SALES}
 
--- Put the KPIs in ONE box (::GROUP) → they render as a compact strip with
--- dividers instead of three big cards beside the charts.
+-- KPIs in a ::GROUP box (compact strip)
 SELECT 'Key metrics'::GROUP;
 SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales;
 SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sales;
 SELECT count(DISTINCT week)::METRIC, 'Weeks'::LABEL FROM sales;
 SELECT 1::ENDGROUP;
 
-SELECT 1::COLUMNS;  -- following charts span the full tab
+SELECT 1::COLUMNS;
 
--- top-level ::TAB, each with nested ::SUBTAB
+-- top-level ::TAB, each with nested ::SUBTAB; ::HEIGHT sets a taller box
 SELECT 'Revenue'::TAB;
 SELECT 'By week'::SUBTAB;
-SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week'::TITLE
+SELECT 420::HEIGHT;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week (tall)'::TITLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'By region'::SUBTAB;
-SELECT region::XAXIS, sum(revenue)::BARCHART, 'Revenue by region'::TITLE FROM sales GROUP BY ALL ORDER BY region;
+SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
 
 SELECT 'Sessions'::TAB;
 SELECT 'Trend'::SUBTAB;
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions trend'::TITLE
-FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions trend'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'Share'::SUBTAB;
 SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP BY ALL;`,
-};
+    },
+  },
+];
+
+const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g.items)));
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => ($("status").textContent = t);
@@ -733,8 +492,10 @@ function renderSidebar() {
   }
   for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, true));
 
-  nav.appendChild(sideSection("Examples"));
-  for (const n of Object.keys(SAMPLES)) nav.appendChild(sideItem(n, SAMPLES[n], false));
+  for (const g of SAMPLE_GROUPS) {
+    nav.appendChild(sideSection(g.group));
+    for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+  }
   markActive();
 }
 function sideSection(t) {
