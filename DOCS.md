@@ -51,12 +51,38 @@ FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
 
+### Layout (from SQL)
+
+Directive statements shape the grid (browser builder / `serve`; the CLI skips them):
+
+| Directive | Effect |
+|-----------|--------|
+| `SELECT n::COLUMNS;` | set the grid to `n` columns |
+| `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
+| `SELECT n::SPAN;` | the **next** panel spans `n` columns (e.g. a full-width chart) |
+
+```sql
+SELECT 2::COLUMNS;                       -- 2-column grid
+
+SELECT 'Filters'::GROUP;                 -- two dropdowns together in one box
+SELECT DISTINCT region::DROPDOWN  FROM sessions ORDER BY region;
+SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
+SELECT 1::ENDGROUP;
+
+SELECT 2::SPAN;                          -- next chart spans both columns
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED FROM sessions …;
+```
+
+A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
+See the **"Layout & filters"** sample.
+
 ### Interactivity
 
 Every chart is hoverable (bars/points/areas carry per-mark tooltips; lines get
-point markers). **Linked highlighting**: click any series/bar to highlight it
-across all panels and dim the rest — click empty space (or the mark again) to
-clear. Pure client-side, no re-query.
+point markers and dim as whole lines). **Linked highlighting**: click any
+series/bar to highlight it across all panels and dim the rest — click empty
+space (or the mark again) to clear. Series colours are **consistent across
+charts**. Pure client-side, no re-query.
 
 ### Example
 
