@@ -71,13 +71,15 @@ SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
 FROM sessions WHERE region = getvariable('region')
 GROUP BY ALL ORDER BY week, channel;
 
-SELECT week::XAXIS, sum(n)::LINECHART
-FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
-GROUP BY ALL ORDER BY week;
-
-SELECT channel::XAXIS, sum(n)::BARCHART
+-- one line per channel (colours match the bars), filtered by region
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
 FROM sessions WHERE region = getvariable('region')
-GROUP BY ALL ORDER BY sum(n) DESC;`,
+GROUP BY ALL ORDER BY week, channel;
+
+-- the selected channel only (uses both dropdowns)
+SELECT week::XAXIS, sum(n)::BARCHART
+FROM sessions WHERE region = getvariable('region') AND channel = getvariable('channel')
+GROUP BY ALL ORDER BY week;`,
 };
 
 const $ = (id) => document.getElementById(id);
