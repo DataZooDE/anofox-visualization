@@ -118,6 +118,22 @@ header .actions select{padding:.42rem .5rem}
 /* Download button (::DOWNLOAD_*) */
 .download-row{justify-content:flex-start}
 .dl-btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:10px;padding:.55rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
+/* MotherDuck connect dialog */
+.md-dialog{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(16,24,40,.45);backdrop-filter:blur(3px)}
+.md-dialog[hidden]{display:none}
+.md-card{background:#fff;border-radius:16px;padding:1.4rem 1.5rem;width:min(440px,92vw);box-shadow:var(--shadow-hi);color:var(--ink)}
+.md-card h3{margin:0 0 .5rem;font-size:1.1rem;font-weight:700}
+.md-note{font-size:.8rem;color:var(--muted);line-height:1.5;margin:0 0 1rem}
+.md-note code{background:#f0f2f7;padding:.05rem .3rem;border-radius:5px;font-size:.92em}
+.md-card label{display:flex;flex-direction:column;gap:.3rem;font-size:.8rem;font-weight:600;color:var(--muted);margin-bottom:.8rem}
+.md-card input{font:inherit;font-size:.9rem;font-weight:500;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem}
+.md-card input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
+.md-status{font-size:.82rem;font-weight:600;min-height:1.2rem;margin-bottom:.6rem}
+.md-status.ok{color:#0ca678}.md-status.err{color:#e03131}
+.md-actions{display:flex;align-items:center;gap:.5rem}
+.md-actions button{cursor:pointer}
+#md-connect{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;border-radius:10px;padding:.5rem 1.1rem;font-weight:600;font-size:.85rem}
+#md.connected{border-color:var(--accent);color:var(--accent)}
 @media print{.editor,header .actions,#loadbar,.dl{display:none !important}.layout{display:block !important}body{background:#fff}}
 .control select[multiple]{padding:.3rem;min-width:130px;cursor:default}
 .control select[multiple] option{padding:.35rem .55rem;border-radius:7px;margin:1px 0;font-weight:600}
@@ -167,6 +183,7 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
   <h1>duckplot</h1>
   <span class="tag">SQL dashboards — live DuckDB or DuckDB-Wasm, rendered by ggplot-rs</span>
   <div class="actions">
+    <button id="md" class="btn2" title="connect a MotherDuck database">☁ MotherDuck</button>
     <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
     <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
     <select id="refresh" title="auto-refresh interval">
@@ -179,6 +196,22 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
   </div>
   <span class="status" id="status">booting…</span>
 </header>
+
+<div id="md-dialog" class="md-dialog" hidden>
+  <div class="md-card">
+    <h3>Connect MotherDuck</h3>
+    <p class="md-note">Runs <code>ATTACH 'md:…'</code> with your service token. The token is stored only in this browser (localStorage) — it is never put in the SQL, the share link, or the exported HTML.</p>
+    <label>Service token<input id="md-token" type="password" placeholder="paste your MotherDuck token" autocomplete="off"></label>
+    <label>Database (optional)<input id="md-db" type="text" placeholder="e.g. my_db  →  ATTACH 'md:my_db'"></label>
+    <div class="md-status" id="md-status"></div>
+    <div class="md-actions">
+      <button id="md-disconnect" class="btn2">Disconnect</button>
+      <span style="flex:1"></span>
+      <button id="md-cancel" class="btn2">Cancel</button>
+      <button id="md-connect">Connect</button>
+    </div>
+  </div>
+</div>
 <div class="layout">
   <div class="editor">
     <div class="bar">

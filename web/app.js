@@ -555,11 +555,106 @@ async function boot() {
     run();
   };
 
+  // MotherDuck connect dialog + auto-connect from a stored token.
+  $("md").onclick = mdOpen;
+  $("md-cancel").onclick = () => ($("md-dialog").hidden = true);
+  $("md-connect").onclick = mdDoConnect;
+  $("md-disconnect").onclick = mdDisconnect;
+  const saved = mdSaved();
+  if (saved && saved.token) {
+    try {
+      await mdConnect(saved.token, saved.db);
+      mdMark(true, saved.db);
+    } catch (e) {
+      mdMark(false);
+    }
+  }
+
   $("run").disabled = false;
   $("run").onclick = () => run();
   $("samples").addEventListener("change", () => run());
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
+}
+
+// ---------- MotherDuck ----------
+const MD_KEY = "dp_md";
+function mdSaved() {
+  try {
+    return JSON.parse(localStorage.getItem(MD_KEY) || "null");
+  } catch (_) {
+    return null;
+  }
+}
+// Attach an md: database. Token/db are substituted here (never in the dashboard
+// SQL), so they stay out of the share link and exported HTML.
+async function mdConnect(token, db) {
+  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+  for (const stmt of ["INSTALL motherduck", "LOAD motherduck"]) {
+    try {
+      await runSql(stmt);
+    } catch (_) {
+      /* autoloaded on some builds */
+    }
+  }
+  await runSql(`SET motherduck_token=${q(token)}`);
+  try {
+    await runSql(db ? `ATTACH ${q("md:" + db)}` : "ATTACH 'md:'");
+  } catch (e) {
+    if (!/already attached|already exists/i.test(String(e))) throw e;
+  }
+}
+function mdMark(ok, db) {
+  const btn = $("md");
+  btn.classList.toggle("connected", ok);
+  btn.textContent = ok ? `☁ ${db || "MotherDuck"} ✓` : "☁ MotherDuck";
+}
+function mdOpen() {
+  const s = mdSaved() || {};
+  $("md-token").value = s.token || "";
+  $("md-db").value = s.db || "";
+  const st = $("md-status");
+  st.textContent = "";
+  st.className = "md-status";
+  $("md-dialog").hidden = false;
+  $("md-token").focus();
+}
+async function mdDoConnect() {
+  const token = $("md-token").value.trim();
+  const db = $("md-db").value.trim();
+  const st = $("md-status");
+  if (!token) {
+    st.textContent = "Please paste a token.";
+    st.className = "md-status err";
+    return;
+  }
+  st.textContent = "Connecting…";
+  st.className = "md-status";
+  try {
+    await mdConnect(token, db);
+    localStorage.setItem(MD_KEY, JSON.stringify({ token, db }));
+    mdMark(true, db);
+    st.textContent = "Connected ✓";
+    st.className = "md-status ok";
+    setTimeout(() => ($("md-dialog").hidden = true), 700);
+    run();
+  } catch (e) {
+    st.textContent = "Failed: " + String(e).replace(/^Error:\s*/, "");
+    st.className = "md-status err";
+  }
+}
+async function mdDisconnect() {
+  const s = mdSaved();
+  localStorage.removeItem(MD_KEY);
+  if (s && s.db) {
+    try {
+      await runSql(`DETACH ${s.db.replace(/[^A-Za-z0-9_]/g, "")}`); // detach by name
+    } catch (_) {}
+  }
+  mdMark(false);
+  const st = $("md-status");
+  st.textContent = "Disconnected — reload the page for a fully clean session.";
+  st.className = "md-status";
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
