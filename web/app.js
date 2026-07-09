@@ -339,6 +339,35 @@ SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'By day'::TITLE
 FROM events
 WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
 GROUP BY ALL ORDER BY day, channel;`,
+
+  "Master–detail (SKU)": `-- Two tables linked by an id (sku), no JOIN needed: the summary table is the
+-- cross-filter SOURCE, the line chart is the detail. Clicking a SKU row sets
+-- getvariable('selected'); the chart plots that SKU's monthly series.
+
+-- 1) a monthly time series, several SKUs
+CREATE OR REPLACE TABLE ts AS SELECT * FROM (VALUES
+  ('SKU-A','2024-01',120),('SKU-A','2024-02',135),('SKU-A','2024-03',128),('SKU-A','2024-04',150),('SKU-A','2024-05',162),('SKU-A','2024-06',158),
+  ('SKU-B','2024-01', 80),('SKU-B','2024-02', 72),('SKU-B','2024-03', 95),('SKU-B','2024-04', 88),('SKU-B','2024-05',101),('SKU-B','2024-06',110),
+  ('SKU-C','2024-01',210),('SKU-C','2024-02',198),('SKU-C','2024-03',205),('SKU-C','2024-04',180),('SKU-C','2024-05',176),('SKU-C','2024-06',165)
+) t(sku, month, sales);
+
+-- 2) summary statistics, one row per SKU (the second table)
+CREATE OR REPLACE TABLE stats AS
+SELECT sku, sum(sales) AS total, round(avg(sales),0) AS avg_sales, max(sales) AS peak, min(sales) AS low
+FROM ts GROUP BY sku;
+
+SELECT 'Click a SKU row to plot its monthly series'::LABEL;
+
+-- summary table: sku is the FIRST column, so its rows are the click source
+SELECT 5::COL;
+SELECT sku, total, avg_sales, peak, low ::TABLE FROM stats ORDER BY total DESC;
+
+-- detail: the selected SKU's line (defaults to the top SKU until you click one)
+SELECT 7::COL;
+SELECT month::XAXIS, sales::LINECHART, 'Monthly sales — selected SKU'::TITLE
+FROM ts
+WHERE sku = COALESCE(NULLIF(getvariable('selected'),''), (SELECT sku FROM stats ORDER BY total DESC LIMIT 1))
+ORDER BY month;`,
 };
 
 const $ = (id) => document.getElementById(id);
