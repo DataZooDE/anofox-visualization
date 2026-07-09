@@ -35,7 +35,12 @@ fn main() {
         if p.roles.iter().any(|(_, r)| {
             matches!(
                 r,
-                Role::Input(_) | Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span
+                Role::Input(_)
+                    | Role::Columns
+                    | Role::GroupStart
+                    | Role::GroupEnd
+                    | Role::Span
+                    | Role::Tab
             )
         }) {
             continue;

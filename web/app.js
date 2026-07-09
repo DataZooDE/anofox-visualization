@@ -157,6 +157,35 @@ FROM m WHERE value >= getvariable('min_value');
 SELECT 12::COL;
 SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP
 FROM m GROUP BY ALL ORDER BY week, channel;`,
+
+  "Tabs & formats": `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('W1','app',30,1200.0),('W1','web',22,900.0),('W1','api',12,400.0),
+  ('W2','app',41,1600.0),('W2','web',28,1100.0),('W2','api',15,520.0),
+  ('W3','app',26,980.0),('W3','web',33,1300.0),('W3','api', 9,330.0),
+  ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
+) t(week, channel, n, revenue);
+
+-- header KPIs (above the tabs) with value formats:
+SELECT 4::COL; SELECT sum(revenue)::MONEY,  'Revenue'::LABEL  FROM sales;
+SELECT 4::COL; SELECT sum(n)::COMPACT,      'Sessions'::LABEL FROM sales;
+SELECT 4::COL; SELECT round(100.0*sum(n) FILTER (WHERE channel='app')/sum(n),0)::PERCENT,
+                      'App share'::LABEL FROM sales;
+
+SELECT 'Revenue'::TAB;
+SELECT 12::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
+FROM sales GROUP BY ALL ORDER BY week, channel;
+
+SELECT 'Sessions'::TAB;
+SELECT 6::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL;
+SELECT channel::CATEGORY, sum(n)::PIE FROM sales GROUP BY ALL;
+
+SELECT 'Data'::TAB;
+SELECT 12::COL;
+SELECT week, channel, n, revenue ::TABLE FROM sales ORDER BY week, channel;`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -224,8 +253,10 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT"];
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
+const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
+const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN"].find((d) => role(s, d));
+const directive = (s) => ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "TAB"].find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('selected')
@@ -233,6 +264,7 @@ let dpFilter = ""; // cross-filter: the clicked value, exposed as getvariable('s
 async function run() {
   const grid = $("grid");
   grid.innerHTML = "";
+  document.querySelector(".dash").querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
   status("running…");
   let stmts;
   try {
@@ -285,6 +317,9 @@ async function run() {
   // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
   // grid columns; ::SPAN widens the next panel.
   let container = grid;
+  let curGrid = grid; // the active surface (the main grid, or the current tab pane)
+  let tabBar = null;
+  let tabWrap = null;
   let nextSpan = 0;
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
@@ -317,21 +352,52 @@ async function run() {
         const body = document.createElement("div");
         body.className = "group-body";
         box.appendChild(body);
-        grid.appendChild(box);
+        curGrid.appendChild(box);
         container = body;
       } else if (d === "ENDGROUP") {
-        container = grid;
+        container = curGrid;
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
+      } else if (d === "TAB") {
+        const name = String((await firstValue(s)) ?? "Tab");
+        if (!tabBar) {
+          const dash = document.querySelector(".dash");
+          tabBar = document.createElement("div");
+          tabBar.className = "tabbar";
+          tabWrap = document.createElement("div");
+          tabWrap.className = "tabwrap";
+          dash.appendChild(tabBar);
+          dash.appendChild(tabWrap);
+        }
+        const pane = document.createElement("div");
+        pane.className = "grid tabpane";
+        pane.style.display = "none";
+        tabWrap.appendChild(pane);
+        const btn = document.createElement("button");
+        btn.className = "tab-btn";
+        btn.textContent = name;
+        btn.onclick = () => {
+          tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
+          tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+          pane.style.display = "";
+          btn.classList.add("active");
+        };
+        tabBar.appendChild(btn);
+        if (tabBar.children.length === 1) {
+          pane.style.display = "";
+          btn.classList.add("active");
+        }
+        curGrid = pane;
+        container = pane;
       } else if (isInput(s)) {
-        if (dd[i]) container.appendChild(makeControl(dd[i], container === grid));
+        if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
         const mkPanel = () => {
           const fig = document.createElement("figure");
           fig.className = "panel";
-          if (container === grid) fig.style.gridColumn = `span ${span}`;
+          if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           return fig;
         };
         if (isHeading(s)) {
@@ -345,14 +411,14 @@ async function run() {
           fig.appendChild(renderTable(JSON.parse(rowsJson)));
           container.appendChild(fig);
           panels++;
-        } else if (role(s, "METRIC")) {
+        } else if (metricRole(s)) {
           const r0 = JSON.parse(rowsJson)[0] || {};
-          const mi = s.roles.find((r) => r[1] === "METRIC")[0];
+          const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
           const fig = mkPanel();
           fig.classList.add("metric");
           fig.innerHTML =
-            `<div class="metric-value">${fmtNum(r0["c" + mi])}</div>` +
+            `<div class="metric-value">${fmtNum(r0["c" + mr[0]], mr[1])}</div>` +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
           container.appendChild(fig);
           panels++;
@@ -432,11 +498,17 @@ function renderTable(rows) {
   return t;
 }
 
-// Format a KPI value with thousands separators.
-function fmtNum(v) {
+// Format a KPI value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
+function fmtNum(v, fmt) {
   const n = typeof v === "number" ? v : parseFloat(v);
   if (v == null) return "–";
-  return Number.isNaN(n) ? String(v) : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (Number.isNaN(n)) return String(v);
+  if (fmt === "MONEY")
+    return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  if (fmt === "PERCENT") return n.toLocaleString(undefined, { maximumFractionDigits: 1 }) + "%";
+  if (fmt === "COMPACT")
+    return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function escapeHtml(s) {

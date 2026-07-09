@@ -51,6 +51,15 @@ pub enum InputKind {
     Text,
 }
 
+/// How a KPI value is formatted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetricFmt {
+    Plain,
+    Money,
+    Percent,
+    Compact,
+}
+
 /// The role a result column plays in the visualization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -77,8 +86,11 @@ pub enum Role {
     Span,
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
-    /// A single big-number KPI (`::METRIC`); an optional `::LABEL` is the caption.
-    Metric,
+    /// A single big-number KPI (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`); an
+    /// optional `::LABEL` is the caption.
+    Metric(MetricFmt),
+    /// Layout: `::TAB` starts a new tab; following panels live under it.
+    Tab,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -112,7 +124,11 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
         "TABLE" | "GRID" => Some(Role::Table),
-        "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric),
+        "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
+        "MONEY" | "DOLLAR" | "CURRENCY" => Some(Role::Metric(MetricFmt::Money)),
+        "PERCENT" | "PCT" => Some(Role::Metric(MetricFmt::Percent)),
+        "COMPACT" => Some(Role::Metric(MetricFmt::Compact)),
+        "TAB" | "PAGE" => Some(Role::Tab),
         "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
         "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),
         "DATE" | "DATEPICKER" => Some(Role::Input(InputKind::Date)),

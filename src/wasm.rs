@@ -65,6 +65,10 @@ fn role_str(r: &Role) -> &'static str {
         Role::GroupEnd => "ENDGROUP",
         Role::Span => "SPAN",
         Role::Table => "TABLE",
-        Role::Metric => "METRIC",
+        Role::Metric(crate::MetricFmt::Plain) => "METRIC",
+        Role::Metric(crate::MetricFmt::Money) => "MONEY",
+        Role::Metric(crate::MetricFmt::Percent) => "PERCENT",
+        Role::Metric(crate::MetricFmt::Compact) => "COMPACT",
+        Role::Tab => "TAB",
     }
 }

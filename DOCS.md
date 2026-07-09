@@ -33,6 +33,7 @@ A dashboard is a `.sql` script. Two kinds of statement:
 | `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
 | `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
 | `::METRIC` (`::KPI`) | a single big-number KPI (add a `::LABEL` for the caption) |
+| `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
 | `::TABLE` | render the whole result set as a data table |
 | `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options) |
 | `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
@@ -68,6 +69,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT n::COL;` (`::SPAN`, `::WIDTH`) | the **next** panel's width — `n` of 12 (`12`=full, `6`=half, `4`=third) |
 | `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
+| `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
 
 ```sql
 SELECT 'Filters'::GROUP;                 -- two dropdowns together in one box
