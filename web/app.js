@@ -572,6 +572,13 @@ async function boot() {
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
   $("cat-refresh").onclick = loadCatalog;
   $("cat-search").oninput = () => filterCatalog($("cat-search").value);
+  $("xq-run").onclick = runExplore;
+  $("xq-sql").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      runExplore();
+    }
+  });
   const hashSql = decodeHashSql();
   if (hashSql) {
     $("sql").value = hashSql;
@@ -945,23 +952,48 @@ function filterCatalog(q) {
     dn.style.display = any ? "" : "none";
   });
 }
+// Run whatever is in the explore SQL editor and show the result table.
+async function runExplore() {
+  $("xq-detail").innerHTML = ""; // a manual query clears the table-stats card
+  await renderExploreResult($("xq-sql").value.trim());
+}
+async function renderExploreResult(sql) {
+  const info = $("xq-info"),
+    res = $("xq-results");
+  if (!sql) {
+    res.innerHTML = '<div class="explore-empty">Pick a table on the left, or write a query above and Run.</div>';
+    info.textContent = "";
+    return;
+  }
+  info.textContent = "Running…";
+  res.innerHTML = "";
+  try {
+    const rows = JSON.parse(await runSql(sql));
+    info.textContent = `${rows.length.toLocaleString()} row${rows.length === 1 ? "" : "s"}`;
+    res.appendChild(renderTable(rows));
+  } catch (e) {
+    info.textContent = "";
+    res.innerHTML = `<div class="err">${escapeHtml(String(e))}</div>`;
+  }
+}
 async function previewTable(db, sc, t, node) {
   document.querySelectorAll(".cat-table").forEach((el) => el.classList.toggle("active", el === node));
-  const main = $("explore-main");
   const fq = fqn(db, sc, t);
   const path = `${escapeHtml(db)}.${escapeHtml(sc)}`;
-  main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${path}</div><div class="explore-empty">Loading…</div>`;
+  $("xq-sql").value = `SELECT * FROM ${fq} LIMIT 100`;
+  const detail = $("xq-detail");
+  detail.innerHTML = '<div class="explore-empty">Loading…</div>';
+  renderExploreResult(`SELECT * FROM ${fq} LIMIT 100`);
   try {
     const stats = JSON.parse(await runSql(`SUMMARIZE FROM ${fq}`));
-    const rows = JSON.parse(await runSql(`SELECT * FROM ${fq} LIMIT 100`));
     let total = null;
     try {
       total = Number(JSON.parse(await runSql(`SELECT count(*) AS n FROM ${fq}`))[0].n);
     } catch (_) {}
-    main.innerHTML = "";
+    detail.innerHTML = "";
     const h = document.createElement("div");
     h.className = "explore-head";
-    const meta = `${total != null ? total.toLocaleString() + " rows" : "first " + rows.length + " rows"} · ${stats.length} columns`;
+    const meta = `${total != null ? total.toLocaleString() + " rows" : ""} · ${stats.length} columns`;
     h.innerHTML = `<div><h3>${escapeHtml(t)}</h3><div class="explore-sub">${path} — ${meta}</div></div>`;
     const open = document.createElement("button");
     open.className = "btn2";
@@ -973,19 +1005,14 @@ async function previewTable(db, sc, t, node) {
         stats.map((r) => r.column_name)
       );
     h.appendChild(open);
-    main.appendChild(h);
-    const sec = (txt) => {
-      const d = document.createElement("div");
-      d.className = "explore-sec";
-      d.textContent = txt;
-      main.appendChild(d);
-    };
-    sec(`Columns (${stats.length})`);
-    main.appendChild(renderTable(stats));
-    sec("Preview");
-    main.appendChild(renderTable(rows));
+    detail.appendChild(h);
+    const sec = document.createElement("div");
+    sec.className = "explore-sec";
+    sec.textContent = `Columns (${stats.length})`;
+    detail.appendChild(sec);
+    detail.appendChild(renderTable(stats));
   } catch (e) {
-    main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${path}</div><div class="err">${escapeHtml(String(e))}</div>`;
+    detail.innerHTML = `<div class="err">${escapeHtml(String(e))}</div>`;
   }
 }
 // Explore → build: prewrite a paged dashboard querying the picked table.

@@ -78,6 +78,12 @@ body.mode-explore #run,body.mode-explore #save,body.mode-explore #cols,body.mode
 .cat-tree{overflow-y:auto;flex:1}
 .explore-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:.3rem;flex-wrap:wrap}
 .explore-head h3{margin:0 0 .2rem}
+.xq{display:flex;gap:.5rem;align-items:stretch;margin-bottom:.7rem}
+.xq-sql{flex:1;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem;min-height:66px;resize:vertical;background:#fff;color:var(--ink);tab-size:2}
+.xq-sql:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.14)}
+.xq #xq-run{align-self:flex-start}
+.xq-info{font-size:.78rem;color:var(--muted);font-weight:600;margin:.2rem 0 .5rem}
+body.dark .xq-sql,body.dark .cat-search{background:#16223e;color:#e8eef8;border-color:#2b3a58}
 .cat-head{display:flex;align-items:center;gap:.4rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:.3rem .4rem .5rem}
 .cat-head .icon{margin-left:auto;font-size:.8rem}
 .cat-node{padding:.32rem .5rem;border-radius:8px;cursor:pointer;font-size:.85rem;display:flex;align-items:center;gap:.35rem;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -319,7 +325,15 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
         <input id="cat-search" class="cat-search" placeholder="🔍 Filter tables…" spellcheck="false">
         <div id="cat-tree" class="cat-tree"></div>
       </aside>
-      <div class="explore-main" id="explore-main"><div class="explore-empty">Pick a table on the left to preview its rows and column stats.</div></div>
+      <div class="explore-main" id="explore-main">
+        <div class="xq">
+          <textarea id="xq-sql" class="xq-sql" placeholder="Write SQL, then Run (Ctrl/⌘+Enter). Click a table on the left to prefill a preview." spellcheck="false"></textarea>
+          <button id="xq-run">Run ▸</button>
+        </div>
+        <div id="xq-detail"></div>
+        <div class="xq-info" id="xq-info"></div>
+        <div id="xq-results"><div class="explore-empty">Pick a table on the left, or write a query above and Run.</div></div>
+      </div>
     </div>
   </main>
 </div>
