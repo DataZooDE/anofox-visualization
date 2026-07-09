@@ -26,13 +26,28 @@ FROM sessions GROUP BY ALL ORDER BY week, channel;
 SELECT channel::XAXIS, sum(n)::BARCHART, 'Totals by channel'::TITLE
 FROM sessions GROUP BY ALL ORDER BY sum(n) DESC;`,
 
-  "Generated series": `SELECT 'Signal explorer'::LABEL;
+  "Signal explorer": `-- No table needed: generate data on the fly with range().
+SELECT 'Signal explorer — data generated with range()'::LABEL;
 
-SELECT i::XAXIS, sin(i/6.0)*40 + 50::LINECHART
-FROM range(0, 40) t(i);
+-- trend + seasonality, as an area with a ± band
+SELECT 8::COL;
+SELECT i::XAXIS,
+       (50 + i*0.5 + sin(i/6.0)*22)::LINECHART,
+       (50 + i*0.5 + sin(i/6.0)*22 - 10)::BAND_LOWER,
+       (50 + i*0.5 + sin(i/6.0)*22 + 10)::BAND_UPPER,
+       'Trend + seasonality'::TITLE
+FROM range(0, 60) t(i);
 
-SELECT (i % 5)::XAXIS, count(*)::BARCHART
-FROM range(0, 137) t(i) GROUP BY ALL ORDER BY 1;`,
+-- a quick KPI + a histogram of a derived value
+SELECT 4::COL;
+SELECT round(avg((i*7) % 100), 1)::METRIC, 'Avg value'::LABEL FROM range(0, 500) t(i);
+
+SELECT 4::COL;
+SELECT ((i * 7) % 100)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500) t(i);
+
+SELECT 8::COL;
+SELECT (i % 7)::XAXIS, count(*)::BARCHART, 'Rows per bucket'::TITLE
+FROM range(0, 300) t(i) GROUP BY ALL ORDER BY 1;`,
 
   "Dropdown filter": `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
   ('W1','app',30),('W1','web',22),('W1','api',12),
@@ -47,7 +62,7 @@ SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;
 
 SELECT 'Sessions for the selected channel'::LABEL;
 
-SELECT week::XAXIS, sum(n)::BARCHART
+SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly sessions'::TITLE
 FROM sessions WHERE channel = getvariable('channel')
 GROUP BY ALL ORDER BY week;`,
 
