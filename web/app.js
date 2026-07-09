@@ -571,6 +571,7 @@ async function boot() {
   $("mode-view").onclick = () => setMode("view");
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
   $("cat-refresh").onclick = loadCatalog;
+  $("cat-search").oninput = () => filterCatalog($("cat-search").value);
   const hashSql = decodeHashSql();
   if (hashSql) {
     $("sql").value = hashSql;
@@ -591,12 +592,6 @@ async function boot() {
     if (s > 0) dpTimer = setInterval(run, s * 1000);
   };
 
-  // layout: default columns-per-row (12-col bootstrap grid; panels span 12/cols)
-  $("cols").onchange = () => {
-    const v = $("cols").value;
-    dpCols = v === "auto" ? 2 : parseInt(v);
-    run();
-  };
 
   // MotherDuck connect dialog + auto-connect from a stored token.
   $("md").onclick = mdOpen;
@@ -622,22 +617,77 @@ async function boot() {
 // ---------- app shell: sidebar, dashboards, modes, data exploration ----------
 const DASH_KEY = "dp_dashboards";
 let curDash = null;
-function savedDashes() {
+// Store: { items: { name: {sql, group} }, groups: [names], collapsed: {group:bool} }.
+function dashStore() {
+  let raw;
   try {
-    return JSON.parse(localStorage.getItem(DASH_KEY) || "{}");
+    raw = JSON.parse(localStorage.getItem(DASH_KEY) || "null");
   } catch (_) {
-    return {};
+    raw = null;
   }
+  if (!raw) return { items: {}, groups: [], collapsed: {} };
+  if (!raw.items) {
+    // migrate the old flat { name: sql } shape
+    const items = {};
+    for (const [n, sql] of Object.entries(raw)) if (typeof sql === "string") items[n] = { sql, group: "" };
+    return { items, groups: [], collapsed: {} };
+  }
+  raw.items ||= {};
+  raw.groups ||= [];
+  raw.collapsed ||= {};
+  return raw;
 }
+const dashSaveStore = (s) => localStorage.setItem(DASH_KEY, JSON.stringify(s));
+
 function renderSidebar() {
   const nav = $("side-nav");
   nav.innerHTML = "";
-  const saved = savedDashes();
-  const names = Object.keys(saved);
-  if (names.length) {
-    nav.appendChild(sideSection("My dashboards"));
-    for (const n of names) nav.appendChild(sideItem(n, saved[n], true));
+  const store = dashStore();
+  const names = Object.keys(store.items);
+
+  // "My dashboards" header with a + group button (drop here to ungroup)
+  const hdr = document.createElement("div");
+  hdr.className = "side-section side-section-row";
+  const lbl = document.createElement("span");
+  lbl.textContent = "My dashboards";
+  const add = document.createElement("button");
+  add.className = "side-mini";
+  add.textContent = "+ group";
+  add.title = "new group";
+  add.onclick = createGroup;
+  hdr.append(lbl, add);
+  hdr.ondragover = (e) => {
+    e.preventDefault();
+    hdr.classList.add("drop");
+  };
+  hdr.ondragleave = () => hdr.classList.remove("drop");
+  hdr.ondrop = (e) => {
+    e.preventDefault();
+    hdr.classList.remove("drop");
+    moveDash(e.dataTransfer.getData("text/plain"), "");
+  };
+  nav.appendChild(hdr);
+
+  // bucket dashboards by group
+  const byGroup = {};
+  for (const g of store.groups) byGroup[g] = [];
+  const ungrouped = [];
+  for (const n of names) {
+    const g = store.items[n].group;
+    if (g && byGroup[g]) byGroup[g].push(n);
+    else ungrouped.push(n);
   }
+  for (const g of store.groups) {
+    nav.appendChild(groupHeader(g, store));
+    if (!store.collapsed[g])
+      for (const n of byGroup[g]) {
+        const it = sideItem(n, store.items[n].sql, true);
+        it.classList.add("in-group");
+        nav.appendChild(it);
+      }
+  }
+  for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, true));
+
   nav.appendChild(sideSection("Examples"));
   for (const n of Object.keys(SAMPLES)) nav.appendChild(sideItem(n, SAMPLES[n], false));
   markActive();
@@ -648,10 +698,62 @@ function sideSection(t) {
   d.textContent = t;
   return d;
 }
+function groupHeader(g, store) {
+  const h = document.createElement("div");
+  h.className = "side-group" + (store.collapsed[g] ? " collapsed" : "");
+  const caret = document.createElement("span");
+  caret.className = "g-caret";
+  caret.textContent = store.collapsed[g] ? "▸" : "▾";
+  const nm = document.createElement("span");
+  nm.className = "g-name";
+  nm.textContent = g;
+  const ren = document.createElement("button");
+  ren.className = "g-btn";
+  ren.textContent = "✎";
+  ren.title = "rename group";
+  const del = document.createElement("button");
+  del.className = "g-btn";
+  del.textContent = "✕";
+  del.title = "delete group";
+  h.append(caret, nm, ren, del);
+  h.onclick = (e) => {
+    if (e.target === ren || e.target === del) return;
+    const s = dashStore();
+    s.collapsed[g] = !s.collapsed[g];
+    dashSaveStore(s);
+    renderSidebar();
+  };
+  ren.onclick = (e) => {
+    e.stopPropagation();
+    renameGroup(g);
+  };
+  del.onclick = (e) => {
+    e.stopPropagation();
+    deleteGroup(g);
+  };
+  h.ondragover = (e) => {
+    e.preventDefault();
+    h.classList.add("drop");
+  };
+  h.ondragleave = () => h.classList.remove("drop");
+  h.ondrop = (e) => {
+    e.preventDefault();
+    h.classList.remove("drop");
+    moveDash(e.dataTransfer.getData("text/plain"), g);
+  };
+  return h;
+}
 function sideItem(name, sql, deletable) {
   const b = document.createElement("button");
   b.className = "side-item";
   b.dataset.name = name;
+  if (deletable) {
+    b.draggable = true;
+    b.ondragstart = (e) => {
+      e.dataTransfer.setData("text/plain", name);
+      e.dataTransfer.effectAllowed = "move";
+    };
+  }
   const s = document.createElement("span");
   s.className = "s-name";
   s.textContent = name;
@@ -672,6 +774,43 @@ function sideItem(name, sql, deletable) {
 }
 function markActive() {
   document.querySelectorAll(".side-item").forEach((el) => el.classList.toggle("active", el.dataset.name === curDash));
+}
+function createGroup() {
+  const g = (prompt("New group name") || "").trim();
+  if (!g) return;
+  const s = dashStore();
+  if (!s.groups.includes(g)) s.groups.push(g);
+  dashSaveStore(s);
+  renderSidebar();
+}
+function renameGroup(old) {
+  const g = (prompt("Rename group", old) || "").trim();
+  if (!g || g === old) return;
+  const s = dashStore();
+  s.groups = s.groups.map((x) => (x === old ? g : x));
+  for (const n in s.items) if (s.items[n].group === old) s.items[n].group = g;
+  if (s.collapsed[old] !== undefined) {
+    s.collapsed[g] = s.collapsed[old];
+    delete s.collapsed[old];
+  }
+  dashSaveStore(s);
+  renderSidebar();
+}
+function deleteGroup(g) {
+  const s = dashStore();
+  s.groups = s.groups.filter((x) => x !== g);
+  for (const n in s.items) if (s.items[n].group === g) s.items[n].group = "";
+  delete s.collapsed[g];
+  dashSaveStore(s);
+  renderSidebar();
+}
+function moveDash(name, group) {
+  const s = dashStore();
+  if (s.items[name]) {
+    s.items[name].group = group;
+    dashSaveStore(s);
+    renderSidebar();
+  }
 }
 function loadDash(name, sql) {
   curDash = name || null;
@@ -695,17 +834,18 @@ function saveDash() {
     $("dash-name").focus();
     return status("name it first");
   }
-  const saved = savedDashes();
-  saved[name] = $("sql").value;
-  localStorage.setItem(DASH_KEY, JSON.stringify(saved));
+  const s = dashStore();
+  const group = s.items[name] ? s.items[name].group : "";
+  s.items[name] = { sql: $("sql").value, group };
+  dashSaveStore(s);
   curDash = name;
   renderSidebar();
   status("saved ✓");
 }
 function delDash(name) {
-  const saved = savedDashes();
-  delete saved[name];
-  localStorage.setItem(DASH_KEY, JSON.stringify(saved));
+  const s = dashStore();
+  delete s.items[name];
+  dashSaveStore(s);
   if (curDash === name) curDash = null;
   renderSidebar();
 }
@@ -786,28 +926,81 @@ async function loadCatalog() {
     }
   }
 }
+function filterCatalog(q) {
+  q = q.trim().toLowerCase();
+  const tree = $("cat-tree");
+  tree.querySelectorAll(".cat-table").forEach((tn) => {
+    tn.style.display = !q || tn.textContent.toLowerCase().includes(q) ? "" : "none";
+  });
+  tree.querySelectorAll(".cat-schema").forEach((sn) => {
+    let any = false;
+    for (let el = sn.nextElementSibling; el && el.classList.contains("cat-table"); el = el.nextElementSibling)
+      if (el.style.display !== "none") any = true;
+    sn.style.display = any ? "" : "none";
+  });
+  tree.querySelectorAll(".cat-db").forEach((dn) => {
+    let any = false;
+    for (let el = dn.nextElementSibling; el && !el.classList.contains("cat-db"); el = el.nextElementSibling)
+      if (el.classList.contains("cat-table") && el.style.display !== "none") any = true;
+    dn.style.display = any ? "" : "none";
+  });
+}
 async function previewTable(db, sc, t, node) {
   document.querySelectorAll(".cat-table").forEach((el) => el.classList.toggle("active", el === node));
   const main = $("explore-main");
-  const head = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${escapeHtml(db)}.${escapeHtml(sc)}</div>`;
-  main.innerHTML = head + '<div class="explore-empty">Loading…</div>';
+  const fq = fqn(db, sc, t);
+  const path = `${escapeHtml(db)}.${escapeHtml(sc)}`;
+  main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${path}</div><div class="explore-empty">Loading…</div>`;
   try {
-    const stats = JSON.parse(await runSql(`SUMMARIZE FROM ${fqn(db, sc, t)}`));
-    const rows = JSON.parse(await runSql(`SELECT * FROM ${fqn(db, sc, t)} LIMIT 100`));
-    main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${escapeHtml(db)}.${escapeHtml(sc)} — first ${rows.length} rows</div>`;
+    const stats = JSON.parse(await runSql(`SUMMARIZE FROM ${fq}`));
+    const rows = JSON.parse(await runSql(`SELECT * FROM ${fq} LIMIT 100`));
+    let total = null;
+    try {
+      total = Number(JSON.parse(await runSql(`SELECT count(*) AS n FROM ${fq}`))[0].n);
+    } catch (_) {}
+    main.innerHTML = "";
+    const h = document.createElement("div");
+    h.className = "explore-head";
+    const meta = `${total != null ? total.toLocaleString() + " rows" : "first " + rows.length + " rows"} · ${stats.length} columns`;
+    h.innerHTML = `<div><h3>${escapeHtml(t)}</h3><div class="explore-sub">${path} — ${meta}</div></div>`;
+    const open = document.createElement("button");
+    open.className = "btn2";
+    open.textContent = "＋ New dashboard from this table";
+    open.onclick = () =>
+      openTableAsDashboard(
+        t,
+        fq,
+        stats.map((r) => r.column_name)
+      );
+    h.appendChild(open);
+    main.appendChild(h);
     const sec = (txt) => {
       const d = document.createElement("div");
       d.className = "explore-sec";
       d.textContent = txt;
       main.appendChild(d);
     };
-    sec("Column stats (SUMMARIZE)");
+    sec(`Columns (${stats.length})`);
     main.appendChild(renderTable(stats));
     sec("Preview");
     main.appendChild(renderTable(rows));
   } catch (e) {
-    main.innerHTML = head + `<div class="err">${escapeHtml(String(e))}</div>`;
+    main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${path}</div><div class="err">${escapeHtml(String(e))}</div>`;
   }
+}
+// Explore → build: prewrite a paged dashboard querying the picked table.
+function openTableAsDashboard(name, fq, colNames) {
+  const cols = (colNames || []).filter(Boolean);
+  let sql;
+  if (cols.length) {
+    const items = cols.map((c, i) => (i === cols.length - 1 ? `${qid(c)} ::PAGED` : qid(c))).join(", ");
+    sql = `-- Paged view of ${fq}\nSELECT ${items} FROM ${fq};`;
+  } else {
+    sql = `SELECT * FROM ${fq} LIMIT 100 ::TABLE;`;
+  }
+  setMode("edit");
+  loadDash(name, sql);
+  $("dash-name").value = name;
 }
 
 // ---------- MotherDuck ----------
@@ -1022,7 +1215,6 @@ async function run() {
           dpCols = n;
           defaultSpan = Math.max(1, Math.round(12 / n));
         }
-        $("cols").value = n > 0 && n <= 3 ? String(n) : "auto";
       } else if (d === "GROUP") {
         const title = await firstValue(s);
         const box = document.createElement("section");
@@ -1588,7 +1780,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
           td.style.fontVariantNumeric = "tabular-nums";
           if (n != null) {
             const pct = (Math.abs(n) / maxAbs[c]) * 100;
-            td.style.background = `linear-gradient(90deg, rgba(69,100,129,.13) ${pct}%, transparent ${pct}%)`;
+            td.style.background = `linear-gradient(90deg, rgba(42,157,143,.16) 0, rgba(31,140,166,.14) ${pct}%, transparent ${pct}%)`;
           }
         }
       }

@@ -38,6 +38,17 @@ body.side-collapsed .sidebar{display:none}
 .side-item.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
 .side-item .s-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .side-item .s-del{opacity:0;background:none;box-shadow:none;color:inherit;padding:0 .15rem;font-size:1rem;line-height:1}
+.side-item.in-group{padding-left:1.55rem}
+.side-section-row{display:flex;align-items:center;justify-content:space-between;padding-right:.3rem}
+.side-mini{background:none;color:var(--accent);box-shadow:none;padding:.05rem .35rem;font-size:.72rem;font-weight:700;border-radius:6px}
+.side-mini:hover{background:rgba(42,157,143,.1);transform:none;filter:none}
+.side-group{display:flex;align-items:center;gap:.3rem;padding:.36rem .5rem;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:700;color:var(--ink);margin-top:.15rem}
+.side-group:hover{background:rgba(42,157,143,.06)}
+.side-group.drop,.side-section-row.drop{background:rgba(42,157,143,.16);outline:1px dashed var(--accent);outline-offset:-1px}
+.side-group .g-caret{width:.85rem;font-size:.65rem;color:var(--muted)}
+.side-group .g-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-group .g-btn{opacity:0;background:none;box-shadow:none;color:var(--muted);padding:0 .12rem;font-size:.8rem;line-height:1}
+.side-group:hover .g-btn{opacity:.55}.side-group .g-btn:hover{opacity:1;color:var(--accent);transform:none;filter:none}
 .side-item:hover .s-del{opacity:.6}.side-item .s-del:hover{opacity:1;transform:none;filter:none}
 .side-explore{width:100%;justify-content:center;background:none;color:var(--accent);border:1px solid var(--line);box-shadow:none}
 .side-explore:hover{background:rgba(42,157,143,.07);transform:none;filter:none}
@@ -61,7 +72,12 @@ body.mode-explore #run,body.mode-explore #save,body.mode-explore #cols,body.mode
 .editor{border-right:1px solid var(--line);background:rgba(255,255,255,.6);display:flex;flex-direction:column;backdrop-filter:blur(6px);min-height:0}
 /* data-exploration */
 .explore{display:none;flex:1;min-height:0}
-.cat{width:250px;flex:none;border-right:1px solid var(--line);overflow-y:auto;background:rgba(255,255,255,.5);padding:.5rem}
+.cat{width:250px;flex:none;border-right:1px solid var(--line);overflow-y:auto;background:rgba(255,255,255,.5);padding:.5rem;display:flex;flex-direction:column}
+.cat-search{width:100%;font:inherit;font-size:.82rem;border:1px solid var(--line);border-radius:9px;padding:.4rem .6rem;margin:0 0 .5rem;background:#fff;color:var(--ink)}
+.cat-search:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.14)}
+.cat-tree{overflow-y:auto;flex:1}
+.explore-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:.3rem;flex-wrap:wrap}
+.explore-head h3{margin:0 0 .2rem}
 .cat-head{display:flex;align-items:center;gap:.4rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:.3rem .4rem .5rem}
 .cat-head .icon{margin-left:auto;font-size:.8rem}
 .cat-node{padding:.32rem .5rem;border-radius:8px;cursor:pointer;font-size:.85rem;display:flex;align-items:center;gap:.35rem;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -287,12 +303,6 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
       <button id="run" disabled>Run ▸</button>
       <input id="dash-name" class="dash-name" placeholder="Untitled dashboard" spellcheck="false">
       <button id="save" class="btn2" title="save to this browser">Save</button>
-      <select id="cols" title="layout columns">
-        <option value="auto">Auto cols</option>
-        <option value="1">1 column</option>
-        <option value="2">2 columns</option>
-        <option value="3">3 columns</option>
-      </select>
       <span class="tb-spacer"></span>
       <div class="mode-toggle">
         <button id="mode-edit" class="seg active">✎ Edit</button>
@@ -304,7 +314,11 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
       <div class="dash"><div class="grid" id="grid"></div></div>
     </div>
     <div class="explore" id="explore" hidden>
-      <aside class="cat"><div class="cat-head">Catalog <button id="cat-refresh" class="btn2 icon" title="refresh">⟳</button></div><div id="cat-tree" class="cat-tree"></div></aside>
+      <aside class="cat">
+        <div class="cat-head">Catalog <button id="cat-refresh" class="btn2 icon" title="refresh">⟳</button></div>
+        <input id="cat-search" class="cat-search" placeholder="🔍 Filter tables…" spellcheck="false">
+        <div id="cat-tree" class="cat-tree"></div>
+      </aside>
       <div class="explore-main" id="explore-main"><div class="explore-empty">Pick a table on the left to preview its rows and column stats.</div></div>
     </div>
   </main>
