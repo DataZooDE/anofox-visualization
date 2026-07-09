@@ -562,15 +562,26 @@ async function boot() {
     conn = await db.connect();
   }
 
-  // samples dropdown
-  const sel = $("samples");
-  for (const name of Object.keys(SAMPLES)) {
-    const o = document.createElement("option");
-    o.value = o.textContent = name;
-    sel.appendChild(o);
+  // Sidebar (dashboard list) + app-shell controls
+  renderSidebar();
+  $("side-new").onclick = () => loadDash("", "");
+  $("save").onclick = saveDash;
+  $("side-toggle").onclick = () => document.body.classList.toggle("side-collapsed");
+  $("mode-edit").onclick = () => setMode("edit");
+  $("mode-view").onclick = () => setMode("view");
+  $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
+  $("cat-refresh").onclick = loadCatalog;
+  const hashSql = decodeHashSql();
+  if (hashSql) {
+    $("sql").value = hashSql;
+    $("dash-name").value = "Shared";
+  } else {
+    const first = Object.keys(SAMPLES)[0];
+    curDash = first;
+    $("sql").value = SAMPLES[first];
+    $("dash-name").value = first;
+    markActive();
   }
-  sel.onchange = () => ($("sql").value = SAMPLES[sel.value]);
-  $("sql").value = decodeHashSql() || SAMPLES[Object.keys(SAMPLES)[0]];
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
   $("dark").onclick = () => document.body.classList.toggle("dark");
@@ -604,9 +615,191 @@ async function boot() {
 
   $("run").disabled = false;
   $("run").onclick = () => run();
-  $("samples").addEventListener("change", () => run());
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
+}
+
+// ---------- app shell: sidebar, dashboards, modes, data exploration ----------
+const DASH_KEY = "dp_dashboards";
+let curDash = null;
+function savedDashes() {
+  try {
+    return JSON.parse(localStorage.getItem(DASH_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+function renderSidebar() {
+  const nav = $("side-nav");
+  nav.innerHTML = "";
+  const saved = savedDashes();
+  const names = Object.keys(saved);
+  if (names.length) {
+    nav.appendChild(sideSection("My dashboards"));
+    for (const n of names) nav.appendChild(sideItem(n, saved[n], true));
+  }
+  nav.appendChild(sideSection("Examples"));
+  for (const n of Object.keys(SAMPLES)) nav.appendChild(sideItem(n, SAMPLES[n], false));
+  markActive();
+}
+function sideSection(t) {
+  const d = document.createElement("div");
+  d.className = "side-section";
+  d.textContent = t;
+  return d;
+}
+function sideItem(name, sql, deletable) {
+  const b = document.createElement("button");
+  b.className = "side-item";
+  b.dataset.name = name;
+  const s = document.createElement("span");
+  s.className = "s-name";
+  s.textContent = name;
+  b.appendChild(s);
+  if (deletable) {
+    const del = document.createElement("span");
+    del.className = "s-del";
+    del.textContent = "✕";
+    del.title = "delete";
+    del.onclick = (e) => {
+      e.stopPropagation();
+      delDash(name);
+    };
+    b.appendChild(del);
+  }
+  b.onclick = () => loadDash(name, sql);
+  return b;
+}
+function markActive() {
+  document.querySelectorAll(".side-item").forEach((el) => el.classList.toggle("active", el.dataset.name === curDash));
+}
+function loadDash(name, sql) {
+  curDash = name || null;
+  $("sql").value = sql;
+  $("dash-name").value = name || "";
+  if (bodyMode() === "explore") setMode("edit");
+  markActive();
+  run();
+}
+function saveDash() {
+  const name = ($("dash-name").value || "").trim();
+  if (!name) {
+    $("dash-name").focus();
+    return status("name it first");
+  }
+  const saved = savedDashes();
+  saved[name] = $("sql").value;
+  localStorage.setItem(DASH_KEY, JSON.stringify(saved));
+  curDash = name;
+  renderSidebar();
+  status("saved ✓");
+}
+function delDash(name) {
+  const saved = savedDashes();
+  delete saved[name];
+  localStorage.setItem(DASH_KEY, JSON.stringify(saved));
+  if (curDash === name) curDash = null;
+  renderSidebar();
+}
+
+// ---- Edit / View / Explore modes ----
+function bodyMode() {
+  const c = document.body.classList;
+  return c.contains("mode-explore") ? "explore" : c.contains("mode-view") ? "view" : "edit";
+}
+function setMode(m) {
+  document.body.classList.remove("mode-view", "mode-explore");
+  if (m === "view") document.body.classList.add("mode-view");
+  else if (m === "explore") document.body.classList.add("mode-explore");
+  $("mode-edit").classList.toggle("active", m === "edit");
+  $("mode-view").classList.toggle("active", m === "view");
+  $("side-explore").classList.toggle("active", m === "explore");
+  if (m === "explore") loadCatalog();
+}
+
+// ---- Data exploration: catalog browser + table preview + column stats ----
+const qid = (s) => `"${String(s).replace(/"/g, '""')}"`;
+const fqn = (db, sc, t) => `${qid(db)}.${qid(sc)}.${qid(t)}`;
+async function loadCatalog() {
+  const tree = $("cat-tree");
+  tree.innerHTML = '<div class="cat-empty">Loading…</div>';
+  let rows;
+  try {
+    rows = JSON.parse(
+      await runSql(
+        "SELECT database_name, schema_name, table_name FROM duckdb_tables() " +
+          "UNION ALL SELECT database_name, schema_name, view_name FROM duckdb_views() " +
+          "WHERE NOT internal ORDER BY 1,2,3"
+      )
+    );
+  } catch (_) {
+    try {
+      rows = JSON.parse(
+        await runSql(
+          "SELECT table_catalog AS database_name, table_schema AS schema_name, table_name FROM information_schema.tables ORDER BY 1,2,3"
+        )
+      );
+    } catch (e) {
+      tree.innerHTML = `<div class="cat-empty">${escapeHtml(String(e))}</div>`;
+      return;
+    }
+  }
+  if (!rows.length) {
+    tree.innerHTML = '<div class="cat-empty">No tables yet. Create one in Edit mode, or connect MotherDuck.</div>';
+    return;
+  }
+  const groups = {};
+  for (const r of rows) {
+    const db = r.database_name,
+      sc = r.schema_name,
+      t = r.table_name;
+    (groups[db] ??= {})[sc] ??= [];
+    groups[db][sc].push(t);
+  }
+  tree.innerHTML = "";
+  for (const db of Object.keys(groups)) {
+    const dn = document.createElement("div");
+    dn.className = "cat-node cat-db";
+    dn.textContent = "🗄 " + db;
+    tree.appendChild(dn);
+    for (const sc of Object.keys(groups[db])) {
+      const sn = document.createElement("div");
+      sn.className = "cat-node cat-schema";
+      sn.textContent = sc;
+      tree.appendChild(sn);
+      for (const t of groups[db][sc]) {
+        const tn = document.createElement("div");
+        tn.className = "cat-node cat-table";
+        tn.textContent = t;
+        tn.dataset.fq = fqn(db, sc, t);
+        tn.onclick = () => previewTable(db, sc, t, tn);
+        tree.appendChild(tn);
+      }
+    }
+  }
+}
+async function previewTable(db, sc, t, node) {
+  document.querySelectorAll(".cat-table").forEach((el) => el.classList.toggle("active", el === node));
+  const main = $("explore-main");
+  const head = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${escapeHtml(db)}.${escapeHtml(sc)}</div>`;
+  main.innerHTML = head + '<div class="explore-empty">Loading…</div>';
+  try {
+    const stats = JSON.parse(await runSql(`SUMMARIZE FROM ${fqn(db, sc, t)}`));
+    const rows = JSON.parse(await runSql(`SELECT * FROM ${fqn(db, sc, t)} LIMIT 100`));
+    main.innerHTML = `<h3>${escapeHtml(t)}</h3><div class="explore-sub">${escapeHtml(db)}.${escapeHtml(sc)} — first ${rows.length} rows</div>`;
+    const sec = (txt) => {
+      const d = document.createElement("div");
+      d.className = "explore-sec";
+      d.textContent = txt;
+      main.appendChild(d);
+    };
+    sec("Column stats (SUMMARIZE)");
+    main.appendChild(renderTable(stats));
+    sec("Preview");
+    main.appendChild(renderTable(rows));
+  } catch (e) {
+    main.innerHTML = head + `<div class="err">${escapeHtml(String(e))}</div>`;
+  }
 }
 
 // ---------- MotherDuck ----------
@@ -1324,6 +1517,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
         const own = dpXf[key] !== undefined ? dpXf[key] : dpSelected;
         if (own && keyVal === own) tr.classList.add("row-sel");
         tr.onclick = (e) => {
+          if (document.body.classList.contains("mode-explore")) return; // preview tables aren't cross-filters
           e.stopPropagation();
           const on = (dpXf[key] ?? "") !== keyVal;
           dpXf[key] = on ? keyVal : "";

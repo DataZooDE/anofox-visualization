@@ -26,9 +26,61 @@ header h1::before{content:"";width:11px;height:11px;border-radius:50%;background
 header .tag{color:var(--muted);font-size:.82rem}
 header .actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
 header .status{font-size:.78rem;color:var(--muted);min-width:58px;text-align:right;font-weight:600}
-.layout{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:0;min-height:calc(100vh - 57px)}
-.editor{border-right:1px solid var(--line);background:rgba(255,255,255,.6);display:flex;flex-direction:column;backdrop-filter:blur(6px)}
-.editor .bar{padding:.6rem .8rem;border-bottom:1px solid var(--line);display:flex;gap:.5rem;align-items:center}
+/* ---- app shell: sidebar + main (toolbar over workspace/explore) ---- */
+.shell{display:flex;min-height:calc(100vh - 57px)}
+.sidebar{width:238px;flex:none;border-right:1px solid var(--line);background:rgba(255,255,255,.55);backdrop-filter:blur(8px);display:flex;flex-direction:column;padding:.8rem .7rem;gap:.55rem;overflow-y:auto}
+body.side-collapsed .sidebar{display:none}
+.side-new{width:100%;justify-content:center}
+.side-nav{flex:1;display:flex;flex-direction:column;gap:.08rem;overflow-y:auto;margin:.2rem -.1rem}
+.side-section{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:.8rem .4rem .25rem}
+.side-item{display:flex;align-items:center;gap:.4rem;padding:.44rem .55rem;border-radius:9px;font-size:.85rem;font-weight:600;color:var(--ink);cursor:pointer;border:0;background:none;text-align:left;width:100%;box-shadow:none}
+.side-item:hover{background:rgba(42,157,143,.08);transform:none;filter:none}
+.side-item.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.side-item .s-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-item .s-del{opacity:0;background:none;box-shadow:none;color:inherit;padding:0 .15rem;font-size:1rem;line-height:1}
+.side-item:hover .s-del{opacity:.6}.side-item .s-del:hover{opacity:1;transform:none;filter:none}
+.side-explore{width:100%;justify-content:center;background:none;color:var(--accent);border:1px solid var(--line);box-shadow:none}
+.side-explore:hover{background:rgba(42,157,143,.07);transform:none;filter:none}
+.side-explore.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.toolbar{display:flex;align-items:center;gap:.5rem;padding:.55rem .9rem;border-bottom:1px solid var(--line);background:rgba(255,255,255,.5);backdrop-filter:blur(6px)}
+.icon{padding:.4rem .55rem;line-height:1}
+.dash-name{font:inherit;font-size:.9rem;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:9px;padding:.42rem .7rem;min-width:170px}
+.dash-name:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
+.tb-spacer{flex:1}
+.mode-toggle{display:inline-flex;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:2px;gap:2px}
+.seg{background:none;color:var(--muted);box-shadow:none;padding:.35rem .75rem;font-size:.82rem;border-radius:8px}
+.seg:hover{background:rgba(42,157,143,.08);transform:none;filter:none;color:var(--ink)}
+.seg.active{background:#fff;color:var(--accent);box-shadow:0 1px 3px rgba(16,24,40,.12)}
+.workspace{display:grid;grid-template-columns:minmax(300px,400px) 1fr;flex:1;min-height:0}
+body.mode-view .editor{display:none}
+body.mode-view .workspace{grid-template-columns:1fr}
+body.mode-explore .workspace{display:none}
+body.mode-explore .explore{display:flex}
+body.mode-explore #run,body.mode-explore #save,body.mode-explore #cols,body.mode-explore .dash-name,body.mode-explore .mode-toggle{display:none}
+.editor{border-right:1px solid var(--line);background:rgba(255,255,255,.6);display:flex;flex-direction:column;backdrop-filter:blur(6px);min-height:0}
+/* data-exploration */
+.explore{display:none;flex:1;min-height:0}
+.cat{width:250px;flex:none;border-right:1px solid var(--line);overflow-y:auto;background:rgba(255,255,255,.5);padding:.5rem}
+.cat-head{display:flex;align-items:center;gap:.4rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:.3rem .4rem .5rem}
+.cat-head .icon{margin-left:auto;font-size:.8rem}
+.cat-node{padding:.32rem .5rem;border-radius:8px;cursor:pointer;font-size:.85rem;display:flex;align-items:center;gap:.35rem;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cat-node:hover{background:rgba(42,157,143,.08)}
+.cat-db{font-weight:700}
+.cat-schema{padding-left:1.1rem;font-weight:600;color:var(--muted)}
+.cat-table{padding-left:2rem;font-weight:500}
+.cat-table.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.cat-empty{color:var(--muted);font-size:.82rem;padding:1rem .5rem}
+.explore-main{flex:1;overflow:auto;padding:1.1rem 1.4rem;min-width:0}
+.explore-empty{color:var(--muted);font-size:.9rem;padding:2.5rem 1rem}
+.explore-main h3{margin:.1rem 0 .3rem;font-size:1.1rem}
+.explore-sub{color:var(--muted);font-size:.82rem;margin-bottom:1.2rem}
+.explore-sec{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:1.6rem 0 .6rem}
+body.dark .sidebar,body.dark .toolbar,body.dark .editor,body.dark .cat{background:rgba(13,20,43,.55);color:#e8eef8}
+body.dark .side-item,body.dark .cat-node{color:#e8eef8}
+body.dark .mode-toggle{background:#0f1830;border-color:#2b3a58}
+body.dark .seg.active{background:#1c2942;color:#7fe3d4}
+body.dark .dash-name{background:#16223e;color:#e8eef8;border-color:#2b3a58}
 .bar select,.actions select{font:inherit;font-size:.83rem;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:9px;padding:.4rem 1.9rem .4rem .7rem;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right .6rem center;transition:border-color .15s,box-shadow .15s}
 .bar select:hover,.actions select:hover{border-color:#c7cede}
 .bar select:focus,.actions select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(42,157,143,.16)}
@@ -223,23 +275,39 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
     </div>
   </div>
 </div>
-<div class="layout">
-  <div class="editor">
-    <div class="bar">
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <button id="side-new" class="side-new">＋ New dashboard</button>
+    <nav class="side-nav" id="side-nav"></nav>
+    <button id="side-explore" class="side-explore">🔍 Explore data</button>
+  </aside>
+  <main class="main">
+    <div class="toolbar">
+      <button id="side-toggle" class="btn2 icon" title="toggle sidebar">☰</button>
       <button id="run" disabled>Run ▸</button>
-      <select id="samples" title="load a sample"></select>
+      <input id="dash-name" class="dash-name" placeholder="Untitled dashboard" spellcheck="false">
+      <button id="save" class="btn2" title="save to this browser">Save</button>
       <select id="cols" title="layout columns">
         <option value="auto">Auto cols</option>
         <option value="1">1 column</option>
         <option value="2">2 columns</option>
         <option value="3">3 columns</option>
       </select>
+      <span class="tb-spacer"></span>
+      <div class="mode-toggle">
+        <button id="mode-edit" class="seg active">✎ Edit</button>
+        <button id="mode-view" class="seg">▦ View</button>
+      </div>
     </div>
-    <textarea id="sql" spellcheck="false"></textarea>
-  </div>
-  <div class="dash">
-    <div class="grid" id="grid"></div>
-  </div>
+    <div class="workspace">
+      <div class="editor"><textarea id="sql" spellcheck="false"></textarea></div>
+      <div class="dash"><div class="grid" id="grid"></div></div>
+    </div>
+    <div class="explore" id="explore" hidden>
+      <aside class="cat"><div class="cat-head">Catalog <button id="cat-refresh" class="btn2 icon" title="refresh">⟳</button></div><div id="cat-tree" class="cat-tree"></div></aside>
+      <div class="explore-main" id="explore-main"><div class="explore-empty">Pick a table on the left to preview its rows and column stats.</div></div>
+    </div>
+  </main>
 </div>
 <div id="dp-tip" class="dp-tip"></div>
 <script type="module" src="./app.js"></script>
