@@ -264,18 +264,16 @@ CREATE TABLE IF NOT EXISTS fc AS
   SELECT series, ds, round(yhat,0) AS yhat, round(yhat_lower,0) AS lo, round(yhat_upper,0) AS hi
   FROM ts_forecast_by('m', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
 
-CREATE TABLE IF NOT EXISTS ts AS
-  SELECT series AS item, ds, y AS actual, NULL::DOUBLE AS yhat, NULL::DOUBLE AS lo, NULL::DOUBLE AS hi FROM m
-  UNION ALL SELECT series, ds, NULL, yhat, lo, hi FROM fc;
-
+-- Small per-series summary computed straight from m + fc (no big materialised
+-- history+forecast union, so re-running keeps memory low).
 CREATE TABLE IF NOT EXISTS summary AS
-  SELECT h.item, h.last_actual, c.next_fc, c.fc_total,
+  SELECT h.series AS item, h.last_actual, c.next_fc, c.fc_total,
          round(100.0*(c.fc_total-h.actual_12)/nullif(h.actual_12,0),1) AS growth
-  FROM (SELECT item, arg_max(actual,ds) AS last_actual,
-               sum(actual) FILTER (WHERE ds > (SELECT max(ds) FROM ts WHERE actual IS NOT NULL)-INTERVAL 12 MONTH) AS actual_12
-        FROM ts WHERE actual IS NOT NULL GROUP BY 1) h
-  JOIN (SELECT item, sum(yhat) AS fc_total, arg_min(yhat,ds) AS next_fc
-        FROM ts WHERE yhat IS NOT NULL GROUP BY 1) c USING(item);
+  FROM (SELECT series, arg_max(y,ds) AS last_actual,
+               sum(y) FILTER (WHERE ds > (SELECT max(ds) FROM m)-INTERVAL 12 MONTH) AS actual_12
+        FROM m GROUP BY 1) h
+  JOIN (SELECT series, sum(yhat) AS fc_total, arg_min(yhat,ds) AS next_fc
+        FROM fc GROUP BY 1) c USING(series);
 
 SELECT 'Forecasting ' || (SELECT count(*) FROM summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
 
@@ -289,20 +287,22 @@ SELECT item        AS "Item × store"     ::PAGED,
        growth      AS "vs prior 12mo %"  ::TREND
 FROM summary ORDER BY fc_total DESC;
 
--- History + forecast for the selected item (default: the top forecast).
+-- History (m) + forecast (fc) for the selected item (default: the top forecast),
+-- unioned on the fly. The forecast series repeats the last actual point (bridge)
+-- so the two lines join and the band starts from there.
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
-       actual   ::LINECHART,
-       actual   ::BAND_LOWER,
-       actual   ::BAND_UPPER,
+       y        ::LINECHART,
+       y        ::BAND_LOWER,
+       y        ::BAND_UPPER,
        'History + 12-month SeasonalES forecast (shaded = 95% interval)'::TITLE
-FROM ts WHERE actual IS NOT NULL AND item=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
+FROM m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
-SELECT ds, 'Forecast', actual, actual, actual, '' FROM ts
-  WHERE actual IS NOT NULL AND item=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM ts WHERE actual IS NOT NULL)
+SELECT ds, 'Forecast', y, y, y, '' FROM m
+  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM m)
 UNION ALL
-SELECT ds, 'Forecast', yhat, lo, hi, '' FROM ts WHERE yhat IS NOT NULL AND item=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
+SELECT ds, 'Forecast', yhat, lo, hi, '' FROM fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;`,
     },
   },
