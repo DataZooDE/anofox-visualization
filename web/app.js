@@ -264,22 +264,29 @@ SELECT item        AS "Item × store"     ::PAGED,
        growth      AS "vs prior 12mo %"  ::TREND
 FROM lx_summary ORDER BY fc_total DESC;
 
--- History (lx_m) + forecast (lx_fc) for the selected item (default: the top
--- forecast), unioned on the fly. The forecast series repeats the last actual
--- point (bridge) so the two lines join and the band starts from there.
+-- History (lx_m) + 12-month SeasonalES forecast (lx_fc, shaded 95% interval) for
+-- the selected item, PLUS both methods' backtest predictions over the 12-month
+-- holdout (lx_bt) — so the same chart shows the future forecast and how each
+-- method would have done against the (known) last-year actuals.
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
        y        ::LINECHART,
        y        ::BAND_LOWER,
        y        ::BAND_UPPER,
-       'History + 12-month SeasonalES forecast (shaded = 95% interval)'::TITLE
+       'History + 12-month SeasonalES forecast (shaded = 95% interval) + backtest'::TITLE
 FROM lx_m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'Forecast', y, y, y, '' FROM lx_m
   WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
 UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+UNION ALL
+SELECT ds, 'SeasonalES (backtest)', predicted, predicted, predicted, '' FROM lx_bt
+  WHERE method='SeasonalES' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+UNION ALL
+SELECT ds, 'SeasonalNaive (backtest)', predicted, predicted, predicted, '' FROM lx_bt
+  WHERE method='SeasonalNaive' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;
 
 -- Backtest per series: the 12-month-holdout KPIs of BOTH methods for every
@@ -295,23 +302,6 @@ FROM lx_metrics GROUP BY method ORDER BY 2;
 SELECT 6::COL;
 SELECT winner ::XAXIS, count(*) AS wins ::BARCHART, 'Series won per method (by MAE)'::TITLE
 FROM lx_scores WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
-
--- The backtest on the line: for the selected series, the actual line (last 24
--- months for context) overlaid with each method's prediction on the 12-month
--- holdout — so you can see which method tracks the held-out actuals. Click any
--- table row above/below to change the series.
-SELECT 12::COL;
-SELECT ds       ::XAXIS,
-       'Actual' ::CATEGORY,
-       y        ::LINECHART,
-       'Backtest on the holdout — actual vs SeasonalES vs SeasonalNaive'::TITLE
-FROM lx_m
-  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
-    AND ds > (SELECT max(ds) FROM lx_m)-INTERVAL 24 MONTH
-UNION ALL
-SELECT ds, method, predicted, '' FROM lx_bt
-  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
-ORDER BY 2, 1;
 
 SELECT 12::COL;
 SELECT item    AS "Item × store" ::PAGED,
