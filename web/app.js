@@ -246,16 +246,14 @@ UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM series WHERE yhat IS NOT NULL AND category=COALESCE(NULLIF(getvariable('selected'),''),'FOODS')
 ORDER BY 1;`,
       "M5 forecast (live extension)": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
--- anofox-forecast COMMUNITY extension entirely client-side. The app registers the
--- parquet and does the equivalent of, on a v1.5.x engine:
+-- anofox-forecast extension entirely client-side — no server. On boot the app
+-- registers the parquet and, on a v1.5.x engine, does the equivalent of:
 --
---   SET custom_extension_repository='https://community-extensions.duckdb.org';
+--   SET custom_extension_repository='<app>/localext';  -- our local wasm build
 --   INSTALL anofox_forecast; LOAD anofox_forecast;
 --
--- WARNING: the extension's wasm build currently fails to LOAD in the browser
--- (DataZooDE/anofox-forecast#239). Until it's fixed this errors here — use
--- "M5 forecast (precomputed)" or a native backend meanwhile. The parquet itself
--- loads fine, so read_parquet('m5_monthly.parquet') is queryable.
+-- (We serve a locally-built wasm because the signed community build doesn't link
+-- against this DuckDB-Wasm runtime — DataZooDE/anofox-forecast#239.)
 
 CREATE OR REPLACE TABLE m AS SELECT series, ds, y FROM read_parquet('m5_monthly.parquet');
 
@@ -570,20 +568,18 @@ async function ensureForecast(sql) {
   if (/\bts_forecast_by\b|\banofox_forecast\b/i.test(sql)) {
     if (!fcExt) {
       fcExt = (async () => {
-        await conn.query("SET custom_extension_repository='https://community-extensions.duckdb.org';");
-        try {
-          await conn.query("INSTALL anofox_forecast;");
-        } catch (_) {
-          /* the FROM-community JS quirk; INSTALL still fetches */
-        }
+        // Load our locally-built wasm extension (served from web/localext/ in the
+        // repo layout <version>/<platform>/). The signed community build doesn't
+        // link against this runtime (#239); this local build's imports do.
+        const repo = new URL("localext", document.baseURI).href.replace(/\/$/, "");
+        await conn.query(`SET custom_extension_repository='${repo}';`);
+        await conn.query("INSTALL anofox_forecast;");
         await conn.query("LOAD anofox_forecast;");
       })().catch((e) => {
         throw new Error(
-          "The anofox_forecast WASM extension failed to LOAD in DuckDB-Wasm " +
-            "(tracked in DataZooDE/anofox-forecast#239 — its wasm build imports DuckDB " +
-            "C++ symbols the browser runtime doesn't provide). The parquet is loaded and " +
-            "queryable, but ts_forecast_by() is unavailable here: run this on a native " +
-            "backend, or use “M5 forecast (precomputed)”. Underlying error: " +
+          "Couldn't load the anofox_forecast wasm extension in the browser. The " +
+            "parquet is loaded and queryable; run ts_forecast_by() on a native backend " +
+            "or use “M5 forecast (precomputed)”. Underlying error: " +
             (e.message || e)
         );
       });
@@ -661,6 +657,13 @@ async function boot() {
     );
     db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    // Allow unsigned extensions so we can load our locally-built anofox_forecast
+    // wasm (the signed community build doesn't link against this runtime — #239).
+    try {
+      await db.open({ allowUnsignedExtensions: true });
+    } catch (_) {
+      /* older duckdb-wasm without the option — extensions just won't load */
+    }
     conn = await db.connect();
   }
 
