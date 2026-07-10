@@ -34,10 +34,10 @@ body.embed .workspace{grid-template-columns:1fr}
 body.embed .dash{padding:1rem 1.2rem}
 /* ---- app shell: sidebar + main (toolbar over workspace/explore) ---- */
 .shell{display:flex;min-height:calc(100vh - 57px)}
-.sidebar{width:238px;flex:none;border-right:1px solid var(--line);background:rgba(255,255,255,.55);backdrop-filter:blur(8px);display:flex;flex-direction:column;padding:.8rem .7rem;gap:.55rem;overflow-y:auto}
+.sidebar{width:238px;flex:none;border-right:1px solid var(--line);background:rgba(255,255,255,.55);backdrop-filter:blur(8px);display:flex;flex-direction:column;padding:.8rem .7rem;gap:.55rem;overflow-y:auto;position:sticky;top:57px;align-self:flex-start;height:calc(100vh - 57px)}
 body.side-collapsed .sidebar{display:none}
 .side-new{width:100%;justify-content:center}
-.side-nav{flex:1;display:flex;flex-direction:column;gap:.08rem;overflow-y:auto;margin:.2rem -.1rem}
+.side-nav{flex:1;min-height:0;display:flex;flex-direction:column;gap:.08rem;overflow-y:auto;margin:.2rem -.1rem}
 .side-section{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:.8rem .4rem .25rem}
 .side-section-toggle{display:flex;align-items:center;gap:.3rem;cursor:pointer;user-select:none;border-radius:6px;padding:.15rem .4rem}
 .side-section-toggle:hover{color:var(--ink);background:rgba(42,157,143,.06)}
@@ -64,6 +64,10 @@ body.side-collapsed .sidebar{display:none}
 .side-explore{width:100%;justify-content:center;background:none;color:var(--accent);border:1px solid var(--line);box-shadow:none}
 .side-explore:hover{background:rgba(42,157,143,.07);transform:none;filter:none}
 .side-explore.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0}
+.side-foot{display:flex;align-items:center;justify-content:space-between;gap:.4rem;margin-top:.15rem;padding:.5rem .35rem .1rem;border-top:1px solid var(--line);font-size:.72rem;color:var(--muted)}
+.side-foot .side-ver{font-variant-numeric:tabular-nums;font-weight:600}
+.side-foot a{color:var(--muted);text-decoration:none;font-weight:700}
+.side-foot a:hover{color:var(--accent)}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 .toolbar{display:flex;align-items:center;gap:.5rem;padding:.55rem .9rem;border-bottom:1px solid var(--line);background:rgba(255,255,255,.5);backdrop-filter:blur(6px)}
 .icon{padding:.4rem .55rem;line-height:1}
@@ -332,6 +336,10 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
     <button id="side-new" class="side-new">＋ New dashboard</button>
     <nav class="side-nav" id="side-nav"></nav>
     <button id="side-explore" class="side-explore">🔍 Explore data</button>
+    <footer class="side-foot">
+      <span class="side-ver" id="side-ver">v0.1.0</span>
+      <a href="https://data-zoo.de" target="_blank" rel="noopener noreferrer">© DataZoo GmbH</a>
+    </footer>
   </aside>
   <main class="main">
     <div class="toolbar">
