@@ -1895,6 +1895,9 @@ async function run(fresh = true) {
             holder.className = "panel-svg";
             holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "", "");
             fig.appendChild(holder);
+            // Stash the panel's data/roles so the toolbox (data view, chart-type
+            // toggle) can reach them without re-querying.
+            fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -2769,8 +2772,8 @@ function attachHover() {
   attachToolbox();
 }
 
-// ECharts-style toolbox: a small hover-reveal toolbar per chart panel. For now a
-// single "save as PNG" tool that rasterises the SVG (2×) to a downloaded image.
+// ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
+// toggle (line↔bar), data view, restore (reset zoom), and save-as-PNG.
 function attachToolbox() {
   document.querySelectorAll(".panel").forEach((panel) => {
     if (panel.dataset.toolboxWired) return;
@@ -2779,17 +2782,113 @@ function attachToolbox() {
     panel.dataset.toolboxWired = "1";
     const bar = document.createElement("div");
     bar.className = "dp-toolbox";
-    const save = document.createElement("button");
-    save.className = "dp-tool";
-    save.title = "Save as PNG";
-    save.textContent = "⭳";
-    save.addEventListener("click", (e) => {
-      e.stopPropagation();
-      savePanelPng(panel);
-    });
-    bar.appendChild(save);
+    const mkTool = (title, glyph, fn) => {
+      const b = document.createElement("button");
+      b.className = "dp-tool";
+      b.title = title;
+      b.textContent = glyph;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fn();
+      });
+      bar.appendChild(b);
+      return b;
+    };
+    const dp = panel._dp;
+    // magicType: swap a line chart to bars and back (only for line/bar charts).
+    if (dp && !dp.isMap && magicSwap(dp.roles)) {
+      mkTool("Line / bar", "⇄", () => toggleMagicType(panel));
+    }
+    // dataView: show the panel's underlying rows as a table.
+    if (dp) mkTool("Data view", "▤", () => showDataView(panel));
+    // restore: reset any zoom/pan (a double-click on the chart does the same).
+    if (panel.querySelector(".dp-zoom")) {
+      mkTool("Restore", "⟳", () => {
+        const h = panel.querySelector(".panel-svg");
+        if (h) h.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      });
+    }
+    mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
     panel.appendChild(bar);
   });
+}
+
+// Return the swapped chart-type role string (LINE↔BAR family), or null if the
+// panel isn't a plain line/bar chart. Used by the magicType toggle.
+function magicSwap(roles) {
+  const map = {
+    LINECHART: "BARCHART",
+    LINE: "BARCHART",
+    BARCHART: "LINECHART",
+    BAR: "LINECHART",
+    AREACHART: "BARCHART",
+    AREA: "BARCHART",
+  };
+  const v = roles.find((r) => map[r[1]]);
+  return v ? map[v[1]] : null;
+}
+
+function toggleMagicType(panel) {
+  const dp = panel._dp;
+  const holder = panel.querySelector(".panel-svg");
+  if (!dp || !holder) return;
+  const next = panel._magic ? 0 : 1;
+  panel._magic = next;
+  let use = dp.roles;
+  if (next) {
+    const vi = dp.roles.findIndex((r) => magicSwap([r])); // first line/bar value role
+    use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
+  }
+  holder.innerHTML = render_panel(dp.rows, JSON.stringify(use), 460, dp.ph, dpPrimary || "", "");
+  attachHover();
+}
+
+// A modal listing the panel's rows as a table (ECharts toolbox "data view").
+function showDataView(panel) {
+  const dp = panel._dp;
+  if (!dp) return;
+  let rows;
+  try {
+    rows = JSON.parse(dp.rows);
+  } catch (_) {
+    return;
+  }
+  const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
+  // Drop non-data columns (the panel title, tooltips, hints) from the view.
+  const SKIP = new Set(["TITLE", "HINT", "LABEL"]);
+  const keys = (rows.length ? Object.keys(rows[0]) : []).filter((k) => {
+    const r = roleFor(k);
+    return !r || !SKIP.has(r[1]);
+  });
+  // Header names: the role's display name, else a friendly role name, else key.
+  const FRIENDLY = { XAXIS: "x", YAXIS: "y", CATEGORY: "series" };
+  const nameFor = (k) => {
+    const r = roleFor(k);
+    if (r && r[2]) return r[2];
+    if (r && FRIENDLY[r[1]]) return FRIENDLY[r[1]];
+    if (r && /CHART|BAR|LINE|AREA|SCATTER|STEP|SMOOTH/.test(r[1])) return "value";
+    return k;
+  };
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
+  const head = keys.map((k) => `<th>${esc(nameFor(k))}</th>`).join("");
+  const body = rows
+    .slice(0, 500)
+    .map((r) => `<tr>${keys.map((k) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
+    .join("");
+  const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Data";
+  const back = document.createElement("div");
+  back.className = "dp-modal-back";
+  back.innerHTML =
+    `<div class="dp-modal"><div class="dp-modal-head"><b>${esc(title)}</b>` +
+    `<button class="dp-modal-x" title="Close">✕</button></div>` +
+    `<div class="dp-modal-body"><table class="dp-dv"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (rows.length > 500 ? `<div class="dp-modal-note">Showing 500 of ${rows.length} rows</div>` : "") +
+    `</div></div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", (e) => {
+    if (e.target === back || e.target.classList.contains("dp-modal-x")) close();
+  });
+  document.body.appendChild(back);
 }
 
 function savePanelPng(panel) {
