@@ -173,6 +173,11 @@ header .actions select{padding:.42rem .5rem}
 .panel{position:relative;margin:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:1.1rem 1.2rem;box-shadow:var(--shadow);transition:box-shadow .2s ease,border-color .2s ease}
 .panel:hover{box-shadow:var(--shadow-hi);border-color:#dfe4ee}
 .panel svg{width:100%;height:auto;display:block}
+@keyframes dp-panel-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+@keyframes dp-line-draw{to{stroke-dashoffset:0}}
+.panel.dp-in{animation:dp-panel-in .42s cubic-bezier(.22,.61,.36,1) both}
+.panel.dp-in svg polyline.dp-draw{animation:dp-line-draw .8s cubic-bezier(.22,.61,.36,1) both}
+@media (prefers-reduced-motion: reduce){.panel.dp-in,.panel.dp-in svg polyline.dp-draw{animation:none}}
 .panel-title{font-size:.9rem;font-weight:700;letter-spacing:-.01em;color:var(--ink);margin:-.1rem 0 .6rem;padding-bottom:.55rem;border-bottom:1px solid var(--line)}
 .group-body .panel .panel-title{border-bottom:0;padding-bottom:.2rem}
 .dp-table{width:100%;border-collapse:collapse;font-size:.85rem}

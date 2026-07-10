@@ -1773,8 +1773,32 @@ async function run(fresh = true) {
   if (tabBar) dash.append(tabBar, tabWrap);
   attachHover();
   addExportButtons();
+  if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
   document.body.classList.remove("loading");
+}
+
+// Entrance animation on a fresh render: panels fade+rise in and line series
+// "draw" left-to-right (stroke-dashoffset). Skipped for cross-filter re-runs so
+// interactions feel instant, and honours prefers-reduced-motion via CSS.
+function animateIn() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    panel.classList.remove("dp-in");
+    void panel.offsetWidth; // reflow so the animation restarts
+    panel.classList.add("dp-in");
+    panel.querySelectorAll("svg polyline").forEach((pl) => {
+      let len;
+      try {
+        len = pl.getTotalLength();
+      } catch (_) {
+        return;
+      }
+      if (!len || !isFinite(len)) return;
+      pl.style.strokeDasharray = len;
+      pl.style.strokeDashoffset = len;
+      pl.classList.add("dp-draw");
+    });
+  });
 }
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
