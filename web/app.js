@@ -2548,14 +2548,19 @@ function attachHover() {
     el.classList.add("dp-hit");
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
+      if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
       tip.textContent = txt;
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
+      if (el.closest(".has-axis-pointer")) return;
       tip.style.left = e.clientX + 14 + "px";
       tip.style.top = e.clientY + 14 + "px";
     });
-    el.addEventListener("mouseleave", () => tip.classList.remove("show"));
+    el.addEventListener("mouseleave", () => {
+      if (el.closest(".has-axis-pointer")) return;
+      tip.classList.remove("show");
+    });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
@@ -2566,6 +2571,84 @@ function attachHover() {
     });
   });
   apply();
+  attachAxisPointer();
+}
+
+// ECharts-style axis pointer: hovering a cartesian chart draws a vertical
+// crosshair at the nearest x and shows one tooltip listing every series' value
+// there (colour swatch + name + value), instead of a per-point tooltip.
+function attachAxisPointer() {
+  const tip = $("dp-tip");
+  const cross = $("dp-cross");
+  document.querySelectorAll(".panel").forEach((panel) => {
+    if (panel.dataset.axisWired) return;
+    const svg = panel.querySelector("svg");
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
+    const circles = [...svg.querySelectorAll("circle.dp-hit")];
+    if (circles.length < 3) return; // needs a line/scatter-style chart
+    const pts = circles.map((el) => ({
+      el,
+      cx: +el.getAttribute("cx"),
+      tip: el.getAttribute("data-tip") || "",
+      fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
+    }));
+    const cols = new Map();
+    for (const p of pts) {
+      const k = Math.round(p.cx);
+      (cols.get(k) || cols.set(k, []).get(k)).push(p);
+    }
+    const colXs = [...cols.keys()].sort((a, b) => a - b);
+    if (colXs.length < 2) return; // essentially a single column — item tooltip is enough
+    panel.dataset.axisWired = "1";
+    panel.classList.add("has-axis-pointer");
+    const area = panel.querySelector(".panel-svg") || svg;
+
+    const move = (e) => {
+      const vb = svg.viewBox.baseVal;
+      const r = svg.getBoundingClientRect();
+      if (!r.width) return;
+      const scale = r.width / vb.width;
+      const ux = vb.x + (e.clientX - r.left) / scale;
+      let best = colXs[0],
+        bd = Infinity;
+      for (const cx of colXs) {
+        const d = Math.abs(cx - ux);
+        if (d < bd) {
+          bd = d;
+          best = cx;
+        }
+      }
+      cross.style.left = r.left + (best - vb.x) * scale + "px";
+      cross.style.top = r.top + "px";
+      cross.style.height = r.height + "px";
+      cross.style.display = "";
+      pts.forEach((p) => (p.el.style.transform = ""));
+      const colPts = cols.get(best);
+      colPts.forEach((p) => {
+        p.el.style.transformBox = "fill-box";
+        p.el.style.transformOrigin = "center";
+        p.el.style.transform = "scale(1.7)";
+      });
+      tip.innerHTML = colPts
+        .map((p) => {
+          const i = p.tip.lastIndexOf(": ");
+          const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
+          const val = i >= 0 ? p.tip.slice(i + 2) : "";
+          return `<div class="tip-row"><span><span class="tip-dot" style="background:${p.fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+        })
+        .join("");
+      tip.classList.add("show");
+      tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
+      tip.style.top = e.clientY + 8 + "px";
+    };
+    const leave = () => {
+      cross.style.display = "none";
+      tip.classList.remove("show");
+      pts.forEach((p) => (p.el.style.transform = ""));
+    };
+    area.addEventListener("mousemove", move);
+    area.addEventListener("mouseleave", leave);
+  });
 }
 
 // Click empty dashboard space to clear all cross-filters / selections.

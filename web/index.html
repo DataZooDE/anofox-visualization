@@ -265,6 +265,12 @@ body.dark .page-size,body.dark .page-btn{background:#1a2130;color:#e8eef8}
 .err{grid-column:1/-1;color:#b42318;background:#fef3f2;border:1px solid #fecdca;border-radius:12px;padding:.8rem 1rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}
 .dp-tip{position:fixed;pointer-events:none;background:rgba(17,24,39,.95);backdrop-filter:blur(4px);color:#fff;padding:.4rem .6rem;border-radius:9px;font-size:.8rem;font-weight:500;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;transform:translateY(3px) scale(.96);transition:opacity .1s,transform .1s;z-index:50;white-space:nowrap}
 .dp-tip.show{opacity:1;transform:none}
+.dp-tip .tip-dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.4rem;vertical-align:baseline}
+.dp-tip .tip-head{font-weight:700;margin-bottom:.25rem;opacity:.85}
+.dp-tip .tip-row{display:flex;justify-content:space-between;gap:1.1rem;line-height:1.5}
+.dp-tip .tip-row b{font-variant-numeric:tabular-nums}
+.dp-cross{position:fixed;width:0;border-left:1px dashed rgba(17,24,39,.45);pointer-events:none;z-index:49;display:none}
+body.dark .dp-cross{border-color:rgba(255,255,255,.45)}
 .dp-hit{transition:filter .12s}.dp-hit:hover{filter:brightness(1.1) saturate(1.06)}
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-thumb{background:#c4cddd;border-radius:8px;border:3px solid transparent;background-clip:padding-box}
@@ -382,6 +388,7 @@ body.dark .control select,body.dark .group .control select{background:#fff;color
   </main>
 </div>
 <div id="dp-tip" class="dp-tip"></div>
+<div id="dp-cross" class="dp-cross"></div>
 <script type="module" src="./app.js"></script>
 </body>
 </html>
