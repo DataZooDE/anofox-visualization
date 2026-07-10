@@ -673,6 +673,16 @@ async function boot() {
       /* older duckdb-wasm without the option — extensions just won't load */
     }
     conn = await db.connect();
+    // Memory-friendly defaults for the in-browser (in-memory, ~capped) engine:
+    // dropping insertion-order preservation avoids OOM on large ops like
+    // forecasting every M5 series. Best-effort — ignore if unsupported.
+    for (const pragma of ["SET preserve_insertion_order=false", "SET memory_limit='3.6GB'"]) {
+      try {
+        await conn.query(pragma);
+      } catch (_) {
+        /* option not available on this build */
+      }
+    }
   }
 
   // Sidebar (dashboard list) + app-shell controls
