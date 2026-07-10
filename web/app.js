@@ -204,25 +204,44 @@ SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
 
 -- All ~30k M5 item×store series are forecast at once (SeasonalES, 12 months).
 -- The heavy steps use CREATE TABLE IF NOT EXISTS so they run once per session
--- (~2s for every series) and clicking a row is then instant.
-CREATE TABLE IF NOT EXISTS m AS SELECT series, ds, y FROM read_parquet('m5_monthly.parquet');
+-- (~2s for every series) and clicking a row is then instant. Tables are prefixed
+-- lx_ so they never clash with the other forecast dashboards' cached tables.
+CREATE TABLE IF NOT EXISTS lx_m AS SELECT series, ds, y FROM read_parquet('m5_monthly.parquet');
 
-CREATE TABLE IF NOT EXISTS fc AS
+CREATE TABLE IF NOT EXISTS lx_fc AS
   SELECT series, ds, round(yhat,0) AS yhat, round(yhat_lower,0) AS lo, round(yhat_upper,0) AS hi
-  FROM ts_forecast_by('m', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
+  FROM ts_forecast_by('lx_m', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
 
--- Small per-series summary computed straight from m + fc (no big materialised
+-- Small per-series summary computed straight from lx_m + lx_fc (no big materialised
 -- history+forecast union, so re-running keeps memory low).
-CREATE TABLE IF NOT EXISTS summary AS
+CREATE TABLE IF NOT EXISTS lx_summary AS
   SELECT h.series AS item, h.last_actual, c.next_fc, c.fc_total,
          round(100.0*(c.fc_total-h.actual_12)/nullif(h.actual_12,0),1) AS growth
   FROM (SELECT series, arg_max(y,ds) AS last_actual,
-               sum(y) FILTER (WHERE ds > (SELECT max(ds) FROM m)-INTERVAL 12 MONTH) AS actual_12
-        FROM m GROUP BY 1) h
+               sum(y) FILTER (WHERE ds > (SELECT max(ds) FROM lx_m)-INTERVAL 12 MONTH) AS actual_12
+        FROM lx_m GROUP BY 1) h
   JOIN (SELECT series, sum(yhat) AS fc_total, arg_min(yhat,ds) AS next_fc
-        FROM fc GROUP BY 1) c USING(series);
+        FROM lx_fc GROUP BY 1) c USING(series);
 
-SELECT 'Forecasting ' || (SELECT count(*) FROM summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
+-- 12-month backtest: hold out the last year, forecast it from the train with two
+-- methods, and compare to the held-out actuals across every series.
+CREATE TABLE IF NOT EXISTS lx_train AS
+  SELECT series, ds, y FROM lx_m WHERE ds <= (SELECT max(ds) FROM lx_m)-INTERVAL 12 MONTH;
+CREATE TABLE IF NOT EXISTS lx_bt AS
+  WITH act AS (SELECT series, ds, y AS actual FROM lx_m WHERE ds > (SELECT max(ds) FROM lx_train))
+  SELECT 'SeasonalES' AS method, a.series, a.ds, a.actual, f.yhat AS predicted
+    FROM act a JOIN ts_forecast_by('lx_train', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'}) f USING(series, ds)
+  UNION ALL
+  SELECT 'SeasonalNaive', a.series, a.ds, a.actual, f.yhat
+    FROM act a JOIN ts_forecast_by('lx_train', series, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f USING(series, ds);
+CREATE TABLE IF NOT EXISTS lx_metrics AS
+  SELECT method,
+         round(avg(abs(actual-predicted)),1)                      AS mae,
+         round(sqrt(avg(pow(actual-predicted,2))),1)              AS rmse,
+         round(100*avg(abs(actual-predicted)/nullif(actual,0)),2) AS mape
+  FROM lx_bt GROUP BY 1;
+
+SELECT 'Forecasting ' || (SELECT count(*) FROM lx_summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM lx_m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
 
 -- Paginated summary of all series (server-side LIMIT/OFFSET). Click a row to
 -- drill the chart to that item. ::PAGED sits on the first (cross-filter) column.
@@ -232,11 +251,11 @@ SELECT item        AS "Item × store"     ::PAGED,
        next_fc     AS "Next month"       ::COMPACT,
        fc_total    AS "12-mo forecast"   ::COMPACT,
        growth      AS "vs prior 12mo %"  ::TREND
-FROM summary ORDER BY fc_total DESC;
+FROM lx_summary ORDER BY fc_total DESC;
 
--- History (m) + forecast (fc) for the selected item (default: the top forecast),
--- unioned on the fly. The forecast series repeats the last actual point (bridge)
--- so the two lines join and the band starts from there.
+-- History (lx_m) + forecast (lx_fc) for the selected item (default: the top
+-- forecast), unioned on the fly. The forecast series repeats the last actual
+-- point (bridge) so the two lines join and the band starts from there.
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
@@ -244,32 +263,46 @@ SELECT ds       ::XAXIS,
        y        ::BAND_LOWER,
        y        ::BAND_UPPER,
        'History + 12-month SeasonalES forecast (shaded = 95% interval)'::TITLE
-FROM m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
+FROM lx_m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
-SELECT ds, 'Forecast', y, y, y, '' FROM m
-  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM m)
+SELECT ds, 'Forecast', y, y, y, '' FROM lx_m
+  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
 UNION ALL
-SELECT ds, 'Forecast', yhat, lo, hi, '' FROM fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
-ORDER BY 1;`,
+SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+ORDER BY 1;
+
+-- Backtest: which method wins on the 12-month holdout, aggregated over all series.
+SELECT 'Backtest — 12-month holdout: SeasonalES vs SeasonalNaive (all series)'::LABEL;
+SELECT 'Best method (lowest MAE): ' || (SELECT method FROM lx_metrics ORDER BY mae LIMIT 1) ::LABEL;
+SELECT 7::COL;
+SELECT method AS "Method" ::TABLE,
+       mae  AS "MAE"    ::COMPACT,
+       rmse AS "RMSE"   ::COMPACT,
+       mape AS "MAPE %" ::PLAIN,
+       CASE WHEN mae = (SELECT min(mae) FROM lx_metrics) THEN '✓ best' ELSE '' END AS "Best" ::BADGE
+FROM lx_metrics ORDER BY mae;
+SELECT 5::COL;
+SELECT method ::XAXIS, mae ::BARCHART, 'Mean absolute error by method (lower is better)'::TITLE
+FROM lx_metrics ORDER BY mae;`,
       "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
 -- one dashboard across all categories (monthly). Simple method: SeasonalNaive.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
-CREATE TABLE IF NOT EXISTS cat AS
+CREATE TABLE IF NOT EXISTS an_cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
 
 -- 12-month forecast
-CREATE TABLE IF NOT EXISTS fc AS
+CREATE TABLE IF NOT EXISTS an_fc AS
   SELECT category, ds, round(yhat,0) AS yhat
-  FROM ts_forecast_by('cat', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'});
+  FROM ts_forecast_by('an_cat', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'});
 
 -- Decomposition: take the smooth TREND from the extension's MSTL, then split the
 -- detrended signal into a classical seasonal component (mean per calendar month,
 -- centred) and the remainder — a simple, transparent additive decomposition.
-CREATE TABLE IF NOT EXISTS decomp AS
+CREATE TABLE IF NOT EXISTS an_decomp AS
   WITH d AS (SELECT category, generate_subscripts(trend,1) AS rn, unnest(trend) AS trend
-             FROM ts_mstl_decomposition_by('cat', category, ds, y, MAP{'periods':'[12]'})),
-       o AS (SELECT category, ds, y, row_number() OVER (PARTITION BY category ORDER BY ds) AS rn FROM cat),
+             FROM ts_mstl_decomposition_by('an_cat', category, ds, y, MAP{'periods':'[12]'})),
+       o AS (SELECT category, ds, y, row_number() OVER (PARTITION BY category ORDER BY ds) AS rn FROM an_cat),
        j AS (SELECT o.category, o.ds, o.y AS observed, d.trend, o.y - d.trend AS detrended, month(o.ds) AS mo
              FROM o JOIN d USING (category, rn)),
        s AS (SELECT category, mo, avg(detrended) AS smean FROM j GROUP BY 1,2),
@@ -280,11 +313,11 @@ CREATE TABLE IF NOT EXISTS decomp AS
   FROM j JOIN sc USING (category, mo);
 
 -- Backtest: hold out the last 12 months, forecast them from the train, compare to actuals
-CREATE TABLE IF NOT EXISTS train AS SELECT * FROM cat WHERE ds <= (SELECT max(ds) FROM cat)-INTERVAL 12 MONTH;
-CREATE TABLE IF NOT EXISTS bt AS
+CREATE TABLE IF NOT EXISTS an_train AS SELECT * FROM an_cat WHERE ds <= (SELECT max(ds) FROM an_cat)-INTERVAL 12 MONTH;
+CREATE TABLE IF NOT EXISTS an_bt AS
   SELECT f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
-  FROM ts_forecast_by('train', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f
-  JOIN cat t ON f.category=t.category AND f.ds=t.ds;
+  FROM ts_forecast_by('an_train', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f
+  JOIN an_cat t ON f.category=t.category AND f.ds=t.ds;
 
 SELECT 'M5 — forecast · decomposition · backtest (SeasonalNaive, all categories)'::LABEL;
 
@@ -293,19 +326,19 @@ SELECT 'Forecast — history + 12-month SeasonalNaive'::LABEL;
 SELECT 12::COL;
 SELECT ds ::XAXIS, category ::CATEGORY, y ::LINECHART,
        'History + 12-month forecast, per category'::TITLE
-FROM (SELECT category, ds, y FROM cat UNION ALL SELECT category, ds, yhat FROM fc) ORDER BY category, ds;
+FROM (SELECT category, ds, y FROM an_cat UNION ALL SELECT category, ds, yhat FROM an_fc) ORDER BY category, ds;
 
 -- Decomposition: one row per category (observed+trend · seasonal · remainder).
 SELECT 'Decomposition — MSTL trend · classical seasonal · remainder'::LABEL;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'FOODS — observed + trend'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'FOODS — seasonal'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'FOODS — remainder'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOBBIES — observed + trend'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOBBIES — seasonal'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOBBIES — remainder'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOUSEHOLD — observed + trend'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOUSEHOLD — seasonal'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOUSEHOLD — remainder'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'FOODS — observed + trend'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'FOODS — seasonal'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'FOODS — remainder'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOBBIES — observed + trend'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOBBIES — seasonal'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOBBIES — remainder'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOUSEHOLD — observed + trend'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOUSEHOLD — seasonal'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOUSEHOLD — remainder'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
 
 -- Backtest: 12-month holdout, error metrics + actual vs predicted per category.
 SELECT 'Backtest — 12-month holdout'::LABEL;
@@ -314,20 +347,20 @@ SELECT category AS "Category" ::TABLE,
        round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
        round(sqrt(avg(pow(actual-predicted,2))),0)              AS "RMSE"   ::COMPACT,
        round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS "MAPE %" ::PLAIN
-FROM bt GROUP BY 1 ORDER BY 2;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM bt WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES — actual vs predicted'::TITLE FROM bt WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD — actual vs predicted'::TITLE FROM bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
+FROM an_bt GROUP BY 1 ORDER BY 2;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM an_bt WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES — actual vs predicted'::TITLE FROM an_bt WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD — actual vs predicted'::TITLE FROM an_bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
       "M5 changepoints": `-- Changepoint detection on M5 monthly sales per category (anofox-forecast).
 -- ts_detect_changepoints_by returns a probability per point; points with a high
 -- probability are marked on each series.
-CREATE TABLE IF NOT EXISTS cat AS
+CREATE TABLE IF NOT EXISTS cp_cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
-CREATE TABLE IF NOT EXISTS cp AS
+CREATE TABLE IF NOT EXISTS cp_pts AS
   SELECT c.category, c.ds, m.y, c.changepoint_probability AS prob
-  FROM ts_detect_changepoints_by('cat', category, ds, y, MAP{}) c
-  JOIN cat m ON c.category = m.category AND c.ds = m.ds;
+  FROM ts_detect_changepoints_by('cp_cat', category, ds, y, MAP{}) c
+  JOIN cp_cat m ON c.category = m.category AND c.ds = m.ds;
 
 SELECT 'M5 changepoint detection — monthly sales (dots = high changepoint probability)'::LABEL;
 
@@ -335,15 +368,15 @@ SELECT 12::COL;
 SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
        CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER,
        'FOODS — likely changepoints (prob > 0.7)'::TITLE
-FROM cp WHERE category='FOODS' ORDER BY ds;
+FROM cp_pts WHERE category='FOODS' ORDER BY ds;
 SELECT 12::COL;
 SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
        CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOBBIES'::TITLE
-FROM cp WHERE category='HOBBIES' ORDER BY ds;
+FROM cp_pts WHERE category='HOBBIES' ORDER BY ds;
 SELECT 12::COL;
 SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
        CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOUSEHOLD'::TITLE
-FROM cp WHERE category='HOUSEHOLD' ORDER BY ds;`,
+FROM cp_pts WHERE category='HOUSEHOLD' ORDER BY ds;`,
     },
   },
 
