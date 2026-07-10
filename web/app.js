@@ -890,7 +890,11 @@ function renderSidebar() {
       hdr.className = "side-section side-sub";
       hdr.textContent = g.group;
       nav.appendChild(hdr);
-      for (const [n, sql] of Object.entries(g.items)) nav.appendChild(sideItem(n, sql, false));
+      for (const [n, sql] of Object.entries(g.items)) {
+        const it = sideItem(n, sql, false);
+        it.classList.add("side-ex-item"); // indent examples under their group header
+        nav.appendChild(it);
+      }
     }
   }
   markActive();
