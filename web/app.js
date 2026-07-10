@@ -251,6 +251,96 @@ SELECT ds, 'Forecast', y, y, y, '' FROM m
 UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;`,
+      "M5 analytics (tabs)": `-- M5 analytics on the anofox-forecast extension (monthly, per category).
+-- Simple method: SeasonalNaive. Heavy steps cached with CREATE TABLE IF NOT EXISTS.
+CREATE TABLE IF NOT EXISTS cat AS
+  SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
+  FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
+
+-- 12-month forecast
+CREATE TABLE IF NOT EXISTS fc AS
+  SELECT category, ds, round(yhat,0) AS yhat
+  FROM ts_forecast_by('cat', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'});
+
+-- Decomposition: take the smooth TREND from the extension's MSTL, then split the
+-- detrended signal into a classical seasonal component (mean per calendar month,
+-- centred) and the remainder — a simple, transparent additive decomposition.
+CREATE TABLE IF NOT EXISTS decomp AS
+  WITH d AS (SELECT category, generate_subscripts(trend,1) AS rn, unnest(trend) AS trend
+             FROM ts_mstl_decomposition_by('cat', category, ds, y, MAP{'periods':'[12]'})),
+       o AS (SELECT category, ds, y, row_number() OVER (PARTITION BY category ORDER BY ds) AS rn FROM cat),
+       j AS (SELECT o.category, o.ds, o.y AS observed, d.trend, o.y - d.trend AS detrended, month(o.ds) AS mo
+             FROM o JOIN d USING (category, rn)),
+       s AS (SELECT category, mo, avg(detrended) AS smean FROM j GROUP BY 1,2),
+       sc AS (SELECT category, mo, smean - avg(smean) OVER (PARTITION BY category) AS seasonal FROM s)
+  SELECT j.category, j.ds, round(j.observed,0) AS observed, round(j.trend,0) AS trend,
+         round(sc.seasonal,0) AS seasonal,
+         round(j.observed - j.trend - sc.seasonal,0) AS remainder
+  FROM j JOIN sc USING (category, mo);
+
+-- Backtest: hold out the last 12 months, forecast them from the train, compare to actuals
+CREATE TABLE IF NOT EXISTS train AS SELECT * FROM cat WHERE ds <= (SELECT max(ds) FROM cat)-INTERVAL 12 MONTH;
+CREATE TABLE IF NOT EXISTS bt AS
+  SELECT f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
+  FROM ts_forecast_by('train', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f
+  JOIN cat t ON f.category=t.category AND f.ds=t.ds;
+
+SELECT 'M5 analytics (SeasonalNaive) — forecast · decomposition · backtest'::LABEL;
+
+SELECT 'Forecast'::TAB;
+SELECT 12::COL;
+SELECT ds ::XAXIS, category ::CATEGORY, y ::LINECHART,
+       'History + 12-month SeasonalNaive forecast, per category'::TITLE
+FROM (SELECT category, ds, y FROM cat UNION ALL SELECT category, ds, yhat FROM fc) ORDER BY category, ds;
+
+SELECT 'Decomposition'::TAB;
+SELECT DISTINCT category ::DROPDOWN FROM decomp ORDER BY category;
+SELECT 12::COL;
+SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + trend'::TITLE
+FROM decomp WHERE category = getvariable('category') ORDER BY ds;
+SELECT 6::COL;
+SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal (12-month)'::TITLE
+FROM decomp WHERE category = getvariable('category') ORDER BY ds;
+SELECT 6::COL;
+SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE
+FROM decomp WHERE category = getvariable('category') ORDER BY ds;
+
+SELECT 'Backtest + metrics'::TAB;
+SELECT 12::COL;
+SELECT category AS "Category" ::TABLE,
+       round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
+       round(sqrt(avg(pow(actual-predicted,2))),0)              AS "RMSE"   ::COMPACT,
+       round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS "MAPE %" ::PLAIN
+FROM bt GROUP BY 1 ORDER BY 2;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM bt WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES'::TITLE FROM bt WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD'::TITLE FROM bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
+      "M5 changepoints": `-- Changepoint detection on M5 monthly sales per category (anofox-forecast).
+-- ts_detect_changepoints_by returns a probability per point; points with a high
+-- probability are marked on each series.
+CREATE TABLE IF NOT EXISTS cat AS
+  SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
+  FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
+CREATE TABLE IF NOT EXISTS cp AS
+  SELECT c.category, c.ds, m.y, c.changepoint_probability AS prob
+  FROM ts_detect_changepoints_by('cat', category, ds, y, MAP{}) c
+  JOIN cat m ON c.category = m.category AND c.ds = m.ds;
+
+SELECT 'M5 changepoint detection — monthly sales (dots = high changepoint probability)'::LABEL;
+
+SELECT 12::COL;
+SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
+       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER,
+       'FOODS — likely changepoints (prob > 0.7)'::TITLE
+FROM cp WHERE category='FOODS' ORDER BY ds;
+SELECT 12::COL;
+SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
+       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOBBIES'::TITLE
+FROM cp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 12::COL;
+SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
+       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOUSEHOLD'::TITLE
+FROM cp WHERE category='HOUSEHOLD' ORDER BY ds;`,
     },
   },
 
@@ -517,9 +607,16 @@ async function ensureForecast(sql) {
   await fcParquet;
   // 2. Load the community extension only for statements that use it (memoised;
   //    a failure is remembered so we don't re-hammer the CDN each panel).
-  if (/\bts_forecast_by\b|\banofox_forecast\b/i.test(sql)) {
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(sql)) {
     if (!fcExt) {
       fcExt = (async () => {
+        // json (from the default repo) is needed by some anofox macros
+        // (e.g. ts_mstl_decomposition_by parses JSON params).
+        try {
+          await conn.query("INSTALL json; LOAD json;");
+        } catch (_) {
+          /* usually bundled */
+        }
         // Load our locally-built wasm extension (served from web/localext/ in the
         // repo layout <version>/<platform>/). The signed community build doesn't
         // link against this runtime (#239); this local build's imports do.
@@ -546,7 +643,7 @@ async function ensureForecast(sql) {
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
 async function runSql(sql) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
-  if (/m5_monthly|\bts_forecast_by\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
+  if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
     if (!r.ok) throw new Error(await r.text());

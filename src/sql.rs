@@ -12,6 +12,9 @@ pub struct Panel {
     /// SQL with the `::ROLE` casts rewritten to `AS c{i}` aliases.
     pub sql: String,
     pub roles: Vec<(usize, Role)>,
+    /// Human display name per charted-measure column (`AS alias`, or the bare
+    /// column name) keyed by output position — used to label combo legends.
+    pub names: Vec<(usize, String)>,
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
@@ -24,11 +27,11 @@ pub fn plan(script: &str) -> Vec<Panel> {
             if stmt.is_empty() {
                 return None;
             }
-            let (sql, roles) = rewrite(stmt);
+            let (sql, roles, names) = rewrite(stmt);
             Some(if roles.is_empty() {
-                Panel { setup: true, sql: stmt.to_string(), roles }
+                Panel { setup: true, sql: stmt.to_string(), roles, names: Vec::new() }
             } else {
-                Panel { setup: false, sql, roles }
+                Panel { setup: false, sql, roles, names }
             })
         })
         .collect()
@@ -203,12 +206,15 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     out
 }
 
+/// `(rewritten SQL, [(col idx, role)], [(col idx, display name)])`.
+type Rewritten = (String, Vec<(usize, Role)>, Vec<(usize, String)>);
+
 /// Rewrite `<expr>::ROLE` casts in the SELECT list into `<expr> AS c{i}`.
-pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
+pub fn rewrite(stmt: &str) -> Rewritten {
     let up = stmt.to_ascii_uppercase();
     let sel = match up.find("SELECT") {
         Some(p) => p + 6,
-        None => return (stmt.to_string(), Vec::new()),
+        None => return (stmt.to_string(), Vec::new(), Vec::new()),
     };
     let list_end = top_level_kw(&stmt[sel..], "FROM").map(|o| sel + o).unwrap_or(stmt.len());
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
@@ -255,10 +261,11 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                 _ => it.trim().to_string(),
             })
             .collect();
-        return (format!("{head} {} {tail}", items.join(", ")), roles);
+        return (format!("{head} {} {tail}", items.join(", ")), roles, Vec::new());
     }
 
     let mut roles = Vec::new();
+    let mut names = Vec::new();
     let mut items = Vec::new();
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
@@ -276,7 +283,18 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
                     | Role::BandUpper
                     | Role::Trend
                     | Role::Reload => {
-                        format!("CAST({expr} AS DOUBLE) AS c{i}")
+                        // A charted measure remembers a human name (explicit
+                        // trailing `AS alias`, else a bare column name) so a combo
+                        // legend can read e.g. "observed"/"trend". The output alias
+                        // stays `c{i}` so the render side keeps its by-position
+                        // column lookup — the name travels as separate metadata.
+                        let (core, alias) = trailing_alias(expr);
+                        if matches!(role, Role::Value(_)) {
+                            if let Some(nm) = alias.or_else(|| simple_ident(core)) {
+                                names.push((i, nm));
+                            }
+                        }
+                        format!("CAST({core} AS DOUBLE) AS c{i}")
                     }
                     // Inputs keep the original column name — it becomes the
                     // DuckDB variable name the browser binds the control to.
@@ -290,7 +308,7 @@ pub fn rewrite(stmt: &str) -> (String, Vec<(usize, Role)>) {
         }
         items.push(format!("{item} AS c{i}"));
     }
-    (format!("{head} {} {tail}", items.join(", ")), roles)
+    (format!("{head} {} {tail}", items.join(", ")), roles, names)
 }
 
 fn trailing_role(item: &str) -> Option<(&str, &str)> {
@@ -298,6 +316,69 @@ fn trailing_role(item: &str) -> Option<(&str, &str)> {
     let role = item[idx + 2..].trim();
     if ROLES.contains(&role.to_ascii_uppercase().as_str()) {
         Some((item[..idx].trim(), role))
+    } else {
+        None
+    }
+}
+
+/// Split a trailing top-level `AS <alias>` off an expression. The alias may be a
+/// bare identifier or a `"quoted"` one. A nested `AS` (as in `CAST(x AS INT)`)
+/// stays put — only a top-level, trailing `AS` at paren depth 0 is peeled.
+fn trailing_alias(expr: &str) -> (&str, Option<String>) {
+    let trimmed = expr.trim_end();
+    // The final token: a quoted identifier, or a run of identifier chars.
+    let (alias_start, alias) = if let Some(body) = trimmed.strip_suffix('"') {
+        match body.rfind('"') {
+            Some(o) => (o, body[o + 1..].to_string()),
+            None => return (expr, None),
+        }
+    } else {
+        let cut = trimmed.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+        if cut.len() == trimmed.len() {
+            return (expr, None); // no trailing word
+        }
+        (cut.len(), trimmed[cut.len()..].to_string())
+    };
+    if alias.is_empty() {
+        return (expr, None);
+    }
+    let before = trimmed[..alias_start].trim_end();
+    if before.len() < 2 || !before[before.len() - 2..].eq_ignore_ascii_case("AS") {
+        return (expr, None);
+    }
+    let head = &before[..before.len() - 2];
+    // The `AS` must stand alone (whitespace before it) and at paren depth 0.
+    if !head.is_empty() && !head.ends_with(|c: char| c.is_whitespace()) {
+        return (expr, None);
+    }
+    let core = head.trim_end();
+    let balanced = {
+        let (mut d, mut s) = (0i32, false);
+        for c in core.chars() {
+            match c {
+                '\'' => s = !s,
+                '(' if !s => d += 1,
+                ')' if !s => d -= 1,
+                _ => {}
+            }
+        }
+        d == 0 && !s
+    };
+    if core.is_empty() || !balanced {
+        return (expr, None);
+    }
+    (core, Some(alias))
+}
+
+/// `Some(s)` if `s` is a bare SQL identifier (so a plain `col ::LINECHART` can
+/// carry `col` as its series name); `None` for anything computed.
+fn simple_ident(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !t.is_empty()
+        && !t.starts_with(|c: char| c.is_ascii_digit())
+        && t.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        Some(t.to_string())
     } else {
         None
     }
@@ -353,4 +434,28 @@ fn top_level_kw(s: &str, kw: &str) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    #[test]
+    fn value_columns_keep_names() {
+        // Data lookup stays keyed by c{i}; the human name travels as metadata.
+        // Explicit quoted alias → name, alias stripped from the DOUBLE cast.
+        let (s, _, n) = rewrite(r#"SELECT ds ::XAXIS, y AS "sales" ::LINECHART, CASE WHEN prob>0.7 THEN y END AS "changepoint" ::SCATTER FROM cp"#);
+        assert!(s.contains("CAST(y AS DOUBLE) AS c1"), "{s}");
+        assert!(s.contains("CAST(CASE WHEN prob>0.7 THEN y END AS DOUBLE) AS c2"), "{s}");
+        assert_eq!(n, vec![(1, "sales".to_string()), (2, "changepoint".to_string())]);
+        // Bare column name becomes the series name.
+        let (_, _, n2) = rewrite("SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART FROM d");
+        assert_eq!(n2, vec![(1, "observed".to_string()), (2, "trend".to_string())]);
+        // A computed expr with no alias has no name (legend falls back to c{i}).
+        let (s3, _, n3) = rewrite("SELECT ds ::XAXIS, sum(y) ::BARCHART FROM d");
+        assert!(s3.contains("CAST(sum(y) AS DOUBLE) AS c1"), "{s3}");
+        assert!(n3.is_empty(), "{n3:?}");
+        // Nested CAST(.. AS ..) must not be mistaken for a trailing alias.
+        let (s4, _, _) = rewrite("SELECT ds ::XAXIS, CAST(y AS INT) ::LINECHART FROM d");
+        assert!(s4.contains("CAST(CAST(y AS INT) AS DOUBLE) AS c1"), "{s4}");
+    }
 }

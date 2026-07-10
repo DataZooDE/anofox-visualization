@@ -422,6 +422,34 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     data.push(("label".to_string(), label_vals));
     aes = aes.label("label");
 
+    // Multi-measure combo with no explicit CATEGORY (e.g. observed+trend,
+    // actual+predicted, or a line with a changepoint-point overlay): colour each
+    // measure distinctly and name it in the legend by its column header, so the
+    // series are separable. The default single-series theming would otherwise
+    // paint every measure the same brand colour.
+    let combo_names: Vec<String> = if category.is_none() && !extras.is_empty() && !bar {
+        let n = value.values.len();
+        let name_of = |c: &Column, i: usize| {
+            if c.name.is_empty() {
+                format!("series {}", i + 1)
+            } else {
+                c.name.clone()
+            }
+        };
+        let mut names = vec![name_of(value, 0)];
+        for ev in &extras {
+            let idx = names.len();
+            names.push(name_of(ev, idx));
+        }
+        for (k, nm) in names.iter().enumerate() {
+            data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
+        }
+        aes = aes.color("__s0");
+        names
+    } else {
+        Vec::new()
+    };
+
     let mut plot = GGPlot::new(data).aes(aes);
     // A ::BAND (prediction interval) matches the forecast — the last coloured
     // series — at half opacity, so it reads as that series' uncertainty.
@@ -477,13 +505,19 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     for (k, ev) in extras.iter().enumerate() {
         if let Role::Value(ekind) = ev.role {
             let yk = format!("y{}", k + 2);
+            let mut lay = Aes::new().x("x").y(&yk);
+            if !combo_names.is_empty() {
+                lay = lay.color(&format!("__s{}", k + 1));
+            }
             plot = match ekind {
                 Kind::Line => plot.geom_line(),
                 Kind::Area => plot.geom_area(),
-                Kind::Point => plot.geom_point(),
+                // A point overlay (e.g. detected changepoints/peaks) reads as a
+                // marker on the base line, so make it a touch larger.
+                Kind::Point => plot.geom_point_with(GeomPoint { size: 3.4, ..Default::default() }),
                 _ => plot.geom_col(),
             }
-            .layer_aes(Aes::new().x("x").y(&yk));
+            .layer_aes(lay);
         }
     }
     // Horizontal reference/target line (`::REFLINE`/`::YLINE`).
@@ -508,6 +542,15 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
             .collect();
         plot = if by_colour { plot.scale_color_manual(pairs) } else { plot.scale_fill_manual(pairs) };
+    }
+    if !combo_names.is_empty() {
+        // Combo measures → distinct palette colours, keyed by column header.
+        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = combo_names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), dz_color(i)))
+            .collect();
+        plot = plot.scale_color_manual(pairs);
     }
     if x_coloured {
         plot = plot.show_legend(false); // the x axis already labels the colours
@@ -534,7 +577,9 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // preset — presets replace the whole theme. Box plots opt out so they stay
     // unfilled (primary would re-colour the box fill).
     plot = plot.theme_minimal();
-    if !matches!(kind, Kind::Boxplot) {
+    // A combo already colours each measure explicitly via the manual scale; the
+    // brand primary would flatten them all back to one colour, so skip it there.
+    if !matches!(kind, Kind::Boxplot) && combo_names.is_empty() {
         plot = plot.primary_color(brand());
     }
     plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);

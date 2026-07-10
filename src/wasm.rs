@@ -15,10 +15,16 @@ pub fn plan(script: &str) -> String {
     let arr: Vec<serde_json::Value> = sql::plan(script)
         .iter()
         .map(|p| {
+            // Each role entry is `[colIdx, "ROLE", name]` — the trailing name
+            // (a charted measure's display label, else "") is metadata the browser
+            // passes back verbatim; JS role checks only read the first two.
             serde_json::json!({
                 "setup": p.setup,
                 "sql": p.sql,
-                "roles": p.roles.iter().map(|(i, r)| serde_json::json!([i, role_str(r)])).collect::<Vec<_>>(),
+                "roles": p.roles.iter().map(|(i, r)| {
+                    let name = p.names.iter().find(|(j, _)| j == i).map(|(_, n)| n.as_str()).unwrap_or("");
+                    serde_json::json!([i, role_str(r), name])
+                }).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -38,12 +44,20 @@ pub fn render_panel(
 ) -> String {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(rows_json).unwrap_or_default();
-    let roles: Vec<(usize, Role)> = serde_json::from_str::<Vec<(usize, String)>>(roles_json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(i, s)| parse_role(&s).map(|r| (i, r)))
+    let entries: Vec<(usize, String, String)> = parse_role_entries(roles_json);
+    let roles: Vec<(usize, Role)> = entries
+        .iter()
+        .filter_map(|(i, s, _)| parse_role(s).map(|r| (*i, r)))
         .collect();
-    let cols = sql::columns_from_rows(&rows, &roles);
+    let mut cols = sql::columns_from_rows(&rows, &roles);
+    // Overlay the human display names (combo legends read these).
+    for (i, _, name) in &entries {
+        if !name.is_empty() {
+            if let Some(c) = cols.iter_mut().find(|c| c.name == format!("c{i}")) {
+                c.name = name.clone();
+            }
+        }
+    }
     crate::set_brand(parse_primary(primary));
     // Optional map zoom window `[x0, x1, y0, y1]` (lon/lat). Empty = auto-fit.
     crate::set_panel_zoom(parse_zoom(zoom_json));
@@ -59,11 +73,10 @@ pub fn render_panel(
 pub fn map_bounds(rows_json: &str, roles_json: &str) -> String {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(rows_json).unwrap_or_default();
-    let roles: Vec<(usize, String)> = serde_json::from_str(roles_json).unwrap_or_default();
-    let geo_cols: Vec<String> = roles
+    let geo_cols: Vec<String> = parse_role_entries(roles_json)
         .iter()
-        .filter(|(_, r)| r == "MAP" || r == "BASEMAP")
-        .map(|(i, _)| format!("c{i}"))
+        .filter(|(_, r, _)| r == "MAP" || r == "BASEMAP")
+        .map(|(i, _, _)| format!("c{i}"))
         .collect();
     let (mut x0, mut y0, mut x1, mut y1) =
         (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -96,10 +109,9 @@ pub fn panel_bounds(rows_json: &str, roles_json: &str) -> String {
     use ggplot_rs::prelude::Value;
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(rows_json).unwrap_or_default();
-    let roles: Vec<(usize, Role)> = serde_json::from_str::<Vec<(usize, String)>>(roles_json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(i, s)| parse_role(&s).map(|r| (i, r)))
+    let roles: Vec<(usize, Role)> = parse_role_entries(roles_json)
+        .iter()
+        .filter_map(|(i, s, _)| parse_role(s).map(|r| (*i, r)))
         .collect();
     let cols = sql::columns_from_rows(&rows, &roles);
     let Some(x) = cols.iter().find(|c| c.role == Role::X) else {
@@ -147,6 +159,21 @@ fn parse_zoom(s: &str) -> Option<crate::ZoomWindow> {
         [x0, x1, y0, y1] => Some(((*x0, *x1), (*y0, *y1))),
         _ => None,
     }
+}
+
+/// Parse the `roles` JSON from [`plan`] into `(colIdx, "ROLE", name)` triples.
+/// Tolerates both the current `[i, "ROLE", name]` form and a legacy `[i, "ROLE"]`
+/// (name defaults to empty).
+fn parse_role_entries(roles_json: &str) -> Vec<(usize, String, String)> {
+    let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(roles_json).unwrap_or_default();
+    raw.into_iter()
+        .filter_map(|e| {
+            let i = e.first()?.as_u64()? as usize;
+            let role = e.get(1)?.as_str()?.to_string();
+            let name = e.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some((i, role, name))
+        })
+        .collect()
 }
 
 /// Parse a `RRGGBB` / `#rrggbb` brand colour (empty / invalid → default).
