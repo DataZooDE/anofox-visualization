@@ -2801,6 +2801,11 @@ function attachToolbox() {
     }
     // dataView: show the panel's underlying rows as a table.
     if (dp) mkTool("Data view", "▤", () => showDataView(panel));
+    // brush + value filter: only for charts with real marks (line/scatter).
+    if (dp && !dp.isMap && svg.querySelector("circle.dp-hit")) {
+      mkTool("Brush select", "▧", () => toggleBrush(panel));
+      mkTool("Value filter", "◧", () => toggleVisualMap(panel));
+    }
     // restore: reset any zoom/pan (a double-click on the chart does the same).
     if (panel.querySelector(".dp-zoom")) {
       mkTool("Restore", "⟳", () => {
@@ -2889,6 +2894,164 @@ function showDataView(panel) {
     if (e.target === back || e.target.classList.contains("dp-modal-x")) close();
   });
   document.body.appendChild(back);
+}
+
+// Parse the numeric value out of a mark's "label: 22" tooltip (else null).
+function markValue(el) {
+  const t = el.getAttribute("data-tip") || "";
+  const i = t.lastIndexOf(": ");
+  const n = parseFloat((i >= 0 ? t.slice(i + 2) : t).replace(/[^0-9.eE+-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+// Dim every data mark that fails `keep(el)`; pass null to clear the emphasis.
+function filterMarks(panel, keep) {
+  panel.querySelectorAll("svg circle.dp-hit, svg rect[fill]").forEach((el) => {
+    el.style.opacity = keep && !keep(el) ? "0.12" : "";
+  });
+}
+
+// ECharts-style brush: toggle a drag-to-select overlay; marks inside the box
+// stay highlighted, the rest dim. Toggling again (or Esc) clears it.
+function toggleBrush(panel) {
+  if (panel._brush) {
+    panel._brush.remove();
+    panel._brush = null;
+    filterMarks(panel, null);
+    return;
+  }
+  const holder = panel.querySelector(".panel-svg");
+  const svg = panel.querySelector("svg");
+  if (!holder || !svg) return;
+  filterMarks(panel, null);
+  const ov = document.createElement("div");
+  ov.className = "dp-brush-ov";
+  const rect = document.createElement("div");
+  rect.className = "dp-brush-rect";
+  ov.appendChild(rect);
+  holder.appendChild(ov);
+  panel._brush = ov;
+  let start = null;
+  const rel = (e) => {
+    const r = ov.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  ov.addEventListener("mousedown", (e) => {
+    start = rel(e);
+    Object.assign(rect.style, { left: start.x + "px", top: start.y + "px", width: 0, height: 0, display: "block" });
+    e.preventDefault();
+  });
+  ov.addEventListener("mousemove", (e) => {
+    if (!start) return;
+    const p = rel(e);
+    const x = Math.min(start.x, p.x),
+      y = Math.min(start.y, p.y),
+      w = Math.abs(p.x - start.x),
+      h = Math.abs(p.y - start.y);
+    Object.assign(rect.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" });
+  });
+  ov.addEventListener("mouseup", (e) => {
+    if (!start) return;
+    const p = rel(e);
+    const box = {
+      x0: Math.min(start.x, p.x),
+      y0: Math.min(start.y, p.y),
+      x1: Math.max(start.x, p.x),
+      y1: Math.max(start.y, p.y),
+    };
+    start = null;
+    if (box.x1 - box.x0 < 4 && box.y1 - box.y0 < 4) {
+      filterMarks(panel, null);
+      return;
+    }
+    const ovr = ov.getBoundingClientRect();
+    filterMarks(panel, (el) => {
+      const b = el.getBoundingClientRect();
+      const cx = b.left + b.width / 2 - ovr.left,
+        cy = b.top + b.height / 2 - ovr.top;
+      return cx >= box.x0 && cx <= box.x1 && cy >= box.y0 && cy <= box.y1;
+    });
+  });
+}
+
+// ECharts-style visualMap: a value slider; marks whose value falls outside the
+// selected [lo,hi] range dim. Toggling again removes the control + emphasis.
+function toggleVisualMap(panel) {
+  if (panel._vmap) {
+    panel._vmap.remove();
+    panel._vmap = null;
+    filterMarks(panel, null);
+    return;
+  }
+  const svg = panel.querySelector("svg");
+  const vals = [...svg.querySelectorAll("circle.dp-hit")].map(markValue).filter((v) => v != null);
+  if (vals.length < 2) return;
+  const min = Math.min(...vals),
+    max = Math.max(...vals),
+    span = max - min || 1;
+  const bar = document.createElement("div");
+  bar.className = "dp-vmap";
+  bar.innerHTML =
+    `<span class="dp-vmap-lab dp-vmap-lo"></span>` +
+    `<div class="dp-vmap-track"><div class="dp-vmap-fill"></div>` +
+    `<div class="dp-vmap-h dp-vmap-h0"></div><div class="dp-vmap-h dp-vmap-h1"></div></div>` +
+    `<span class="dp-vmap-lab dp-vmap-hi"></span>`;
+  (panel.querySelector(".panel-svg") || panel).after
+    ? panel.querySelector(".panel-svg").after(bar)
+    : panel.appendChild(bar);
+  panel._vmap = bar;
+  const track = bar.querySelector(".dp-vmap-track");
+  const fill = bar.querySelector(".dp-vmap-fill");
+  const h0 = bar.querySelector(".dp-vmap-h0");
+  const h1 = bar.querySelector(".dp-vmap-h1");
+  const loLab = bar.querySelector(".dp-vmap-lo");
+  const hiLab = bar.querySelector(".dp-vmap-hi");
+  let f0 = 0,
+    f1 = 1;
+  const fmt = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10);
+  const apply = () => {
+    fill.style.left = f0 * 100 + "%";
+    fill.style.width = (f1 - f0) * 100 + "%";
+    h0.style.left = f0 * 100 + "%";
+    h1.style.left = f1 * 100 + "%";
+    const lo = min + f0 * span,
+      hi = min + f1 * span;
+    loLab.textContent = fmt(lo);
+    hiLab.textContent = fmt(hi);
+    filterMarks(panel, (el) => {
+      if (!el.matches("circle.dp-hit")) return true;
+      const v = markValue(el);
+      return v == null || (v >= lo - 1e-9 && v <= hi + 1e-9);
+    });
+  };
+  const fracAt = (cx) => {
+    const r = track.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (cx - r.left) / (r.width || 1)));
+  };
+  let drag = null;
+  const onMove = (e) => {
+    if (!drag) return;
+    const f = fracAt(e.clientX);
+    if (drag === "h0") f0 = Math.min(f, f1 - 0.02);
+    else f1 = Math.max(f, f0 + 0.02);
+    apply();
+  };
+  const onUp = () => {
+    drag = null;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  const start = (which) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    drag = which;
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+  h0.addEventListener("mousedown", start("h0"));
+  h1.addEventListener("mousedown", start("h1"));
+  bar.addEventListener("click", (e) => e.stopPropagation());
+  apply();
 }
 
 function savePanelPng(panel) {
