@@ -78,8 +78,12 @@ pub fn map_bounds(rows_json: &str, roles_json: &str) -> String {
         .filter(|(_, r, _)| r == "MAP" || r == "BASEMAP")
         .map(|(i, _, _)| format!("c{i}"))
         .collect();
-    let (mut x0, mut y0, mut x1, mut y1) =
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
     for row in &rows {
         for key in &geo_cols {
             if let Some(b) = row
@@ -200,7 +204,10 @@ fn role_str(r: &Role) -> &'static str {
         Role::Value(Kind::BarStackedPercent) => "BARCHART_STACKED_PERCENT",
         Role::Value(Kind::Line) => "LINECHART",
         Role::Value(Kind::LinePercent) => "LINECHART_PERCENT",
+        Role::Value(Kind::Step) => "STEP",
+        Role::Value(Kind::Smooth) => "SMOOTH",
         Role::Value(Kind::Area) => "AREACHART",
+        Role::Value(Kind::AreaStacked) => "AREACHART_STACKED",
         Role::Value(Kind::Point) => "SCATTER",
         Role::Value(Kind::Pie) => "PIE",
         Role::Value(Kind::Donut) => "DONUTCHART",
@@ -257,5 +264,8 @@ fn role_str(r: &Role) -> &'static str {
         Role::Metric(crate::MetricFmt::Compact) => "COMPACT",
         Role::Tab => "TAB",
         Role::SubTab => "SUBTAB",
+        Role::Size => "SIZE",
+        Role::DataLabels => "DATALABELS",
+        Role::MarkArea => "MARKAREA",
     }
 }

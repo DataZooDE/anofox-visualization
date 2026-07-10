@@ -29,9 +29,19 @@ pub fn plan(script: &str) -> Vec<Panel> {
             }
             let (sql, roles, names) = rewrite(stmt);
             Some(if roles.is_empty() {
-                Panel { setup: true, sql: stmt.to_string(), roles, names: Vec::new() }
+                Panel {
+                    setup: true,
+                    sql: stmt.to_string(),
+                    roles,
+                    names: Vec::new(),
+                }
             } else {
-                Panel { setup: false, sql, roles, names }
+                Panel {
+                    setup: false,
+                    sql,
+                    roles,
+                    names,
+                }
             })
         })
         .collect()
@@ -65,7 +75,10 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
     match v {
         Some(serde_json::Value::Number(n)) => n.as_f64().map(Value::Float).unwrap_or(Value::Na),
         Some(serde_json::Value::String(s)) => match numeric {
-            true => s.parse::<f64>().map(Value::Float).unwrap_or_else(|_| Value::Str(s.clone())),
+            true => s
+                .parse::<f64>()
+                .map(Value::Float)
+                .unwrap_or_else(|_| Value::Str(s.clone())),
             false => Value::Str(s.clone()),
         },
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
@@ -92,7 +105,9 @@ fn maybe_datetime(vals: Vec<Value>) -> Vec<Value> {
     }
     vals.into_iter()
         .map(|v| match v {
-            Value::Str(s) => parse_iso_epoch(&s).map(Value::DateTime).unwrap_or(Value::Na),
+            Value::Str(s) => parse_iso_epoch(&s)
+                .map(Value::DateTime)
+                .unwrap_or(Value::Na),
             other => other,
         })
         .collect()
@@ -137,25 +152,174 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 const ROLES: &[&str] = &[
-    "XAXIS", "X", "YAXIS", "Y", "CATEGORY", "SERIES", "COLOR", "COLOUR", "LABEL", "TITLE", "HEADING", "BARCHART",
-    "BAR", "BARCHART_STACKED", "BAR_STACKED", "STACKED_BAR", "LINECHART", "LINE", "AREACHART", "AREA",
-    "SCATTER", "POINT", "SCATTERCHART", "PIE", "DONUT", "PIECHART", "HISTOGRAM", "HIST", "BOXPLOT",
-    "BOX_PLOT", "VIOLIN", "VIOLINPLOT", "DENSITY", "KDE", "FLIP", "COORD_FLIP", "HORIZONTAL", "ALPHA", "OPACITY",
-    "HEATMAP", "TILE", "TILES", "SPARKLINE", "SPARK", "REFLINE", "TARGET", "GOAL", "MAP",
-    "GEOMETRY", "GEO", "CHOROPLETH", "BASEMAP", "MAPBASE", "BACKDROP", "TABLE", "PAGED", "TABLE_PAGED", "PAGINATED", "GRID", "METRIC", "KPI", "BIGNUMBER", "DROPDOWN",
-    "OPTIONS", "SELECT_INPUT", "NUMBER", "SLIDER", "NUMERIC", "DATE", "DATEPICKER", "TEXT", "SEARCH",
-    "STRING", "MULTISELECT", "MULTI", "DATERANGE", "DATE_RANGE", "MONEY", "DOLLAR", "CURRENCY",
-    "PERCENT", "PCT", "COMPACT",
-    "DELTA", "COMPARE", "PREVIOUS", "TAB", "PAGE", "SUBTAB", "SUB_TAB", "COLUMNS",
-    "COLS", "GROUP", "BOX", "ROW", "ENDGROUP", "ENDBOX", "ENDROW", "SPAN", "WIDTH", "COL", "HEIGHT", "TALL",
+    "XAXIS",
+    "X",
+    "YAXIS",
+    "Y",
+    "CATEGORY",
+    "SERIES",
+    "COLOR",
+    "COLOUR",
+    "LABEL",
+    "TITLE",
+    "HEADING",
+    "BARCHART",
+    "BAR",
+    "BARCHART_STACKED",
+    "BAR_STACKED",
+    "STACKED_BAR",
+    "LINECHART",
+    "LINE",
+    "AREACHART",
+    "AREA",
+    "STEP",
+    "STEPLINE",
+    "STEP_LINE",
+    "SMOOTH",
+    "TRENDLINE",
+    "TREND_LINE",
+    "AREACHART_STACKED",
+    "AREA_STACKED",
+    "STACKED_AREA",
+    "SIZE",
+    "BUBBLE",
+    "DATALABELS",
+    "DATALABEL",
+    "VALUELABELS",
+    "SHOWLABELS",
+    "MARKAREA",
+    "MARK_AREA",
+    "SHADE",
+    "SCATTER",
+    "POINT",
+    "SCATTERCHART",
+    "PIE",
+    "DONUT",
+    "PIECHART",
+    "HISTOGRAM",
+    "HIST",
+    "BOXPLOT",
+    "BOX_PLOT",
+    "VIOLIN",
+    "VIOLINPLOT",
+    "DENSITY",
+    "KDE",
+    "FLIP",
+    "COORD_FLIP",
+    "HORIZONTAL",
+    "ALPHA",
+    "OPACITY",
+    "HEATMAP",
+    "TILE",
+    "TILES",
+    "SPARKLINE",
+    "SPARK",
+    "REFLINE",
+    "TARGET",
+    "GOAL",
+    "MAP",
+    "GEOMETRY",
+    "GEO",
+    "CHOROPLETH",
+    "BASEMAP",
+    "MAPBASE",
+    "BACKDROP",
+    "TABLE",
+    "PAGED",
+    "TABLE_PAGED",
+    "PAGINATED",
+    "GRID",
+    "METRIC",
+    "KPI",
+    "BIGNUMBER",
+    "DROPDOWN",
+    "OPTIONS",
+    "SELECT_INPUT",
+    "NUMBER",
+    "SLIDER",
+    "NUMERIC",
+    "DATE",
+    "DATEPICKER",
+    "TEXT",
+    "SEARCH",
+    "STRING",
+    "MULTISELECT",
+    "MULTI",
+    "DATERANGE",
+    "DATE_RANGE",
+    "MONEY",
+    "DOLLAR",
+    "CURRENCY",
+    "PERCENT",
+    "PCT",
+    "COMPACT",
+    "DELTA",
+    "COMPARE",
+    "PREVIOUS",
+    "TAB",
+    "PAGE",
+    "SUBTAB",
+    "SUB_TAB",
+    "COLUMNS",
+    "COLS",
+    "GROUP",
+    "BOX",
+    "ROW",
+    "ENDGROUP",
+    "ENDBOX",
+    "ENDROW",
+    "SPAN",
+    "WIDTH",
+    "COL",
+    "HEIGHT",
+    "TALL",
     // Shaper-parity additions:
-    "BARCHART_PERCENT", "BAR_PERCENT", "BARCHART_STACKED_PERCENT", "BAR_STACKED_PERCENT",
-    "LINECHART_PERCENT", "LINE_PERCENT", "DONUTCHART", "DONUTCHART_PERCENT", "PIECHART_PERCENT",
-    "GAUGE", "GAUGE_PERCENT", "YLINE", "XLINE", "BAND_LOWER", "BANDLOWER", "BAND_UPPER", "BANDUPPER",
-    "TREND", "HINT", "TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE", "PLACEHOLDER", "HEADER_IMAGE",
-    "HEADERIMAGE", "FOOTER_LINK", "FOOTERLINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_EXCEL",
-    "DOWNLOAD_PDF", "RELOAD", "REFRESH", "RANGE", "LABELS", "COLORS", "COLOURS",
-    "COLORSCALE", "COLOURSCALE", "HEAT", "GRADIENT", "BADGE", "STATUS", "PILL", "PLAIN", "NOBAR",
+    "BARCHART_PERCENT",
+    "BAR_PERCENT",
+    "BARCHART_STACKED_PERCENT",
+    "BAR_STACKED_PERCENT",
+    "LINECHART_PERCENT",
+    "LINE_PERCENT",
+    "DONUTCHART",
+    "DONUTCHART_PERCENT",
+    "PIECHART_PERCENT",
+    "GAUGE",
+    "GAUGE_PERCENT",
+    "YLINE",
+    "XLINE",
+    "BAND_LOWER",
+    "BANDLOWER",
+    "BAND_UPPER",
+    "BANDUPPER",
+    "TREND",
+    "HINT",
+    "TEXT_SMALL",
+    "TEXT_MEDIUM",
+    "TEXT_LARGE",
+    "PLACEHOLDER",
+    "HEADER_IMAGE",
+    "HEADERIMAGE",
+    "FOOTER_LINK",
+    "FOOTERLINK",
+    "DOWNLOAD_CSV",
+    "DOWNLOAD_XLSX",
+    "DOWNLOAD_EXCEL",
+    "DOWNLOAD_PDF",
+    "RELOAD",
+    "REFRESH",
+    "RANGE",
+    "LABELS",
+    "COLORS",
+    "COLOURS",
+    "COLORSCALE",
+    "COLOURSCALE",
+    "HEAT",
+    "GRADIENT",
+    "BADGE",
+    "STATUS",
+    "PILL",
+    "PLAIN",
+    "NOBAR",
 ];
 
 /// Strip `-- …` line comments (outside single-quoted strings).
@@ -216,7 +380,9 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         Some(p) => p + 6,
         None => return (stmt.to_string(), Vec::new(), Vec::new()),
     };
-    let list_end = top_level_kw(&stmt[sel..], "FROM").map(|o| sel + o).unwrap_or(stmt.len());
+    let list_end = top_level_kw(&stmt[sel..], "FROM")
+        .map(|o| sel + o)
+        .unwrap_or(stmt.len());
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
     let split = split_top_commas(list);
 
@@ -228,9 +394,11 @@ pub fn rewrite(stmt: &str) -> Rewritten {
             Role::Table | Role::PagedTable | Role::Input(InputKind::DateRange) | Role::Download(_)
         )
     };
-    let intact = split
-        .iter()
-        .find_map(|it| trailing_role(it.trim()).and_then(|(_, r)| parse_role(r)).filter(|r| keep_intact(*r)));
+    let intact = split.iter().find_map(|it| {
+        trailing_role(it.trim())
+            .and_then(|(_, r)| parse_role(r))
+            .filter(|r| keep_intact(*r))
+    });
     if let Some(role) = intact {
         // Keep every column and its name; strip the recognised casts. A ::TITLE
         // column is recorded by its output position so the panel shows a title
@@ -261,7 +429,11 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 _ => it.trim().to_string(),
             })
             .collect();
-        return (format!("{head} {} {tail}", items.join(", ")), roles, Vec::new());
+        return (
+            format!("{head} {} {tail}", items.join(", ")),
+            roles,
+            Vec::new(),
+        );
     }
 
     let mut roles = Vec::new();
@@ -443,13 +615,25 @@ mod alias_tests {
     fn value_columns_keep_names() {
         // Data lookup stays keyed by c{i}; the human name travels as metadata.
         // Explicit quoted alias → name, alias stripped from the DOUBLE cast.
-        let (s, _, n) = rewrite(r#"SELECT ds ::XAXIS, y AS "sales" ::LINECHART, CASE WHEN prob>0.7 THEN y END AS "changepoint" ::SCATTER FROM cp"#);
+        let (s, _, n) = rewrite(
+            r#"SELECT ds ::XAXIS, y AS "sales" ::LINECHART, CASE WHEN prob>0.7 THEN y END AS "changepoint" ::SCATTER FROM cp"#,
+        );
         assert!(s.contains("CAST(y AS DOUBLE) AS c1"), "{s}");
-        assert!(s.contains("CAST(CASE WHEN prob>0.7 THEN y END AS DOUBLE) AS c2"), "{s}");
-        assert_eq!(n, vec![(1, "sales".to_string()), (2, "changepoint".to_string())]);
+        assert!(
+            s.contains("CAST(CASE WHEN prob>0.7 THEN y END AS DOUBLE) AS c2"),
+            "{s}"
+        );
+        assert_eq!(
+            n,
+            vec![(1, "sales".to_string()), (2, "changepoint".to_string())]
+        );
         // Bare column name becomes the series name.
-        let (_, _, n2) = rewrite("SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART FROM d");
-        assert_eq!(n2, vec![(1, "observed".to_string()), (2, "trend".to_string())]);
+        let (_, _, n2) =
+            rewrite("SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART FROM d");
+        assert_eq!(
+            n2,
+            vec![(1, "observed".to_string()), (2, "trend".to_string())]
+        );
         // A computed expr with no alias has no name (legend falls back to c{i}).
         let (s3, _, n3) = rewrite("SELECT ds ::XAXIS, sum(y) ::BARCHART FROM d");
         assert!(s3.contains("CAST(sum(y) AS DOUBLE) AS c1"), "{s3}");
