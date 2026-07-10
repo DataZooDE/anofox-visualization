@@ -2766,6 +2766,66 @@ function attachHover() {
   apply();
   attachAxisPointer();
   attachLegendToggle();
+  attachToolbox();
+}
+
+// ECharts-style toolbox: a small hover-reveal toolbar per chart panel. For now a
+// single "save as PNG" tool that rasterises the SVG (2×) to a downloaded image.
+function attachToolbox() {
+  document.querySelectorAll(".panel").forEach((panel) => {
+    if (panel.dataset.toolboxWired) return;
+    const svg = panel.querySelector("svg");
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
+    panel.dataset.toolboxWired = "1";
+    const bar = document.createElement("div");
+    bar.className = "dp-toolbox";
+    const save = document.createElement("button");
+    save.className = "dp-tool";
+    save.title = "Save as PNG";
+    save.textContent = "⭳";
+    save.addEventListener("click", (e) => {
+      e.stopPropagation();
+      savePanelPng(panel);
+    });
+    bar.appendChild(save);
+    panel.appendChild(bar);
+  });
+}
+
+function savePanelPng(panel) {
+  const svg = panel.querySelector("svg");
+  if (!svg) return;
+  const vb = svg.viewBox.baseVal;
+  const clone = svg.cloneNode(true);
+  clone.querySelectorAll(".dp-toolbox").forEach((el) => el.remove());
+  if (!clone.getAttribute("width")) clone.setAttribute("width", vb.width);
+  if (!clone.getAttribute("height")) clone.setAttribute("height", vb.height);
+  const xml = new XMLSerializer().serializeToString(clone);
+  const url = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+  const scale = 2;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement("canvas");
+    c.width = vb.width * scale;
+    c.height = vb.height * scale;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = document.body.classList.contains("dark") ? "#0f1729" : "#ffffff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob((blob) => {
+      if (!blob) return;
+      const title = (panel.querySelector(".panel-title")?.textContent || "chart")
+        .trim()
+        .replace(/[^\w.-]+/g, "_")
+        .slice(0, 60) || "chart";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = title + ".png";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+  };
+  img.src = url;
 }
 
 // ECharts-style legend toggle: click a series name in the top legend to hide /
@@ -2815,6 +2875,19 @@ function attachLegendToggle() {
         if (e.swatch && e.fill) e.swatch.setAttribute("fill", off ? "#c4c9d2" : e.fill); // grey when off
       });
     };
+    // ECharts-style focus: hovering a legend entry emphasises that series and
+    // fades the others (visible ones only; hidden/toggled-off series stay off).
+    const emphasize = (only) => {
+      svg.querySelectorAll("[data-series]").forEach((el) => {
+        const s = el.getAttribute("data-series");
+        if (hidden.has(s)) return;
+        el.style.opacity = only && s !== only ? "0.15" : "";
+      });
+      entries.forEach((e) => {
+        if (hidden.has(e.s)) return;
+        e.text.style.fontWeight = only === e.s ? "700" : "";
+      });
+    };
     entries.forEach((e) => {
       const toggle = (ev) => {
         ev.stopPropagation();
@@ -2825,6 +2898,8 @@ function attachLegendToggle() {
         if (!el) return;
         el.style.cursor = "pointer";
         el.addEventListener("click", toggle);
+        el.addEventListener("mouseenter", () => emphasize(e.s));
+        el.addEventListener("mouseleave", () => emphasize(null));
       });
     });
     apply();
