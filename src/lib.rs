@@ -438,7 +438,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
-            .geom_ribbon_with(GeomRibbon { fill: band_color, alpha: 0.5 })
+            .geom_ribbon_with(GeomRibbon { fill: band_color, alpha: 0.25 })
             .layer_aes(Aes::new().x("x").ymin("bandlo").ymax("bandhi"));
     }
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
