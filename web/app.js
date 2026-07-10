@@ -295,6 +295,24 @@ FROM lx_metrics GROUP BY method ORDER BY 2;
 SELECT 6::COL;
 SELECT winner ::XAXIS, count(*) AS wins ::BARCHART, 'Series won per method (by MAE)'::TITLE
 FROM lx_scores WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
+
+-- The backtest on the line: for the selected series, the actual line (last 24
+-- months for context) overlaid with each method's prediction on the 12-month
+-- holdout — so you can see which method tracks the held-out actuals. Click any
+-- table row above/below to change the series.
+SELECT 12::COL;
+SELECT ds       ::XAXIS,
+       'Actual' ::CATEGORY,
+       y        ::LINECHART,
+       'Backtest on the holdout — actual vs SeasonalES vs SeasonalNaive'::TITLE
+FROM lx_m
+  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+    AND ds > (SELECT max(ds) FROM lx_m)-INTERVAL 24 MONTH
+UNION ALL
+SELECT ds, method, predicted, '' FROM lx_bt
+  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+ORDER BY 2, 1;
+
 SELECT 12::COL;
 SELECT item    AS "Item × store" ::PAGED,
        winner  AS "Winner"       ::BADGE,
