@@ -234,12 +234,23 @@ CREATE TABLE IF NOT EXISTS lx_bt AS
   UNION ALL
   SELECT 'SeasonalNaive', a.series, a.ds, a.actual, f.yhat
     FROM act a JOIN ts_forecast_by('lx_train', series, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f USING(series, ds);
+-- Per-series, per-method error metrics (one row per series × method).
 CREATE TABLE IF NOT EXISTS lx_metrics AS
-  SELECT method,
-         round(avg(abs(actual-predicted)),1)                      AS mae,
-         round(sqrt(avg(pow(actual-predicted,2))),1)              AS rmse,
-         round(100*avg(abs(actual-predicted)/nullif(actual,0)),2) AS mape
-  FROM lx_bt GROUP BY 1;
+  SELECT series, method,
+         round(avg(abs(actual-predicted)),2)                      AS mae,
+         round(sqrt(avg(pow(actual-predicted,2))),2)              AS rmse,
+         round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS mape
+  FROM lx_bt GROUP BY series, method;
+-- One row per series: each method's KPIs side by side + the per-series winner
+-- (the method with the lower MAE on that series' holdout).
+CREATE TABLE IF NOT EXISTS lx_scores AS
+  SELECT series AS item,
+         arg_min(method, mae)                            AS winner,
+         min(mae)  FILTER (WHERE method='SeasonalES')    AS es_mae,
+         min(mae)  FILTER (WHERE method='SeasonalNaive') AS sn_mae,
+         min(rmse) FILTER (WHERE method='SeasonalES')    AS es_rmse,
+         min(rmse) FILTER (WHERE method='SeasonalNaive') AS sn_rmse
+  FROM lx_metrics GROUP BY series;
 
 SELECT 'Forecasting ' || (SELECT count(*) FROM lx_summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM lx_m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
 
@@ -271,19 +282,27 @@ UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;
 
--- Backtest: which method wins on the 12-month holdout, aggregated over all series.
-SELECT 'Backtest — 12-month holdout: SeasonalES vs SeasonalNaive (all series)'::LABEL;
-SELECT 'Best method (lowest MAE): ' || (SELECT method FROM lx_metrics ORDER BY mae LIMIT 1) ::LABEL;
-SELECT 7::COL;
+-- Backtest per series: the 12-month-holdout KPIs of BOTH methods for every
+-- series, plus the per-series winner. Click a row to drill the chart above.
+SELECT 'Backtest per series — 12-month holdout: SeasonalES vs SeasonalNaive'::LABEL;
+SELECT 'Overall winner (most series won by MAE): ' || (SELECT winner FROM lx_scores WHERE winner IS NOT NULL GROUP BY winner ORDER BY count(*) DESC LIMIT 1) ::LABEL;
+SELECT 6::COL;
 SELECT method AS "Method" ::TABLE,
-       mae  AS "MAE"    ::COMPACT,
-       rmse AS "RMSE"   ::COMPACT,
-       mape AS "MAPE %" ::PLAIN,
-       CASE WHEN mae = (SELECT min(mae) FROM lx_metrics) THEN '✓ best' ELSE '' END AS "Best" ::BADGE
-FROM lx_metrics ORDER BY mae;
-SELECT 5::COL;
-SELECT method ::XAXIS, mae ::BARCHART, 'Mean absolute error by method (lower is better)'::TITLE
-FROM lx_metrics ORDER BY mae;`,
+       round(avg(mae),2)     AS "Avg MAE"       ::COMPACT,
+       round(avg(rmse),2)    AS "Avg RMSE"      ::COMPACT,
+       round(median(mape),1) AS "Median MAPE %" ::PLAIN
+FROM lx_metrics GROUP BY method ORDER BY 2;
+SELECT 6::COL;
+SELECT winner ::XAXIS, count(*) AS wins ::BARCHART, 'Series won per method (by MAE)'::TITLE
+FROM lx_scores WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
+SELECT 12::COL;
+SELECT item    AS "Item × store" ::PAGED,
+       winner  AS "Winner"       ::BADGE,
+       es_mae  AS "ES · MAE"     ::COMPACT,
+       sn_mae  AS "SN · MAE"     ::COMPACT,
+       es_rmse AS "ES · RMSE"    ::COMPACT,
+       sn_rmse AS "SN · RMSE"    ::COMPACT
+FROM lx_scores ORDER BY item;`,
       "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
 -- one dashboard across all categories (monthly). Simple method: SeasonalNaive.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
