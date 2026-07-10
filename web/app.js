@@ -3000,6 +3000,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   const full = { x0: b[0], x1: b[1], y0: b[2], y1: b[3] };
   let view = null; // null = auto (full extent)
   let raf = 0;
+  let syncSlider = () => {}; // set up below once the slider DOM exists
   const draw = () => {
     if (raf) return;
     raf = requestAnimationFrame(() => {
@@ -3007,6 +3008,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
       holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, dpPrimary || "", zoom);
       attachHover();
+      syncSlider();
     });
   };
   const plotMap = () => {
@@ -3078,6 +3080,83 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     view = null;
     draw();
   });
+
+  // ECharts-style dataZoom slider: a range bar under the chart. Drag a handle to
+  // resize the x-window, the middle band to pan it, or click the track to jump.
+  // Stays in sync with the wheel/drag zoom; double-click the chart still resets.
+  if (ph >= 160) {
+    const bar = document.createElement("div");
+    bar.className = "dp-zoom";
+    bar.innerHTML =
+      '<div class="dp-zoom-track"><div class="dp-zoom-fill"></div>' +
+      '<div class="dp-zoom-h dp-zoom-h0"></div><div class="dp-zoom-h dp-zoom-h1"></div></div>';
+    holder.after(bar);
+    bar.addEventListener("click", (e) => e.stopPropagation());
+    const track = bar.querySelector(".dp-zoom-track");
+    const fill = bar.querySelector(".dp-zoom-fill");
+    const h0 = bar.querySelector(".dp-zoom-h0");
+    const h1 = bar.querySelector(".dp-zoom-h1");
+    const span = () => full.x1 - full.x0 || 1;
+    const MINW = 0.02; // smallest window = 2% of the full extent
+    syncSlider = () => {
+      const v = view || full;
+      const f0 = Math.max(0, Math.min(1, (v.x0 - full.x0) / span()));
+      const f1 = Math.max(0, Math.min(1, (v.x1 - full.x0) / span()));
+      fill.style.left = f0 * 100 + "%";
+      fill.style.width = Math.max(0, f1 - f0) * 100 + "%";
+      h0.style.left = f0 * 100 + "%";
+      h1.style.left = f1 * 100 + "%";
+      bar.classList.toggle("dp-zoom-on", !!view);
+    };
+    const setX = (x0, x1) => {
+      const y = view || full;
+      view = { x0, x1, y0: y.y0, y1: y.y1 };
+      draw();
+    };
+    const fracAt = (clientX) => {
+      const r = track.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (clientX - r.left) / (r.width || 1)));
+    };
+    let zd = null;
+    const onMove = (e) => {
+      if (!zd) return;
+      const xAt = full.x0 + fracAt(e.clientX) * span();
+      const min = span() * MINW;
+      if (zd.mode === "h0") setX(Math.min(xAt, zd.x1 - min), zd.x1);
+      else if (zd.mode === "h1") setX(zd.x0, Math.max(xAt, zd.x0 + min));
+      else {
+        const dx = (fracAt(e.clientX) - fracAt(zd.x)) * span();
+        let nx0 = zd.x0 + dx,
+          nx1 = zd.x1 + dx;
+        if (nx0 < full.x0) ((nx1 += full.x0 - nx0), (nx0 = full.x0));
+        if (nx1 > full.x1) ((nx0 -= nx1 - full.x1), (nx1 = full.x1));
+        setX(nx0, nx1);
+      }
+    };
+    const onUp = () => {
+      zd = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    const start = (mode) => (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const v = view || full;
+      zd = { mode, x: e.clientX, x0: v.x0, x1: v.x1 };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    };
+    h0.addEventListener("mousedown", start("h0"));
+    h1.addEventListener("mousedown", start("h1"));
+    fill.addEventListener("mousedown", start("mid"));
+    track.addEventListener("mousedown", (e) => {
+      if (e.target !== track) return; // handled by fill/handles otherwise
+      const w = view ? view.x1 - view.x0 : span() * 0.5;
+      const cx = full.x0 + fracAt(e.clientX) * span();
+      setX(Math.max(full.x0, cx - w / 2), Math.min(full.x1, cx + w / 2));
+    });
+    syncSlider();
+  }
 }
 
 // Click empty dashboard space to clear all cross-filters / selections.
