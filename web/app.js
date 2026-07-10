@@ -100,6 +100,11 @@ SELECT i AS id,
              + 100 + (i % 3) * 12, 1) AS value
 FROM range(0, 600) t(i);
 
+-- a small continuous-x series for the step / smooth / bubble / markArea demos
+CREATE OR REPLACE TABLE ts AS
+SELECT i AS day, round(50 + 30 * sin(i / 3.0) + (random() - 0.5) * 12, 1) AS y
+FROM range(1, 25) t(i);
+
 SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bar & line'::TAB;
@@ -123,6 +128,20 @@ SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP
 SELECT 'Combo & sparkline'::TAB;
 SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
 SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;
+
+SELECT 'New chart types'::TAB;
+-- Every chart below is interactive: hover for the toolbox (⇄ line/bar toggle ·
+-- ▤ data view · ▧ brush · ◧ value filter · ⭳ save PNG); drag the range bar under
+-- a continuous-x chart to zoom; hover a legend entry to focus that series.
+SELECT 'Interactive: hover a chart for the toolbox (⇄ line/bar · ▤ data view · ▧ brush · ◧ value filter · ⭳ save) and drag the range bar to zoom'::LABEL;
+SELECT 6::COL; SELECT day::XAXIS, y::STEP, 'Step line (::STEP)'::TITLE FROM ts ORDER BY day;
+SELECT 6::COL; SELECT day::XAXIS, y::SMOOTH, 'Scatter + LOESS trend (::SMOOTH)'::TITLE FROM ts ORDER BY day;
+SELECT 6::COL; SELECT day::XAXIS, y::SCATTER, y::SIZE, 'Bubble — size = value (::SIZE)'::TITLE FROM ts ORDER BY day;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::AREA_STACKED, 'Stacked area (::AREA_STACKED)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars with data labels (::DATALABELS)'::TITLE FROM sales GROUP BY channel ORDER BY channel;
+SELECT 6::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
+       (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
+       'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
 -- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
