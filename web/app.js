@@ -2574,6 +2574,44 @@ function attachHover() {
   });
   apply();
   attachAxisPointer();
+  attachLegendToggle();
+}
+
+// ECharts-style legend toggle: click a series name in the top legend to hide /
+// show that series (its marks + line). Hidden state persists per panel across
+// zoom re-renders; the legend entry dims when off.
+function attachLegendToggle() {
+  document.querySelectorAll(".panel").forEach((panel) => {
+    const svg = panel.querySelector("svg");
+    if (!svg || svg.dataset.legendWired || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    const series = new Set([...svg.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series")));
+    if (series.size < 2) return; // need a real multi-series legend
+    const vbH = svg.viewBox.baseVal.height;
+    // Legend labels: text in the top band whose content is a series name (so
+    // titles / axis numbers are excluded).
+    const legendTexts = [...svg.querySelectorAll("text")].filter(
+      (t) => (+t.getAttribute("y") || 0) < vbH * 0.16 && series.has(t.textContent.trim())
+    );
+    if (!legendTexts.length) return;
+    svg.dataset.legendWired = "1";
+    const hidden = panel._hiddenSeries || (panel._hiddenSeries = new Set());
+    const apply = () => {
+      svg
+        .querySelectorAll("[data-series]")
+        .forEach((el) => (el.style.display = hidden.has(el.getAttribute("data-series")) ? "none" : ""));
+      legendTexts.forEach((t) => (t.style.opacity = hidden.has(t.textContent.trim()) ? "0.3" : ""));
+    };
+    legendTexts.forEach((t) => {
+      const s = t.textContent.trim();
+      t.style.cursor = "pointer";
+      t.addEventListener("click", (e) => {
+        e.stopPropagation();
+        hidden.has(s) ? hidden.delete(s) : hidden.add(s);
+        apply();
+      });
+    });
+    apply();
+  });
 }
 
 // ECharts-style axis pointer: hovering a cartesian chart draws a vertical
