@@ -423,20 +423,36 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     aes = aes.label("label");
 
     let mut plot = GGPlot::new(data).aes(aes);
+    // A ::BAND (prediction interval) matches the forecast — the last coloured
+    // series — at half opacity, so it reads as that series' uncertainty.
+    let band_color: (u8, u8, u8) = color_levels
+        .as_ref()
+        .filter(|lv| !lv.is_empty())
+        .map(|lv| {
+            let i = lv.len() - 1;
+            parse_hex(&lv[i])
+                .map(|c| (c.r, c.g, c.b))
+                .unwrap_or(DZ_COLORS[i % DZ_COLORS.len()])
+        })
+        .unwrap_or_else(brand);
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
-            .geom_ribbon_with(GeomRibbon { fill: lighten(brand(), 0.5), alpha: 0.4 })
+            .geom_ribbon_with(GeomRibbon { fill: band_color, alpha: 0.5 })
             .layer_aes(Aes::new().x("x").ymin("bandlo").ymax("bandhi"));
     }
+    // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
+    // don't get swamped by the dots.
+    let thin_line = || GeomLine { width: 1.0, ..Default::default() };
+    let small_point = || GeomPoint { size: 1.8, ..Default::default() };
     plot = match kind {
         Kind::Bar | Kind::BarPercent => plot.geom_col().position(PositionDodge),
         Kind::BarStacked => plot.geom_col().position(PositionStack),
         Kind::BarStackedPercent => plot.geom_col().position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
-        Kind::Line | Kind::LinePercent => plot.geom_line().geom_point(),
-        Kind::Area => plot.geom_area().geom_point(),
+        Kind::Line | Kind::LinePercent => plot.geom_line_with(thin_line()).geom_point_with(small_point()),
+        Kind::Area => plot.geom_area().geom_point_with(small_point()),
         Kind::Point => plot.geom_point(),
         // Box plots are unfilled by default (white box, dark whiskers/outline) —
         // the ggplot idiom; a CATEGORY still colours the outline via the border.

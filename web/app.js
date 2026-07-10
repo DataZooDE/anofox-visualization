@@ -1326,6 +1326,7 @@ let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
 let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
 let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
+let dpKbdActive = false; // one-shot: re-focus a server table after a keyboard page-change
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
 let dpTimer = null; // auto-refresh interval handle
@@ -2088,6 +2089,63 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
       mk("▶", cur >= pages - 1, () => (server ? server.onPage(cur + 1) : (page = Math.min(pages - 1, page + 1))))
     );
   }
+  // Keyboard navigation: Tab into the table (or click a row), then ↑/↓ move the
+  // highlighted row, ←/→ (or PageUp/PageDown) change pages, Enter drills in
+  // (cross-filter), Home/End jump to the first/last row of the page.
+  t.tabIndex = 0;
+  t.classList.add("dp-kbd");
+  let focusIdx = -1;
+  const applyFocus = () => {
+    [...tb.rows].forEach((r, i) => r.classList.toggle("row-focus", i === focusIdx));
+    if (focusIdx >= 0) tb.rows[focusIdx]?.scrollIntoView({ block: "nearest" });
+  };
+  const totalPages = () =>
+    server ? Math.max(1, Math.ceil((server.total || 0) / pageSize)) : Math.max(1, Math.ceil(rows.length / pageSize));
+  const gotoPage = (p) => {
+    p = Math.max(0, Math.min(totalPages() - 1, p));
+    if (server) {
+      if (p === server.page) return;
+      dpKbdActive = true; // re-focus the reloaded table
+      server.onPage(p);
+    } else {
+      page = p;
+      focusIdx = 0;
+      body();
+      applyFocus();
+      t.focus();
+    }
+  };
+  t.addEventListener("focus", () => {
+    if (focusIdx < 0) {
+      const sel = [...tb.rows].findIndex((r) => r.classList.contains("row-sel"));
+      focusIdx = sel >= 0 ? sel : 0;
+      applyFocus();
+    }
+  });
+  t.addEventListener("keydown", (e) => {
+    const n = tb.rows.length;
+    if (!n) return;
+    const cur = server ? server.page : page;
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); focusIdx = Math.min(focusIdx + 1, n - 1); applyFocus(); break;
+      case "ArrowUp": e.preventDefault(); focusIdx = Math.max((focusIdx < 0 ? 1 : focusIdx) - 1, 0); applyFocus(); break;
+      case "Home": e.preventDefault(); focusIdx = 0; applyFocus(); break;
+      case "End": e.preventDefault(); focusIdx = n - 1; applyFocus(); break;
+      case "ArrowRight": case "PageDown": e.preventDefault(); gotoPage(cur + 1); break;
+      case "ArrowLeft": case "PageUp": e.preventDefault(); gotoPage(cur - 1); break;
+      case "Enter": case " ": e.preventDefault(); tb.rows[focusIdx]?.click(); break;
+    }
+  });
+  // A server page-change reloads this panel; restore keyboard focus once.
+  if (server && dpKbdActive) {
+    dpKbdActive = false;
+    requestAnimationFrame(() => {
+      t.focus();
+      focusIdx = 0;
+      applyFocus();
+    });
+  }
+
   head();
   body();
   return wrap;
