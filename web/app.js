@@ -2575,7 +2575,14 @@ function attachHover() {
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
       if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
-      tip.textContent = txt;
+      const dx = el.getAttribute("data-x") || "";
+      const i = txt.lastIndexOf(": ");
+      const label = i >= 0 ? txt.slice(0, i) : txt;
+      const val = i >= 0 ? txt.slice(i + 2) : "";
+      const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
+      tip.innerHTML =
+        (dx ? `<div class="tip-head">${escapeHtml(dx)}</div>` : "") +
+        `<div class="tip-row"><span><span class="tip-dot" style="background:${fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
@@ -2664,6 +2671,7 @@ function attachAxisPointer() {
         el,
         cx: +el.getAttribute("cx"),
         tip: el.getAttribute("data-tip") || "",
+        dx: el.getAttribute("data-x") || "",
         fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
       }));
       const vb = svg.viewBox.baseVal;
@@ -2691,14 +2699,17 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
-      tip.innerHTML = colPts
-        .map((p) => {
-          const i = p.tip.lastIndexOf(": ");
-          const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
-          const val = i >= 0 ? p.tip.slice(i + 2) : "";
-          return `<div class="tip-row"><span><span class="tip-dot" style="background:${p.fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
-        })
-        .join("");
+      const head = colPts[0] && colPts[0].dx ? `<div class="tip-head">${escapeHtml(colPts[0].dx)}</div>` : "";
+      tip.innerHTML =
+        head +
+        colPts
+          .map((p) => {
+            const i = p.tip.lastIndexOf(": ");
+            const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
+            const val = i >= 0 ? p.tip.slice(i + 2) : "";
+            return `<div class="tip-row"><span><span class="tip-dot" style="background:${p.fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+          })
+          .join("");
       tip.classList.add("show");
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
