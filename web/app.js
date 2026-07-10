@@ -251,8 +251,9 @@ SELECT ds, 'Forecast', y, y, y, '' FROM m
 UNION ALL
 SELECT ds, 'Forecast', yhat, lo, hi, '' FROM fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;`,
-      "M5 analytics (tabs)": `-- M5 analytics on the anofox-forecast extension (monthly, per category).
--- Simple method: SeasonalNaive. Heavy steps cached with CREATE TABLE IF NOT EXISTS.
+      "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
+-- one dashboard across all categories (monthly). Simple method: SeasonalNaive.
+-- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
@@ -285,27 +286,29 @@ CREATE TABLE IF NOT EXISTS bt AS
   FROM ts_forecast_by('train', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f
   JOIN cat t ON f.category=t.category AND f.ds=t.ds;
 
-SELECT 'M5 analytics (SeasonalNaive) — forecast · decomposition · backtest'::LABEL;
+SELECT 'M5 — forecast · decomposition · backtest (SeasonalNaive, all categories)'::LABEL;
 
-SELECT 'Forecast'::TAB;
+-- Forecast: history + 12-month forecast, all categories on one panel.
+SELECT 'Forecast — history + 12-month SeasonalNaive'::LABEL;
 SELECT 12::COL;
 SELECT ds ::XAXIS, category ::CATEGORY, y ::LINECHART,
-       'History + 12-month SeasonalNaive forecast, per category'::TITLE
+       'History + 12-month forecast, per category'::TITLE
 FROM (SELECT category, ds, y FROM cat UNION ALL SELECT category, ds, yhat FROM fc) ORDER BY category, ds;
 
-SELECT 'Decomposition'::TAB;
-SELECT DISTINCT category ::DROPDOWN FROM decomp ORDER BY category;
-SELECT 12::COL;
-SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + trend'::TITLE
-FROM decomp WHERE category = getvariable('category') ORDER BY ds;
-SELECT 6::COL;
-SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal (12-month)'::TITLE
-FROM decomp WHERE category = getvariable('category') ORDER BY ds;
-SELECT 6::COL;
-SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE
-FROM decomp WHERE category = getvariable('category') ORDER BY ds;
+-- Decomposition: one row per category (observed+trend · seasonal · remainder).
+SELECT 'Decomposition — MSTL trend · classical seasonal · remainder'::LABEL;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'FOODS — observed + trend'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'FOODS — seasonal'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'FOODS — remainder'::TITLE FROM decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOBBIES — observed + trend'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOBBIES — seasonal'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOBBIES — remainder'::TITLE FROM decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOUSEHOLD — observed + trend'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOUSEHOLD — seasonal'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOUSEHOLD — remainder'::TITLE FROM decomp WHERE category='HOUSEHOLD' ORDER BY ds;
 
-SELECT 'Backtest + metrics'::TAB;
+-- Backtest: 12-month holdout, error metrics + actual vs predicted per category.
+SELECT 'Backtest — 12-month holdout'::LABEL;
 SELECT 12::COL;
 SELECT category AS "Category" ::TABLE,
        round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
@@ -313,8 +316,8 @@ SELECT category AS "Category" ::TABLE,
        round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS "MAPE %" ::PLAIN
 FROM bt GROUP BY 1 ORDER BY 2;
 SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM bt WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES'::TITLE FROM bt WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD'::TITLE FROM bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES — actual vs predicted'::TITLE FROM bt WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD — actual vs predicted'::TITLE FROM bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
       "M5 changepoints": `-- Changepoint detection on M5 monthly sales per category (anofox-forecast).
 -- ts_detect_changepoints_by returns a probability per point; points with a high
 -- probability are marked on each series.
