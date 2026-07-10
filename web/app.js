@@ -2626,19 +2626,45 @@ function attachLegendToggle() {
     if (!legendTexts.length) return;
     svg.dataset.legendWired = "1";
     const hidden = panel._hiddenSeries || (panel._hiddenSeries = new Set());
+    // The swatch is a small coloured rect just left of each label at a similar y.
+    const swatches = [...svg.querySelectorAll("rect")].filter((r) => {
+      const bb = r.getBBox();
+      return bb.y < vbH * 0.16 && bb.width < 20 && bb.width > 3;
+    });
+    const entries = legendTexts.map((t) => {
+      const tb = t.getBBox();
+      let swatch = null,
+        best = Infinity;
+      for (const r of swatches) {
+        const rb = r.getBBox();
+        const d = tb.x - (rb.x + rb.width); // gap to the swatch on the left
+        if (d >= -2 && d < 24 && Math.abs(rb.y + rb.height / 2 - (tb.y + tb.height / 2)) < 10 && d < best) {
+          best = d;
+          swatch = r;
+        }
+      }
+      return { s: t.textContent.trim(), text: t, swatch, fill: swatch ? swatch.getAttribute("fill") : null };
+    });
     const apply = () => {
       svg
         .querySelectorAll("[data-series]")
         .forEach((el) => (el.style.display = hidden.has(el.getAttribute("data-series")) ? "none" : ""));
-      legendTexts.forEach((t) => (t.style.opacity = hidden.has(t.textContent.trim()) ? "0.3" : ""));
+      entries.forEach((e) => {
+        const off = hidden.has(e.s);
+        e.text.style.opacity = off ? "0.35" : "";
+        if (e.swatch && e.fill) e.swatch.setAttribute("fill", off ? "#c4c9d2" : e.fill); // grey when off
+      });
     };
-    legendTexts.forEach((t) => {
-      const s = t.textContent.trim();
-      t.style.cursor = "pointer";
-      t.addEventListener("click", (e) => {
-        e.stopPropagation();
-        hidden.has(s) ? hidden.delete(s) : hidden.add(s);
+    entries.forEach((e) => {
+      const toggle = (ev) => {
+        ev.stopPropagation();
+        hidden.has(e.s) ? hidden.delete(e.s) : hidden.add(e.s);
         apply();
+      };
+      [e.text, e.swatch].forEach((el) => {
+        if (!el) return;
+        el.style.cursor = "pointer";
+        el.addEventListener("click", toggle);
       });
     });
     apply();
