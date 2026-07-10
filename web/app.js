@@ -1340,7 +1340,29 @@ let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
 let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
 let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
-let dpKbdActive = false; // one-shot: re-focus a server table after a keyboard page-change
+let dpKbdActive = false; // one-shot: keep row highlight after a server page-change
+let dpNav = null; // arrow-key controller for the table the pointer is over
+let dpPageSize = {}; // ::PAGED tables: statement idx -> rows per page
+
+// Arrow-key table navigation acts on whichever table the pointer is over
+// (dpNav), so no clicking/tabbing is needed — and browsing rows doesn't trigger
+// a re-run. Enter drills into the highlighted row (cross-filter). Ignored while
+// typing in an input or the SQL editor.
+document.addEventListener("keydown", (e) => {
+  if (!dpNav) return;
+  const el = document.activeElement;
+  const tag = ((el && el.tagName) || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select" || (el && el.isContentEditable)) return;
+  switch (e.key) {
+    case "ArrowDown": e.preventDefault(); dpNav.move(1); break;
+    case "ArrowUp": e.preventDefault(); dpNav.move(-1); break;
+    case "Home": e.preventDefault(); dpNav.move("home"); break;
+    case "End": e.preventDefault(); dpNav.move("end"); break;
+    case "ArrowRight": case "PageDown": e.preventDefault(); dpNav.page(1); break;
+    case "ArrowLeft": case "PageUp": e.preventDefault(); dpNav.page(-1); break;
+    case "Enter": e.preventDefault(); dpNav.drill(); break;
+  }
+});
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
 let dpTimer = null; // auto-refresh interval handle
@@ -1580,7 +1602,6 @@ async function run() {
         const titleRole = s.roles.find((r) => r[1] === "TITLE");
         const titleIdx = titleRole ? titleRole[0] : -1;
         const base = s.sql;
-        const pageSize = 50;
         const idx = i;
         const titleHolder = document.createElement("div");
         const holder = document.createElement("div");
@@ -1588,6 +1609,7 @@ async function run() {
         const qident = (c) => `"${String(c).replace(/"/g, '""')}"`;
         let cachedTotal = null;
         const load = async () => {
+          const pageSize = dpPageSize[idx] || 50;
           const page = dpPage[idx] || 0;
           const sort = dpSort[idx];
           if (cachedTotal == null) {
@@ -1628,6 +1650,11 @@ async function run() {
             onSort: (col) => {
               const cur = dpSort[idx];
               dpSort[idx] = { col, dir: cur && cur.col === col ? -cur.dir : 1 };
+              dpPage[idx] = 0;
+              load();
+            },
+            onPageSize: (n) => {
+              dpPageSize[idx] = n;
               dpPage[idx] = 0;
               load();
             },
@@ -1953,7 +1980,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   });
   const tb = t.createTBody();
   let page = 0;
-  const pageSize = server ? server.pageSize : 50;
+  let pageSize = server ? server.pageSize : 50;
   const sortedRows = () => {
     if (server) return rows; // already sorted + paged server-side
     const data = rows.slice();
@@ -2069,7 +2096,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   foot.className = "table-foot";
   wrap.appendChild(foot);
   function updateFoot(total, pages) {
-    if (total <= pageSize) {
+    // Hide the pager only for genuinely small tables (≤ the smallest page size),
+    // so the rows-per-page control stays available for paged tables.
+    if (total <= 10) {
       foot.style.display = "none";
       return;
     }
@@ -2097,16 +2126,37 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
     const info = document.createElement("span");
     info.className = "table-info";
     info.textContent = `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`;
+    // Rows-per-page selector.
+    const sizeSel = document.createElement("select");
+    sizeSel.className = "page-size";
+    for (const nn of [10, 20, 50, 100]) {
+      const o = document.createElement("option");
+      o.value = String(nn);
+      o.textContent = `${nn} / page`;
+      if (nn === pageSize) o.selected = true;
+      sizeSel.appendChild(o);
+    }
+    sizeSel.onchange = (e) => {
+      e.stopPropagation();
+      const nn = Number(sizeSel.value);
+      if (server) server.onPageSize(nn);
+      else {
+        pageSize = nn;
+        page = 0;
+        body();
+      }
+    };
     foot.append(
       mk("◀", cur === 0, () => (server ? server.onPage(cur - 1) : (page = Math.max(0, page - 1)))),
       info,
-      mk("▶", cur >= pages - 1, () => (server ? server.onPage(cur + 1) : (page = Math.min(pages - 1, page + 1))))
+      mk("▶", cur >= pages - 1, () => (server ? server.onPage(cur + 1) : (page = Math.min(pages - 1, page + 1)))),
+      sizeSel
     );
   }
-  // Keyboard navigation: Tab into the table (or click a row), then ↑/↓ move the
-  // highlighted row, ←/→ (or PageUp/PageDown) change pages, Enter drills in
-  // (cross-filter), Home/End jump to the first/last row of the page.
-  t.tabIndex = 0;
+  // Arrow-key navigation while the pointer is over the table (no click/focus
+  // needed, so browsing rows never triggers a re-run): ↑/↓ move the highlighted
+  // row, ←/→ (PageUp/Down) page, Enter drills into the row (cross-filter),
+  // Home/End jump. Registered on the shared dpNav handler on hover.
   t.classList.add("dp-kbd");
   let focusIdx = -1;
   const applyFocus = () => {
@@ -2117,47 +2167,50 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
     server ? Math.max(1, Math.ceil((server.total || 0) / pageSize)) : Math.max(1, Math.ceil(rows.length / pageSize));
   const gotoPage = (p) => {
     p = Math.max(0, Math.min(totalPages() - 1, p));
+    const cur = server ? server.page : page;
+    if (p === cur) return;
     if (server) {
-      if (p === server.page) return;
-      dpKbdActive = true; // re-focus the reloaded table
+      dpKbdActive = true; // keep the highlight going on the reloaded table
       server.onPage(p);
     } else {
       page = p;
       focusIdx = 0;
       body();
       applyFocus();
-      t.focus();
     }
   };
-  t.addEventListener("focus", () => {
+  const startFocus = () => {
     if (focusIdx < 0) {
       const sel = [...tb.rows].findIndex((r) => r.classList.contains("row-sel"));
       focusIdx = sel >= 0 ? sel : 0;
       applyFocus();
     }
+  };
+  const controller = {
+    move: (d) => {
+      const n = tb.rows.length;
+      if (!n) return;
+      if (d === "home") focusIdx = 0;
+      else if (d === "end") focusIdx = n - 1;
+      else focusIdx = Math.max(0, Math.min(n - 1, (focusIdx < 0 ? 0 : focusIdx) + d));
+      applyFocus();
+    },
+    page: (d) => gotoPage((server ? server.page : page) + d),
+    drill: () => tb.rows[focusIdx]?.click(),
+  };
+  t.addEventListener("mouseenter", () => {
+    dpNav = controller;
+    startFocus();
   });
-  t.addEventListener("keydown", (e) => {
-    const n = tb.rows.length;
-    if (!n) return;
-    const cur = server ? server.page : page;
-    switch (e.key) {
-      case "ArrowDown": e.preventDefault(); focusIdx = Math.min(focusIdx + 1, n - 1); applyFocus(); break;
-      case "ArrowUp": e.preventDefault(); focusIdx = Math.max((focusIdx < 0 ? 1 : focusIdx) - 1, 0); applyFocus(); break;
-      case "Home": e.preventDefault(); focusIdx = 0; applyFocus(); break;
-      case "End": e.preventDefault(); focusIdx = n - 1; applyFocus(); break;
-      case "ArrowRight": case "PageDown": e.preventDefault(); gotoPage(cur + 1); break;
-      case "ArrowLeft": case "PageUp": e.preventDefault(); gotoPage(cur - 1); break;
-      case "Enter": case " ": e.preventDefault(); tb.rows[focusIdx]?.click(); break;
-    }
+  t.addEventListener("mouseleave", () => {
+    if (dpNav === controller) dpNav = null;
   });
-  // A server page-change reloads this panel; restore keyboard focus once.
+  // After a server page-change the panel is rebuilt; keep this table navigable.
   if (server && dpKbdActive) {
     dpKbdActive = false;
-    requestAnimationFrame(() => {
-      t.focus();
-      focusIdx = 0;
-      applyFocus();
-    });
+    dpNav = controller;
+    focusIdx = 0;
+    requestAnimationFrame(applyFocus);
   }
 
   head();
