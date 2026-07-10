@@ -1368,7 +1368,12 @@ let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
 let dpTimer = null; // auto-refresh interval handle
 let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 
-async function run() {
+// `fresh` = a full run (Run button / load): execute every setup statement.
+// A cross-filter re-run (selecting a row, an input, clearing) passes fresh=false
+// so we SKIP setup that doesn't depend on the selection — e.g. an expensive
+// CREATE OR REPLACE TABLE fc AS ts_forecast_by(...) is computed once, not on
+// every row click. Setup that references getvariable() still re-runs.
+async function run(fresh = true) {
   const grid = $("grid");
   document.body.classList.add("loading");
   status("running…");
@@ -1407,6 +1412,9 @@ async function run() {
     const s = stmts[i];
     try {
       if (s.setup) {
+        // On a cross-filter re-run, skip selection-independent setup (it already
+        // ran on the last full run) so clicks don't recompute forecasts etc.
+        if (!fresh && !/getvariable/i.test(s.sql)) continue;
         await runSql(s.sql);
       } else if (isInput(s)) {
         const kind = inputKind(s);
@@ -1609,7 +1617,7 @@ async function run() {
         const qident = (c) => `"${String(c).replace(/"/g, '""')}"`;
         let cachedTotal = null;
         const load = async () => {
-          const pageSize = dpPageSize[idx] || 50;
+          const pageSize = dpPageSize[idx] || 10;
           const page = dpPage[idx] || 0;
           const sort = dpSort[idx];
           if (cachedTotal == null) {
@@ -1841,7 +1849,7 @@ function makeControl(meta, bar) {
       inp.value = dpVars[k] || "";
       inp.onchange = () => {
         dpVars[k] = inp.value;
-        run();
+        run(false);
       };
       return inp;
     };
@@ -1866,7 +1874,7 @@ function makeControl(meta, bar) {
     });
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
-      run();
+      run(false);
     };
   } else if (meta.kind === "MULTISELECT") {
     input = document.createElement("select");
@@ -1881,7 +1889,7 @@ function makeControl(meta, bar) {
     }
     input.onchange = () => {
       dpVars[meta.varname] = [...input.selectedOptions].map((o) => o.value);
-      run();
+      run(false);
     };
   } else {
     input = document.createElement("input");
@@ -1889,7 +1897,7 @@ function makeControl(meta, bar) {
     input.value = dpVars[meta.varname] ?? "";
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
-      run();
+      run(false);
     };
   }
   wrap.appendChild(input);
@@ -1980,7 +1988,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   });
   const tb = t.createTBody();
   let page = 0;
-  let pageSize = server ? server.pageSize : 50;
+  let pageSize = server ? server.pageSize : 10;
   const sortedRows = () => {
     if (server) return rows; // already sorted + paged server-side
     const data = rows.slice();
@@ -2026,7 +2034,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
           dpXf[key] = on ? keyVal : "";
           dpFilter = on ? keyVal : "";
           dpSelected = dpFilter || null;
-          run();
+          run(false);
         };
       }
       for (const c of cols) {
@@ -2607,7 +2615,7 @@ function attachHover() {
       // opt in (getvariable('selected')) filter; the rest just highlight it.
       dpFilter = dpFilter === series ? "" : series;
       dpSelected = dpFilter || null;
-      run();
+      run(false);
     });
   });
   apply();
@@ -2620,7 +2628,7 @@ document.querySelector(".dash").addEventListener("click", () => {
     dpFilter = "";
     dpSelected = null;
     for (const k in dpXf) dpXf[k] = "";
-    run();
+    run(false);
   }
 });
 
