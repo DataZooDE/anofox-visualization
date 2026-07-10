@@ -1,7 +1,7 @@
 // Browser dashboard builder — 100% client-side.
 //   DuckDB-Wasm runs the SQL, duckplot (wasm) plans the ::ROLE annotations and
 //   renders each panel to SVG. No server, no DuckDB extension.
-import init, { plan, render_panel, map_bounds } from "./pkg/duckplot.js";
+import init, { plan, render_panel, map_bounds, panel_bounds } from "./pkg/duckplot.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -1735,8 +1735,10 @@ async function run(fresh = true) {
             holder.className = "panel-svg";
             holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "", "");
             fig.appendChild(holder);
-            // Maps are scroll-to-zoom / drag-to-pan (double-click resets).
+            // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
+            // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
+            else attachCartZoom(holder, rowsJson, s.roles, ph); // self-skips discrete x
           }
           container.appendChild(fig);
           panels++;
@@ -2581,49 +2583,47 @@ function attachAxisPointer() {
   const tip = $("dp-tip");
   const cross = $("dp-cross");
   document.querySelectorAll(".panel").forEach((panel) => {
+    // Wire each panel once; the handlers read the marks fresh so they survive a
+    // zoom re-render (which swaps the SVG inside the same panel).
     if (panel.dataset.axisWired) return;
-    const svg = panel.querySelector("svg");
-    if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
-    const circles = [...svg.querySelectorAll("circle.dp-hit")];
-    if (circles.length < 3) return; // needs a line/scatter-style chart
-    const pts = circles.map((el) => ({
-      el,
-      cx: +el.getAttribute("cx"),
-      tip: el.getAttribute("data-tip") || "",
-      fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
-    }));
-    const cols = new Map();
-    for (const p of pts) {
-      const k = Math.round(p.cx);
-      (cols.get(k) || cols.set(k, []).get(k)).push(p);
-    }
-    const colXs = [...cols.keys()].sort((a, b) => a - b);
-    if (colXs.length < 2) return; // essentially a single column — item tooltip is enough
+    const svg0 = panel.querySelector("svg");
+    if (!svg0 || !svg0.viewBox || !svg0.viewBox.baseVal || !svg0.viewBox.baseVal.width) return;
+    if (svg0.querySelectorAll("circle.dp-hit").length < 3) return; // needs a line/scatter chart
     panel.dataset.axisWired = "1";
     panel.classList.add("has-axis-pointer");
-    const area = panel.querySelector(".panel-svg") || svg;
+    const area = panel.querySelector(".panel-svg") || svg0;
 
     const move = (e) => {
+      const svg = area.querySelector ? area.querySelector("svg") : svg0;
+      if (!svg || !svg.viewBox.baseVal.width) return;
+      const circles = [...svg.querySelectorAll("circle.dp-hit")];
+      if (circles.length < 3) return leave();
+      const pts = circles.map((el) => ({
+        el,
+        cx: +el.getAttribute("cx"),
+        tip: el.getAttribute("data-tip") || "",
+        fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
+      }));
       const vb = svg.viewBox.baseVal;
       const r = svg.getBoundingClientRect();
       if (!r.width) return;
       const scale = r.width / vb.width;
       const ux = vb.x + (e.clientX - r.left) / scale;
-      let best = colXs[0],
+      let best = null,
         bd = Infinity;
-      for (const cx of colXs) {
-        const d = Math.abs(cx - ux);
+      for (const p of pts) {
+        const d = Math.abs(p.cx - ux);
         if (d < bd) {
           bd = d;
-          best = cx;
+          best = Math.round(p.cx);
         }
       }
+      const colPts = pts.filter((p) => Math.round(p.cx) === best);
       cross.style.left = r.left + (best - vb.x) * scale + "px";
       cross.style.top = r.top + "px";
       cross.style.height = r.height + "px";
       cross.style.display = "";
       pts.forEach((p) => (p.el.style.transform = ""));
-      const colPts = cols.get(best);
       colPts.forEach((p) => {
         p.el.style.transformBox = "fill-box";
         p.el.style.transformOrigin = "center";
@@ -2644,10 +2644,105 @@ function attachAxisPointer() {
     const leave = () => {
       cross.style.display = "none";
       tip.classList.remove("show");
-      pts.forEach((p) => (p.el.style.transform = ""));
+      area.querySelectorAll("circle.dp-hit").forEach((el) => (el.style.transform = ""));
     };
     area.addEventListener("mousemove", move);
     area.addEventListener("mouseleave", leave);
+  });
+}
+
+// Scroll-to-zoom / drag-to-pan for a continuous cartesian chart (double-click
+// resets). Uses the SVG's data-plot rect (panel area in viewBox units) to map
+// the cursor accurately to data coords, and re-renders with a zoom window.
+function attachCartZoom(holder, rowsJson, roles, ph) {
+  let b;
+  try {
+    b = JSON.parse(panel_bounds(rowsJson, JSON.stringify(roles)));
+  } catch (_) {
+    b = [];
+  }
+  if (b.length !== 4) return; // not a continuous-x chart → no zoom
+  const W = 460;
+  const full = { x0: b[0], x1: b[1], y0: b[2], y1: b[3] };
+  let view = null; // null = auto (full extent)
+  let raf = 0;
+  const draw = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
+      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, dpPrimary || "", zoom);
+      attachHover();
+    });
+  };
+  const plotMap = () => {
+    const svg = holder.querySelector("svg");
+    if (!svg) return null;
+    const pa = (svg.dataset.plot || "").split(" ").map(Number);
+    if (pa.length !== 4 || !pa[2]) return null;
+    const r = svg.getBoundingClientRect();
+    const scale = r.width / svg.viewBox.baseVal.width;
+    return { pa, r, scale };
+  };
+  const toData = (e, v) => {
+    const m = plotMap();
+    if (!m) return null;
+    const vx = (e.clientX - m.r.left) / m.scale;
+    const vy = (e.clientY - m.r.top) / m.scale;
+    const fx = (vx - m.pa[0]) / m.pa[2];
+    const fy = (vy - m.pa[1]) / m.pa[3];
+    return { x: v.x0 + fx * (v.x1 - v.x0), y: v.y1 - fy * (v.y1 - v.y0) };
+  };
+  holder.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      if (!view) view = { ...full };
+      const d = toData(e, view);
+      if (!d) return;
+      const k = e.deltaY < 0 ? 0.82 : 1 / 0.82;
+      view = {
+        x0: d.x + (view.x0 - d.x) * k,
+        x1: d.x + (view.x1 - d.x) * k,
+        y0: d.y + (view.y0 - d.y) * k,
+        y1: d.y + (view.y1 - d.y) * k,
+      };
+      draw();
+    },
+    { passive: false }
+  );
+  let drag = null;
+  holder.addEventListener("mousedown", (e) => {
+    if (!view) view = { ...full };
+    drag = { x: e.clientX, y: e.clientY, v: { ...view }, moved: false };
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) drag.moved = true;
+    const m = plotMap();
+    if (!m) return;
+    const dx = ((e.clientX - drag.x) / m.scale / m.pa[2]) * (drag.v.x1 - drag.v.x0);
+    const dy = ((e.clientY - drag.y) / m.scale / m.pa[3]) * (drag.v.y1 - drag.v.y0);
+    view = { x0: drag.v.x0 - dx, x1: drag.v.x1 - dx, y0: drag.v.y0 + dy, y1: drag.v.y1 + dy };
+    draw();
+  });
+  window.addEventListener("mouseup", () => {
+    if (drag && drag.moved) holder._panned = true;
+    drag = null;
+  });
+  holder.addEventListener(
+    "click",
+    (e) => {
+      if (holder._panned) {
+        holder._panned = false;
+        e.stopPropagation();
+      }
+    },
+    true
+  );
+  holder.addEventListener("dblclick", () => {
+    view = null;
+    draw();
   });
 }
 

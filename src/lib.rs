@@ -317,15 +317,15 @@ pub type ZoomWindow = ((f64, f64), (f64, f64));
 
 thread_local! {
     /// Per-render map zoom window. `None` = the default equal-aspect `coord_sf` fit.
-    static MAP_ZOOM: std::cell::Cell<Option<ZoomWindow>> = const { std::cell::Cell::new(None) };
+    static PANEL_ZOOM: std::cell::Cell<Option<ZoomWindow>> = const { std::cell::Cell::new(None) };
 }
 /// Set the map zoom window for the next `render()` (a `::MAP` panel). `None`
 /// restores the auto-fit view.
-pub fn set_map_zoom(window: Option<ZoomWindow>) {
-    MAP_ZOOM.with(|z| z.set(window));
+pub fn set_panel_zoom(window: Option<ZoomWindow>) {
+    PANEL_ZOOM.with(|z| z.set(window));
 }
-fn map_zoom() -> Option<ZoomWindow> {
-    MAP_ZOOM.with(|z| z.get())
+fn panel_zoom() -> Option<ZoomWindow> {
+    PANEL_ZOOM.with(|z| z.get())
 }
 
 /// Distinct category labels in a **stable (sorted) order**, so a given series
@@ -519,8 +519,16 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         );
     }
     // `::FLIP` swaps the axes — e.g. a horizontal bar chart.
-    if cols.iter().any(|c| c.role == Role::Flip) {
+    let flipped = cols.iter().any(|c| c.role == Role::Flip);
+    if flipped {
         plot = plot.coord_flip();
+    }
+    // Scroll/drag-zoom window (from the UI) — clip a continuous cartesian panel to
+    // the given data rectangle. The UI only sets it for continuous/datetime x.
+    if !flipped {
+        if let Some((xlim, ylim)) = panel_zoom() {
+            plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
+        }
     }
     // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
     // preset — presets replace the whole theme. Box plots opt out so they stay
@@ -839,7 +847,7 @@ fn render_map(cols: &[Column], _title: Option<&str>, width: u32, height: u32) ->
     // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
     // otherwise fit the whole geometry with an equal aspect ratio.
     let plot = plot.geom_sf_with(ggplot_rs::geom::sf::GeomSf { alpha, ..Default::default() });
-    let mut plot = match map_zoom() {
+    let mut plot = match panel_zoom() {
         Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
         None => plot.coord_sf(),
     };

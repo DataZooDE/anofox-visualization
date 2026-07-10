@@ -46,9 +46,9 @@ pub fn render_panel(
     let cols = sql::columns_from_rows(&rows, &roles);
     crate::set_brand(parse_primary(primary));
     // Optional map zoom window `[x0, x1, y0, y1]` (lon/lat). Empty = auto-fit.
-    crate::set_map_zoom(parse_zoom(zoom_json));
+    crate::set_panel_zoom(parse_zoom(zoom_json));
     let svg = render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
-    crate::set_map_zoom(None);
+    crate::set_panel_zoom(None);
     crate::set_brand(None);
     svg
 }
@@ -83,6 +83,58 @@ pub fn map_bounds(rows_json: &str, roles_json: &str) -> String {
         }
     }
     if !x0.is_finite() {
+        return "[]".into();
+    }
+    format!("[{x0},{x1},{y0},{y1}]")
+}
+
+/// Data extent `[x0, x1, y0, y1]` of a cartesian panel — used to seed scroll/drag
+/// zoom. Returns `[]` unless the x axis is continuous/datetime (so discrete bar
+/// charts aren't made zoomable).
+#[wasm_bindgen]
+pub fn panel_bounds(rows_json: &str, roles_json: &str) -> String {
+    use ggplot_rs::prelude::Value;
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(rows_json).unwrap_or_default();
+    let roles: Vec<(usize, Role)> = serde_json::from_str::<Vec<(usize, String)>>(roles_json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(i, s)| parse_role(&s).map(|r| (i, r)))
+        .collect();
+    let cols = sql::columns_from_rows(&rows, &roles);
+    let Some(x) = cols.iter().find(|c| c.role == Role::X) else {
+        return "[]".into();
+    };
+    // Continuous only: a plain string in x means a discrete axis → no zoom.
+    if x.values.iter().any(|v| matches!(v, Value::Str(_)))
+        || !x.values.iter().any(|v| v.as_f64().is_some())
+    {
+        return "[]".into();
+    }
+    let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in &x.values {
+        if let Some(f) = v.as_f64() {
+            if f.is_finite() {
+                x0 = x0.min(f);
+                x1 = x1.max(f);
+            }
+        }
+    }
+    let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+    for c in cols
+        .iter()
+        .filter(|c| matches!(c.role, Role::Value(_) | Role::BandLower | Role::BandUpper))
+    {
+        for v in &c.values {
+            if let Some(f) = v.as_f64() {
+                if f.is_finite() {
+                    y0 = y0.min(f);
+                    y1 = y1.max(f);
+                }
+            }
+        }
+    }
+    if !x0.is_finite() || !y0.is_finite() || x1 <= x0 {
         return "[]".into();
     }
     format!("[{x0},{x1},{y0},{y1}]")
