@@ -144,47 +144,63 @@ FROM range(1, 25) t(i), (VALUES ('alpha', 22, 0), ('beta', 15, 4), ('gamma', 28,
 
 SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
-SELECT 'Bar & line'::TAB;
+SELECT 'Bars & columns'::TAB;
 SELECT 12::COL;
-SELECT 'Every built-in chart kind, grouped into **tabs**. This one: a **stacked bar**, a **multi-series line**, and a **horizontal bar** (::FLIP swaps the axes). The other tabs cover pie/donut/gauge, distributions, combos, the newer kinds (step, smooth, bubble, stacked area…), an interactivity playground, and maps.'::MARKDOWN, 'What this shows'::TITLE;
-SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
-SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week × channel (stacked)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
-SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (coord flip)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
+SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
+SELECT 12::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars with data labels (::DATALABELS)'::TITLE FROM sales GROUP BY channel ORDER BY channel;
 
-SELECT 'Pie / donut / gauge'::TAB;
-SELECT 4::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
-SELECT 4::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
-SELECT 4::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
+SELECT 'Lines & areas'::TAB;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions — multi-series line'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL; SELECT day::XAXIS, y::STEP, 'Step line (::STEP)'::TITLE FROM ts ORDER BY day;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::AREA_STACKED, 'Stacked area (::AREA_STACKED)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Combo — bar + line + reference line'::TITLE FROM sales GROUP BY ALL ORDER BY week;
+SELECT 12::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
+       (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
+       'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
+
+SELECT 'Scatter & trends'::TAB;
+SELECT 6::COL; SELECT day::XAXIS, y::SMOOTH, 'Scatter + LOESS trend (::SMOOTH)'::TITLE FROM ts ORDER BY day;
+SELECT 6::COL; SELECT day::XAXIS, y::SCATTER, y::SIZE, 'Bubble — size = value (::SIZE)'::TITLE FROM ts ORDER BY day;
+-- Jitter (::JITTER): a categorical scatter that spreads overlapping points.
+SELECT 6::COL; SELECT grp::XAXIS, val::JITTER, 'Jittered scatter (::JITTER)'::TITLE FROM groups5;
+-- A single-axis strip plot (jitter over one row).
+SELECT 6::COL; SELECT val::XAXIS, 1::JITTER, 'Strip plot — one variable on a single axis'::TITLE FROM groups5 WHERE grp='G1';
 
 SELECT 'Distributions'::TAB;
 SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
-SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- boxplot-multi: several groups side by side.
+SELECT 12::COL; SELECT grp::XAXIS, val::BOXPLOT, 'Box plots — five groups'::TITLE FROM groups5 ORDER BY grp;
+
+SELECT 'Pie, gauge & radar'::TAB;
+SELECT 3::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
+SELECT 3::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
+SELECT 3::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
+-- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
+SELECT 3::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
+
+SELECT 'Heatmap, calendar & candlestick'::TAB;
+SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
+SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
+SELECT 12::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
 -- Calendar heatmap (::CALENDAR): a date axis + a daily value, laid out
 -- GitHub-style with month labels on top and weekday rows.
 SELECT 165::HEIGHT;
 SELECT 12::COL; SELECT d::XAXIS, value::CALENDAR, 'Calendar heatmap — a year of daily activity'::TITLE FROM cal ORDER BY d;
 
-SELECT 'Combo & sparkline'::TAB;
-SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
-SELECT 4::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue trend'::TITLE FROM sales GROUP BY week ORDER BY week;
-
-SELECT 'New chart types'::TAB;
--- Every chart below is interactive: hover for the toolbox (⇄ line/bar toggle ·
--- ▤ data view · ▧ brush · ◧ value filter · ⭳ save PNG); drag the range bar under
--- a continuous-x chart to zoom; hover a legend entry to focus that series.
-SELECT 'Interactive: hover a chart for the toolbox (⇄ line/bar · ▤ data view · ▧ brush · ◧ value filter · ⭳ save) and drag the range bar to zoom'::LABEL;
-SELECT 6::COL; SELECT day::XAXIS, y::STEP, 'Step line (::STEP)'::TITLE FROM ts ORDER BY day;
-SELECT 6::COL; SELECT day::XAXIS, y::SMOOTH, 'Scatter + LOESS trend (::SMOOTH)'::TITLE FROM ts ORDER BY day;
-SELECT 6::COL; SELECT day::XAXIS, y::SCATTER, y::SIZE, 'Bubble — size = value (::SIZE)'::TITLE FROM ts ORDER BY day;
-SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::AREA_STACKED, 'Stacked area (::AREA_STACKED)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
-SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars with data labels (::DATALABELS)'::TITLE FROM sales GROUP BY channel ORDER BY channel;
-SELECT 6::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
-       (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
-       'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
+SELECT 'Sparklines'::TAB;
+SELECT 12::COL;
+SELECT 'Sparklines are word-sized trend lines — ideal as small multiples in a table or grid. One **::SPARKLINE** per series; here revenue plus three activity series side by side.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 3::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue'::TITLE FROM sales GROUP BY week ORDER BY week;
+SELECT 3::COL; SELECT y::SPARKLINE, 'alpha'::TITLE FROM tsm WHERE series='alpha' ORDER BY day;
+SELECT 3::COL; SELECT y::SPARKLINE, 'beta'::TITLE FROM tsm WHERE series='beta' ORDER BY day;
+SELECT 3::COL; SELECT y::SPARKLINE, 'gamma'::TITLE FROM tsm WHERE series='gamma' ORDER BY day;
 
 SELECT 'Interactive'::TAB;
 -- A ::MARKDOWN column renders as a rich-text panel (headings, lists, links…).
@@ -204,23 +220,6 @@ Also: a crosshair **tooltip** on hover, **click** a legend to hide a series, **h
 SELECT 8::COL; SELECT day::XAXIS, series::CATEGORY, y::LINECHART, 'Multi-series — toggle/focus the legend, ⇄ to bars, ⬍ to zoom'::TITLE FROM tsm ORDER BY series, day;
 SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ brush a box, ◧ filter by value'::TITLE FROM tsm ORDER BY y;
 SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
-
-SELECT 'More charts'::TAB;
--- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
-SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
-SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
--- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
-SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
--- Jitter (::JITTER): a categorical scatter that spreads overlapping points.
-SELECT 6::COL; SELECT grp::XAXIS, val::JITTER, 'Jittered scatter (::JITTER)'::TITLE FROM groups5;
--- A single-axis strip plot (jitter over one row).
-SELECT 6::COL; SELECT val::XAXIS, 1::JITTER, 'Strip plot — one variable on a single axis'::TITLE FROM groups5 WHERE grp='G1';
--- boxplot-multi: several groups side by side.
-SELECT 6::COL; SELECT grp::XAXIS, val::BOXPLOT, 'Box plots — five groups'::TITLE FROM groups5 ORDER BY grp;
--- matrix of sparklines: small multiples, one trend per series.
-SELECT 4::COL; SELECT y::SPARKLINE, 'alpha'::TITLE FROM tsm WHERE series='alpha' ORDER BY day;
-SELECT 4::COL; SELECT y::SPARKLINE, 'beta'::TITLE FROM tsm WHERE series='beta' ORDER BY day;
-SELECT 4::COL; SELECT y::SPARKLINE, 'gamma'::TITLE FROM tsm WHERE series='gamma' ORDER BY day;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
 -- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
