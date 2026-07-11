@@ -524,22 +524,33 @@ FROM cp_pts WHERE category='HOUSEHOLD' ORDER BY ds;`,
   (DATE '2024-03-28','app','US','launch',48)
 ) t(day, channel, region, note, n);
 
-SELECT 'Filters & inputs — every input type'::LABEL;
+-- 80 categories → the multiselect switches to its searchable mode (>50 options).
+CREATE OR REPLACE TABLE cats AS
+SELECT 'CAT-' || lpad(i::VARCHAR, 3, '0') AS code, (abs(hash(i)) % 500)::INT AS v
+FROM range(1, 81) t(i);
 
+-- Two tables for the cross-filter tab; each emits a variable named after its
+-- first column (sku / market) so the two selections compose independently.
+CREATE OR REPLACE TABLE sales2 AS
+SELECT sku, region, month, (abs(hash(sku || region || month)) % 80 + 40) AS amount
+FROM (VALUES ('SKU-A'),('SKU-B'),('SKU-C')) a(sku),
+     (VALUES ('EU'),('US')) b(region),
+     (VALUES ('2024-01'),('2024-02'),('2024-03'),('2024-04'),('2024-05'),('2024-06')) c(month);
+
+SELECT 'Filters & inputs — controls, date range & cross-filter'::LABEL;
+
+SELECT 'Inputs'::TAB;
 SELECT 12::COL;
-SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, a slider (::NUMBER), a date picker, a text search, and a multiselect. Each control''s output **column name becomes a DuckDB variable** — the charts below read it with **getvariable(''name'')**, so changing a control re-runs their queries live.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, two multiselects (the 80-option one is **searchable**), a slider (::NUMBER), free text, and a date. Each control''s output **column name becomes a DuckDB variable** — the charts read it with **getvariable(''name'')**, so changing a control re-runs their queries live. (Date range and cross-filter are on the next tabs.)'::MARKDOWN, 'What this shows'::TITLE;
 
 -- the output COLUMN NAME becomes the DuckDB variable (getvariable('name'))
 SELECT 'Filters'::GROUP;
 SELECT DISTINCT region::DROPDOWN FROM events ORDER BY region;      -- single-select
-SELECT DISTINCT channel::MULTISELECT FROM events ORDER BY channel; -- multi-select (a list)
+SELECT DISTINCT channel::MULTISELECT FROM events ORDER BY channel; -- multi-select (a few)
+SELECT DISTINCT code::MULTISELECT FROM cats ORDER BY code;         -- many → searchable
 SELECT 5 AS min_n ::NUMBER;                                        -- number
 SELECT '' AS note ::TEXT;                                          -- free text (try 'promo')
 SELECT DATE '2024-01-01' AS since ::DATE;                          -- single date
-SELECT 1::ENDGROUP;
-
-SELECT 'Date range'::GROUP;
-SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;  -- from → to
 SELECT 1::ENDGROUP;
 
 -- KPI: honours every input AND the click cross-filter (click a bar segment
@@ -550,7 +561,6 @@ WHERE region = getvariable('region')
   AND list_contains(getvariable('channel'), channel)
   AND n >= getvariable('min_n')
   AND day >= getvariable('since')::DATE
-  AND day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
   AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%')
   AND (getvariable('selected') = '' OR channel = getvariable('selected'));
 
@@ -561,59 +571,50 @@ WHERE region = getvariable('region')
   AND list_contains(getvariable('channel'), channel)
   AND n >= getvariable('min_n')
   AND day >= getvariable('since')::DATE
-  AND day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
   AND (getvariable('note') = '' OR note ILIKE '%' || getvariable('note') || '%')
-GROUP BY ALL ORDER BY day, channel;`,
+GROUP BY ALL ORDER BY day, channel;
 
-      "Cross-filter & drill-down": `-- Two tables, two INDEPENDENT named cross-filters. Each table emits a variable
--- named after its first column (sku / region); the panels filter by both.
-CREATE OR REPLACE TABLE sales2 AS
-SELECT sku, region, month, (abs(hash(sku || region || month)) % 80 + 40) AS amount
-FROM (VALUES ('SKU-A'),('SKU-B'),('SKU-C')) a(sku),
-     (VALUES ('EU'),('US')) b(region),
-     (VALUES ('2024-01'),('2024-02'),('2024-03'),('2024-04'),('2024-05'),('2024-06')) c(month);
-
-SELECT 'Click a SKU and a region — the KPI and chart filter by both'::LABEL;
-
-SELECT 12::COL;
-SELECT 'Two **independent named cross-filters**. Each table emits its own variable (named after its first column — sku / region); **click a SKU and a region** and the KPI + chart below filter by *both* at once. This is finer-grained than the single generic click-to-filter — you compose several selections.'::MARKDOWN, 'What this shows'::TITLE;
-
-SELECT 4::COL; SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
-SELECT 4::COL; SELECT region, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
-
+-- The searchable multiselect drives its own KPIs over the 80-row cats table.
 SELECT 4::COL;
-SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales2
-WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
-  AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'));
+SELECT count(*)::METRIC, 'Categories in filter'::LABEL FROM cats
+WHERE list_contains(getvariable('code'), code);
+SELECT 8::COL;
+SELECT sum(v)::METRIC, 'Value across selected categories'::LABEL FROM cats
+WHERE list_contains(getvariable('code'), code);
 
-SELECT 12::COL;
-SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & region)'::TITLE FROM sales2
-WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
-  AND (COALESCE(getvariable('region'),'') = '' OR region = getvariable('region'))
-GROUP BY month ORDER BY month;`,
-
-      "Date range": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
-  (DATE '2024-01-03','app',30),(DATE '2024-01-10','web',22),(DATE '2024-01-18','app',41),
-  (DATE '2024-01-27','api',28),(DATE '2024-02-04','web',26),(DATE '2024-02-13','app',33),
-  (DATE '2024-02-21','api',48),(DATE '2024-02-28','web',30),(DATE '2024-03-07','app',37)
-) t(day, channel, n);
-
-SELECT 'Date range filter'::LABEL;
+SELECT 'Date range'::TAB;
 SELECT 12::COL;
 SELECT 'A **::DATERANGE** control — two columns (from / to) become a pair of linked date pickers seeded from the data''s min/max. **Drag the dates** and the KPI and chart below recompute for the selected window via **getvariable(''from_day'')** / **getvariable(''to_day'')**.'::MARKDOWN, 'What this shows'::TITLE;
 
-SELECT 'Date range'::GROUP;
+SELECT 'Window'::GROUP;
 SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;
 SELECT 1::ENDGROUP;
 
-SELECT 'Sessions in the selected range'::LABEL;
 SELECT 4::COL;
 SELECT sum(n)::METRIC, 'Total sessions'::LABEL FROM events
 WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE;
 SELECT 8::COL;
-SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'By day'::TITLE FROM events
+SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions by day (in range)'::TITLE FROM events
 WHERE day BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE
-GROUP BY ALL ORDER BY day, channel;`,
+GROUP BY ALL ORDER BY day, channel;
+
+SELECT 'Cross-filter'::TAB;
+SELECT 12::COL;
+SELECT 'Two **independent named cross-filters**. Each table emits its own variable (named after its first column — sku / market); **click a SKU and a market** and the KPI + chart below filter by *both* at once. This is finer-grained than the single generic click-to-filter — you compose several selections. Click a selected row again to clear it.'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 4::COL; SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
+SELECT 4::COL; SELECT region AS market, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
+
+SELECT 4::COL;
+SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales2
+WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+  AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'));
+
+SELECT 12::COL;
+SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & market)'::TITLE FROM sales2
+WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+  AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'))
+GROUP BY month ORDER BY month;`,
     },
   },
 
@@ -2111,6 +2112,20 @@ function finalizeControl(wrap, bar) {
   return box;
 }
 
+// One document-level listener closes any open dropdown-multiselect when you
+// click outside it. Installed once (queries the DOM live, so it covers widgets
+// created on later re-runs too — no per-widget listener to leak).
+let msAutoCloseInstalled = false;
+function installMsAutoClose() {
+  if (msAutoCloseInstalled) return;
+  msAutoCloseInstalled = true;
+  document.addEventListener("mousedown", (e) => {
+    document.querySelectorAll("details.dp-ms[open]").forEach((d) => {
+      if (!d.contains(e.target)) d.open = false;
+    });
+  });
+}
+
 function makeControl(meta, bar) {
   const wrap = document.createElement("label");
   wrap.className = "control";
@@ -2150,20 +2165,106 @@ function makeControl(meta, bar) {
       run(false);
     };
   } else if (meta.kind === "MULTISELECT") {
-    input = document.createElement("select");
-    input.multiple = true;
-    input.size = Math.min(4, Math.max(2, meta.options.length));
+    // Dropdown-style multiselect: a summary button opens a popover of
+    // checkboxes (searchable when the list is long). Built in its own
+    // `.control` container so the option <label>s aren't nested inside the
+    // caption <label> (invalid + would hijack clicks).
+    const options = meta.options;
     const sel = new Set(dpVars[meta.varname] || []);
-    for (const o of meta.options) {
-      const opt = document.createElement("option");
-      opt.value = opt.textContent = o;
-      if (sel.has(o)) opt.selected = true;
-      input.appendChild(opt);
-    }
-    input.onchange = () => {
-      dpVars[meta.varname] = [...input.selectedOptions].map((o) => o.value);
-      run(false);
+    const cont = document.createElement("div");
+    cont.className = "control";
+    const cap = document.createElement("span");
+    cap.textContent = (meta.varname || "") + ":";
+    cont.appendChild(cap);
+
+    const det = document.createElement("details");
+    det.className = "dp-ms";
+    const sum = document.createElement("summary");
+    sum.className = "dp-ms-btn";
+    det.appendChild(sum);
+    const pop = document.createElement("div");
+    pop.className = "dp-ms-pop";
+    det.appendChild(pop);
+
+    const summarize = () => {
+      sum.textContent =
+        sel.size === 0 ? "None" : sel.size === options.length ? "All" : `${sel.size} selected`;
     };
+    // Re-running rebuilds the controls (closing this popover), so we batch:
+    // toggles just update `sel` + the summary, and we commit once on close.
+    let dirty = false;
+    det.addEventListener("toggle", () => {
+      if (!det.open && dirty) {
+        dirty = false;
+        dpVars[meta.varname] = [...sel];
+        run(false);
+      }
+    });
+
+    const rows = [];
+    // A search box appears once the list gets long, so many categories stay usable.
+    if (options.length > 50) {
+      const sb = document.createElement("input");
+      sb.type = "search";
+      sb.placeholder = `Search ${options.length} options…`;
+      sb.className = "dp-ms-search";
+      sb.oninput = () => {
+        const q = sb.value.toLowerCase();
+        for (const r of rows) r.row.style.display = r.o.toLowerCase().includes(q) ? "" : "none";
+      };
+      sb.onkeydown = (e) => e.stopPropagation(); // don't let space/enter toggle <details>
+      pop.appendChild(sb);
+    }
+    const tools = document.createElement("div");
+    tools.className = "dp-ms-tools";
+    const allB = document.createElement("button");
+    allB.type = "button";
+    allB.textContent = "All";
+    const noB = document.createElement("button");
+    noB.type = "button";
+    noB.textContent = "None";
+    tools.append(allB, noB);
+    pop.appendChild(tools);
+
+    const list = document.createElement("div");
+    list.className = "dp-ms-list";
+    pop.appendChild(list);
+    for (const o of options) {
+      const row = document.createElement("label");
+      row.className = "dp-ms-opt";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = sel.has(o);
+      cb.onchange = () => {
+        if (cb.checked) sel.add(o);
+        else sel.delete(o);
+        dirty = true;
+        summarize();
+      };
+      const tx = document.createElement("span");
+      tx.textContent = o;
+      row.append(cb, tx);
+      list.appendChild(row);
+      rows.push({ o, row, cb });
+    }
+    allB.onclick = () => {
+      for (const r of rows) {
+        sel.add(r.o);
+        r.cb.checked = true;
+      }
+      dirty = true;
+      summarize();
+    };
+    noB.onclick = () => {
+      sel.clear();
+      for (const r of rows) r.cb.checked = false;
+      dirty = true;
+      summarize();
+    };
+    summarize();
+    installMsAutoClose();
+    cont.appendChild(det);
+    return finalizeControl(cont, bar);
   } else {
     input = document.createElement("input");
     input.type = meta.kind === "NUMBER" ? "number" : meta.kind === "DATE" ? "date" : "text";
