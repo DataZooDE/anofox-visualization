@@ -27,6 +27,9 @@ ${SESSIONS}
 
 SELECT 'Overview — click a pie slice or a table row to filter the KPIs'::LABEL;
 
+SELECT 12::COL;
+SELECT '**How duckplot works:** every panel is a SQL query whose columns are tagged with \`::ROLE\` casts — \`::XAXIS\`, \`::CATEGORY\`, a chart kind like \`::BARCHART_STACKED\`, \`::PIE\`, \`::LINECHART\`, \`::TABLE\`, or a KPI (\`::COMPACT\`/\`::METRIC\`). Un-annotated statements (the \`CREATE TABLE\`) are setup. **Click a pie slice or a table row** — the KPI strip filters via \`getvariable(''selected'')\`.'::MARKDOWN, 'What this shows'::TITLE;
+
 -- KPIs in a ::GROUP render as a compact strip. They opt into the cross-filter
 -- (getvariable('selected')), so clicking a channel re-computes them.
 SELECT 'Key metrics'::GROUP;
@@ -52,6 +55,9 @@ FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
       "Signal explorer": `-- Everything below is generated on the fly with range() — no table needed.
 SELECT 'Signal explorer — generated with range()'::LABEL;
+
+SELECT 12::COL;
+SELECT 'No data table needed — every panel is math over DuckDB''s **range()**. It shows a **line with a ± confidence band** (::BAND_LOWER / ::BAND_UPPER), a **gauge**, a **scatter**, a **histogram**, and a **heatmap surface**, plus a KPI strip. Hover any chart for the toolbox.'::MARKDOWN, 'What this shows'::TITLE;
 
 SELECT 'Signal stats'::GROUP;
 SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL FROM range(0,120) t(i);
@@ -115,6 +121,8 @@ FROM range(1, 25) t(i), (VALUES ('alpha', 22, 0), ('beta', 15, 4), ('gamma', 28,
 SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bar & line'::TAB;
+SELECT 12::COL;
+SELECT 'Every built-in chart kind, grouped into **tabs**. This one: a **stacked bar**, a **multi-series line**, and a **horizontal bar** (::FLIP swaps the axes). The other tabs cover pie/donut/gauge, distributions, combos, the newer kinds (step, smooth, bubble, stacked area…), an interactivity playground, and maps.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
@@ -216,6 +224,9 @@ WHERE q.mag IS NOT NULL;
 
 SELECT 'Linked maps — click a country to filter the quakes'::LABEL;
 
+SELECT 12::COL;
+SELECT 'Two **linked maps** rendered from real GeoJSON (DuckDB''s spatial extension → WKT → ::MAP). **Click a country** on the left choropleth and the right map filters to the earthquakes *inside* it — a true point-in-polygon join, so no neighbours leak in. Click empty space to clear.'::MARKDOWN, 'What this shows'::TITLE;
+
 -- LEFT: world, filled by onshore-quake count per country. Click a country.
 SELECT 6::COL;
 SELECT c.wkt ::MAP, count(q.country) ::BARCHART, c.country ::LABEL,
@@ -298,6 +309,9 @@ CREATE TABLE IF NOT EXISTS lx_scores AS
   FROM lx_metrics GROUP BY series;
 
 SELECT 'Forecasting ' || (SELECT count(*) FROM lx_summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM lx_m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
+
+SELECT 12::COL;
+SELECT 'Fully **in-browser forecasting**: DuckDB-Wasm loads a Parquet and runs the anofox-forecast extension (SeasonalES) over ~30k M5 series — no server. **Click a row** in the paginated table to drill the chart to that item (history + 12-month forecast with a 95% band, and both methods'' backtest). Below: a per-series 12-month backtest comparing SeasonalES vs SeasonalNaive with the winner per series.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- Paginated summary of all series (server-side LIMIT/OFFSET). Click a row to
 -- drill the chart to that item. ::PAGED sits on the first (cross-filter) column.
@@ -393,6 +407,9 @@ CREATE TABLE IF NOT EXISTS an_bt AS
 
 SELECT 'M5 — forecast · decomposition · backtest (SeasonalNaive, all categories)'::LABEL;
 
+SELECT 12::COL;
+SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category, all in one scrolling dashboard: a 12-month **forecast** (history + prediction), an additive **decomposition** (trend from the extension''s MSTL + a classical seasonal component + remainder), and a 12-month-holdout **backtest** with MAE/RMSE/MAPE and actual-vs-predicted.'::MARKDOWN, 'What this shows'::TITLE;
+
 -- Forecast: history + 12-month forecast, all categories on one panel.
 SELECT 'Forecast — history + 12-month SeasonalNaive'::LABEL;
 SELECT 12::COL;
@@ -437,6 +454,9 @@ CREATE TABLE IF NOT EXISTS cp_pts AS
 SELECT 'M5 changepoint detection — monthly sales (dots = high changepoint probability)'::LABEL;
 
 SELECT 12::COL;
+SELECT 'The anofox-forecast extension''s **changepoint detection** run in-browser on each category''s monthly sales. Each series is a line (::LINECHART) with the points where the structural-break probability exceeds 0.7 marked as a distinct **::SCATTER** overlay — the moments the level or trend shifts.'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 12::COL;
 SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
        CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER,
        'FOODS — likely changepoints (prob > 0.7)'::TITLE
@@ -463,6 +483,9 @@ FROM cp_pts WHERE category='HOUSEHOLD' ORDER BY ds;`,
 ) t(day, channel, region, note, n);
 
 SELECT 'Filters & inputs — every input type'::LABEL;
+
+SELECT 12::COL;
+SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, a slider (::NUMBER), a date picker, a text search, and a multiselect. Each control''s output **column name becomes a DuckDB variable** — the charts below read it with **getvariable(''name'')**, so changing a control re-runs their queries live.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- the output COLUMN NAME becomes the DuckDB variable (getvariable('name'))
 SELECT 'Filters'::GROUP;
@@ -510,6 +533,9 @@ FROM (VALUES ('SKU-A'),('SKU-B'),('SKU-C')) a(sku),
 
 SELECT 'Click a SKU and a region — the KPI and chart filter by both'::LABEL;
 
+SELECT 12::COL;
+SELECT 'Two **independent named cross-filters**. Each table emits its own variable (named after its first column — sku / region); **click a SKU and a region** and the KPI + chart below filter by *both* at once. This is finer-grained than the single generic click-to-filter — you compose several selections.'::MARKDOWN, 'What this shows'::TITLE;
+
 SELECT 4::COL; SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
 SELECT 4::COL; SELECT region, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
 
@@ -529,6 +555,10 @@ GROUP BY month ORDER BY month;`,
   (DATE '2024-01-27','api',28),(DATE '2024-02-04','web',26),(DATE '2024-02-13','app',33),
   (DATE '2024-02-21','api',48),(DATE '2024-02-28','web',30),(DATE '2024-03-07','app',37)
 ) t(day, channel, n);
+
+SELECT 'Date range filter'::LABEL;
+SELECT 12::COL;
+SELECT 'A **::DATERANGE** control — two columns (from / to) become a pair of linked date pickers seeded from the data''s min/max. **Drag the dates** and the KPI and chart below recompute for the selected window via **getvariable(''from_day'')** / **getvariable(''to_day'')**.'::MARKDOWN, 'What this shows'::TITLE;
 
 SELECT 'Date range'::GROUP;
 SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE FROM events;
@@ -563,6 +593,8 @@ CREATE OR REPLACE TABLE hist AS SELECT * FROM (VALUES
 
 SELECT 'Per-column formatting: MONEY / COLORSCALE / BADGE / TREND / SPARKLINE'::LABEL;
 SELECT 12::COL;
+SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
        mape AS "MAPE %" ::COLORSCALE,
@@ -575,6 +607,7 @@ FROM fc ORDER BY forecast DESC;`,
 
 SELECT '1,000 rows (client)'::TAB;
 SELECT 12::COL;
+SELECT 'Two ways to page big results. A plain **::TABLE** returns all rows and the browser paginates them (fine for ~1k). **::PAGED** runs LIMIT/OFFSET + COUNT in DuckDB — **one page at a time** — so it scales to 100k+ rows with sortable columns, all in-browser. Compare the two tabs.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 'ID-' || lpad(i::VARCHAR, 4, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
        ((i * 37) % 100) AS score, ((i * 7) % 500) AS events ::TABLE
 FROM range(1, 1001) t(i) ORDER BY i;
@@ -593,6 +626,10 @@ FROM range(1, 100001) t(i);`,
     group: "Layout",
     items: {
       "Groups, tabs & height": `${SALES}
+
+SELECT 'Layout — groups, tabs & height'::LABEL;
+SELECT 12::COL;
+SELECT 'The **layout primitives**: **::GROUP** boxes cluster KPIs/panels together, **::COL** sets a panel''s grid width (1–12), **::HEIGHT** sets its pixel height, and **::TAB** / **::SUBTAB** organise panels into (nested) tabs. Mix them to compose any dashboard shape from plain SQL.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- KPIs in a ::GROUP box (compact strip). They react to plot clicks: clicking a
 -- channel segment/bar below sets getvariable('selected'), and each KPI filters

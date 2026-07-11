@@ -882,7 +882,7 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
     ];
 
     let steel = brand();
-    let fill = lighten(steel, 0.72); // pale wash under the line
+    let fill = lighten(steel, 0.62); // wash under the line
     let last = n.saturating_sub(1);
     // A single-point layer marking the most recent value (the eye-catching dot).
     let end = vec![
@@ -898,16 +898,16 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
         .geom_area_with(GeomArea {
             fill,
             color: fill,
-            alpha: 0.5,
+            alpha: 0.55,
             line_width: 0.0,
         })
         .geom_line_with(GeomLine {
             color: steel,
-            width: 2.0,
+            width: 2.6,
             alpha: 1.0,
         })
         .geom_point_with(GeomPoint {
-            size: 3.2,
+            size: 4.2,
             color: DZ_COLORS[2],
             alpha: 1.0,
         })
@@ -916,7 +916,9 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0),
         )
         .theme_void()
-        .render_svg_native_with_size(width, height)
+        // Render at a compact width so strokes stay crisp when the inline
+        // sparkline is scaled down into a narrow panel column.
+        .render_svg_native_with_size(width.min(240), height)
         .map_err(|e| format!("render failed: {e:?}"))
 }
 
