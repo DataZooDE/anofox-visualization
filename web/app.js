@@ -105,6 +105,13 @@ CREATE OR REPLACE TABLE ts AS
 SELECT i AS day, round(50 + 30 * sin(i / 3.0) + (random() - 0.5) * 12, 1) AS y
 FROM range(1, 25) t(i);
 
+-- a 3-series version for the interactivity demos (legend toggle/focus etc.)
+CREATE OR REPLACE TABLE tsm AS
+SELECT i AS day, s.name AS series,
+       round(50 + s.amp * sin((i + s.ph) / 3.0) + (random() - 0.5) * 8, 1) AS y,
+       round(random() * 100, 1) AS z
+FROM range(1, 25) t(i), (VALUES ('alpha', 22, 0), ('beta', 15, 4), ('gamma', 28, 8)) s(name, amp, ph);
+
 SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bar & line'::TAB;
@@ -142,6 +149,25 @@ SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars wi
 SELECT 6::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
        (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
        'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
+
+SELECT 'Interactive'::TAB;
+-- A ::MARKDOWN column renders as a rich-text panel (headings, lists, links…).
+SELECT 4::COL;
+SELECT '## Every chart is interactive
+
+Hover a chart for its **toolbox**:
+
+- **⇄** line ↔ bar
+- **▤** data view (rows as a table)
+- **▧** brush-select a region
+- **◧** value filter (dim by range)
+- **⬍** range slider (drag to zoom x)
+- **⟳** restore · **⭳** save PNG
+
+Also: a crosshair **tooltip** on hover, **click** a legend to hide a series, **hover** it to *focus*, and scroll / drag to zoom.'::MARKDOWN, 'How to explore'::TITLE;
+SELECT 8::COL; SELECT day::XAXIS, series::CATEGORY, y::LINECHART, 'Multi-series — toggle/focus the legend, ⇄ to bars, ⬍ to zoom'::TITLE FROM tsm ORDER BY series, day;
+SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ brush a box, ◧ filter by value'::TITLE FROM tsm ORDER BY y;
+SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
 -- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
@@ -1845,6 +1871,19 @@ async function run(fresh = true) {
         } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF")) {
           const rows = JSON.parse(rowsJson);
           container.appendChild(mkDownload(s, rows));
+        } else if (role(s, "MARKDOWN")) {
+          const fig = mkPanel();
+          fig.classList.add("md-box");
+          const tr = s.roles.find((r) => r[1] === "TITLE");
+          const r0 = JSON.parse(rowsJson)[0] || {};
+          if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
+          const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
+          const body = document.createElement("div");
+          body.className = "md-body";
+          body.innerHTML = renderMarkdown(mdr ? r0["c" + mdr[0]] : firstCell());
+          fig.appendChild(body);
+          container.appendChild(fig);
+          panels++;
         } else if (textSizeOf(s)) {
           const fig = mkPanel();
           fig.classList.add("textcard", "text-" + textSizeOf(s));
@@ -2454,6 +2493,94 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 }
 
+// Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
+// fenced code, links, blockquotes, ordered/unordered lists, rules, paragraphs).
+// Raw HTML in the source is escaped, so it's safe to inject.
+function renderMarkdown(src) {
+  const esc = escapeHtml;
+  const inline = (s) =>
+    esc(s)
+      .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${t}</a>`);
+  const lines = String(src ?? "").replace(/\r/g, "").split("\n");
+  let html = "",
+    i = 0,
+    list = null;
+  const closeList = () => {
+    if (list) {
+      html += `</${list}>`;
+      list = null;
+    }
+  };
+  const special = /^(#{1,6}\s|```|>\s?|\s*[-*+]\s|\s*\d+\.\s)/;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      closeList();
+      i++;
+      let code = "";
+      while (i < lines.length && !/^```/.test(lines[i])) code += esc(lines[i++]) + "\n";
+      i++;
+      html += `<pre><code>${code}</code></pre>`;
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      closeList();
+      html += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`;
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      closeList();
+      html += "<hr>";
+      i++;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      closeList();
+      html += `<blockquote>${inline(line.replace(/^>\s?/, ""))}</blockquote>`;
+      i++;
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      if (list !== "ul") {
+        closeList();
+        html += "<ul>";
+        list = "ul";
+      }
+      html += `<li>${inline(line.replace(/^\s*[-*+]\s+/, ""))}</li>`;
+      i++;
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      if (list !== "ol") {
+        closeList();
+        html += "<ol>";
+        list = "ol";
+      }
+      html += `<li>${inline(line.replace(/^\s*\d+\.\s+/, ""))}</li>`;
+      i++;
+      continue;
+    }
+    if (/^\s*$/.test(line)) {
+      closeList();
+      i++;
+      continue;
+    }
+    closeList();
+    let para = line;
+    i++;
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !special.test(lines[i])) para += " " + lines[i++];
+    html += `<p>${inline(para)}</p>`;
+  }
+  closeList();
+  return html;
+}
+
 // ---------- export & share ----------
 function download(blob, name) {
   const a = document.createElement("a");
@@ -2820,8 +2947,8 @@ function attachToolbox() {
     }
     // dataView: show the panel's underlying rows as a table.
     if (dp) mkTool("Data view", "▤", () => showDataView(panel));
-    // brush + value filter: only for charts with real marks (line/scatter).
-    if (dp && !dp.isMap && svg.querySelector("circle.dp-hit")) {
+    // brush + value filter: only for charts with real marks (points or bars).
+    if (dp && !dp.isMap && svg.querySelector(".dp-hit")) {
       mkTool("Brush select", "▧", () => toggleBrush(panel));
       mkTool("Value filter", "◧", () => toggleVisualMap(panel));
     }
@@ -2924,17 +3051,23 @@ function showDataView(panel) {
   document.body.appendChild(back);
 }
 
-// Parse the numeric value out of a mark's "label: 22" tooltip (else null).
+// Parse the measure out of a mark's tooltip — the last number in "label: 22",
+// "web: 22", or "(3, 22)" (else null).
 function markValue(el) {
-  const t = el.getAttribute("data-tip") || "";
-  const i = t.lastIndexOf(": ");
-  const n = parseFloat((i >= 0 ? t.slice(i + 2) : t).replace(/[^0-9.eE+-]/g, ""));
+  const m = (el.getAttribute("data-tip") || "").match(/-?\d[\d,]*\.?\d*(?:[eE][+-]?\d+)?/g);
+  if (!m) return null;
+  const n = parseFloat(m[m.length - 1].replace(/,/g, ""));
   return isNaN(n) ? null : n;
+}
+
+// Every drawn data mark (scatter/line points AND bars carry class "dp-hit").
+function marksOf(panel) {
+  return panel.querySelectorAll("svg .dp-hit");
 }
 
 // Dim every data mark that fails `keep(el)`; pass null to clear the emphasis.
 function filterMarks(panel, keep) {
-  panel.querySelectorAll("svg circle.dp-hit, svg rect[fill]").forEach((el) => {
+  marksOf(panel).forEach((el) => {
     el.style.opacity = keep && !keep(el) ? "0.12" : "";
   });
 }
@@ -3011,8 +3144,7 @@ function toggleVisualMap(panel) {
     filterMarks(panel, null);
     return;
   }
-  const svg = panel.querySelector("svg");
-  const vals = [...svg.querySelectorAll("circle.dp-hit")].map(markValue).filter((v) => v != null);
+  const vals = [...marksOf(panel)].map(markValue).filter((v) => v != null);
   if (vals.length < 2) return;
   const min = Math.min(...vals),
     max = Math.max(...vals),
@@ -3047,7 +3179,6 @@ function toggleVisualMap(panel) {
     loLab.textContent = fmt(lo);
     hiLab.textContent = fmt(hi);
     filterMarks(panel, (el) => {
-      if (!el.matches("circle.dp-hit")) return true;
       const v = markValue(el);
       return v == null || (v >= lo - 1e-9 && v <= hi + 1e-9);
     });

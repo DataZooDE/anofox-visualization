@@ -199,6 +199,9 @@ pub enum Role {
     /// Shade a vertical x-region behind the data (`::MARKAREA`): the band spans
     /// [min, max] of this column's (non-null) x-values.
     MarkArea,
+    /// A rich-text panel whose (string) value is rendered as Markdown
+    /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
+    Markdown,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -245,6 +248,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "SIZE" | "BUBBLE" => Some(Role::Size),
         "DATALABELS" | "DATALABEL" | "VALUELABELS" | "SHOWLABELS" => Some(Role::DataLabels),
         "MARKAREA" | "MARK_AREA" | "SHADE" => Some(Role::MarkArea),
+        "MARKDOWN" | "MD" | "TEXTBOX" | "RICHTEXT" => Some(Role::Markdown),
         "PIE" | "PIECHART" | "PIECHART_PERCENT" => Some(Role::Value(Kind::Pie)),
         "DONUT" | "DONUTCHART" | "DONUTCHART_PERCENT" => Some(Role::Value(Kind::Donut)),
         "GAUGE" | "GAUGE_PERCENT" => Some(Role::Value(Kind::Gauge)),

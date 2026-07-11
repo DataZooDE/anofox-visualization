@@ -267,5 +267,6 @@ fn role_str(r: &Role) -> &'static str {
         Role::Size => "SIZE",
         Role::DataLabels => "DATALABELS",
         Role::MarkArea => "MARKAREA",
+        Role::Markdown => "MARKDOWN",
     }
 }
