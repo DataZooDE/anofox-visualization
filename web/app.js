@@ -117,6 +117,24 @@ SELECT (DATE '2024-01-01' + CAST(i AS INTEGER)) AS d,
        round(15 + 30 * abs(sin(i / 9.0)) + (abs(hash(i)) % 25), 0) AS value
 FROM range(0, 365) t(i);
 
+-- an OHLC random walk for the candlestick demos (cast hash%N to a SIGNED int
+-- before subtracting, else the UINT64 result underflows)
+CREATE OR REPLACE TABLE ohlc AS
+WITH w AS (SELECT i, 100 + sum((CAST(abs(hash(i)) % 100 AS INTEGER) - 50) / 12.0) OVER (ORDER BY i) AS o FROM range(0, 120) t(i)),
+     oc AS (SELECT i, o, o + (CAST(abs(hash(i * 7)) % 80 AS INTEGER) - 40) / 12.0 AS c FROM w)
+SELECT (DATE '2024-01-01' + CAST(i AS INTEGER)) AS d, round(o, 2) AS open, round(c, 2) AS close,
+       round(greatest(o, c) + (abs(hash(i * 3)) % 40) / 12.0, 2) AS high,
+       round(least(o, c) - (abs(hash(i * 5)) % 40) / 12.0, 2) AS low
+FROM oc;
+
+-- multi-series radar data + 5 groups for the multi-boxplot demo
+CREATE OR REPLACE TABLE radar AS SELECT * FROM (VALUES
+  ('Speed','Model A',85),('Power','Model A',90),('Range','Model A',70),('Comfort','Model A',60),('Safety','Model A',95),('Price','Model A',55),
+  ('Speed','Model B',68),('Power','Model B',62),('Range','Model B',90),('Comfort','Model B',82),('Safety','Model B',74),('Price','Model B',88)
+) t(metric, model, score);
+CREATE OR REPLACE TABLE groups5 AS
+SELECT 'G' || ((i % 5) + 1) AS grp, round((random()+random()+random()-1.5)*20 + 50 + (i%5)*8, 1) AS val FROM range(0, 500) t(i);
+
 -- a 3-series version for the interactivity demos (legend toggle/focus etc.)
 CREATE OR REPLACE TABLE tsm AS
 SELECT i AS day, s.name AS series,
@@ -186,6 +204,23 @@ Also: a crosshair **tooltip** on hover, **click** a legend to hide a series, **h
 SELECT 8::COL; SELECT day::XAXIS, series::CATEGORY, y::LINECHART, 'Multi-series — toggle/focus the legend, ⇄ to bars, ⬍ to zoom'::TITLE FROM tsm ORDER BY series, day;
 SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ brush a box, ◧ filter by value'::TITLE FROM tsm ORDER BY y;
 SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
+
+SELECT 'More charts'::TAB;
+-- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
+SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
+SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
+-- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
+SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
+-- Jitter (::JITTER): a categorical scatter that spreads overlapping points.
+SELECT 6::COL; SELECT grp::XAXIS, val::JITTER, 'Jittered scatter (::JITTER)'::TITLE FROM groups5;
+-- A single-axis strip plot (jitter over one row).
+SELECT 6::COL; SELECT val::XAXIS, 1::JITTER, 'Strip plot — one variable on a single axis'::TITLE FROM groups5 WHERE grp='G1';
+-- boxplot-multi: several groups side by side.
+SELECT 6::COL; SELECT grp::XAXIS, val::BOXPLOT, 'Box plots — five groups'::TITLE FROM groups5 ORDER BY grp;
+-- matrix of sparklines: small multiples, one trend per series.
+SELECT 4::COL; SELECT y::SPARKLINE, 'alpha'::TITLE FROM tsm WHERE series='alpha' ORDER BY day;
+SELECT 4::COL; SELECT y::SPARKLINE, 'beta'::TITLE FROM tsm WHERE series='beta' ORDER BY day;
+SELECT 4::COL; SELECT y::SPARKLINE, 'gamma'::TITLE FROM tsm WHERE series='gamma' ORDER BY day;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
 -- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
@@ -3396,8 +3431,11 @@ function attachAxisPointer() {
     // highlight every point sharing the nearest x (two far-apart dots at once).
     // Skip it — the per-point (<title>) hover shows the individual point instead.
     const roles = (panel._dp && panel._dp.roles) || [];
+    // Radar is polar and jitter/scatter has no shared-x series — a vertical
+    // x-crosshair is wrong for both; their per-point (<title>) hover takes over.
+    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK)$/.test(r[1]))) return;
     const scatterOnly =
-      roles.some((r) => /^(SCATTER|POINT|SCATTERCHART)$/.test(r[1])) &&
+      roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
       !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
     if (scatterOnly) return;
     const svg0 = panel.querySelector("svg");

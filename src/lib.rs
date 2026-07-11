@@ -66,6 +66,14 @@ pub enum Kind {
     /// A GitHub-style calendar heatmap — a date `::XAXIS` laid out as weeks ×
     /// weekdays, coloured by the measure (`::CALENDAR`).
     Calendar,
+    /// A scatter with jittered positions to reveal overlapping points (`::JITTER`).
+    Jitter,
+    /// An OHLC candlestick chart — `::XAXIS` + `::OPEN`/`::HIGH`/`::LOW` columns and
+    /// the close as the measure (`::CANDLESTICK`).
+    Candlestick,
+    /// A radar / spider chart — axes from `::XAXIS`, values as `::RADAR`, one
+    /// polygon per `::CATEGORY` series.
+    Radar,
 }
 
 /// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -205,6 +213,12 @@ pub enum Role {
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// Candlestick open price (`::OPEN`).
+    Open,
+    /// Candlestick high price (`::HIGH`).
+    High,
+    /// Candlestick low price (`::LOW`).
+    Low,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -248,6 +262,12 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
             Some(Role::Value(Kind::AreaStacked))
         }
         "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
+        "JITTER" | "JITTERCHART" | "STRIP" => Some(Role::Value(Kind::Jitter)),
+        "CANDLESTICK" | "CANDLE" | "OHLC" => Some(Role::Value(Kind::Candlestick)),
+        "RADAR" | "SPIDER" => Some(Role::Value(Kind::Radar)),
+        "OPEN" => Some(Role::Open),
+        "HIGH" => Some(Role::High),
+        "LOW" => Some(Role::Low),
         "SIZE" | "BUBBLE" => Some(Role::Size),
         "DATALABELS" | "DATALABEL" | "VALUELABELS" | "SHOWLABELS" => Some(Role::DataLabels),
         "MARKAREA" | "MARK_AREA" | "SHADE" => Some(Role::MarkArea),
@@ -413,6 +433,10 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Density => return render_density(value, cols, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
         Kind::Calendar => return render_calendar(value, cols, width, height),
+        Kind::Candlestick => {
+            return render_candlestick(value, cols, title.as_deref(), width, height)
+        }
+        Kind::Radar => return render_radar(value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(value, width, height),
         _ => {}
     }
@@ -437,7 +461,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     }
     let by_colour = matches!(
         kind,
-        Kind::Line | Kind::LinePercent | Kind::Point | Kind::Step | Kind::Smooth
+        Kind::Line | Kind::LinePercent | Kind::Point | Kind::Step | Kind::Smooth | Kind::Jitter
     );
     let bar = matches!(
         kind,
@@ -670,6 +694,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             })
             .position(PositionStack),
         Kind::Point => plot.geom_point(),
+        Kind::Jitter => plot.geom_jitter(),
         // Box plots are unfilled by default (white box, dark whiskers/outline) —
         // the ggplot idiom; a CATEGORY still colours the outline via the border.
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
@@ -692,6 +717,8 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         | Kind::Density
         | Kind::Heatmap
         | Kind::Calendar
+        | Kind::Candlestick
+        | Kind::Radar
         | Kind::Sparkline => {
             unreachable!("handled above")
         }
@@ -1043,6 +1070,274 @@ fn render_calendar(
         );
     }
 
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
+    ))
+}
+
+/// A date `::XAXIS` value as a calendar date, otherwise its plain string.
+fn date_or_str(v: &Value) -> String {
+    match v {
+        Value::DateTime(s) => ggplot_rs::data::format_epoch_secs(*s),
+        other => value_str(other),
+    }
+}
+
+/// An OHLC candlestick chart: `::XAXIS` period, `::OPEN`/`::HIGH`/`::LOW` prices,
+/// and the close as the measure (`::CANDLESTICK`). Up candles green, down red.
+fn render_candlestick(
+    value: &Column,
+    cols: &[Column],
+    _title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let x = cols
+        .iter()
+        .find(|c| c.role == Role::X)
+        .ok_or("candlestick needs an XAXIS column")?;
+    let open = cols
+        .iter()
+        .find(|c| c.role == Role::Open)
+        .ok_or("candlestick needs an ::OPEN column")?;
+    let high = cols
+        .iter()
+        .find(|c| c.role == Role::High)
+        .ok_or("candlestick needs a ::HIGH column")?;
+    let low = cols
+        .iter()
+        .find(|c| c.role == Role::Low)
+        .ok_or("candlestick needs a ::LOW column")?;
+    let n = value.values.len();
+    if n == 0 {
+        return Ok(heading_svg("candlestick needs data", width));
+    }
+    let getf = |c: &Column, i: usize| c.values.get(i).and_then(|v| v.as_f64());
+    let mut ylo = f64::INFINITY;
+    let mut yhi = f64::NEG_INFINITY;
+    for i in 0..n {
+        if let Some(l) = getf(low, i) {
+            ylo = ylo.min(l);
+        }
+        if let Some(hv) = getf(high, i) {
+            yhi = yhi.max(hv);
+        }
+    }
+    if !ylo.is_finite() || !yhi.is_finite() {
+        return Ok(heading_svg("candlestick needs numeric OHLC", width));
+    }
+    let pad = ((yhi - ylo) * 0.05).max(1e-9);
+    let (ylo, yhi) = (ylo - pad, yhi + pad);
+    let yspan = if (yhi - ylo).abs() < 1e-9 {
+        1.0
+    } else {
+        yhi - ylo
+    };
+
+    let (w, h) = (width as f64, height as f64);
+    let (left, top, right, bottom) = (46.0, 8.0, 10.0, 22.0);
+    let pw = w - left - right;
+    let ph = h - top - bottom;
+    let x_px = |i: usize| left + (i as f64 + 0.5) / n as f64 * pw;
+    let y_px = |v: f64| top + (1.0 - (v - ylo) / yspan) * ph;
+    let bw = (pw / n as f64 * 0.6).clamp(1.0, 18.0);
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+    let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+    let up = (0x0c, 0xa6, 0x78);
+    let down = (0xe0, 0x31, 0x31);
+
+    let mut body = String::new();
+    for k in 0..=4 {
+        let v = ylo + (yhi - ylo) * k as f64 / 4.0;
+        let py = y_px(v);
+        body += &format!(
+            "<line x1=\"{left:.1}\" y1=\"{py:.1}\" x2=\"{:.1}\" y2=\"{py:.1}\" stroke=\"#ececec\" stroke-width=\"1\"/><text x=\"{:.1}\" y=\"{py:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{}</text>",
+            left + pw, left - 5.0, esc(&fmt_label(&Value::Float(v)))
+        );
+    }
+    let xstep = (n / 8).max(1);
+    for i in (0..n).step_by(xstep) {
+        body += &format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"8\" fill=\"#7a8496\">{}</text>",
+            x_px(i), h - 7.0, esc(&date_or_str(&x.values[i]))
+        );
+    }
+    for i in 0..n {
+        let (Some(o), Some(c), Some(hv), Some(lv)) = (
+            getf(open, i),
+            value.values[i].as_f64(),
+            getf(high, i),
+            getf(low, i),
+        ) else {
+            continue;
+        };
+        let cx = x_px(i);
+        let col = if c >= o { up } else { down };
+        let ch = hex(col);
+        let yt = y_px(o.max(c));
+        let bh = (y_px(o.min(c)) - yt).max(1.0);
+        let tip = format!(
+            "{} — O {} H {} L {} C {}",
+            date_or_str(&x.values[i]),
+            fmt_label(&Value::Float(o)),
+            fmt_label(&Value::Float(hv)),
+            fmt_label(&Value::Float(lv)),
+            fmt_label(&Value::Float(c))
+        );
+        body += &format!(
+            "<line x1=\"{cx:.1}\" y1=\"{:.1}\" x2=\"{cx:.1}\" y2=\"{:.1}\" stroke=\"{ch}\" stroke-width=\"1\"/><rect class=\"dp-hit\" x=\"{:.1}\" y=\"{yt:.1}\" width=\"{bw:.1}\" height=\"{bh:.1}\" fill=\"{ch}\" stroke=\"{ch}\"><title>{}</title></rect>",
+            y_px(hv), y_px(lv), cx - bw / 2.0, esc(&tip)
+        );
+    }
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
+    ))
+}
+
+/// A radar / spider chart: axes from the `::XAXIS` (metric names), values from
+/// the measure (`::RADAR`), one filled polygon per `::CATEGORY` series.
+fn render_radar(
+    value: &Column,
+    cols: &[Column],
+    _title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let x = cols
+        .iter()
+        .find(|c| c.role == Role::X)
+        .ok_or("radar needs an XAXIS (axis) column")?;
+    let category = cols.iter().find(|c| c.role == Role::Category);
+    let mut axes: Vec<String> = Vec::new();
+    for v in &x.values {
+        let s = value_str(v);
+        if !axes.contains(&s) {
+            axes.push(s);
+        }
+    }
+    let n_ax = axes.len();
+    if n_ax < 3 {
+        return Ok(heading_svg("radar needs at least 3 axes", width));
+    }
+    let series: Vec<String> = match category {
+        Some(c) => {
+            let mut s = Vec::new();
+            for v in &c.values {
+                let k = value_str(v);
+                if !s.contains(&k) {
+                    s.push(k);
+                }
+            }
+            s
+        }
+        None => vec![String::new()],
+    };
+    let mut mat: std::collections::HashMap<(usize, usize), f64> = Default::default();
+    let mut gmax = 1e-9f64;
+    for i in 0..value.values.len() {
+        let ax = axes.iter().position(|a| *a == value_str(&x.values[i]));
+        let se = match category {
+            Some(c) => series.iter().position(|s| *s == value_str(&c.values[i])),
+            None => Some(0),
+        };
+        if let (Some(ax), Some(se), Some(v)) = (ax, se, value.values[i].as_f64()) {
+            mat.insert((se, ax), v);
+            gmax = gmax.max(v.abs());
+        }
+    }
+
+    let (w, h) = (width as f64, height as f64);
+    let cx = w / 2.0;
+    let cy = h / 2.0 + 6.0;
+    let radius = (w.min(h) / 2.0 - 42.0).max(20.0);
+    let pi = std::f64::consts::PI;
+    let angle = |k: usize| -pi / 2.0 + 2.0 * pi * k as f64 / n_ax as f64;
+    let pt = |k: usize, frac: f64| {
+        (
+            cx + radius * frac * angle(k).cos(),
+            cy + radius * frac * angle(k).sin(),
+        )
+    };
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+    let hexc =
+        |c: ggplot_rs::scale::color::RGBAColor| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+
+    let mut body = String::new();
+    for ring in 1..=4 {
+        let frac = ring as f64 / 4.0;
+        let pts: Vec<String> = (0..n_ax)
+            .map(|k| {
+                let (px, py) = pt(k, frac);
+                format!("{px:.1},{py:.1}")
+            })
+            .collect();
+        body += &format!(
+            "<polygon points=\"{}\" fill=\"none\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>",
+            pts.join(" ")
+        );
+    }
+    for (k, axname) in axes.iter().enumerate() {
+        let (px, py) = pt(k, 1.0);
+        body += &format!(
+            "<line x1=\"{cx:.1}\" y1=\"{cy:.1}\" x2=\"{px:.1}\" y2=\"{py:.1}\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>"
+        );
+        let (lx, ly) = pt(k, 1.14);
+        let anchor = if (lx - cx).abs() < radius * 0.05 {
+            "middle"
+        } else if lx > cx {
+            "start"
+        } else {
+            "end"
+        };
+        body += &format!(
+            "<text x=\"{lx:.1}\" y=\"{ly:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
+            esc(axname)
+        );
+    }
+    for (si, sname) in series.iter().enumerate() {
+        let ch = hexc(dz_color(si));
+        let pts: Vec<String> = (0..n_ax)
+            .map(|k| {
+                let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
+                let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
+                format!("{px:.1},{py:.1}")
+            })
+            .collect();
+        body += &format!(
+            "<polygon points=\"{}\" fill=\"{ch}\" fill-opacity=\"0.18\" stroke=\"{ch}\" stroke-width=\"1.6\"/>",
+            pts.join(" ")
+        );
+        for (k, axname) in axes.iter().enumerate() {
+            let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
+            let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
+            let tip = if sname.is_empty() {
+                format!("{}: {}", axname, fmt_label(&Value::Float(v)))
+            } else {
+                format!("{sname} · {}: {}", axname, fmt_label(&Value::Float(v)))
+            };
+            body += &format!(
+                "<circle class=\"dp-hit\" cx=\"{px:.1}\" cy=\"{py:.1}\" r=\"2.6\" fill=\"{ch}\"><title>{}</title></circle>",
+                esc(&tip)
+            );
+        }
+    }
+    if series.iter().any(|s| !s.is_empty()) {
+        let mut lx = 12.0;
+        for (si, sname) in series.iter().enumerate() {
+            if sname.is_empty() {
+                continue;
+            }
+            let ch = hexc(dz_color(si));
+            body += &format!(
+                "<rect x=\"{lx:.1}\" y=\"6\" width=\"9\" height=\"9\" rx=\"2\" fill=\"{ch}\"/>"
+            );
+            body += &format!(
+                "<text x=\"{:.1}\" y=\"14\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#39424f\">{}</text>",
+                lx + 12.0, esc(sname)
+            );
+            lx += 12.0 + sname.len() as f64 * 6.0 + 14.0;
+        }
+    }
     Ok(format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
     ))
