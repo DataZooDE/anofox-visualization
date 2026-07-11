@@ -2825,8 +2825,17 @@ function attachToolbox() {
       mkTool("Brush select", "▧", () => toggleBrush(panel));
       mkTool("Value filter", "◧", () => toggleVisualMap(panel));
     }
+    // range slider: opt-in show/hide of the dataZoom bar (off by default).
+    const zoombar = panel.querySelector(".dp-zoom");
+    if (zoombar) {
+      const t = mkTool("Range slider", "⬍", () => {
+        const on = zoombar.style.display === "none";
+        zoombar.style.display = on ? "" : "none";
+        t.classList.toggle("dp-tool-on", on);
+      });
+    }
     // restore: reset any zoom/pan (a double-click on the chart does the same).
-    if (panel.querySelector(".dp-zoom")) {
+    if (zoombar) {
       mkTool("Restore", "⟳", () => {
         const h = panel.querySelector(".panel-svg");
         if (h) h.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
@@ -3368,6 +3377,9 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   if (ph >= 160) {
     const bar = document.createElement("div");
     bar.className = "dp-zoom";
+    // Off by default — the toolbox "range slider" tool toggles it on. (Scroll /
+    // drag zoom still works without it.)
+    bar.style.display = "none";
     bar.innerHTML =
       '<div class="dp-zoom-track"><div class="dp-zoom-fill"></div>' +
       '<div class="dp-zoom-h dp-zoom-h0"></div><div class="dp-zoom-h dp-zoom-h1"></div></div>';

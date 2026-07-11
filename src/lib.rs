@@ -630,7 +630,12 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
                 ..Default::default()
             }),
         Kind::Area => plot.geom_area().geom_point_with(small_point()),
-        Kind::AreaStacked => plot.geom_area().position(PositionStack),
+        Kind::AreaStacked => plot
+            .geom_area_with(GeomArea {
+                alpha: 0.85,
+                ..Default::default()
+            })
+            .position(PositionStack),
         Kind::Point => plot.geom_point(),
         // Box plots are unfilled by default (white box, dark whiskers/outline) —
         // the ggplot idiom; a CATEGORY still colours the outline via the border.
