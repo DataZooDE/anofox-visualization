@@ -174,15 +174,13 @@ SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
--- boxplot-multi: several groups side by side.
-SELECT 12::COL; SELECT grp::XAXIS, val::BOXPLOT, 'Box plots — five groups'::TITLE FROM groups5 ORDER BY grp;
 
 SELECT 'Pie, gauge & radar'::TAB;
-SELECT 3::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
-SELECT 3::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
-SELECT 3::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
+SELECT 6::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
+SELECT 6::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
+SELECT 6::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
 -- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
-SELECT 3::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
+SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
 
 SELECT 'Heatmap, calendar & candlestick'::TAB;
 SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
@@ -244,13 +242,15 @@ SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL :
 FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
 UNION ALL
 SELECT NULL, NULL, NULL, 0.6, ST_AsText(geom), NULL
-FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';`,
+FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';
 
-      "Linked maps": `-- Two maps that talk to each other: click a country on the left and the right
--- map filters to earthquakes INSIDE that country (true point-in-polygon, so no
--- neighbours leak in). Clicking sets getvariable('selected') = the country name;
--- click empty space to clear. (IF NOT EXISTS keeps the spatial reads and the
--- one-off point-in-polygon join out of the per-click re-run.)
+-- Linked maps: click a country on the left and the right map filters to the
+-- earthquakes INSIDE it (true point-in-polygon, so no neighbours leak in).
+-- Clicking sets getvariable('selected') = the country name; click empty space to
+-- clear. IF NOT EXISTS keeps the spatial reads and the one-off point-in-polygon
+-- join out of the per-click re-run.
+SELECT 'Linked'::SUBTAB;
+
 CREATE TABLE IF NOT EXISTS cgeo AS
 SELECT NAME AS country, ST_AsText(geom) AS wkt, geom,
        ST_XMin(geom) AS x0, ST_XMax(geom) AS x1, ST_YMin(geom) AS y0, ST_YMax(geom) AS y1
@@ -265,8 +265,6 @@ LEFT JOIN cgeo c
   ON ST_X(q.geom) BETWEEN c.x0 AND c.x1 AND ST_Y(q.geom) BETWEEN c.y0 AND c.y1
      AND ST_Contains(c.geom, ST_Point(ST_X(q.geom), ST_Y(q.geom)))
 WHERE q.mag IS NOT NULL;
-
-SELECT 'Linked maps — click a country to filter the quakes'::LABEL;
 
 SELECT 12::COL;
 SELECT 'Two **linked maps** rendered from real GeoJSON (DuckDB''s spatial extension → WKT → ::MAP). **Click a country** on the left choropleth and the right map filters to the earthquakes *inside* it — a true point-in-polygon join, so no neighbours leak in. Click empty space to clear.'::MARKDOWN, 'What this shows'::TITLE;
