@@ -63,6 +63,9 @@ pub enum Kind {
     Sparkline,
     /// A single value as a gauge/progress arc toward a `::RANGE` (`::GAUGE`).
     Gauge,
+    /// A GitHub-style calendar heatmap — a date `::XAXIS` laid out as weeks ×
+    /// weekdays, coloured by the measure (`::CALENDAR`).
+    Calendar,
 }
 
 /// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -257,6 +260,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "VIOLIN" | "VIOLINPLOT" => Some(Role::Value(Kind::Violin)),
         "DENSITY" | "KDE" => Some(Role::Value(Kind::Density)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
+        "CALENDAR" | "CALENDAR_HEATMAP" | "CAL_HEATMAP" => Some(Role::Value(Kind::Calendar)),
         "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
         "REFLINE" | "TARGET" | "GOAL" | "YLINE" => Some(Role::RefLine),
         "XLINE" => Some(Role::VLine),
@@ -408,6 +412,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
         Kind::Density => return render_density(value, cols, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
+        Kind::Calendar => return render_calendar(value, cols, width, height),
         Kind::Sparkline => return render_sparkline(value, width, height),
         _ => {}
     }
@@ -673,13 +678,20 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             width: 0.6,
             alpha: 1.0,
         }),
-        Kind::Violin => plot.geom_violin(),
+        // Violins are unfilled too (white body, dark outline), matching boxplots.
+        Kind::Violin => plot.geom_violin_with(GeomViolin {
+            fill: (255, 255, 255),
+            color: (70, 78, 92),
+            alpha: 1.0,
+            line_width: 1.0,
+        }),
         Kind::Pie
         | Kind::Donut
         | Kind::Gauge
         | Kind::Histogram
         | Kind::Density
         | Kind::Heatmap
+        | Kind::Calendar
         | Kind::Sparkline => {
             unreachable!("handled above")
         }
@@ -782,7 +794,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     plot = plot.theme_minimal();
     // A combo already colours each measure explicitly via the manual scale; the
     // brand primary would flatten them all back to one colour, so skip it there.
-    if !matches!(kind, Kind::Boxplot) && combo_names.is_empty() {
+    if !matches!(kind, Kind::Boxplot | Kind::Violin) && combo_names.is_empty() {
         plot = plot.primary_color(brand());
     }
     plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
@@ -892,18 +904,148 @@ fn render_heatmap(
     // A gridded heatmap with numeric axes should tick on the tile positions, not
     // at generic "nice" breaks (0, 2.5, 5…) that fall between tiles. Use the
     // distinct data values (thinned) as breaks so labels sit under each tile.
+    // Tiles are 1 unit wide/tall (± 0.5), so expand the domain by half a tile —
+    // otherwise the edge tiles spill past the axis and cover the tick labels.
     use ggplot_rs::scale::continuous::ScaleContinuous;
     if let Some(bx) = tile_breaks(&x.values) {
-        plot = plot.scale_x_continuous(ScaleContinuous::new().with_breaks(bx));
+        plot = plot.scale_x_continuous(
+            ScaleContinuous::new()
+                .with_breaks(bx)
+                .with_expand(0.0, 0.55),
+        );
     }
     if let Some(by) = tile_breaks(&y.values) {
-        plot = plot.scale_y_continuous(ScaleContinuous::new().with_breaks(by));
+        plot = plot.scale_y_continuous(
+            ScaleContinuous::new()
+                .with_breaks(by)
+                .with_expand(0.0, 0.55),
+        );
     }
     if let Some(t) = title {
         plot = plot.title(t);
     }
     plot.render_svg_native_with_size(width, height)
         .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// Civil (year, month, day) from days since 1970-01-01 — Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// A GitHub/ECharts-style calendar heatmap: a date `::XAXIS` + a measure laid out
+/// as week-columns × weekday-rows, with month labels along the top and weekday
+/// labels down the left; cells are coloured light→brand by value.
+fn render_calendar(
+    value: &Column,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let x = cols
+        .iter()
+        .find(|c| c.role == Role::X)
+        .ok_or("calendar needs an XAXIS date column")?;
+    let mut pts: Vec<(i64, f64)> = Vec::new();
+    for (dv, vv) in x.values.iter().zip(value.values.iter()) {
+        if let (Some(secs), Some(val)) = (dv.as_f64(), vv.as_f64()) {
+            pts.push(((secs as i64).div_euclid(86_400), val));
+        }
+    }
+    if pts.is_empty() {
+        return Ok(heading_svg("calendar needs a date axis", width));
+    }
+    let min_day = pts.iter().map(|(d, _)| *d).min().unwrap();
+    let max_day = pts.iter().map(|(d, _)| *d).max().unwrap();
+    let vmin = pts.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+    let vmax = pts
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let vspan = if (vmax - vmin).abs() < 1e-9 {
+        1.0
+    } else {
+        vmax - vmin
+    };
+
+    // Sunday = 0 … Saturday = 6 (1970-01-01 was a Thursday → 4).
+    let weekday = |d: i64| ((d % 7) + 4).rem_euclid(7);
+    let first_sun = min_day - weekday(min_day);
+    let col_of = |d: i64| (d - first_sun) / 7;
+    let n_cols = (col_of(max_day) + 1).max(1) as f64;
+
+    let (w, h) = (width as f64, height as f64);
+    let (left, top, right, bottom) = (30.0, 18.0, 10.0, 6.0);
+    let cell = ((w - left - right) / n_cols)
+        .min((h - top - bottom) / 7.0)
+        .max(3.0);
+    let gap = (cell * 0.14).clamp(0.5, 2.5);
+    let sz = cell - gap;
+    let (x0, y0) = (left, top);
+
+    let lo = (0xebu8, 0xf1u8, 0xf7u8);
+    let hi = brand();
+    let mix = |t: f64| {
+        let t = t.clamp(0.0, 1.0);
+        let m = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            m(lo.0, hi.0),
+            m(lo.1, hi.1),
+            m(lo.2, hi.2)
+        )
+    };
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
+
+    let mut body = String::new();
+    for (row, lbl) in [(1u32, "Mon"), (3, "Wed"), (5, "Fri")] {
+        let cy = y0 + row as f64 * cell + sz / 2.0;
+        body += &format!(
+            "<text x=\"{:.1}\" y=\"{cy:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{lbl}</text>",
+            x0 - 5.0
+        );
+    }
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut last_month = 0u32;
+    for d in min_day..=max_day {
+        let (_, m, _) = civil_from_days(d);
+        if m != last_month {
+            let col = col_of(d) as f64;
+            body += &format!(
+                "<text x=\"{:.1}\" y=\"12\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
+                x0 + col * cell,
+                MONTHS[(m - 1) as usize]
+            );
+            last_month = m;
+        }
+    }
+    let round = (sz * 0.18).min(2.5);
+    for &(d, v) in &pts {
+        let cx = x0 + col_of(d) as f64 * cell;
+        let cy = y0 + weekday(d) as f64 * cell;
+        let (yr, mo, dom) = civil_from_days(d);
+        let tip = format!("{yr:04}-{mo:02}-{dom:02}: {}", fmt_label(&Value::Float(v)));
+        body += &format!(
+            "<rect class=\"dp-hit\" x=\"{cx:.1}\" y=\"{cy:.1}\" width=\"{sz:.1}\" height=\"{sz:.1}\" rx=\"{round:.1}\" fill=\"{}\" stroke=\"#e3e8ef\" stroke-width=\"0.5\"><title>{}</title></rect>",
+            mix((v - vmin) / vspan),
+            esc(&tip)
+        );
+    }
+
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
+    ))
 }
 
 /// A minimal inline trend line (no axes) — a sparkline over the row order: a

@@ -217,6 +217,7 @@ fn role_str(r: &Role) -> &'static str {
         Role::Value(Kind::Violin) => "VIOLIN",
         Role::Value(Kind::Density) => "DENSITY",
         Role::Value(Kind::Heatmap) => "HEATMAP",
+        Role::Value(Kind::Calendar) => "CALENDAR",
         Role::Value(Kind::Sparkline) => "SPARKLINE",
         Role::RefLine => "REFLINE",
         Role::VLine => "XLINE",

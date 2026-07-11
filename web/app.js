@@ -145,9 +145,10 @@ SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::T
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
 SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
--- Calendar heatmap: a year of daily values gridded by ISO week (x) × weekday (y).
-SELECT 200::HEIGHT;
-SELECT 12::COL; SELECT week(d)::XAXIS, isodow(d)::YAXIS, sum(value)::HEATMAP, 'Calendar heatmap — daily activity by ISO week × weekday (Mon=1 … Sun=7)'::TITLE FROM cal GROUP BY 1,2 ORDER BY 1,2;
+-- Calendar heatmap (::CALENDAR): a date axis + a daily value, laid out
+-- GitHub-style with month labels on top and weekday rows.
+SELECT 165::HEIGHT;
+SELECT 12::COL; SELECT d::XAXIS, value::CALENDAR, 'Calendar heatmap — a year of daily activity'::TITLE FROM cal ORDER BY d;
 
 SELECT 'Combo & sparkline'::TAB;
 SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
