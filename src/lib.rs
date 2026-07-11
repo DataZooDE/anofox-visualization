@@ -473,11 +473,28 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     } else {
         None
     };
-    // Richer hover: label each mark with its series (or x). The geom appends the
-    // value, so a stacked-bar segment reads e.g. "web: 22". Tooltip-only — not drawn.
-    let label_vals = category
-        .map(|c| c.values.clone())
-        .unwrap_or_else(|| x.values.clone());
+    // Richer hover: label each mark with its series. The geom appends the value,
+    // so a stacked-bar segment reads e.g. "web: 22". Tooltip-only — not drawn.
+    // - a CATEGORY names the series;
+    // - a discrete x (bars) names the group, e.g. "app: 22";
+    // - a continuous x (line/scatter) uses the measure name, so the point-hover
+    //   tooltip reads "sales: 68.2" rather than "6: 68.2" (which duplicates the
+    //   x already shown in the axis-pointer header).
+    let label_vals = if let Some(cat) = category {
+        cat.values.clone()
+    } else if x_discrete {
+        x.values.clone()
+    } else {
+        let name = match value.name.as_str() {
+            n if n.is_empty()
+                || (n.starts_with('c') && n[1..].chars().all(|c| c.is_ascii_digit())) =>
+            {
+                "value".to_string()
+            }
+            n => n.to_string(),
+        };
+        vec![Value::Str(name); value.values.len()]
+    };
     data.push(("label".to_string(), label_vals));
     aes = aes.label("label");
 
@@ -486,8 +503,15 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         data.push(("size".to_string(), sz.values.clone()));
         aes = aes.size("size");
     }
-    // Data labels (`::DATALABELS`): the measure value drawn on each mark.
-    let show_labels = cols.iter().any(|c| c.role == Role::DataLabels);
+    // Data labels (`::DATALABELS`): the measure value drawn above each mark. The
+    // label column's (first numeric) value, if any, sets the font size — e.g.
+    // `14::DATALABELS` — otherwise a readable default.
+    let datalabels = cols.iter().find(|c| c.role == Role::DataLabels);
+    let show_labels = datalabels.is_some();
+    let dlabel_size = datalabels
+        .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
+        .filter(|s| *s >= 5.0 && *s <= 40.0)
+        .unwrap_or(11.0);
     if show_labels {
         let dl: Vec<Value> = value
             .values
@@ -664,9 +688,10 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     if show_labels {
         plot = plot
             .geom_text_with(GeomText {
-                size: 9.0,
+                size: dlabel_size,
                 color: (70, 78, 92),
-                vjust: 0.0,
+                // Lift the label clear of the mark (a small gap above the top).
+                vjust: -0.35,
                 ..Default::default()
             })
             .layer_aes(Aes::new().x("x").y("y").label("dlab"));
@@ -864,6 +889,16 @@ fn render_heatmap(
             ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
         )
         .theme_minimal();
+    // A gridded heatmap with numeric axes should tick on the tile positions, not
+    // at generic "nice" breaks (0, 2.5, 5…) that fall between tiles. Use the
+    // distinct data values (thinned) as breaks so labels sit under each tile.
+    use ggplot_rs::scale::continuous::ScaleContinuous;
+    if let Some(bx) = tile_breaks(&x.values) {
+        plot = plot.scale_x_continuous(ScaleContinuous::new().with_breaks(bx));
+    }
+    if let Some(by) = tile_breaks(&y.values) {
+        plot = plot.scale_y_continuous(ScaleContinuous::new().with_breaks(by));
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -926,6 +961,23 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
 fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
     (f(r), f(g), f(b))
+}
+
+/// Break positions for a numeric heatmap axis: the distinct data values (sorted,
+/// thinned to ≤ ~13) so tick labels align with tile centres. `None` when the
+/// column isn't fully numeric (a categorical axis handles its own alignment).
+fn tile_breaks(vals: &[Value]) -> Option<Vec<f64>> {
+    let mut xs: Vec<f64> = Vec::with_capacity(vals.len());
+    for v in vals {
+        xs.push(v.as_f64()?); // any non-numeric → treat the axis as discrete
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    if xs.is_empty() {
+        return None;
+    }
+    let step = (xs.len() as f64 / 13.0).ceil().max(1.0) as usize;
+    Some(xs.iter().step_by(step).copied().collect())
 }
 
 /// Distinct finite numeric values from a column, in first-seen order — used to

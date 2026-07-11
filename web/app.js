@@ -111,6 +111,12 @@ CREATE OR REPLACE TABLE ts AS
 SELECT i AS day, round(50 + 30 * sin(i / 3.0) + (random() - 0.5) * 12, 1) AS y
 FROM range(1, 25) t(i);
 
+-- a year of daily values for the calendar-heatmap demo
+CREATE OR REPLACE TABLE cal AS
+SELECT (DATE '2024-01-01' + CAST(i AS INTEGER)) AS d,
+       round(15 + 30 * abs(sin(i / 9.0)) + (abs(hash(i)) % 25), 0) AS value
+FROM range(0, 365) t(i);
+
 -- a 3-series version for the interactivity demos (legend toggle/focus etc.)
 CREATE OR REPLACE TABLE tsm AS
 SELECT i AS day, s.name AS series,
@@ -139,6 +145,9 @@ SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::T
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
 SELECT 12::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- Calendar heatmap: a year of daily values gridded by ISO week (x) × weekday (y).
+SELECT 200::HEIGHT;
+SELECT 12::COL; SELECT week(d)::XAXIS, isodow(d)::YAXIS, sum(value)::HEATMAP, 'Calendar heatmap — daily activity by ISO week × weekday (Mon=1 … Sun=7)'::TITLE FROM cal GROUP BY 1,2 ORDER BY 1,2;
 
 SELECT 'Combo & sparkline'::TAB;
 SELECT 8::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART, 35::REFLINE, 'Sessions vs revenue'::TITLE FROM sales GROUP BY ALL ORDER BY week;
@@ -3135,11 +3144,15 @@ function toggleBrush(panel) {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
   ov.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Clear any leftover axis-pointer scaling so hit-test rects are accurate.
+    marksOf(panel).forEach((m) => (m.style.transform = ""));
     start = rel(e);
     Object.assign(rect.style, { left: start.x + "px", top: start.y + "px", width: 0, height: 0, display: "block" });
-    e.preventDefault();
   });
   ov.addEventListener("mousemove", (e) => {
+    e.stopPropagation();
     if (!start) return;
     const p = rel(e);
     const x = Math.min(start.x, p.x),
@@ -3149,6 +3162,7 @@ function toggleBrush(panel) {
     Object.assign(rect.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" });
   });
   ov.addEventListener("mouseup", (e) => {
+    e.stopPropagation();
     if (!start) return;
     const p = rel(e);
     const box = {
@@ -3374,6 +3388,17 @@ function attachAxisPointer() {
     // Wire each panel once; the handlers read the marks fresh so they survive a
     // zoom re-render (which swaps the SVG inside the same panel).
     if (panel.dataset.axisWired) return;
+    // Maps aren't cartesian — a vertical x-crosshair grouping marks by longitude
+    // is meaningless there. They keep their own per-point (<title>) hover.
+    if (panel._dp && panel._dp.isMap) return;
+    // A pure scatter has no shared-x series to group, so an axis crosshair would
+    // highlight every point sharing the nearest x (two far-apart dots at once).
+    // Skip it — the per-point (<title>) hover shows the individual point instead.
+    const roles = (panel._dp && panel._dp.roles) || [];
+    const scatterOnly =
+      roles.some((r) => /^(SCATTER|POINT|SCATTERCHART)$/.test(r[1])) &&
+      !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
+    if (scatterOnly) return;
     const svg0 = panel.querySelector("svg");
     if (!svg0 || !svg0.viewBox || !svg0.viewBox.baseVal || !svg0.viewBox.baseVal.width) return;
     if (svg0.querySelectorAll("circle.dp-hit").length < 3) return; // needs a line/scatter chart
