@@ -1582,6 +1582,7 @@ let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side s
 let dpKbdActive = false; // one-shot: keep row highlight after a server page-change
 let dpNav = null; // arrow-key controller for the table the pointer is over
 let dpPageSize = {}; // ::PAGED tables: statement idx -> rows per page
+let dpFilterText = {}; // ::PAGED tables: statement idx -> full-text filter term
 
 // Arrow-key table navigation acts on whichever table the pointer is over
 // (dpNav), so no clicking/tabbing is needed — and browsing rows doesn't trigger
@@ -1851,17 +1852,31 @@ async function run(fresh = true) {
         const base = s.sql;
         const idx = i;
         const titleHolder = document.createElement("div");
+        // Server-side full-text filter: one WHERE across all columns, re-queried
+        // (with a fresh COUNT) as you type, so it scales like the paging itself.
+        const filterInput = document.createElement("input");
+        filterInput.className = "dp-table-filter";
+        filterInput.type = "search";
+        filterInput.placeholder = "Filter all rows…";
+        filterInput.value = dpFilterText[idx] || "";
         const holder = document.createElement("div");
-        fig.append(titleHolder, holder);
+        fig.append(titleHolder, filterInput, holder);
         const qident = (c) => `"${String(c).replace(/"/g, '""')}"`;
         let cachedTotal = null;
+        const whereClause = () => {
+          const q = (dpFilterText[idx] || "").trim();
+          // Cast the whole row (the subquery alias is a STRUCT of all columns) to
+          // text and match — a generic full-text filter over every column.
+          return q ? ` WHERE CAST(_dp AS VARCHAR) ILIKE '%${q.replace(/'/g, "''")}%'` : "";
+        };
         const load = async () => {
           const pageSize = dpPageSize[idx] || 10;
           const page = dpPage[idx] || 0;
           const sort = dpSort[idx];
+          const where = whereClause();
           if (cachedTotal == null) {
             try {
-              const c = JSON.parse(await runSql(`SELECT count(*) AS n FROM (${base}) _dp`));
+              const c = JSON.parse(await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`));
               cachedTotal = Number(c[0] && c[0].n) || 0;
             } catch (_) {
               cachedTotal = 0;
@@ -1870,7 +1885,7 @@ async function run(fresh = true) {
           const order = sort && sort.col ? ` ORDER BY ${qident(sort.col)} ${sort.dir > 0 ? "ASC" : "DESC"}` : "";
           let rows = [];
           try {
-            rows = JSON.parse(await runSql(`SELECT * FROM (${base}) _dp${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`));
+            rows = JSON.parse(await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`));
           } catch (e) {
             holder.innerHTML = "";
             showError(holder, String(e));
@@ -1907,6 +1922,16 @@ async function run(fresh = true) {
             },
           };
           holder.appendChild(renderTable(rows, sk, fmtByIdx, server));
+        };
+        let filterTimer = null;
+        filterInput.oninput = () => {
+          clearTimeout(filterTimer);
+          filterTimer = setTimeout(() => {
+            dpFilterText[idx] = filterInput.value;
+            cachedTotal = null; // filter changes the row count
+            dpPage[idx] = 0;
+            load();
+          }, 180);
         };
         await load();
         container.appendChild(fig);
@@ -2381,9 +2406,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   const tb = t.createTBody();
   let page = 0;
   let pageSize = server ? server.pageSize : 10;
+  let filtered = rows; // client-side text filter narrows this subset
   const sortedRows = () => {
     if (server) return rows; // already sorted + paged server-side
-    const data = rows.slice();
+    const data = filtered.slice();
     if (sortCol) {
       const num = numeric[sortCol];
       data.sort((a, b) =>
@@ -2489,6 +2515,25 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   // full result is kept for sorting and CSV export.
   const wrap = document.createElement("div");
   wrap.className = "table-wrap";
+  // A per-table text filter across all columns. Client tables filter the held
+  // rows here; ::PAGED tables filter server-side (handled by the caller), so we
+  // only add the box for client tables big enough to warrant it.
+  if (!server && rows.length > 10) {
+    const flt = document.createElement("input");
+    flt.className = "dp-table-filter";
+    flt.type = "search";
+    flt.placeholder = "Filter rows…";
+    flt.onclick = (e) => e.stopPropagation();
+    flt.oninput = () => {
+      const q = flt.value.trim().toLowerCase();
+      filtered = q
+        ? rows.filter((r) => cols.some((c) => String(r[c] ?? "").toLowerCase().includes(q)))
+        : rows;
+      page = 0;
+      body();
+    };
+    wrap.appendChild(flt);
+  }
   wrap.appendChild(t);
   t._rows = rows;
   t._cols = cols;
