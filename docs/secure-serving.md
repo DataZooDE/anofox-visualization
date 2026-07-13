@@ -49,6 +49,20 @@ editor in the UI; it is presentation, not an access boundary.
 
 ---
 
+## What it looks like
+
+Rendered server-side from a **read-only DuckDB** — no editor, no client SQL.
+
+A parameterised dashboard (the `region` dropdown is whitelisted; the server runs
+the fixed query):
+
+![serve mode — sales dashboard with a whitelisted region param](img/serve-sales.png)
+
+A live forecast — `ts_forecast_by(...)` runs inline, read-only, per request
+(`-- @load anofox_forecast`), bounded by `--cache`:
+
+![serve mode — live forecast (Actual + Forecast)](img/serve-forecast.png)
+
 ## Target (v1 — serve mode)
 
 Three changes, in priority order.
