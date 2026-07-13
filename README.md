@@ -1,9 +1,18 @@
-# anofox-visualization
+<h1 align="center">anofox-visualization</h1>
+<p align="center"><b>Charts &amp; dashboards for DuckDB — the grammar of graphics, straight from SQL.</b></p>
 
-SQL-defined dashboards: annotate SQL result columns with *roles* (`XAXIS`,
-`CATEGORY`, `LABEL`, and a chart kind on the value column like `BARCHART` /
-`LINECHART`) and render them to SVG with
-[ggplot-rs](https://crates.io/crates/ggplot-rs).
+<p align="center">
+  <a href="LICENSE"><img alt="License: BSL 1.1" src="https://img.shields.io/badge/license-BSL%201.1-blue"></a>
+  <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-v1.2%2B-yellow?logo=duckdb&logoColor=black">
+  <a href="https://sipemu.github.io/anofox-visualization/"><img alt="Live demo" src="https://img.shields.io/badge/live%20demo-online-2ea44f"></a>
+</p>
+
+> ⚠️ **Early development.** APIs and the extension packaging are still moving; expect rough edges.
+
+Annotate SQL result columns with *roles* — `::XAXIS`, `::CATEGORY`, a chart kind
+on the value column like `::BARCHART` / `::LINECHART` — and render them to SVG
+with the [ggplot-rs](https://crates.io/crates/ggplot-rs) grammar-of-graphics
+engine. No plotting library on the client, no server: just SQL.
 
 ```sql
 SELECT 'Sessions per week'::LABEL;
@@ -11,91 +20,109 @@ SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED
 FROM sessions GROUP BY ALL ORDER BY ALL;
 ```
 
+## ✨ Live demo
+
+**[sipemu.github.io/anofox-visualization](https://sipemu.github.io/anofox-visualization/)** —
+the full dashboard builder running in your browser on DuckDB-Wasm, with a gallery
+of examples (bars, lines, distributions, pie/gauge/radar, heatmaps, candlesticks,
+maps, forecasts, interactivity).
+
+## Key features
+
+- **40+ chart kinds** — bar/line/area/scatter/step/smooth, box/violin/histogram/
+  density, pie/donut/gauge/radar, heatmap/calendar/candlestick, contour, maps.
+- **SQL-native** — every panel is a `SELECT` whose columns carry `::ROLE` casts.
+  Un-annotated statements are setup.
+- **Interactive** — hover tooltips, cross-filter, tabs, data view, brush/value
+  filter, range zoom, full-size, and view-only share links.
+- **Dashboards from SQL** — `::COL`, `::GROUP`, `::TAB`/`::SUBTAB`, `::HEIGHT`,
+  KPI tiles, rich tables (money/badge/sparkline), inputs (`::DROPDOWN`,
+  `::MULTISELECT`, `::DATERANGE`, …), Markdown boxes.
+- **Runs everywhere** — a browser app (DuckDB-Wasm), a DuckDB extension, and a CLI
+  — all backed by one dependency-light, wasm-compatible renderer.
+
 ## Three surfaces, one renderer
 
-1. **Core library** (`src/lib.rs`) — dependency-light and **wasm-compatible**:
-   maps an annotated result set (`Column { name, role, values }`) onto ggplot-rs
-   and returns an SVG. No DuckDB dependency.
-2. **Web app** (`web/`) — a browser dashboard builder. DuckDB-Wasm runs the SQL,
-   the core (compiled to wasm) renders each panel to SVG. Interactive: hover
-   tooltips, cross-filter, tabs, full-size, view-only share links. Ships a
-   gallery of example dashboards.
-3. **DuckDB extension** (`duckext/`) — registers SQL functions that call the
-   core: `SELECT anofox_render(spec) → SVG`, plus convenience macros
-   (`anofox_bar/_line/_scatter(x, y)`, `anofox_xy(x, y, kind := …)`). Works
-   natively today; see `duckext/BUILD.md` and `duckext/DISTRIBUTING.md`.
+1. **Core library** (`src/lib.rs`) — maps an annotated result set onto ggplot-rs
+   and returns an SVG. No DuckDB dependency; compiles to wasm.
+2. **DuckDB extension** (`duckext/`) — `SELECT anofox_render(spec) → SVG` plus
+   convenience macros. See `duckext/BUILD.md`.
+3. **Web app** (`web/`) — the browser dashboard builder (the live demo above).
+
+## 🦆 Launch the dashboard from DuckDB
+
+Like [DuckDB UI](https://duckdb.org/2025/03/12/duckdb-ui), the extension can open
+the builder in your browser wired to the **live** session — one SQL call starts
+an in-process server (a `/query` bridge to your current database) and opens it:
+
+```sql
+LOAD 'anofox_visualization.duckdb_extension';
+SELECT anofox_serve(8080);   -- opens http://localhost:8080 against THIS database
+```
+
+Everything you query in the builder runs on your real tables. (Building the
+extension with a bundled UI needs `web/pkg` present — run the wasm build first;
+see below.)
+
+## Render inside SQL
+
+```sql
+LOAD 'anofox_visualization.duckdb_extension';
+
+-- Convenience macros: pass columns, get one SVG per group.
+WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
+SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
+--   also anofox_line/_scatter/_area(x, y), anofox_xy(x, y, kind := 'VIOLIN'),
+--   anofox_xyc(x, y, series)  (coloured by series)
+
+-- Or the raw spec (rows + role annotations), the same JSON the browser uses:
+SELECT anofox_render('{"rows":[{"c0":"a","c1":3}],"roles":[[0,"XAXIS"],[1,"BARCHART"]]}');
+```
+
+Build it with `duckext/scripts/build-native.sh` (→ `anofox_visualization.duckdb_extension`,
+loaded with `duckdb -unsigned`). See `duckext/DISTRIBUTING.md` for shipping it.
 
 ## Deploy the web app
 
-The app in `web/` is a **static site** (`index.html` + `app.js` + a compiled
-wasm module + sample data). It must be served over HTTP(S) — ES-module imports,
-WebAssembly, and DuckDB-Wasm don't work from `file://`.
-
-### 1. Build the wasm module
-
-Needs [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) (and `wasm-opt`):
+`web/` is a **static site** (`index.html` + `app.js` + a compiled wasm module +
+sample data). Serve it over HTTP(S) — ES modules, WebAssembly, and DuckDB-Wasm
+don't work from `file://`.
 
 ```sh
+# 1. build the wasm module (needs wasm-pack + wasm-opt)
 wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+# 2. serve web/ locally
+cd web && python3 -m http.server 8080     # → http://localhost:8080
 ```
 
-This writes `web/pkg/anofox_visualization.js` + `…_bg.wasm` (~310 KB), which
-`web/app.js` imports. `web/pkg/` is gitignored, so it's a build artifact.
+Publish the whole `web/` dir (with the freshly built `pkg/`) to any static host —
+Netlify, Cloudflare Pages, S3, nginx, GitHub Pages. DuckDB-Wasm loads from the
+jsDelivr CDN at runtime (no special COOP/COEP headers; single-threaded).
+`web/pkg/` is gitignored, so a **GitHub Pages** deploy builds it in CI —
+see `.github/workflows/pages.yml` (that's what powers the live demo).
 
-### 2. Serve `web/` locally
-
-```sh
-cd web && python3 -m http.server 8080     # then open http://localhost:8080
-```
-
-### 3. Publish to any static host
-
-Upload the whole `web/` directory (including the freshly built `pkg/`) to any
-static host — Netlify, Cloudflare Pages, S3 + CloudFront, nginx, GitHub Pages, …
-No server code runs; DuckDB-Wasm loads from the jsDelivr CDN at runtime (needs
-outbound internet, but no special COOP/COEP headers — it runs single-threaded).
-
-Bundled runtime assets already in `web/`: `m5_monthly.parquet` (sample data for
-the forecast demos) and `localext/` (the `anofox_forecast` wasm extension). The
-map examples fetch Natural Earth GeoJSON at runtime via DuckDB-Wasm's spatial
-extension.
-
-### GitHub Pages (CI)
-
-Because `web/pkg/` is gitignored, a Pages deploy must **build the wasm in CI**
-then publish `web/`. Sketch of a workflow:
-
-```yaml
-# .github/workflows/pages.yml
-name: Pages
-on: { push: { branches: [master] } }
-permissions: { pages: write, id-token: write, contents: read }
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: web }
-      - uses: actions/deploy-pages@v4
-```
-
-Enable Pages with **build type = GitHub Actions** in the repo settings first.
-
-## CLI: render a `.sql` file to a dashboard
-
-Write a `.sql` file where result columns are annotated with `::ROLE` casts.
-Statements without a role are setup; annotated `SELECT`s become panels:
+## CLI
 
 ```sh
 cargo run --bin dashboard -- dashboards/sessions.sql   # writes dashboard.html
-xdg-open dashboard.html
 ```
 
-Roles: `::XAXIS`, `::CATEGORY`, `::LABEL` (heading), and a chart kind on the
-measure — `::BARCHART`, `::BARCHART_STACKED`, `::LINECHART`, `::AREACHART`,
-`::SCATTER`, and more. The runner shells out to the `duckdb` CLI, so there's no
-bundled DuckDB compile.
+Shells out to the `duckdb` CLI, so there's no bundled DuckDB compile.
+
+## License
+
+**Business Source License 1.1 (BSL 1.1)** — see [`LICENSE`](LICENSE).
+
+- ✅ **Free for internal / production use** — use it in your own business
+- ✅ **Free for development & research**
+- ❌ **Not** for offering the work to third parties on a **hosted** or
+  **embedded** basis (contact [DataZoo GmbH](https://data-zoo.de) for a
+  commercial license)
+- 🔄 **Converts to MPL 2.0** five years after first publication
+
+Licensor: DataZoo GmbH. Change License: Mozilla Public License 2.0.
+
+## Acknowledgments
+
+Rendering by [ggplot-rs](https://github.com/sipemu/ggplot-rs); data engine by
+[DuckDB](https://duckdb.org) / DuckDB-Wasm. © DataZoo GmbH.

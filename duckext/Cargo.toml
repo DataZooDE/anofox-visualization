@@ -6,6 +6,7 @@
 name = "anofox-visualization-duckdb"
 version = "0.1.0"
 edition = "2021"
+license = "BUSL-1.1"
 description = "DuckDB C-API extension — SELECT anofox_render(...) → SVG via the anofox-visualization renderer. Wasm side-module compatible (no libduckdb linking)."
 
 [lib]
