@@ -2919,7 +2919,62 @@ function addExportButtons() {
       else svgToPng(svg, "chart");
     };
     fig.appendChild(btn);
+    // A full-size button on charts — opens the plot large in an overlay.
+    if (svg) {
+      const exp = document.createElement("button");
+      exp.className = "dl dp-expand";
+      exp.textContent = "⤢";
+      exp.title = "full size";
+      exp.onclick = (e) => {
+        e.stopPropagation();
+        openFullSize(fig);
+      };
+      fig.appendChild(exp);
+    }
   });
+}
+
+// Open a chart panel large in a centred overlay. The SVG is vector, so we clone
+// it and let it scale to fill (Esc / backdrop / ✕ closes).
+function openFullSize(fig) {
+  const svg = fig.querySelector("svg");
+  if (!svg) return;
+  const title = fig.querySelector(".panel-title")?.textContent || "Full size";
+  const back = document.createElement("div");
+  back.className = "dp-modal-back";
+  const modal = document.createElement("div");
+  modal.className = "dp-modal dp-modal-full";
+  const head = document.createElement("div");
+  head.className = "dp-modal-head";
+  const h = document.createElement("strong");
+  h.textContent = title;
+  const x = document.createElement("button");
+  x.className = "dp-modal-x";
+  x.textContent = "✕";
+  head.append(h, x);
+  const body = document.createElement("div");
+  body.className = "dp-modal-body";
+  const clone = svg.cloneNode(true);
+  clone.removeAttribute("width");
+  clone.removeAttribute("height");
+  clone.style.width = "100%";
+  clone.style.height = "auto";
+  body.appendChild(clone);
+  modal.append(head, body);
+  back.appendChild(modal);
+  const close = () => {
+    back.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  x.onclick = close;
+  back.onclick = (e) => {
+    if (e.target === back) close();
+  };
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(back);
 }
 
 // Share: encode the SQL in the URL hash (no server needed).
