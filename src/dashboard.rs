@@ -4,11 +4,11 @@
 //! SVG — no browser required.
 //!
 //! ```no_run
-//! use duckplot::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
+//! use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
 //! # struct MyDb;
 //! # impl DataProvider for MyDb {
 //! #   fn execute(&mut self, _sql: &str) -> Result<(), String> { Ok(()) }
-//! #   fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<duckplot::prelude::Value>)>, String> { Ok(vec![]) }
+//! #   fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<anofox_visualization::prelude::Value>)>, String> { Ok(vec![]) }
 //! # }
 //! let mut db = MyDb;
 //! let svg = render_dashboard_svg(
@@ -65,12 +65,18 @@ impl Default for DashboardOptions {
 fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Vec<Column> {
     roles
         .iter()
-        .filter_map(|(i, role)| result.get(*i).map(|(name, vals)| Column::new(name.clone(), *role, vals.clone())))
+        .filter_map(|(i, role)| {
+            result
+                .get(*i)
+                .map(|(name, vals)| Column::new(name.clone(), *role, vals.clone()))
+        })
         .collect()
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Render a whole annotated SQL script to one composed SVG dashboard.
@@ -85,7 +91,11 @@ pub fn render_dashboard_svg(
     result
 }
 
-fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardOptions) -> Result<String, String> {
+fn render_inner(
+    script: &str,
+    provider: &mut dyn DataProvider,
+    opts: &DashboardOptions,
+) -> Result<String, String> {
     let pad = opts.gap as f64;
     let gap = opts.gap as f64;
     let content_w = opts.width as f64 - 2.0 * pad;
@@ -120,7 +130,11 @@ fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardO
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {
             if let Ok(rows) = provider.query(&panel.sql) {
-                if let Some(n) = rows.first().and_then(|(_, v)| v.first()).and_then(|v| v.as_f64()) {
+                if let Some(n) = rows
+                    .first()
+                    .and_then(|(_, v)| v.first())
+                    .and_then(|v| v.as_f64())
+                {
                     if n >= 1.0 {
                         columns = n as u32;
                         default_span = (12 / columns).max(1);
@@ -131,13 +145,21 @@ fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardO
         }
         if has(&|r| matches!(r, Role::Span)) {
             if let Ok(rows) = provider.query(&panel.sql) {
-                next_span = rows.first().and_then(|(_, v)| v.first()).and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+                next_span = rows
+                    .first()
+                    .and_then(|(_, v)| v.first())
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
             }
             continue;
         }
         if has(&|r| matches!(r, Role::Height)) {
             if let Ok(rows) = provider.query(&panel.sql) {
-                next_height = rows.first().and_then(|(_, v)| v.first()).and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+                next_height = rows
+                    .first()
+                    .and_then(|(_, v)| v.first())
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
             }
             continue;
         }
@@ -167,7 +189,11 @@ fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardO
 
         // Heading (::LABEL alone) → full-width section title, own row.
         if roles.len() == 1 && matches!(roles[0].1, Role::Label) {
-            let text = rows.first().and_then(|(_, v)| v.first()).map(value_str).unwrap_or_default();
+            let text = rows
+                .first()
+                .and_then(|(_, v)| v.first())
+                .map(value_str)
+                .unwrap_or_default();
             if row_units > 0 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
@@ -178,9 +204,17 @@ fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardO
         }
 
         // Compute geometry.
-        let span = if next_span == 0 { default_span } else { next_span.clamp(1, 12) };
+        let span = if next_span == 0 {
+            default_span
+        } else {
+            next_span.clamp(1, 12)
+        };
         next_span = 0;
-        let ch = if next_height > 0 { next_height as f64 } else { opts.panel_height as f64 };
+        let ch = if next_height > 0 {
+            next_height as f64
+        } else {
+            opts.panel_height as f64
+        };
         next_height = 0;
         let cw = (unit_w * span as f64) - gap;
 
@@ -221,7 +255,13 @@ fn render_inner(script: &str, provider: &mut dyn DataProvider, opts: &DashboardO
 
 /// One panel body → an inner `<svg>` sized (w, h). Charts go through the normal
 /// renderer; KPIs / text / tables get a lightweight SVG.
-fn render_panel_svg(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], w: f64, h: f64, _brand: Option<(u8, u8, u8)>) -> String {
+fn render_panel_svg(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    w: f64,
+    h: f64,
+    _brand: Option<(u8, u8, u8)>,
+) -> String {
     let cols = columns_from_result(rows, roles);
     // Title bar (::TITLE) eats a strip off the top.
     let title = roles
@@ -242,7 +282,10 @@ fn render_panel_svg(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], w: f
     }) {
         let raw = rows.get(i).and_then(|(_, v)| v.first());
         let val = match fmt {
-            Some(f) => raw.and_then(|v| v.as_f64()).map(|n| fmt_metric(n, f)).unwrap_or_else(|| "–".into()),
+            Some(f) => raw
+                .and_then(|v| v.as_f64())
+                .map(|n| fmt_metric(n, f))
+                .unwrap_or_else(|| "–".into()),
             None => raw.map(value_str).unwrap_or_default(),
         };
         let cap = roles
@@ -265,13 +308,17 @@ fn render_panel_svg(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], w: f
     }
 
     // A table.
-    if roles.iter().any(|(_, r)| matches!(r, Role::Table | Role::PagedTable)) {
+    if roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+    {
         return table_svg(rows, roles, w, h, title.as_deref());
     }
 
     // Otherwise a chart — render at the content area, then wrap with a title.
     let body_h = (h - title_h - pad).max(30.0);
-    let chart = render(&cols, w as u32, body_h as u32).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
+    let chart =
+        render(&cols, w as u32, body_h as u32).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
     let mut svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\">"
     );
@@ -296,13 +343,24 @@ fn heading_svg(text: &str, w: f64, h: f64) -> String {
 }
 
 /// A minimal table: header row + up to ~14 body rows. Skips a ::TITLE column.
-fn table_svg(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], w: f64, h: f64, title: Option<&str>) -> String {
+fn table_svg(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    w: f64,
+    h: f64,
+    title: Option<&str>,
+) -> String {
     let skip: std::collections::HashSet<usize> = roles
         .iter()
         .filter(|(_, r)| matches!(r, Role::Title))
         .map(|(i, _)| *i)
         .collect();
-    let cols: Vec<&(String, Vec<Value>)> = rows.iter().enumerate().filter(|(i, _)| !skip.contains(i)).map(|(_, c)| c).collect();
+    let cols: Vec<&(String, Vec<Value>)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !skip.contains(i))
+        .map(|(_, c)| c)
+        .collect();
     let ncol = cols.len().max(1);
     let nrow = cols.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
     let top = if title.is_some() { 30.0 } else { 10.0 };

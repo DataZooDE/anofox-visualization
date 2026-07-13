@@ -1,7 +1,7 @@
 // Browser dashboard builder — 100% client-side.
-//   DuckDB-Wasm runs the SQL, duckplot (wasm) plans the ::ROLE annotations and
+//   DuckDB-Wasm runs the SQL, anofox-visualization (wasm) plans the ::ROLE annotations and
 //   renders each panel to SVG. No server, no DuckDB extension.
-import init, { plan, render_panel, map_bounds, panel_bounds } from "./pkg/duckplot.js";
+import init, { plan, render_panel, map_bounds, panel_bounds } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -28,7 +28,7 @@ ${SESSIONS}
 SELECT 'Overview — click a pie slice or a table row to filter the KPIs'::LABEL;
 
 SELECT 12::COL;
-SELECT '**How duckplot works:** every panel is a SQL query whose columns are tagged with \`::ROLE\` casts — \`::XAXIS\`, \`::CATEGORY\`, a chart kind like \`::BARCHART_STACKED\`, \`::PIE\`, \`::LINECHART\`, \`::TABLE\`, or a KPI (\`::COMPACT\`/\`::METRIC\`). Un-annotated statements (the \`CREATE TABLE\`) are setup. **Click a pie slice or a table row** — the KPI strip filters via \`getvariable(''selected'')\`.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT '**How it works:** every panel is a SQL query whose columns are tagged with \`::ROLE\` casts — \`::XAXIS\`, \`::CATEGORY\`, a chart kind like \`::BARCHART_STACKED\`, \`::PIE\`, \`::LINECHART\`, \`::TABLE\`, or a KPI (\`::COMPACT\`/\`::METRIC\`). Un-annotated statements (the \`CREATE TABLE\`) are setup. **Click a pie slice or a table row** — the KPI strip filters via \`getvariable(''selected'')\`.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- KPIs in a ::GROUP render as a compact strip. They opt into the cross-filter
 -- (getvariable('selected')), so clicking a channel re-computes them.
@@ -923,9 +923,9 @@ function toIso(v, dateOnly) {
 }
 
 async function boot() {
-  await init(); // duckplot wasm (plan + render_panel — used in both modes)
+  await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
 
-  // Prefer a live DuckDB bridge (served by `duckplot serve`); else DuckDB-Wasm.
+  // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
   try {
     const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
     if (r.ok) backend = "live";

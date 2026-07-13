@@ -1,14 +1,14 @@
 -- ── M5 monthly sales — 12-month SeasonalES forecast ──────────────────────────
--- A pure-SQL duckplot dashboard powered by the anofox-forecast DuckDB extension.
+-- A pure-SQL anofox-visualization dashboard powered by the anofox-forecast DuckDB extension.
 --
--- Run it against a DuckDB that has the extension (duckplot `serve` / escurel /
+-- Run it against a DuckDB that has the extension (anofox-visualization `serve` / escurel /
 -- the DuckDB CLI). The extension is native code, so the browser DuckDB-Wasm
 -- build can't load it — use a native backend for this dashboard.
 --
 -- Point read_parquet() at your M5 monthly file (item_id, ds, y). Here we use the
 -- anofox-forecast benchmark extract.
 --
--- Note: keep the charts/table as plain SELECT/UNION (no WITH/CTE) — duckplot's
+-- Note: keep the charts/table as plain SELECT/UNION (no WITH/CTE) — anofox-visualization
 -- ::ROLE rewriter reads the first SELECT..FROM, which a CTE would hide. Do the
 -- heavy lifting in CREATE TABLE setup steps instead (as below).
 

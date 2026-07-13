@@ -1,17 +1,21 @@
+# The DuckDB extension crate. The user-facing extension is still named
+# `anofox_visualization` (its .so filename + the `anofox_visualization_init_c_api`
+# symbol), but the cargo package/lib are suffixed `-duckdb`/`_ext` so they don't
+# collide with the core `anofox-visualization` library it depends on.
 [package]
-name = "anofox-visualization"
+name = "anofox-visualization-duckdb"
 version = "0.1.0"
 edition = "2021"
-description = "anofox-visualization: a DuckDB C-API extension — SELECT anofox_render(...) → SVG, rendered by ggplot-rs via duckplot. Wasm side-module compatible (no libduckdb linking)."
+description = "DuckDB C-API extension — SELECT anofox_render(...) → SVG via the anofox-visualization renderer. Wasm side-module compatible (no libduckdb linking)."
 
 [lib]
-name = "anofox_visualization"
+name = "anofox_visualization_ext"
 crate-type = ["cdylib"]
 
 [dependencies]
-duckplot = { path = ".." }
+anofox-visualization = { path = ".." }
 ggplot-rs = { path = "../../ggplot-rs", default-features = false }
-# duckplot_serve(): embed the browser UI + serve it on the live session.
+# anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"
 serde_json = "1"

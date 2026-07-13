@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny static server for the duckplot builder that disables caching, so edits
+"""Tiny static server for the anofox-visualization builder that disables caching, so edits
 show up on a normal refresh. Usage: python3 serve_nocache.py [port]"""
 import functools
 import http.server

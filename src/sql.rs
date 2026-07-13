@@ -47,7 +47,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
         .collect()
 }
 
-/// Build duckplot [`Column`]s from JSON result rows (`[{c0:…,c1:…}, …]`) and the
+/// Build anofox-visualization [`Column`]s from JSON result rows (`[{c0:…,c1:…}, …]`) and the
 /// role mapping. Measure columns are coerced to numeric (DuckDB emits
 /// BIGINT/DECIMAL as JSON strings).
 pub fn columns_from_rows(

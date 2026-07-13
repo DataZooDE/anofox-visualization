@@ -10,8 +10,8 @@ PLATFORM="${PLATFORM:-$("$DUCKDB" -noheader -list -c 'PRAGMA platform;')}"
 echo "== build cdylib =="
 cd "$HERE"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --lib "$@"
-SO=target/debug/libanofox_visualization.so
-[ -f target/release/libanofox_visualization.so ] && SO=target/release/libanofox_visualization.so
+SO=target/debug/libanofox_visualization_ext.so
+[ -f target/release/libanofox_visualization_ext.so ] && SO=target/release/libanofox_visualization_ext.so
 echo "   $SO"
 
 echo "== package (C_STRUCT metadata footer, platform $PLATFORM) =="

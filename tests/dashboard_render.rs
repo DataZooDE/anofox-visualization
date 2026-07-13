@@ -1,4 +1,4 @@
-use duckplot::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
+use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
 use ggplot_rs::prelude::Value;
 
 // A tiny provider: setup is a no-op; queries return canned columns based on the
@@ -16,12 +16,19 @@ impl DataProvider for Mock {
     }
     fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
         // directives: a single number
-        if sql.contains("AS c0") && !sql.contains("AS c1") && sql.contains("SELECT") && sql.len() < 40 {
+        if sql.contains("AS c0")
+            && !sql.contains("AS c1")
+            && sql.contains("SELECT")
+            && sql.len() < 40
+        {
             return Ok(vec![("c0".into(), f(&[2.0]))]);
         }
         // metric query: c0 number, c1 label
         if sql.contains("CAST(") {
-            return Ok(vec![("c0".into(), f(&[12400.0])), ("c1".into(), s(&["Revenue"]))]);
+            return Ok(vec![
+                ("c0".into(), f(&[12400.0])),
+                ("c1".into(), s(&["Revenue"])),
+            ]);
         }
         // heading: one string
         if sql.contains("::") == false && sql.matches("AS c").count() == 1 && sql.contains("'") {
@@ -49,7 +56,14 @@ fn composes_a_dashboard_svg() {
     assert!(svg.starts_with("<svg"));
     assert!(svg.contains("</svg>"));
     // one outer svg + nested panel svgs
-    assert!(svg.matches("<svg").count() >= 4, "expected several nested panels");
+    assert!(
+        svg.matches("<svg").count() >= 4,
+        "expected several nested panels"
+    );
     // the KPI value formatted as money
-    assert!(svg.contains("$12,400"), "money KPI missing: {}", &svg[..svg.len().min(400)]);
+    assert!(
+        svg.contains("$12,400"),
+        "money KPI missing: {}",
+        &svg[..svg.len().min(400)]
+    );
 }

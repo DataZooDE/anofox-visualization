@@ -1,5 +1,5 @@
 //! anofox-visualization — a DuckDB C-API extension: `SELECT anofox_render()` →
-//! an SVG rendered by ggplot-rs (via the duckplot core). Uses the C Extension
+//! an SVG rendered by ggplot-rs (via the anofox-visualization core). Uses the C Extension
 //! API — the DuckDB
 //! functions are resolved at load time through the `access` struct, so nothing
 //! links against libduckdb. That's what lets the same crate become a DuckDB-Wasm
@@ -13,7 +13,7 @@ use ffi::*;
 use std::ffi::CString;
 use std::ptr;
 
-// Live-session HTTP server for `SELECT duckplot_serve(port)` (native only).
+// Live-session HTTP server for `SELECT anofox_serve(port)` (native only).
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
 
@@ -62,9 +62,9 @@ pub(crate) unsafe fn api() -> &'static duckdb_ext_api_v1 {
     API.as_ref().unwrap()
 }
 
-/// `SELECT duckplot_serve(port)` → start the browser builder on the live session.
+/// `SELECT anofox_serve(port)` → start the browser builder on the live session.
 #[cfg(not(target_arch = "wasm32"))]
-unsafe extern "C" fn duckplot_serve_fn(
+unsafe extern "C" fn anofox_serve_fn(
     _info: duckdb_function_info,
     input: duckdb_data_chunk,
     output: duckdb_vector,
@@ -81,7 +81,7 @@ unsafe extern "C" fn duckplot_serve_fn(
 }
 
 fn smoke_svg() -> CString {
-    use duckplot::{render, Column, Kind, Role};
+    use anofox_visualization::{render, Column, Kind, Role};
     use ggplot_rs::prelude::Value;
     let cols = vec![
         Column::new(
@@ -129,7 +129,7 @@ unsafe extern "C" fn anofox_render_fn(
         };
         let svg = if valid && !data.is_null() {
             let bytes = read_string_t(data, i);
-            duckplot::render_spec(std::str::from_utf8(bytes).unwrap_or(""))
+            anofox_visualization::render_spec(std::str::from_utf8(bytes).unwrap_or(""))
         } else {
             String::new()
         };
@@ -209,18 +209,18 @@ pub unsafe extern "C" fn anofox_visualization_init_c_api(
         run_sql(conn, m);
     }
 
-    // duckplot_serve(INTEGER port) -> VARCHAR  (native only)
+    // anofox_serve(INTEGER port) -> VARCHAR  (native only)
     #[cfg(not(target_arch = "wasm32"))]
     {
         let sf = (api().duckdb_create_scalar_function.unwrap())();
-        (api().duckdb_scalar_function_set_name.unwrap())(sf, c"duckplot_serve".as_ptr());
+        (api().duckdb_scalar_function_set_name.unwrap())(sf, c"anofox_serve".as_ptr());
         let mut itype =
             (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_INTEGER);
         (api().duckdb_scalar_function_add_parameter.unwrap())(sf, itype);
         let mut rtype =
             (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
         (api().duckdb_scalar_function_set_return_type.unwrap())(sf, rtype);
-        (api().duckdb_scalar_function_set_function.unwrap())(sf, Some(duckplot_serve_fn));
+        (api().duckdb_scalar_function_set_function.unwrap())(sf, Some(anofox_serve_fn));
         ok = ok
             && (api().duckdb_register_scalar_function.unwrap())(conn, sf)
                 == duckdb_state::DuckDBSuccess;

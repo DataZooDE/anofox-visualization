@@ -1,4 +1,4 @@
-//! `duckplot serve [db] [--port N] [--no-open]` — launch the browser dashboard
+//! `anofox-visualization serve [db] [--port N] [--no-open]` — launch the browser dashboard
 //! builder wired to a **live** DuckDB. Serves the embedded `web/` UI and a
 //! `/query` endpoint that runs SQL through the `duckdb` CLI against a shared
 //! database file (so `CREATE`d tables persist across panel queries).
@@ -27,13 +27,16 @@ fn main() {
     }
     // Default to a temp DB so setup statements persist across requests.
     if db.is_empty() {
-        db = std::env::temp_dir().join("duckplot_serve.db").to_string_lossy().to_string();
+        db = std::env::temp_dir()
+            .join("anofox_serve.db")
+            .to_string_lossy()
+            .to_string();
     }
 
     let addr = format!("127.0.0.1:{port}");
     let server = Server::http(&addr).unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     let url = format!("http://{addr}/");
-    println!("duckplot serving {url}\n  database: {db}\n  (Ctrl-C to stop)");
+    println!("anofox-visualization serving {url}\n  database: {db}\n  (Ctrl-C to stop)");
     if open_browser {
         let _ = open::that(&url);
     }
@@ -52,11 +55,20 @@ fn main() {
 fn handle_query(mut req: tiny_http::Request, db: &str) {
     let mut sql = String::new();
     let _ = std::io::Read::read_to_string(req.as_reader(), &mut sql);
-    let out = Command::new("duckdb").arg(db).arg("-json").arg("-c").arg(&sql).output();
+    let out = Command::new("duckdb")
+        .arg(db)
+        .arg("-json")
+        .arg("-c")
+        .arg(&sql)
+        .output();
     match out {
         Ok(o) if o.status.success() => {
             let body = String::from_utf8_lossy(&o.stdout);
-            let body = if body.trim().is_empty() { "[]" } else { body.trim() };
+            let body = if body.trim().is_empty() {
+                "[]"
+            } else {
+                body.trim()
+            };
             let _ = req.respond(Response::from_string(body).with_header(json_header()));
         }
         Ok(o) => {
@@ -64,7 +76,8 @@ fn handle_query(mut req: tiny_http::Request, db: &str) {
             let _ = req.respond(Response::from_string(msg).with_status_code(400));
         }
         Err(e) => {
-            let _ = req.respond(Response::from_string(format!("duckdb: {e}")).with_status_code(500));
+            let _ =
+                req.respond(Response::from_string(format!("duckdb: {e}")).with_status_code(500));
         }
     }
 }

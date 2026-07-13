@@ -1,4 +1,4 @@
-//! duckplot — SQL-defined dashboards, Shaper-style.
+//! anofox-visualization — SQL-defined dashboards, Shaper-style.
 //!
 //! You annotate SQL result columns with *roles* (`XAXIS`, `CATEGORY`, `LABEL`,
 //! and a chart kind on the value column such as `BARCHART`/`LINECHART`), and this
@@ -7,7 +7,7 @@
 //! extension packaging (native + wasm) sits on top and calls [`render`].
 //!
 //! ```
-//! use duckplot::{Column, Role, Kind, render};
+//! use anofox_visualization::{Column, Role, Kind, render};
 //! use ggplot_rs::prelude::Value;
 //! let cols = vec![
 //!     Column::new("week", Role::X, vec![Value::Str("W1".into()), Value::Str("W2".into())]),
@@ -353,7 +353,7 @@ fn value_str(v: &Value) -> String {
     }
 }
 
-/// The DataZoo palette — duckplot's default categorical + single-series colours.
+/// The DataZoo palette — anofox-visualization's default categorical + single-series colours.
 pub const DZ_COLORS: [(u8, u8, u8); 5] = [
     (0x45, 0x64, 0x81), // steel blue
     (0xe8, 0x64, 0x33), // orange
@@ -1895,10 +1895,10 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 
 /// C-ABI smoke test: render a fixed bar chart and return a heap SVG string
-/// (free it with [`duckplot_free`]). Exercises the whole render path through FFI
+/// (free it with [`anofox_free`]). Exercises the whole render path through FFI
 /// — the shape the DuckDB extension entrypoint will use.
 #[no_mangle]
-pub extern "C" fn duckplot_smoke() -> *mut c_char {
+pub extern "C" fn anofox_smoke() -> *mut c_char {
     let cols = vec![
         Column::new(
             "x",
@@ -1920,7 +1920,7 @@ pub extern "C" fn duckplot_smoke() -> *mut c_char {
 /// Free a string returned by the C ABI.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn duckplot_free(p: *mut c_char) {
+pub extern "C" fn anofox_free(p: *mut c_char) {
     if !p.is_null() {
         unsafe { drop(CString::from_raw(p)) };
     }

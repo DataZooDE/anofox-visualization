@@ -1,4 +1,4 @@
-# duckplot
+# anofox-visualization
 
 SQL-defined dashboards, Shaper-style: annotate SQL result columns with *roles*
 (`XAXIS`, `CATEGORY`, `LABEL`, and a chart kind on the value column like

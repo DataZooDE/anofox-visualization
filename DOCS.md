@@ -1,7 +1,7 @@
-# duckplot — documentation
+# anofox-visualization — documentation
 
 SQL-defined dashboards, Shaper-style: you annotate SQL result columns with
-**roles** (`::XAXIS`, `::CATEGORY`, a chart kind on the measure), and duckplot
+**roles** (`::XAXIS`, `::CATEGORY`, a chart kind on the measure), and anofox-visualization
 renders them with [ggplot-rs](../ggplot-rs). The core is dependency-light and
 **wasm-compatible**, so the same renderer runs on the CLI and in the browser.
 
@@ -182,7 +182,7 @@ xdg-open dashboard.html
 
 ### b) Browser builder (no server) — interactive analysis
 
-A single-page app: type SQL, **DuckDB-Wasm** runs it in the page, **duckplot
+A single-page app: type SQL, **DuckDB-Wasm** runs it in the page, **anofox-visualization
 compiled to wasm** renders the panels. Everything is client-side — static files,
 no backend, no DuckDB extension.
 
@@ -196,7 +196,7 @@ readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
 
 ### b2) Serve the UI on a live DuckDB — explore existing data
 
-`duckplot serve` starts a tiny local HTTP server that serves the same builder UI
+`anofox-visualization serve` starts a tiny local HTTP server that serves the same builder UI
 plus a `/query` endpoint backed by a **live** DuckDB — so the UI operates on your
 real tables (big data stays in DuckDB), and opens the browser for you:
 
@@ -210,18 +210,18 @@ cargo build --bin serve --features serve
 
 The UI **auto-detects**: if a `/query` bridge answers it uses live DuckDB,
 otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
-*(Next: `CALL duckplot_serve()` to launch this from inside a DuckDB session — see
+*(Next: `CALL anofox_serve()` to launch this from inside a DuckDB session — see
 the roadmap.)*
 
 ### c) DuckDB extension — launch the UI *from a DuckDB session*
 
 The `anofox-visualization` C-API extension (in `duckext/`) adds
-`duckplot_serve(port)`: start the browser builder wired to the **current**
+`anofox_serve(port)`: start the browser builder wired to the **current**
 session, from inside DuckDB.
 
 ```sql
 LOAD 'anofox_visualization.duckdb_extension';  -- (duckdb -unsigned; see duckext/BUILD.md)
-SELECT duckplot_serve(8080);                    -- serves http://127.0.0.1:8080 + opens the browser
+SELECT anofox_serve(8080);                    -- serves http://127.0.0.1:8080 + opens the browser
 ```
 
 The extension embeds the same UI and answers `/query` on a live connection
@@ -243,14 +243,14 @@ static HTML.
 
 ## 4. WASM compatibility
 
-The **core** (`duckplot`) has no `polars`/native-only deps; it renders through
+The **core** (`anofox-visualization`) has no `polars`/native-only deps; it renders through
 ggplot-rs’s plotters-free `render_svg_native`, which compiles to
 `wasm32-unknown-unknown`. That’s what makes the browser builder possible:
 
 ```
  ┌── browser tab ───────────────────────────────────────────┐
  │  SQL editor                                               │
- │     │ plan(sql)         (duckplot-wasm)                   │
+ │     │ plan(sql)         (anofox-visualization-wasm)                   │
  │     ▼                                                     │
  │  DuckDB-Wasm  ──rows──▶  render_panel(rows, roles)  ─SVG─▶ dashboard
  └───────────────────────────────────────────────────────────┘

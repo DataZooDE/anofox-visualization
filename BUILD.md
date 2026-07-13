@@ -9,13 +9,13 @@ SQL-defined dashboards with ggplot-rs. Real R&D; this tracks what works.
 2. **emscripten** 3.1.57 (`~/emsdk`) + Rust `wasm32-unknown-emscripten` target.
 3. **ggplot-rs compiles for emscripten** (incl. plotters).
 4. **A loadable emscripten side-module `.wasm` builds** with the render path
-   reachable over the C ABI (`duckplot_smoke`/`duckplot_free`):
+   reachable over the C ABI (`anofox_smoke`/`anofox_free`):
 
    ```sh
    source ~/emsdk/emsdk_env.sh
    RUSTFLAGS="-C link-arg=-sSIDE_MODULE=1 -C link-arg=-sWASM_BIGINT" \
      cargo build --target wasm32-unknown-emscripten          # dev works
-   wasm-opt -Oz --strip-debug target/.../debug/duckplot.wasm -o duckplot.wasm  # 35M → 23M
+   wasm-opt -Oz --strip-debug target/.../debug/anofox-visualization.wasm -o anofox-visualization.wasm  # 35M → 23M
    ```
 
 ## ⚠️ Known snags

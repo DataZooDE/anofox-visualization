@@ -1,13 +1,13 @@
 //! `dashboard` — the Shaper-style viewer. Takes a `.sql` file of annotated
 //! queries, runs them through the DuckDB CLI, renders each annotated `SELECT`
-//! with the duckplot core (ggplot-rs), and writes an interactive HTML dashboard.
+//! with the anofox-visualization core (ggplot-rs), and writes an interactive HTML dashboard.
 //!
 //! Usage:  cargo run --bin dashboard -- dashboards/sessions.sql [out.html]
 //!
 //! The SQL parsing (`::ROLE` casts, comments, statement splitting) lives in
-//! `duckplot::sql`, shared with the wasm browser build.
+//! `anofox_visualization::sql`, shared with the wasm browser build.
 
-use duckplot::{render, sql, Role};
+use anofox_visualization::{render, sql, Role};
 use std::process::Command;
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
     let out = args.next().unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
 
-    let db = std::env::temp_dir().join(format!("duckplot_{}.db", std::process::id()));
+    let db = std::env::temp_dir().join(format!("anofox_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let db = db.to_string_lossy().to_string();
 
@@ -50,8 +50,15 @@ fn main() {
             serde_json::from_str(json.trim()).unwrap_or_default();
         // A label-only panel is a spanning section heading, not a card.
         if p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label) {
-            let text = rows.first().and_then(|r| r.values().next()).and_then(|v| v.as_str()).unwrap_or("");
-            let esc = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            let text = rows
+                .first()
+                .and_then(|r| r.values().next())
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let esc = text
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             panels.push_str(&format!("<h2 class=\"section\">{esc}</h2>"));
             continue;
         }
@@ -72,9 +79,16 @@ fn run(db: &str, sql: &str, json: bool) -> String {
     if json {
         cmd.arg("-json");
     }
-    let out = cmd.arg("-c").arg(sql).output().unwrap_or_else(|e| panic!("run duckdb: {e}"));
+    let out = cmd
+        .arg("-c")
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("run duckdb: {e}"));
     if !out.status.success() {
-        eprintln!("duckdb error on: {sql}\n{}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "duckdb error on: {sql}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return String::new();
     }
     String::from_utf8_lossy(&out.stdout).to_string()
@@ -85,8 +99,8 @@ fn run(db: &str, sql: &str, json: bool) -> String {
 fn page(path: &str, n: usize, panels: &str) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
-<title>duckplot dashboard</title><style>{STYLE}</style></head>\
-<body><h1>duckplot dashboard</h1><div class=\"src\">rendered from <code>{path}</code> · {n} panels</div>\
+<title>anofox-visualization dashboard</title><style>{STYLE}</style></head>\
+<body><h1>anofox-visualization dashboard</h1><div class=\"src\">rendered from <code>{path}</code> · {n} panels</div>\
 <div class=\"grid\">{panels}</div><div id=\"dp-tip\" class=\"dp-tip\"></div>\
 <script>{SCRIPT}</script></body></html>"
     )

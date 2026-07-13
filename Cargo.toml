@@ -1,15 +1,19 @@
 [package]
-name = "duckplot"
+name = "anofox-visualization"
 version = "0.1.0"
 edition = "2021"
-description = "SQL-defined dashboards: Shaper-style column roles rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
+description = "SQL-defined dashboards: column-role annotations rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
 license = "MIT"
 
 [lib]
+name = "anofox_visualization"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
+# NOTE: uses ggplot-rs APIs newer than crates.io v0.12.0 (legend_position,
+# CoordPolar::inner_radius, geom hover…), so this stays a path/git dep until a
+# newer ggplot-rs is published. See duckext/DISTRIBUTING.md.
 ggplot-rs = { path = "../ggplot-rs", default-features = false, features = ["sf"] }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
@@ -21,9 +25,9 @@ open = { version = "5", optional = true }
 
 [features]
 default = []
-# Browser build (DuckDB-Wasm + duckplot renderer). `wasm-pack build --features wasm`.
+# Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
 wasm = ["dep:wasm-bindgen", "ggplot-rs/wasm"]
-# `duckplot serve <db>` — serve the builder UI wired to a live DuckDB.
+# `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.
 serve = ["dep:tiny_http", "dep:include_dir", "dep:open"]
 
 [[bin]]

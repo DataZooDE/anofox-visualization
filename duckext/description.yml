@@ -13,7 +13,7 @@ extension:
     - sipemu
 
 repo:
-  github: sipemu/duckplot   # TODO: push duckplot to GitHub first (it has no remote yet)
+  github: sipemu/anofox-visualization   # TODO: push anofox-visualization to GitHub first (it has no remote yet)
   ref: <commit-or-tag>
 
 docs:
@@ -26,7 +26,7 @@ docs:
     SELECT anofox_render('{"rows":[{"c0":"a","c1":3}],"roles":[[0,"XAXIS"],[1,"BARCHART"]]}');
   extended_description: |
     anofox_visualization renders charts as SVG from inside DuckDB, using the
-    ggplot-rs grammar-of-graphics engine (via the duckplot core). It exposes:
+    ggplot-rs grammar-of-graphics engine (via the anofox-visualization core). It exposes:
       - anofox_render(spec VARCHAR) -> VARCHAR  — a JSON panel spec -> SVG
       - anofox_bar / anofox_line / anofox_scatter / anofox_area (x, y)
       - anofox_xy(x, y, kind := 'BARCHART', width := 640, height := 400)

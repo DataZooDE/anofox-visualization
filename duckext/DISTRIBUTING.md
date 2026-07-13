@@ -9,14 +9,19 @@ users. There are two routes; pick based on whether you need signed `INSTALL`.
   `anofox_xy(x, y, kind := ...)`, `anofox_xyc(x, y, series, kind := ...)`.
 
 ## Prerequisites (both routes)
-1. **Push `duckplot` to a public GitHub repo.** It has no git remote yet; a
+1. **Push `anofox-visualization` to a public GitHub repo.** It has no git remote yet; a
    loadable extension needs a public source repo + tags.
-2. **Make the build self-contained.** `duckplot` currently depends on `ggplot-rs`
-   by **path** (`../ggplot-rs`). For CI you must either
-   - check `ggplot-rs` out as a sibling (what `.github/workflows/extension.yml`
-     does — pinned to `v0.12.0`), or
-   - switch the dep to the crates.io version (`ggplot-rs = "0.12"`), which is
-     cleaner but requires that every ggplot-rs API duckplot uses is released.
+2. **Make the build self-contained.** The core depends on `ggplot-rs` by **path**
+   (`../ggplot-rs`), and it uses APIs newer than the published crates.io
+   **v0.12.0** (`legend_position`, `CoordPolar::inner_radius`, geom hover…), so a
+   plain `ggplot-rs = "0.12"` does **not** compile (verified). Options:
+   - **git dependency** — push ggplot-rs (it has unreleased commits) and point the
+     dep at that rev: `ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "…" }`.
+     Self-contained for CI, keeps every feature, no crates.io publish needed.
+   - **crates.io** — publish a newer `ggplot-rs` (e.g. 0.13) that has those APIs,
+     then `ggplot-rs = "0.13"`. Cleanest long-term.
+   - **sibling checkout** — what `.github/workflows/extension.yml` does today
+     (`ref: main`); that ref must contain the required commits.
 
 ## Route 1 — self-hosted repo (works now, unsigned)
 The included `.github/workflows/extension.yml` builds + packages the extension

@@ -1,4 +1,4 @@
-//! In-process HTTP server behind `SELECT duckplot_serve(port)`. Serves the
+//! In-process HTTP server behind `SELECT anofox_serve(port)`. Serves the
 //! embedded browser builder and a `/query` bridge backed by the **live** DuckDB
 //! session — a fresh `duckdb_connect` per request (connections aren't
 //! thread-safe), all via the C API (no libduckdb linking).
@@ -26,14 +26,14 @@ pub unsafe fn set_conn(conn: duckdb_connection) {
 /// Start the server (once) on a background thread and open the browser.
 pub fn start(port: u16) -> String {
     if STARTED.swap(true, Ordering::SeqCst) {
-        return "duckplot is already serving".to_string();
+        return "anofox-visualization is already serving".to_string();
     }
     let addr = format!("127.0.0.1:{port}");
     let server = match Server::http(&addr) {
         Ok(s) => s,
         Err(e) => {
             STARTED.store(false, Ordering::SeqCst);
-            return format!("duckplot: could not bind {addr}: {e}");
+            return format!("anofox-visualization: could not bind {addr}: {e}");
         }
     };
     let url = format!("http://{addr}/");
@@ -44,7 +44,7 @@ pub fn start(port: u16) -> String {
             handle(req);
         }
     });
-    format!("duckplot serving {url} — open it in your browser")
+    format!("anofox-visualization serving {url} — open it in your browser")
 }
 
 fn handle(mut req: tiny_http::Request) {
