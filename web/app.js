@@ -2888,11 +2888,22 @@ function decodeHashSql() {
     return null;
   }
 }
-function shareLink() {
-  location.hash = "sql=" + encodeSql($("sql").value);
-  navigator.clipboard.writeText(location.href).then(
-    () => status("link copied ✓"),
-    () => status("URL updated — copy it from the address bar")
+// Share a view-only link: the SQL rides in the #sql hash and ?embed=1 hides the
+// editor, sidebar and toolbar, so the recipient can view and interact with the
+// dashboard but not edit its SQL. (Shift-click for an editable link instead.)
+function shareLink(e) {
+  const encoded = encodeSql($("sql").value);
+  const editable = e && e.shiftKey;
+  const base = location.origin + location.pathname;
+  const url = editable
+    ? base + "#sql=" + encoded
+    : base + "?embed=1#sql=" + encoded;
+  navigator.clipboard.writeText(url).then(
+    () => status(editable ? "editable link copied ✓" : "view-only link copied ✓"),
+    () => {
+      location.hash = "sql=" + encoded;
+      status("copy the link from the address bar");
+    }
   );
 }
 
