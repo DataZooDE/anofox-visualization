@@ -11,10 +11,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
-# NOTE: uses ggplot-rs APIs newer than crates.io v0.12.0 (legend_position,
-# CoordPolar::inner_radius, geom hover…), so this stays a path/git dep until a
-# newer ggplot-rs is published. See duckext/DISTRIBUTING.md.
-ggplot-rs = { path = "../ggplot-rs", default-features = false, features = ["sf"] }
+# Pinned to a git rev because it uses ggplot-rs APIs newer than crates.io v0.12.0
+# (legend_position, CoordPolar::inner_radius, geom hover…). Makes the build
+# self-contained (no ggplot-rs sibling checkout needed). Bump the rev to update;
+# for local ggplot-rs work, `[patch]` it to a path. See duckext/DISTRIBUTING.md.
+ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "498aad5a851ea249bf19f14947c3561cf3a4a3e0", default-features = false, features = ["sf"] }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

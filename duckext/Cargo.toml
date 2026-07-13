@@ -14,7 +14,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anofox-visualization = { path = ".." }
-ggplot-rs = { path = "../../ggplot-rs", default-features = false }
+# Same git rev as the core crate (both must resolve to one ggplot-rs).
+ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "498aad5a851ea249bf19f14947c3561cf3a4a3e0", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"

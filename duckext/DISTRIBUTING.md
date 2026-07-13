@@ -8,20 +8,17 @@ users. There are two routes; pick based on whether you need signed `INSTALL`.
 - Convenience macros (auto-registered at LOAD): `anofox_bar/_line/_scatter/_area(x, y)`,
   `anofox_xy(x, y, kind := ...)`, `anofox_xyc(x, y, series, kind := ...)`.
 
-## Prerequisites (both routes)
-1. **Push `anofox-visualization` to a public GitHub repo.** It has no git remote yet; a
-   loadable extension needs a public source repo + tags.
-2. **Make the build self-contained.** The core depends on `ggplot-rs` by **path**
-   (`../ggplot-rs`), and it uses APIs newer than the published crates.io
-   **v0.12.0** (`legend_position`, `CoordPolar::inner_radius`, geom hover…), so a
-   plain `ggplot-rs = "0.12"` does **not** compile (verified). Options:
-   - **git dependency** — push ggplot-rs (it has unreleased commits) and point the
-     dep at that rev: `ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "…" }`.
-     Self-contained for CI, keeps every feature, no crates.io publish needed.
-   - **crates.io** — publish a newer `ggplot-rs` (e.g. 0.13) that has those APIs,
-     then `ggplot-rs = "0.13"`. Cleanest long-term.
-   - **sibling checkout** — what `.github/workflows/extension.yml` does today
-     (`ref: main`); that ref must contain the required commits.
+## Prerequisites
+1. **Repo on GitHub** — ✅ done: `github.com/sipemu/anofox-visualization` (private).
+   The DuckDB *community-extensions* route needs it **public**; the self-hosted
+   route below works while it's private.
+2. **Self-contained build** — ✅ done: `ggplot-rs` is a **pinned git dependency**
+   (`git = "https://github.com/sipemu/ggplot-rs", rev = "498aad5…"`) in both
+   `Cargo.toml`s, so Cargo fetches it — no sibling checkout, no crates.io publish.
+   The core uses ggplot-rs APIs newer than the published v0.12.0
+   (`legend_position`, `CoordPolar::inner_radius`, geom hover…), which is why it's
+   a git rev rather than `ggplot-rs = "0.12"`. Bump the rev to update; for local
+   ggplot-rs work, `[patch]` it back to a path.
 
 ## Route 1 — self-hosted repo (works now, unsigned)
 The included `.github/workflows/extension.yml` builds + packages the extension

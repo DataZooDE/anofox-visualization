@@ -2,8 +2,8 @@ name: Build DuckDB extension
 
 # Build + package the anofox_visualization DuckDB extension for each platform and
 # upload the loadable `.duckdb_extension` artifacts. Mirrors duckext/scripts/
-# build-native.sh (proven locally). NOTE: the core depends on ggplot-rs via a
-# PATH dependency, so this checks BOTH repos out as siblings.
+# build-native.sh (proven locally). Self-contained: ggplot-rs is a pinned git
+# dependency, so Cargo fetches it — no sibling checkout needed.
 on:
   push:
     tags: ["v*"]
@@ -25,21 +25,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Checkout anofox-visualization
-        uses: actions/checkout@v4
-        with:
-          path: anofox-visualization
-
-      # PATH dependency: ggplot-rs must sit next to the core crate. The core uses
-      # ggplot-rs APIs newer than crates.io v0.12.0, so this MUST point at a ref
-      # that has them (currently that means an unreleased branch — see
-      # duckext/DISTRIBUTING.md). Update the ref once ggplot-rs is published.
-      - name: Checkout ggplot-rs
-        uses: actions/checkout@v4
-        with:
-          repository: sipemu/ggplot-rs
-          ref: main
-          path: ggplot-rs
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -48,11 +34,11 @@ jobs:
           python3 -m pip install --quiet duckdb || true
 
       - name: Build (release cdylib)
-        working-directory: anofox-visualization/duckext
+        working-directory: duckext
         run: cargo build --release --lib
 
       - name: Package (metadata footer)
-        working-directory: anofox-visualization/duckext
+        working-directory: duckext
         run: |
           LIB=$(ls target/release/*anofox_visualization_ext.${{ matrix.ext }} target/release/anofox_visualization_ext.${{ matrix.ext }} 2>/dev/null | head -1)
           python3 scripts/append_extension_metadata.py -l "$LIB" -n anofox_visualization \
@@ -60,7 +46,7 @@ jobs:
             -o anofox_visualization.duckdb_extension
 
       - name: Smoke test (Python DuckDB, unsigned)
-        working-directory: anofox-visualization/duckext
+        working-directory: duckext
         run: |
           python3 - <<'PY'
           import duckdb
@@ -77,4 +63,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: anofox_visualization-${{ matrix.name }}
-          path: anofox-visualization/duckext/anofox_visualization.duckdb_extension
+          path: duckext/anofox_visualization.duckdb_extension
