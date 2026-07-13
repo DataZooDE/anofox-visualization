@@ -414,17 +414,20 @@ SELECT item    AS "Item × store" ::PAGED,
        sn_rmse AS "SN · RMSE"    ::COMPACT
 FROM lx_scores ORDER BY item;`,
       "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
--- one dashboard across all categories (monthly). Method: MSTL.
+-- one dashboard across all categories (monthly). Methods: MFLES vs MSTL.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS an_cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
 
--- 12-month forecast (MSTL = multiple seasonal-trend decomposition, so the forward
--- path carries the extracted trend plus the learned seasonal pattern)
+-- 12-month forecast with BOTH methods (a method column tags each), so the panels
+-- can overlay MFLES against MSTL on the same history.
 CREATE TABLE IF NOT EXISTS an_fc AS
-  SELECT category, ds, round(yhat,0) AS yhat
-  FROM ts_forecast_by('an_cat', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'});
+  SELECT 'MFLES' AS method, category, ds, round(yhat,0) AS yhat
+    FROM ts_forecast_by('an_cat', category, ds, y, 'MFLES', 12, '1mo', MAP{'seasonal_period':'12'})
+  UNION ALL
+  SELECT 'MSTL', category, ds, round(yhat,0)
+    FROM ts_forecast_by('an_cat', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'});
 
 -- Decomposition: take the smooth TREND from the extension's MSTL, then split the
 -- detrended signal into a classical seasonal component (mean per calendar month,
@@ -442,47 +445,73 @@ CREATE TABLE IF NOT EXISTS an_decomp AS
          round(j.observed - j.trend - sc.seasonal,0) AS remainder
   FROM j JOIN sc USING (category, mo);
 
--- Backtest: hold out the last 12 months, forecast them from the train (MSTL), compare to actuals
+-- Backtest: hold out the last 12 months, forecast them from the train with BOTH
+-- methods, compare to actuals.
 CREATE TABLE IF NOT EXISTS an_train AS SELECT * FROM an_cat WHERE ds <= (SELECT max(ds) FROM an_cat)-INTERVAL 12 MONTH;
 CREATE TABLE IF NOT EXISTS an_bt AS
-  SELECT f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
-  FROM ts_forecast_by('an_train', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'}) f
-  JOIN an_cat t ON f.category=t.category AND f.ds=t.ds;
+  SELECT 'MFLES' AS method, f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
+    FROM ts_forecast_by('an_train', category, ds, y, 'MFLES', 12, '1mo', MAP{'seasonal_period':'12'}) f
+    JOIN an_cat t ON f.category=t.category AND f.ds=t.ds
+  UNION ALL
+  SELECT 'MSTL', f.category, f.ds, round(f.yhat,0), t.y
+    FROM ts_forecast_by('an_train', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'}) f
+    JOIN an_cat t ON f.category=t.category AND f.ds=t.ds;
+-- Per category × method error metrics, then a per-category winner (lower MAE) with
+-- both methods' scores side by side.
+CREATE TABLE IF NOT EXISTS an_metrics AS
+  SELECT category, method,
+         round(avg(abs(actual-predicted)),0)                      AS mae,
+         round(sqrt(avg(pow(actual-predicted,2))),0)              AS rmse,
+         round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS mape
+  FROM an_bt GROUP BY 1,2;
+CREATE TABLE IF NOT EXISTS an_scores AS
+  SELECT category,
+         arg_min(method, mae)                    AS winner,
+         min(mae)  FILTER (WHERE method='MFLES')  AS mfles_mae,
+         min(mae)  FILTER (WHERE method='MSTL')   AS mstl_mae,
+         min(rmse) FILTER (WHERE method='MFLES')  AS mfles_rmse,
+         min(rmse) FILTER (WHERE method='MSTL')   AS mstl_rmse
+  FROM an_metrics GROUP BY category;
 
-SELECT 'M5 — forecast · decomposition · backtest (MSTL, all categories)'::LABEL;
+SELECT 'M5 — MFLES vs MSTL: forecast · decomposition · backtest'::LABEL;
 
 SELECT 12::COL;
-SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category: an at-a-glance **MSTL forecast** (history + 12-month prediction) and a 12-month-holdout **backtest** for all categories, then a **tab per category** (FOODS / HOBBIES / HOUSEHOLD) with an additive **decomposition** (MSTL trend + classical seasonal + remainder) and **residual diagnostics** — a histogram and a normal **Q-Q plot** of the remainder. Residuals that look normal (bell histogram, points hugging the Q-Q line) mean the trend+seasonal model captured the structure.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A head-to-head of two anofox-forecast methods — **MFLES** vs **MSTL** — on M5 monthly sales aggregated to category. Each small multiple overlays both 12-month forecasts on the history; the table scores a 12-month-holdout **backtest** (MAE / RMSE per category, with the winner). Each **category tab** drills in: both methods'' backtest fit, plus the MSTL **decomposition** (trend + seasonal + remainder) and **residual diagnostics** (histogram + normal **Q-Q plot** of the remainder).'::MARKDOWN, 'What this shows'::TITLE;
 
--- Forecast overview: one small multiple per category so the forecast reads in a
--- distinct colour (Actual vs Forecast) instead of matching its own history, and
--- each panel auto-scales (FOODS ≫ HOBBIES). The forecast is bridged to the last
--- actual so the two segments join.
-SELECT 'Forecast — history + 12-month MSTL (actual vs forecast)'::LABEL;
+-- Forecast overview: one small multiple per category overlaying the history with
+-- BOTH methods' 12-month forecasts (each bridged to the last actual so it joins).
+-- Each panel auto-scales (FOODS ≫ HOBBIES).
+SELECT 'Forecast — history + 12-month MFLES vs MSTL'::LABEL;
 SELECT 4::COL;
 SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'FOODS'::TITLE
 FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='FOODS'
-      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='FOODS'
-      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='FOODS' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
+      UNION ALL SELECT ds, method, yhat FROM an_fc WHERE category='FOODS'
+      UNION ALL SELECT ds, 'MFLES', y FROM an_cat WHERE category='FOODS' AND ds=(SELECT max(ds) FROM an_cat)
+      UNION ALL SELECT ds, 'MSTL', y FROM an_cat WHERE category='FOODS' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
 SELECT 4::COL;
 SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'HOBBIES'::TITLE
 FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='HOBBIES'
-      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='HOBBIES'
-      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='HOBBIES' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
+      UNION ALL SELECT ds, method, yhat FROM an_fc WHERE category='HOBBIES'
+      UNION ALL SELECT ds, 'MFLES', y FROM an_cat WHERE category='HOBBIES' AND ds=(SELECT max(ds) FROM an_cat)
+      UNION ALL SELECT ds, 'MSTL', y FROM an_cat WHERE category='HOBBIES' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
 SELECT 4::COL;
 SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'HOUSEHOLD'::TITLE
 FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='HOUSEHOLD'
-      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='HOUSEHOLD'
-      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='HOUSEHOLD' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
+      UNION ALL SELECT ds, method, yhat FROM an_fc WHERE category='HOUSEHOLD'
+      UNION ALL SELECT ds, 'MFLES', y FROM an_cat WHERE category='HOUSEHOLD' AND ds=(SELECT max(ds) FROM an_cat)
+      UNION ALL SELECT ds, 'MSTL', y FROM an_cat WHERE category='HOUSEHOLD' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
 
--- Backtest overview: 12-month-holdout error metrics per category.
-SELECT 'Backtest — 12-month holdout (MSTL)'::LABEL;
+-- Backtest overview: 12-month-holdout MAE / RMSE for each method per category,
+-- side by side, with the per-category winner (lower MAE).
+SELECT 'Backtest — 12-month holdout: MFLES vs MSTL'::LABEL;
 SELECT 12::COL;
-SELECT category AS "Category" ::TABLE,
-       round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
-       round(sqrt(avg(pow(actual-predicted,2))),0)              AS "RMSE"   ::COMPACT,
-       round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS "MAPE %" ::PLAIN
-FROM an_bt GROUP BY 1 ORDER BY 2;
+SELECT category   AS "Category"     ::TABLE,
+       winner     AS "Winner (MAE)" ::BADGE,
+       mfles_mae  AS "MFLES · MAE"  ::COMPACT,
+       mstl_mae   AS "MSTL · MAE"   ::COMPACT,
+       mfles_rmse AS "MFLES · RMSE" ::COMPACT,
+       mstl_rmse  AS "MSTL · RMSE"  ::COMPACT
+FROM an_scores ORDER BY category;
 
 -- Per-category deep dive (one tab each): decomposition + residual diagnostics
 -- (histogram + normal Q-Q of the remainder) + the backtest fit.
@@ -492,7 +521,9 @@ SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM a
 SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
 SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='FOODS';
 SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='FOODS';
-SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='FOODS' ORDER BY ds;
+SELECT 12::COL; SELECT ds ::XAXIS, series ::CATEGORY, val ::LINECHART, 'Backtest — actual vs MFLES vs MSTL'::TITLE
+FROM (SELECT ds, 'Actual' AS series, actual AS val FROM an_bt WHERE category='FOODS' AND method='MSTL'
+      UNION ALL SELECT ds, method, predicted FROM an_bt WHERE category='FOODS') ORDER BY series, ds;
 
 SELECT 'HOBBIES'::TAB;
 SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + MSTL trend'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
@@ -500,7 +531,9 @@ SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM a
 SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
 SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='HOBBIES';
 SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='HOBBIES';
-SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='HOBBIES' ORDER BY ds;
+SELECT 12::COL; SELECT ds ::XAXIS, series ::CATEGORY, val ::LINECHART, 'Backtest — actual vs MFLES vs MSTL'::TITLE
+FROM (SELECT ds, 'Actual' AS series, actual AS val FROM an_bt WHERE category='HOBBIES' AND method='MSTL'
+      UNION ALL SELECT ds, method, predicted FROM an_bt WHERE category='HOBBIES') ORDER BY series, ds;
 
 SELECT 'HOUSEHOLD'::TAB;
 SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + MSTL trend'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
@@ -508,7 +541,9 @@ SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM a
 SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
 SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='HOUSEHOLD';
 SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='HOUSEHOLD';
-SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
+SELECT 12::COL; SELECT ds ::XAXIS, series ::CATEGORY, val ::LINECHART, 'Backtest — actual vs MFLES vs MSTL'::TITLE
+FROM (SELECT ds, 'Actual' AS series, actual AS val FROM an_bt WHERE category='HOUSEHOLD' AND method='MSTL'
+      UNION ALL SELECT ds, method, predicted FROM an_bt WHERE category='HOUSEHOLD') ORDER BY series, ds;`,
     },
   },
 
