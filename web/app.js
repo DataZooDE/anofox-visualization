@@ -454,12 +454,26 @@ SELECT 'M5 — forecast · decomposition · backtest (AutoETS, all categories)':
 SELECT 12::COL;
 SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category: an at-a-glance **AutoETS forecast** (history + 12-month prediction) and a 12-month-holdout **backtest** for all categories, then a **tab per category** (FOODS / HOBBIES / HOUSEHOLD) with an additive **decomposition** (MSTL trend + classical seasonal + remainder) and **residual diagnostics** — a histogram and a normal **Q-Q plot** of the remainder. Residuals that look normal (bell histogram, points hugging the Q-Q line) mean the trend+seasonal model captured the structure.'::MARKDOWN, 'What this shows'::TITLE;
 
--- Forecast overview: history + 12-month AutoETS forecast, all categories.
-SELECT 'Forecast — history + 12-month AutoETS'::LABEL;
-SELECT 12::COL;
-SELECT ds ::XAXIS, category ::CATEGORY, y ::LINECHART,
-       'History + 12-month AutoETS forecast, per category'::TITLE
-FROM (SELECT category, ds, y FROM an_cat UNION ALL SELECT category, ds, yhat FROM an_fc) ORDER BY category, ds;
+-- Forecast overview: one small multiple per category so the forecast reads in a
+-- distinct colour (Actual vs Forecast) instead of matching its own history, and
+-- each panel auto-scales (FOODS ≫ HOBBIES). The forecast is bridged to the last
+-- actual so the two segments join.
+SELECT 'Forecast — history + 12-month AutoETS (actual vs forecast)'::LABEL;
+SELECT 4::COL;
+SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'FOODS'::TITLE
+FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='FOODS'
+      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='FOODS'
+      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='FOODS' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
+SELECT 4::COL;
+SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'HOBBIES'::TITLE
+FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='HOBBIES'
+      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='HOBBIES'
+      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='HOBBIES' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
+SELECT 4::COL;
+SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'HOUSEHOLD'::TITLE
+FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='HOUSEHOLD'
+      UNION ALL SELECT ds, 'Forecast', yhat FROM an_fc WHERE category='HOUSEHOLD'
+      UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='HOUSEHOLD' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
 
 -- Backtest overview: 12-month-holdout error metrics per category.
 SELECT 'Backtest — 12-month holdout (AutoETS)'::LABEL;
