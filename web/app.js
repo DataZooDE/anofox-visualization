@@ -83,7 +83,8 @@ SELECT i::XAXIS, (sin(i/5.0)*25 + 50 + ((i*13) % 20))::SCATTER, 'Noisy samples':
 FROM range(0, 120) t(i);
 
 SELECT 6::COL;
-SELECT ((i*7) % 100)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500) t(i);
+-- sum of three coprime modular sequences ≈ a bell (Irwin–Hall), all from range()
+SELECT ((i*7) % 34 + (i*13) % 33 + (i*29) % 31)::HISTOGRAM, 'Value distribution'::TITLE FROM range(0, 500) t(i);
 
 SELECT 12::COL;
 SELECT (i % 12)::XAXIS, floor(i/12.0)::YAXIS,
@@ -692,7 +693,7 @@ SELECT 'By week'::SUBTAB;
 SELECT 420::HEIGHT;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week (tall)'::TITLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
-SELECT 'By region'::SUBTAB;
+SELECT 'By channel'::SUBTAB;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
 
 SELECT 'Sessions'::TAB;
@@ -703,6 +704,12 @@ SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP B
     },
   },
 ];
+
+// Present the examples as a learning path: start → the visual vocabulary →
+// making it interactive → tables → page layout → the advanced live-forecasting
+// extension last (so a missing extension never blocks the core demos).
+const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", "Forecasting"];
+SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
 
 const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g.items)));
 
