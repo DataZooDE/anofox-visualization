@@ -109,6 +109,57 @@ cargo run --bin dashboard -- dashboards/sessions.sql   # writes dashboard.html
 
 Shells out to the `duckdb` CLI, so there's no bundled DuckDB compile.
 
+## Live dashboards for consumers
+
+Because DuckDB is the connector and a dashboard is just annotated SQL, the
+end-to-end flow is:
+
+> **Attach** a live source through DuckDB (MotherDuck, PostgreSQL, remote
+> Parquet/CSV) → **write** the dashboard SQL (an LLM does this well — it's just
+> `SELECT`s with `::ROLE` casts) → **deploy** it view-only → **send a link**.
+> Consumers see current data, because every panel re-queries the live backend
+> (set an auto-refresh interval to poll).
+
+Where the query runs decides which sources work and how consumers are served:
+
+| | **Server-side** (`anofox_serve` on a host) | **Browser** (static site / Pages) |
+|---|---|---|
+| PostgreSQL source | ✅ (connection stays server-side) | ❌ a browser can't reach Postgres |
+| MotherDuck / remote Parquet | ✅ | ✅ (browser connects, needs a token / public files) |
+| Consumer needs DB credentials? | **No** | Yes |
+| Best for "send a link to consumers" | **this one** | great for MotherDuck / public data |
+
+For untrusted consumers, read the trust model below first —
+[`docs/secure-serving.md`](docs/secure-serving.md) is the design + plan for
+serving safely.
+
+## Security & trust model
+
+**View-only is presentation, not an access boundary.** `?embed=1` (and the
+"view-only share link") hides the editor for a clean display, but it is **not**
+a security control:
+
+- **Browser model** — the query engine (DuckDB-Wasm) runs *in the consumer's
+  browser*. A technical viewer can un-hide the editor, edit the `#sql=` hash, or
+  run SQL from the console, and can extract any credential embedded in the page.
+- **`anofox_serve` today** — the `/query` bridge executes **whatever SQL the
+  client sends**. That's convenient for *you on localhost*, but it means an
+  untrusted consumer could `curl` arbitrary SQL against your live database. Do
+  **not** expose it to untrusted users as-is; treat it as a single-user
+  authoring tool.
+
+**Serving untrusted consumers safely** needs three things (design + plan in
+[`docs/secure-serving.md`](docs/secure-serving.md)):
+
+1. **The server owns the SQL** — the client requests a dashboard/panel by **id**
+   plus **whitelisted parameters**; the server runs the fixed, pre-defined query.
+   The client never sends SQL.
+2. **A read-only, least-privilege connection** — scoped to just the views a
+   dashboard needs, so a mistake or leak is bounded.
+3. **Auth + TLS** at a reverse proxy in front of the serving process.
+
+Today's free-form `anofox_serve` is kept as a future **admin / authoring mode**.
+
 ## License
 
 **Business Source License 1.1 (BSL 1.1)** — see [`LICENSE`](LICENSE).
