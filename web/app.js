@@ -414,17 +414,17 @@ SELECT item    AS "Item × store" ::PAGED,
        sn_rmse AS "SN · RMSE"    ::COMPACT
 FROM lx_scores ORDER BY item;`,
       "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
--- one dashboard across all categories (monthly). Method: SeasonalES.
+-- one dashboard across all categories (monthly). Method: MSTL.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS an_cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
 
--- 12-month forecast (SeasonalES = seasonal exponential smoothing, so the forward
--- path carries the smoothed level plus the learned monthly seasonal pattern)
+-- 12-month forecast (MSTL = multiple seasonal-trend decomposition, so the forward
+-- path carries the extracted trend plus the learned seasonal pattern)
 CREATE TABLE IF NOT EXISTS an_fc AS
   SELECT category, ds, round(yhat,0) AS yhat
-  FROM ts_forecast_by('an_cat', category, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
+  FROM ts_forecast_by('an_cat', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'});
 
 -- Decomposition: take the smooth TREND from the extension's MSTL, then split the
 -- detrended signal into a classical seasonal component (mean per calendar month,
@@ -442,23 +442,23 @@ CREATE TABLE IF NOT EXISTS an_decomp AS
          round(j.observed - j.trend - sc.seasonal,0) AS remainder
   FROM j JOIN sc USING (category, mo);
 
--- Backtest: hold out the last 12 months, forecast them from the train (SeasonalES), compare to actuals
+-- Backtest: hold out the last 12 months, forecast them from the train (MSTL), compare to actuals
 CREATE TABLE IF NOT EXISTS an_train AS SELECT * FROM an_cat WHERE ds <= (SELECT max(ds) FROM an_cat)-INTERVAL 12 MONTH;
 CREATE TABLE IF NOT EXISTS an_bt AS
   SELECT f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
-  FROM ts_forecast_by('an_train', category, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'}) f
+  FROM ts_forecast_by('an_train', category, ds, y, 'MSTL', 12, '1mo', MAP{'seasonal_period':'12'}) f
   JOIN an_cat t ON f.category=t.category AND f.ds=t.ds;
 
-SELECT 'M5 — forecast · decomposition · backtest (SeasonalES, all categories)'::LABEL;
+SELECT 'M5 — forecast · decomposition · backtest (MSTL, all categories)'::LABEL;
 
 SELECT 12::COL;
-SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category: an at-a-glance **SeasonalES forecast** (history + 12-month prediction) and a 12-month-holdout **backtest** for all categories, then a **tab per category** (FOODS / HOBBIES / HOUSEHOLD) with an additive **decomposition** (MSTL trend + classical seasonal + remainder) and **residual diagnostics** — a histogram and a normal **Q-Q plot** of the remainder. Residuals that look normal (bell histogram, points hugging the Q-Q line) mean the trend+seasonal model captured the structure.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category: an at-a-glance **MSTL forecast** (history + 12-month prediction) and a 12-month-holdout **backtest** for all categories, then a **tab per category** (FOODS / HOBBIES / HOUSEHOLD) with an additive **decomposition** (MSTL trend + classical seasonal + remainder) and **residual diagnostics** — a histogram and a normal **Q-Q plot** of the remainder. Residuals that look normal (bell histogram, points hugging the Q-Q line) mean the trend+seasonal model captured the structure.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- Forecast overview: one small multiple per category so the forecast reads in a
 -- distinct colour (Actual vs Forecast) instead of matching its own history, and
 -- each panel auto-scales (FOODS ≫ HOBBIES). The forecast is bridged to the last
 -- actual so the two segments join.
-SELECT 'Forecast — history + 12-month SeasonalES (actual vs forecast)'::LABEL;
+SELECT 'Forecast — history + 12-month MSTL (actual vs forecast)'::LABEL;
 SELECT 4::COL;
 SELECT ds ::XAXIS, phase ::CATEGORY, val ::LINECHART, 'FOODS'::TITLE
 FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='FOODS'
@@ -476,7 +476,7 @@ FROM (SELECT ds, 'Actual' AS phase, y AS val FROM an_cat WHERE category='HOUSEHO
       UNION ALL SELECT ds, 'Forecast', y FROM an_cat WHERE category='HOUSEHOLD' AND ds=(SELECT max(ds) FROM an_cat)) ORDER BY phase, ds;
 
 -- Backtest overview: 12-month-holdout error metrics per category.
-SELECT 'Backtest — 12-month holdout (SeasonalES)'::LABEL;
+SELECT 'Backtest — 12-month holdout (MSTL)'::LABEL;
 SELECT 12::COL;
 SELECT category AS "Category" ::TABLE,
        round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
