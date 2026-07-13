@@ -1,4 +1,4 @@
--- A anofox-visualization dashboard: annotate result columns with ::ROLE casts (Shaper-style).
+-- A anofox-visualization dashboard: annotate result columns with ::ROLE casts (e.g.tyle).
 -- Statements without a role (this CREATE) are setup; the annotated SELECTs below
 -- each become a panel. Run:  cargo run --bin dashboard -- dashboards/sessions.sql
 

@@ -9,7 +9,7 @@ fn nums(v: &[f64]) -> Vec<Value> {
 }
 
 #[test]
-fn parses_shaper_roles() {
+fn parses_roles() {
     assert_eq!(parse_role("XAXIS"), Some(Role::X));
     assert_eq!(parse_role("category"), Some(Role::Category));
     assert_eq!(

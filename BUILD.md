@@ -4,8 +4,8 @@ Goal: a DuckDB-Wasm-loadable extension (emscripten side-module) that renders
 SQL-defined dashboards with ggplot-rs. Real R&D; this tracks what works.
 
 ## ✅ Proven so far (the hard feasibility chain)
-1. **Core** (`src/lib.rs`) — Shaper roles → ggplot-rs → SVG. Tested; renders the
-   Shaper stacked-bar example.
+1. **Core** (`src/lib.rs`) — role annotations → ggplot-rs → SVG. Tested; renders the
+   stacked-bar example.
 2. **emscripten** 3.1.57 (`~/emsdk`) + Rust `wasm32-unknown-emscripten` target.
 3. **ggplot-rs compiles for emscripten** (incl. plotters).
 4. **A loadable emscripten side-module `.wasm` builds** with the render path

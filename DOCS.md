@@ -1,6 +1,6 @@
 # anofox-visualization — documentation
 
-SQL-defined dashboards, Shaper-style: you annotate SQL result columns with
+SQL-defined dashboards: you annotate SQL result columns with
 **roles** (`::XAXIS`, `::CATEGORY`, a chart kind on the measure), and anofox-visualization
 renders them with [ggplot-rs](../ggplot-rs). The core is dependency-light and
 **wasm-compatible**, so the same renderer runs on the CLI and in the browser.

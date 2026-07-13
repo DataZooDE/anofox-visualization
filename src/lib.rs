@@ -1,4 +1,4 @@
-//! anofox-visualization — SQL-defined dashboards, Shaper-style.
+//! anofox-visualization — SQL-defined dashboards.
 //!
 //! You annotate SQL result columns with *roles* (`XAXIS`, `CATEGORY`, `LABEL`,
 //! and a chart kind on the value column such as `BARCHART`/`LINECHART`), and this
@@ -24,7 +24,7 @@ pub mod sql;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-/// The kind of chart, taken from the cast on the *value* column (Shaper's
+/// The kind of chart, taken from the cast on the *value* column (e.g.
 /// `count()::BARCHART` etc.).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -245,7 +245,7 @@ impl Column {
     }
 }
 
-/// Parse a Shaper-style role annotation (the part after `::`) into a [`Role`].
+/// Parse a role annotation (the part after `::`) into a [`Role`].
 /// Case-insensitive; returns `None` for unknown annotations (plain columns).
 pub fn parse_role(annotation: &str) -> Option<Role> {
     match annotation.trim().to_ascii_uppercase().as_str() {

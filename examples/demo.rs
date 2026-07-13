@@ -7,7 +7,7 @@ fn n(v: &[f64]) -> Vec<Value> {
     v.iter().map(|&f| Value::Float(f)).collect()
 }
 fn main() {
-    // SELECT week::XAXIS, category::CATEGORY, count()::BARCHART_STACKED  (Shaper's example)
+    // SELECT week::XAXIS, category::CATEGORY, count()::BARCHART_STACKED  (example)
     let cols = vec![
         Column::new("t", Role::Label, s(&["Sessions per week"])),
         Column::new(

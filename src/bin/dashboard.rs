@@ -1,4 +1,4 @@
-//! `dashboard` — the Shaper-style viewer. Takes a `.sql` file of annotated
+//! `dashboard` — the viewer. Takes a `.sql` file of annotated
 //! queries, runs them through the DuckDB CLI, renders each annotated `SELECT`
 //! with the anofox-visualization core (ggplot-rs), and writes an interactive HTML dashboard.
 //!

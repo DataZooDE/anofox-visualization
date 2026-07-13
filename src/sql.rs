@@ -1,4 +1,4 @@
-//! Shaper-style SQL parsing: strip comments, split statements, and pull `::ROLE`
+//! SQL parsing: strip comments, split statements, and pull `::ROLE`
 //! casts off the SELECT list. Shared by the native `dashboard` bin and the wasm
 //! binding so the browser and CLI behave identically.
 
@@ -297,7 +297,7 @@ const ROLES: &[&str] = &[
     "COL",
     "HEIGHT",
     "TALL",
-    // Shaper-parity additions:
+    // Additional roles:
     "BARCHART_PERCENT",
     "BAR_PERCENT",
     "BARCHART_STACKED_PERCENT",
