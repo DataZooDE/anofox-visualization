@@ -158,7 +158,20 @@ a security control:
    dashboard needs, so a mistake or leak is bounded.
 3. **Auth + TLS** at a reverse proxy in front of the serving process.
 
-Today's free-form `anofox_serve` is kept as a future **admin / authoring mode**.
+A first cut of #1–#2 ships as **serve mode** — dashboards live server-side and
+consumers only pick an id + whitelisted params (no `/query`, read-only):
+
+```sh
+serve --dashboards examples/serve-dashboards/dash \
+      --init       examples/serve-dashboards/init.sql
+# → http://127.0.0.1:8080/  — pick a dashboard; the `region` dropdown is
+#   whitelisted, and ?region='anything-else' is rejected. Put TLS+auth in front
+#   for public use. (--init is where you ATTACH MotherDuck/Postgres read-only.)
+```
+
+The free-form `anofox_serve` (embedded builder + `/query`) is kept as the
+**admin / authoring mode**, localhost-only. See
+[`docs/secure-serving.md`](docs/secure-serving.md) for the full plan.
 
 ## License
 

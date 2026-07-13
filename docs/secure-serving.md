@@ -6,6 +6,29 @@ dashboard they were given.
 
 This document is the plan to get from today's single-developer serving to that.
 
+## Status (v0.1 — first cut shipped)
+
+The **serve mode** exists: `serve --dashboards <dir> [--init setup.sql]`.
+
+- ✅ **Server owns the SQL** — dashboards are `.sql` files loaded server-side; the
+  client selects a dashboard by id and parameter *values* only. No `/query`, no
+  client SQL. (steps 1, 2, 4)
+- ✅ **Whitelisted params** — declared per dashboard (`-- @param region [EU, US]
+  = EU`); a value outside the list is rejected with `400`. (step 3)
+- ✅ **Read-only queries** — every panel query runs `duckdb --readonly`. (step 5,
+  partial)
+- ⬜ **Full capability lockdown** — a dedicated read-only role / disabling
+  `ATTACH`/file reads at the session level is still the operator's job via
+  `--init` + DuckDB config. (step 5, rest)
+- ⬜ **Auth + TLS + caching** — deployment concerns; put a reverse proxy in front,
+  and add per-panel result caching for many concurrent viewers. (step 6)
+
+Try it: `serve --dashboards examples/serve-dashboards/dash --init
+examples/serve-dashboards/init.sql` → open `http://127.0.0.1:8080/`.
+
+The authoring mode (embedded builder + free-form `/query`) is unchanged and
+localhost-only.
+
 ---
 
 ## Where we are today (v0 — authoring mode)
