@@ -2936,36 +2936,25 @@ function svgToPng(svg, name) {
   img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
 }
 
-// A hover download button on every chart (PNG) / table (CSV) panel.
+// A hover CSV-download button on table panels. Charts get their download (PNG)
+// and full-size actions from the toolbox (attachToolbox), which lives in the same
+// top-right corner — so we don't add overlapping corner buttons on charts.
 function addExportButtons() {
   document.querySelectorAll(".panel").forEach((fig) => {
     if (fig.querySelector(".dl")) return;
     const svg = fig.querySelector("svg");
     const table = fig.querySelector(".dp-table");
-    if (!svg && !table) return;
+    if (svg || !table) return;
     fig.style.position = "relative";
     const btn = document.createElement("button");
     btn.className = "dl";
     btn.textContent = "⤓";
-    btn.title = table ? "download CSV" : "download PNG";
+    btn.title = "download CSV";
     btn.onclick = (e) => {
       e.stopPropagation();
-      if (table) download(new Blob([csvOf(table)], { type: "text/csv" }), "data.csv");
-      else svgToPng(svg, "chart");
+      download(new Blob([csvOf(table)], { type: "text/csv" }), "data.csv");
     };
     fig.appendChild(btn);
-    // A full-size button on charts — opens the plot large in an overlay.
-    if (svg) {
-      const exp = document.createElement("button");
-      exp.className = "dl dp-expand";
-      exp.textContent = "⤢";
-      exp.title = "full size";
-      exp.onclick = (e) => {
-        e.stopPropagation();
-        openFullSize(fig);
-      };
-      fig.appendChild(exp);
-    }
   });
 }
 
@@ -3312,6 +3301,7 @@ function attachToolbox() {
         if (h) h.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
       });
     }
+    mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
     panel.appendChild(bar);
   });
