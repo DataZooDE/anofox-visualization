@@ -163,10 +163,12 @@ consumers only pick an id + whitelisted params (no `/query`, read-only):
 
 ```sh
 serve --dashboards examples/serve-dashboards/dash \
-      --init       examples/serve-dashboards/init.sql
+      --init       examples/serve-dashboards/init.sql \
+      --cache 30                                        # cache each view 30s
 # → http://127.0.0.1:8080/  — pick a dashboard; the `region` dropdown is
-#   whitelisted, and ?region='anything-else' is rejected. Put TLS+auth in front
-#   for public use. (--init is where you ATTACH MotherDuck/Postgres read-only.)
+#   whitelisted, and ?region='anything-else' is rejected. --cache shares one
+#   render across viewers and doubles as the freshness window. Put TLS+auth in
+#   front for public use. (--init is where you ATTACH MotherDuck/Postgres.)
 ```
 
 The free-form `anofox_serve` (embedded builder + `/query`) is kept as the

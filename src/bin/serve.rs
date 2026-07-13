@@ -12,9 +12,10 @@
 
 use anofox_visualization::{render, sql, Role};
 use include_dir::{include_dir, Dir};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server};
 
 // Embedded at compile time (authoring mode) — run `wasm-pack build … --out-dir
@@ -28,6 +29,7 @@ fn main() {
     let mut dashboards_dir: Option<String> = None;
     let mut init: Option<String> = None;
     let mut bind = "127.0.0.1".to_string();
+    let mut cache_secs = 0u64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -36,13 +38,14 @@ fn main() {
             "--dashboards" => dashboards_dir = args.next(),
             "--init" => init = args.next(),
             "--bind" => bind = args.next().unwrap_or(bind),
+            "--cache" => cache_secs = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--db" => db = args.next().unwrap_or(db),
             _ => db = a,
         }
     }
 
     match dashboards_dir {
-        Some(dir) => serve_dashboards(&dir, db, init, &bind, port),
+        Some(dir) => serve_dashboards(&dir, db, init, &bind, port, Duration::from_secs(cache_secs)),
         None => authoring_mode(db, &bind, port, open_browser),
     }
 }
@@ -169,7 +172,14 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
     out
 }
 
-fn serve_dashboards(dir: &str, mut db: String, init: Option<String>, bind: &str, port: u16) {
+fn serve_dashboards(
+    dir: &str,
+    mut db: String,
+    init: Option<String>,
+    bind: &str,
+    port: u16,
+    cache_ttl: Duration,
+) {
     if db.is_empty() {
         db = std::env::temp_dir()
             .join("anofox_dashboards.db")
@@ -186,10 +196,21 @@ fn serve_dashboards(dir: &str, mut db: String, init: Option<String>, bind: &str,
     let dashboards = load_dashboards(Path::new(dir));
     let addr = format!("{bind}:{port}");
     let server = Server::http(&addr).unwrap_or_else(|e| panic!("bind {addr}: {e}"));
+    let cache_note = if cache_ttl.is_zero() {
+        "off".to_string()
+    } else {
+        format!("{}s", cache_ttl.as_secs())
+    };
     println!(
-        "anofox-visualization serving {} dashboard(s) at http://{addr}/ (read-only; no client SQL)\n  database: {db}\n  dashboards: {dir}\n  (put TLS + auth in front for public use — docs/secure-serving.md)",
+        "anofox-visualization serving {} dashboard(s) at http://{addr}/ (read-only; no client SQL; cache: {cache_note})\n  database: {db}\n  dashboards: {dir}\n  (put TLS + auth in front for public use — docs/secure-serving.md)",
         dashboards.len()
     );
+
+    // Per-(dashboard + resolved params) rendered-page cache. The loop is
+    // single-threaded, so a plain map is fine. TTL doubles as the freshness knob:
+    // within it, N viewers of the same view share one render → no extra DB load.
+    let mut cache: HashMap<String, (Instant, String)> = HashMap::new();
+
     for req in server.incoming_requests() {
         let url = req.url().to_string();
         let path = url.split('?').next().unwrap_or("/");
@@ -197,18 +218,38 @@ fn serve_dashboards(dir: &str, mut db: String, init: Option<String>, bind: &str,
             respond_html(req, &list_page(&dashboards));
         } else if let Some(rest) = path.strip_prefix("/d/") {
             let id = rest.trim_end_matches('/');
-            match dashboards.iter().find(|d| d.id == id) {
-                Some(dash) => {
-                    let chosen = parse_query(&url);
-                    match render_dashboard_page(&db, dash, &chosen) {
-                        Ok(html) => respond_html(req, &html),
-                        Err(e) => {
-                            let _ = req.respond(Response::from_string(e).with_status_code(400));
-                        }
-                    }
+            let Some(dash) = dashboards.iter().find(|d| d.id == id) else {
+                let _ = req.respond(Response::from_string("no such dashboard").with_status_code(404));
+                continue;
+            };
+            // Validate params against the whitelist (unknown/disallowed → 400).
+            let resolved = match resolve_params(dash, &parse_query(&url)) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = req.respond(Response::from_string(e).with_status_code(400));
+                    continue;
                 }
-                None => {
-                    let _ = req.respond(Response::from_string("no such dashboard").with_status_code(404));
+            };
+            let key = cache_key(&dash.id, &resolved);
+            if !cache_ttl.is_zero() {
+                if let Some(html) = cache
+                    .get(&key)
+                    .filter(|(ts, _)| ts.elapsed() < cache_ttl)
+                    .map(|(_, h)| h.clone())
+                {
+                    respond_html(req, &html); // cache hit — no DB touched
+                    continue;
+                }
+            }
+            match render_dashboard_page(&db, dash, &resolved) {
+                Ok(html) => {
+                    if !cache_ttl.is_zero() {
+                        cache.insert(key, (Instant::now(), html.clone()));
+                    }
+                    respond_html(req, &html);
+                }
+                Err(e) => {
+                    let _ = req.respond(Response::from_string(e).with_status_code(400));
                 }
             }
         } else {
@@ -218,23 +259,53 @@ fn serve_dashboards(dir: &str, mut db: String, init: Option<String>, bind: &str,
     }
 }
 
+/// Validate the requested params against each dashboard's whitelist, filling
+/// defaults. Returns `(name, value)` in declaration order, or an error for any
+/// value not in the declared list. The client can only choose allowed values.
+fn resolve_params(
+    dash: &Dashboard,
+    chosen: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for p in &dash.params {
+        let val = chosen.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
+        if !p.allowed.contains(&val) {
+            return Err(format!("parameter '{}' = '{}' is not allowed", p.name, val));
+        }
+        out.push((p.name.clone(), val));
+    }
+    Ok(out)
+}
+
+fn cache_key(id: &str, resolved: &[(String, String)]) -> String {
+    let params: Vec<String> = resolved.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{id}|{}", params.join("&"))
+}
+
 /// Render one dashboard to a view-only HTML page. Validates every parameter value
 /// against its declared whitelist, binds them as DuckDB variables, and runs each
 /// panel's fixed query READ-ONLY. Rejects any value not in the whitelist.
 fn render_dashboard_page(
     db: &str,
     dash: &Dashboard,
-    chosen: &BTreeMap<String, String>,
+    resolved: &[(String, String)],
 ) -> Result<String, String> {
-    // Validated variable prefix (only whitelisted values reach SQL) + controls.
+    // Bind the (already whitelisted) values as DuckDB variables, and build a
+    // <select> per param.
+    let value_of = |name: &str| -> String {
+        resolved
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
     let mut prefix = String::new();
+    for (name, val) in resolved {
+        prefix.push_str(&format!("SET VARIABLE {} = '{}'; ", name, val.replace('\'', "''")));
+    }
     let mut selects = String::new();
     for p in &dash.params {
-        let val = chosen.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
-        if !p.allowed.contains(&val) {
-            return Err(format!("parameter '{}' = '{}' is not allowed", p.name, val));
-        }
-        prefix.push_str(&format!("SET VARIABLE {} = '{}'; ", p.name, val.replace('\'', "''")));
+        let val = value_of(&p.name);
         selects.push_str(&format!(
             "<label>{}: <select name=\"{}\" onchange=\"this.form.submit()\">",
             esc(&p.name),

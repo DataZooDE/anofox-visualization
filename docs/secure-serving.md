@@ -17,11 +17,14 @@ The **serve mode** exists: `serve --dashboards <dir> [--init setup.sql]`.
   = EU`); a value outside the list is rejected with `400`. (step 3)
 - ✅ **Read-only queries** — every panel query runs `duckdb --readonly`. (step 5,
   partial)
+- ✅ **Result caching** — `--cache <seconds>` caches each rendered
+  (dashboard + resolved params) view. Within the TTL, N viewers of the same view
+  share one render (no extra DB load), and the TTL is the freshness knob (data
+  changes appear after it). Off by default. (step 6, caching)
 - ⬜ **Full capability lockdown** — a dedicated read-only role / disabling
   `ATTACH`/file reads at the session level is still the operator's job via
   `--init` + DuckDB config. (step 5, rest)
-- ⬜ **Auth + TLS + caching** — deployment concerns; put a reverse proxy in front,
-  and add per-panel result caching for many concurrent viewers. (step 6)
+- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front. (step 6, rest)
 
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → open `http://127.0.0.1:8080/`.
