@@ -117,20 +117,32 @@ struct Dashboard {
     script: String,
     params: Vec<Param>,
     refresh: u32,
+    /// DuckDB extensions to `LOAD` per read-only session (e.g. `anofox_forecast`),
+    /// so a panel can call `ts_forecast_by(...)` live. Server-declared, not client.
+    loads: Vec<String>,
 }
 
 /// Parse the header-comment metadata of a dashboard `.sql`:
-/// `-- @title …`, `-- @refresh <seconds>`, `-- @param name [a, b, c] = a`.
+/// `-- @title …`, `-- @refresh <seconds>`, `-- @param name [a, b, c] = a`,
+/// `-- @load <extension>`.
 fn parse_dashboard(id: &str, script: &str) -> Dashboard {
     let mut title = id.to_string();
     let mut params = Vec::new();
     let mut refresh = 0u32;
+    let mut loads = Vec::new();
     for line in script.lines() {
         let l = line.trim();
         if let Some(r) = l.strip_prefix("-- @title ") {
             title = r.trim().to_string();
         } else if let Some(r) = l.strip_prefix("-- @refresh ") {
             refresh = r.trim().parse().unwrap_or(0);
+        } else if let Some(r) = l.strip_prefix("-- @load ") {
+            let ext = r.trim();
+            // Server-authored, but keep it an identifier so a stray file can't
+            // smuggle SQL into the LOAD.
+            if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                loads.push(ext.to_string());
+            }
         } else if let Some(r) = l.strip_prefix("-- @param ") {
             if let (Some(o), Some(c)) = (r.find('['), r.find(']')) {
                 let name = r[..o].trim().to_string();
@@ -152,7 +164,7 @@ fn parse_dashboard(id: &str, script: &str) -> Dashboard {
             }
         }
     }
-    Dashboard { id: id.to_string(), title, script: script.to_string(), params, refresh }
+    Dashboard { id: id.to_string(), title, script: script.to_string(), params, refresh, loads }
 }
 
 fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
@@ -300,6 +312,9 @@ fn render_dashboard_page(
             .unwrap_or_default()
     };
     let mut prefix = String::new();
+    for ext in &dash.loads {
+        prefix.push_str(&format!("LOAD {ext}; ")); // e.g. anofox_forecast (per session)
+    }
     for (name, val) in resolved {
         prefix.push_str(&format!("SET VARIABLE {} = '{}'; ", name, val.replace('\'', "''")));
     }
