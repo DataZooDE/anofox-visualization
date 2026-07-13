@@ -989,13 +989,29 @@ async function boot() {
     document.documentElement.style.setProperty("--accent2", "#" + hex);
     dpPrimary = hex; // chart primary colour (passed to the wasm renderer)
   }
-  if (params.get("embed") === "1" || params.has("embed")) {
+  // Served mode: `anofox-visualization serve --dashboards` injects window.__served
+  // = { id, sql } for a fixed, server-owned dashboard. It's view-only (embed) and
+  // the server gates /query, so the client can render everything but only run the
+  // server's registered queries.
+  const served = window.__served || null;
+  if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
+  const decodeB64 = (x) => {
+    try {
+      return decodeURIComponent(escape(atob(x)));
+    } catch (_) {
+      return null;
+    }
+  };
+  const servedSql = served ? decodeB64(served.sql) : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
   const savedItems = dashStore().items;
-  if (hashSql) {
+  if (servedSql != null) {
+    $("sql").value = servedSql;
+    $("dash-name").value = served.title || "Dashboard";
+  } else if (hashSql) {
     $("sql").value = hashSql;
     $("dash-name").value = "Shared";
   } else if (wantDash && (SAMPLES[wantDash] || savedItems[wantDash])) {
