@@ -7,6 +7,19 @@ DUCKDB="${DUCKDB:-$HOME/.local/bin/duckdb}"
 OUT="${OUT:-/tmp/anofox_visualization.duckdb_extension}"
 PLATFORM="${PLATFORM:-$("$DUCKDB" -noheader -list -c 'PRAGMA platform;')}"
 
+# The extension embeds web/ at compile time (include_dir!) so `SELECT
+# anofox_serve(port)` can serve the browser builder. Build the wasm module first
+# so web/pkg is present; skip (with a warning) if wasm-pack is unavailable.
+CORE="$(cd "$HERE/.." && pwd)"
+if [ "${SKIP_WASM:-0}" != "1" ] && command -v wasm-pack >/dev/null 2>&1; then
+  echo "== build web/pkg (wasm) — embedded UI for anofox_serve =="
+  ( cd "$CORE" && wasm-pack build --target web --out-dir web/pkg \
+      --no-default-features --features wasm 2>&1 | grep -iE "error|Done" )
+  touch "$HERE/src/serve.rs"   # force include_dir! to re-embed the fresh web/pkg
+else
+  echo "== skip wasm (no wasm-pack / SKIP_WASM=1) — anofox_serve UI won't include the renderer =="
+fi
+
 echo "== build cdylib =="
 cd "$HERE"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --lib "$@"
