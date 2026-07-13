@@ -1,29 +1,39 @@
 
-## anofox-visualization — native C-API extension (where it got to)
+## anofox-visualization — native C-API extension ✅ WORKING
 `duckext/` is a hand-rolled DuckDB C Extension API binding (bindgen of
 `duckdb_extension.h`, **no libduckdb linking** — the wasm-viable design).
 
-Proven working:
+Working end-to-end on DuckDB v1.5.3 (`linux_amd64`):
 - Compiles to a cdylib exporting `anofox_visualization_init_c_api`.
-- With the 512-byte metadata footer (magic `4`, platform, capi-version `v1.2.0`,
-  ext-version, ABI `C_STRUCT`) appended → `anofox_visualization.duckdb_extension`.
-- **DuckDB LOADs it** (`duckdb -unsigned`), runs the entrypoint, gets the API +
-  database, connects, and **registers the `anofox_render()` scalar** — all via the
-  C API struct. The scalar callback then fires when called.
+- Packaged with the official metadata footer (abi `C_STRUCT`, capi-version
+  `v1.2.0`) via `scripts/append_extension_metadata.py` →
+  `anofox_visualization.duckdb_extension`.
+- **DuckDB LOADs it** (`duckdb -unsigned`), registers the
+  `anofox_render(VARCHAR spec) → VARCHAR` scalar, and the callback renders each
+  row's spec to an SVG via ggplot-rs. Vectorised; NULL-safe; bad JSON → an
+  `<pre>error</pre>` SVG.
 
-Remaining bug: in the callback, `duckdb_data_chunk_get_size` reads as a null fn
-pointer while `duckdb_create_scalar_function` (used at register time) is valid —
-a struct field-offset mismatch between the bindgen `duckdb_ext_api_v1` and the
-host's exact ABI. Needs offset debugging (dump/compare the struct, or match the
-host's exact CAPI build flags / requested version string). The duckdb-rs crate
-gets this right but bundles+compiles libduckdb (unusable for the wasm side-module),
-so the hand-rolled path is required for wasm.
+The old "null fn pointer for `duckdb_data_chunk_get_size`" note was stale — it
+came from a mismatched header/version combo. With the v1.5.3 `duckdb_extension.h`
+requesting capi `v1.2.0`, the struct offsets line up and every API call resolves.
 
-## Footer recipe (works)
+`scripts/build-native.sh` builds + packages + smoke-tests it.
+
+### Usage
 ```sh
-# append the 512-byte metadata footer, then:
-duckdb -unsigned -c "LOAD '.../anofox_visualization.duckdb_extension'; SELECT anofox_render();"
+./scripts/build-native.sh   # → /tmp/anofox_visualization.duckdb_extension
+duckdb -unsigned <<'SQL'
+LOAD '/tmp/anofox_visualization.duckdb_extension';
+WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
+SELECT anofox_render(json_object(
+  'rows',  (SELECT to_json(list({ch: ch, n: n})) FROM d),
+  'roles', json('[[0,"XAXIS"],[1,"BARCHART"]]'),
+  'width', 400, 'height', 260)) AS svg;
+SQL
 ```
+The `spec` is the same JSON the browser renderer takes: `rows` (array of row
+objects), `roles` (`[[colIdx, "ROLE", "displayName"?], …]`), optional `width` /
+`height` / `primary`.
 
 ## WASM extension — where it got to (this is the big one)
 Targeting DuckDB-Wasm 1.29.0 = **DuckDB v1.1.1, platform `wasm_eh`, C-ext-API

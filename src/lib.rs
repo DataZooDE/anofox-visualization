@@ -411,6 +411,64 @@ fn distinct_labels(col: &Column) -> Vec<String> {
     seen
 }
 
+/// Render a panel from a single JSON spec — the entry point used by hosts that
+/// pass everything as one string (the DuckDB extension, CLI, services). The spec:
+/// `{"rows":[{col:val,…},…], "roles":[[idx,"ROLE","name"],…], "width":W,
+/// "height":H, "primary":"rrggbb"}`. Returns the SVG (or `<pre>error</pre>`).
+pub fn render_spec(spec_json: &str) -> String {
+    let spec: serde_json::Value = match serde_json::from_str(spec_json) {
+        Ok(v) => v,
+        Err(e) => return format!("<pre>bad spec JSON: {e}</pre>"),
+    };
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = spec
+        .get("rows")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let entries: Vec<(usize, String, String)> = spec
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let e = e.as_array()?;
+                    let i = e.first()?.as_u64()? as usize;
+                    let role = e.get(1)?.as_str()?.to_string();
+                    let name = e.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    Some((i, role, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let roles: Vec<(usize, Role)> = entries
+        .iter()
+        .filter_map(|(i, s, _)| parse_role(s).map(|r| (*i, r)))
+        .collect();
+    let mut cols = sql::columns_from_rows(&rows, &roles);
+    for (i, _, name) in &entries {
+        if !name.is_empty() {
+            if let Some(c) = cols.iter_mut().find(|c| c.name == format!("c{i}")) {
+                c.name = name.clone();
+            }
+        }
+    }
+    let width = spec.get("width").and_then(|v| v.as_u64()).unwrap_or(640) as u32;
+    let height = spec.get("height").and_then(|v| v.as_u64()).unwrap_or(400) as u32;
+    let primed = spec
+        .get("primary")
+        .and_then(|v| v.as_str())
+        .map(|p| p.trim().trim_start_matches('#').to_string())
+        .filter(|h| h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit()));
+    if let Some(h) = &primed {
+        let px = |a, b| u8::from_str_radix(&h[a..b], 16).unwrap_or(0);
+        set_brand(Some((px(0, 2), px(2, 4), px(4, 6))));
+    }
+    let svg = render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
+    if primed.is_some() {
+        set_brand(None);
+    }
+    svg
+}
+
 /// Render an annotated result set to an SVG dashboard element.
 ///
 /// Recognises one `X` column, an optional `Category` column, an optional `Label`

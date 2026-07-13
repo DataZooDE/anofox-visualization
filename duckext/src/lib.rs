@@ -98,16 +98,43 @@ fn smoke_svg() -> CString {
     CString::new(render(&cols, 320, 220).unwrap_or_default()).unwrap_or_default()
 }
 
-/// `SELECT anofox_render()` → one SVG string per input row.
+/// Decode a `duckdb_string_t` at index `i` (16 bytes: u32 length, then the inline
+/// bytes when length ≤ 12, else a 4-byte prefix + an 8-byte data pointer).
+unsafe fn read_string_t(base: *const u8, i: idx_t) -> &'static [u8] {
+    let s = base.add(i as usize * 16);
+    let len = *(s as *const u32) as usize;
+    let data = if len <= 12 {
+        s.add(4)
+    } else {
+        *(s.add(8) as *const *const u8)
+    };
+    std::slice::from_raw_parts(data, len)
+}
+
+/// `SELECT anofox_render(spec)` → an SVG per row. `spec` is the JSON panel spec
+/// (rows + role annotations + size), the same shape the browser renderer takes.
 unsafe extern "C" fn anofox_render_fn(
     _info: duckdb_function_info,
     input: duckdb_data_chunk,
     output: duckdb_vector,
 ) {
     let n = (api().duckdb_data_chunk_get_size.unwrap())(input);
-    let svg = smoke_svg();
+    let vec = (api().duckdb_data_chunk_get_vector.unwrap())(input, 0);
+    let data = (api().duckdb_vector_get_data.unwrap())(vec) as *const u8;
+    let validity = (api().duckdb_vector_get_validity.unwrap())(vec);
     for i in 0..n {
-        (api().duckdb_vector_assign_string_element.unwrap())(output, i, svg.as_ptr());
+        let valid = validity.is_null() || {
+            let word = *validity.add((i / 64) as usize);
+            (word >> (i % 64)) & 1 == 1
+        };
+        let svg = if valid && !data.is_null() {
+            let bytes = read_string_t(data, i);
+            duckplot::render_spec(std::str::from_utf8(bytes).unwrap_or(""))
+        } else {
+            String::new()
+        };
+        let c = CString::new(svg).unwrap_or_default();
+        (api().duckdb_vector_assign_string_element.unwrap())(output, i, c.as_ptr());
     }
 }
 
@@ -132,14 +159,17 @@ pub unsafe extern "C" fn anofox_visualization_init_c_api(
         return false;
     }
 
-    // anofox_render() -> VARCHAR
+    // anofox_render(VARCHAR spec) -> VARCHAR (SVG)
     let f = (api().duckdb_create_scalar_function.unwrap())();
     (api().duckdb_scalar_function_set_name.unwrap())(f, c"anofox_render".as_ptr());
+    let mut ptype = (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
+    (api().duckdb_scalar_function_add_parameter.unwrap())(f, ptype);
     let mut vtype = (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
     (api().duckdb_scalar_function_set_return_type.unwrap())(f, vtype);
     (api().duckdb_scalar_function_set_function.unwrap())(f, Some(anofox_render_fn));
     let mut ok = (api().duckdb_register_scalar_function.unwrap())(conn, f) == duckdb_state::DuckDBSuccess;
     (api().duckdb_destroy_logical_type.unwrap())(&mut vtype);
+    (api().duckdb_destroy_logical_type.unwrap())(&mut ptype);
     let mut fm = f;
     (api().duckdb_destroy_scalar_function.unwrap())(&mut fm);
 
