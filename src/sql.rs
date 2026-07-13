@@ -219,6 +219,8 @@ const ROLES: &[&str] = &[
     "VIOLINPLOT",
     "DENSITY",
     "KDE",
+    "QQ",
+    "QQPLOT",
     "FLIP",
     "COORD_FLIP",
     "HORIZONTAL",

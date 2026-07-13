@@ -57,6 +57,8 @@ pub enum Kind {
     Violin,
     /// A kernel-density curve of the measure column (`::DENSITY`).
     Density,
+    /// A normal quantile-quantile plot of the measure column (`::QQ`).
+    QQ,
     /// A heatmap — `x` × `y` tiles coloured by the measure (`::HEATMAP`).
     Heatmap,
     /// A minimal inline trend line, no axes (`::SPARKLINE`).
@@ -279,6 +281,7 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
         "VIOLIN" | "VIOLINPLOT" => Some(Role::Value(Kind::Violin)),
         "DENSITY" | "KDE" => Some(Role::Value(Kind::Density)),
+        "QQ" | "QQPLOT" => Some(Role::Value(Kind::QQ)),
         "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
         "CALENDAR" | "CALENDAR_HEATMAP" | "CAL_HEATMAP" => Some(Role::Value(Kind::Calendar)),
         "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
@@ -431,6 +434,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Gauge => return render_gauge(value, cols, title.as_deref(), width, height),
         Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
         Kind::Density => return render_density(value, cols, title.as_deref(), width, height),
+        Kind::QQ => return render_qq(value, title.as_deref(), width, height),
         Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
         Kind::Calendar => return render_calendar(value, cols, width, height),
         Kind::Candlestick => {
@@ -715,6 +719,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         | Kind::Gauge
         | Kind::Histogram
         | Kind::Density
+        | Kind::QQ
         | Kind::Heatmap
         | Kind::Calendar
         | Kind::Candlestick
@@ -891,6 +896,31 @@ fn render_density(
             .theme_minimal()
             .primary_color(brand());
     }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// A normal quantile-quantile plot of the measure column (`geom_qq` + a
+/// reference line) — points on the line ⇒ roughly normal; systematic bowing ⇒
+/// skew/heavy tails. Handy for checking a model's residuals.
+fn render_qq(
+    value: &Column,
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let data = vec![("y".to_string(), value.values.clone())];
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().y("y"))
+        .geom_qq()
+        .geom_qq_line()
+        .xlab("Theoretical")
+        .ylab("Sample")
+        .theme_minimal()
+        .primary_color(brand());
     if let Some(t) = title {
         plot = plot.title(t);
     }
