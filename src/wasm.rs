@@ -273,6 +273,8 @@ fn role_str(r: &Role) -> &'static str {
         Role::Tab => "TAB",
         Role::SubTab => "SUBTAB",
         Role::Size => "SIZE",
+        Role::YFormat => "YFORMAT",
+        Role::XFormat => "XFORMAT",
         Role::DataLabels => "DATALABELS",
         Role::MarkArea => "MARKAREA",
         Role::Markdown => "MARKDOWN",

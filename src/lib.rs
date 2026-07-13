@@ -206,6 +206,11 @@ pub enum Role {
     SubTab,
     /// Bubble size for a scatter — maps a measure to point area (`::SIZE`).
     Size,
+    /// Format the y-axis tick labels (`::YFORMAT`) — the column's (string) value
+    /// is a currency symbol / keyword ("$", "€", "comma", "percent"…).
+    YFormat,
+    /// Format the x-axis tick labels (`::XFORMAT`), like [`Role::YFormat`].
+    XFormat,
     /// Draw the value on each mark as a text label (`::DATALABELS`). A marker
     /// column; its values (if any) are ignored — the measure is labelled.
     DataLabels,
@@ -310,6 +315,8 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
         "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
         "BASEMAP" | "MAPBASE" | "BACKDROP" => Some(Role::Basemap),
         "FLIP" | "COORD_FLIP" | "HORIZONTAL" => Some(Role::Flip),
+        "YFORMAT" | "YAXISFORMAT" | "YUNIT" | "YCURRENCY" => Some(Role::YFormat),
+        "XFORMAT" | "XAXISFORMAT" | "XUNIT" | "XCURRENCY" => Some(Role::XFormat),
         "ALPHA" | "OPACITY" => Some(Role::Alpha),
         "TABLE" | "GRID" => Some(Role::Table),
         "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
@@ -808,6 +815,29 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
                 .with_label_formatter(ggplot_rs::scale::format::label_percent),
         );
     }
+    // ggplot2-style axis label formatting (`::YFORMAT '€'`, `::XFORMAT '$'`, …).
+    let fmt_spec = |role: Role| -> Option<String> {
+        cols.iter().find(|c| c.role == role).and_then(|c| {
+            c.values.iter().find_map(|v| match v {
+                Value::Str(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            })
+        })
+    };
+    if let Some(f) = fmt_spec(Role::YFormat).and_then(|s| axis_formatter(&s)) {
+        plot = plot.scale_y_continuous(
+            ggplot_rs::scale::continuous::ScaleContinuous::new().with_label_formatter(f),
+        );
+    }
+    // An x formatter only makes sense on a continuous x (numeric/date), not on the
+    // discrete category axis of a bar chart.
+    if !x_discrete {
+        if let Some(f) = fmt_spec(Role::XFormat).and_then(|s| axis_formatter(&s)) {
+            plot = plot.scale_x_continuous(
+                ggplot_rs::scale::continuous::ScaleContinuous::new().with_label_formatter(f),
+            );
+        }
+    }
     // `::FLIP` swaps the axes — e.g. a horizontal bar chart.
     let flipped = cols.iter().any(|c| c.role == Role::Flip);
     if flipped {
@@ -901,6 +931,53 @@ fn render_density(
     }
     plot.render_svg_native_with_size(width, height)
         .map_err(|e| format!("render failed: {e:?}"))
+}
+
+/// Build an axis tick formatter from a short spec — a keyword or a currency
+/// symbol — mirroring ggplot2's `scales::` label helpers. Numbers are always
+/// thousands-grouped. A leading space marks a suffix ("` kg`" → "12 kg");
+/// otherwise the spec is a prefix ("€" → "€1,200", "CHF " → "CHF 1,200").
+fn axis_formatter(spec: &str) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
+    use ggplot_rs::scale::format::{label_comma, label_dollar};
+    let s = spec.trim_end_matches(|c: char| c == ';');
+    let low = s.trim().to_ascii_lowercase();
+    if low.is_empty() {
+        return None;
+    }
+    let money = |sym: &'static str| -> Box<dyn Fn(f64) -> String + Send + Sync> {
+        Box::new(move |v: f64| {
+            if v < 0.0 {
+                format!("-{sym}{}", label_comma(-v))
+            } else {
+                format!("{sym}{}", label_comma(v))
+            }
+        })
+    };
+    let f: Box<dyn Fn(f64) -> String + Send + Sync> = match low.as_str() {
+        "$" | "usd" | "dollar" | "dollars" => Box::new(label_dollar),
+        "€" | "eur" | "euro" | "euros" => money("€"),
+        "£" | "gbp" | "pound" | "pounds" => money("£"),
+        "¥" | "jpy" | "yen" | "cny" | "yuan" => money("¥"),
+        "%" | "percent" | "pct" => Box::new(|v: f64| format!("{}%", label_comma(v))),
+        "," | "comma" | "thousands" | "number" => Box::new(label_comma),
+        _ => {
+            // Literal prefix, or suffix if it starts with a space.
+            if let Some(suffix) = s.strip_prefix(' ') {
+                let suffix = suffix.to_string();
+                Box::new(move |v: f64| format!("{}{}", label_comma(v), suffix))
+            } else {
+                let prefix = s.to_string();
+                Box::new(move |v: f64| {
+                    if v < 0.0 {
+                        format!("-{}{}", prefix, label_comma(-v))
+                    } else {
+                        format!("{}{}", prefix, label_comma(v))
+                    }
+                })
+            }
+        }
+    };
+    Some(f)
 }
 
 /// A normal quantile-quantile plot of the measure column (`geom_qq` + a

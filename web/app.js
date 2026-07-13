@@ -148,7 +148,7 @@ SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 SELECT 'Bars & columns'::TAB;
 SELECT 12::COL;
 SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
-SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week × channel (stacked)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week × channel (stacked, € axis)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
 SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
 SELECT 12::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars with data labels (::DATALABELS)'::TITLE FROM sales GROUP BY channel ORDER BY channel;
@@ -691,7 +691,7 @@ SELECT 1::COLUMNS;
 SELECT 'Revenue'::TAB;
 SELECT 'By week'::SUBTAB;
 SELECT 420::HEIGHT;
-SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by week (tall)'::TITLE
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'By channel'::SUBTAB;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
