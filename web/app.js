@@ -54,10 +54,10 @@ SELECT 'Detail'::TITLE, channel, week, sum(n) AS n ::TABLE
 FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
       "Signal explorer": `-- Everything below is generated on the fly with range() — no table needed.
-SELECT 'Signal explorer — generated with range()'::LABEL;
+SELECT 'No table needed — a whole dashboard from pure SQL math'::LABEL;
 
 SELECT 12::COL;
-SELECT 'No data table needed — every panel is math over DuckDB''s **range()**. It shows a **line with a ± confidence band** (::BAND_LOWER / ::BAND_UPPER), a **gauge**, a **scatter**, a **histogram**, and a **heatmap surface**, plus a KPI strip. Hover any chart for the toolbox.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'The point of this example: **you don''t need a data source.** Every panel is a formula over DuckDB''s **range()** (a row-number generator), so the entire dashboard is computed on the fly — no table, file, or database. Handy for **synthetic demos, parametric what-ifs, and teaching**. It still exercises the full chart vocabulary from math alone: a **line with a ± confidence band** (::BAND_LOWER / ::BAND_UPPER), a **gauge**, a **scatter**, a **histogram**, and a **heatmap surface**, plus a KPI strip. Hover any chart for the toolbox.'::MARKDOWN, 'What this shows'::TITLE;
 
 SELECT 'Signal stats'::GROUP;
 SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL FROM range(0,120) t(i);
@@ -414,16 +414,17 @@ SELECT item    AS "Item × store" ::PAGED,
        sn_rmse AS "SN · RMSE"    ::COMPACT
 FROM lx_scores ORDER BY item;`,
       "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
--- one dashboard across all categories (monthly). Simple method: SeasonalNaive.
+-- one dashboard across all categories (monthly). Method: AutoETS.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS an_cat AS
   SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
   FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
 
--- 12-month forecast
+-- 12-month forecast (AutoETS auto-selects the error/trend/season terms, so the
+-- forward path is a clear projection rather than a flat repeat of last season)
 CREATE TABLE IF NOT EXISTS an_fc AS
   SELECT category, ds, round(yhat,0) AS yhat
-  FROM ts_forecast_by('an_cat', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'});
+  FROM ts_forecast_by('an_cat', category, ds, y, 'AutoETS', 12, '1mo', MAP{'seasonal_period':'12'});
 
 -- Decomposition: take the smooth TREND from the extension's MSTL, then split the
 -- detrended signal into a classical seasonal component (mean per calendar month,
@@ -441,48 +442,59 @@ CREATE TABLE IF NOT EXISTS an_decomp AS
          round(j.observed - j.trend - sc.seasonal,0) AS remainder
   FROM j JOIN sc USING (category, mo);
 
--- Backtest: hold out the last 12 months, forecast them from the train, compare to actuals
+-- Backtest: hold out the last 12 months, forecast them from the train (AutoETS), compare to actuals
 CREATE TABLE IF NOT EXISTS an_train AS SELECT * FROM an_cat WHERE ds <= (SELECT max(ds) FROM an_cat)-INTERVAL 12 MONTH;
 CREATE TABLE IF NOT EXISTS an_bt AS
   SELECT f.category, f.ds, round(f.yhat,0) AS predicted, t.y AS actual
-  FROM ts_forecast_by('an_train', category, ds, y, 'SeasonalNaive', 12, '1mo', MAP{'seasonal_period':'12'}) f
+  FROM ts_forecast_by('an_train', category, ds, y, 'AutoETS', 12, '1mo', MAP{'seasonal_period':'12'}) f
   JOIN an_cat t ON f.category=t.category AND f.ds=t.ds;
 
-SELECT 'M5 — forecast · decomposition · backtest (SeasonalNaive, all categories)'::LABEL;
+SELECT 'M5 — forecast · decomposition · backtest (AutoETS, all categories)'::LABEL;
 
 SELECT 12::COL;
-SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category, all in one scrolling dashboard: a 12-month **forecast** (history + prediction), an additive **decomposition** (trend from the extension''s MSTL + a classical seasonal component + remainder), and a 12-month-holdout **backtest** with MAE/RMSE/MAPE and actual-vs-predicted.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A full **time-series workflow** on M5 monthly sales aggregated to category: an at-a-glance **AutoETS forecast** (history + 12-month prediction) and a 12-month-holdout **backtest** for all categories, then a **tab per category** (FOODS / HOBBIES / HOUSEHOLD) with an additive **decomposition** (MSTL trend + classical seasonal + remainder) and **residual diagnostics** — a histogram and a normal **Q-Q plot** of the remainder. Residuals that look normal (bell histogram, points hugging the Q-Q line) mean the trend+seasonal model captured the structure.'::MARKDOWN, 'What this shows'::TITLE;
 
--- Forecast: history + 12-month forecast, all categories on one panel.
-SELECT 'Forecast — history + 12-month SeasonalNaive'::LABEL;
+-- Forecast overview: history + 12-month AutoETS forecast, all categories.
+SELECT 'Forecast — history + 12-month AutoETS'::LABEL;
 SELECT 12::COL;
 SELECT ds ::XAXIS, category ::CATEGORY, y ::LINECHART,
-       'History + 12-month forecast, per category'::TITLE
+       'History + 12-month AutoETS forecast, per category'::TITLE
 FROM (SELECT category, ds, y FROM an_cat UNION ALL SELECT category, ds, yhat FROM an_fc) ORDER BY category, ds;
 
--- Decomposition: one row per category (observed+trend · seasonal · remainder).
-SELECT 'Decomposition — MSTL trend · classical seasonal · remainder'::LABEL;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'FOODS — observed + trend'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'FOODS — seasonal'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'FOODS — remainder'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOBBIES — observed + trend'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOBBIES — seasonal'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOBBIES — remainder'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'HOUSEHOLD — observed + trend'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'HOUSEHOLD — seasonal'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'HOUSEHOLD — remainder'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
-
--- Backtest: 12-month holdout, error metrics + actual vs predicted per category.
-SELECT 'Backtest — 12-month holdout'::LABEL;
+-- Backtest overview: 12-month-holdout error metrics per category.
+SELECT 'Backtest — 12-month holdout (AutoETS)'::LABEL;
 SELECT 12::COL;
 SELECT category AS "Category" ::TABLE,
        round(avg(abs(actual-predicted)),0)                      AS "MAE"    ::COMPACT,
        round(sqrt(avg(pow(actual-predicted,2))),0)              AS "RMSE"   ::COMPACT,
        round(100*avg(abs(actual-predicted)/nullif(actual,0)),1) AS "MAPE %" ::PLAIN
 FROM an_bt GROUP BY 1 ORDER BY 2;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM an_bt WHERE category='FOODS' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES — actual vs predicted'::TITLE FROM an_bt WHERE category='HOBBIES' ORDER BY ds;
-SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD — actual vs predicted'::TITLE FROM an_bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
+
+-- Per-category deep dive (one tab each): decomposition + residual diagnostics
+-- (histogram + normal Q-Q of the remainder) + the backtest fit.
+SELECT 'FOODS'::TAB;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + MSTL trend'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='FOODS' ORDER BY ds;
+SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='FOODS';
+SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='FOODS';
+SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='FOODS' ORDER BY ds;
+
+SELECT 'HOBBIES'::TAB;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + MSTL trend'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='HOBBIES' ORDER BY ds;
+SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='HOBBIES';
+SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='HOBBIES';
+SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='HOBBIES' ORDER BY ds;
+
+SELECT 'HOUSEHOLD'::TAB;
+SELECT 4::COL; SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART, 'Observed + MSTL trend'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, seasonal ::LINECHART, 'Seasonal'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 4::COL; SELECT ds ::XAXIS, remainder ::LINECHART, 'Remainder'::TITLE FROM an_decomp WHERE category='HOUSEHOLD' ORDER BY ds;
+SELECT 6::COL; SELECT remainder ::HISTOGRAM, 'Residual histogram'::TITLE FROM an_decomp WHERE category='HOUSEHOLD';
+SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decomp WHERE category='HOUSEHOLD';
+SELECT 12::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'Backtest — actual vs predicted'::TITLE FROM an_bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
     },
   },
 
@@ -593,7 +605,7 @@ GROUP BY month ORDER BY month;`,
   {
     group: "Tables",
     items: {
-      "Formatted table": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
+      "Formatting & paging": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
   ('SKU-A',12400, 4.2,'on track',  8.5),
   ('SKU-B', 7300,11.8,'at risk',  -3.1),
   ('SKU-C',21850, 6.5,'on track',  2.7),
@@ -606,7 +618,10 @@ CREATE OR REPLACE TABLE hist AS SELECT * FROM (VALUES
   ('SKU-D',1, 60),('SKU-D',2, 52),('SKU-D',3, 48),('SKU-D',4, 40),('SKU-D',5, 35)
 ) t(sku, m, sales);
 
-SELECT 'Per-column formatting: MONEY / COLORSCALE / BADGE / TREND / SPARKLINE'::LABEL;
+SELECT 'Tables — rich per-column formatting & scalable paging'::LABEL;
+
+-- Rich formatting: each column picks its own presentation role.
+SELECT 'Formatted'::TAB;
 SELECT 12::COL;
 SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
@@ -616,21 +631,21 @@ SELECT sku::TABLE,
        status::BADGE,
        growth AS "growth %" ::TREND,
        (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE
-FROM fc ORDER BY forecast DESC;`,
+FROM fc ORDER BY forecast DESC;
 
-      "Large tables": `SELECT 'Large tables — client pagination vs SQL-paged (in tabs)'::LABEL;
-
+-- Paging: a plain ::TABLE returns everything and the browser paginates it.
 SELECT '1,000 rows (client)'::TAB;
 SELECT 12::COL;
-SELECT 'Two ways to page big results. A plain **::TABLE** returns all rows and the browser paginates them (fine for ~1k). **::PAGED** runs LIMIT/OFFSET + COUNT in DuckDB — **one page at a time** — so it scales to 100k+ rows with sortable columns, all in-browser. Compare the two tabs.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Two ways to page big results. A plain **::TABLE** returns all rows and the browser paginates them (fine for ~1k). The next tab shows **::PAGED**, which pages in DuckDB so it scales to 100k+ rows.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 'ID-' || lpad(i::VARCHAR, 4, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
        ((i * 37) % 100) AS score, ((i * 7) % 500) AS events ::TABLE
 FROM range(1, 1001) t(i) ORDER BY i;
 
+-- Paging: ::PAGED runs LIMIT/OFFSET + COUNT in DuckDB — one page at a time, so it
+-- scales to huge / remote tables (parquet in S3, MotherDuck). Sorting is server-side.
 SELECT '100,000 rows (::PAGED)'::TAB;
 SELECT 12::COL;
--- ::PAGED runs LIMIT/OFFSET + COUNT in DuckDB — one page at a time, so it scales
--- to huge / remote tables (parquet in S3, MotherDuck). Sorting is server-side.
+SELECT '**::PAGED** runs LIMIT/OFFSET + COUNT in DuckDB — **one page at a time** — so it scales to huge / remote tables (Parquet in S3, MotherDuck) with server-side sorting. Same grid, 100k rows, still instant.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 'ID-' || lpad(i::VARCHAR, 6, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
        ((i * 37) % 1000) AS score, ((i * 91) % 100) AS load_pct ::PAGED
 FROM range(1, 100001) t(i);`,
@@ -2050,6 +2065,17 @@ async function run(fresh = true) {
   const dash = document.querySelector(".dash");
   dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
   if (tabBar) dash.append(tabBar, tabWrap);
+  // A "Powered by DataZoo GmbH" credit at the foot of every dashboard.
+  dash.querySelector(".dp-credit")?.remove();
+  const credit = document.createElement("div");
+  credit.className = "dp-credit";
+  const creditLink = document.createElement("a");
+  creditLink.href = "https://data-zoo.de";
+  creditLink.target = "_blank";
+  creditLink.rel = "noopener noreferrer";
+  creditLink.textContent = "DataZoo GmbH";
+  credit.append("Powered by ", creditLink);
+  dash.append(credit);
   attachHover();
   addExportButtons();
   if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
