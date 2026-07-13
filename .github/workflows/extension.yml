@@ -1,0 +1,77 @@
+name: Build DuckDB extension
+
+# Build + package the anofox_visualization DuckDB extension for each platform and
+# upload the loadable `.duckdb_extension` artifacts. Mirrors duckext/scripts/
+# build-native.sh (proven locally). NOTE: duckplot depends on ggplot-rs via a
+# PATH dependency, so this checks BOTH repos out as siblings.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux_amd64,   ext: so }
+          - { os: macos-14,       name: osx_arm64,     ext: so }
+          - { os: macos-13,       name: osx_amd64,     ext: so }
+          - { os: windows-latest, name: windows_amd64, ext: dll }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout duckplot
+        uses: actions/checkout@v4
+        with:
+          path: duckplot
+
+      # PATH dependency: ggplot-rs must sit next to duckplot. Pin a released tag.
+      - name: Checkout ggplot-rs
+        uses: actions/checkout@v4
+        with:
+          repository: sipemu/ggplot-rs
+          ref: v0.12.0
+          path: ggplot-rs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install DuckDB CLI (for the platform string + a load test)
+        run: |
+          python3 -m pip install --quiet duckdb || true
+
+      - name: Build (release cdylib)
+        working-directory: duckplot/duckext
+        run: cargo build --release --lib
+
+      - name: Package (metadata footer)
+        working-directory: duckplot/duckext
+        run: |
+          LIB=$(ls target/release/*anofox_visualization.${{ matrix.ext }} target/release/anofox_visualization.${{ matrix.ext }} 2>/dev/null | head -1)
+          python3 scripts/append_extension_metadata.py -l "$LIB" -n anofox_visualization \
+            -p ${{ matrix.name }} -dv v1.2.0 -ev ${GITHUB_REF_NAME:-v0.0.0} --abi-type C_STRUCT \
+            -o anofox_visualization.duckdb_extension
+
+      - name: Smoke test (Python DuckDB, unsigned)
+        working-directory: duckplot/duckext
+        run: |
+          python3 - <<'PY'
+          import duckdb
+          con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+          con.execute("LOAD 'anofox_visualization.duckdb_extension'")
+          svg = con.execute("""
+            WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22)) t(ch,n))
+            SELECT anofox_bar(ch, n) FROM d
+          """).fetchone()[0]
+          assert svg.startswith("<svg") and "<rect" in svg, svg[:80]
+          print("OK:", len(svg), "byte SVG")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anofox_visualization-${{ matrix.name }}
+          path: duckplot/duckext/anofox_visualization.duckdb_extension

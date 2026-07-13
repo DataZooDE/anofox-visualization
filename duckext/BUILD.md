@@ -24,16 +24,20 @@ requesting capi `v1.2.0`, the struct offsets line up and every API call resolves
 ./scripts/build-native.sh   # → /tmp/anofox_visualization.duckdb_extension
 duckdb -unsigned <<'SQL'
 LOAD '/tmp/anofox_visualization.duckdb_extension';
-WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
-SELECT anofox_render(json_object(
-  'rows',  (SELECT to_json(list({ch: ch, n: n})) FROM d),
-  'roles', json('[[0,"XAXIS"],[1,"BARCHART"]]'),
-  'width', 400, 'height', 260)) AS svg;
+-- Friendly macros (auto-registered): pass columns, get one SVG per group.
+WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
+SELECT anofox_bar(ch, n) FROM sales;                 -- bar chart
+--   anofox_line/_scatter/_area(x, y), or any kind:
+--   anofox_xy(x, y, kind := 'VIOLIN'), anofox_xyc(x, y, series)  (coloured by series)
 SQL
 ```
-The `spec` is the same JSON the browser renderer takes: `rows` (array of row
-objects), `roles` (`[[colIdx, "ROLE", "displayName"?], …]`), optional `width` /
-`height` / `primary`.
+`anofox_render(spec)` is the raw form — `spec` is the same JSON the browser
+renderer takes: `rows` (row objects keyed `c0`,`c1`,…), `roles`
+(`[[colIdx,"ROLE","displayName"?],…]`), optional `width`/`height`/`primary`.
+The macros just build that spec via `json_object` + `list()`.
+
+See `DISTRIBUTING.md` for shipping it (self-hosted repo or community-extensions)
+and `.github/workflows/extension.yml` for the multi-platform build.
 
 ## WASM extension — where it got to (this is the big one)
 Targeting DuckDB-Wasm 1.29.0 = **DuckDB v1.1.1, platform `wasm_eh`, C-ext-API

@@ -138,6 +138,35 @@ unsafe extern "C" fn anofox_render_fn(
     }
 }
 
+/// Convenience SQL macros bundled with the extension, so callers don't hand-write
+/// the JSON spec. Each wraps `anofox_render(json_object(...))`; the `list()` makes
+/// them aggregates, so `SELECT anofox_bar(x, y) FROM t` collects the rows and
+/// returns one SVG. `anofox_xy` / `anofox_xyc` take an explicit `kind` (any chart
+/// role, e.g. 'LINECHART', 'SMOOTH', 'VIOLIN'); the named ones are shorthands.
+const MACROS: &[&str] = &[
+    r#"CREATE OR REPLACE MACRO anofox_xy(x, y, kind := 'BARCHART', width := 640, height := 400) AS
+         anofox_render(json_object('rows', to_json(list({c0: x, c1: y})),
+           'roles', ('[[0,"XAXIS"],[1,"' || kind || '"]]')::JSON,
+           'width', width, 'height', height))"#,
+    r#"CREATE OR REPLACE MACRO anofox_xyc(x, y, series, kind := 'BARCHART_STACKED', width := 640, height := 400) AS
+         anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series})),
+           'roles', ('[[0,"XAXIS"],[1,"' || kind || '"],[2,"CATEGORY"]]')::JSON,
+           'width', width, 'height', height))"#,
+    "CREATE OR REPLACE MACRO anofox_bar(x, y) AS anofox_xy(x, y, kind := 'BARCHART')",
+    "CREATE OR REPLACE MACRO anofox_line(x, y) AS anofox_xy(x, y, kind := 'LINECHART')",
+    "CREATE OR REPLACE MACRO anofox_scatter(x, y) AS anofox_xy(x, y, kind := 'SCATTER')",
+    "CREATE OR REPLACE MACRO anofox_area(x, y) AS anofox_xy(x, y, kind := 'AREACHART')",
+];
+
+/// Run a SQL statement on `conn` for its side effect (macro registration).
+unsafe fn run_sql(conn: duckdb_connection, sql: &str) -> bool {
+    let Ok(c) = CString::new(sql) else { return false };
+    let mut res: duckdb_result = std::mem::zeroed();
+    let ok = (api().duckdb_query.unwrap())(conn, c.as_ptr(), &mut res) == duckdb_state::DuckDBSuccess;
+    (api().duckdb_destroy_result.unwrap())(&mut res);
+    ok
+}
+
 /// DuckDB calls `<extension_name>_init_c_api` on LOAD.
 #[no_mangle]
 pub unsafe extern "C" fn anofox_visualization_init_c_api(
@@ -172,6 +201,13 @@ pub unsafe extern "C" fn anofox_visualization_init_c_api(
     (api().duckdb_destroy_logical_type.unwrap())(&mut ptype);
     let mut fm = f;
     (api().duckdb_destroy_scalar_function.unwrap())(&mut fm);
+
+    // Bundled convenience macros (anofox_bar/_line/_scatter/_xy/_xyc). Best-effort
+    // — they need the json functions at call time, but defining them can't fail
+    // the load.
+    for m in MACROS {
+        run_sql(conn, m);
+    }
 
     // duckplot_serve(INTEGER port) -> VARCHAR  (native only)
     #[cfg(not(target_arch = "wasm32"))]

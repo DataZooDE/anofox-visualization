@@ -1,0 +1,35 @@
+# Descriptor for the duckdb/community-extensions repo. Copy to
+#   community-extensions/extensions/anofox_visualization/description.yml
+# and open a PR there. See DISTRIBUTING.md for prerequisites (public repo,
+# self-contained dependencies).
+extension:
+  name: anofox_visualization
+  description: Render charts and dashboards straight from SQL — the ggplot-rs grammar of graphics, emitted as SVG.
+  version: 0.1.0
+  language: Rust
+  license: MIT
+  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads"  # native only for now
+  maintainers:
+    - sipemu
+
+repo:
+  github: sipemu/duckplot   # TODO: push duckplot to GitHub first (it has no remote yet)
+  ref: <commit-or-tag>
+
+docs:
+  hello_world: |
+    -- One scalar plus convenience macros. Pass columns; get an SVG per group.
+    WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
+    SELECT anofox_bar(ch, n) FROM sales;          -- <svg> bar chart
+
+    -- Any chart kind via anofox_xy(..., kind := ...), or the raw spec:
+    SELECT anofox_render('{"rows":[{"c0":"a","c1":3}],"roles":[[0,"XAXIS"],[1,"BARCHART"]]}');
+  extended_description: |
+    anofox_visualization renders charts as SVG from inside DuckDB, using the
+    ggplot-rs grammar-of-graphics engine (via the duckplot core). It exposes:
+      - anofox_render(spec VARCHAR) -> VARCHAR  — a JSON panel spec -> SVG
+      - anofox_bar / anofox_line / anofox_scatter / anofox_area (x, y)
+      - anofox_xy(x, y, kind := 'BARCHART', width := 640, height := 400)
+      - anofox_xyc(x, y, series, kind := 'BARCHART_STACKED')
+    The convenience macros aggregate rows via list(), so `SELECT anofox_bar(x, y)
+    FROM t` returns one SVG for the group.
