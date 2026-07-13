@@ -351,25 +351,14 @@ CREATE TABLE IF NOT EXISTS lx_scores AS
          min(rmse) FILTER (WHERE method='SeasonalNaive') AS sn_rmse
   FROM lx_metrics GROUP BY series;
 
-SELECT 'Forecasting ' || (SELECT count(*) FROM lx_summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM lx_m)::VARCHAR || ' M5 item×store series in the browser — click a row'::LABEL;
+SELECT 'Forecasting ' || (SELECT count(*) FROM lx_summary)::VARCHAR || ' of ' || (SELECT count(DISTINCT series) FROM lx_m)::VARCHAR || ' M5 item×store series in the browser — click a row to drill the chart'::LABEL;
 
 SELECT 12::COL;
-SELECT 'Fully **in-browser forecasting**: DuckDB-Wasm loads a Parquet and runs the anofox-forecast extension (SeasonalES) over ~30k M5 series — no server. **Click a row** in the paginated table to drill the chart to that item (history + 12-month forecast with a 95% band, and both methods'' backtest). Below: a per-series 12-month backtest comparing SeasonalES vs SeasonalNaive with the winner per series.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Fully **in-browser forecasting**: DuckDB-Wasm loads a Parquet and runs the anofox-forecast extension (SeasonalES) over ~30k M5 series — no server. The chart shows the selected item''s **history + 12-month forecast** (shaded = 95% interval) with **both methods'' backtest** over the held-out last year drawn on top. The **Summary** and **Backtest statistics** tabs below list every series — **click any row** to drill the chart to that item.'::MARKDOWN, 'What this shows'::TITLE;
 
--- Paginated summary of all series (server-side LIMIT/OFFSET). Click a row to
--- drill the chart to that item. ::PAGED sits on the first (cross-filter) column.
-SELECT 12::COL;
-SELECT item        AS "Item × store"     ::PAGED,
-       last_actual AS "Last actual"      ::COMPACT,
-       next_fc     AS "Next month"       ::COMPACT,
-       fc_total    AS "12-mo forecast"   ::COMPACT,
-       growth      AS "vs prior 12mo %"  ::TREND
-FROM lx_summary ORDER BY fc_total DESC;
-
--- History (lx_m) + 12-month SeasonalES forecast (lx_fc, shaded 95% interval) for
--- the selected item, PLUS both methods' backtest predictions over the 12-month
--- holdout (lx_bt) — so the same chart shows the future forecast and how each
--- method would have done against the (known) last-year actuals.
+-- The chart, prominent: history (lx_m) + 12-month SeasonalES forecast (lx_fc,
+-- shaded 95% interval) + BOTH methods' backtest predictions over the 12-month
+-- holdout (lx_bt), for the selected item (defaults to the largest by forecast).
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
@@ -391,10 +380,22 @@ SELECT ds, 'SeasonalNaive (backtest)', predicted, predicted, predicted, '' FROM 
   WHERE method='SeasonalNaive' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;
 
--- Backtest per series: the 12-month-holdout KPIs of BOTH methods for every
--- series, plus the per-series winner. Click a row to drill the chart above.
-SELECT 'Backtest per series — 12-month holdout: SeasonalES vs SeasonalNaive'::LABEL;
-SELECT 'Overall winner (most series won by MAE): ' || (SELECT winner FROM lx_scores WHERE winner IS NOT NULL GROUP BY winner ORDER BY count(*) DESC LIMIT 1) ::LABEL;
+-- Two tabs share the chart above: a per-series Summary and the Backtest
+-- statistics. Both tables are click-to-drill (set getvariable('selected')).
+SELECT 'Summary'::TAB;
+SELECT 12::COL;
+SELECT 'Per-series **summary** of every forecast item — last actual, next-month and 12-month forecast totals, and growth vs the prior 12 months. **Click a row** to drill the chart above to that item.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 12::COL;
+SELECT item        AS "Item × store"     ::PAGED,
+       last_actual AS "Last actual"      ::COMPACT,
+       next_fc     AS "Next month"       ::COMPACT,
+       fc_total    AS "12-mo forecast"   ::COMPACT,
+       growth      AS "vs prior 12mo %"  ::TREND
+FROM lx_summary ORDER BY fc_total DESC;
+
+SELECT 'Backtest statistics'::TAB;
+SELECT 12::COL;
+SELECT 'A 12-month-holdout **backtest** comparing **SeasonalES** vs **SeasonalNaive** across every series (MAE / RMSE / MAPE), with a per-series winner. **Overall winner (most series won by MAE): ' || (SELECT winner FROM lx_scores WHERE winner IS NOT NULL GROUP BY winner ORDER BY count(*) DESC LIMIT 1) || '.** Click a row to drill the chart above.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL;
 SELECT method AS "Method" ::TABLE,
        round(avg(mae),2)     AS "Avg MAE"       ::COMPACT,
@@ -404,7 +405,6 @@ FROM lx_metrics GROUP BY method ORDER BY 2;
 SELECT 6::COL;
 SELECT winner ::XAXIS, count(*) AS wins ::BARCHART, 'Series won per method (by MAE)'::TITLE
 FROM lx_scores WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
-
 SELECT 12::COL;
 SELECT item    AS "Item × store" ::PAGED,
        winner  AS "Winner"       ::BADGE,
@@ -483,35 +483,6 @@ FROM an_bt GROUP BY 1 ORDER BY 2;
 SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'FOODS — actual vs predicted'::TITLE FROM an_bt WHERE category='FOODS' ORDER BY ds;
 SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOBBIES — actual vs predicted'::TITLE FROM an_bt WHERE category='HOBBIES' ORDER BY ds;
 SELECT 4::COL; SELECT ds ::XAXIS, actual ::LINECHART, predicted ::LINECHART, 'HOUSEHOLD — actual vs predicted'::TITLE FROM an_bt WHERE category='HOUSEHOLD' ORDER BY ds;`,
-      "M5 changepoints": `-- Changepoint detection on M5 monthly sales per category (anofox-forecast).
--- ts_detect_changepoints_by returns a probability per point; points with a high
--- probability are marked on each series.
-CREATE TABLE IF NOT EXISTS cp_cat AS
-  SELECT split_part(series,'_',1) AS category, ds, sum(y) AS y
-  FROM read_parquet('m5_monthly.parquet') GROUP BY 1,2;
-CREATE TABLE IF NOT EXISTS cp_pts AS
-  SELECT c.category, c.ds, m.y, c.changepoint_probability AS prob
-  FROM ts_detect_changepoints_by('cp_cat', category, ds, y, MAP{}) c
-  JOIN cp_cat m ON c.category = m.category AND c.ds = m.ds;
-
-SELECT 'M5 changepoint detection — monthly sales (dots = high changepoint probability)'::LABEL;
-
-SELECT 12::COL;
-SELECT 'The anofox-forecast extension''s **changepoint detection** run in-browser on each category''s monthly sales. Each series is a line (::LINECHART) with the points where the structural-break probability exceeds 0.7 marked as a distinct **::SCATTER** overlay — the moments the level or trend shifts.'::MARKDOWN, 'What this shows'::TITLE;
-
-SELECT 12::COL;
-SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
-       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER,
-       'FOODS — likely changepoints (prob > 0.7)'::TITLE
-FROM cp_pts WHERE category='FOODS' ORDER BY ds;
-SELECT 12::COL;
-SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
-       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOBBIES'::TITLE
-FROM cp_pts WHERE category='HOBBIES' ORDER BY ds;
-SELECT 12::COL;
-SELECT ds ::XAXIS, y AS "sales" ::LINECHART,
-       CASE WHEN prob > 0.7 THEN y END AS "changepoint" ::SCATTER, 'HOUSEHOLD'::TITLE
-FROM cp_pts WHERE category='HOUSEHOLD' ORDER BY ds;`,
     },
   },
 
