@@ -2,7 +2,7 @@
 
 SQL-defined dashboards: you annotate SQL result columns with
 **roles** (`::XAXIS`, `::CATEGORY`, a chart kind on the measure), and anofox-visualization
-renders them with [ggplot-rs](../ggplot-rs). The core is dependency-light and
+renders them with [ggplot-rs](https://github.com/sipemu/ggplot-rs). The core is dependency-light and
 **wasm-compatible**, so the same renderer runs on the CLI and in the browser.
 
 ---
@@ -275,7 +275,7 @@ files is a linked set, served with a shared cross-dashboard nav bar.
 
 For the full trust model, the static-render alternative (`serve` bin), and
 deployment (reverse proxy, TLS, auth), see
-[`docs/secure-serving.md`](docs/secure-serving.md).
+[`secure-serving.md`](secure-serving.md).
 
 ---
 
