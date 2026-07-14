@@ -16,12 +16,14 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
+        Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         None | Some("--help") | Some("-h") => {
             eprintln!(
                 "usage:\n  \
                  dashboard <file.sql> [out.html]         render to interactive HTML\n  \
                  dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
-                 dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)"
+                 dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
+                 dashboard --roles                       list every valid ::ROLE token"
             );
             std::process::exit(2);
         }

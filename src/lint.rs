@@ -48,9 +48,32 @@ where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
     let mut diags = Vec::new();
+    // The original statements (with casts intact) — plan() rewrites panels, so we
+    // scan these for typo'd roles. Same non-empty order as plan(), so indices align.
+    let raws: Vec<String> = sql::split_statements(&sql::strip_line_comments(script))
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     for (i, p) in sql::plan(script).into_iter().enumerate() {
         let stmt = i + 1;
         let short = one_line(p.sql.trim());
+
+        // A mistyped role token (::BARCHRT) silently drops that column's role.
+        if let Some(raw) = raws.get(i) {
+            for tok in unknown_casts(raw) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "unknown-cast",
+                    message: format!(
+                        "`::{tok}` is not a role or a known type — likely a mistyped ::ROLE, \
+                         so that column won't be mapped. See `dashboard --roles`."
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
 
         // Setup statements: a query-shaped one that still carries ::ROLE casts
         // is a panel that lost its roles (the #1 silent failure) — flag it, and
@@ -68,7 +91,7 @@ where
                               into a FROM (SELECT …) subquery, or put the ::ROLE casts on the \
                               outer SELECT list."
                         .into(),
-                    sql: short,
+                    sql: short.clone(),
                 });
             } else if let Err(e) = run_query(&p.sql) {
                 diags.push(Diagnostic {
@@ -76,7 +99,7 @@ where
                     stmt,
                     code: "sql-error",
                     message: one_line(&e),
-                    sql: short,
+                    sql: short.clone(),
                 });
             }
             continue;
@@ -91,7 +114,7 @@ where
                     stmt,
                     code: "sql-error",
                     message: one_line(&e),
-                    sql: short,
+                    sql: short.clone(),
                 });
                 continue;
             }
@@ -115,7 +138,7 @@ where
                           filters and getvariable() defaults (a multiselect with nothing \
                           selected filters everything out unless you guard with len()=0)."
                     .into(),
-                sql: short,
+                sql: short.clone(),
             });
             continue;
         }
@@ -129,7 +152,7 @@ where
                 stmt,
                 code: "render-error",
                 message: one_line(&e),
-                sql: short,
+                sql: short.clone(),
             });
         }
     }
@@ -176,6 +199,66 @@ fn has_role_cast(sql: &str) -> bool {
         }
     }
     false
+}
+
+/// DuckDB scalar types that are *not* role tokens — so a `::TYPE` cast to one of
+/// these is legitimate SQL, not a mistyped role. (Types that are also roles —
+/// TEXT, DATE, NUMBER, MAP — parse as roles first and never reach here.)
+const KNOWN_TYPES: &[&str] = &[
+    "INT", "INTEGER", "INT1", "INT2", "INT4", "INT8", "TINYINT", "SMALLINT", "BIGINT", "HUGEINT",
+    "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "FLOAT4", "FLOAT8", "REAL",
+    "DOUBLE", "DECIMAL", "NUMERIC", "VARCHAR", "CHAR", "BPCHAR", "BLOB", "BYTEA", "BOOL", "BOOLEAN",
+    "BIT", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS", "TIME",
+    "TIMETZ", "INTERVAL", "UUID", "JSON", "STRUCT", "LIST", "ARRAY", "ENUM", "NULL",
+];
+
+/// Trailing `::TOKEN` casts that are neither a recognised role nor a known SQL
+/// type — i.e. probable typo'd roles. Skips single-quoted string literals.
+fn unknown_casts(sql: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let b = sql.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                // skip a single-quoted string (with '' escape)
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if i + 1 < b.len() && b[i + 1] == b'\'' {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b':' if i + 1 < b.len() && b[i + 1] == b':' => {
+                let mut j = i + 2;
+                while j < b.len() && b[j] == b' ' {
+                    j += 1;
+                }
+                let start = j;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                if j > start {
+                    let up = sql[start..j].to_ascii_uppercase();
+                    if crate::parse_role(&up).is_none()
+                        && !KNOWN_TYPES.contains(&up.as_str())
+                        && !out.contains(&up)
+                    {
+                        out.push(up);
+                    }
+                }
+                i = j.max(i + 2);
+            }
+            _ => i += 1,
+        }
+    }
+    out
 }
 
 fn is_non_render(r: &Role) -> bool {

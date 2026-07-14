@@ -44,6 +44,11 @@ single SQL script that renders the requested dashboard.
 sit in the SELECT list (not after FROM). Don't pre-alias a cast column
 (`x AS a ::BARCHART` breaks) except inside `::TABLE`/`::PAGED`/`::DOWNLOAD_*`.
 
+**Only use real role tokens.** `dashboard --roles` prints the authoritative,
+always-current list (grouped, from the engine itself) — use it instead of
+guessing. `--check` warns on any unrecognised `::ROLE` (a typo silently drops
+that column's role).
+
 ## Roles reference
 
 ### Chart kinds (put on the measure column)
