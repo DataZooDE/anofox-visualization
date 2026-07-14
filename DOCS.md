@@ -166,6 +166,24 @@ FROM sessions GROUP BY ALL ORDER BY week, channel;
 SELECT week::XAXIS, sum(n)::LINECHART FROM sessions GROUP BY ALL;   -- line
 ```
 
+### Authoring rules (avoid silent breakage)
+
+A few rules where the wrong form makes a panel render incorrectly or disappear:
+
+- **A chart panel must not start with `WITH`.** The role detector keys off the
+  first `SELECT`, so a leading CTE hides the projection and the statement is
+  treated as *setup* (no panel). Use a `FROM (SELECT …)` subquery so the outer
+  `SELECT` with the casts comes first, or a setup `CREATE TEMP VIEW`.
+- **A table uses one `::TABLE` marker, not one per column.** Tag a single column
+  `::TABLE`; the rest keep their `AS "Header"` aliases and all show. (Only inside
+  `::TABLE`/`::PAGED`/`::DOWNLOAD_*` may a `::ROLE` follow an `AS` alias.)
+- **`::CATEGORY`/`::COLOR` is discrete.** To colour by a continuous value, bucket
+  it into a `CASE` band; a raw continuous column yields a per-value legend.
+- **A KPI caption is `::LABEL`, not `::TITLE`.** `::METRIC`/`::MONEY`/… render the
+  number; add a `::LABEL` column for the caption (`::TITLE` is a panel title bar).
+- **A `::ROLE` must be in the `SELECT` list**, not after `FROM`; aggregating
+  charts usually need `GROUP BY ALL`.
+
 ---
 
 ## 2. Three ways to run it
@@ -229,6 +247,35 @@ The extension embeds the same UI and answers `/query` on a live connection
 stays in DuckDB. `SELECT anofox_render()` also returns an SVG directly. Native
 works today; the wasm side-module links + instantiates in DuckDB-Wasm with one
 emscripten ABI detail remaining (browsers use **(b)/(b2)** instead).
+
+### d) Serve locked dashboards to consumers (read-only)
+
+`anofox_serve(port)` above is the **authoring** mode — its `/query` runs whatever
+the client sends, so it's for you on localhost. To hand a dashboard to *untrusted*
+consumers, serve a folder of `.sql` files locked down:
+
+```sql
+LOAD 'anofox_visualization.duckdb_extension';
+SELECT anofox_serve_dashboards('dashboards', 8095);
+-- http://127.0.0.1:8095/       a list of the folder's dashboards
+-- http://127.0.0.1:8095/d/<name>  one dashboard, full UI, editor removed
+```
+
+Same interactive client, but locked: the editor is gone and `POST /query` is
+**allow-listed** to each dashboard's own planned panel SQL (plus validated
+`SET VARIABLE`s) — arbitrary SQL is rejected `403`. It is **read-only by
+construction**: at startup it snapshots the live database and serves through a
+fresh read-only DuckDB handle, so even a gate bypass can't write (it serves that
+snapshot; re-run to refresh). Requests are self-contained, so it is multi-user
+safe.
+
+**Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
+pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
+files is a linked set, served with a shared cross-dashboard nav bar.
+
+For the full trust model, the static-render alternative (`serve` bin), and
+deployment (reverse proxy, TLS, auth), see
+[`docs/secure-serving.md`](docs/secure-serving.md).
 
 ---
 

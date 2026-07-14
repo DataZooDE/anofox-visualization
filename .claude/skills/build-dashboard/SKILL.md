@@ -133,8 +133,42 @@ ORDER BY month;
 ```
 
 ## Gotchas
+
+**These silently break a panel — it renders wrong or vanishes. Get them right:**
+- **A chart panel must NOT start with `WITH`.** The role detector keys off the
+  *first* `SELECT`, so a leading CTE hides the projection and the whole statement
+  is treated as **setup** (no panel appears). Push the CTE into a
+  `FROM (SELECT …)` subquery so the outer `SELECT` (with the casts) comes first,
+  or into a setup `CREATE TEMP VIEW`.
+- **A table takes ONE `::TABLE` marker**, not one per column. Tag a single column
+  `::TABLE`; the others keep their `AS "Header"` aliases and all still show.
+- **`::CATEGORY`/`::COLOR` is DISCRETE.** To colour by a continuous value, bucket
+  it into a `CASE` band (`'at risk'/'watch'/'ok'`); a raw continuous column makes
+  an ugly per-value legend.
+- **A KPI caption is `::LABEL`, not `::TITLE`.** `::METRIC`/`::MONEY`/… show only
+  the number; add a `::LABEL` column for the caption. (`::TITLE` is a title *bar*
+  and doesn't caption a metric tile.)
+- **"Nothing selected = all"** for a multiselect: guard the filter with
+  `(len(getvariable('name'))=0 OR list_contains(getvariable('name'), col))`.
+
+**General:**
 - Aggregating charts usually need `GROUP BY ALL`.
 - A `::ROLE` must be in the SELECT list, not after `FROM`.
 - Don't invent columns — inspect the schema first (`DESCRIBE`/`SUMMARIZE`).
 - For very large tables use `::PAGED`, not `::TABLE`.
 - Generate data ad-hoc with `range(n)` / `VALUES` if the user has no table yet.
+
+## Serving the dashboard
+
+Your output is a `.sql` script — here's how it gets run:
+- **Authoring / local:** `SELECT anofox_serve(port)` in a DuckDB session opens the
+  full builder wired to your live tables.
+- **To consumers (locked, read-only):** put the `.sql` file(s) in a folder and
+  `SELECT anofox_serve_dashboards('<dir>', <port>)`. Same UI, but the editor is
+  removed and `/query` is allow-listed to the dashboards' own SQL and served
+  read-only (a snapshot). Each file is a page at `/d/<name>`; a folder of files
+  gets a shared cross-dashboard nav bar.
+- **Multi-page:** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes pages *within* a
+  dashboard; the active tab is deep-linkable via `?tab=<name>`.
+
+Trust model + deployment: `docs/secure-serving.md`.
