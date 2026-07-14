@@ -11,7 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
-use crate::{render, sql, Role};
+use crate::{render, sql, InputKind, Role};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +41,18 @@ pub struct Diagnostic {
     pub sql: String,
 }
 
-/// Lint `script`. `run_query` runs a statement against a stateful connection
-/// and returns its rows (empty on a successful non-SELECT), or a DuckDB error.
+/// Lint `script`. `run_query` runs a whole SQL script in a **fresh** session and
+/// returns the last statement's rows (empty on a non-SELECT), or a DuckDB error.
+///
+/// The linter replays an accumulated `prelude` (setup + input `SET`s — none of
+/// which emit rows) before each statement, so session state (temp views, bound
+/// variables) is faithfully in scope without needing a long-lived connection.
 pub fn check<F>(script: &str, mut run_query: F) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
     let mut diags = Vec::new();
+    let mut prelude = String::new();
     // The original statements (with casts intact) — plan() rewrites panels, so we
     // scan these for typo'd roles. Same non-empty order as plan(), so indices align.
     let raws: Vec<String> = sql::split_statements(&sql::strip_line_comments(script))
@@ -93,7 +98,7 @@ where
                         .into(),
                     sql: short.clone(),
                 });
-            } else if let Err(e) = run_query(&p.sql) {
+            } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
                 diags.push(Diagnostic {
                     severity: Severity::Error,
                     stmt,
@@ -101,12 +106,38 @@ where
                     message: one_line(&e),
                     sql: short.clone(),
                 });
+            } else {
+                // Genuine setup succeeded — keep it in scope for later panels.
+                prelude.push_str(&p.sql);
+                prelude.push_str(";\n");
             }
             continue;
         }
 
-        // Panel: run it, then check the rows and the render.
-        let rows = match run_query(&p.sql) {
+        // Input panel: run its option query and prime the variable(s) to a
+        // default (into the prelude), so downstream getvariable() panels aren't
+        // spuriously empty — mirrors the browser's input pre-pass.
+        if let Some(kind) = input_kind(&p.roles) {
+            match run_query(&format!("{prelude}{};", p.sql)) {
+                Ok(rows) => {
+                    for setv in input_defaults(kind, &rows) {
+                        prelude.push_str(&setv);
+                        prelude.push_str(";\n");
+                    }
+                }
+                Err(e) => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "sql-error",
+                    message: one_line(&e),
+                    sql: short.clone(),
+                }),
+            }
+            continue;
+        }
+
+        // Panel: run it (with the prelude in scope), then check rows and render.
+        let rows = match run_query(&format!("{prelude}{};", p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
                 diags.push(Diagnostic {
@@ -120,7 +151,7 @@ where
             }
         };
 
-        // Inputs and layout directives don't render a chart — nothing to check.
+        // Layout directives don't render a chart — nothing to check.
         if p.roles.iter().any(|(_, r)| is_non_render(r)) {
             continue;
         }
@@ -259,6 +290,57 @@ fn unknown_casts(sql: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn input_kind(roles: &[(usize, Role)]) -> Option<InputKind> {
+    roles.iter().find_map(|(_, r)| match r {
+        Role::Input(k) => Some(*k),
+        _ => None,
+    })
+}
+
+/// `SET VARIABLE` statement(s) that give an input its default value — the first
+/// option for a single input, all options for a multiselect, both ends for a
+/// date range — so downstream `getvariable()` panels have something to read.
+fn input_defaults(kind: InputKind, rows: &[Map<String, Value>]) -> Vec<String> {
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let keys: Vec<&String> = first.keys().collect();
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    match kind {
+        InputKind::DateRange => keys
+            .iter()
+            .take(2)
+            .filter_map(|k| first.get(*k).map(|v| format!("SET VARIABLE {k} = {}", lit(v))))
+            .collect(),
+        InputKind::Multiselect => {
+            let k = keys[0];
+            let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
+            vec![format!("SET VARIABLE {k} = [{}]", vals.join(", "))]
+        }
+        _ => {
+            let k = keys[0];
+            vec![format!("SET VARIABLE {k} = {}", lit(&first[k]))]
+        }
+    }
+}
+
+fn lit(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => {
+            if *b {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }
+        }
+        _ => "NULL".into(),
+    }
 }
 
 fn is_non_render(r: &Role) -> bool {

@@ -107,11 +107,9 @@ fn cmd_check(args: &[String]) {
         std::process::exit(2);
     });
 
-    let db = std::env::temp_dir().join(format!("anofox_check_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&db);
-    let db = db.to_string_lossy().to_string();
-    let diags = lint::check(&script, |sql| run_query(&db, sql));
-    let _ = std::fs::remove_file(&db);
+    // Each call runs a full script (prelude + one statement) in a fresh
+    // in-memory session — the linter manages the replayed session state.
+    let diags = lint::check(&script, run_query);
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     if json_out {
@@ -178,14 +176,13 @@ fn cmd_describe(args: &[String]) {
     }
 }
 
-/// Run one statement against a stateful DB via the duckdb CLI; return its rows
-/// (empty for a successful non-SELECT) or the DuckDB error text.
-fn run_query(
-    db: &str,
-    sql: &str,
-) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+/// Run a full script in a fresh in-memory duckdb session; return the last
+/// statement's rows (empty for a non-SELECT) or the DuckDB error text. The
+/// prelude the linter prepends contains only non-SELECT statements, so the only
+/// JSON on stdout is the final statement's.
+fn run_query(sql: &str) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
     let out = Command::new("duckdb")
-        .arg(db)
+        .arg(":memory:")
         .arg("-json")
         .arg("-c")
         .arg(sql)
