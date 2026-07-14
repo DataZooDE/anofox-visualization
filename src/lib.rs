@@ -20,6 +20,7 @@
 use ggplot_rs::prelude::*;
 
 pub mod dashboard;
+pub mod lint;
 pub mod sql;
 #[cfg(feature = "wasm")]
 pub mod wasm;

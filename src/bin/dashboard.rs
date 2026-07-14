@@ -7,16 +7,32 @@
 //! The SQL parsing (`::ROLE` casts, comments, statement splitting) lives in
 //! `anofox_visualization::sql`, shared with the wasm browser build.
 
+use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::{render, sql, Role};
 use std::process::Command;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path = args.next().unwrap_or_else(|| {
-        eprintln!("usage: dashboard <file.sql> [out.html]");
-        std::process::exit(2)
-    });
-    let out = args.next().unwrap_or_else(|| "dashboard.html".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--check") => cmd_check(&args[1..]),
+        Some("--describe") => cmd_describe(&args[1..]),
+        None | Some("--help") | Some("-h") => {
+            eprintln!(
+                "usage:\n  \
+                 dashboard <file.sql> [out.html]         render to interactive HTML\n  \
+                 dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
+                 dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)"
+            );
+            std::process::exit(2);
+        }
+        Some(_) => cmd_render(&args),
+    }
+}
+
+/// Render an annotated `.sql` file to an interactive HTML dashboard.
+fn cmd_render(args: &[String]) {
+    let path = args[0].clone();
+    let out = args.get(1).cloned().unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
 
     let db = std::env::temp_dir().join(format!("anofox_{}.db", std::process::id()));
@@ -71,6 +87,117 @@ fn main() {
 
     std::fs::write(&out, page(&path, n, &panels)).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");
+}
+
+/// Lint a dashboard: report panels that error, render wrong, are silently
+/// dropped to setup, or return no rows. Exit 1 if there are errors.
+fn cmd_check(args: &[String]) {
+    let json_out = args.iter().any(|a| a == "--json");
+    let path = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("usage: dashboard --check <file.sql> [--json]");
+            std::process::exit(2);
+        }
+    };
+    let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("read {path}: {e}");
+        std::process::exit(2);
+    });
+
+    let db = std::env::temp_dir().join(format!("anofox_check_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let db = db.to_string_lossy().to_string();
+    let diags = lint::check(&script, |sql| run_query(&db, sql));
+    let _ = std::fs::remove_file(&db);
+
+    let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+    if json_out {
+        let items: Vec<String> = diags
+            .iter()
+            .map(|d| {
+                format!(
+                    "{{\"severity\":{:?},\"stmt\":{},\"code\":{:?},\"message\":{:?},\"sql\":{:?}}}",
+                    d.severity.label(),
+                    d.stmt,
+                    d.code,
+                    d.message,
+                    d.sql
+                )
+            })
+            .collect();
+        println!("{{\"ok\":{},\"diagnostics\":[{}]}}", errors == 0, items.join(","));
+    } else {
+        for d in &diags {
+            println!(
+                "{}: [stmt {}] {} — {}\n    {}",
+                d.severity.label(),
+                d.stmt,
+                d.code,
+                d.message,
+                d.sql
+            );
+        }
+        println!("\n{}", lint::summary(&diags));
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
+/// schema grounding so an author never invents columns.
+fn cmd_describe(args: &[String]) {
+    let mut src = None;
+    let mut dbfile = ":memory:".to_string();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => dbfile = it.next().cloned().unwrap_or(dbfile),
+            _ if !a.starts_with("--") => src = Some(a.clone()),
+            _ => {}
+        }
+    }
+    let Some(src) = src else {
+        eprintln!("usage: dashboard --describe <table|'file.parquet'|read_csv(...)> [--db file]");
+        std::process::exit(2);
+    };
+    let out = Command::new("duckdb")
+        .arg(&dbfile)
+        .arg("-c")
+        .arg(format!("SUMMARIZE SELECT * FROM {src}"))
+        .output()
+        .unwrap_or_else(|e| panic!("run duckdb: {e}"));
+    if out.status.success() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    } else {
+        eprintln!("{}", String::from_utf8_lossy(&out.stderr));
+        std::process::exit(1);
+    }
+}
+
+/// Run one statement against a stateful DB via the duckdb CLI; return its rows
+/// (empty for a successful non-SELECT) or the DuckDB error text.
+fn run_query(
+    db: &str,
+    sql: &str,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let out = Command::new("duckdb")
+        .arg(db)
+        .arg("-json")
+        .arg("-c")
+        .arg(sql)
+        .output()
+        .map_err(|e| format!("run duckdb: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(s).map_err(|e| format!("parse duckdb json: {e}"))
 }
 
 fn run(db: &str, sql: &str, json: bool) -> String {

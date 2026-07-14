@@ -198,6 +198,24 @@ cargo run --bin dashboard -- dashboards/sessions.sql   # → dashboard.html
 xdg-open dashboard.html
 ```
 
+The same binary lints and inspects — useful when authoring (by hand or with an
+LLM), since most dashboard failures are **silent** (a broken panel renders
+nothing, with no error):
+
+```sh
+# Validate: run every statement, report what breaks. Exit 1 on errors.
+dashboard --check mydash.sql            # (add --json for machine output)
+#   silent-setup  a panel that lost its ::ROLE casts (usually a leading WITH)
+#   sql-error     the query failed         render-error  missing required aesthetic
+#   empty-panel   query returned 0 rows (blank card)
+
+# Ground on the data before writing SQL: types, cardinality, min/max, null %.
+dashboard --describe 'sales.parquet'    # or a table name, read_csv(...), --db file.db
+```
+
+`--check` is the validate step of a **generate → validate → repair** loop, and
+doubles as a guardrail before serving a dashboard to consumers.
+
 ### b) Browser builder (no server) — interactive analysis
 
 A single-page app: type SQL, **DuckDB-Wasm** runs it in the page, **anofox-visualization

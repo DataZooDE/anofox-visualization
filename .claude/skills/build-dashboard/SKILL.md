@@ -15,8 +15,12 @@ single SQL script that renders the requested dashboard.
 
 ## Workflow
 
-1. **Know the data.** If you don't have the schema, ask for it or run
-   `DESCRIBE <table>` / `SUMMARIZE <table>` first. Never invent column names.
+1. **Ground on the schema — required.** Never invent column names or guess types.
+   Run `dashboard --describe <source>` (a table, `'file.parquet'`, or
+   `read_csv(...)`) — it prints each column's type, min/max, **approx-distinct**
+   (low = discrete → bar/category; high = search/paged), and null %. Use it to
+   pick the right chart per column (time → line, discrete category → bar,
+   numeric → histogram/box, geo → map).
 2. **Pick panels.** Map the request to panels: KPIs for headline numbers, a
    line for trends over time, bars for category comparisons, a table for detail,
    inputs for filtering.
@@ -26,6 +30,13 @@ single SQL script that renders the requested dashboard.
 4. **Write the SQL.** One annotated `SELECT` per panel, in top-to-bottom order.
 5. **Add interactivity** if asked: inputs (`::DROPDOWN`/`::MULTISELECT`/…) and
    cross-filter (`getvariable('selected')`).
+6. **Validate & repair — required. Do not finish on unvalidated SQL.** Run
+   `dashboard --check <file.sql>` (add `--json` for structured output). It runs
+   every statement and reports what silently breaks: `silent-setup` (a panel that
+   lost its roles — usually a leading `WITH`), `sql-error`, `render-error`
+   (missing required aesthetics), and `empty-panel` (0 rows). Fix each and
+   re-run until it prints **clean** (exit 0). These failures are invisible in the
+   rendered output — the linter is how you catch them.
 
 ## The cast is on the OUTPUT column
 
