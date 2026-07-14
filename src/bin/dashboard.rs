@@ -95,21 +95,31 @@ fn cmd_render(args: &[String]) {
 /// dropped to setup, or return no rows. Exit 1 if there are errors.
 fn cmd_check(args: &[String]) {
     let json_out = args.iter().any(|a| a == "--json");
-    let path = match args.iter().find(|a| !a.starts_with("--")) {
-        Some(p) => p.clone(),
-        None => {
-            eprintln!("usage: dashboard --check <file.sql> [--json]");
-            std::process::exit(2);
+    // --db <file>: validate against a prebuilt (read-only) database — its views
+    // and tables are already in scope, so the dashboards are pure queries.
+    let mut db: Option<String> = None;
+    let mut path = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().cloned(),
+            "--json" => {}
+            _ if !a.starts_with("--") => path = Some(a.clone()),
+            _ => {}
         }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: dashboard --check <file.sql> [--json] [--db prebuilt.duckdb]");
+        std::process::exit(2);
     };
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("read {path}: {e}");
         std::process::exit(2);
     });
 
-    // Each call runs a full script (prelude + one statement) in a fresh
-    // in-memory session — the linter manages the replayed session state.
-    let diags = lint::check(&script, run_query);
+    // Each call runs a full script (prelude + one statement) in a fresh session
+    // (in-memory, or read-only against --db) — the linter replays session state.
+    let diags = lint::check(&script, |sql| run_query(db.as_deref(), sql));
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     if json_out {
@@ -180,9 +190,20 @@ fn cmd_describe(args: &[String]) {
 /// statement's rows (empty for a non-SELECT) or the DuckDB error text. The
 /// prelude the linter prepends contains only non-SELECT statements, so the only
 /// JSON on stdout is the final statement's.
-fn run_query(sql: &str) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
-    let out = Command::new("duckdb")
-        .arg(":memory:")
+fn run_query(
+    db: Option<&str>,
+    sql: &str,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let mut cmd = Command::new("duckdb");
+    match db {
+        Some(f) => {
+            cmd.arg("-readonly").arg(f);
+        }
+        None => {
+            cmd.arg(":memory:");
+        }
+    }
+    let out = cmd
         .arg("-json")
         .arg("-c")
         .arg(sql)
