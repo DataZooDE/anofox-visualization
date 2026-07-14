@@ -1024,6 +1024,9 @@ async function boot() {
   if (tabParam) dpTab = tabParam;
   // Persistent cross-dashboard nav (served mode, 2+ dashboards).
   renderServedNav(served);
+  // Loading spinner + opt-in chart zoom (off by default; ?zoom=1 enables).
+  installSpinner();
+  if (params.get("zoom") === "1") document.body.classList.add("dp-zoom");
   const servedSql = served && typeof served.sql === "string" ? served.sql : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
@@ -1347,6 +1350,7 @@ function loadDash(name, sql) {
   curDash = name || null;
   // A different dashboard starts clean — don't carry tab/filter/page state over.
   dpTab = null;
+  dpTableUI = {};
   dpSubTab = {};
   dpFilter = "";
   dpSelected = null;
@@ -1654,6 +1658,7 @@ let dpKbdActive = false; // one-shot: keep row highlight after a server page-cha
 let dpNav = null; // arrow-key controller for the table the pointer is over
 let dpPageSize = {}; // ::PAGED tables: statement idx -> rows per page
 let dpFilterText = {}; // ::PAGED tables: statement idx -> full-text filter term
+let dpTableUI = {}; // client ::TABLE: statement idx -> {sortCol,dir,page,pageSize,colQ} — survives a cross-filter re-run so sort/filter/page persist
 
 // Arrow-key table navigation acts on whichever table the pointer is over
 // (dpNav), so no clicking/tabbing is needed — and browsing rows doesn't trigger
@@ -1694,6 +1699,39 @@ function setTabParam(name) {
   } catch (e) {}
 }
 
+// A full-view loading spinner shown while queries are in flight (body.loading is
+// toggled by run(), including a series-change re-run). Injected once.
+function installSpinner() {
+  if (document.getElementById("dp-spinner")) return;
+  const s = document.createElement("style");
+  s.textContent =
+    "#dp-spinner{position:fixed;inset:0;display:none;align-items:center;justify-content:center;" +
+    "background:rgba(248,250,252,.5);z-index:9999;pointer-events:none}" +
+    "body.loading #dp-spinner{display:flex}" +
+    ".dp-spin{width:44px;height:44px;border:4px solid #cbd5e1;border-top-color:#0f766e;" +
+    "border-radius:50%;animation:dpspin .8s linear infinite}" +
+    "@keyframes dpspin{to{transform:rotate(360deg)}}" +
+    // ::HEIGHT caps a chart's SVG (keeps aspect, centres) so a full-width chart
+    // can be made shorter; tables have no <svg> so they are unaffected.
+    ".dp-colf{width:100%;box-sizing:border-box;font:400 12px system-ui;padding:3px 6px;" +
+    "border:1px solid #d1d5db;border-radius:5px;margin-top:2px}" +
+    ".dp-range{position:relative;height:24px;margin-top:6px}" +
+    ".dp-range .trk{position:absolute;top:7px;left:0;width:100%;height:4px;background:#e2e8f0;border-radius:3px}" +
+    ".dp-range .fil{position:absolute;top:7px;height:4px;background:#5eead4;border-radius:3px}" +
+    ".dp-range .out{position:absolute;top:12px;right:0;font:400 10px system-ui;color:#64748b}" +
+    ".dp-range input{position:absolute;top:2px;left:0;width:100%;height:14px;margin:0;pointer-events:none;" +
+    "-webkit-appearance:none;appearance:none;background:transparent}" +
+    ".dp-range input::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:13px;height:13px;" +
+    "border-radius:50%;background:#0f766e;border:2px solid #fff;box-shadow:0 0 0 1px #94a3b8;cursor:pointer}" +
+    ".dp-range input::-moz-range-thumb{pointer-events:auto;width:13px;height:13px;border:2px solid #fff;" +
+    "border-radius:50%;background:#0f766e;cursor:pointer}";
+  document.head.appendChild(s);
+  const o = document.createElement("div");
+  o.id = "dp-spinner";
+  o.innerHTML = '<div class="dp-spin"></div>';
+  document.body.appendChild(o);
+}
+
 // Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
 // built from window.__served.nav. No-op unless there are 2+ dashboards.
 function renderServedNav(served) {
@@ -1702,7 +1740,8 @@ function renderServedNav(served) {
   const nav = document.createElement("nav");
   nav.className = "served-nav";
   nav.style.cssText =
-    "display:flex;gap:.25rem;padding:.5rem 1rem;background:#fff;border-bottom:1px solid #e5e9f0;flex-wrap:wrap;align-items:center";
+    "position:sticky;top:0;z-index:50;display:flex;gap:.25rem;padding:.5rem 1rem;background:#fff;" +
+    "border-bottom:1px solid #e5e9f0;flex-wrap:wrap;align-items:center;box-shadow:0 1px 3px rgba(16,24,40,.06)";
   for (const d of served.nav) {
     const a = document.createElement("a");
     a.href = "/d/" + encodeURIComponent(d.id);
@@ -2134,7 +2173,7 @@ async function run(fresh = true) {
           const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
-          fig.appendChild(renderTable(rows, skip, fmtByIdx));
+          fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -2175,7 +2214,11 @@ async function run(fresh = true) {
             const isMap = s.roles.some((r) => r[1] === "MAP");
             const holder = document.createElement("div");
             holder.className = "panel-svg";
-            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), 460, ph, dpPrimary || "", "");
+            // Render width proportional to the panel's span, so displayed height
+            // (= panel width × height / render width) is the same for any span at
+            // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
+            const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
+            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, dpPrimary || "", "");
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
@@ -2183,7 +2226,9 @@ async function run(fresh = true) {
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
-            else attachCartZoom(holder, rowsJson, s.roles, ph); // self-skips discrete x
+            // Chart zoom/pan is OFF by default; enable per-view with ?zoom=1.
+            else if (document.body.classList.contains("dp-zoom"))
+              attachCartZoom(holder, rowsJson, s.roles, ph); // self-skips discrete x
           }
           container.appendChild(fig);
           panels++;
@@ -2468,17 +2513,91 @@ const cleanNum = (v) => {
   return isNaN(n) ? null : n;
 };
 
+// One per-column filter test: substring match, or a numeric comparison
+// (>n / >=n / <n / <=n) when the column is numeric.
+function matchCell(v, q, isNum) {
+  const m = q.match(/^([<>]=?)\s*(-?\d[\d.]*)$/);
+  if (m && isNum) {
+    const n = cleanNum(v),
+      t = parseFloat(m[2]);
+    if (n == null || isNaN(t)) return false;
+    return m[1] === ">" ? n > t : m[1] === ">=" ? n >= t : m[1] === "<" ? n < t : n <= t;
+  }
+  return String(v ?? "")
+    .replace(/^"|"$/g, "")
+    .toLowerCase()
+    .includes(q.toLowerCase());
+}
+
+// A dual-handle range slider. Calls onChange(lo, hi) with nulls for an
+// unbounded end (so a full-range slider = no filter). `init` = [lo, hi] or null.
+function dualRange(min, max, init, onChange) {
+  const wrap = document.createElement("div");
+  wrap.className = "dp-range";
+  wrap.onclick = (e) => e.stopPropagation();
+  const trk = document.createElement("div");
+  trk.className = "trk";
+  const fil = document.createElement("div");
+  fil.className = "fil";
+  const out = document.createElement("div");
+  out.className = "out";
+  const lo = document.createElement("input");
+  const hi = document.createElement("input");
+  const span = max - min || 1;
+  [lo, hi].forEach((inp) => {
+    inp.type = "range";
+    inp.min = min;
+    inp.max = max;
+    inp.step = span / 200 || 1;
+  });
+  lo.value = init && init[0] != null ? init[0] : min;
+  hi.value = init && init[1] != null ? init[1] : max;
+  const fmtv = (v) => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : String(Math.round(v * 100) / 100));
+  const paint = () => {
+    const a = +lo.value,
+      b = +hi.value;
+    const pa = ((a - min) / span) * 100,
+      pb = ((b - min) / span) * 100;
+    fil.style.left = pa + "%";
+    fil.style.width = Math.max(0, pb - pa) + "%";
+    out.textContent = `${fmtv(a)} – ${fmtv(b)}`;
+  };
+  const fire = () => onChange(+lo.value <= min ? null : +lo.value, +hi.value >= max ? null : +hi.value);
+  lo.oninput = () => {
+    if (+lo.value > +hi.value) lo.value = hi.value;
+    paint();
+    fire();
+  };
+  hi.oninput = () => {
+    if (+hi.value < +lo.value) hi.value = lo.value;
+    paint();
+    fire();
+  };
+  wrap.append(trk, fil, lo, hi, out);
+  paint();
+  return wrap;
+}
+
 // A ::TABLE result → a sortable HTML table with in-cell bars + per-column
 // formatting (fmtByIdx maps an output column index to a format role). Pass
 // `server` = {total, page, pageSize, onPage, onSort, sortCol, sortDir} for
 // SQL-driven pagination/sorting (::PAGED); otherwise it paginates client-side.
-function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
+function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) {
   const t = document.createElement("table");
   t.className = "dp-table";
   if (!rows.length) {
     t.textContent = "(no rows)";
     return t;
   }
+  // Restore sort/filter/page from a previous render of this same panel so a
+  // cross-filter re-run (clicking a row) doesn't reset the table the user set up.
+  const saved = key != null && !server ? dpTableUI[key] || {} : {};
+  const persist = () => {
+    if (key != null && !server) dpTableUI[key] = { sortCol, dir, page, pageSize, colQ, colRange, colEq };
+  };
+  const colQ = saved.colQ ? { ...saved.colQ } : {}; // text/comparison per column
+  const colRange = saved.colRange ? { ...saved.colRange } : {}; // [lo,hi] slider per numeric column
+  const colEq = saved.colEq ? { ...saved.colEq } : {}; // exact value from a categorical dropdown
   const allKeys = Object.keys(rows[0]);
   const colFmt = {}; // column key -> format role
   for (const [idx, f] of Object.entries(fmtByIdx)) colFmt[allKeys[idx]] = f;
@@ -2496,8 +2615,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
     colMin[c] = fin.length ? Math.min(...fin) : 0;
     colMax[c] = fin.length ? Math.max(...fin) : 1;
   }
-  let sortCol = server ? server.sortCol : null;
-  let dir = server ? server.sortDir || 1 : 1;
+  let sortCol = server ? server.sortCol : saved.sortCol ?? null;
+  let dir = server ? server.sortDir || 1 : saved.dir ?? 1;
   const hr = t.createTHead().insertRow();
   cols.forEach((c) => {
     const th = document.createElement("th");
@@ -2510,15 +2629,35 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
       }
       dir = sortCol === c ? -dir : 1;
       sortCol = c;
+      persist();
       head();
       body();
     };
     hr.appendChild(th);
   });
   const tb = t.createTBody();
-  let page = 0;
-  let pageSize = server ? server.pageSize : 10;
-  let filtered = rows; // client-side text filter narrows this subset
+  let page = saved.page || 0;
+  let pageSize = server ? server.pageSize : saved.pageSize || 10;
+  let filtered = rows; // narrowed by the per-column filters (colQ)
+  const unquote = (v) => String(v ?? "").replace(/^"|"$/g, "");
+  const applyColFilters = () => {
+    const qs = Object.entries(colQ);
+    const rs = Object.entries(colRange);
+    const es = Object.entries(colEq);
+    filtered =
+      qs.length || rs.length || es.length
+        ? rows.filter(
+            (r) =>
+              qs.every(([cc, qq]) => matchCell(r[cc], qq, numeric[cc])) &&
+              es.every(([cc, val]) => unquote(r[cc]) === val) &&
+              rs.every(([cc, [lo, hi]]) => {
+                const n = cleanNum(r[cc]);
+                return n != null && (lo == null || n >= lo) && (hi == null || n <= hi);
+              })
+          )
+        : rows;
+  };
+  applyColFilters(); // re-apply any restored filters
   const sortedRows = () => {
     if (server) return rows; // already sorted + paged server-side
     const data = filtered.slice();
@@ -2630,21 +2769,74 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
   // A per-table text filter across all columns. Client tables filter the held
   // rows here; ::PAGED tables filter server-side (handled by the caller), so we
   // only add the box for client tables big enough to warrant it.
+  // Per-column filters: an input under each header, ANDed together. Numeric
+  // columns also accept >n / <n / >=n / <=n. (Client tables only; ::PAGED
+  // tables filter server-side, handled by the caller.)
   if (!server && rows.length > 10) {
-    const flt = document.createElement("input");
-    flt.className = "dp-table-filter";
-    flt.type = "search";
-    flt.placeholder = "Filter rows…";
-    flt.onclick = (e) => e.stopPropagation();
-    flt.oninput = () => {
-      const q = flt.value.trim().toLowerCase();
-      filtered = q
-        ? rows.filter((r) => cols.some((c) => String(r[c] ?? "").toLowerCase().includes(q)))
-        : rows;
-      page = 0;
-      body();
-    };
-    wrap.appendChild(flt);
+    const fRow = t.tHead.insertRow();
+    cols.forEach((c) => {
+      const th = document.createElement("th");
+      // A low-cardinality categorical column → a dropdown of its values.
+      const distinct = numeric[c]
+        ? null
+        : [...new Set(rows.map((r) => unquote(r[c])))].filter((x) => x !== "");
+      if (distinct && distinct.length > 1 && distinct.length <= 30) {
+        const sel = document.createElement("select");
+        sel.className = "dp-colf";
+        sel.onclick = (e) => e.stopPropagation();
+        const all = document.createElement("option");
+        all.value = "";
+        all.textContent = "All";
+        sel.appendChild(all);
+        distinct.sort().forEach((v) => {
+          const o = document.createElement("option");
+          o.value = v;
+          o.textContent = v;
+          sel.appendChild(o);
+        });
+        sel.value = colEq[c] || "";
+        sel.onchange = () => {
+          if (sel.value) colEq[c] = sel.value;
+          else delete colEq[c];
+          applyColFilters();
+          page = 0;
+          persist();
+          body();
+        };
+        th.appendChild(sel);
+      } else {
+        const inp = document.createElement("input");
+        inp.className = "dp-colf";
+        inp.placeholder = numeric[c] ? ">n / <n" : "filter";
+        inp.value = colQ[c] || "";
+        inp.onclick = (e) => e.stopPropagation();
+        inp.oninput = () => {
+          const q = inp.value.trim();
+          if (q) colQ[c] = q;
+          else delete colQ[c];
+          applyColFilters();
+          page = 0;
+          persist();
+          body();
+        };
+        th.appendChild(inp);
+        // Numeric columns also get a dual-handle range slider (an extra option).
+        if (numeric[c] && colMax[c] > colMin[c]) {
+          const init = colRange[c] ? [colRange[c][0] ?? colMin[c], colRange[c][1] ?? colMax[c]] : null;
+          th.appendChild(
+            dualRange(colMin[c], colMax[c], init, (lo, hi) => {
+              if (lo == null && hi == null) delete colRange[c];
+              else colRange[c] = [lo, hi];
+              applyColFilters();
+              page = 0;
+              persist();
+              body();
+            })
+          );
+        }
+      }
+      fRow.appendChild(th);
+    });
   }
   wrap.appendChild(t);
   t._rows = rows;
@@ -2675,6 +2867,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
           fn(); // server.onPage handles the re-query + re-render
         } else {
           fn();
+          persist();
           body();
         }
       };
@@ -2700,6 +2893,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null) {
       else {
         pageSize = nn;
         page = 0;
+        persist();
         body();
       }
     };
