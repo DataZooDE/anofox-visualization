@@ -38,6 +38,10 @@ maps, forecasts, interactivity).
 - **Dashboards from SQL** — `::COL`, `::GROUP`, `::TAB`/`::SUBTAB`, `::HEIGHT`,
   KPI tiles, rich tables (money/badge/sparkline), inputs (`::DROPDOWN`,
   `::MULTISELECT`, `::DATERANGE`, …), Markdown boxes.
+- **Serve locked dashboards** — `anofox_serve_dashboards(dir, port)` serves a
+  folder of checked-in dashboards with the *full* interactive UI, but with the
+  editor hidden and every `/query` **allow-listed** to those dashboards' own SQL
+  (read-only, and multi-user-safe — each request carries its own inputs).
 - **Runs everywhere** — a browser app (DuckDB-Wasm), a DuckDB extension, and a CLI
   — all backed by one dependency-light, wasm-compatible renderer.
 
@@ -46,7 +50,8 @@ maps, forecasts, interactivity).
 1. **Core library** (`src/lib.rs`) — maps an annotated result set onto ggplot-rs
    and returns an SVG. No DuckDB dependency; compiles to wasm.
 2. **DuckDB extension** (`duckext/`) — `SELECT anofox_render(spec) → SVG` plus
-   convenience macros. See `duckext/BUILD.md`.
+   convenience macros, and the two serve functions (`anofox_serve` for
+   authoring, `anofox_serve_dashboards` for locked serving). See `duckext/BUILD.md`.
 3. **Web app** (`web/`) — the browser dashboard builder (the live demo above).
 
 ## 🦆 Launch the dashboard from DuckDB
@@ -142,11 +147,12 @@ a security control:
 - **Browser model** — the query engine (DuckDB-Wasm) runs *in the consumer's
   browser*. A technical viewer can un-hide the editor, edit the `#sql=` hash, or
   run SQL from the console, and can extract any credential embedded in the page.
-- **`anofox_serve` today** — the `/query` bridge executes **whatever SQL the
-  client sends**. That's convenient for *you on localhost*, but it means an
+- **`anofox_serve` (authoring)** — its `/query` bridge executes **whatever SQL
+  the client sends**. That's convenient for *you on localhost*, but it means an
   untrusted consumer could `curl` arbitrary SQL against your live database. Do
   **not** expose it to untrusted users as-is; treat it as a single-user
-  authoring tool.
+  authoring tool. To show a dashboard to consumers, use the **gated**
+  `anofox_serve_dashboards` (below) instead — same UI, locked down.
 
 **Serving untrusted consumers safely** needs three things (design + plan in
 [`docs/secure-serving.md`](docs/secure-serving.md)):
@@ -158,22 +164,56 @@ a security control:
    dashboard needs, so a mistake or leak is bounded.
 3. **Auth + TLS** at a reverse proxy in front of the serving process.
 
-A first cut of #1–#2 ships as **serve mode** — dashboards live server-side and
-consumers only pick an id + whitelisted params (no `/query`, read-only):
+#1–#2 ship today in two shapes, both read-only:
+
+**Locked full UI — `anofox_serve_dashboards(dir, port)`** (extension). Serves a
+folder of checked-in `*.sql` dashboards with the *same* interactive client as
+the builder — charts, rich tables, KPIs, dropdowns, hover, tabs — but the editor
+is hidden and the `/query` bridge is **gated**: it runs only the panel SQL those
+dashboards declare (an `sql::plan` allow-list) plus validated `SET VARIABLE`s,
+and nothing else. Each request is self-contained (the client inlines its own
+input variables), so concurrent viewers never clobber one another's state.
+
+On top of the gate it is **read-only by construction**: at startup it snapshots
+the live database to a temp file and serves through a fresh read-only DuckDB
+handle with no writable database attached — so even a gate bypass cannot write
+(verified: an allow-listed `INSERT` is rejected *"attached in read-only mode"*).
+It serves that snapshot; re-run `anofox_serve_dashboards` to refresh.
+
+```sql
+LOAD 'anofox_visualization.duckdb_extension';
+SELECT anofox_serve_dashboards('dashboards', 8095);
+-- → http://127.0.0.1:8095/       a locked list of the folder's dashboards
+--   http://127.0.0.1:8095/d/<name>  serves one, full UI, editor removed.
+--   The server owns the SQL; a consumer can only pick a dashboard and move its
+--   inputs — arbitrary SQL sent to /query is rejected (403).
+```
+
+This is how you get the browser app's full feature set *without* re-implementing
+it: the same `app.js`, locked down. It's the recommended path for showing a
+dashboard to consumers.
+
+*Multi-page & navigation.* A dashboard has **pages** via `::TAB` (alias `::PAGE`;
+`::SUBTAB` nests a second level). A **folder of `.sql` files** is a linked set —
+each file is its own page at `/d/<name>`, and the served client draws a shared
+**cross-dashboard nav bar** across them. The active tab is reflected in the URL
+(`?tab=<name>`), so a reload or shared link restores the page.
+
+**Static render — the `serve` bin.** The most locked-down option: no client-side
+`/query` at all, server-side SVG only, consumers pick an id + whitelisted params.
 
 ```sh
 serve --dashboards examples/serve-dashboards/dash \
       --init       examples/serve-dashboards/init.sql \
-      --cache 30                                        # cache each view 30s
-# → http://127.0.0.1:8080/  — pick a dashboard; the `region` dropdown is
-#   whitelisted, and ?region='anything-else' is rejected. --cache shares one
-#   render across viewers and doubles as the freshness window. Put TLS+auth in
-#   front for public use. (--init is where you ATTACH MotherDuck/Postgres.)
+      --cache 30   # cache each view 30s — shared across viewers = freshness window
+# → the `region` dropdown is whitelisted; ?region='anything-else' is rejected.
+#   --init is where you ATTACH MotherDuck/Postgres.
 ```
 
-The free-form `anofox_serve` (embedded builder + `/query`) is kept as the
-**admin / authoring mode**, localhost-only. See
-[`docs/secure-serving.md`](docs/secure-serving.md) for the full plan.
+Put **TLS + auth at a reverse proxy** in front of either for public use. The
+free-form `anofox_serve` (embedded builder + *ungated* `/query`) is the
+**admin / authoring mode** — localhost-only. Full plan in
+[`docs/secure-serving.md`](docs/secure-serving.md).
 
 ## License
 

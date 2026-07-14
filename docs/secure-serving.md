@@ -6,31 +6,62 @@ dashboard they were given.
 
 This document is the plan to get from today's single-developer serving to that.
 
-## Status (v0.1 — first cut shipped)
+## Status
 
-The **serve mode** exists: `serve --dashboards <dir> [--init setup.sql]`.
+Two serving implementations exist, **both read-only**. Pick by whether consumers
+need the interactive UI (A) or just a static picture (B).
 
-- ✅ **Server owns the SQL** — dashboards are `.sql` files loaded server-side; the
-  client selects a dashboard by id and parameter *values* only. No `/query`, no
-  client SQL. (steps 1, 2, 4)
+### A. Gated full-UI serving — the extension
+
+`SELECT anofox_serve_dashboards('<dir>', <port>);` serves the *real* browser
+client, locked down: the editor is removed and `POST /query` is **gated** to the
+panel SQL each dashboard declares (an `sql::plan` allow-list) plus validated
+`SET VARIABLE`s — anything else is `403`. So consumers get the whole feature set
+(charts, rich tables, KPIs, inputs, hover) without the client being able to run
+arbitrary SQL.
+
+- ✅ **Server owns the SQL** — allow-list built from the checked-in `.sql`; a
+  request that isn't a registered panel query (or a valid `SET VARIABLE`) → `403`.
+- ✅ **Read-only, by construction** — `access_mode` can't be flipped at runtime
+  and a read-only `ATTACH` would leave the original DB reachable by qualified
+  name, so at startup it **snapshots the live database to a temp file** (`COPY
+  FROM DATABASE`) and serves through a **fresh read-only DuckDB handle** with no
+  writable database attached. Even a gate bypass can't write — *verified*: an
+  allow-listed `INSERT` is rejected `"… attached in read-only mode"`.
+- ✅ **Multi-user safe** — each request is self-contained (the client inlines its
+  own input variables), so concurrent viewers never clobber one another's state.
+- ✅ **Multi-page** — `::TAB`/`::PAGE` are pages within a dashboard; a folder of
+  `.sql` files is a linked set, served with a shared **cross-dashboard nav bar**
+  and `?tab=` **deep-links** (a reload / shared link restores the page).
+- ⬜ **Least-privilege scoping** — it snapshots the *whole* current database; a
+  dedicated read-only view-scoped source is still the operator's job (point it at
+  a database that only exposes the dashboards' views).
+- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front.
+- **Caveat:** it serves the snapshot taken at startup — re-run
+  `anofox_serve_dashboards` to refresh (per-request refresh on the read-only
+  handle is a follow-up).
+
+### B. Static server-side render — the `serve` bin
+
+`serve --dashboards <dir> [--init setup.sql]` — the most locked-down option: **no
+client `/query` at all**, server-side SVG only. Consumers pick a dashboard id and
+whitelisted params.
+
+- ✅ **Server owns the SQL** — id + parameter *values* only; no client SQL.
 - ✅ **Whitelisted params** — declared per dashboard (`-- @param region [EU, US]
-  = EU`); a value outside the list is rejected with `400`. (step 3)
-- ✅ **Read-only queries** — every panel query runs `duckdb --readonly`. (step 5,
-  partial)
-- ✅ **Result caching** — `--cache <seconds>` caches each rendered
-  (dashboard + resolved params) view. Within the TTL, N viewers of the same view
-  share one render (no extra DB load), and the TTL is the freshness knob (data
-  changes appear after it). Off by default. (step 6, caching)
+  = EU`); a value outside the list is rejected with `400`.
+- ✅ **Read-only queries** — runs `duckdb --readonly`.
+- ✅ **Result caching** — `--cache <seconds>` shares one render across N viewers
+  of the same view and doubles as the freshness knob. Off by default.
 - ⬜ **Full capability lockdown** — a dedicated read-only role / disabling
-  `ATTACH`/file reads at the session level is still the operator's job via
-  `--init` + DuckDB config. (step 5, rest)
-- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front. (step 6, rest)
+  `ATTACH`/file reads is the operator's job via `--init` + DuckDB config.
+- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front.
 
-Try it: `serve --dashboards examples/serve-dashboards/dash --init
+Try B: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → open `http://127.0.0.1:8080/`.
 
-The authoring mode (embedded builder + free-form `/query`) is unchanged and
-localhost-only.
+The authoring mode (`anofox_serve` — embedded builder + free-form `/query`) is
+unchanged and localhost-only.
 
 ---
 
@@ -65,7 +96,12 @@ A live forecast — `ts_forecast_by(...)` runs inline, read-only, per request
 
 ## Target (v1 — serve mode)
 
-Three changes, in priority order.
+Three changes, in priority order. **Note:** #1 (server owns the SQL) and #2
+(read-only) are **already delivered** by the gated extension mode (A) above —
+via an allow-listed `/query` plus a read-only snapshot, rather than the
+per-panel-endpoint design sketched below. That design remains a valid
+alternative; the remaining real gaps are **least-privilege view-scoping** and
+**#3 (auth + TLS)**.
 
 ### 1. The server owns the SQL (the architectural flip)
 
@@ -114,17 +150,19 @@ Defence in depth, so even a bug in param handling is bounded.
 
 ---
 
-## Two modes, one binary
+## Three modes
 
-| | **Admin / authoring** (today) | **Serve** (new) |
-|---|---|---|
-| UI | full builder + editor | view-only, fixed dashboards |
-| SQL source | free-form `/query` from the client | server-owned templates + params |
-| DB connection | read-write session | read-only, view-scoped |
-| Bind / auth | localhost, dev token | proxy + TLS + auth |
-| Audience | the author | untrusted consumers |
+| | **Admin / authoring** | **Gated serve (A)** | **Static serve (B)** |
+|---|---|---|---|
+| Entry | `anofox_serve(port)` | `anofox_serve_dashboards(dir, port)` | `serve --dashboards <dir>` |
+| UI | full builder + editor | real client, editor removed | server-side SVG only |
+| SQL source | free-form `/query` | **allow-listed** `/query` (panel SQL + `SET VARIABLE`) | id + whitelisted params only |
+| DB connection | read-write session | **read-only snapshot** | `duckdb --readonly` |
+| Multi-page / nav | n/a | tabs + folder + shared nav + `?tab=` | one dashboard per URL |
+| Bind / auth | localhost, dev token | proxy + TLS + auth | proxy + TLS + auth |
+| Audience | the author | untrusted consumers (interactive) | untrusted consumers (static) |
 
-Admin mode stays for development; serve mode is what you expose.
+Admin mode stays for development; A and B are what you expose to consumers.
 
 ---
 
