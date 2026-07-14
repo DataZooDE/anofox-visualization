@@ -80,6 +80,32 @@ unsafe extern "C" fn anofox_serve_fn(
     }
 }
 
+/// `SELECT anofox_serve_dashboards(dir, port)` → serve locked, server-owned
+/// dashboards (the real client, gated /query). Same extension as anofox_serve.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe extern "C" fn anofox_serve_dashboards_fn(
+    _info: duckdb_function_info,
+    input: duckdb_data_chunk,
+    output: duckdb_vector,
+) {
+    let n = (api().duckdb_data_chunk_get_size.unwrap())(input);
+    let dvec = (api().duckdb_data_chunk_get_vector.unwrap())(input, 0);
+    let ddata = (api().duckdb_vector_get_data.unwrap())(dvec) as *const u8;
+    let pvec = (api().duckdb_data_chunk_get_vector.unwrap())(input, 1);
+    let pdata = (api().duckdb_vector_get_data.unwrap())(pvec) as *const i32;
+    for i in 0..n {
+        let dir = if ddata.is_null() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(read_string_t(ddata, i)).into_owned()
+        };
+        let port = if pdata.is_null() { 8080 } else { (*pdata.add(i as usize)).max(0) as u16 };
+        let port = if port == 0 { 8080 } else { port };
+        let msg = CString::new(serve::start_dashboards(port, &dir)).unwrap_or_default();
+        (api().duckdb_vector_assign_string_element.unwrap())(output, i, msg.as_ptr());
+    }
+}
+
 fn smoke_svg() -> CString {
     use anofox_visualization::{render, Column, Kind, Role};
     use ggplot_rs::prelude::Value;
@@ -224,6 +250,31 @@ pub unsafe extern "C" fn anofox_visualization_init_c_api(
         ok = ok
             && (api().duckdb_register_scalar_function.unwrap())(conn, sf)
                 == duckdb_state::DuckDBSuccess;
+        (api().duckdb_destroy_logical_type.unwrap())(&mut itype);
+        (api().duckdb_destroy_logical_type.unwrap())(&mut rtype);
+        let mut sfm = sf;
+        (api().duckdb_destroy_scalar_function.unwrap())(&mut sfm);
+    }
+
+    // anofox_serve_dashboards(VARCHAR dir, INTEGER port) -> VARCHAR  (native only)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let sf = (api().duckdb_create_scalar_function.unwrap())();
+        (api().duckdb_scalar_function_set_name.unwrap())(sf, c"anofox_serve_dashboards".as_ptr());
+        let mut dtype =
+            (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
+        (api().duckdb_scalar_function_add_parameter.unwrap())(sf, dtype);
+        let mut itype =
+            (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_INTEGER);
+        (api().duckdb_scalar_function_add_parameter.unwrap())(sf, itype);
+        let mut rtype =
+            (api().duckdb_create_logical_type.unwrap())(duckdb_type::DUCKDB_TYPE_VARCHAR);
+        (api().duckdb_scalar_function_set_return_type.unwrap())(sf, rtype);
+        (api().duckdb_scalar_function_set_function.unwrap())(sf, Some(anofox_serve_dashboards_fn));
+        ok = ok
+            && (api().duckdb_register_scalar_function.unwrap())(conn, sf)
+                == duckdb_state::DuckDBSuccess;
+        (api().duckdb_destroy_logical_type.unwrap())(&mut dtype);
         (api().duckdb_destroy_logical_type.unwrap())(&mut itype);
         (api().duckdb_destroy_logical_type.unwrap())(&mut rtype);
         let mut sfm = sf;
