@@ -34,9 +34,15 @@ single SQL script that renders the requested dashboard.
    `dashboard --check <file.sql>` (add `--json` for structured output). It runs
    every statement and reports what silently breaks: `silent-setup` (a panel that
    lost its roles — usually a leading `WITH`), `sql-error`, `render-error`
-   (missing required aesthetics), and `empty-panel` (0 rows). Fix each and
-   re-run until it prints **clean** (exit 0). These failures are invisible in the
-   rendered output — the linter is how you catch them.
+   (missing required aesthetics), `empty-panel` (0 rows), and `unknown-cast` (a
+   typo'd `::ROLE`). Fix each and re-run until it prints **clean** (exit 0).
+   These failures are invisible in the rendered output — the linter is how you
+   catch them.
+7. **Self-critique against the rubric.** Once it's clean, correctness is not
+   taste. Review against the **Design rubric** below: does it lead with KPIs? is
+   each chart the right kind for its column's data? is every chart titled and are
+   money/percent axes formatted? are filters grouped and wired to *all* dependent
+   panels? is it ≤ ~8 panels per view? Refine, then re-run `--check`.
 
 ## The cast is on the OUTPUT column
 
@@ -146,6 +152,82 @@ SELECT 7::COL;
 SELECT month::XAXIS, sales::LINECHART, 'Monthly sales'::TITLE FROM ts
 WHERE sku = COALESCE(NULLIF(getvariable('sku'),''), (SELECT sku FROM ts ORDER BY sales DESC LIMIT 1))
 ORDER BY month;
+```
+
+## Design rubric
+
+Correctness (it lints clean) is not taste. Aim for these.
+
+**Pick the chart from the data (use `--describe` for cardinality):**
+
+| You have | Use |
+|---|---|
+| one headline number | `::METRIC` / `::MONEY` / `::PERCENT` + a `::LABEL` caption |
+| a number over time (date x) | `::LINECHART` (+ `::SMOOTH` for trend); keep ≤ ~6 series |
+| a number by a discrete category | `::BARCHART`; part-of-whole → `::BARCHART_STACKED` or `::DONUTCHART` (≤ 6 slices) |
+| the distribution of a number | `::HISTOGRAM`, or `::BOXPLOT` split by a category |
+| the relationship of two numbers | `::SCATTER` (size a 3rd → `::BUBBLE`) |
+| two categories + a measure | `::HEATMAP` |
+| progress toward a goal | `::GAUGE` + `::RANGE 'min,max'` |
+| geography (WKT geometry) | `::MAP` |
+| row-level detail / many columns | `::TABLE` (`::PAGED` if large/remote) |
+
+**Compose it well:**
+
+- **Lead with KPIs** — a row of 2–4 headline tiles, *then* the primary chart that
+  answers the main question, *then* supporting breakdowns, *then* a detail table.
+- **Filters up top**, inside a `::GROUP` box, and actually wire them: every panel
+  that should react must reference `getvariable('<name>')`.
+- **Title every chart** (`::TITLE`) and **format money/percent axes**
+  (`::YFORMAT '€'`, `::PERCENT`) — unlabelled numbers read as noise.
+- **Stay focused**: ~4–8 panels per view; split topics with `::TAB` rather than
+  one endless page. Full-width (`::SPAN 12`) for time series and heatmaps; 2-up
+  for comparisons.
+- **Colour is discrete** — band a continuous value into a `CASE` before `::COLOR`.
+
+A complete, well-composed reference dashboard (self-contained, lints clean):
+`examples/dashboards/sales-overview.sql`.
+
+## Templates
+
+Start from the shape that fits, then fill the `<placeholders>` from the schema.
+
+**Overview** — filter → KPIs → trend → breakdown → table:
+```sql
+SELECT 'Filter'::GROUP;
+SELECT <cat> AS <cat> ::DROPDOWN FROM <t> GROUP BY <cat> ORDER BY 1;
+SELECT 1::ENDGROUP;
+SELECT SUM(<measure>)::MONEY, 'Total'::LABEL FROM <t> WHERE <cat> = getvariable('<cat>');
+SELECT 12::SPAN;
+SELECT <date>::XAXIS, SUM(<measure>)::LINECHART, '€'::YFORMAT, 'Trend'::TITLE
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <date> ORDER BY <date>;
+SELECT <cat2>::XAXIS, SUM(<measure>)::BARCHART, 'By <cat2>'::TITLE
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <cat2> ORDER BY 2 DESC;
+SELECT 12::SPAN;
+SELECT <cat2> AS "<Cat2>" ::TABLE, SUM(<measure>) AS "Total"
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <cat2> ORDER BY "Total" DESC;
+```
+
+**Master–detail** — click a row to drive a chart:
+```sql
+SELECT 5::COL;
+SELECT <id> AS "<Id>" ::TABLE, SUM(<measure>) AS total FROM <t> GROUP BY <id> ORDER BY total DESC;
+SELECT 7::COL;
+SELECT <date>::XAXIS, <measure>::LINECHART, 'Detail'::TITLE FROM <t>
+WHERE <id> = COALESCE(NULLIF(getvariable('<id>'),''),
+                      (SELECT <id> FROM <t> GROUP BY <id> ORDER BY SUM(<measure>) DESC LIMIT 1))
+ORDER BY <date>;
+```
+
+**Distribution** — multiselect → histogram + boxplot:
+```sql
+SELECT 'Filter'::GROUP;
+SELECT DISTINCT <cat>::MULTISELECT FROM <t> ORDER BY 1;
+SELECT 1::ENDGROUP;
+SELECT <measure>::HISTOGRAM, 'Distribution'::TITLE FROM <t>
+WHERE (len(getvariable('<cat>'))=0 OR list_contains(getvariable('<cat>'), <cat>));
+SELECT <cat>::XAXIS, <measure>::BOXPLOT, 'By <cat>'::TITLE FROM <t>
+WHERE (len(getvariable('<cat>'))=0 OR list_contains(getvariable('<cat>'), <cat>));
 ```
 
 ## Gotchas
