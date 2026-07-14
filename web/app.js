@@ -780,6 +780,12 @@ function syncHL() {
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
+// Served (locked) mode: the server owns the SQL and gates /query. To stay
+// stateless (multi-user safe — no shared session variables), we don't SET
+// VARIABLE on the connection; we capture each one here and inline them into the
+// front of every data query, so each /query call is self-contained.
+let servedMode = false;
+const servedVars = {};
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 
 // The map examples read remote GeoJSON with DuckDB's `spatial` extension. Load
@@ -874,6 +880,20 @@ async function ensureForecast(sql) {
 async function runSql(sql) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
+  if (servedMode) {
+    // Capture a SET VARIABLE (don't touch the connection) …
+    const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
+    if (m) {
+      servedVars[m[1]] = m[2].trim();
+      return "[]";
+    }
+    // … and inline all current variables into each data query, so the request
+    // is self-contained (the gated, stateless server needs no session state).
+    const prefix = Object.entries(servedVars)
+      .map(([k, v]) => `SET VARIABLE ${k} = ${v}; `)
+      .join("");
+    sql = prefix + sql;
+  }
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
     if (!r.ok) throw new Error(await r.text());
@@ -994,17 +1014,17 @@ async function boot() {
   // the server gates /query, so the client can render everything but only run the
   // server's registered queries.
   const served = window.__served || null;
+  if (served) servedMode = true;
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
-  const decodeB64 = (x) => {
-    try {
-      return decodeURIComponent(escape(atob(x)));
-    } catch (_) {
-      return null;
-    }
-  };
-  const servedSql = served ? decodeB64(served.sql) : null;
+  // Deep-link: activate the tab named in ?tab= on first render (loadDash resets
+  // this only when switching dashboards, so it survives the initial run()).
+  const tabParam = getTabParam();
+  if (tabParam) dpTab = tabParam;
+  // Persistent cross-dashboard nav (served mode, 2+ dashboards).
+  renderServedNav(served);
+  const servedSql = served && typeof served.sql === "string" ? served.sql : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
   const savedItems = dashStore().items;
@@ -1656,6 +1676,46 @@ document.addEventListener("keydown", (e) => {
 });
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
+
+// Deep-linking: reflect the active tab in the URL (?tab=) so a reload or a
+// shared link lands on the same page.
+function getTabParam() {
+  try {
+    return new URLSearchParams(location.search).get("tab");
+  } catch (e) {
+    return null;
+  }
+}
+function setTabParam(name) {
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set("tab", name);
+    history.replaceState(null, "", u);
+  } catch (e) {}
+}
+
+// Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
+// built from window.__served.nav. No-op unless there are 2+ dashboards.
+function renderServedNav(served) {
+  if (!served || !Array.isArray(served.nav) || served.nav.length < 2) return;
+  if (document.querySelector(".served-nav")) return;
+  const nav = document.createElement("nav");
+  nav.className = "served-nav";
+  nav.style.cssText =
+    "display:flex;gap:.25rem;padding:.5rem 1rem;background:#fff;border-bottom:1px solid #e5e9f0;flex-wrap:wrap;align-items:center";
+  for (const d of served.nav) {
+    const a = document.createElement("a");
+    a.href = "/d/" + encodeURIComponent(d.id);
+    a.textContent = d.title || d.id;
+    const active = d.id === served.id;
+    a.style.cssText =
+      "padding:.35rem .8rem;border-radius:6px;text-decoration:none;font:600 14px system-ui;" +
+      (active ? "background:#0f766e;color:#fff" : "color:#334");
+    nav.appendChild(a);
+  }
+  const dash = document.querySelector(".dash");
+  if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
+}
 let dpTimer = null; // auto-refresh interval handle
 let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 
@@ -1821,6 +1881,7 @@ async function run(fresh = true) {
         btn.onclick = (e) => {
           e.stopPropagation();
           dpTab = name; // remember, so a cross-filter re-run keeps this tab
+          setTabParam(name); // deep-link: reflect the active tab in the URL
           tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
           tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
           pane.style.display = "";
