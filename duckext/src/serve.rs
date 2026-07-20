@@ -324,15 +324,29 @@ pub fn start_dashboards(port: u16, dir: &str) -> String {
 fn handle_served(mut req: tiny_http::Request) {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/").to_string();
+    // Access log: one line per request (method + path) for observability.
+    eprintln!("[anofox-serve] {} {}", req.method(), path);
+
+    // Liveness/readiness probe for supervisors (systemd, Docker, k8s, LBs).
+    if path == "/health" || path == "/healthz" {
+        let n = DASHBOARDS.get().map(|d| d.len()).unwrap_or(0);
+        let body = format!("{{\"status\":\"ok\",\"dashboards\":{n}}}");
+        let _ = req.respond(Response::from_string(body).with_header(ct("application/json")));
+        return;
+    }
     if req.method() == &Method::Post && path == "/query" {
         let mut sql = String::new();
         let _ = std::io::Read::read_to_string(req.as_reader(), &mut sql);
         let resp = if gate(&sql) {
             match unsafe { query_json(&sql) } {
                 Ok(json) => Response::from_string(json).with_header(ct("application/json")),
-                Err(e) => Response::from_string(e).with_header(ct("text/plain")).with_status_code(400),
+                Err(e) => {
+                    eprintln!("[anofox-serve] 400 query error: {e}");
+                    Response::from_string(e).with_header(ct("text/plain")).with_status_code(400)
+                }
             }
         } else {
+            eprintln!("[anofox-serve] 403 query not permitted (not in allow-list)");
             Response::from_string("query not permitted").with_status_code(403)
         };
         let _ = req.respond(resp);
