@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # (legend_position, CoordPolar::inner_radius, geom hover…). Makes the build
 # self-contained (no ggplot-rs sibling checkout needed). Bump the rev to update;
 # for local ggplot-rs work, `[patch]` it to a path. See duckext/DISTRIBUTING.md.
-ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "498aad5a851ea249bf19f14947c3561cf3a4a3e0", default-features = false, features = ["sf"] }
+ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37a5b6405328fe14e82b7c7fe845ce80901", default-features = false, features = ["sf"] }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

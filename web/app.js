@@ -1866,6 +1866,21 @@ async function run(fresh = true) {
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
+  // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
+  // ::MONEY/::PERCENT, no ::TABLE) into one compact strip, so a plain dashboard
+  // gets a metric band without an explicit ::GROUP. Never fires inside a
+  // ::GROUP/tab that already boxes the tiles.
+  const isKpi = (st) => !st.setup && !directive(st) && !isInput(st) && !!metricRole(st) && !role(st, "TABLE");
+  const kpiRun = (from) => {
+    let n = 0;
+    for (let j = from; j < stmts.length; j++) {
+      if (stmts[j].setup) continue;
+      if (isKpi(stmts[j])) n++;
+      else break;
+    }
+    return n;
+  };
+  let autoGroup = null; // open synthetic ::GROUP body element, or null
   const firstValue = async (s) => {
     const rows = JSON.parse(await runSql(s.sql));
     return rows[0] ? Object.values(rows[0])[0] : null;
@@ -1874,6 +1889,22 @@ async function run(fresh = true) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
+    // Close an open auto-strip the moment a non-KPI statement appears; open one
+    // when a fresh top-level run of >=2 KPI tiles begins.
+    if (autoGroup && !isKpi(s)) {
+      container = curGrid;
+      autoGroup = null;
+    }
+    if (!autoGroup && container === curGrid && isKpi(s) && kpiRun(i) >= 2) {
+      const box = document.createElement("section");
+      box.className = "group";
+      const body = document.createElement("div");
+      body.className = "group-body";
+      box.appendChild(body);
+      curGrid.appendChild(box);
+      container = body;
+      autoGroup = body;
+    }
     try {
       if (d === "COLUMNS") {
         const n = parseInt(await firstValue(s));
@@ -3025,17 +3056,26 @@ function cellSpark(v) {
   );
 }
 
+// Number formatting locale — pinned (not the viewer's) so a dashboard reads the
+// same for everyone: "$53.8T"/"1.92", never a locale-dependent "53,8 Bio.".
+const NUM_LOCALE = "en-US";
+
 // Format a KPI value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
 function fmtNum(v, fmt) {
   const n = typeof v === "number" ? v : parseFloat(v);
   if (v == null) return "–";
   if (Number.isNaN(n)) return String(v);
   if (fmt === "MONEY")
-    return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-  if (fmt === "PERCENT") return n.toLocaleString(undefined, { maximumFractionDigits: 1 }) + "%";
+    return n.toLocaleString(NUM_LOCALE, {
+      style: "currency",
+      currency: "USD",
+      notation: Math.abs(n) >= 1e6 ? "compact" : "standard",
+      maximumFractionDigits: Math.abs(n) >= 1e6 ? 1 : 0,
+    });
+  if (fmt === "PERCENT") return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 }) + "%";
   if (fmt === "COMPACT")
-    return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    return new Intl.NumberFormat(NUM_LOCALE, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
 }
 
 function escapeHtml(s) {

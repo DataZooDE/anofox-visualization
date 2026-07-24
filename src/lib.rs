@@ -355,13 +355,23 @@ fn value_str(v: &Value) -> String {
     }
 }
 
-/// The DataZoo palette — anofox-visualization's default categorical + single-series colours.
-pub const DZ_COLORS: [(u8, u8, u8); 5] = [
-    (0x45, 0x64, 0x81), // steel blue
+/// The DataZoo palette — anofox-visualization's default categorical + single-series
+/// colours. The first five are the brand set (index 0 = the default primary);
+/// seven more distinct hues follow so a chart with up to ~12 categories keeps
+/// every series visually separable (11 GICS sectors used to collide at 5).
+pub const DZ_COLORS: [(u8, u8, u8); 12] = [
+    (0x45, 0x64, 0x81), // steel blue (brand primary)
     (0xe8, 0x64, 0x33), // orange
     (0xE8, 0x33, 0x5D), // pink
     (0xef, 0xc9, 0x4c), // yellow
     (0x21, 0x21, 0x21), // near-black
+    (0x3f, 0xa6, 0x6f), // green
+    (0x81, 0x56, 0xa0), // purple
+    (0x57, 0xb7, 0xd6), // sky blue
+    (0x9c, 0x6b, 0x3f), // brown
+    (0xa7, 0xc9, 0x57), // lime
+    (0xd0, 0x81, 0xb8), // mauve
+    (0x7a, 0x8b, 0x99), // slate grey
 ];
 
 fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
