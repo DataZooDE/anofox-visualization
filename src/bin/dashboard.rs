@@ -34,7 +34,10 @@ fn main() {
 /// Render an annotated `.sql` file to an interactive HTML dashboard.
 fn cmd_render(args: &[String]) {
     let path = args[0].clone();
-    let out = args.get(1).cloned().unwrap_or_else(|| "dashboard.html".to_string());
+    let out = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
 
     let db = std::env::temp_dir().join(format!("anofox_{}.db", std::process::id()));
@@ -99,17 +102,24 @@ fn cmd_check(args: &[String]) {
     // and tables are already in scope, so the dashboards are pure queries.
     let mut db: Option<String> = None;
     let mut path = None;
+    let mut design = true; // --no-design turns off the design/* advisory pass
+    let mut strict = false; // --strict makes design/* warnings fail the exit code
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().cloned(),
             "--json" => {}
+            "--no-design" => design = false,
+            "--strict" => strict = true,
             _ if !a.starts_with("--") => path = Some(a.clone()),
             _ => {}
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: dashboard --check <file.sql> [--json] [--db prebuilt.duckdb]");
+        eprintln!(
+            "usage: dashboard --check <file.sql> [--json] [--db prebuilt.duckdb] \
+             [--strict] [--no-design]"
+        );
         std::process::exit(2);
     };
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -119,9 +129,22 @@ fn cmd_check(args: &[String]) {
 
     // Each call runs a full script (prelude + one statement) in a fresh session
     // (in-memory, or read-only against --db) — the linter replays session state.
-    let diags = lint::check(&script, |sql| run_query(db.as_deref(), sql));
+    let diags = lint::check_opts(
+        &script,
+        |sql| run_query(db.as_deref(), sql),
+        lint::LintOptions { design },
+    );
 
-    let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+    let errors = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    // --strict: a design/* advisory also fails the exit code (for CI gating).
+    let design_hits = diags
+        .iter()
+        .filter(|d| d.code.starts_with("design/"))
+        .count();
+    let failed = errors > 0 || (strict && design_hits > 0);
     if json_out {
         let items: Vec<String> = diags
             .iter()
@@ -136,7 +159,11 @@ fn cmd_check(args: &[String]) {
                 )
             })
             .collect();
-        println!("{{\"ok\":{},\"diagnostics\":[{}]}}", errors == 0, items.join(","));
+        println!(
+            "{{\"ok\":{},\"diagnostics\":[{}]}}",
+            !failed,
+            items.join(",")
+        );
     } else {
         for d in &diags {
             println!(
@@ -150,7 +177,7 @@ fn cmd_check(args: &[String]) {
         }
         println!("\n{}", lint::summary(&diags));
     }
-    if errors > 0 {
+    if failed {
         std::process::exit(1);
     }
 }

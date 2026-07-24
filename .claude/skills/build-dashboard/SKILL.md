@@ -32,17 +32,30 @@ single SQL script that renders the requested dashboard.
    cross-filter (`getvariable('selected')`).
 6. **Validate & repair — required. Do not finish on unvalidated SQL.** Run
    `dashboard --check <file.sql>` (add `--json` for structured output). It runs
-   every statement and reports what silently breaks: `silent-setup` (a panel that
-   lost its roles — usually a leading `WITH`), `sql-error`, `render-error`
-   (missing required aesthetics), `empty-panel` (0 rows), and `unknown-cast` (a
-   typo'd `::ROLE`). Fix each and re-run until it prints **clean** (exit 0).
-   These failures are invisible in the rendered output — the linter is how you
-   catch them.
-7. **Self-critique against the rubric.** Once it's clean, correctness is not
-   taste. Review against the **Design rubric** below: does it lead with KPIs? is
-   each chart the right kind for its column's data? is every chart titled and are
-   money/percent axes formatted? are filters grouped and wired to *all* dependent
-   panels? is it ≤ ~8 panels per view? Refine, then re-run `--check`.
+   every statement and reports two classes of problem:
+   - **Correctness (`error`) — must be zero.** `silent-setup` (a panel that lost
+     its roles — usually a leading `WITH`), `sql-error`, `render-error` (missing
+     required aesthetics), `empty-panel` (0 rows), `unknown-cast` (a typo'd
+     `::ROLE`). These are invisible in the output — the linter is how you catch
+     them.
+   - **Design (`design/*` warnings) — resolve or justify each.** `pie-slices`,
+     `unsorted-bars`, `untitled-chart`, `many-series`, `too-many-panels`,
+     `ungrouped-kpis`, `raw-table`. Fix each and re-run until it prints **clean**
+     (exit 0). CI can gate on design too with `--strict`; `--no-design` silences
+     the advisory pass.
+7. **Self-critique against the design contract.** Correctness is not taste. Hold
+   the dashboard to the **Design contract** below (full rationale:
+   [`docs/dashboard-design.md`](../../docs/dashboard-design.md)). Refine, then
+   re-run `--check` until both classes are clean.
+8. **Visual review — required. `--check` never looks at the render.** Serve and
+   screenshot the dashboard, then grade the *image*: `scripts/shoot.sh --dash
+   <dir> [--init <file> --workdir <dir>] --tabs "A,B" --out /tmp/shots`. Review
+   each PNG against [`docs/dashboard-visual-review.md`](../../docs/dashboard-visual-review.md)
+   — a vision agent (or you, looking at the images) returns
+   `{severity, panel, issue, fix}`; fix every `blocker`/`major` (clipped labels,
+   colliding colours, locale-broken numbers, empty panels, no hierarchy) and
+   re-shoot until clean. Only now is the dashboard done. Save the reviewed PNGs
+   as the golden baseline next to the dashboard.
 
 ## The cast is on the OUTPUT column
 
@@ -154,9 +167,11 @@ WHERE sku = COALESCE(NULLIF(getvariable('sku'),''), (SELECT sku FROM ts ORDER BY
 ORDER BY month;
 ```
 
-## Design rubric
+## Design contract
 
-Correctness (it lints clean) is not taste. Aim for these.
+Correctness (it lints clean) is not taste. Hold to these — full rationale and
+sources in [`docs/dashboard-design.md`](../../docs/dashboard-design.md). Items
+marked **[lint]** are enforced by `dashboard --check` (`design/*`).
 
 **Pick the chart from the data (use `--describe` for cardinality):**
 
@@ -172,17 +187,26 @@ Correctness (it lints clean) is not taste. Aim for these.
 | geography (WKT geometry) | `::MAP` |
 | row-level detail / many columns | `::TABLE` (`::PAGED` if large/remote) |
 
-**Compose it well:**
+**Compose it well (inverted pyramid):**
 
-- **Lead with KPIs** — a row of 2–4 headline tiles, *then* the primary chart that
-  answers the main question, *then* supporting breakdowns, *then* a detail table.
+- **Lead with a KPI strip** — 2–6 headline tiles wrapped in `::GROUP … ::ENDGROUP`
+  (not scattered top-level cards) — *then* the primary full-width chart that
+  answers the main question, *then* 2-up breakdowns, *then* a detail table.
+  **[lint: ungrouped-kpis]**
 - **Filters up top**, inside a `::GROUP` box, and actually wire them: every panel
   that should react must reference `getvariable('<name>')`.
-- **Title every chart** (`::TITLE`) and **format money/percent axes**
-  (`::YFORMAT '€'`, `::PERCENT`) — unlabelled numbers read as noise.
-- **Stay focused**: ~4–8 panels per view; split topics with `::TAB` rather than
-  one endless page. Full-width (`::SPAN 12`) for time series and heatmaps; 2-up
-  for comparisons.
+- **Title every chart** with the *takeaway* (`::TITLE 'Revenue up 12% YoY'`, not
+  `'Revenue'`) and **format money/percent axes** (`::YFORMAT '€'`). **[lint: untitled-chart]**
+- **Sort bars by value** (`ORDER BY <measure> DESC`) unless x is time; long
+  category labels → `::FLIP` horizontal bars. **[lint: unsorted-bars]**
+- **No pie/donut past ~6 slices** (use a sorted bar); **≤ ~7 colour series**
+  (top-N + "Other" beyond). **[lint: pie-slices, many-series]**
+- **Stay focused**: ≤ ~7 panels per view; split topics with `::TAB` rather than
+  one endless page. Full-width (`::COL 12`) for time series/heatmaps; 2-up
+  (default) for comparisons. **[lint: too-many-panels]**
+- **Don't dump raw rows** — `::TABLE` paginates the view but loads every row;
+  cut a big detail table to a top-N or aggregate (`::PAGED` for remote sources).
+  **[lint: raw-table]**
 - **Colour is discrete** — band a continuous value into a `CASE` before `::COLOR`.
 
 A complete, well-composed reference dashboard (self-contained, lints clean):

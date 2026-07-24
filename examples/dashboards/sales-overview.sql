@@ -17,7 +17,8 @@ SELECT 'Filter' ::GROUP;
 SELECT region AS region ::DROPDOWN FROM sales GROUP BY region ORDER BY region;
 SELECT 1 ::ENDGROUP;
 
--- KPI row: headline numbers first
+-- KPI row: headline numbers first, in a ::GROUP so they render as one strip
+SELECT 'Performance' ::GROUP;
 SELECT ROUND(SUM(units*price),0) ::MONEY, 'Revenue' ::LABEL
 FROM sales WHERE region = getvariable('region');
 SELECT SUM(units) ::COMPACT, 'Units' ::LABEL
@@ -26,6 +27,7 @@ SELECT ROUND(SUM(units*price)/SUM(units),2) ::MONEY, 'Avg unit price' ::LABEL
 FROM sales WHERE region = getvariable('region');
 SELECT COUNT(DISTINCT channel) ::METRIC, 'Channels' ::LABEL
 FROM sales WHERE region = getvariable('region');
+SELECT 1 ::ENDGROUP;
 
 -- Primary question: revenue over time by channel (full width, € axis)
 SELECT 12 ::SPAN;
