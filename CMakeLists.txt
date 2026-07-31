@@ -53,6 +53,14 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_link_libraries(${EXTENSION_NAME} anofox_viz_ffi-static)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} anofox_viz_ffi-static)
 
+if(APPLE)
+    # CoreFoundation/IOKit: the Rust staticlib's iana_time_zone crate (via chrono)
+    # references _CFRelease/_CFStringGetBytes. Rust's framework link directives are
+    # NOT propagated when a staticlib is linked by CMake/clang++, so add them here.
+    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+endif()
+
 if(WIN32)
     # bcrypt: required by Rust's getrandom crate
     target_link_libraries(${EXTENSION_NAME} bcrypt)
