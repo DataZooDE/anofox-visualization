@@ -10,11 +10,12 @@ extension:
   license: BUSL-1.1
   excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads"  # native only for now
   maintainers:
+    - DataZooDE
     - sipemu
 
 repo:
-  github: sipemu/anofox-visualization   # TODO: push anofox-visualization to GitHub first (it has no remote yet)
-  ref: <commit-or-tag>
+  github: DataZooDE/anofox-visualization
+  ref: main   # set to a release tag when cutting a versioned release
 
 docs:
   hello_world: |
