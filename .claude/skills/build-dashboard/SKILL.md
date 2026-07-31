@@ -26,7 +26,11 @@ single SQL script that renders the requested dashboard.
    inputs for filtering.
 3. **Lay it out.** Set `SELECT n::COLUMNS;` for the grid, use `::COL` for
    per-panel width, group KPIs in a `::GROUP` box, use `::TAB`/`::SUBTAB` for
-   sections.
+   sections. **Follow the placement do/don'ts** in
+   [`docs/dashboard-design.md` §7](../../docs/dashboard-design.md) — especially:
+   keep the top to one slim row (a bare `::DROPDOWN` filter, no banner that
+   repeats the KPIs), title 2-up panels with a `::TITLE` column (not a full-width
+   `::LABEL` that stacks them), and equalise a row's heights with `::HEIGHT`.
 4. **Write the SQL.** One annotated `SELECT` per panel, in top-to-bottom order.
 5. **Add interactivity** if asked: inputs (`::DROPDOWN`/`::MULTISELECT`/…) and
    cross-filter (`getvariable('selected')`).

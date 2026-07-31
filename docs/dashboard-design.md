@@ -107,3 +107,47 @@ Pick the chart from the *question*, grounded in the column's cardinality
 Run `dashboard --check <file.sql>` to see these on your own dashboard; add
 `--strict` to make them fail CI, `--no-design` to silence them. A clean,
 well-composed reference dashboard lives at `examples/dashboards/sales-overview.sql`.
+
+## 7. Layout & placement — do / don't (framework recipes)
+
+*How* to place panels in `::ROLE` SQL — the mechanics behind the rules above,
+validated on real dashboards. This is the fastest way from "it renders" to "it's
+well placed." All **[guide]** unless noted.
+
+**Widths & rows**
+- ✅ **Default to 2-up** (`::COL 6`); reserve `::COL 12` for time series, wide /
+  coloured scatter, and detail tables.
+- ✅ **Equalise heights in a 2-up row** with `::HEIGHT` — ragged heights are the
+  #1 "badly placed" tell.
+- ❌ **Don't put a full-width `::LABEL` heading *between* two panels you want side
+  by side** — a lone `::LABEL` forces a new row, so they stack. Title them with a
+  **`::TITLE` column instead** (works on charts *and* tables).
+- ❌ **Don't use `::GROUP` to get 2-up** — a group is always full-width and
+  ignores `::COL`. Use it for the KPI strip or a filter box, not side-by-side.
+
+**The top of the page (above-the-fold space is scarce)**
+- ✅ **Keep the header to one slim row.** A global filter is a **bare input**
+  (`::DROPDOWN` with no `::GROUP`) → it renders as a compact control bar, not a card.
+- ✅ **Lead with the data**: filter (slim) → tabs → KPIs → primary chart. The most
+  important content must be visible without scrolling.
+- ❌ **Don't stack redundant top cards.** A summary **banner that repeats the KPI
+  numbers**, or a **hint that repeats what the dropdown already says**, is pure
+  wasted space — every top row pushes the data below the fold.
+- ❌ **Don't wrap a single control in a full `::GROUP` card** (a big empty box).
+
+**Interactivity placement (linking)**
+- ✅ **Comparative charts (sector bars/boxes) are the click *sources*** — they
+  must NOT self-filter, so they stay clickable and keep showing all categories.
+- ✅ **Detail panels (tables, histograms, filtered charts) are *targets*** that
+  filter to the selection.
+- ✅ **Guard a shared filter against stray clicks** — e.g. only treat
+  `getvariable('selected')` as a sector if it *is* a sector, so clicking a company
+  doesn't blank the sector panels.
+
+**Serving**
+- ❌ **Don't use `::PAGED` in a *locked-served* dashboard** — the allow-list
+  rejects its dynamic LIMIT/OFFSET queries ("query not permitted"). `::TABLE`
+  paginates client-side and works.
+
+The interactive, cross-filtered reference that applies all of the above:
+`examples/sp500-dashboard/sp500.sql`.
