@@ -59,8 +59,12 @@ CREATE OR REPLACE TABLE meta AS SELECT
   (SELECT median(pe)        FROM co WHERE pe IS NOT NULL)               AS med_pe,
   (SELECT median(div_yield) FROM co WHERE div_yield IS NOT NULL)        AS med_dy;
 
--- Sector picker: whatever the dropdown set, else the most-populated sector.
+-- The active sector filter, or NULL = all sectors. Unifies two inputs:
+--   1. clicking a sector bar/box sets getvariable('selected') to the sector name
+--      (a click on anything else — a company — matches no sector, so is ignored);
+--   2. the dropdown sets getvariable('sector') ('All sectors' = no filter).
+-- A click wins over the dropdown. NULL result => panels show every sector.
 CREATE OR REPLACE MACRO sel_sector() AS
-  COALESCE(getvariable('sector'),
-           (SELECT sector FROM co WHERE sector <> 'Other'
-            GROUP BY sector ORDER BY count(*) DESC LIMIT 1));
+  COALESCE(
+    (SELECT DISTINCT sector FROM co WHERE sector = NULLIF(getvariable('selected'), '')),
+    NULLIF(getvariable('sector'), 'All sectors'));
