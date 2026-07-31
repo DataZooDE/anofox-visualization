@@ -63,7 +63,7 @@ the axes and colour series.
 
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
-- **Serve locked, read-only dashboards** — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (allow-listed `/query`) over a read-only snapshot.
+- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (allow-listed `/query`) over a read-only snapshot.
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks) and a `build-dashboard` agent skill that writes dashboards from a prompt.
 
@@ -89,19 +89,30 @@ SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions'::TIT
 FROM sessions GROUP BY ALL ORDER BY ALL;
 ```
 
-Open the **interactive builder** wired to your live database, DuckDB-UI style:
+### What's in the extension vs. the full toolkit
+
+> [!NOTE]
+> The **community extension** you install (below) provides **rendering only** —
+> `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc` macros that
+> turn SQL into SVG. The **serving and builder features** below embed a web UI +
+> HTTP server and are **not** in the community binary — they come with a
+> **from-source build** (see [Installation → From source](#from-source)).
+
+From a from-source build you also get an **in-browser builder** and **locked,
+read-only serving**:
 
 ```sql
-SELECT anofox_serve(8080);   -- http://localhost:8080 against THIS database (localhost only)
-```
+-- Interactive builder wired to THIS database, DuckDB-UI style (localhost only):
+SELECT anofox_serve(8080);              -- http://localhost:8080
 
-Serve a folder of `.sql` dashboards **locked, read-only** to consumers:
-
-```sql
+-- Serve a folder of .sql dashboards locked + read-only to consumers:
 SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/           a list of the folder's dashboards
 -- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
 ```
+
+…plus a `dashboard` CLI (`cargo run --bin dashboard -- file.sql`) and the
+standalone browser app (`web/`).
 
 ## Installation
 
@@ -115,10 +126,14 @@ INSTALL anofox_visualization FROM community;
 LOAD anofox_visualization;
 ```
 
+**Provides: rendering only** — `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc`
+macros (SQL → SVG). Serving and the builder are not included (see below).
+
 ### From source
 
-DuckDB must be started with `-unsigned` (the binary is not signed by the DuckDB
-Foundation).
+The from-source build is the **full toolkit**: rendering **plus** `anofox_serve`,
+`anofox_serve_dashboards`, the `dashboard` CLI, and the web builder. DuckDB must
+be started with `-unsigned` (the binary is not signed by the DuckDB Foundation).
 
 ```sh
 git clone --recurse-submodules https://github.com/DataZooDE/anofox-visualization
