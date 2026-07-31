@@ -8,3 +8,4 @@ duckext/duckdb.h
 duckext/duckdb_extension.h
 
 /web/pkg
+/crates/anofox-viz-ffi/target

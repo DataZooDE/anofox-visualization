@@ -1,0 +1,15 @@
+[package]
+name = "anofox_viz_ffi"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+description = "C FFI boundary for the anofox_visualization DuckDB extension (render-only)"
+
+[lib]
+name = "anofox_viz_ffi"
+crate-type = ["staticlib"]
+
+[dependencies]
+# The render-only core (default features: no serve, no wasm). ggplot-rs is a
+# transitive git dep — public, so the community build can fetch it.
+anofox-visualization = { path = "../..", default-features = false }
