@@ -56,8 +56,17 @@ project(${TARGET_NAME})
 include_directories(src/include)
 set(EXTENSION_SOURCES csrc/anofox_visualization_extension.cpp)
 
+# Feedback banner (header-only). Telemetry stays OFF: this extension does not
+# link posthog-telemetry, so there is no telemetry.hpp to include and no
+# instance to report a banner_shown event through.
+set(DATAZOO_BANNER_TELEMETRY OFF CACHE BOOL "" FORCE)
+add_subdirectory(datazoo-banner)
+
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+target_link_libraries(${EXTENSION_NAME} datazoo_banner)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} datazoo_banner)
 
 # Link the Rust FFI static archive (corrosion registers `<crate>-static`).
 target_link_libraries(${EXTENSION_NAME} anofox_viz_ffi-static)

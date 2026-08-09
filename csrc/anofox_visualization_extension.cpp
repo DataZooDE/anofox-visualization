@@ -1,8 +1,24 @@
 #include "anofox_visualization_extension.hpp"
 #include "anofox_viz_ffi.h"
+#include "anofox_visualization_banner.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <string>
+
+// The build stamps EXT_VERSION_ANOFOX_VISUALIZATION from the git tag; the
+// fallback keeps the banner honest in local builds that do not, and matches
+// what AnofoxVisualizationExtension::Version() reports below.
+#ifdef EXT_VERSION_ANOFOX_VISUALIZATION
+#define ANOFOX_VISUALIZATION_BANNER_VERSION EXT_VERSION_ANOFOX_VISUALIZATION
+#else
+#define ANOFOX_VISUALIZATION_BANNER_VERSION "0.1.0"
+#endif
+
+// Deliberately outside namespace duckdb: the banner library is DuckDB-agnostic
+// and the guard macro refers to this object from every guarded source file.
+const datazoo::BannerInfo ANOFOX_VISUALIZATION_BANNER {
+    "anofox_visualization", ANOFOX_VISUALIZATION_BANNER_VERSION,
+    "https://github.com/DataZooDE/anofox-visualization"};
 
 namespace duckdb {
 
@@ -33,7 +49,11 @@ static const char *MACROS[] = {
 };
 
 void LoadInternal(ExtensionLoader &loader) {
-	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR, AnofoxRenderFunction);
+	// Guarded: anofox_render is the single user-facing entry point. Every
+	// anofox_bar/_line/_scatter/_area/_xy/_xyc macro below expands to a call to
+	// it, so one guard puts the issue link on a failure from any of them.
+	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
 	loader.RegisterFunction(render);
 
 	Connection con(loader.GetDatabaseInstance());
@@ -42,6 +62,11 @@ void LoadInternal(ExtensionLoader &loader) {
 		con.Query(sql);
 	}
 	con.Commit();
+
+	datazoo::RegisterBannerOption(loader);
+	// Last, so a load that fails earlier never advertises itself. Silent unless
+	// stderr is a terminal and the ~/.duckdb stamp is over a day old.
+	datazoo::ShowBanner(ANOFOX_VISUALIZATION_BANNER);
 }
 
 void AnofoxVisualizationExtension::Load(ExtensionLoader &loader) {
