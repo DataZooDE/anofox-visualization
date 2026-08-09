@@ -199,6 +199,19 @@ Contributions are welcome:
 - Documentation, guides, and example dashboards
 - Bug reports and fixes; performance work
 
+## Feedback
+
+If a chart renders wrong, or `anofox_render` returns something you did not expect,
+please [open an issue](https://github.com/DataZooDE/anofox-visualization/issues).
+Rendering depends on your data shape, roles and dimensions in ways we cannot
+reproduce here, so a report with the spec you passed is the fastest path to a fix.
+
+If it saved you time, a star on the repo helps other people find it.
+
+The first time you load the extension in an interactive terminal each day, a small
+banner says the same thing. It never prints when output is piped, in notebooks, or in
+CI. Silence it with `SET datazoo_banner = false;` or `DATAZOO_NO_BANNER=1`.
+
 ## Support
 
 - **Documentation**: [docs/](docs/)
