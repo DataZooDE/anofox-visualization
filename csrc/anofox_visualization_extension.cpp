@@ -3,6 +3,8 @@
 #include "anofox_visualization_banner.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/catalog/default/default_functions.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include <string>
 
 // The build stamps EXT_VERSION_ANOFOX_VISUALIZATION from the git tag; the
@@ -35,17 +37,60 @@ static void AnofoxRenderFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 // SQL sugar: anofox_bar/_line/_scatter/_area/_xy/_xyc — build a spec + call anofox_render.
-static const char *MACROS[] = {
-	"CREATE OR REPLACE MACRO anofox_xy(x, y, kind := 'BARCHART', width := 640, height := 400) AS "
-	"anofox_render(json_object('rows', to_json(list({c0: x, c1: y})), "
-	"'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"]]')::JSON, 'width', width, 'height', height))",
-	"CREATE OR REPLACE MACRO anofox_xyc(x, y, series, kind := 'BARCHART_STACKED', width := 640, height := 400) AS "
-	"anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series})), "
-	"'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"],[2,\"CATEGORY\"]]')::JSON, 'width', width, 'height', height))",
-	"CREATE OR REPLACE MACRO anofox_bar(x, y) AS anofox_xy(x, y, kind := 'BARCHART')",
-	"CREATE OR REPLACE MACRO anofox_line(x, y) AS anofox_xy(x, y, kind := 'LINECHART')",
-	"CREATE OR REPLACE MACRO anofox_scatter(x, y) AS anofox_xy(x, y, kind := 'SCATTER')",
-	"CREATE OR REPLACE MACRO anofox_area(x, y) AS anofox_xy(x, y, kind := 'AREACHART')",
+//
+// Registered as DefaultMacros rather than by executing "CREATE OR REPLACE MACRO ..."
+// against a connection. Two reasons:
+//
+//   1. A macro created by running SQL cannot carry documentation. CREATE MACRO has no
+//      syntax for a description, and COMMENT ON MACRO populates
+//      duckdb_functions().comment, which is a different column from .description --
+//      so these six were invisible to any agent reading the catalog. CreateMacroInfo
+//      derives from CreateFunctionInfo, so this path can carry the metadata.
+//   2. Executing CREATE MACRO wrote them into whatever database the user happened to
+//      have open, persisting extension-owned definitions into their file. Registering
+//      them as internal catalog entries is what DuckDB's own json extension does.
+struct AnofoxMacro {
+	DefaultMacro macro;
+	const char *description;
+	const char *example;
+};
+
+static const AnofoxMacro ANOFOX_MACROS[] = {
+    {{DEFAULT_SCHEMA,
+      "anofox_xy",
+      {"x", "y", nullptr},
+      {{"kind", "'BARCHART'"}, {"width", "640"}, {"height", "400"}, {nullptr, nullptr}},
+      "anofox_render(json_object('rows', to_json(list({c0: x, c1: y})), "
+      "'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"]]')::JSON, 'width', width, 'height', height))"},
+     "Aggregate two columns into a single-series chart and render it as SVG. 'kind' selects the mark "
+     "(BARCHART, LINECHART, SCATTER, AREACHART); x becomes the axis and y the value.",
+     "SELECT anofox_xy(x, y, kind := 'LINECHART') FROM (VALUES ('Jan', 10), ('Feb', 20)) t(x, y)"},
+    {{DEFAULT_SCHEMA,
+      "anofox_xyc",
+      {"x", "y", "series", nullptr},
+      {{"kind", "'BARCHART_STACKED'"}, {"width", "640"}, {"height", "400"}, {nullptr, nullptr}},
+      "anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series})), "
+      "'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"],[2,\"CATEGORY\"]]')::JSON, 'width', width, 'height', "
+      "height))"},
+     "Aggregate three columns into a multi-series chart and render it as SVG, with 'series' splitting the "
+     "data into categories.",
+     "SELECT anofox_xyc(x, y, s) FROM (VALUES ('Jan', 10, 'EU'), ('Jan', 8, 'US')) t(x, y, s)"},
+    {{DEFAULT_SCHEMA, "anofox_bar", {"x", "y", nullptr}, {{nullptr, nullptr}},
+      "anofox_xy(x, y, kind := 'BARCHART')"},
+     "Render a bar chart of two columns as SVG. Shorthand for anofox_xy(x, y, kind := 'BARCHART').",
+     "SELECT anofox_bar(x, y) FROM (VALUES ('Jan', 10), ('Feb', 20)) t(x, y)"},
+    {{DEFAULT_SCHEMA, "anofox_line", {"x", "y", nullptr}, {{nullptr, nullptr}},
+      "anofox_xy(x, y, kind := 'LINECHART')"},
+     "Render a line chart of two columns as SVG. Shorthand for anofox_xy(x, y, kind := 'LINECHART').",
+     "SELECT anofox_line(x, y) FROM (VALUES ('Jan', 10), ('Feb', 20)) t(x, y)"},
+    {{DEFAULT_SCHEMA, "anofox_scatter", {"x", "y", nullptr}, {{nullptr, nullptr}},
+      "anofox_xy(x, y, kind := 'SCATTER')"},
+     "Render a scatter plot of two columns as SVG. Shorthand for anofox_xy(x, y, kind := 'SCATTER').",
+     "SELECT anofox_scatter(x, y) FROM (VALUES (1.5, 10), (2.5, 20)) t(x, y)"},
+    {{DEFAULT_SCHEMA, "anofox_area", {"x", "y", nullptr}, {{nullptr, nullptr}},
+      "anofox_xy(x, y, kind := 'AREACHART')"},
+     "Render an area chart of two columns as SVG. Shorthand for anofox_xy(x, y, kind := 'AREACHART').",
+     "SELECT anofox_area(x, y) FROM (VALUES ('Jan', 10), ('Feb', 20)) t(x, y)"},
 };
 
 void LoadInternal(ExtensionLoader &loader) {
@@ -54,14 +99,33 @@ void LoadInternal(ExtensionLoader &loader) {
 	// it, so one guard puts the issue link on a failure from any of them.
 	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
-	loader.RegisterFunction(render);
-
-	Connection con(loader.GetDatabaseInstance());
-	con.BeginTransaction();
-	for (auto sql : MACROS) {
-		con.Query(sql);
+	{
+		CreateScalarFunctionInfo info(std::move(render));
+		FunctionDescription desc;
+		desc.description =
+		    "Render a chart specification to an SVG string. The spec is JSON carrying 'rows' (the data), "
+		    "'roles' (which column plays which part: XAXIS, BARCHART, CATEGORY, ...) and optional 'width' "
+		    "and 'height'. The anofox_bar/_line/_scatter/_area/_xy/_xyc macros build this spec for you.";
+		desc.parameter_names = {"spec"};
+		desc.parameter_types = {LogicalType::VARCHAR};
+		desc.examples = {"anofox_render(json_object('rows', to_json([{c0: 'Jan', c1: 10}]), "
+		                 "'roles', '[[0,\"XAXIS\"],[1,\"BARCHART\"]]'::JSON))"};
+		desc.categories = {"visualization"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
 	}
-	con.Commit();
+
+	for (auto &entry : ANOFOX_MACROS) {
+		auto info = DefaultFunctionGenerator::CreateInternalMacroInfo(entry.macro);
+		FunctionDescription desc;
+		desc.description = entry.description;
+		desc.examples = {entry.example};
+		desc.categories = {"visualization"};
+		// parameter_names is deliberately unset: a macro already reports its real
+		// parameter names, and a non-empty parameter_names would replace the whole list.
+		info->descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(*info);
+	}
 
 	datazoo::RegisterBannerOption(loader);
 	// Last, so a load that fails earlier never advertises itself. Silent unless
