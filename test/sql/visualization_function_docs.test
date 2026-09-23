@@ -1,0 +1,94 @@
+# name: test/sql/visualization_function_docs.test
+# description: Every function anofox_visualization registers documents itself in duckdb_functions()
+# group: [anofox_visualization]
+
+require anofox_visualization
+
+statement ok
+LOAD anofox_visualization
+
+# ============================================================================
+# Nothing this extension registers is left undocumented
+#
+# This is the first sqllogictest in the repo -- the rest of the suite is Rust,
+# under tests/. It lives here because what is being asserted is a property of
+# the DuckDB catalog, which is only observable from inside a DuckDB session.
+#
+# Enumerated, not allow-listed: an allow-list of names passes green while the
+# functions it forgets to mention stay undocumented.
+# ============================================================================
+
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_name LIKE 'anofox_%'
+  AND (description IS NULL OR description = ''
+       OR len(examples) = 0
+       OR len(categories) = 0
+       OR list_contains(parameters, 'col0'));
+----
+0
+
+# One scalar plus six macros.
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'anofox_%';
+----
+7
+
+# ============================================================================
+# The macros are documented, which is the part that needed the rewrite
+#
+# These six used to be created by EXECUTING "CREATE OR REPLACE MACRO ..."
+# against a connection. A macro made that way cannot carry documentation at
+# all: CREATE MACRO has no syntax for a description, and COMMENT ON MACRO
+# populates duckdb_functions().comment, which is a DIFFERENT column from
+# .description. Registering them as DefaultMacros is what makes the metadata
+# possible.
+# ============================================================================
+
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_type = 'macro'
+  AND function_name IN ('anofox_xy', 'anofox_xyc', 'anofox_bar',
+                        'anofox_line', 'anofox_scatter', 'anofox_area')
+  AND description IS NOT NULL AND description <> '' AND len(examples) > 0;
+----
+6
+
+# Registering them internally rather than by running CREATE MACRO also means
+# they no longer get written into whatever database the user happens to have
+# open. A temporary/internal entry reports no database of its own.
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_name = 'anofox_bar' AND internal;
+----
+1
+
+# ============================================================================
+# Parameter names
+#
+# The macros already reported their real parameter names, so documenting them
+# must not have replaced those with col0 -- which is what a non-empty
+# parameter_names would have done, since it replaces the whole rendered list.
+# ============================================================================
+
+query I
+SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_bar';
+----
+[x, y]
+
+query I
+SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_xy';
+----
+[x, y, kind, width, height]
+
+query I
+SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_render';
+----
+[spec]
+
+# Deliberately NO assertion that the macros RENDER here. Their bodies call
+# json_object, the test runner builds with extension autoloading disabled, and a
+# `require json` would skip this whole FILE -- taking the metadata assertions
+# above with it and reporting green while nothing ran. Rendering is covered by
+# the Rust suite under tests/; what is only observable from inside a DuckDB
+# session is the catalog metadata, which is what this file is for.
