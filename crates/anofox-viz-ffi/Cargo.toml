@@ -1,6 +1,6 @@
 [package]
 name = "anofox_viz_ffi"
-version = "0.1.0"
+version = "2026.9.26"
 edition = "2021"
 license = "BUSL-1.1"
 description = "C FFI boundary for the anofox_visualization DuckDB extension (render-only)"

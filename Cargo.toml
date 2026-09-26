@@ -1,6 +1,6 @@
 [package]
 name = "anofox-visualization"
-version = "0.1.0"
+version = "2026.9.26"
 edition = "2021"
 description = "SQL-defined dashboards: column-role annotations rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
 license = "BUSL-1.1"
