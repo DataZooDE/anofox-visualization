@@ -5,3 +5,8 @@ duckdb_extension_load(anofox_visualization
     LOAD_TESTS
     LINKED_LIBS "$<TARGET_FILE:anofox_viz_ffi-static>"
 )
+
+# json is statically linked into the *test/CLI build only* (not into the
+# loadable extension) so the sqllogictests can exercise the macros, whose
+# bodies call json_object/json_array.
+duckdb_extension_load(json)

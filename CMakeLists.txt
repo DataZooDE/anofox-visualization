@@ -3,20 +3,30 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- Rust target detection (propagate arch to the cargo build in CI) ---
-execute_process(COMMAND rustup target list --installed OUTPUT_VARIABLE RUST_TARGETS ERROR_QUIET)
+# musl only when we are actually building for musl: the platform the CI asked
+# for (DUCKDB_EXPLICIT_PLATFORM, e.g. linux_amd64_musl), or a musl host libc
+# (a native Alpine build). Merely having a musl Rust target *installed* must not
+# switch a glibc build to musl.
+set(ANOFOX_VIZ_MUSL OFF)
+if("${DUCKDB_EXPLICIT_PLATFORM}" MATCHES "musl")
+    set(ANOFOX_VIZ_MUSL ON)
+elseif("${OS_NAME}" STREQUAL "linux")
+    execute_process(COMMAND ldd --version OUTPUT_VARIABLE _LDD_OUT ERROR_VARIABLE _LDD_OUT ERROR_QUIET)
+    if("${_LDD_OUT}" MATCHES "musl")
+        set(ANOFOX_VIZ_MUSL ON)
+    endif()
+endif()
 set(Rust_CARGO_TARGET "")
 if("${OS_NAME}" STREQUAL "linux")
-    if("${OS_ARCH}" STREQUAL "arm64")
-        set(Rust_CARGO_TARGET "aarch64-unknown-linux-gnu")
-    elseif("${CMAKE_CXX_COMPILER}" MATCHES "aarch64")
-        set(Rust_CARGO_TARGET "aarch64-unknown-linux-gnu")
+    if("${OS_ARCH}" STREQUAL "arm64" OR "${CMAKE_CXX_COMPILER}" MATCHES "aarch64")
+        set(_RUST_ARCH "aarch64")
     else()
-        string(FIND "${RUST_TARGETS}" "musl" MUSL_TARGET_FOUND)
-        if(NOT MUSL_TARGET_FOUND EQUAL -1)
-            set(Rust_CARGO_TARGET "x86_64-unknown-linux-musl")
-        else()
-            set(Rust_CARGO_TARGET "x86_64-unknown-linux-gnu")
-        endif()
+        set(_RUST_ARCH "x86_64")
+    endif()
+    if(ANOFOX_VIZ_MUSL)
+        set(Rust_CARGO_TARGET "${_RUST_ARCH}-unknown-linux-musl")
+    else()
+        set(Rust_CARGO_TARGET "${_RUST_ARCH}-unknown-linux-gnu")
     endif()
 elseif("${OS_NAME}" STREQUAL "osx")
     if("${OSX_BUILD_ARCH}" STREQUAL "arm64")
@@ -43,10 +53,19 @@ message(STATUS "Rust_CARGO_TARGET: ${Rust_CARGO_TARGET}")
 include(FetchContent)
 FetchContent_Declare(Corrosion GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git GIT_TAG v0.5.2)
 FetchContent_MakeAvailable(Corrosion)
+# --locked: build exactly the committed Cargo.lock (workspace root).
 corrosion_import_crate(
     MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/crates/anofox-viz-ffi/Cargo.toml"
     CRATES "anofox_viz_ffi"
+    LOCKED
 )
+
+# Single version source of truth: [workspace.package] version in Cargo.toml.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" _ANOFOX_VERSION_LINES REGEX "^version = \"[^\"]+\"")
+list(GET _ANOFOX_VERSION_LINES 0 _ANOFOX_VERSION_LINE)
+string(REGEX REPLACE "^version = \"([^\"]+)\".*" "\\1" ANOFOX_VIZ_CARGO_VERSION "${_ANOFOX_VERSION_LINE}")
+message(STATUS "anofox_visualization version (Cargo.toml): ${ANOFOX_VIZ_CARGO_VERSION}")
+add_definitions(-DANOFOX_VIZ_CARGO_VERSION="${ANOFOX_VIZ_CARGO_VERSION}")
 
 set(TARGET_NAME anofox_visualization)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)

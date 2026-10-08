@@ -86,9 +86,6 @@ SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_render';
 ----
 [spec]
 
-# Deliberately NO assertion that the macros RENDER here. Their bodies call
-# json_object, the test runner builds with extension autoloading disabled, and a
-# `require json` would skip this whole FILE -- taking the metadata assertions
-# above with it and reporting green while nothing ran. Rendering is covered by
-# the Rust suite under tests/; what is only observable from inside a DuckDB
-# session is the catalog metadata, which is what this file is for.
+# Rendering (and the NULL / error behaviour) is asserted in anofox_render.test
+# and anofox_macros.test; this file stays about the catalog metadata, which is
+# only observable from inside a DuckDB session.
