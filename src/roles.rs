@@ -90,8 +90,10 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("AREACHART", &["AREA"], R::Value(Kind::Area), "chart", true, "area chart"),
     e("AREACHART_STACKED", &["AREA_STACKED", "STACKED_AREA"], R::Value(Kind::AreaStacked), "chart",
       true, "stacked areas (by CATEGORY)"),
-    e("SCATTER", &["POINT", "SCATTERCHART", "BUBBLE"], R::Value(Kind::Point), "chart", true,
+    e("SCATTER", &["POINT", "SCATTERCHART"], R::Value(Kind::Point), "chart", true,
       "scatter; add a ::SIZE column for a bubble chart"),
+    e("BUBBLE", &["BUBBLECHART"], R::Value(Kind::Bubble), "chart", true,
+      "bubble chart: alone = the y measure (size via ::SIZE); beside a ::SCATTER = its size"),
     e("JITTER", &["JITTERCHART", "STRIP"], R::Value(Kind::Jitter), "chart", true,
       "jittered scatter (reveals overlapping points)"),
     e("PIE", &["PIECHART", "PIECHART_PERCENT"], R::Value(Kind::Pie), "chart", true,
@@ -377,6 +379,19 @@ mod tests {
     }
 
     #[test]
+    fn docs_role_table_is_in_sync() {
+        let doc = include_str!("../docs/DOCS.md");
+        let start = "<!-- roles-table:start -->\n";
+        let a = doc.find(start).expect("start marker") + start.len();
+        let b = doc.find("<!-- roles-table:end -->").expect("end marker");
+        assert_eq!(
+            &doc[a..b],
+            markdown_table(),
+            "docs/DOCS.md role table is stale — regenerate with `dashboard --roles-md`"
+        );
+    }
+
+    #[test]
     fn tokens_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for d in REGISTRY {
@@ -445,8 +460,7 @@ mod tests {
         ] {
             assert!(lookup(t).is_some(), "::{t}");
         }
-        // BUBBLE is a chart (a scatter sized by ::SIZE), not the size column.
-        assert_eq!(parse_role("BUBBLE"), Some(Role::Value(Kind::Point)));
+        assert_eq!(parse_role("BUBBLE"), Some(Role::Value(Kind::Bubble)));
     }
 
     /// Every `Role` value. The `match` below has no wildcard, so adding a
@@ -479,6 +493,7 @@ mod tests {
             K::Jitter,
             K::Candlestick,
             K::Radar,
+            K::Bubble,
         ];
         let mut v: Vec<Role> = kinds.into_iter().map(Role::Value).collect();
         v.extend(

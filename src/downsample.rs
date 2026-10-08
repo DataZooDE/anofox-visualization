@@ -24,12 +24,22 @@ pub const OTHER: &str = "Other";
 
 pub(crate) fn prepare(cols: &[Column], o: &RenderOptions) -> Vec<Column> {
     let n = cols.iter().map(|c| c.values.len()).max().unwrap_or(0);
+    // `::BUBBLE` beside another chart measure is that chart's size; alone it is
+    // a scatter measure (sized by an optional `::SIZE`).
+    let has_other_measure = cols
+        .iter()
+        .any(|c| matches!(c.role, Role::Value(k) if k != Kind::Bubble));
+    let resolve = |r: Role| match r {
+        Role::Value(Kind::Bubble) if has_other_measure => Role::Size,
+        Role::Value(Kind::Bubble) => Role::Value(Kind::Point),
+        r => r,
+    };
     let mut out: Vec<Column> = cols
         .iter()
         .map(|c| {
             let mut values: Vec<Value> = c.values.iter().map(sanitize).collect();
             values.resize(n, Value::Na);
-            Column::new(c.name.clone(), c.role, values)
+            Column::new(c.name.clone(), resolve(c.role), values)
         })
         .collect();
     let kind = out.iter().find_map(|c| match c.role {

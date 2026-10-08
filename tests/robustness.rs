@@ -450,3 +450,23 @@ fn long_lines_are_downsampled() {
     // ≤ max_line_points markers (+ a little chrome), not 100k.
     assert!(svg.matches("<circle").count() <= 5_100);
 }
+
+#[test]
+fn bubble_works_in_both_documented_forms() {
+    let rows = r#"[{"c0":1,"c1":2,"c2":10},{"c0":2,"c1":3,"c2":40},{"c0":3,"c1":1,"c2":90}]"#;
+    for roles in [
+        r#"[[0,"XAXIS"],[1,"BUBBLE"],[2,"SIZE"]]"#,
+        r#"[[0,"XAXIS"],[1,"SCATTER"],[2,"BUBBLE"]]"#,
+    ] {
+        let svg = render_spec_checked(&format!(r#"{{"rows":{rows},"roles":{roles}}}"#)).unwrap();
+        assert_safe_svg(&svg, roles);
+        let radii: std::collections::BTreeSet<String> = svg
+            .split("<circle")
+            .skip(1)
+            .filter_map(|c| c.split(" r=\"").nth(1))
+            .filter_map(|r| r.split('"').next())
+            .map(str::to_string)
+            .collect();
+        assert!(radii.len() >= 3, "{roles}: points not sized: {radii:?}");
+    }
+}

@@ -18,6 +18,8 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
+        // The DOCS.md role table (generated from the registry).
+        Some("--roles-md") => print!("{}", anofox_visualization::roles::markdown_table()),
         None | Some("--help") | Some("-h") => {
             eprintln!(
                 "usage:\n  \

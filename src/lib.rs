@@ -83,6 +83,11 @@ pub enum Kind {
     /// A radar / spider chart — axes from `::XAXIS`, values as `::RADAR`, one
     /// polygon per `::CATEGORY` series.
     Radar,
+    /// `::BUBBLE` — context-dependent so both documented forms work: alone it is
+    /// the scatter's y measure (sized by a `::SIZE` column); next to another
+    /// chart measure (`y::SCATTER, pop::BUBBLE`) it is that chart's size.
+    /// Resolved before rendering (never reaches a geom).
+    Bubble,
 }
 
 /// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -762,7 +767,13 @@ fn render_inner(
     }
     let by_colour = matches!(
         kind,
-        Kind::Line | Kind::LinePercent | Kind::Point | Kind::Step | Kind::Smooth | Kind::Jitter
+        Kind::Line
+            | Kind::LinePercent
+            | Kind::Point
+            | Kind::Bubble
+            | Kind::Step
+            | Kind::Smooth
+            | Kind::Jitter
     );
     let bar = matches!(
         kind,
@@ -994,7 +1005,7 @@ fn render_inner(
                 ..Default::default()
             })
             .position(PositionStack),
-        Kind::Point => plot.geom_point(),
+        Kind::Point | Kind::Bubble => plot.geom_point(),
         Kind::Jitter => plot.geom_jitter(),
         // Box plots are unfilled by default (white box, dark whiskers/outline) —
         // the ggplot idiom; a CATEGORY still colours the outline via the border.

@@ -594,6 +594,7 @@ fn is_big_chart(k: Kind) -> bool {
             | Kind::Area
             | Kind::AreaStacked
             | Kind::Point
+            | Kind::Bubble
             | Kind::Pie
             | Kind::Donut
             | Kind::Histogram
