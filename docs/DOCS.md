@@ -35,14 +35,21 @@ terminal.
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
 | `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area) |
+| `::YMIN` | `::Y_MIN` | encoding | lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars |
+| `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
+| `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
+| `::XMAX` | `::X_MAX` | encoding | upper end of a horizontal interval (see ::XMIN) |
+| `::FACET` | `::FACET_WRAP`, `::PANEL_BY` | encoding | small multiples: one panel per distinct value, shared axes |
+| `::FACET_FREE` | `::FACET_WRAP_FREE` | encoding | small multiples with independent axes per panel |
+| `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
-| `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars, percent y-axis |
+| `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars as % of each x's total (fractions ≤ 1 are drawn as given) |
 | `::BARCHART_STACKED_PERCENT` | `::BAR_STACKED_PERCENT` | chart | bars normalised to 100% per x |
 | `::LINECHART` | `::LINE` | chart | line chart |
 | `::LINECHART_PERCENT` | `::LINE_PERCENT` | chart | line chart, percent y-axis |
 | `::STEP` | `::STEPLINE`, `::STEP_LINE` | chart | step line |
-| `::SMOOTH` | `::TRENDLINE`, `::TREND_LINE` | chart | scatter + LOESS trend line |
+| `::SMOOTH` | `::TRENDLINE`, `::TREND_LINE` | chart | scatter + trend line (LOESS; ::SMOOTH_METHOD 'lm'/'gam') |
 | `::AREACHART` | `::AREA` | chart | area chart |
 | `::AREACHART_STACKED` | `::AREA_STACKED`, `::STACKED_AREA` | chart | stacked areas (by CATEGORY) |
 | `::SCATTER` | `::POINT`, `::SCATTERCHART` | chart | scatter; add a ::SIZE column for a bubble chart |
@@ -69,9 +76,16 @@ terminal.
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
 | `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark (value = font size) |
+| `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
+| `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
+| `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | y-axis tick format: '€', '$', 'percent', 'comma', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
+| `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
+| `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
+| `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
+| `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
@@ -139,6 +153,45 @@ FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
+
+### Statistical graphics (intervals, facets, scales, reference lines)
+
+Roles for model output — coefficient forests, residual diagnostics, CV curves:
+
+| Need | SQL | Notes |
+|---|---|---|
+| point ± interval | `term::XAXIS, est::SCATTER, lo::YMIN, hi::YMAX` | a `::SCATTER` becomes a pointrange; a bar/line gets capped error bars |
+| horizontal forest | `… , 1::FLIP, 0::REFLINE` | `::FLIP` turns the intervals horizontal, `::REFLINE` the zero line vertical |
+| several models | `… , model::CATEGORY` | pointranges (and `::BARCHART` bars) on a discrete x are dodged side by side |
+| x interval | `x::XAXIS, y::SCATTER, a::XMIN, b::XMAX` | a horizontal segment through each point |
+| straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
+| small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes |
+| axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
+| label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
+| trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
+
+```sql
+-- Coefficient forest of two models
+SELECT term::XAXIS, model_id::CATEGORY, estimate::SCATTER,
+       conf_low::YMIN, conf_high::YMAX, 1::FLIP, 0::REFLINE
+FROM coefficients;
+
+-- Residuals vs fitted with a GAM trend, top-3 influential rows labelled
+SELECT fitted::XAXIS, residual::SMOOTH, 'gam'::SMOOTH_METHOD, 0::REFLINE,
+       row_id::LABEL, 3::LABEL_TOP, cooks_d::RANK
+FROM augmented;
+```
+
+`::BARCHART_PERCENT` draws each bar's share of its x's total (of the grand
+total without a `::CATEGORY`); values already given as fractions (all within
+±1) are drawn as they are. `::LINECHART_PERCENT` formats fractions ×100 and
+treats larger values as percentages already.
+
+On a dodged/slotted discrete x the SVG root carries `data-xticks`
+(`{"1":"W1",…}`) so hosts can map a mark's numeric `data-x` back to its level.
+
+For whole model outputs there are ready-made plot macros — see
+[Plotting model output](#plotting-model-output-contract-macros).
 
 ### Combo charts, auto-refresh, dark mode
 

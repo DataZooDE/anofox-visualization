@@ -94,6 +94,13 @@ fn row_aligned(r: Role) -> bool {
             | Role::Open
             | Role::High
             | Role::Low
+            | Role::YMin
+            | Role::YMax
+            | Role::XMin
+            | Role::XMax
+            | Role::Facet
+            | Role::FacetFree
+            | Role::Rank
     )
 }
 

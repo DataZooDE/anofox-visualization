@@ -28,6 +28,7 @@ pub mod format;
 pub mod host;
 pub mod lint;
 pub mod roles;
+mod smooth;
 pub mod sql;
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -261,6 +262,39 @@ pub enum Role {
     High,
     /// Candlestick low price (`::LOW`).
     Low,
+    /// Lower end of a y interval (`::YMIN`): a point measure becomes a
+    /// pointrange, any other measure gets error bars.
+    YMin,
+    /// Upper end of a y interval (`::YMAX`), see [`Role::YMin`].
+    YMax,
+    /// Lower end of an x interval (`::XMIN`): a horizontal interval through
+    /// each point.
+    XMin,
+    /// Upper end of an x interval (`::XMAX`), see [`Role::XMin`].
+    XMax,
+    /// Small multiples (`::FACET`): one panel per distinct value, shared axes.
+    Facet,
+    /// Small multiples with independent axes per panel (`::FACET_FREE`).
+    FacetFree,
+    /// Panels per row of a `::FACET` (`::FACET_NCOL`). Read from the first value.
+    FacetCols,
+    /// x-axis scale transform (`::XSCALE`): `'log10'`, `'sqrt'` or `'reverse'`.
+    XScale,
+    /// y-axis scale transform (`::YSCALE`), like [`Role::XScale`].
+    YScale,
+    /// A straight reference line `y = slope·x + intercept` per distinct
+    /// `'slope,intercept'` value (`::ABLINE`).
+    AbLine,
+    /// The identity line `y = x`, dashed grey (`::IDENTITY`). A marker column.
+    Identity,
+    /// Label only the top-k points (`::LABEL_TOP`, k = the first value) with
+    /// the panel's `::LABEL` text — ranked by `::RANK` if present, else |y|.
+    LabelTop,
+    /// Ranking score for `::LABEL_TOP` (`::RANK`): higher = labelled first.
+    Rank,
+    /// Trend-line method for `::SMOOTH` (`::SMOOTH_METHOD`): `'loess'`
+    /// (default), `'lm'`, `'gam'`; `'glm'` draws the Gaussian GLM (= lm).
+    SmoothMethod,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -624,6 +658,8 @@ pub(crate) enum Panel {
         plot: Box<GGPlot>,
         width: u32,
         height: u32,
+        /// Extra root attributes (e.g. `data-xticks`) written on the `<svg>`.
+        attrs: Vec<(&'static str, String)>,
     },
     Own {
         width: u32,
@@ -639,6 +675,7 @@ impl Panel {
             plot: Box::new(plot),
             width,
             height,
+            attrs: Vec::new(),
         }
     }
 
@@ -650,6 +687,7 @@ impl Panel {
                 plot,
                 width,
                 height,
+                attrs,
             } => {
                 let svg = match place {
                     Place::Doc => plot.render_svg_native_with_warnings(width, height),
@@ -657,7 +695,13 @@ impl Panel {
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map_err(|e| format!("render failed: {e:?}"))
+                svg.map(|(mut s, w)| {
+                    for (k, v) in &attrs {
+                        s = with_root_attr(s, k, v);
+                    }
+                    (s, w)
+                })
+                .map_err(|e| format!("render failed: {e:?}"))
             }
             Panel::Own {
                 width,
@@ -737,8 +781,18 @@ pub fn render_with_warnings(
 /// Record `warnings` on the SVG root as `data-warnings="[…]"` (escaped JSON).
 /// The root start tag ends at the first `>`: every writer escapes `>` inside
 /// attribute values.
-fn with_warnings_attr(mut svg: String, warnings: &[String]) -> String {
-    if warnings.is_empty() || !svg.starts_with("<svg") {
+fn with_warnings_attr(svg: String, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        return svg;
+    }
+    let json = serde_json::to_string(warnings).unwrap_or_default();
+    with_root_attr(svg, "data-warnings", &json)
+}
+
+/// Add `name="value"` (escaped) to the root `<svg>` start tag. The root start
+/// tag ends at the first `>`: every writer escapes `>` inside attribute values.
+fn with_root_attr(mut svg: String, name: &str, value: &str) -> String {
+    if !svg.starts_with("<svg") {
         return svg;
     }
     if let Some(end) = svg.find('>') {
@@ -747,11 +801,7 @@ fn with_warnings_attr(mut svg: String, warnings: &[String]) -> String {
         } else {
             end
         };
-        let json = serde_json::to_string(warnings).unwrap_or_default();
-        svg.insert_str(
-            at,
-            &format!(" data-warnings=\"{}\"", format::escape_xml(&json)),
-        );
+        svg.insert_str(at, &format!(" {name}=\"{}\"", format::escape_xml(value)));
     }
     svg
 }
@@ -900,12 +950,8 @@ fn render_inner(
         .map(value_str);
 
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
-    if let Some(g) = cols.iter().find(|c| c.role == Role::Geometry) {
-        if !g
-            .values
-            .iter()
-            .any(|v| matches!(v, Value::Str(s) if !s.is_empty()))
-        {
+    if cols.iter().any(|c| c.role == Role::Geometry) {
+        if map_geometry(cols).is_none() {
             return Ok(note_svg(None, "No data", width, height));
         }
         return render_map(o, cols, title.as_deref(), width, height);
@@ -960,16 +1006,310 @@ fn render_inner(
         Kind::Sparkline => return render_sparkline(o, value, width, height),
         _ => {}
     }
-    let x = cols
-        .iter()
-        .find(|c| c.role == Role::X)
-        .ok_or("no XAXIS column")?;
-    let category = cols.iter().find(|c| c.role == Role::Category);
+    render_cartesian(o, kind, value, cols, title, width, height)
+}
 
-    let mut data: Vec<(String, Vec<Value>)> = vec![
-        ("x".to_string(), x.values.clone()),
-        ("y".to_string(), value.values.clone()),
-    ];
+/// The first column carrying `role`.
+fn find_role(cols: &[Column], role: Role) -> Option<&Column> {
+    cols.iter().find(|c| c.role == role)
+}
+
+/// The first non-empty string value of a `role` column (directive-style
+/// modifiers such as `'€'::YFORMAT`, `'log10'::YSCALE`).
+fn role_str(cols: &[Column], role: Role) -> Option<String> {
+    find_role(cols, role).and_then(|c| {
+        c.values.iter().find_map(|v| match v {
+            Value::Str(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        })
+    })
+}
+
+/// The first finite numeric value of a `role` column.
+fn role_num(cols: &[Column], role: Role) -> Option<f64> {
+    find_role(cols, role).and_then(|c| {
+        c.values
+            .iter()
+            .find_map(|v| v.as_f64().filter(|f| f.is_finite()))
+    })
+}
+
+/// A discrete x axis turned into numeric slots `1, 2, …` with each group
+/// offset inside its slot, so grouped marks sit side by side.
+///
+/// TODO(ggplot-rs 0.17): `position_dodge(w)` places grouped marks on a
+/// discrete x (0.16's `PositionDodge` only shifts numeric x, so bars and
+/// pointranges overlapped). Switch bars and pointranges to it and drop this.
+struct Dodged {
+    x: Vec<Value>,
+    breaks: Vec<f64>,
+    labels: Vec<String>,
+    /// Width of one group's sub-slot.
+    step: f64,
+}
+
+fn dodge_discrete(x: &[Value], group: &[Value], width: f64) -> Dodged {
+    let mut labels: Vec<String> = Vec::new();
+    let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for v in x.iter().filter(|v| !matches!(v, Value::Na)) {
+        let s = value_str(v);
+        if !slot.contains_key(&s) {
+            slot.insert(s.clone(), labels.len());
+            labels.push(s);
+        }
+    }
+    // Groups in the sorted order of the colour scale, so the left-to-right
+    // order inside a slot matches the legend.
+    let groups: Vec<String> = distinct_labels(&Column::new("", Role::Category, group.to_vec()));
+    let n = groups.len().max(1) as f64;
+    let step = width / n;
+    let xs = x
+        .iter()
+        .zip(group)
+        .map(|(v, g)| {
+            if matches!(v, Value::Na) {
+                return Value::Na;
+            }
+            let base = slot[&value_str(v)] as f64 + 1.0;
+            let gi = groups.iter().position(|l| *l == value_str(g)).unwrap_or(0) as f64;
+            Value::Float(base + (gi - (n - 1.0) / 2.0) * step)
+        })
+        .collect();
+    Dodged {
+        x: xs,
+        breaks: (1..=labels.len()).map(|i| i as f64).collect(),
+        labels,
+        step,
+    }
+}
+
+/// `::BARCHART_PERCENT` values as fractions: input already in `[-1, 1]` is a
+/// fraction (a rate or share) and is drawn as given; anything else (counts,
+/// amounts) becomes each bar's share of its x's total — or of the grand total
+/// without a `::CATEGORY` — so the percent axis reads 0–100 %.
+fn percent_shares(x: &[Value], y: &[Value], by_x: bool) -> Vec<Value> {
+    let nums = || y.iter().filter_map(|v| v.as_f64());
+    if nums().all(|f| f.abs() <= 1.0) {
+        return y.to_vec();
+    }
+    let mut totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (xv, yv) in x.iter().zip(y) {
+        let k = if by_x { value_str(xv) } else { String::new() };
+        *totals.entry(k).or_insert(0.0) += yv.as_f64().unwrap_or(0.0);
+    }
+    x.iter()
+        .zip(y)
+        .map(|(xv, yv)| {
+            let k = if by_x { value_str(xv) } else { String::new() };
+            match (yv.as_f64(), totals.get(&k)) {
+                (Some(f), Some(t)) if *t != 0.0 => Value::Float(f / t),
+                _ => Value::Na,
+            }
+        })
+        .collect()
+}
+
+/// Percent tick labels for `::LINECHART_PERCENT`: fractions (all |v| ≤ 1) are
+/// scaled ×100 (`0.42` → `42%`); larger values are already percentages.
+fn percent_axis(values: &[Value]) -> Box<dyn Fn(f64) -> String + Send + Sync> {
+    if values
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .all(|f| f.abs() <= 1.0)
+    {
+        Box::new(ggplot_rs::scale::format::label_percent)
+    } else {
+        Box::new(|v: f64| format!("{}%", ggplot_rs::scale::format::label_comma(v)))
+    }
+}
+
+/// A `'log10' | 'sqrt' | 'reverse'` axis transform (`::XSCALE`/`::YSCALE`).
+fn axis_transform(
+    spec: &str,
+    role: Role,
+) -> Result<ggplot_rs::scale::transform::ScaleTransform, String> {
+    use ggplot_rs::scale::transform::ScaleTransform as T;
+    match spec.to_ascii_lowercase().as_str() {
+        "log10" | "log" => Ok(T::Log10),
+        "sqrt" => Ok(T::Sqrt),
+        "reverse" | "rev" => Ok(T::Reverse),
+        "identity" | "linear" | "none" => Ok(T::Identity),
+        other => Err(format!(
+            "::{} '{other}' is not one of 'log10', 'sqrt', 'reverse'",
+            role.token()
+        )),
+    }
+}
+
+/// The segment of `y = slope·x + intercept` inside the data box
+/// `[x0, x1] × [y0, y1]` (`None` if the line misses it). Drawn instead of
+/// `geom_abline`, which in ggplot-rs 0.16 works in normalised panel units.
+///
+/// TODO(ggplot-rs 0.17): data-mapped `geom_abline(aes(slope, intercept))` in
+/// data units spanning the whole panel.
+fn clip_line(
+    slope: f64,
+    intercept: f64,
+    xb: (f64, f64),
+    yb: (f64, f64),
+) -> Option<[(f64, f64); 2]> {
+    let (x0, x1) = xb;
+    let (y0, y1) = yb;
+    let (lo, hi) = if slope == 0.0 {
+        if intercept < y0 || intercept > y1 {
+            return None;
+        }
+        (x0, x1)
+    } else {
+        let (a, b) = ((y0 - intercept) / slope, (y1 - intercept) / slope);
+        (x0.max(a.min(b)), x1.min(a.max(b)))
+    };
+    (lo < hi && lo.is_finite() && hi.is_finite())
+        .then_some([(lo, slope * lo + intercept), (hi, slope * hi + intercept)])
+}
+
+/// Finite extent of the numeric values in `cols`.
+fn extent<'a>(cols: impl IntoIterator<Item = &'a [Value]>) -> Option<(f64, f64)> {
+    let mut r: Option<(f64, f64)> = None;
+    for vals in cols {
+        for f in vals
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .filter(|f| f.is_finite())
+        {
+            r = Some(r.map_or((f, f), |(a, b)| (a.min(f), b.max(f))));
+        }
+    }
+    r
+}
+
+/// A reference line at `v` on the x (`vertical`) or y axis spanning the panel,
+/// as a zero-width `geom_rect` with ±Inf ends — 0.16's geom_hline/geom_vline
+/// collapse to a point under coord_flip.
+/// TODO(ggplot-rs 0.17): data-mapped geom_hline/geom_vline (flip-safe).
+/// `span` is the data range of that axis: the rule is 0.2 % of it thick
+/// (SVG does not draw a zero-width rect).
+fn ref_rule(plot: GGPlot, vertical: bool, v: f64, span: f64) -> GGPlot {
+    let (inf, ninf) = (Value::Float(f64::INFINITY), Value::Float(f64::NEG_INFINITY));
+    let eps = if span.is_finite() && span > 0.0 {
+        span * 0.001
+    } else {
+        v.abs().max(1.0) * 1e-3
+    };
+    let (lo, hi) = (Value::Float(v - eps), Value::Float(v + eps));
+    let (x0, x1, y0, y1) = if vertical {
+        (lo, hi, ninf, inf)
+    } else {
+        (ninf, inf, lo, hi)
+    };
+    plot.geom_rect_with(GeomRect {
+        fill: (60, 60, 60),
+        color: (60, 60, 60),
+        alpha: 0.9,
+        line_width: 0.8,
+    })
+    .layer_data(vec![
+        ("rx0".to_string(), vec![x0]),
+        ("rx1".to_string(), vec![x1]),
+        ("ry0".to_string(), vec![y0]),
+        ("ry1".to_string(), vec![y1]),
+    ])
+    .layer_aes(Aes::new().xmin("rx0").xmax("rx1").ymin("ry0").ymax("ry1"))
+}
+
+/// Rows `idx` of a plot frame (for per-group / subset layers).
+fn subset(data: &[(String, Vec<Value>)], idx: &[usize]) -> Vec<(String, Vec<Value>)> {
+    data.iter()
+        .map(|(k, v)| (k.clone(), idx.iter().map(|&i| v[i].clone()).collect()))
+        .collect()
+}
+
+/// Row indices grouped by the (string) keys of the given columns, in
+/// first-seen order.
+fn group_rows(n: usize, keys: &[&[Value]]) -> Vec<Vec<usize>> {
+    let mut order: Vec<Vec<usize>> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for i in 0..n {
+        let k: String = keys
+            .iter()
+            .map(|c| value_str(&c[i]))
+            .collect::<Vec<_>>()
+            .join("\u{1}");
+        let g = *at.entry(k).or_insert_with(|| {
+            order.push(Vec::new());
+            order.len() - 1
+        });
+        order[g].push(i);
+    }
+    order
+}
+
+/// The cartesian chart kinds (bars, lines, areas, points, box/violin plots)
+/// with every encoding/annotation/modifier role.
+fn render_cartesian(
+    o: &RenderOptions,
+    kind: Kind,
+    value: &Column,
+    cols: &[Column],
+    title: Option<String>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let x = find_role(cols, Role::X).ok_or("no XAXIS column")?;
+    // A ::CATEGORY that is entirely missing (e.g. a macro's NULL default) is
+    // no category at all.
+    let category =
+        find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
+    // `::LABEL_TOP k` turns ::LABEL into per-point text, so it is no title.
+    let label_top = role_num(cols, Role::LabelTop).map(|k| k.clamp(0.0, 10_000.0) as usize);
+    let title = if label_top.is_some() { None } else { title };
+
+    let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
+    let bar = matches!(
+        kind,
+        Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
+    );
+    let point_kind = matches!(kind, Kind::Point | Kind::Bubble);
+    let interval = |lo: Role, hi: Role| -> Result<Option<(&Column, &Column)>, String> {
+        match (find_role(cols, lo), find_role(cols, hi)) {
+            (Some(a), Some(b)) => Ok(Some((a, b))),
+            (None, None) => Ok(None),
+            _ => Err(format!(
+                "::{} needs a matching ::{}",
+                lo.token(),
+                hi.token()
+            )),
+        }
+    };
+    let y_interval = interval(Role::YMin, Role::YMax)?;
+    let x_interval = interval(Role::XMin, Role::XMax)?;
+
+    // A discrete x is drawn on numeric slots when grouped bars / pointranges
+    // must sit side by side, or when intervals need x offsets for their caps.
+    let dodge_kind = matches!(kind, Kind::Bar | Kind::BarPercent) || point_kind;
+    let slotted = x_discrete
+        && (y_interval.is_some()
+            || x_interval.is_some()
+            || (category.is_some() && matches!(kind, Kind::Bar | Kind::BarPercent)));
+    let dodged = slotted.then(|| {
+        let groups = match category {
+            Some(cat) if dodge_kind => cat.values.clone(),
+            _ => vec![Value::Na; x.values.len()],
+        };
+        dodge_discrete(&x.values, &groups, if bar { 0.9 } else { 0.6 })
+    });
+    let xvals = dodged
+        .as_ref()
+        .map(|d| d.x.clone())
+        .unwrap_or_else(|| x.values.clone());
+    let yvals = if kind == Kind::BarPercent {
+        percent_shares(&x.values, &value.values, category.is_some())
+    } else {
+        value.values.clone()
+    };
+
+    let mut data: Vec<(String, Vec<Value>)> =
+        vec![("x".to_string(), xvals), ("y".to_string(), yvals)];
     // Extra measure columns → additional overlaid layers (combo charts).
     let extras: Vec<&Column> = cols
         .iter()
@@ -978,6 +1318,16 @@ fn render_inner(
         .collect();
     for (k, ev) in extras.iter().enumerate() {
         data.push((format!("y{}", k + 2), ev.values.clone()));
+    }
+    // Interval ends under non-canonical names: a column called `ymin` would be
+    // read by geom_col as a stacked bar's base.
+    if let Some((lo, hi)) = y_interval {
+        data.push(("ilo".to_string(), lo.values.clone()));
+        data.push(("ihi".to_string(), hi.values.clone()));
+    }
+    if let Some((lo, hi)) = x_interval {
+        data.push(("jlo".to_string(), lo.values.clone()));
+        data.push(("jhi".to_string(), hi.values.clone()));
     }
     let by_colour = matches!(
         kind,
@@ -989,22 +1339,32 @@ fn render_inner(
             | Kind::Smooth
             | Kind::Jitter
     );
-    let bar = matches!(
-        kind,
-        Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
-    );
     let percent = matches!(
         kind,
         Kind::BarPercent | Kind::BarStackedPercent | Kind::LinePercent
     );
-    let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
 
     // Optional confidence band around a line (`::BAND_LOWER`/`::BAND_UPPER`).
-    let band_lo = cols.iter().find(|c| c.role == Role::BandLower);
-    let band_hi = cols.iter().find(|c| c.role == Role::BandUpper);
+    let band_lo = find_role(cols, Role::BandLower);
+    let band_hi = find_role(cols, Role::BandUpper);
     if let (Some(lo), Some(hi)) = (band_lo, band_hi) {
         data.push(("bandlo".to_string(), lo.values.clone()));
         data.push(("bandhi".to_string(), hi.values.clone()));
+    }
+    // Small multiples (`::FACET` / `::FACET_FREE`): one panel per level.
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
+    if let Some(f) = facet {
+        let levels = f
+            .values
+            .iter()
+            .map(|v| match v {
+                Value::Na => Value::Str("NA".into()),
+                v => Value::Str(value_str(v)),
+            })
+            .collect();
+        data.push(("facet".to_string(), levels));
     }
     let mut aes = Aes::new().x("x").y("y");
 
@@ -1022,7 +1382,9 @@ fn render_inner(
         };
         Some(cat)
     } else if bar && x_discrete {
-        aes = aes.fill("x");
+        // Fill by the x level (the slotted x is numeric).
+        data.push(("xlev".to_string(), x.values.clone()));
+        aes = aes.fill("xlev");
         x_coloured = true;
         Some(x)
     } else {
@@ -1054,25 +1416,21 @@ fn render_inner(
     aes = aes.label("label");
 
     // Bubble scatter: a `::SIZE` measure maps to point area.
-    if let Some(sz) = cols.iter().find(|c| c.role == Role::Size) {
+    if let Some(sz) = find_role(cols, Role::Size) {
         data.push(("size".to_string(), sz.values.clone()));
         aes = aes.size("size");
     }
     // Data labels (`::DATALABELS`): the measure value drawn above each mark. The
     // label column's (first numeric) value, if any, sets the font size — e.g.
     // `14::DATALABELS` — otherwise a readable default.
-    let datalabels = cols.iter().find(|c| c.role == Role::DataLabels);
+    let datalabels = find_role(cols, Role::DataLabels);
     let show_labels = datalabels.is_some();
     let dlabel_size = datalabels
         .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
         .filter(|s| *s >= 5.0 && *s <= 40.0)
         .unwrap_or(11.0);
     if show_labels {
-        let dl: Vec<Value> = value
-            .values
-            .iter()
-            .map(|v| Value::Str(fmt_label(v)))
-            .collect();
+        let dl: Vec<Value> = data[1].1.iter().map(|v| Value::Str(fmt_label(v))).collect();
         data.push(("dlab".to_string(), dl));
     }
 
@@ -1107,12 +1465,32 @@ fn render_inner(
     // Single-series marks take the brand colour (geoms added with explicit
     // `geom_*_with` styles below set it themselves; mapped colours win).
     let brand = o.brand();
-    let mut plot = GGPlot::new(data).aes(aes).primary_color(brand);
+    let n_rows = value.values.len();
+    let col_of = |data: &[(String, Vec<Value>)], k: &str| -> Vec<Value> {
+        data.iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    // Per-series row groups (category × facet) for layers drawn per group.
+    let series_rows = {
+        let cat = col_of(&data, "cat");
+        let fac = col_of(&data, "facet");
+        let mut keys: Vec<&[Value]> = Vec::new();
+        if !cat.is_empty() {
+            keys.push(&cat);
+        }
+        if !fac.is_empty() {
+            keys.push(&fac);
+        }
+        group_rows(n_rows, &keys)
+    };
+    let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
     // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
     // [min, max] of the mark column's x-values, the full panel height
     // (ymin/ymax = ∓Inf reach the panel edges and don't train the y scale).
-    if let Some(ma) = cols.iter().find(|c| c.role == Role::MarkArea) {
+    if let Some(ma) = find_role(cols, Role::MarkArea) {
         let xs = ma.values.iter().filter(|v| v.as_f64().is_some());
         let by_x = |a: &&Value, b: &&Value| {
             a.as_f64()
@@ -1162,8 +1540,12 @@ fn render_inner(
         size: 1.8,
         ..Default::default()
     };
+    // A light brand wash for box/violin bodies (unless a CATEGORY fills them).
+    let body_fill = lighten(brand, 0.72);
     plot = match kind {
-        Kind::Bar | Kind::BarPercent => plot.geom_col().position(PositionDodge),
+        // Dodged bars: the x is already slotted per category (see
+        // `dodge_discrete`), so the bars are placed as given.
+        Kind::Bar | Kind::BarPercent => plot.geom_col(),
         Kind::BarStacked => plot.geom_col().position(PositionStack),
         Kind::BarStackedPercent => plot.geom_col().position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
@@ -1171,23 +1553,86 @@ fn render_inner(
         Kind::Line | Kind::LinePercent => plot
             .geom_line_with(thin_line())
             .geom_point_with(small_point()),
-        Kind::Step => plot
-            .geom_step_with(ggplot_rs::geom::step::GeomStep {
+        Kind::Step => {
+            // One step line per series: 0.16's geom_step joins all rows of a
+            // layer into a single path, so each category gets its own layer.
+            // TODO(ggplot-rs 0.17): a grouped geom_step (and geom_stepribbon for
+            // Kaplan–Meier bands) — then one layer again.
+            let step = || ggplot_rs::geom::step::GeomStep {
                 color: brand,
                 width: 1.2,
                 ..Default::default()
-            })
-            .geom_point_with(small_point()),
-        // Scatter + a LOESS trend line (no CI ribbon) — an analytical "smooth".
-        Kind::Smooth => plot
-            .geom_point_with(small_point())
-            .geom_smooth_with(GeomSmooth {
-                color: brand,
-                se: false,
-                line_width: 2.0,
-                method: ggplot_rs::stat::smooth::SmoothMethod::Loess { span: 0.75 },
-                ..Default::default()
-            }),
+            };
+            for rows in &series_rows {
+                plot = plot.geom_step_with(step()).layer_data(subset(&data, rows));
+            }
+            plot.geom_point_with(small_point())
+        }
+        // Scatter + a trend line (no CI ribbon) — an analytical "smooth".
+        Kind::Smooth => {
+            plot = plot.geom_point_with(small_point());
+            let method = role_str(cols, Role::SmoothMethod).map(|s| s.to_ascii_lowercase());
+            use ggplot_rs::stat::smooth::SmoothMethod;
+            let fit = |plot: GGPlot, method: SmoothMethod| {
+                plot.geom_smooth_with(GeomSmooth {
+                    color: brand,
+                    se: false,
+                    line_width: 2.0,
+                    method,
+                    ..Default::default()
+                })
+            };
+            match method.as_deref() {
+                None | Some("loess") => fit(plot, SmoothMethod::Loess { span: 0.75 }),
+                // A Gaussian GLM with identity link is ordinary least squares.
+                // TODO(ggplot-rs 0.17): GeomSmooth::glm(SmoothFamily::binomial() …)
+                // for the other families.
+                Some("lm") | Some("glm") | Some("linear") => fit(plot, SmoothMethod::Lm),
+                Some("gam") => {
+                    // P-spline per series (see `smooth::pspline`).
+                    let xs = col_of(&data, "x");
+                    let ys = col_of(&data, "y");
+                    for rows in &series_rows {
+                        let pts: Vec<(f64, f64)> = rows
+                            .iter()
+                            .filter_map(|&i| Some((xs[i].as_f64()?, ys[i].as_f64()?)))
+                            .collect();
+                        let Some(curve) = smooth::pspline(&pts, 80) else {
+                            continue;
+                        };
+                        let mut frame = vec![
+                            (
+                                "x".to_string(),
+                                curve.iter().map(|p| Value::Float(p.0)).collect(),
+                            ),
+                            (
+                                "y".to_string(),
+                                curve.iter().map(|p| Value::Float(p.1)).collect(),
+                            ),
+                        ];
+                        for key in ["cat", "facet"] {
+                            let c = col_of(&data, key);
+                            if let Some(v) = c.get(rows[0]) {
+                                frame.push((key.to_string(), vec![v.clone(); curve.len()]));
+                            }
+                        }
+                        plot = plot
+                            .geom_line_with(GeomLine {
+                                color: brand,
+                                width: 2.0,
+                                ..Default::default()
+                            })
+                            .layer_data(frame);
+                    }
+                    plot
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "::SMOOTH_METHOD '{other}' is not one of 'loess', 'lm', 'gam', 'glm'"
+                    ))
+                }
+            }
+        }
         Kind::Area => plot.geom_area().geom_point_with(small_point()),
         Kind::AreaStacked => plot
             .geom_area_with(GeomArea {
@@ -1197,20 +1642,21 @@ fn render_inner(
                 ..Default::default()
             })
             .position(PositionStack),
+        // With a y interval a point becomes a pointrange (drawn below).
+        Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
         Kind::Point | Kind::Bubble => plot.geom_point(),
         Kind::Jitter => plot.geom_jitter(),
-        // Box plots are unfilled by default (white box, dark whiskers/outline) —
-        // the ggplot idiom; a CATEGORY still colours the outline via the border.
+        // Box plots and violins: a light brand body with a dark outline (a
+        // CATEGORY fill still wins).
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
-            fill: (255, 255, 255),
+            fill: body_fill,
             color: (60, 60, 60),
             width: 0.6,
             alpha: 1.0,
         }),
-        // Violins are unfilled too (white body, dark outline), matching boxplots.
         Kind::Violin => plot.geom_violin_with(GeomViolin {
-            fill: (255, 255, 255),
-            color: (70, 78, 92),
+            fill: body_fill,
+            color: darken(brand, 0.35),
             alpha: 1.0,
             line_width: 1.0,
         }),
@@ -1228,6 +1674,121 @@ fn render_inner(
             unreachable!("handled above")
         }
     };
+    // Intervals, drawn from segments (0.16's geom_pointrange/geom_errorbar
+    // collapse under coord_flip): a point measure becomes a pointrange; any
+    // other measure gets capped error bars. An x interval is a horizontal
+    // segment through y. The ymin/ymax (xmin/xmax) mappings only train the
+    // position scale on both ends.
+    // TODO(ggplot-rs 0.17): geom_pointrange / geom_errorbar / geom_errorbarh
+    // with position_dodge once they are flip-safe.
+    if y_interval.is_some() {
+        if point_kind {
+            plot = plot
+                .geom_segment_with(GeomSegment {
+                    color: brand,
+                    width: 1.4,
+                    alpha: 1.0,
+                })
+                .layer_aes(
+                    Aes::new()
+                        .x("x")
+                        .xend("x")
+                        .y("ilo")
+                        .yend("ihi")
+                        .ymin("ilo")
+                        .ymax("ihi"),
+                )
+                .geom_point_with(GeomPoint {
+                    color: brand,
+                    size: 2.6,
+                    ..Default::default()
+                });
+        } else {
+            let grey = GeomSegment {
+                color: (60, 60, 60),
+                width: 1.0,
+                alpha: 1.0,
+            };
+            plot = plot.geom_segment_with(grey).layer_aes(
+                Aes::new()
+                    .x("x")
+                    .xend("x")
+                    .y("ilo")
+                    .yend("ihi")
+                    .ymin("ilo")
+                    .ymax("ihi"),
+            );
+            // Caps: short horizontal segments at both ends.
+            let xs = col_of(&data, "x");
+            let half = match &dodged {
+                Some(d) => 0.18 * d.step,
+                None => {
+                    let mut v: Vec<f64> = xs.iter().filter_map(|v| v.as_f64()).collect();
+                    v.sort_by(f64::total_cmp);
+                    v.dedup();
+                    let gap = v
+                        .windows(2)
+                        .map(|w| w[1] - w[0])
+                        .fold(f64::INFINITY, f64::min);
+                    if gap.is_finite() {
+                        0.2 * gap
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            if half > 0.0 {
+                let cap = |plot: GGPlot, end: &str| {
+                    let ys = col_of(&data, end);
+                    let mut frame = vec![
+                        (
+                            "cx0".to_string(),
+                            xs.iter()
+                                .map(|v| v.as_f64().map_or(Value::Na, |f| Value::Float(f - half)))
+                                .collect(),
+                        ),
+                        (
+                            "cx1".to_string(),
+                            xs.iter()
+                                .map(|v| v.as_f64().map_or(Value::Na, |f| Value::Float(f + half)))
+                                .collect(),
+                        ),
+                        ("cy".to_string(), ys),
+                    ];
+                    let fac = col_of(&data, "facet");
+                    if !fac.is_empty() {
+                        frame.push(("facet".to_string(), fac));
+                    }
+                    plot.geom_segment_with(GeomSegment {
+                        color: (60, 60, 60),
+                        width: 1.0,
+                        alpha: 1.0,
+                    })
+                    .layer_data(frame)
+                    .layer_aes(Aes::new().x("cx0").xend("cx1").y("cy").yend("cy"))
+                };
+                plot = cap(plot, "ilo");
+                plot = cap(plot, "ihi");
+            }
+        }
+    }
+    if x_interval.is_some() {
+        plot = plot
+            .geom_segment_with(GeomSegment {
+                color: brand,
+                width: 1.4,
+                alpha: 1.0,
+            })
+            .layer_aes(
+                Aes::new()
+                    .x("jlo")
+                    .xend("jhi")
+                    .y("y")
+                    .yend("y")
+                    .xmin("jlo")
+                    .xmax("jhi"),
+            );
+    }
     // Data labels (`::DATALABELS`): draw the measure value just above each mark.
     if show_labels {
         plot = plot
@@ -1263,17 +1824,158 @@ fn render_inner(
             .layer_aes(lay);
         }
     }
+    // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or |y|).
+    // TODO(ggplot-rs 0.17): geom_text_repel instead of check_overlap.
+    if let Some(k) = label_top {
+        let xs = col_of(&data, "x");
+        let ys = col_of(&data, "y");
+        let rank = find_role(cols, Role::Rank);
+        let score = |i: usize| -> f64 {
+            match rank {
+                Some(r) => r.values.get(i).and_then(|v| v.as_f64()),
+                None => ys[i].as_f64().map(f64::abs),
+            }
+            .filter(|f| f.is_finite())
+            .unwrap_or(f64::NEG_INFINITY)
+        };
+        let mut idx: Vec<usize> = (0..n_rows)
+            .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some())
+            .collect();
+        idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+        idx.truncate(k);
+        if !idx.is_empty() {
+            let text = find_role(cols, Role::Label);
+            let mut frame = subset(&data, &idx);
+            frame.retain(|(n, _)| matches!(n.as_str(), "x" | "y" | "facet"));
+            frame.push((
+                "txt".to_string(),
+                idx.iter()
+                    .map(|&i| match text.and_then(|t| t.values.get(i)) {
+                        Some(v) if *v != Value::Na => Value::Str(value_str(v)),
+                        _ => Value::Str(fmt_label(&ys[i])),
+                    })
+                    .collect(),
+            ));
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 10.0,
+                    color: (55, 62, 75),
+                    vjust: -0.6,
+                    check_overlap: true,
+                    ..Default::default()
+                })
+                .layer_data(frame)
+                .layer_aes(Aes::new().x("x").y("y").label("txt"));
+        }
+    }
     // Horizontal reference/target lines (`::REFLINE`/`::YLINE`) — one per distinct
     // value in the column (an average line, min/max bands, several thresholds…).
-    if let Some(rl) = cols.iter().find(|c| c.role == Role::RefLine) {
+    let flipped = cols.iter().any(|c| c.role == Role::Flip);
+    let span_of = |keys: &[&str]| -> f64 {
+        let vals: Vec<&[Value]> = data
+            .iter()
+            .filter(|(n, _)| keys.contains(&n.as_str()))
+            .map(|(_, v)| v.as_slice())
+            .collect();
+        extent(vals).map_or(f64::NAN, |(a, b)| b - a)
+    };
+    if let Some(rl) = find_role(cols, Role::RefLine) {
         for v in distinct_nums(&rl.values) {
-            plot = plot.geom_hline(v);
+            plot = if flipped {
+                ref_rule(
+                    plot,
+                    false,
+                    v,
+                    span_of(&["y", "ilo", "ihi", "bandlo", "bandhi"]),
+                )
+            } else {
+                plot.geom_hline(v)
+            };
         }
     }
     // Vertical reference lines (`::XLINE`) — only meaningful on a continuous x.
-    if let Some(vl) = cols.iter().find(|c| c.role == Role::VLine) {
+    if let Some(vl) = find_role(cols, Role::VLine) {
         for v in distinct_nums(&vl.values) {
-            plot = plot.geom_vline(v);
+            plot = if flipped {
+                ref_rule(plot, true, v, span_of(&["x", "jlo", "jhi"]))
+            } else {
+                plot.geom_vline(v)
+            };
+        }
+    }
+    // Straight lines in data units: `::ABLINE 'slope,intercept'` and `::IDENTITY`.
+    let mut lines: Vec<(f64, f64)> = Vec::new();
+    if let Some(ab) = find_role(cols, Role::AbLine) {
+        let mut seen = std::collections::HashSet::new();
+        for v in ab.values.iter().filter(|v| **v != Value::Na) {
+            let s = value_str(v);
+            if !seen.insert(s.clone()) {
+                continue;
+            }
+            let p: Vec<f64> = s
+                .trim_matches(|c| c == '[' || c == ']')
+                .split([',', ';'])
+                .filter_map(|t| t.trim().parse::<f64>().ok())
+                .collect();
+            match p.as_slice() {
+                [slope, intercept] if slope.is_finite() && intercept.is_finite() => {
+                    lines.push((*slope, *intercept))
+                }
+                _ => return Err(format!("::ABLINE '{s}' must be 'slope,intercept'")),
+            }
+        }
+    }
+    let identity = find_role(cols, Role::Identity).is_some();
+    if (identity || !lines.is_empty()) && !x_discrete {
+        let xcols: Vec<&[Value]> = ["x", "jlo", "jhi"]
+            .iter()
+            .filter_map(|k| data.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_slice()))
+            .collect();
+        let ycols: Vec<&[Value]> = data
+            .iter()
+            .filter(|(n, _)| {
+                n == "y" || n == "ilo" || n == "ihi" || n.starts_with("band") || {
+                    n.starts_with('y') && n[1..].chars().all(|c| c.is_ascii_digit())
+                }
+            })
+            .map(|(_, v)| v.as_slice())
+            .collect();
+        if let (Some(xb), Some(yb)) = (extent(xcols), extent(ycols)) {
+            let draw = |plot: GGPlot, seg: [(f64, f64); 2], colour, dashed: bool| {
+                let lt = if dashed { "dash" } else { "solid" };
+                plot.geom_line_with(GeomLine {
+                    color: colour,
+                    width: 1.1,
+                    alpha: 0.9,
+                })
+                .layer_data(vec![
+                    (
+                        "x".to_string(),
+                        vec![Value::Float(seg[0].0), Value::Float(seg[1].0)],
+                    ),
+                    (
+                        "y".to_string(),
+                        vec![Value::Float(seg[0].1), Value::Float(seg[1].1)],
+                    ),
+                    ("lt".to_string(), vec![Value::Str(lt.into()); 2]),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").linetype("lt"))
+                .show_legend(false)
+            };
+            if identity {
+                if let Some(seg) = clip_line(1.0, 0.0, xb, yb) {
+                    plot = draw(plot, seg, (130, 136, 148), true);
+                }
+            }
+            for (slope, intercept) in &lines {
+                if let Some(seg) = clip_line(*slope, *intercept, xb, yb) {
+                    plot = draw(plot, seg, (90, 98, 112), false);
+                }
+            }
+            plot = plot.scale_linetype_manual(vec![
+                ("dash", ggplot_rs::render::backend::Linetype::Dashed),
+                ("solid", ggplot_rs::render::backend::Linetype::Solid),
+            ]);
         }
     }
     if let Some(col) = color_col {
@@ -1297,43 +1999,77 @@ fn render_inner(
     if x_coloured {
         plot = plot.show_legend(false); // the x axis already labels the colours
     }
-    if percent {
-        plot = plot.scale_y_continuous(
-            ggplot_rs::scale::continuous::ScaleContinuous::new()
-                .with_label_formatter(ggplot_rs::scale::format::label_percent),
-        );
-    }
-    // ggplot2-style axis label formatting (`::YFORMAT '€'`, `::XFORMAT '$'`, …).
-    let fmt_spec = |role: Role| -> Option<String> {
-        cols.iter().find(|c| c.role == role).and_then(|c| {
-            c.values.iter().find_map(|v| match v {
-                Value::Str(s) if !s.is_empty() => Some(s.clone()),
-                _ => None,
-            })
-        })
+    // One continuous scale per axis, combining tick format (`::YFORMAT`,
+    // percent kinds), transform (`::YSCALE`) and — for a dodged discrete x —
+    // the level breaks/labels.
+    use ggplot_rs::scale::continuous::ScaleContinuous;
+    let y_fmt = role_str(cols, Role::YFormat).and_then(|s| axis_formatter(&s));
+    let y_fmt = if percent {
+        let f: Box<dyn Fn(f64) -> String + Send + Sync> = if kind == Kind::LinePercent {
+            percent_axis(&value.values)
+        } else {
+            Box::new(ggplot_rs::scale::format::label_percent)
+        };
+        Some(f)
+    } else {
+        y_fmt
     };
-    if let Some(f) = fmt_spec(Role::YFormat).and_then(|s| axis_formatter(&s)) {
-        plot = plot.scale_y_continuous(
-            ggplot_rs::scale::continuous::ScaleContinuous::new().with_label_formatter(f),
-        );
+    let y_tr = role_str(cols, Role::YScale)
+        .map(|s| axis_transform(&s, Role::YScale))
+        .transpose()?;
+    if y_fmt.is_some() || y_tr.is_some() {
+        let mut s = ScaleContinuous::new();
+        if let Some(f) = y_fmt {
+            s = s.with_label_formatter(f);
+        }
+        if let Some(t) = y_tr {
+            s = s.with_transform(t);
+        }
+        plot = plot.scale_y_continuous(s);
     }
-    // An x formatter only makes sense on a continuous x (numeric/date), not on the
-    // discrete category axis of a bar chart.
-    if !x_discrete {
-        if let Some(f) = fmt_spec(Role::XFormat).and_then(|s| axis_formatter(&s)) {
-            plot = plot.scale_x_continuous(
-                ggplot_rs::scale::continuous::ScaleContinuous::new().with_label_formatter(f),
-            );
+    // An x formatter/transform only makes sense on a continuous x (numeric/date),
+    // not on the discrete category axis of a bar chart.
+    if let Some(d) = &dodged {
+        plot = plot.scale_x_continuous(
+            ScaleContinuous::new()
+                .with_limits(0.4, d.labels.len() as f64 + 0.6)
+                .with_expand(0.0, 0.0)
+                .with_breaks(d.breaks.clone())
+                .with_labels(d.labels.clone()),
+        );
+    } else if !x_discrete {
+        let x_fmt = role_str(cols, Role::XFormat).and_then(|s| axis_formatter(&s));
+        let x_tr = role_str(cols, Role::XScale)
+            .map(|s| axis_transform(&s, Role::XScale))
+            .transpose()?;
+        if x_fmt.is_some() || x_tr.is_some() {
+            let mut s = ScaleContinuous::new();
+            if let Some(f) = x_fmt {
+                s = s.with_label_formatter(f);
+            }
+            if let Some(t) = x_tr {
+                s = s.with_transform(t);
+            }
+            plot = plot.scale_x_continuous(s);
         }
     }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize);
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
+    }
     // `::FLIP` swaps the axes — e.g. a horizontal bar chart.
-    let flipped = cols.iter().any(|c| c.role == Role::Flip);
     if flipped {
         plot = plot.coord_flip();
     }
     // Scroll/drag-zoom window (from the UI) — clip a continuous cartesian panel to
     // the given data rectangle. The UI only sets it for continuous/datetime x.
-    if !flipped {
+    if !flipped && facet.is_none() {
         if let Some((xlim, ylim)) = o.zoom {
             plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
         }
@@ -1343,7 +2079,19 @@ fn render_inner(
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    let mut panel = Panel::plot(plot, width, height);
+    // A dodged discrete x is drawn on numeric slots: tell hosts which level
+    // each slot is, so a tooltip header reads "W1" rather than "1.225".
+    if let (Some(d), Panel::Plot { attrs, .. }) = (&dodged, &mut panel) {
+        let ticks: serde_json::Map<String, serde_json::Value> = d
+            .breaks
+            .iter()
+            .zip(&d.labels)
+            .map(|(b, l)| (format!("{b}"), serde_json::Value::String(l.clone())))
+            .collect();
+        attrs.push(("data-xticks", serde_json::Value::Object(ticks).to_string()));
+    }
+    Ok(panel)
 }
 
 /// A histogram of the measure column (ggplot bins + counts).
@@ -1780,6 +2528,12 @@ fn render_sparkline(
     Ok(Panel::plot(plot, width.min(240), height))
 }
 
+/// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
+fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    let f = |c: u8| (c as f64 * (1.0 - t)).round() as u8;
+    (f(r), f(g), f(b))
+}
+
 /// Blend a colour toward white by `t` (0 = unchanged, 1 = white).
 fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
@@ -2094,8 +2848,34 @@ fn fmt_g(v: f64) -> String {
     }
 }
 
-/// A choropleth map from a WKT `::MAP` geometry column, optionally coloured by a
-/// measure (light → steel blue).
+/// The WKT column of a map: the first `::MAP`-role column holding text.
+/// (`::CHOROPLETH` is an alias of `::MAP`, so `v::CHOROPLETH` next to a
+/// geometry is a *second* geometry-role column — a numeric one is the measure.)
+fn map_geometry(cols: &[Column]) -> Option<&Column> {
+    cols.iter().find(|c| {
+        c.role == Role::Geometry
+            && c.values
+                .iter()
+                .any(|v| matches!(v, Value::Str(s) if !s.is_empty() && num_str(s).is_none()))
+    })
+}
+
+/// A cell as a number: numeric values, or text that parses as one (DuckDB's
+/// JSON writes DECIMALs as strings, e.g. `"1.0"`).
+fn num_str(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|f| f.is_finite())
+}
+
+fn cell_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Str(s) => num_str(s),
+        v => v.as_f64().filter(|f| f.is_finite()),
+    }
+}
+
+/// A choropleth map from a WKT `::MAP` geometry column, filled by a numeric
+/// measure (light → brand gradient, viridis over a basemap), else by a
+/// `::CATEGORY` (DataZoo palette), else in a light brand tint.
 fn render_map(
     o: &RenderOptions,
     cols: &[Column],
@@ -2103,30 +2883,49 @@ fn render_map(
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
-    let geom = cols
+    let geom = map_geometry(cols).ok_or("map needs a ::MAP column of WKT text")?;
+    // The measure: a chart-kind column, or a numeric second ::MAP/::CHOROPLETH
+    // column (`region::MAP, sales::CHOROPLETH`).
+    let numeric_geometry = cols
         .iter()
-        .find(|c| c.role == Role::Geometry)
-        .ok_or("map needs a ::MAP column")?;
-    let fill = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
-    let label = cols.iter().find(|c| c.role == Role::Label);
-    let base = cols.iter().find(|c| c.role == Role::Basemap);
+        .find(|c| {
+            c.role == Role::Geometry
+                && !std::ptr::eq(*c, geom)
+                && c.values.iter().any(|v| cell_num(v).is_some())
+                && c.values
+                    .iter()
+                    .all(|v| *v == Value::Na || cell_num(v).is_some())
+        })
+        .map(|c| {
+            let vals = c
+                .values
+                .iter()
+                .map(|v| cell_num(v).map_or(Value::Na, Value::Float))
+                .collect();
+            Column::new(c.name.clone(), Role::Value(Kind::Bar), vals)
+        });
+    let measure = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Value(_)))
+        .or(numeric_geometry.as_ref())
+        .filter(|c| c.values.iter().any(|v| v.as_f64().is_some()));
+    let category =
+        find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
+    let label = find_role(cols, Role::Label);
+    let base = find_role(cols, Role::Basemap);
     // Optional layer opacity (`::ALPHA`) — e.g. overlapping quake points reading
     // as density. Clamp to a valid 0..1; default fully opaque.
-    let alpha = cols
-        .iter()
-        .find(|c| c.role == Role::Alpha)
-        .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
+    let alpha = role_num(cols, Role::Alpha)
         .map(|a| a.clamp(0.05, 1.0))
         .unwrap_or(1.0);
     let mut data: Vec<(String, Vec<Value>)> = vec![("geometry".to_string(), geom.values.clone())];
     let mut aes = Aes::new();
-    if let Some(f) = fill {
+    let fill_col = measure.or(category);
+    if let Some(f) = fill_col {
         data.push(("fill".to_string(), f.values.clone()));
         aes = aes.fill("fill");
     }
-    let lab = label
-        .map(|l| l.values.clone())
-        .or_else(|| fill.map(|f| f.values.clone()));
+    let lab = label.or(fill_col).map(|l| l.values.clone());
     if let Some(lv) = lab {
         data.push(("label".to_string(), lv));
         aes = aes.label("label");
@@ -2145,28 +2944,32 @@ fn render_map(
             .layer_data(vec![("geometry".to_string(), b.values.clone())])
             .layer_aes(Aes::new());
     }
-    // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
-    // otherwise fit the whole geometry with an equal aspect ratio.
+    // An unfilled map takes a light brand tint (not ggplot's default blue).
     let plot = plot.geom_sf_with(ggplot_rs::geom::sf::GeomSf {
         alpha,
+        fill: lighten(o.brand(), 0.55),
+        color: (90, 98, 112),
         ..Default::default()
     });
+    // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
+    // otherwise fit the whole geometry with an equal aspect ratio.
     let mut plot = match o.zoom {
         Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
         None => plot.coord_sf(),
     };
     plot = plot.theme_void();
-    if fill.is_some() {
+    if measure.is_some() {
         // Viridis gives points/regions strong contrast over the grey basemap;
         // a plain choropleth keeps the on-brand light→primary gradient.
         plot = if base.is_some() {
             plot.scale_fill_viridis_c()
         } else {
-            plot.scale_fill_gradient(
-                ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-                ggplot_rs::scale::color::RGBAColor::new(o.brand().0, o.brand().1, o.brand().2),
-            )
+            plot.scale_fill_gradient(rgba((0xed, 0xf1, 0xf7)), rgba(o.brand()))
         };
+    } else if let Some(cat) = category {
+        plot = plot
+            .scale_fill(dz_scale(Aesthetic::Fill, cat))
+            .legend_position(ggplot_rs::theme::LegendPosition::Top);
     }
     Ok(Panel::plot(plot, width, height))
 }

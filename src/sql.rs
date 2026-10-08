@@ -475,6 +475,11 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 | Role::VLine
                 | Role::BandLower
                 | Role::BandUpper
+                | Role::YMin
+                | Role::YMax
+                | Role::XMin
+                | Role::XMax
+                | Role::Rank
                 | Role::Trend
                 | Role::Reload => {
                     // A charted measure remembers a human name (explicit
