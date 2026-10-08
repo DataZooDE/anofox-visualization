@@ -20,6 +20,7 @@
 use ggplot_rs::prelude::*;
 
 pub mod dashboard;
+pub mod host;
 pub mod lint;
 pub mod roles;
 pub mod sql;
