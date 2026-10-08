@@ -345,6 +345,8 @@ pub fn roles_json() -> String {
         )),
         "table_formats": tokens(&|r| is_table_format(r)),
         "text_sizes": tokens(&|r| matches!(r, Role::Text(_))),
+        // Chart kinds whose panel honours a zoom window (scroll/drag zoom).
+        "zoomable": tokens(&|r| matches!(r, Role::Value(k) if k.zoomable())),
     });
     serde_json::json!({ "roles": roles, "sets": sets }).to_string()
 }

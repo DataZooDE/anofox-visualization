@@ -91,6 +91,28 @@ pub enum Kind {
     Bubble,
 }
 
+impl Kind {
+    /// Drawn on plain cartesian axes by the main renderer, which honours a
+    /// [`RenderOptions::zoom`] window (bars, lines, areas, scatters, box/violin
+    /// plots). The browser only offers scroll/drag zoom for these.
+    pub fn zoomable(self) -> bool {
+        !matches!(
+            self,
+            Kind::Pie
+                | Kind::Donut
+                | Kind::Gauge
+                | Kind::Histogram
+                | Kind::Density
+                | Kind::QQ
+                | Kind::Heatmap
+                | Kind::Calendar
+                | Kind::Candlestick
+                | Kind::Radar
+                | Kind::Sparkline
+        )
+    }
+}
+
 /// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSize {

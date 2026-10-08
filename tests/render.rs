@@ -100,3 +100,31 @@ fn brand_and_palette_colours() {
     assert_eq!(fill_of("a"), "#E86433");
     assert_eq!(fill_of("b"), "#E8335D");
 }
+
+/// The browser offers zoom only for kinds that honour a zoom window; the set
+/// comes from `roles_json()`.
+#[test]
+fn zoomable_role_set() {
+    let v: serde_json::Value =
+        serde_json::from_str(&anofox_visualization::roles::roles_json()).unwrap();
+    let z: Vec<&str> = v["sets"]["zoomable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    for k in ["LINECHART", "BARCHART", "SCATTER", "AREACHART"] {
+        assert!(z.contains(&k), "{k} zoomable: {z:?}");
+    }
+    for k in [
+        "GAUGE",
+        "PIE",
+        "HEATMAP",
+        "CALENDAR",
+        "CANDLESTICK",
+        "RADAR",
+        "SPARKLINE",
+    ] {
+        assert!(!z.contains(&k), "{k} not zoomable");
+    }
+}

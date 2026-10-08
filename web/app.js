@@ -5,7 +5,6 @@ import init, {
   plan,
   render_panel,
   map_bounds,
-  panel_bounds,
   roles_json,
   format_number,
 } from "./pkg/anofox_visualization.js";
@@ -1703,6 +1702,24 @@ let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
+// Chart kinds whose panel honours a zoom window (plain cartesian charts).
+let ZOOMABLE = [
+  "BARCHART",
+  "BARCHART_STACKED",
+  "BARCHART_PERCENT",
+  "BARCHART_STACKED_PERCENT",
+  "LINECHART",
+  "LINECHART_PERCENT",
+  "STEP",
+  "SMOOTH",
+  "AREACHART",
+  "AREACHART_STACKED",
+  "SCATTER",
+  "BUBBLE",
+  "JITTER",
+  "BOXPLOT",
+  "VIOLIN",
+];
 function loadRoleSets() {
   try {
     const sets = JSON.parse(roles_json()).sets;
@@ -1711,6 +1728,7 @@ function loadRoleSets() {
     DIRECTIVES = sets.directives;
     TFMT = sets.table_formats;
     TEXT_SIZES = sets.text_sizes;
+    if (sets.zoomable) ZOOMABLE = sets.zoomable;
   } catch (_) {}
 }
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
@@ -4179,19 +4197,27 @@ function attachAxisPointer() {
   });
 }
 
+// The position domain a rendered chart SVG actually shows: ggplot-rs writes the
+// trained, expanded `data-domain="x0 x1 y0 y1"` on the root <svg> when both
+// axes are continuous (absent for a discrete axis). null when unusable.
+function svgDomain(svg) {
+  const d = ((svg && svg.getAttribute("data-domain")) || "").trim().split(/\s+/).map(Number);
+  if (d.length !== 4 || !d.every(Number.isFinite) || !(d[1] > d[0]) || !(d[3] > d[2])) return null;
+  return { x0: d[0], x1: d[1], y0: d[2], y1: d[3] };
+}
+
 // Scroll-to-zoom / drag-to-pan for a continuous cartesian chart (double-click
-// resets). Uses the SVG's data-plot rect (panel area in viewBox units) to map
-// the cursor accurately to data coords, and re-renders with a zoom window.
+// resets). Uses the SVG's data-plot rect (panel area in viewBox units) and its
+// data-domain (the domain drawn there) to map the cursor accurately to data
+// coords, and re-renders with a zoom window.
 function attachCartZoom(holder, rowsJson, roles, ph) {
-  let b;
-  try {
-    b = JSON.parse(panel_bounds(rowsJson, JSON.stringify(roles)));
-  } catch (_) {
-    b = [];
-  }
-  if (b.length !== 4) return; // not a continuous-x chart → no zoom
+  // Only plain cartesian kinds honour a zoom window; flipped panels don't.
+  if (!roles.some((r) => ZOOMABLE.includes(r[1]))) return;
+  const svg0 = holder.querySelector("svg");
+  if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
+  const full = svgDomain(svg0);
+  if (!full) return; // not a continuous x/y chart → no zoom
   const W = 460;
-  const full = { x0: b[0], x1: b[1], y0: b[2], y1: b[3] };
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -4217,6 +4243,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   const toData = (e, v) => {
     const m = plotMap();
     if (!m) return null;
+    v = svgDomain(holder.querySelector("svg")) || v; // the domain actually drawn
     const vx = (e.clientX - m.r.left) / m.scale;
     const vy = (e.clientY - m.r.top) / m.scale;
     const fx = (vx - m.pa[0]) / m.pa[2];

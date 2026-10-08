@@ -136,9 +136,15 @@ fn map_bounds_inner(rows_json: &str, roles_json: &str) -> String {
     format!("[{x0},{x1},{y0},{y1}]")
 }
 
-/// Data extent `[x0, x1, y0, y1]` of a cartesian panel — used to seed scroll/drag
-/// zoom. Returns `[]` unless the x axis is continuous/datetime (so discrete bar
-/// charts aren't made zoomable).
+/// Data extent `[x0, x1, y0, y1]` of a cartesian panel. Returns `[]` unless the
+/// x axis is continuous/datetime.
+///
+/// **Deprecated** — kept only for external callers of older bundles. The
+/// browser UI now reads the rendered SVG root's `data-domain` (the trained,
+/// expanded `x0 x1 y0 y1` domain written by ggplot-rs ≥ 0.16, present only
+/// when both axes are continuous) and `data-flip`, plus the `zoomable` role
+/// set from [`roles_json`]; those match what is actually drawn, which this
+/// raw data extent does not.
 #[wasm_bindgen]
 pub fn panel_bounds(rows_json: &str, roles_json: &str) -> String {
     guard(|| Ok(panel_bounds_inner(rows_json, roles_json))).unwrap_or_else(|_| "[]".into())

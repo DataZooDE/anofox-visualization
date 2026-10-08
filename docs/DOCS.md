@@ -425,8 +425,9 @@ wasm exports (`src/wasm.rs`):
 |--------|---------|
 | `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
 | `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
-| `map_bounds(rows_json, roles_json)` / `panel_bounds(…)` | data extents for the zoom UI |
-| `roles_json()` | the role registry + derived role sets (the browser's single source) |
+| `map_bounds(rows_json, roles_json)` | a map's lon/lat extent for the zoom UI |
+| `panel_bounds(…)` | *deprecated* raw data extent of a cartesian panel; the UI now reads the rendered SVG's `data-domain` / `data-flip` attributes (ggplot-rs) and the `zoomable` role set instead |
+| `roles_json()` | the role registry + derived role sets (inputs, metrics, directives, table formats, text sizes, zoomable chart kinds — the browser's single source) |
 | `format_number(value, fmt)` | KPI/table number formatting shared with the headless renderer |
 
 The SQL parsing in `src/sql.rs` is shared with every native host, so the CLI,
