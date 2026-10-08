@@ -1341,26 +1341,6 @@ fn render_heatmap(
             ggplot_rs::scale::color::RGBAColor::new(o.brand().0, o.brand().1, o.brand().2),
         )
         .theme_minimal();
-    // A gridded heatmap with numeric axes should tick on the tile positions, not
-    // at generic "nice" breaks (0, 2.5, 5…) that fall between tiles. Use the
-    // distinct data values (thinned) as breaks so labels sit under each tile.
-    // Tiles are 1 unit wide/tall (± 0.5), so expand the domain by half a tile —
-    // otherwise the edge tiles spill past the axis and cover the tick labels.
-    use ggplot_rs::scale::continuous::ScaleContinuous;
-    if let Some(bx) = tile_breaks(&x.values) {
-        plot = plot.scale_x_continuous(
-            ScaleContinuous::new()
-                .with_breaks(bx)
-                .with_expand(0.0, 0.55),
-        );
-    }
-    if let Some(by) = tile_breaks(&y.values) {
-        plot = plot.scale_y_continuous(
-            ScaleContinuous::new()
-                .with_breaks(by)
-                .with_expand(0.0, 0.55),
-        );
-    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -1647,23 +1627,6 @@ fn render_sparkline(
 fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
     (f(r), f(g), f(b))
-}
-
-/// Break positions for a numeric heatmap axis: the distinct data values (sorted,
-/// thinned to ≤ ~13) so tick labels align with tile centres. `None` when the
-/// column isn't fully numeric (a categorical axis handles its own alignment).
-fn tile_breaks(vals: &[Value]) -> Option<Vec<f64>> {
-    let mut xs: Vec<f64> = Vec::with_capacity(vals.len());
-    for v in vals {
-        xs.push(v.as_f64()?); // any non-numeric → treat the axis as discrete
-    }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    if xs.is_empty() {
-        return None;
-    }
-    let step = (xs.len() as f64 / 13.0).ceil().max(1.0) as usize;
-    Some(xs.iter().step_by(step).copied().collect())
 }
 
 /// Distinct finite numeric values from a column, in first-seen order — used to
