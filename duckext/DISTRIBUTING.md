@@ -11,10 +11,9 @@ through different routes.
 ## Prerequisites (both)
 
 - The repository is public: `github.com/DataZooDE/anofox-visualization`.
-- Self-contained build: `ggplot-rs` is a **pinned git dependency** of the core
-  (`git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37…"` in the root
-  `Cargo.toml`), so Cargo fetches it — no sibling checkout, no crates.io
-  publish. `Cargo.lock` is committed and every build uses `--locked`.
+- Self-contained build: `ggplot-rs` comes from crates.io (`ggplot-rs = "0.16"`
+  in the root `Cargo.toml`) — no sibling checkout needed. `Cargo.lock` is
+  committed and every build uses `--locked`.
 - One version: `[workspace.package] version` in the root `Cargo.toml`
   (CalVer). `duckext/description.yml`'s `version` must match it; release tags are
   `v<version>`.

@@ -42,6 +42,11 @@ single SQL script that renders the requested dashboard.
      required aesthetics), `empty-panel` (0 rows), `unknown-cast` (a typo'd
      `::ROLE`). These are invisible in the output — the linter is how you catch
      them.
+   - **`render-warning` (warning) — fix or justify.** The plotting engine
+     dropped data: non-finite values (NaN/±Inf, `log` of ≤ 0), or a stat layer
+     with too little data (a density/violin of one value, a smooth on two
+     points). Filter or cast in SQL (`WHERE isfinite(x)`, `NULLIF`) rather than
+     shipping a chart that silently omits rows.
    - **Design (`design/*` warnings) — resolve or justify each.** `pie-slices`,
      `unsorted-bars`, `untitled-chart`, `many-series`, `too-many-panels`,
      `ungrouped-kpis`, `raw-table`. Fix each and re-run until it prints **clean**
