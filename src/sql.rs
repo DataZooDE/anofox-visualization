@@ -1,8 +1,41 @@
 //! SQL parsing: strip comments, split statements, and pull `::ROLE`
-//! casts off the SELECT list. Shared by the native `dashboard` bin and the wasm
-//! binding so the browser and CLI behave identically.
+//! casts off the SELECT list. Shared by the native `dashboard` bin, `serve`,
+//! the DuckDB extension and the wasm binding so every host behaves identically.
+//!
+//! All SQL surgery goes through one lexer ([`lex`]), so quotes, `''`/`""`
+//! escapes, `E''` strings, `$$`/`$tag$` strings and `--`/`/* */` comments are
+//! handled consistently everywhere.
+//!
+//! ## Which statements are panels
+//!
+//! Only **query statements** — those whose first keyword is `SELECT`, `WITH`
+//! or `FROM` (or that start with `(`) — are inspected for role casts; DDL/DML
+//! (`CREATE … AS SELECT`, `INSERT … SELECT`, `SET`, …) is always setup. In a
+//! query the **main** `SELECT` list is the first `SELECT` at bracket depth 0,
+//! so a leading `WITH` CTE list works (`WITH t AS (…) SELECT x::XAXIS …`).
+//!
+//! ## Role tokens that are also SQL types
+//!
+//! `::DATE`, `::TEXT`, `::STRING`, `::NUMERIC` (inputs) and `::MAP`,
+//! `::GEOMETRY` (maps) are both DuckDB types and roles
+//! ([`crate::roles::SQL_TYPE_TOKENS`]). They are roles only in a query
+//! statement, and then:
+//! - `::MAP`/`::GEOMETRY` are always the map role;
+//! - the input tokens are roles only when the SELECT is an **input
+//!   statement** — no other unambiguous role except `::HINT`/`::LABEL`/
+//!   `::TITLE`. In a chart panel (`SELECT day::DATE, n::BARCHART …`) they stay
+//!   real casts;
+//! - inside a `::TABLE`/`::PAGED`/`::DOWNLOAD_*`/`::DATERANGE` panel they stay
+//!   real casts.
+//!
+//! Chain a role after a type cast to get both: `ts::DATE::XAXIS`.
 
-use crate::{parse_role, Column, InputKind, Kind, Role};
+pub mod lex;
+
+pub use lex::{split_top_commas, strip_comments, trailing_alias};
+
+use crate::roles::is_sql_type_token;
+use crate::{parse_role, Column, InputKind, Role};
 use ggplot_rs::prelude::Value;
 
 /// A planned statement: either setup (run for effect) or a panel (rewritten SQL
@@ -19,7 +52,7 @@ pub struct Panel {
 
 /// Parse a whole script into ordered [`Panel`]s.
 pub fn plan(script: &str) -> Vec<Panel> {
-    let clean = strip_line_comments(script);
+    let clean = strip_comments(script);
     split_statements(&clean)
         .into_iter()
         .filter_map(|stmt| {
@@ -49,7 +82,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
 
 /// Build anofox-visualization [`Column`]s from JSON result rows (`[{c0:…,c1:…}, …]`) and the
 /// role mapping. Measure columns are coerced to numeric (DuckDB emits
-/// BIGINT/DECIMAL as JSON strings).
+/// BIGINT/DECIMAL as JSON strings); `"NaN"`/`"inf"` strings become missing.
 pub fn columns_from_rows(
     rows: &[serde_json::Map<String, serde_json::Value>],
     roles: &[(usize, Role)],
@@ -73,17 +106,97 @@ pub fn columns_from_rows(
 
 fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
     match v {
-        Some(serde_json::Value::Number(n)) => n.as_f64().map(Value::Float).unwrap_or(Value::Na),
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .filter(|f| f.is_finite())
+            .map(Value::Float)
+            .unwrap_or(Value::Na),
         Some(serde_json::Value::String(s)) => match numeric {
-            true => s
-                .parse::<f64>()
-                .map(Value::Float)
-                .unwrap_or_else(|_| Value::Str(s.clone())),
+            true => match s.trim().parse::<f64>() {
+                Ok(f) if f.is_finite() => Value::Float(f),
+                Ok(_) => Value::Na, // "NaN", "inf", "-Infinity"
+                Err(_) => Value::Str(s.clone()),
+            },
             false => Value::Str(s.clone()),
         },
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
         _ => Value::Na,
     }
+}
+
+/// Replace bare `NaN` / `Infinity` / `-Infinity` / `inf` / `nan` tokens
+/// **outside JSON strings** with `null`, so JSON from DuckDB (`to_json`, the
+/// CLI's `-json`) that contains non-finite doubles still parses. Returns the
+/// input unchanged (borrowed) when there is nothing to fix.
+pub fn sanitize_json_numbers(s: &str) -> std::borrow::Cow<'_, str> {
+    const BAD: [&str; 3] = ["nan", "infinity", "inf"];
+    let b = s.as_bytes();
+    let mut out: Option<String> = None;
+    let mut last = 0usize;
+    let mut i = 0usize;
+    let mut in_str = false;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 2,
+                b'"' => {
+                    in_str = false;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        if c == b'"' {
+            in_str = true;
+            i += 1;
+            continue;
+        }
+        let prev_ok =
+            i == 0 || matches!(b[i - 1], b':' | b',' | b'[' | b' ' | b'\t' | b'\n' | b'\r');
+        if prev_ok && matches!(c, b'N' | b'n' | b'I' | b'i' | b'-' | b'+') {
+            let mut j = i;
+            if matches!(b[j], b'-' | b'+') {
+                j += 1;
+            }
+            let word_start = j;
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            let word = s[word_start..j].to_ascii_lowercase();
+            let next_ok =
+                j == b.len() || matches!(b[j], b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r');
+            if next_ok && BAD.contains(&word.as_str()) {
+                let o = out.get_or_insert_with(|| String::with_capacity(s.len()));
+                o.push_str(&s[last..i]);
+                o.push_str("null");
+                last = j;
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    match out {
+        Some(mut o) => {
+            o.push_str(&s[last..]);
+            std::borrow::Cow::Owned(o)
+        }
+        None => std::borrow::Cow::Borrowed(s),
+    }
+}
+
+/// Parse a DuckDB JSON result (`[{…},…]`, or empty output) into rows,
+/// tolerating bare `NaN`/`Infinity`. Use this in every host instead of
+/// `serde_json::from_str(..).unwrap_or_default()` so a non-finite double
+/// doesn't silently blank a panel.
+pub fn parse_rows_json(s: &str) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&sanitize_json_numbers(t)).map_err(|e| format!("bad result JSON: {e}"))
 }
 
 /// If every non-null value is an ISO date/timestamp string, reinterpret the
@@ -113,35 +226,102 @@ fn maybe_datetime(vals: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-/// Parse `YYYY-MM-DD` or `YYYY-MM-DD[ T]HH:MM:SS` into seconds since the Unix
-/// epoch (UTC). Returns `None` for anything that isn't that exact shape.
-fn parse_iso_epoch(s: &str) -> Option<i64> {
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
+/// Parse an ISO date / timestamp into seconds since the Unix epoch (UTC):
+/// `YYYY-MM-DD`, optionally followed by `[ T]HH:MM[:SS[.fff…]]` and a zone
+/// `Z` / `±HH` / `±HHMM` / `±HH:MM` (DuckDB's `TIMESTAMPTZ` text form). The
+/// offset is honoured (`12:00+02` → 10:00 UTC). Impossible dates
+/// (`2024-02-31`) and trailing garbage return `None`.
+pub fn parse_iso_epoch(s: &str) -> Option<i64> {
     let s = s.trim();
     let b = s.as_bytes();
-    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' || !s.is_char_boundary(10) {
         return None;
     }
-    let y: i64 = s.get(0..4)?.parse().ok()?;
-    let mo: u32 = s.get(5..7)?.parse().ok()?;
-    let d: u32 = s.get(8..10)?.parse().ok()?;
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+    let digits = |r: std::ops::Range<usize>| -> Option<i64> {
+        let t = s.get(r)?;
+        if t.is_empty() || !t.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        t.parse().ok()
+    };
+    let y = digits(0..4)?;
+    let mo = digits(5..7)? as u32;
+    let d = digits(8..10)? as u32;
+    if !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) {
         return None;
     }
     let mut secs = days_from_civil(y, mo, d) * 86_400;
-    if b.len() >= 19 && (b[10] == b' ' || b[10] == b'T') {
-        let hh: i64 = s.get(11..13)?.parse().ok()?;
-        let mi: i64 = s.get(14..16)?.parse().ok()?;
-        let ss: i64 = s.get(17..19)?.parse().ok()?;
-        if hh > 23 || mi > 59 || ss > 60 {
-            return None;
-        }
-        secs += hh * 3600 + mi * 60 + ss;
+    let rest = &s[10..];
+    if rest.is_empty() {
+        return Some(secs);
     }
-    Some(secs)
+    let rb = rest.as_bytes();
+    if !(rb[0] == b' ' || rb[0] == b'T') || rest.len() < 6 {
+        return None;
+    }
+    let t = &rest[1..];
+    let hh = digits_of(t, 0..2)?;
+    if t.as_bytes().get(2) != Some(&b':') {
+        return None;
+    }
+    let mi = digits_of(t, 3..5)?;
+    let mut k = 5;
+    let mut ss = 0;
+    if t.as_bytes().get(k) == Some(&b':') {
+        ss = digits_of(t, k + 1..k + 3)?;
+        k += 3;
+        if t.as_bytes().get(k) == Some(&b'.') {
+            k += 1;
+            while t.as_bytes().get(k).is_some_and(|c| c.is_ascii_digit()) {
+                k += 1;
+            }
+        }
+    }
+    if hh > 23 || mi > 59 || ss > 60 {
+        return None;
+    }
+    secs += hh * 3600 + mi * 60 + ss;
+    let zone = t.get(k..)?.trim_start();
+    if zone.is_empty() || zone.eq_ignore_ascii_case("Z") || zone.eq_ignore_ascii_case("UTC") {
+        return Some(secs);
+    }
+    let sign = match zone.as_bytes()[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let z = &zone[1..];
+    let (oh, om) = match z.len() {
+        2 => (digits_of(z, 0..2)?, 0),
+        4 => (digits_of(z, 0..2)?, digits_of(z, 2..4)?),
+        5 if z.as_bytes()[2] == b':' => (digits_of(z, 0..2)?, digits_of(z, 3..5)?),
+        _ => return None,
+    };
+    if oh > 18 || om > 59 {
+        return None;
+    }
+    Some(secs - sign * (oh * 3600 + om * 60))
+}
+
+fn digits_of(s: &str, r: std::ops::Range<usize>) -> Option<i64> {
+    let t = s.get(r)?;
+    if t.is_empty() || !t.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    t.parse().ok()
 }
 
 /// Days since 1970-01-01 for a civil (Y, M, D) date — Howard Hinnant's algorithm.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -151,264 +331,93 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-const ROLES: &[&str] = &[
-    "XAXIS",
-    "X",
-    "YAXIS",
-    "Y",
-    "CATEGORY",
-    "SERIES",
-    "COLOR",
-    "COLOUR",
-    "LABEL",
-    "TITLE",
-    "HEADING",
-    "BARCHART",
-    "BAR",
-    "BARCHART_STACKED",
-    "BAR_STACKED",
-    "STACKED_BAR",
-    "LINECHART",
-    "LINE",
-    "AREACHART",
-    "AREA",
-    "STEP",
-    "STEPLINE",
-    "STEP_LINE",
-    "SMOOTH",
-    "TRENDLINE",
-    "TREND_LINE",
-    "AREACHART_STACKED",
-    "AREA_STACKED",
-    "STACKED_AREA",
-    "SIZE",
-    "BUBBLE",
-    "DATALABELS",
-    "DATALABEL",
-    "VALUELABELS",
-    "SHOWLABELS",
-    "MARKAREA",
-    "MARK_AREA",
-    "SHADE",
-    "MARKDOWN",
-    "MD",
-    "TEXTBOX",
-    "RICHTEXT",
-    "SCATTER",
-    "JITTER",
-    "JITTERCHART",
-    "STRIP",
-    "CANDLESTICK",
-    "CANDLE",
-    "OHLC",
-    "RADAR",
-    "SPIDER",
-    "OPEN",
-    "HIGH",
-    "LOW",
-    "POINT",
-    "SCATTERCHART",
-    "PIE",
-    "DONUT",
-    "PIECHART",
-    "HISTOGRAM",
-    "HIST",
-    "BOXPLOT",
-    "BOX_PLOT",
-    "VIOLIN",
-    "VIOLINPLOT",
-    "DENSITY",
-    "KDE",
-    "QQ",
-    "QQPLOT",
-    "FLIP",
-    "COORD_FLIP",
-    "YFORMAT",
-    "XFORMAT",
-    "YCURRENCY",
-    "XCURRENCY",
-    "HORIZONTAL",
-    "ALPHA",
-    "OPACITY",
-    "HEATMAP",
-    "CALENDAR",
-    "CALENDAR_HEATMAP",
-    "CAL_HEATMAP",
-    "TILE",
-    "TILES",
-    "SPARKLINE",
-    "SPARK",
-    "REFLINE",
-    "TARGET",
-    "GOAL",
-    "MAP",
-    "GEOMETRY",
-    "GEO",
-    "CHOROPLETH",
-    "BASEMAP",
-    "MAPBASE",
-    "BACKDROP",
-    "TABLE",
-    "PAGED",
-    "TABLE_PAGED",
-    "PAGINATED",
-    "GRID",
-    "METRIC",
-    "KPI",
-    "BIGNUMBER",
-    "DROPDOWN",
-    "OPTIONS",
-    "SELECT_INPUT",
-    "NUMBER",
-    "SLIDER",
-    "NUMERIC",
-    "DATE",
-    "DATEPICKER",
-    "TEXT",
-    "SEARCH",
-    "STRING",
-    "MULTISELECT",
-    "MULTI",
-    "DATERANGE",
-    "DATE_RANGE",
-    "MONEY",
-    "DOLLAR",
-    "CURRENCY",
-    "PERCENT",
-    "PCT",
-    "COMPACT",
-    "DELTA",
-    "COMPARE",
-    "PREVIOUS",
-    "TAB",
-    "PAGE",
-    "SUBTAB",
-    "SUB_TAB",
-    "COLUMNS",
-    "COLS",
-    "GROUP",
-    "BOX",
-    "ROW",
-    "ENDGROUP",
-    "ENDBOX",
-    "ENDROW",
-    "SPAN",
-    "WIDTH",
-    "COL",
-    "HEIGHT",
-    "TALL",
-    // Additional roles:
-    "BARCHART_PERCENT",
-    "BAR_PERCENT",
-    "BARCHART_STACKED_PERCENT",
-    "BAR_STACKED_PERCENT",
-    "LINECHART_PERCENT",
-    "LINE_PERCENT",
-    "DONUTCHART",
-    "DONUTCHART_PERCENT",
-    "PIECHART_PERCENT",
-    "GAUGE",
-    "GAUGE_PERCENT",
-    "YLINE",
-    "XLINE",
-    "BAND_LOWER",
-    "BANDLOWER",
-    "BAND_UPPER",
-    "BANDUPPER",
-    "TREND",
-    "HINT",
-    "TEXT_SMALL",
-    "TEXT_MEDIUM",
-    "TEXT_LARGE",
-    "PLACEHOLDER",
-    "HEADER_IMAGE",
-    "HEADERIMAGE",
-    "FOOTER_LINK",
-    "FOOTERLINK",
-    "DOWNLOAD_CSV",
-    "DOWNLOAD_XLSX",
-    "DOWNLOAD_EXCEL",
-    "DOWNLOAD_PDF",
-    "RELOAD",
-    "REFRESH",
-    "RANGE",
-    "LABELS",
-    "COLORS",
-    "COLOURS",
-    "COLORSCALE",
-    "COLOURSCALE",
-    "HEAT",
-    "GRADIENT",
-    "BADGE",
-    "STATUS",
-    "PILL",
-    "PLAIN",
-    "NOBAR",
-];
-
-/// Strip `-- …` line comments (outside single-quoted strings).
+/// Strip `--` and `/* */` comments outside literals (kept for compatibility;
+/// same as [`strip_comments`], which no longer resets string state per line).
 pub fn strip_line_comments(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    for line in sql.lines() {
-        let (mut in_str, mut prev_dash) = (false, false);
-        let mut cut = None;
-        for (i, c) in line.char_indices() {
-            match c {
-                '\'' => {
-                    in_str = !in_str;
-                    prev_dash = false;
-                }
-                '-' if !in_str => {
-                    if prev_dash {
-                        cut = Some(i - 1);
-                        break;
-                    }
-                    prev_dash = true;
-                }
-                _ => prev_dash = false,
-            }
-        }
-        out.push_str(cut.map_or(line, |i| &line[..i]));
-        out.push('\n');
-    }
-    out
+    strip_comments(sql)
 }
 
-/// Split a script into statements on top-level `;`.
+/// Split a script into statements on `;` outside literals and comments.
 pub fn split_statements(sql: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let (mut cur, mut in_str) = (String::new(), false);
-    for c in sql.chars() {
-        match c {
-            '\'' => {
-                in_str = !in_str;
-                cur.push(c);
-            }
-            ';' if !in_str => out.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
-        }
-    }
-    if !cur.trim().is_empty() {
-        out.push(cur);
-    }
-    out
+    lex::split_statements(sql)
 }
 
 /// `(rewritten SQL, [(col idx, role)], [(col idx, display name)])`.
 type Rewritten = (String, Vec<(usize, Role)>, Vec<(usize, String)>);
 
+/// Clause keywords that end a SELECT list when there's no `FROM`.
+const LIST_END: &[&str] = &[
+    "FROM",
+    "WHERE",
+    "GROUP",
+    "HAVING",
+    "QUALIFY",
+    "WINDOW",
+    "ORDER",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+];
+
+/// Is this statement a query (the only kind that may be a panel)?
+pub fn is_query_statement(stmt: &str) -> bool {
+    let first_tok = lex::tokenize(stmt).into_iter().find(|t| !t.is_trivia());
+    if first_tok.is_some_and(|t| t.is_punct(stmt, '(')) {
+        return true;
+    }
+    matches!(
+        lex::first_keyword(stmt).as_deref(),
+        Some("SELECT" | "WITH" | "FROM")
+    )
+}
+
+/// Locate the main SELECT list: `(byte start, byte end)` of the item list.
+fn main_select_list(stmt: &str) -> Option<(usize, usize)> {
+    let sel = lex::find_top_level_keyword(stmt, "SELECT", 0)?;
+    let start = sel + "SELECT".len();
+    let end = lex::find_top_level_any(stmt, LIST_END, start)
+        .map(|(p, _)| p)
+        .unwrap_or(stmt.len());
+    Some((start, end))
+}
+
+/// A recognised trailing `::ROLE` on a select item, honouring the SQL-type
+/// ambiguity rules (see the module docs). `inputs_ok` = this SELECT is an
+/// input statement.
+fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
+    let (expr, tok) = lex::trailing_cast(item)?;
+    let role = parse_role(tok)?;
+    if is_sql_type_token(tok) && matches!(role, Role::Input(_)) && !inputs_ok {
+        return None;
+    }
+    Some((expr, role))
+}
+
 /// Rewrite `<expr>::ROLE` casts in the SELECT list into `<expr> AS c{i}`.
 pub fn rewrite(stmt: &str) -> Rewritten {
-    let up = stmt.to_ascii_uppercase();
-    let sel = match up.find("SELECT") {
-        Some(p) => p + 6,
-        None => return (stmt.to_string(), Vec::new(), Vec::new()),
+    let none = || (stmt.to_string(), Vec::new(), Vec::new());
+    if !is_query_statement(stmt) {
+        return none();
+    }
+    let Some((sel, list_end)) = main_select_list(stmt) else {
+        return none();
     };
-    let list_end = top_level_kw(&stmt[sel..], "FROM")
-        .map(|o| sel + o)
-        .unwrap_or(stmt.len());
     let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
     let split = split_top_commas(list);
+
+    // Unambiguous roles present in the list decide whether the SQL-type tokens
+    // (DATE/TEXT/STRING/NUMERIC) are input roles or plain casts.
+    let unambiguous: Vec<Role> = split
+        .iter()
+        .filter_map(|it| lex::trailing_cast(it.trim()))
+        .filter(|(_, tok)| !is_sql_type_token(tok))
+        .filter_map(|(_, tok)| parse_role(tok))
+        .collect();
+    let inputs_ok = unambiguous
+        .iter()
+        .all(|r| matches!(r, Role::Input(_) | Role::Hint | Role::Label | Role::Title));
 
     // ::TABLE, ::DATERANGE and ::DOWNLOAD_* keep every column and its name — the
     // whole result is the payload; strip only the casts.
@@ -418,35 +427,25 @@ pub fn rewrite(stmt: &str) -> Rewritten {
             Role::Table | Role::PagedTable | Role::Input(InputKind::DateRange) | Role::Download(_)
         )
     };
-    let intact = split.iter().find_map(|it| {
-        trailing_role(it.trim())
-            .and_then(|(_, r)| parse_role(r))
-            .filter(|r| keep_intact(*r))
-    });
+    let intact = unambiguous.iter().copied().find(|r| keep_intact(*r));
     if let Some(role) = intact {
-        // Keep every column and its name; strip the recognised casts. A ::TITLE
-        // column is recorded by its output position so the panel shows a title
-        // bar (the browser drops that column from a table's cells).
+        // Keep every column and its name; strip the recognised (unambiguous)
+        // role casts — real casts like `name::TEXT` stay. A ::TITLE column is
+        // recorded by its output position so the panel shows a title bar (the
+        // browser drops that column from a table's cells).
         let mut roles = vec![(0, role)];
         let items: Vec<String> = split
             .iter()
             .enumerate()
-            .map(|(idx, it)| match trailing_role(it.trim()) {
-                Some((expr, r)) => {
+            .map(|(idx, it)| match lex::trailing_cast(it.trim()) {
+                Some((expr, tok)) if !is_sql_type_token(tok) && parse_role(tok).is_some() => {
                     // Record per-column table formatting (title bar, trend arrow,
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
-                    if let Some(
-                        rr @ (Role::Title
-                        | Role::Trend
-                        | Role::Metric(_)
-                        | Role::Value(Kind::Sparkline)
-                        | Role::ColorScale
-                        | Role::Badge
-                        | Role::Plain),
-                    ) = parse_role(r)
-                    {
-                        roles.push((idx, rr));
+                    if let Some(rr) = parse_role(tok) {
+                        if rr == Role::Title || crate::roles::is_table_format(rr) {
+                            roles.push((idx, rr));
+                        }
                     }
                     expr.to_string()
                 }
@@ -465,171 +464,55 @@ pub fn rewrite(stmt: &str) -> Rewritten {
     let mut items = Vec::new();
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
-        if let Some((expr, role_str)) = trailing_role(item) {
-            if let Some(role) = parse_role(role_str) {
-                // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
-                // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
-                let item = match role {
-                    Role::Value(_)
-                    | Role::Metric(_)
-                    | Role::Delta
-                    | Role::RefLine
-                    | Role::VLine
-                    | Role::BandLower
-                    | Role::BandUpper
-                    | Role::Trend
-                    | Role::Reload => {
-                        // A charted measure remembers a human name (explicit
-                        // trailing `AS alias`, else a bare column name) so a combo
-                        // legend can read e.g. "observed"/"trend". The output alias
-                        // stays `c{i}` so the render side keeps its by-position
-                        // column lookup — the name travels as separate metadata.
-                        let (core, alias) = trailing_alias(expr);
-                        if matches!(role, Role::Value(_)) {
-                            if let Some(nm) = alias.or_else(|| simple_ident(core)) {
-                                names.push((i, nm));
-                            }
+        if let Some((expr, role)) = item_role(item, inputs_ok) {
+            // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
+            // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
+            let rewritten = match role {
+                Role::Value(_)
+                | Role::Metric(_)
+                | Role::Delta
+                | Role::RefLine
+                | Role::VLine
+                | Role::BandLower
+                | Role::BandUpper
+                | Role::Trend
+                | Role::Reload => {
+                    // A charted measure remembers a human name (explicit
+                    // trailing `AS alias`, else a bare column name) so a combo
+                    // legend can read e.g. "observed"/"trend". The output alias
+                    // stays `c{i}` so the render side keeps its by-position
+                    // column lookup — the name travels as separate metadata.
+                    let (core, alias) = trailing_alias(expr);
+                    if matches!(role, Role::Value(_)) {
+                        if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                            names.push((i, nm));
                         }
-                        format!("CAST({core} AS DOUBLE) AS c{i}")
                     }
-                    // Inputs keep the original column name — it becomes the
-                    // DuckDB variable name the browser binds the control to.
-                    Role::Input(_) => expr.to_string(),
-                    _ => format!("{expr} AS c{i}"),
-                };
-                roles.push((i, role));
-                items.push(item);
-                continue;
-            }
+                    format!("CAST({core} AS DOUBLE) AS c{i}")
+                }
+                // Inputs keep the original column name — it becomes the
+                // DuckDB variable name the browser binds the control to.
+                Role::Input(_) => expr.to_string(),
+                // Any other role: an explicit `AS alias` is replaced by c{i}.
+                _ => format!("{} AS c{i}", trailing_alias(expr).0),
+            };
+            roles.push((i, role));
+            items.push(rewritten);
+            continue;
         }
-        items.push(format!("{item} AS c{i}"));
+        if lex::is_star_item(item) {
+            items.push(item.to_string()); // `*`, `t.*`, COLUMNS(…) expand in place
+        } else {
+            items.push(format!("{} AS c{i}", trailing_alias(item).0));
+        }
     }
     (format!("{head} {} {tail}", items.join(", ")), roles, names)
 }
 
-fn trailing_role(item: &str) -> Option<(&str, &str)> {
-    let idx = item.rfind("::")?;
-    let role = item[idx + 2..].trim();
-    if ROLES.contains(&role.to_ascii_uppercase().as_str()) {
-        Some((item[..idx].trim(), role))
-    } else {
-        None
-    }
-}
-
-/// Split a trailing top-level `AS <alias>` off an expression. The alias may be a
-/// bare identifier or a `"quoted"` one. A nested `AS` (as in `CAST(x AS INT)`)
-/// stays put — only a top-level, trailing `AS` at paren depth 0 is peeled.
-fn trailing_alias(expr: &str) -> (&str, Option<String>) {
-    let trimmed = expr.trim_end();
-    // The final token: a quoted identifier, or a run of identifier chars.
-    let (alias_start, alias) = if let Some(body) = trimmed.strip_suffix('"') {
-        match body.rfind('"') {
-            Some(o) => (o, body[o + 1..].to_string()),
-            None => return (expr, None),
-        }
-    } else {
-        let cut = trimmed.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
-        if cut.len() == trimmed.len() {
-            return (expr, None); // no trailing word
-        }
-        (cut.len(), trimmed[cut.len()..].to_string())
-    };
-    if alias.is_empty() {
-        return (expr, None);
-    }
-    let before = trimmed[..alias_start].trim_end();
-    if before.len() < 2 || !before[before.len() - 2..].eq_ignore_ascii_case("AS") {
-        return (expr, None);
-    }
-    let head = &before[..before.len() - 2];
-    // The `AS` must stand alone (whitespace before it) and at paren depth 0.
-    if !head.is_empty() && !head.ends_with(|c: char| c.is_whitespace()) {
-        return (expr, None);
-    }
-    let core = head.trim_end();
-    let balanced = {
-        let (mut d, mut s) = (0i32, false);
-        for c in core.chars() {
-            match c {
-                '\'' => s = !s,
-                '(' if !s => d += 1,
-                ')' if !s => d -= 1,
-                _ => {}
-            }
-        }
-        d == 0 && !s
-    };
-    if core.is_empty() || !balanced {
-        return (expr, None);
-    }
-    (core, Some(alias))
-}
-
 /// `Some(s)` if `s` is a bare SQL identifier (so a plain `col ::LINECHART` can
 /// carry `col` as its series name); `None` for anything computed.
-fn simple_ident(s: &str) -> Option<String> {
-    let t = s.trim();
-    if !t.is_empty()
-        && !t.starts_with(|c: char| c.is_ascii_digit())
-        && t.chars().all(|c| c.is_alphanumeric() || c == '_')
-    {
-        Some(t.to_string())
-    } else {
-        None
-    }
-}
-
-fn split_top_commas(s: &str) -> Vec<String> {
-    let (mut out, mut cur, mut depth, mut in_str) = (Vec::new(), String::new(), 0i32, false);
-    for c in s.chars() {
-        match c {
-            '\'' => {
-                in_str = !in_str;
-                cur.push(c);
-            }
-            '(' if !in_str => {
-                depth += 1;
-                cur.push(c);
-            }
-            ')' if !in_str => {
-                depth -= 1;
-                cur.push(c);
-            }
-            ',' if depth == 0 && !in_str => out.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
-        }
-    }
-    if !cur.trim().is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn top_level_kw(s: &str, kw: &str) -> Option<usize> {
-    // `to_ascii_uppercase` preserves byte length, so indices map back to `s`.
-    // Iterate by char boundaries so multibyte UTF-8 (e.g. `Δ`, `±`) never panics
-    // a `&up[i..]` slice.
-    let up = s.to_ascii_uppercase();
-    let (mut depth, mut in_str) = (0i32, false);
-    for (i, c) in up.char_indices() {
-        match c {
-            '\'' => in_str = !in_str,
-            '(' if !in_str => depth += 1,
-            ')' if !in_str => depth -= 1,
-            _ if !in_str && depth == 0 && up[i..].starts_with(kw) => {
-                // `_` is an identifier char, so `from_day` must NOT match `FROM`.
-                let ident = |c: char| c.is_alphanumeric() || c == '_';
-                let before = up[..i].chars().next_back().is_none_or(|p| !ident(p));
-                let after = up[i + kw.len()..].chars().next().is_none_or(|c| !ident(c));
-                if before && after {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+pub fn simple_ident(s: &str) -> Option<String> {
+    lex::simple_ident(s)
 }
 
 #[cfg(test)]
