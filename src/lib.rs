@@ -559,12 +559,94 @@ pub fn error_pre(msg: &str) -> String {
 /// A small SVG showing an (escaped) error message — for hosts that need an
 /// image either way (the wasm entry points).
 pub fn error_svg(msg: &str, width: u32) -> String {
-    let w = clamp_dim(width as u64);
+    error_svg_at(Place::Doc, msg, width)
+}
+
+/// [`error_svg`] at `place` (a dashboard nests it as a fragment).
+pub(crate) fn error_svg_at(place: Place, msg: &str, width: u32) -> String {
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"40\" viewBox=\"0 0 {w} 40\">\
-         <text x=\"4\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#b42318\">{}</text></svg>",
+        "{}<text x=\"4\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#b42318\">{}</text></svg>",
+        svg_open(place, clamp_dim(width as u64), 40),
         format::escape_xml(msg)
     )
+}
+
+/// Where a rendered panel goes: a standalone SVG document, or a nested
+/// `<svg x y …>` fragment at `(x, y)` in a parent SVG (no `xmlns`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Place {
+    Doc,
+    At(f64, f64),
+}
+
+/// The opening `<svg>` tag of a `width`×`height` panel at `place`.
+pub(crate) fn svg_open(
+    place: Place,
+    width: impl std::fmt::Display,
+    height: impl std::fmt::Display,
+) -> String {
+    match place {
+        Place::Doc => format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+        ),
+        Place::At(x, y) => format!(
+            "<svg x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+        ),
+    }
+}
+
+/// A panel ready to be written: a ggplot (rendered by ggplot-rs) or one of
+/// the extension's own small SVGs (notes, headings, errors).
+pub(crate) enum Panel {
+    Plot {
+        plot: Box<GGPlot>,
+        width: u32,
+        height: u32,
+    },
+    Own {
+        width: u32,
+        height: u32,
+        /// The SVG content (without the `<svg>` wrapper).
+        body: String,
+    },
+}
+
+impl Panel {
+    fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
+        Panel::Plot {
+            plot: Box::new(plot),
+            width,
+            height,
+        }
+    }
+
+    /// Write the panel at `place`: the SVG plus the plotting engine's build
+    /// warnings (rows dropped for non-finite values, empty layers, …).
+    pub(crate) fn finish(self, place: Place) -> Result<(String, Vec<String>), String> {
+        match self {
+            Panel::Plot {
+                plot,
+                width,
+                height,
+            } => {
+                let svg = match place {
+                    Place::Doc => plot.render_svg_native_with_warnings(width, height),
+                    Place::At(x, y) => plot
+                        .render_svg_native_at(x, y, width, height)
+                        .map(|s| (s, Vec::new())),
+                };
+                svg.map_err(|e| format!("render failed: {e:?}"))
+            }
+            Panel::Own {
+                width,
+                height,
+                body,
+            } => Ok((
+                format!("{}{body}</svg>", svg_open(place, width, height)),
+                Vec::new(),
+            )),
+        }
+    }
 }
 
 /// Parse `rrggbb` / `#rrggbb`.
@@ -598,12 +680,41 @@ pub fn render_with(
     height: u32,
     o: &RenderOptions,
 ) -> Result<String, RenderError> {
+    render_placed(cols, Place::Doc, width, height, o).map(|(svg, _)| svg)
+}
+
+/// Like [`render_with`], but renders a nested `<svg x y width height
+/// viewBox>` fragment (no `xmlns`) positioned at `(x, y)` in a parent SVG —
+/// for composing dashboards without string surgery.
+pub fn render_with_at(
+    cols: &[Column],
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<String, RenderError> {
+    let (x, y) = (
+        if x.is_finite() { x } else { 0.0 },
+        if y.is_finite() { y } else { 0.0 },
+    );
+    render_placed(cols, Place::At(x, y), width, height, o).map(|(svg, _)| svg)
+}
+
+fn render_placed(
+    cols: &[Column],
+    place: Place,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<(String, Vec<String>), RenderError> {
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
         let cols = downsample::prepare(cols, o);
-        render_inner(&cols, w, h, o)
-            .map(strip_nonfinite_marks)
-            .map_err(RenderError::Render)
+        let (svg, warnings) = render_inner(&cols, w, h, o)
+            .and_then(|p| p.finish(place))
+            .map_err(RenderError::Render)?;
+        Ok((strip_nonfinite_marks(svg), warnings))
     })
 }
 
@@ -707,7 +818,7 @@ fn render_inner(
     width: u32,
     height: u32,
     o: &RenderOptions,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let title = cols
         .iter()
         .find(|c| c.role == Role::Label)
@@ -1158,8 +1269,7 @@ fn render_inner(
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A histogram of the measure column (ggplot bins + counts).
@@ -1169,7 +1279,7 @@ fn render_histogram(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let data = vec![("x".to_string(), value.values.clone())];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x"))
@@ -1179,8 +1289,7 @@ fn render_histogram(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A kernel-density curve of the measure column. An optional `CATEGORY` splits
@@ -1192,7 +1301,7 @@ fn render_density(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let category = cols.iter().find(|c| c.role == Role::Category);
     let mut data: Vec<(String, Vec<Value>)> = vec![("x".to_string(), value.values.clone())];
     let mut aes = Aes::new().x("x");
@@ -1220,8 +1329,7 @@ fn render_density(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// Build an axis tick formatter from a short spec — a keyword or a currency
@@ -1280,7 +1388,7 @@ fn render_qq(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let data = vec![("y".to_string(), value.values.clone())];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().y("y"))
@@ -1293,8 +1401,7 @@ fn render_qq(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A heatmap: `x` × `y` tiles coloured by the measure (light → steel blue).
@@ -1305,7 +1412,7 @@ fn render_heatmap(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
@@ -1331,8 +1438,7 @@ fn render_heatmap(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// Max span a calendar heatmap draws (one column per week; beyond this the
@@ -1351,7 +1457,7 @@ fn render_calendar(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     use ggplot_rs::stat::calendar::day_number;
     let x = cols
         .iter()
@@ -1401,8 +1507,7 @@ fn render_calendar(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// An OHLC candlestick chart (`geom_candlestick`): `::XAXIS` period,
@@ -1415,7 +1520,7 @@ fn render_candlestick(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let find = |role: Role, msg: &'static str| cols.iter().find(|c| c.role == role).ok_or(msg);
     let x = find(Role::X, "candlestick needs an XAXIS column")?;
     let open = find(Role::Open, "candlestick needs an ::OPEN column")?;
@@ -1457,8 +1562,7 @@ fn render_candlestick(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A radar / spider chart (`coord_radar`): axes from the `::XAXIS` (metric
@@ -1471,7 +1575,7 @@ fn render_radar(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
@@ -1540,8 +1644,7 @@ fn render_radar(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
@@ -1555,7 +1658,7 @@ fn render_sparkline(
     value: &Column,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let n = value.values.len();
     let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
     let data = vec![
@@ -1575,7 +1678,7 @@ fn render_sparkline(
         ),
     ];
 
-    GGPlot::new(data)
+    let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
         .geom_area_with(GeomArea {
             fill,
@@ -1597,11 +1700,10 @@ fn render_sparkline(
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0),
         )
-        .theme_void()
-        // Render at a compact width so strokes stay crisp when the inline
-        // sparkline is scaled down into a narrow panel column.
-        .render_svg_native_with_size(width.min(240), height)
-        .map_err(|e| format!("render failed: {e:?}"))
+        .theme_void();
+    // Render at a compact width so strokes stay crisp when the inline
+    // sparkline is scaled down into a narrow panel column.
+    Ok(Panel::plot(plot, width.min(240), height))
 }
 
 /// Blend a colour toward white by `t` (0 = unchanged, 1 = white).
@@ -1672,7 +1774,7 @@ fn render_gauge(
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     use ggplot_rs::scale::continuous::ScaleContinuous;
     let val = value
         .values
@@ -1882,8 +1984,7 @@ fn render_gauge(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A gauge's `::RANGE` — `'min,max'` (or `'min;max'`, or a 2-element list).
@@ -1927,7 +2028,7 @@ fn render_map(
     _title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let geom = cols
         .iter()
         .find(|c| c.role == Role::Geometry)
@@ -1993,8 +2094,7 @@ fn render_map(
             )
         };
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
@@ -2006,7 +2106,7 @@ fn render_pie(
     inner: f64,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let category = cols
         .iter()
         .find(|c| c.role == Role::Category)
@@ -2037,31 +2137,36 @@ fn render_pie(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A minimal SVG heading (for a `::LABEL`-only result).
-fn heading_svg(text: &str, width: u32) -> String {
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"40\" viewBox=\"0 0 {width} 40\">\
-         <text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"#1f2430\">{}</text></svg>",
-        format::escape_xml(text)
-    )
+fn heading_svg(text: &str, width: u32) -> Panel {
+    Panel::Own {
+        width,
+        height: 40,
+        body: format!(
+            "<text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"#1f2430\">{}</text>",
+            format::escape_xml(text)
+        ),
+    }
 }
 
 /// A full-size placeholder panel with a centred note ("No data", "needs ≥ 2
 /// values", …) and the optional title — instead of a confusing ggplot error.
-fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> String {
+fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
     let (w, h) = (width as f64, height as f64);
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{}\
-         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"#8a93a6\">{}</text></svg>",
-        title_text(title, w),
-        w / 2.0,
-        h / 2.0,
-        format::escape_xml(note)
-    )
+    Panel::Own {
+        width,
+        height,
+        body: format!(
+            "{}<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"#8a93a6\">{}</text>",
+            title_text(title, w),
+            w / 2.0,
+            h / 2.0,
+            format::escape_xml(note)
+        ),
+    }
 }
 
 /// The `<text>` title strip of a [`note_svg`] placeholder, or `""` without a
