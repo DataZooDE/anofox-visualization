@@ -2354,6 +2354,10 @@ async function run(fresh = true) {
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
             holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, dpPrimary || "", "");
+            // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
+            // SVG root as data-warnings — surface them for debugging.
+            const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
+            if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.

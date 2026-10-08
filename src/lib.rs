@@ -696,18 +696,70 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
 /// [`MIN_DIM`]`..=`[`MAX_DIM`], non-finite numbers become missing, discrete
 /// axes are capped at [`RenderOptions::max_categories`], long lines are
 /// LTTB-downsampled, and an internal panic becomes [`RenderError::Panic`].
+///
+/// Build warnings from the plotting engine (see [`render_with_warnings`]) are
+/// also recorded on the SVG root as `data-warnings="[…]"` (a JSON array).
 pub fn render_with(
     cols: &[Column],
     width: u32,
     height: u32,
     o: &RenderOptions,
 ) -> Result<String, RenderError> {
-    render_placed(cols, Place::Doc, width, height, o).map(|(svg, _)| svg)
+    render_with_warnings(cols, width, height, o).map(|r| r.svg)
+}
+
+/// A rendered panel and the plotting engine's build warnings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    /// The SVG document (carrying `data-warnings` when `warnings` is non-empty).
+    pub svg: String,
+    /// ggplot-rs build warnings, e.g. `"geom_point: removed 3 rows containing
+    /// non-finite values"` or a layer whose stat produced no data and was
+    /// skipped — things that render fine but silently drop data.
+    pub warnings: Vec<String>,
+}
+
+/// [`render_with`], also returning the plotting engine's build warnings
+/// (`dashboard --check` reports them as `render-warning` diagnostics).
+pub fn render_with_warnings(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<Rendered, RenderError> {
+    let (svg, warnings) = render_placed(cols, Place::Doc, width, height, o)?;
+    Ok(Rendered {
+        svg: with_warnings_attr(svg, &warnings),
+        warnings,
+    })
+}
+
+/// Record `warnings` on the SVG root as `data-warnings="[…]"` (escaped JSON).
+/// The root start tag ends at the first `>`: every writer escapes `>` inside
+/// attribute values.
+fn with_warnings_attr(mut svg: String, warnings: &[String]) -> String {
+    if warnings.is_empty() || !svg.starts_with("<svg") {
+        return svg;
+    }
+    if let Some(end) = svg.find('>') {
+        let at = if svg[..end].ends_with('/') {
+            end - 1
+        } else {
+            end
+        };
+        let json = serde_json::to_string(warnings).unwrap_or_default();
+        svg.insert_str(
+            at,
+            &format!(" data-warnings=\"{}\"", format::escape_xml(&json)),
+        );
+    }
+    svg
 }
 
 /// Like [`render_with`], but renders a nested `<svg x y width height
 /// viewBox>` fragment (no `xmlns`) positioned at `(x, y)` in a parent SVG —
-/// for composing dashboards without string surgery.
+/// for composing dashboards without string surgery. (ggplot-rs reports no
+/// build warnings for fragments; use [`render_with_warnings`] to lint.)
 pub fn render_with_at(
     cols: &[Column],
     x: f64,

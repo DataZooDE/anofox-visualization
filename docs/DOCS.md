@@ -300,6 +300,7 @@ dashboard --check mydash.sql            # (add --json for machine output)
 #   silent-setup  a query with ::ROLE casts outside its main SELECT list
 #   sql-error     the query failed         render-error  missing required aesthetic
 #   empty-panel   query returned 0 rows (blank card)
+#   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer)
 
 # Ground on the data before writing SQL: types, cardinality, min/max, null %.
 dashboard --describe 'sales.parquet'    # or a table name, read_csv(...), --db file.db
@@ -452,6 +453,18 @@ guarantee is that the core never panics on user input (fuzz-tested).
 - `render_with(&cols, w, h, &RenderOptions)` — brand colour, zoom window,
   category cap and LTTB threshold passed explicitly (`render(&cols, w, h)` and
   `set_brand`/`set_panel_zoom` remain as compatibility wrappers).
+- `render_with_warnings(…) -> Result<Rendered { svg, warnings }, RenderError>`
+  — also returns ggplot-rs's build warnings (rows dropped for non-finite
+  positions, a layer whose stat produced no data, …): the chart renders, but
+  data went missing. Every SVG document (`render_with`, `render_spec*`, the
+  wasm `render_panel`) also records them on its root as
+  `data-warnings="[…]"` (escaped JSON; absent when there are none; the
+  browser logs them to the console), and `dashboard --check` reports each as
+  a `render-warning` diagnostic.
+- `render_with_at(&cols, x, y, w, h, &RenderOptions)` — a nested,
+  positioned `<svg x y width height viewBox>` fragment (no `xmlns`) for
+  composing pages; `dashboard::render_dashboard_svg` uses it. Fragments carry
+  no warnings (lint with `render_with_warnings`).
 - `sql::plan`, `sql::rewrite`, `sql::parse_rows_json` (DuckDB JSON with bare
   `NaN` tolerated), `sql::sanitize_json_numbers`, and the shared lexer
   `sql::lex` (`tokenize`, `split_statements`, `split_top_commas`,

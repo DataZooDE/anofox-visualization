@@ -11,7 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
-use crate::{render, roles, sql, InputKind, Kind, Role};
+use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,9 @@ pub struct Diagnostic {
     /// 1-based statement index in the script.
     pub stmt: usize,
     /// Stable machine code. Correctness: `sql-error` | `silent-setup` |
-    /// `render-error` | `empty-panel` | `unknown-cast`. Design advisories
+    /// `render-error` | `render-warning` (the plotting engine dropped data,
+    /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
+    /// `unknown-cast`. Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -226,14 +228,23 @@ where
         // Let the render engine validate the role/column combination (this
         // catches missing required aesthetics, e.g. a bar chart with no x).
         let cols = sql::columns_from_rows(&rows, &p.roles);
-        if let Err(e) = render(&cols, 460, 300) {
-            diags.push(Diagnostic {
+        match render_with_warnings(&cols, 460, 300, &RenderOptions::default()) {
+            Err(e) => diags.push(Diagnostic {
                 severity: Severity::Error,
                 stmt,
                 code: "render-error",
-                message: one_line(&e),
+                message: one_line(&e.to_string()),
                 sql: short.clone(),
-            });
+            }),
+            // The plotting engine's build warnings: the panel renders, but some
+            // data was dropped (non-finite positions, a layer with no data).
+            Ok(r) => diags.extend(r.warnings.iter().map(|w| Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "render-warning",
+                message: one_line(w),
+                sql: short.clone(),
+            })),
         }
 
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
@@ -842,6 +853,25 @@ mod design_tests {
         let tabbed = format!("SELECT 'Page'::TAB;\n{flat}");
         let d2 = check(&tabbed, |_q| Ok(data.clone()));
         assert!(!has(&d2, "design/too-many-panels"), "{d2:?}");
+    }
+
+    #[test]
+    fn engine_warnings_become_render_warnings() {
+        // A density per category where every group has one value: the stat
+        // can't estimate anything, so ggplot-rs skips the layer with a warning.
+        let data = rows(2, |i| {
+            let g = ["a", "b"][i];
+            json!({ "c0": g, "c1": 1.0 })
+        });
+        let d = check_opts(
+            "SELECT g::CATEGORY, v::DENSITY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let w: Vec<_> = d.iter().filter(|x| x.code == "render-warning").collect();
+        assert_eq!(w.len(), 1, "{d:?}");
+        assert_eq!(w[0].severity, Severity::Warning);
+        assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
     }
 
     #[test]

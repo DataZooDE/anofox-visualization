@@ -470,3 +470,40 @@ fn bubble_works_in_both_documented_forms() {
         assert!(radii.len() >= 3, "{roles}: points not sized: {radii:?}");
     }
 }
+
+/// ggplot-rs build warnings are returned by `render_with_warnings` and
+/// recorded (escaped) on the SVG root as `data-warnings`.
+#[test]
+fn engine_warnings_are_surfaced() {
+    use anofox_visualization::{render_with_warnings, Column, Kind, RenderOptions, Role, Value};
+    let cols = vec![
+        Column::new(
+            "<g>\"",
+            Role::Category,
+            vec![Value::Str("a\"><x".into()), Value::Str("b".into())],
+        ),
+        Column::new(
+            "v",
+            Role::Value(Kind::Density),
+            vec![Value::Float(1.0), Value::Float(1.0)],
+        ),
+    ];
+    let r = render_with_warnings(&cols, 400, 300, &RenderOptions::default()).unwrap();
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    assert_safe_svg(&r.svg, "warnings");
+    let doc = roxmltree::Document::parse(&r.svg).unwrap();
+    let attr = doc.root_element().attribute("data-warnings").unwrap();
+    let parsed: Vec<String> = serde_json::from_str(attr).unwrap();
+    assert_eq!(parsed, r.warnings);
+    // A clean render carries no attribute.
+    let ok = vec![
+        Column::new("x", Role::X, vec![Value::Float(1.0), Value::Float(2.0)]),
+        Column::new(
+            "y",
+            Role::Value(Kind::Line),
+            vec![Value::Float(1.0), Value::Float(2.0)],
+        ),
+    ];
+    let r = render_with_warnings(&ok, 400, 300, &RenderOptions::default()).unwrap();
+    assert!(r.warnings.is_empty() && !r.svg.contains("data-warnings"));
+}
