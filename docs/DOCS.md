@@ -397,10 +397,17 @@ deployment (reverse proxy, TLS, auth), see
 
 ## 3. Interactivity
 
-Rendered panels carry an SVG `<title>` per mark. Both the CLI output and the
-browser builder attach a small hover layer that shows a styled tooltip
-(`web: 22`) and highlights the mark. It’s pure DOM — no chart runtime, works on
-static HTML.
+Rendered panels carry an SVG `<title>` per mark plus ggplot-rs's hover
+metadata: `data-x` (the mark's x), `data-series` (its colour/fill/group level)
+and `data-value` (the raw measured value; a stacked segment's own value). Both
+the CLI output and the browser builder attach a small hover layer that shows a
+styled tooltip (`web: 22`) and highlights the mark; the browser keys its
+cross-filter / series highlight / legend toggle on `data-series` and reads the
+value from `data-value`, falling back to the `"series: value"` title text only
+for marks without them (map features). The root `<svg>` carries the drawn
+domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
+`data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
+runtime, works on static HTML.
 
 ---
 

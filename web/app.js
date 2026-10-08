@@ -3610,10 +3610,37 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   });
 }
 
+// A mark's tooltip value for display: ggplot-rs writes `data-value` raw, so
+// round numbers like its own tooltip formatter (3 decimals).
+function fmtTipValue(v) {
+  const f = Number(v);
+  return v !== "" && Number.isFinite(f) ? String(Math.round(f * 1000) / 1000) : v;
+}
+
+// Hover / selection metadata of a mark. ggplot-rs (>= 0.16) writes
+// `data-series` (colour/fill/group level), `data-value` (the raw measured value)
+// and `data-x`; marks without them (maps, older SVGs) fall back to parsing the
+// "series: value" `<title>` text `tip`. `attr` reads an attribute (null if
+// absent). `detail` is the full tooltip when it says more than "series: value"
+// (box-plot stats, OHLC, bin ranges, …), else "".
+function markInfo(attr, tip) {
+  const i = tip.lastIndexOf(": ");
+  const tSeries = i >= 0 ? tip.slice(0, i) : tip;
+  const tValue = i >= 0 ? tip.slice(i + 2) : "";
+  const ds = attr("data-series");
+  const dv = attr("data-value");
+  const series = ds !== null && ds !== "" ? ds : tSeries;
+  const value = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
+  const plain =
+    tip === value || tip === series || tip === `${series}: ${value}` || tip === `${tSeries}: ${value}`;
+  return { series, value, x: attr("data-x") || "", detail: plain ? "" : tip };
+}
+
 // Styled hover tooltips + click-to-highlight LINKING across all panels.
-// Every mark carrying a `<title>` ("series: value") becomes hoverable; its series
-// (the part before ": ") is stored on the element. Clicking a mark highlights
-// that series everywhere and dims the rest; click again (or the background) clears.
+// Every mark carrying a `<title>` becomes hoverable; its series key (ggplot's
+// `data-series`, else the title part before ": ") is the selection key.
+// Clicking a mark highlights that series everywhere and dims the rest; click
+// again (or the background) clears.
 let dpSelected = null;
 
 function attachHover() {
@@ -3647,7 +3674,8 @@ function attachHover() {
   marks.forEach((el) => {
     const t = el.querySelector("title");
     const txt = t.textContent;
-    const series = txt.includes(": ") ? txt.slice(0, txt.lastIndexOf(": ")) : txt;
+    const info = markInfo((k) => el.getAttribute(k), txt);
+    const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);
     el.setAttribute("data-tip", txt);
@@ -3655,14 +3683,8 @@ function attachHover() {
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
       if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
-      const dx = el.getAttribute("data-x") || "";
-      const i = txt.lastIndexOf(": ");
-      const label = i >= 0 ? txt.slice(0, i) : txt;
-      const val = i >= 0 ? txt.slice(i + 2) : "";
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
-      tip.innerHTML =
-        (dx ? `<div class="tip-head">${escapeHtml(dx)}</div>` : "") +
-        `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+      tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
@@ -3687,6 +3709,15 @@ function attachHover() {
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
+}
+
+// One tooltip row: colour swatch + series + value (+ the full tooltip text
+// when it carries more, e.g. box-plot stats or OHLC).
+function tipRow(info, fill) {
+  return (
+    `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(info.series)}</span><b>${escapeHtml(info.value)}</b></div>` +
+    (info.detail ? `<div class="tip-row"><span>${escapeHtml(info.detail)}</span></div>` : "")
+  );
 }
 
 // ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
@@ -3823,9 +3854,11 @@ function showDataView(panel) {
   document.body.appendChild(back);
 }
 
-// Parse the measure out of a mark's tooltip — the last number in "label: 22",
-// "web: 22", or "(3, 22)" (else null).
+// A mark's measure: ggplot's `data-value`, else the last number in its
+// tooltip ("label: 22", "web: 22", "(3, 22)"); null if none.
 function markValue(el) {
+  const dv = parseFloat(el.getAttribute("data-value"));
+  if (Number.isFinite(dv)) return dv;
   const m = (el.getAttribute("data-tip") || "").match(/-?\d[\d,]*\.?\d*(?:[eE][+-]?\d+)?/g);
   if (!m) return null;
   const n = parseFloat(m[m.length - 1].replace(/,/g, ""));
@@ -4143,8 +4176,7 @@ function attachAxisPointer() {
       const pts = circles.map((el) => ({
         el,
         cx: +el.getAttribute("cx"),
-        tip: el.getAttribute("data-tip") || "",
-        dx: el.getAttribute("data-x") || "",
+        info: markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip") || ""),
         fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
       }));
       const vb = svg.viewBox.baseVal;
@@ -4172,17 +4204,8 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
-      const head = colPts[0] && colPts[0].dx ? `<div class="tip-head">${escapeHtml(colPts[0].dx)}</div>` : "";
-      tip.innerHTML =
-        head +
-        colPts
-          .map((p) => {
-            const i = p.tip.lastIndexOf(": ");
-            const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
-            const val = i >= 0 ? p.tip.slice(i + 2) : "";
-            return `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(p.fill)}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
-          })
-          .join("");
+      const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
+      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("");
       tip.classList.add("show");
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
