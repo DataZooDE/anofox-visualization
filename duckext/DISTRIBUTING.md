@@ -1,60 +1,58 @@
 # Distributing the anofox_visualization DuckDB extension
 
-The extension works today (see `BUILD.md`). This describes how to ship it to
-users. There are two routes; pick based on whether you need signed `INSTALL`.
+There are two native binaries (see the root [`BUILD.md`](../BUILD.md)); they ship
+through different routes.
 
-## What's in the box
-- `anofox_render(spec VARCHAR) -> VARCHAR` — a JSON panel spec → SVG.
-- Convenience macros (auto-registered at LOAD): `anofox_bar/_line/_scatter/_area(x, y)`,
-  `anofox_xy(x, y, kind := ...)`, `anofox_xyc(x, y, series, kind := ...)`.
+| Binary | Built by | Ships via |
+|---|---|---|
+| **Render-only** (`anofox_render` + macros) | `make` at the repo root (C++ shell + `crates/anofox-viz-ffi`) | DuckDB **community extensions** (signed) — `.github/workflows/MainDistributionPipeline.yml` |
+| **Full toolkit** (render + `anofox_serve*`) | `duckext/scripts/build-native.sh` (this crate, C-API) | **self-hosted**, unsigned — `.github/workflows/extension.yml` |
 
-## Prerequisites
-1. **Repo on GitHub** — ✅ done: `github.com/sipemu/anofox-visualization` (private).
-   The DuckDB *community-extensions* route needs it **public**; the self-hosted
-   route below works while it's private.
-2. **Self-contained build** — ✅ done: `ggplot-rs` is a **pinned git dependency**
-   (`git = "https://github.com/sipemu/ggplot-rs", rev = "498aad5…"`) in both
-   `Cargo.toml`s, so Cargo fetches it — no sibling checkout, no crates.io publish.
-   The core uses ggplot-rs APIs newer than the published v0.12.0
-   (`legend_position`, `CoordPolar::inner_radius`, geom hover…), which is why it's
-   a git rev rather than `ggplot-rs = "0.12"`. Bump the rev to update; for local
-   ggplot-rs work, `[patch]` it back to a path.
+## Prerequisites (both)
 
-## Route 1 — self-hosted repo (works now, unsigned)
-The included `.github/workflows/extension.yml` builds + packages the extension
-for linux/macOS/Windows and uploads `anofox_visualization.duckdb_extension` per
-platform (via `duckext/scripts/append_extension_metadata.py`, exactly like the
-local `build-native.sh`). Serve those files in the DuckDB repo layout:
+- The repository is public: `github.com/DataZooDE/anofox-visualization`.
+- Self-contained build: `ggplot-rs` is a **pinned git dependency** of the core
+  (`git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37…"` in the root
+  `Cargo.toml`), so Cargo fetches it — no sibling checkout, no crates.io
+  publish. `Cargo.lock` is committed and every build uses `--locked`.
+- One version: `[workspace.package] version` in the root `Cargo.toml`
+  (CalVer). `duckext/description.yml`'s `version` must match it; release tags are
+  `v<version>`.
+
+## Route 1 — DuckDB Community Extensions (render-only, signed `INSTALL`)
+
+```sql
+INSTALL anofox_visualization FROM community;
+LOAD anofox_visualization;
+```
+
+Submit `duckext/description.yml` to
+[duckdb/community-extensions](https://github.com/duckdb/community-extensions):
+copy it to `extensions/anofox_visualization/description.yml`, set `repo.ref` to
+the release commit SHA, and open a PR. Their CI runs the same
+extension-ci-tools pipeline as `MainDistributionPipeline.yml` (`build: cmake`,
+`requires_toolchains: rust`) and signs the result. The C++ ABI pins one DuckDB
+version per build (currently v1.5.6).
+
+## Route 2 — self-hosted repository (full toolkit, unsigned)
+
+`.github/workflows/extension.yml` (on `v*` tags or manually) builds the web UI
+(`wasm-pack`), the C-API extension, packages it with
+`append_extension_metadata.py` (`--abi-type C_STRUCT`, C-API `v1.2.0`) for
+linux/macOS/Windows, smoke-tests it with a pinned Python `duckdb`, and uploads
+`anofox_visualization.duckdb_extension` per platform. Serve the files in the
+DuckDB repository layout:
 
 ```
 <repo>/v1.2.0/<platform>/anofox_visualization.duckdb_extension[.gz]
 ```
 
-Users then opt in:
 ```sql
 SET custom_extension_repository = 'https://you.example.com/duckdb';
 INSTALL anofox_visualization;      -- needs allow_unsigned_extensions / duckdb -unsigned
 LOAD anofox_visualization;
 ```
-Self-hosted extensions are **not signed by DuckDB**, so they load only in
-unsigned mode. Fine for internal / opt-in distribution.
 
-## Route 2 — DuckDB Community Extensions (signed `INSTALL`)
-Signed, installable with a plain `INSTALL anofox_visualization FROM community`.
-Submit `duckext/description.yml` to
-[duckdb/community-extensions](https://github.com/duckdb/community-extensions):
-copy it to `extensions/anofox_visualization/description.yml`, fill `repo.ref`,
-and open a PR. Their CI builds + signs it.
-
-**Caveat:** the community CI's Rust path expects the standard
-`duckdb`/`duckdb-loadable-macros` framework. This extension is a hand-rolled
-C-API binding (chosen for wasm side-module viability). To fit the community
-build cleanly you'll likely need to either port the entry point to that
-framework, or arrange a custom build (Makefile) in the descriptor. Until then,
-Route 1 is the reliable path.
-
-## C-API version / portability
-The extension requests C-API `v1.2.0` and is packaged with `--abi-type C_STRUCT`.
 C-API (`C_STRUCT`) extensions are portable across DuckDB releases that provide
 that API version (v1.2.0+), so one build per platform covers many DuckDB
-versions — unlike the older C++ ABI, which pins an exact version.
+versions — unlike the C++ ABI build, which pins an exact version.

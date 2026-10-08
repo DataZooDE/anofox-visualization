@@ -239,15 +239,17 @@ real tables (big data stays in DuckDB), and opens the browser for you:
 ```sh
 wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
 cargo build --bin serve --features serve
-./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080
+./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080/?token=…
 #   --port N     choose the port
-#   --no-open    don't launch a browser
+#   --no-open    don't launch a browser (open the printed URL yourself)
 ```
+
+It runs whatever SQL the builder sends, so it is locked to you: loopback only,
+and the printed URL carries a per-run token (kept in a cookie) that every
+request needs. See [`secure-serving.md`](secure-serving.md).
 
 The UI **auto-detects**: if a `/query` bridge answers it uses live DuckDB,
 otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
-*(Next: `CALL anofox_serve()` to launch this from inside a DuckDB session — see
-the roadmap.)*
 
 ### c) DuckDB extension — launch the UI *from a DuckDB session*
 
@@ -257,11 +259,13 @@ session, from inside DuckDB.
 
 ```sql
 LOAD 'anofox_visualization.duckdb_extension';  -- (duckdb -unsigned; see duckext/BUILD.md)
-SELECT anofox_serve(8080);                    -- serves http://127.0.0.1:8080 + opens the browser
+SELECT anofox_serve(8080);                    -- serves http://127.0.0.1:8080/?token=… + opens the browser
+SELECT anofox_serve_stop(8080);               -- stop it again
 ```
 
 The extension embeds the same UI and answers `/query` on a live connection
-(reused serially), so panels render your **actual session tables** — big data
+(reused serially; loopback + per-server token only), so panels render your
+**actual session tables** — big data
 stays in DuckDB. `SELECT anofox_render()` also returns an SVG directly. Native
 works today; the wasm side-module links + instantiates in DuckDB-Wasm with one
 emscripten ABI detail remaining (browsers use **(b)/(b2)** instead).
@@ -279,13 +283,15 @@ SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/d/<name>  one dashboard, full UI, editor removed
 ```
 
-Same interactive client, but locked: the editor is gone and `POST /query` is
-**allow-listed** to each dashboard's own planned panel SQL (plus validated
-`SET VARIABLE`s) — arbitrary SQL is rejected `403`. It is **read-only by
-construction**: at startup it snapshots the live database and serves through a
-fresh read-only DuckDB handle, so even a gate bypass can't write (it serves that
-snapshot; re-run to refresh). Requests are self-contained, so it is multi-user
-safe.
+Same interactive client, but locked: the editor is gone and **no SQL crosses
+the wire** — the client asks for panel *n* of dashboard *id* with variable
+*values* (`POST /api/panel`), which the server binds as typed literals. It is
+**read-only by construction**: at startup it snapshots the session's databases
+into a private temp directory and serves them through a fresh DuckDB instance
+with external access, extension loading and configuration changes disabled (it
+serves that snapshot; `anofox_serve_stop` + re-run to refresh). Each request
+gets its own connection, a row cap and a timeout (optional third argument:
+`'{"max_rows": …, "timeout_ms": …, "threads": …}'`).
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`

@@ -7,7 +7,7 @@ SVG by the [ggplot-rs](https://github.com/sipemu/ggplot-rs) engine. No JS
 charting library, no bespoke config — the SQL *is* the dashboard.
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
-[![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.x%20LTS%20%7C%20v1.5.x-brightgreen.svg)](https://duckdb.org)
+[![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.5.x-brightgreen.svg)](https://duckdb.org)
 [![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f.svg)](https://datazoode.github.io/anofox-visualization/)
 
 > [!IMPORTANT]
@@ -63,7 +63,7 @@ the axes and colour series.
 
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
-- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (allow-listed `/query`) over a read-only snapshot.
+- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot.
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks) and a `build-dashboard` agent skill that writes dashboards from a prompt.
 
@@ -102,13 +102,15 @@ From a from-source build you also get an **in-browser builder** and **locked,
 read-only serving**:
 
 ```sql
--- Interactive builder wired to THIS database, DuckDB-UI style (localhost only):
-SELECT anofox_serve(8080);              -- http://localhost:8080
+-- Interactive builder wired to THIS database, DuckDB-UI style (loopback only;
+-- the printed URL carries a per-server token):
+SELECT anofox_serve(8080);              -- http://127.0.0.1:8080/?token=…
 
 -- Serve a folder of .sql dashboards locked + read-only to consumers:
 SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/           a list of the folder's dashboards
 -- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
+SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
 ```
 
 …plus a `dashboard` CLI (`cargo run --bin dashboard -- file.sql`) and the
@@ -131,19 +133,47 @@ macros (SQL → SVG). Serving and the builder are not included (see below).
 
 ### From source
 
-The from-source build is the **full toolkit**: rendering **plus** `anofox_serve`,
-`anofox_serve_dashboards`, the `dashboard` CLI, and the web builder. DuckDB must
-be started with `-unsigned` (the binary is not signed by the DuckDB Foundation).
+There are two native builds (see [BUILD.md](BUILD.md) for why):
+
+| | `make` (CMake, C++ shell) | `duckext/scripts/build-native.sh` (C-API) |
+|---|---|---|
+| Provides | rendering: `anofox_render` + macros | **full toolkit**: rendering + `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` (embedded web builder) |
+| Same as | the community binary | — |
+| DuckDB | exactly the pinned version (v1.5.6) | any DuckDB with C-API v1.2.0+ (v1.2 or newer) |
+| Needs | submodules, CMake, a C++ toolchain, Rust | Rust, libclang (bindgen), `wasm-pack`, Python 3, a `duckdb` CLI |
+
+Both binaries are unsigned: start DuckDB with `-unsigned` (or set
+`allow_unsigned_extensions`).
+
+**Render-only (`make`)**
 
 ```sh
 git clone --recurse-submodules https://github.com/DataZooDE/anofox-visualization
 cd anofox-visualization
 make                 # → build/release/extension/anofox_visualization/anofox_visualization.duckdb_extension
+make test            # sqllogictests in test/sql
 ```
 
 ```sql
 LOAD './build/release/extension/anofox_visualization/anofox_visualization.duckdb_extension';
 ```
+
+**Full toolkit (`build-native.sh`)**
+
+```sh
+git clone https://github.com/DataZooDE/anofox-visualization
+cd anofox-visualization
+duckext/scripts/build-native.sh --release   # builds web/pkg, the extension, packages + smoke-tests it
+# → /tmp/anofox_visualization.duckdb_extension   (OUT=… to change)
+```
+
+```sql
+LOAD '/tmp/anofox_visualization.duckdb_extension';
+SELECT anofox_serve(8080);
+```
+
+The `dashboard` CLI and the standalone `serve` binary come from the core crate:
+`cargo run --bin dashboard -- file.sql`, `cargo run --features serve --bin serve -- my.duckdb`.
 
 ## Documentation
 
@@ -155,7 +185,7 @@ LOAD './build/release/extension/anofox_visualization/anofox_visualization.duckdb
 
 ## Dependencies
 
-- **DuckDB**: v1.4.x LTS or v1.5.x (latest)
+- **DuckDB**: v1.5.x for the CMake / community build (pinned to v1.5.6 in this repo); C-API v1.2.0+ (DuckDB v1.2 or newer) for the `duckext` full-toolkit build
 - **Rust**: stable toolchain (for building from source)
 - **[ggplot-rs](https://github.com/sipemu/ggplot-rs)**: the grammar-of-graphics rendering engine
 - **plotters / image / ab_glyph**: SVG & raster backends (via Cargo)
