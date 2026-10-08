@@ -261,11 +261,13 @@ WHERE (len(getvariable('<cat>'))=0 OR list_contains(getvariable('<cat>'), <cat>)
 ## Gotchas
 
 **These silently break a panel — it renders wrong or vanishes. Get them right:**
-- **A chart panel must NOT start with `WITH`.** The role detector keys off the
-  *first* `SELECT`, so a leading CTE hides the projection and the whole statement
-  is treated as **setup** (no panel appears). Push the CTE into a
-  `FROM (SELECT …)` subquery so the outer `SELECT` (with the casts) comes first,
-  or into a setup `CREATE TEMP VIEW`.
+- **Put the `::ROLE` casts on the main (outermost) `SELECT` list.** A leading
+  `WITH` CTE is fine (`WITH s AS (…) SELECT x::XAXIS, n::BARCHART FROM s`), but
+  casts inside a CTE body or subquery are plain SQL, and DDL/DML
+  (`CREATE … AS SELECT`) is always setup — no panel appears.
+- **`::DATE`/`::TEXT`/`::NUMERIC` are also SQL types.** In a chart panel they
+  stay real casts; they only make an input in an input statement. To cast and
+  tag an axis, chain them: `ts::DATE::XAXIS`.
 - **A table takes ONE `::TABLE` marker**, not one per column. Tag a single column
   `::TABLE`; the others keep their `AS "Header"` aliases and all still show.
 - **`::CATEGORY`/`::COLOR` is DISCRETE.** To colour by a continuous value, bucket

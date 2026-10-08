@@ -18,49 +18,106 @@ A dashboard is a `.sql` script. Two kinds of statement:
 
 ### Roles
 
-| Cast | Meaning |
-|------|---------|
-| `::XAXIS` (`::X`) | x position |
-| `::CATEGORY` (`::SERIES`, `::COLOR`) | grouping / colour series |
-| `::LABEL` | a section heading (title-only panel); or a per-mark/feature label on a chart/map |
-| `::TITLE` (`::HEADING`) | a title bar above a single panel (chart, table, gauge, …) |
-| `::BARCHART` (`::BAR`) | bar chart (measure) |
-| `::BARCHART_STACKED` | stacked bar (measure) |
-| `::BARCHART_PERCENT` | dodged bars with a percent-formatted y-axis |
-| `::BARCHART_STACKED_PERCENT` | bars normalised to 100% per x |
-| `::LINECHART` (`::LINE`) | line chart (measure) |
-| `::LINECHART_PERCENT` | line chart with a percent-formatted y-axis |
-| `::AREACHART` (`::AREA`) | area chart (measure) |
-| `::SCATTER` (`::POINT`) | scatter (measure) |
-| `::PIE` (`::PIECHART`) | pie — slices by `CATEGORY`, sized by the measure |
-| `::DONUTCHART` (`::DONUT`) | donut (pie with a centre hole) |
-| `::GAUGE` | single value as a progress arc toward a `::RANGE` (`min,max`); optional `::COLORS` zones |
-| `::HISTOGRAM` | histogram of the measure column (binned + counted) |
-| `::BOXPLOT` | box plot — `x` = `XAXIS` groups, `y` = the measure (raw rows) |
-| `::HEATMAP` | tiles at `XAXIS` × `YAXIS`, coloured by the measure |
-| `::SPARKLINE` | a minimal inline trend line (no axes), dot on the latest value |
-| `::MAP` (`::GEOMETRY`) | choropleth from a WKT geometry column, coloured by a measure |
-| `::REFLINE` (`::YLINE`, `::TARGET`) | a horizontal reference/target line on a chart |
-| `::XLINE` | a vertical reference line at an x-position |
-| `::BAND_LOWER` / `::BAND_UPPER` | a shaded confidence band around a line |
-| `::METRIC` (`::KPI`) | a single big-number KPI (add `::LABEL` caption, `::DELTA` for a trend arrow) |
-| `::MONEY`, `::PERCENT`, `::COMPACT` | a KPI with a value format (`$12,220` / `46%` / `1.2K`) |
-| `::TEXT_SMALL`, `::TEXT_MEDIUM`, `::TEXT_LARGE` | a single-value text card at the chosen size |
-| `::TABLE` | data table — sortable headers, in-cell bars, clickable rows (cross-filter), paginated 50/page client-side. Per-column formatting below. |
-| `::PAGED` (`::PAGINATED`) | like `::TABLE` but paged in SQL (`LIMIT`/`OFFSET`+`COUNT(*)`, server-side sort) — fetches one page at a time, for huge results (e.g. a large parquet in S3/MotherDuck) |
-| `::TREND` | table column: a coloured ▲/▼ arrow (by sign) |
-| `::MONEY` / `::PERCENT` / `::COMPACT` | table column: number format (also KPI formats) |
-| `::COLORSCALE` (`::HEAT`) | table column: heatmap-colour the cells light→steel by value |
-| `::BADGE` (`::STATUS`) | table column: render text as coloured status pills (good/warn/bad by keyword) |
-| `::SPARKLINE` | table column: a mini inline trend line from a numeric array (`list(x ORDER BY y)`) |
-| `::DROPDOWN` (`::OPTIONS`) | dropdown input (the column's values become options); add a `::HINT` column for per-option hints |
-| `::NUMBER`, `::DATE`, `::TEXT` | number / date / text inputs (the value is the default) |
-| `::MULTISELECT` | multi-value picker → a DuckDB list; filter with `list_contains(getvariable('name'), col)` |
-| `::DATERANGE` | a from→to date pair (query returns two columns → two variables) |
-| `::DOWNLOAD_CSV`, `::DOWNLOAD_XLSX`, `::DOWNLOAD_PDF` | an export button (CSV / Excel of the rows; PDF prints the dashboard) |
-| `::HEADER_IMAGE` / `::FOOTER_LINK` | a banner image at the top / a link at the bottom |
-| `::PLACEHOLDER` | reserve an empty grid cell |
-| `::RELOAD` (`::REFRESH`) | auto-refresh the dashboard every N seconds (the value) |
+The table below is **generated from the role registry** (`src/roles.rs`, the
+single source of truth — `dashboard --roles-md` prints it; a test keeps this
+copy in sync). `dashboard --roles` prints the same list grouped for the
+terminal.
+
+<!-- roles-table:start -->
+| Cast | Aliases | Category | Meaning |
+|------|---------|----------|---------|
+| `::XAXIS` | `::X` | encoding | x position |
+| `::YAXIS` | `::Y` | encoding | y position (a heatmap's second axis) |
+| `::CATEGORY` | `::SERIES`, `::COLOR`, `::COLOUR` | encoding | grouping / colour series (discrete) |
+| `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
+| `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
+| `::OPEN` |  | encoding | candlestick open price |
+| `::HIGH` |  | encoding | candlestick high price |
+| `::LOW` |  | encoding | candlestick low price |
+| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area) |
+| `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
+| `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
+| `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars, percent y-axis |
+| `::BARCHART_STACKED_PERCENT` | `::BAR_STACKED_PERCENT` | chart | bars normalised to 100% per x |
+| `::LINECHART` | `::LINE` | chart | line chart |
+| `::LINECHART_PERCENT` | `::LINE_PERCENT` | chart | line chart, percent y-axis |
+| `::STEP` | `::STEPLINE`, `::STEP_LINE` | chart | step line |
+| `::SMOOTH` | `::TRENDLINE`, `::TREND_LINE` | chart | scatter + LOESS trend line |
+| `::AREACHART` | `::AREA` | chart | area chart |
+| `::AREACHART_STACKED` | `::AREA_STACKED`, `::STACKED_AREA` | chart | stacked areas (by CATEGORY) |
+| `::SCATTER` | `::POINT`, `::SCATTERCHART` | chart | scatter; add a ::SIZE column for a bubble chart |
+| `::BUBBLE` | `::BUBBLECHART` | chart | bubble chart: alone = the y measure (size via ::SIZE); beside a ::SCATTER = its size |
+| `::JITTER` | `::JITTERCHART`, `::STRIP` | chart | jittered scatter (reveals overlapping points) |
+| `::PIE` | `::PIECHART`, `::PIECHART_PERCENT` | chart | pie — slices by CATEGORY, sized by the measure |
+| `::DONUTCHART` | `::DONUT`, `::DONUTCHART_PERCENT` | chart | donut (pie with a hole) |
+| `::GAUGE` | `::GAUGE_PERCENT` | chart | value as an arc toward ::RANGE 'min,max' (zones: ::COLORS, ::LABELS) |
+| `::RADAR` | `::SPIDER` | chart | radar / spider chart — axes from XAXIS, one polygon per CATEGORY |
+| `::HISTOGRAM` | `::HIST` | chart | histogram of the measure |
+| `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
+| `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
+| `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
+| `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot |
+| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure |
+| `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
+| `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
+| `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
+| `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
+| `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
+| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value |
+| `::XLINE` |  | annotation | vertical reference line at an x |
+| `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
+| `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
+| `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
+| `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark (value = font size) |
+| `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
+| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | y-axis tick format: '€', '$', 'percent', 'comma', ' kg'… |
+| `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
+| `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
+| `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100) |
+| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
+| `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
+| `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
+| `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
+| `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
+| `::COMPACT` |  | kpi | compact-number KPI / table column format (1.2K) |
+| `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI |
+| `::TEXT_SMALL` |  | kpi | small text card |
+| `::TEXT_MEDIUM` |  | kpi | medium text card |
+| `::TEXT_LARGE` |  | kpi | large text card |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser) |
+| `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
+| `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
+| `::TREND` |  | table | ▲/▼ arrow in a table cell |
+| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells |
+| `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
+| `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
+| `::DOWNLOAD_CSV` |  | table | CSV export button |
+| `::DOWNLOAD_XLSX` | `::DOWNLOAD_EXCEL` | table | Excel export button |
+| `::DOWNLOAD_PDF` |  | table | print-to-PDF button |
+| `::DROPDOWN` | `::OPTIONS`, `::SELECT_INPUT` | input | single-select → a DuckDB variable |
+| `::MULTISELECT` | `::MULTI` | input | multi-select → a list variable |
+| `::NUMBER` | `::SLIDER`, `::NUMERIC` | input | numeric input (value = default) |
+| `::DATE` | `::DATEPICKER` | input | date picker (value = default) |
+| `::TEXT` | `::SEARCH`, `::STRING` | input | free-text input (value = default) |
+| `::DATERANGE` | `::DATE_RANGE` | input | two date columns → from/to variables |
+| `::HINT` |  | input | per-option hint next to a dropdown option |
+| `::COLUMNS` | `::COLS` | layout | default panels per row |
+| `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
+| `::HEIGHT` | `::TALL` | layout | next panel's height in px |
+| `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
+| `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
+| `::TAB` | `::PAGE` | layout | start a tab/page |
+| `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
+| `::PLACEHOLDER` |  | layout | an empty grid cell |
+| `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
+| `::HEADER_IMAGE` | `::HEADERIMAGE` | chrome | banner image URL |
+| `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
+<!-- roles-table:end -->
+
+**Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
+`::PERCENT`, `::COMPACT`, `::METRIC` (number formats), `::TREND` (▲/▼),
+`::COLORSCALE`, `::BADGE`, `::SPARKLINE` (a `list()` column) and `::PLAIN`
+format that column; `::TITLE` becomes the table's title bar.
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).
@@ -170,19 +227,54 @@ SELECT week::XAXIS, sum(n)::LINECHART FROM sessions GROUP BY ALL;   -- line
 
 A few rules where the wrong form makes a panel render incorrectly or disappear:
 
-- **A chart panel must not start with `WITH`.** The role detector keys off the
-  first `SELECT`, so a leading CTE hides the projection and the statement is
-  treated as *setup* (no panel). Use a `FROM (SELECT …)` subquery so the outer
-  `SELECT` with the casts comes first, or a setup `CREATE TEMP VIEW`.
+- **Only query statements are panels.** A statement whose first keyword is
+  `SELECT`, `WITH` or `FROM` (or that starts with `(`) may carry roles; DDL/DML
+  (`CREATE … AS SELECT`, `INSERT … SELECT`, `SET`, `COPY`, …) is always setup,
+  run for effect, its casts untouched.
+- **Casts are read from the main `SELECT` list** — the first `SELECT` at
+  bracket depth 0. A leading `WITH` CTE list is fine
+  (`WITH s AS (…) SELECT week::XAXIS, n::LINECHART FROM s`); casts inside a CTE
+  body or subquery are ordinary SQL.
+- **A `::ROLE` may follow an `AS` alias on any column.** The alias is replaced by
+  the internal `c{i}` name. For a measure it becomes the legend name of a combo
+  chart; for an input it *is* the DuckDB variable name
+  (`SELECT region AS zone ::DROPDOWN` → `getvariable('zone')`); in a
+  `::TABLE`/`::PAGED`/`::DOWNLOAD_*` panel it is the column header.
+- **Role tokens that are also SQL types** — `::DATE`, `::TEXT`, `::STRING`,
+  `::NUMERIC` (inputs) and `::MAP`, `::GEOMETRY` (maps). In a query statement
+  `::MAP`/`::GEOMETRY` are always the map role. The input tokens are roles only
+  in an **input statement** (no other role except `::HINT`/`::LABEL`/`::TITLE`,
+  e.g. `SELECT DATE '2024-01-01' AS start ::DATE`); in a chart panel
+  (`SELECT day::DATE, n::BARCHART …`) and inside a `::TABLE` they stay real
+  casts. To cast *and* tag, chain them: `ts::DATE::XAXIS`.
 - **A table uses one `::TABLE` marker, not one per column.** Tag a single column
-  `::TABLE`; the rest keep their `AS "Header"` aliases and all show. (Only inside
-  `::TABLE`/`::PAGED`/`::DOWNLOAD_*` may a `::ROLE` follow an `AS` alias.)
+  `::TABLE`; the rest keep their `AS "Header"` aliases and all show.
 - **`::CATEGORY`/`::COLOR` is discrete.** To colour by a continuous value, bucket
   it into a `CASE` band; a raw continuous column yields a per-value legend.
 - **A KPI caption is `::LABEL`, not `::TITLE`.** `::METRIC`/`::MONEY`/… render the
   number; add a `::LABEL` column for the caption (`::TITLE` is a panel title bar).
+- **`*` expands in place**: `SELECT *, v::BARCHART …` works (roles are looked up
+  by their `c{i}` alias, not by position).
 - **A `::ROLE` must be in the `SELECT` list**, not after `FROM`; aggregating
   charts usually need `GROUP BY ALL`.
+
+### Rendering limits & data hygiene
+
+- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter
+  x axis or in a `::CATEGORY` keep the largest 29 (by total |measure|, or row
+  count for raw-row charts) and fold the rest into **"Other"** (summed for
+  bars/lines/areas/pies). Hosts can change it (`max_categories` in a
+  `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
+- **Long lines are downsampled**: a line/area/step series with more than 5,000
+  points is reduced with LTTB (Largest-Triangle-Three-Buckets), which keeps the
+  visual shape (`max_line_points` / `RenderOptions::max_line_points`).
+- **Calendars** draw at most 50 years; a wider span is an error.
+- **Sizes** are clamped to 32–8192 px.
+- **Non-finite numbers** (`NaN`, `±Infinity` — bare in DuckDB's JSON, or as
+  `"NaN"`/`"inf"` strings in a measure) are treated as missing; no `NaN` ever
+  reaches the SVG.
+- **Empty or too-small results** render a clear note — "No data", or e.g.
+  "::DENSITY needs at least 2 values" — instead of a plotting error.
 
 ---
 
@@ -205,7 +297,7 @@ nothing, with no error):
 ```sh
 # Validate: run every statement, report what breaks. Exit 1 on errors.
 dashboard --check mydash.sql            # (add --json for machine output)
-#   silent-setup  a panel that lost its ::ROLE casts (usually a leading WITH)
+#   silent-setup  a query with ::ROLE casts outside its main SELECT list
 #   sql-error     the query failed         render-error  missing required aesthetic
 #   empty-panel   query returned 0 rows (blank card)
 
@@ -321,25 +413,56 @@ ggplot-rs’s plotters-free `render_svg_native`, which compiles to
 ```
  ┌── browser tab ───────────────────────────────────────────┐
  │  SQL editor                                               │
- │     │ plan(sql)         (anofox-visualization-wasm)                   │
+ │     │ plan(sql)         (anofox-visualization-wasm)       │
  │     ▼                                                     │
- │  DuckDB-Wasm  ──rows──▶  render_panel(rows, roles)  ─SVG─▶ dashboard
+ │  DuckDB-Wasm  ──rows──▶  render_panel(rows, roles, …) ─SVG─▶ dashboard
  └───────────────────────────────────────────────────────────┘
 ```
 
-Two wasm exports (`src/wasm.rs`): `plan(script)` returns the statements + roles;
-`render_panel(rows_json, roles_json, w, h)` returns SVG. The SQL parsing in
-`src/sql.rs` is shared with the native bin, so the CLI and browser behave
-identically.
+wasm exports (`src/wasm.rs`):
 
----
+| Export | Purpose |
+|--------|---------|
+| `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
+| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
+| `map_bounds(rows_json, roles_json)` / `panel_bounds(…)` | data extents for the zoom UI |
+| `roles_json()` | the role registry + derived role sets (the browser's single source) |
+| `format_number(value, fmt)` | KPI/table number formatting shared with the headless renderer |
+
+The SQL parsing in `src/sql.rs` is shared with every native host, so the CLI,
+`serve`, the DuckDB extension and the browser behave identically. Every export
+is wrapped so failures return an error value; note that on
+`wasm32-unknown-unknown` a panic aborts rather than unwinds, so the real
+guarantee is that the core never panics on user input (fuzz-tested).
+
+### Host API (Rust)
+
+- `render_spec_checked(json) -> Result<String, RenderError>` — the checked
+  entry point for hosts (the DuckDB extension's FFI): `BadSpec` / `Render` /
+  `Panic` (a caught internal panic). `render_spec(json) -> String` keeps the old
+  shape (SVG or an escaped `<pre>error</pre>`).
+- `render_with(&cols, w, h, &RenderOptions)` — brand colour, zoom window,
+  category cap and LTTB threshold passed explicitly (`render(&cols, w, h)` and
+  `set_brand`/`set_panel_zoom` remain as compatibility wrappers).
+- `sql::plan`, `sql::rewrite`, `sql::parse_rows_json` (DuckDB JSON with bare
+  `NaN` tolerated), `sql::sanitize_json_numbers`, and the shared lexer
+  `sql::lex` (`tokenize`, `split_statements`, `split_top_commas`,
+  `strip_comments`, `find_top_level_keyword`, `trailing_cast`, …).
+- `roles::REGISTRY`, `roles::lookup`, `Role::token()`, `Role::renders()`,
+  `roles::is_directive_panel(&roles)` (does a planned statement draw nothing?),
+  `roles::roles_json()`.
+- `format::escape_xml` (attribute-safe) and `format::format_number`.
 
 ## 5. Architecture
 
 ```
-src/lib.rs    core: Role/Kind/Column + render() → SVG (via ggplot-rs)
-src/sql.rs    ::ROLE + statement parsing (shared native/wasm)
-src/wasm.rs   wasm-bindgen: plan() + render_panel()   (feature = "wasm")
+src/lib.rs        core: Role/Kind/Column + render_with()/render_spec_checked() → SVG
+src/roles.rs      the role registry (single source of the ::ROLE vocabulary)
+src/sql.rs        ::ROLE + statement planning (shared by every host)
+src/sql/lex.rs    the shared SQL lexer
+src/format.rs     escaping + number formatting (shared with the browser)
+src/downsample.rs input hygiene: NaN, category cap ("Other"), LTTB
+src/wasm.rs       wasm-bindgen exports                     (feature = "wasm")
 src/bin/…     dashboard CLI runner (duckdb CLI + shared sql module)
 web/          no-server browser builder (index.html + app.js + pkg/)
 duckext/      DuckDB C-API extension (native + wasm side-module)
@@ -347,7 +470,12 @@ duckext/      DuckDB C-API extension (native + wasm side-module)
 
 ## 6. Known limitations
 
-- `::BARCHART` *with* a `::CATEGORY` currently stacks rather than dodges — use
-  `::BARCHART_STACKED`, or a `::BARCHART` without a category.
-- One panel = one measure. Multi-measure / mixed-geom panels are future work.
-- No cross-panel filtering yet (see the roadmap notes).
+- `::MAP` uses `::LABEL` as the per-feature hover label, so a map panel has no
+  in-SVG title — use `::TITLE` (the panel title bar) instead.
+- `::MARKDOWN`, inputs, downloads, tabs and other directives are interactive
+  features of the browser builder / `serve`; the static CLI and headless SVG
+  renderers skip them.
+- Downsampling applies to line/area/step charts only; scatter plots with very
+  many points still draw every point.
+- In the browser (wasm), a Rust panic aborts the module instead of returning an
+  error; the core is fuzz-tested to never panic on user input.

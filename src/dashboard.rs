@@ -3,12 +3,12 @@
 //! over DuckDB/Arrow), renders every panel, and composes them into one gridded
 //! SVG — no browser required.
 //!
-//! ```no_run
+//! ```
 //! use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
 //! # struct MyDb;
 //! # impl DataProvider for MyDb {
 //! #   fn execute(&mut self, _sql: &str) -> Result<(), String> { Ok(()) }
-//! #   fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<anofox_visualization::prelude::Value>)>, String> { Ok(vec![]) }
+//! #   fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> { Ok(vec![]) }
 //! # }
 //! let mut db = MyDb;
 //! let svg = render_dashboard_svg(
@@ -16,9 +16,11 @@
 //!     &mut db,
 //!     &DashboardOptions::default(),
 //! ).unwrap();
+//! assert!(svg.starts_with("<svg"));
 //! ```
 
-use crate::{render, set_brand, sql, value_str, Column, MetricFmt, Role};
+use crate::format::{escape_xml as esc, format_number};
+use crate::{render_with, roles, sql, value_str, Column, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 
 /// A data source for headless rendering. Implement this over your engine
@@ -60,23 +62,25 @@ impl Default for DashboardOptions {
     }
 }
 
+/// The output column for planned index `i`: the column aliased `c{i}` (robust
+/// when a `*` item expands to several columns), else the i-th column.
+fn column_at(result: &[(String, Vec<Value>)], i: usize) -> Option<&(String, Vec<Value>)> {
+    let key = format!("c{i}");
+    result
+        .iter()
+        .find(|(n, _)| *n == key)
+        .or_else(|| result.get(i))
+}
+
 /// Map a query result (columns in SELECT order) to typed [`Column`]s by the
 /// role's output index.
 fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Vec<Column> {
     roles
         .iter()
         .filter_map(|(i, role)| {
-            result
-                .get(*i)
-                .map(|(name, vals)| Column::new(name.clone(), *role, vals.clone()))
+            column_at(result, *i).map(|(name, vals)| Column::new(name.clone(), *role, vals.clone()))
         })
         .collect()
-}
-
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// Render a whole annotated SQL script to one composed SVG dashboard.
@@ -85,10 +89,7 @@ pub fn render_dashboard_svg(
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
 ) -> Result<String, String> {
-    set_brand(opts.brand);
-    let result = render_inner(script, provider, opts);
-    set_brand(None);
-    result
+    render_inner(script, provider, opts)
 }
 
 fn render_inner(
@@ -163,22 +164,9 @@ fn render_inner(
             }
             continue;
         }
-        // Non-rendering: inputs, downloads, tabs, chrome, reload, group markers.
-        if has(&|r| {
-            matches!(
-                r,
-                Role::Input(_)
-                    | Role::Download(_)
-                    | Role::Reload
-                    | Role::Tab
-                    | Role::SubTab
-                    | Role::GroupStart
-                    | Role::GroupEnd
-                    | Role::Placeholder
-                    | Role::HeaderImage
-                    | Role::FooterLink
-            )
-        }) {
+        // Non-rendering directives (inputs, downloads, tabs, chrome, reload,
+        // group markers, placeholders) — from the role registry.
+        if roles::is_directive_panel(roles) {
             continue;
         }
 
@@ -223,7 +211,11 @@ fn render_inner(
         }
 
         // Render the panel body to an inner SVG sized (cw, ch).
-        let inner = render_panel_svg(&rows, roles, cw, ch, opts.brand);
+        let ropts = RenderOptions {
+            brand: opts.brand,
+            ..RenderOptions::default()
+        };
+        let inner = render_panel_svg(&rows, roles, cw, ch, &ropts);
         placed.push((x, row_y, cw, ch, inner));
 
         x += unit_w * span as f64;
@@ -260,14 +252,14 @@ fn render_panel_svg(
     roles: &[(usize, Role)],
     w: f64,
     h: f64,
-    _brand: Option<(u8, u8, u8)>,
+    ropts: &RenderOptions,
 ) -> String {
     let cols = columns_from_result(rows, roles);
     // Title bar (::TITLE) eats a strip off the top.
     let title = roles
         .iter()
         .find(|(_, r)| matches!(r, Role::Title))
-        .and_then(|(i, _)| rows.get(*i))
+        .and_then(|(i, _)| column_at(rows, *i))
         .and_then(|(_, v)| v.first())
         .map(value_str)
         .filter(|s| !s.is_empty());
@@ -280,18 +272,18 @@ fn render_panel_svg(
         Role::Text(_) => Some((*i, None)),
         _ => None,
     }) {
-        let raw = rows.get(i).and_then(|(_, v)| v.first());
+        let raw = column_at(rows, i).and_then(|(_, v)| v.first());
         let val = match fmt {
             Some(f) => raw
                 .and_then(|v| v.as_f64())
-                .map(|n| fmt_metric(n, f))
+                .map(|n| format_number(n, f))
                 .unwrap_or_else(|| "–".into()),
             None => raw.map(value_str).unwrap_or_default(),
         };
         let cap = roles
             .iter()
             .find(|(_, r)| matches!(r, Role::Label))
-            .and_then(|(i, _)| rows.get(*i))
+            .and_then(|(i, _)| column_at(rows, *i))
             .and_then(|(_, v)| v.first())
             .map(value_str)
             .unwrap_or_default();
@@ -317,8 +309,8 @@ fn render_panel_svg(
 
     // Otherwise a chart — render at the content area, then wrap with a title.
     let body_h = (h - title_h - pad).max(30.0);
-    let chart =
-        render(&cols, w as u32, body_h as u32).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
+    let chart = render_with(&cols, w as u32, body_h as u32, ropts)
+        .unwrap_or_else(|e| crate::error_svg(&e.to_string(), w as u32));
     let mut svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\">"
     );
@@ -355,14 +347,24 @@ fn table_svg(
         .filter(|(_, r)| matches!(r, Role::Title))
         .map(|(i, _)| *i)
         .collect();
-    let cols: Vec<&(String, Vec<Value>)> = rows
+    // Per-column number formats (::MONEY/::PERCENT/::COMPACT/::METRIC), the
+    // same formatter the browser uses (wasm `format_number`).
+    let fmt_of: std::collections::HashMap<usize, crate::MetricFmt> = roles
+        .iter()
+        .filter_map(|(i, r)| match r {
+            Role::Metric(f) => Some((*i, *f)),
+            _ => None,
+        })
+        .collect();
+    type FmtCol<'a> = (Option<crate::MetricFmt>, &'a (String, Vec<Value>));
+    let cols: Vec<FmtCol> = rows
         .iter()
         .enumerate()
         .filter(|(i, _)| !skip.contains(i))
-        .map(|(_, c)| c)
+        .map(|(i, c)| (fmt_of.get(&i).copied(), c))
         .collect();
     let ncol = cols.len().max(1);
-    let nrow = cols.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let nrow = cols.iter().map(|(_, (_, v))| v.len()).max().unwrap_or(0);
     let top = if title.is_some() { 30.0 } else { 10.0 };
     let col_w = (w - 20.0) / ncol as f64;
     let row_h = 22.0;
@@ -379,7 +381,7 @@ fn table_svg(
         ));
     }
     // header
-    for (c, (name, _)) in cols.iter().enumerate() {
+    for (c, (_, (name, _))) in cols.iter().enumerate() {
         let cx = 12.0 + c as f64 * col_w;
         s.push_str(&format!(
             "<text x=\"{cx:.0}\" y=\"{y:.0}\" font-weight=\"700\" fill=\"#667085\">{}</text>",
@@ -395,9 +397,14 @@ fn table_svg(
     // rows
     for r in 0..max_rows {
         let y = top + 22.0 + (r as f64 + 1.0) * row_h;
-        for (c, (_, vals)) in cols.iter().enumerate() {
+        for (c, (fmt, (_, vals))) in cols.iter().enumerate() {
             let cx = 12.0 + c as f64 * col_w;
-            let cell = vals.get(r).map(value_str).unwrap_or_default();
+            let cell = match (fmt, vals.get(r)) {
+                (Some(f), Some(v)) if v.as_f64().is_some() => {
+                    format_number(v.as_f64().unwrap_or(f64::NAN), *f)
+                }
+                (_, v) => v.map(value_str).unwrap_or_default(),
+            };
             s.push_str(&format!(
                 "<text x=\"{cx:.0}\" y=\"{y:.0}\" fill=\"#1f2937\">{}</text>",
                 esc(&cell)
@@ -413,53 +420,4 @@ fn table_svg(
     }
     s.push_str("</svg>");
     s
-}
-
-fn fmt_metric(n: f64, fmt: MetricFmt) -> String {
-    let group = |v: f64| {
-        let neg = v < 0.0;
-        let s = format!("{}", v.abs().round() as i64);
-        let mut out = String::new();
-        for (i, ch) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                out.push(',');
-            }
-            out.push(ch);
-        }
-        let grouped: String = out.chars().rev().collect();
-        if neg {
-            format!("-{grouped}")
-        } else {
-            grouped
-        }
-    };
-    match fmt {
-        MetricFmt::Money => format!("${}", group(n)),
-        MetricFmt::Percent => {
-            if (n - n.round()).abs() < 1e-9 {
-                format!("{}%", n.round() as i64)
-            } else {
-                format!("{n:.1}%")
-            }
-        }
-        MetricFmt::Compact => {
-            let a = n.abs();
-            if a >= 1e9 {
-                format!("{:.1}B", n / 1e9)
-            } else if a >= 1e6 {
-                format!("{:.1}M", n / 1e6)
-            } else if a >= 1e3 {
-                format!("{:.1}K", n / 1e3)
-            } else {
-                group(n)
-            }
-        }
-        MetricFmt::Plain => {
-            if (n - n.round()).abs() < 1e-9 {
-                group(n)
-            } else {
-                format!("{n:.2}")
-            }
-        }
-    }
 }
