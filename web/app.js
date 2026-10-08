@@ -1,7 +1,14 @@
 // Browser dashboard builder — 100% client-side.
 //   DuckDB-Wasm runs the SQL, anofox-visualization (wasm) plans the ::ROLE annotations and
 //   renders each panel to SVG. No server, no DuckDB extension.
-import init, { plan, render_panel, map_bounds, panel_bounds } from "./pkg/anofox_visualization.js";
+import init, {
+  plan,
+  render_panel,
+  map_bounds,
+  panel_bounds,
+  roles_json,
+  format_number,
+} from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -944,6 +951,7 @@ function toIso(v, dateOnly) {
 
 async function boot() {
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
+  loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
   try {
@@ -1640,14 +1648,29 @@ async function mdDisconnect() {
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
-const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+// Role sets come from the Rust role registry (wasm `roles_json()`), so the
+// browser never drifts from the planner. The literals are only a fallback for
+// an older wasm build without that export.
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"];
+let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
+let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
+function loadRoleSets() {
+  try {
+    const sets = JSON.parse(roles_json()).sets;
+    INPUTS = sets.inputs;
+    METRICS = sets.metrics;
+    DIRECTIVES = sets.directives;
+    TFMT = sets.table_formats;
+    TEXT_SIZES = sets.text_sizes;
+  } catch (_) {}
+}
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
-const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) =>
-  ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"].find((d) => role(s, d));
+const directive = (s) => DIRECTIVES.find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -2026,7 +2049,6 @@ async function run(fresh = true) {
         const fig = document.createElement("figure");
         fig.className = "panel";
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
-        const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
         const fmtByIdx = {};
         for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
         const titleRole = s.roles.find((r) => r[1] === "TITLE");
@@ -2150,14 +2172,17 @@ async function run(fresh = true) {
         } else if (role(s, "HEADER_IMAGE")) {
           const img = document.createElement("img");
           img.className = "header-image";
-          img.src = firstCell();
-          container.appendChild(img);
+          const src = safeUrl(firstCell(), { image: true });
+          if (src) {
+            img.src = src;
+            container.appendChild(img);
+          }
         } else if (role(s, "FOOTER_LINK")) {
           const rows = JSON.parse(rowsJson);
           const vals = rows[0] ? Object.values(rows[0]).map((v) => String(v ?? "")) : [""];
           const a = document.createElement("a");
           a.className = "footer-link";
-          a.href = vals[0];
+          a.href = safeUrl(vals[0].replace(/^"|"$/g, "")) || "#";
           a.textContent = (vals[1] || vals[0]).replace(/^"|"$/g, "");
           a.target = "_blank";
           a.rel = "noopener";
@@ -2201,7 +2226,6 @@ async function run(fresh = true) {
           // Per-column formatting (::MONEY/::PERCENT/::COMPACT/::METRIC number
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
-          const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i));
@@ -2223,11 +2247,11 @@ async function run(fresh = true) {
               const up = pct >= 0;
               deltaHtml =
                 `<div class="metric-delta ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
-                `${Math.abs(pct).toLocaleString(undefined, { maximumFractionDigits: 1 })}%</div>`;
+                `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
             }
           }
           fig.innerHTML =
-            `<div class="metric-value">${fmtNum(r0["c" + mr[0]], mr[1])}</div>` +
+            `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
           container.appendChild(fig);
@@ -2639,7 +2663,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
   const colMax = {};
   for (const c of cols) {
     const nums = rows.map((r) => cleanNum(r[c]));
-    const numFmt = ["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
+    const numFmt = [...METRICS, "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
     numeric[c] = numFmt || (nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v)));
     maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
     const fin = nums.filter((v) => v != null);
@@ -2757,7 +2781,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           if (n != null) {
             td.innerHTML =
               `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
-              `${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>`;
+              `${Math.abs(n).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 })}</span>`;
           }
           continue;
         }
@@ -2768,12 +2792,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           td.style.fontVariantNumeric = "tabular-nums";
           continue;
         }
-        if (["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE"].includes(f)) {
+        if ([...METRICS, "COLORSCALE"].includes(f)) {
           const n = cleanNum(v);
           td.style.textAlign = "right";
           td.style.fontVariantNumeric = "tabular-nums";
           td.textContent =
-            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : fmtNum(n, f);
+            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? fmtNum(n, "METRIC") : fmtNum(n, f);
           if (f === "COLORSCALE" && n != null) {
             td.style.background = heatColor((n - colMin[c]) / (colMax[c] - colMin[c] || 1));
             td.style.fontWeight = "600";
@@ -3060,26 +3084,42 @@ function cellSpark(v) {
 // same for everyone: "$53.8T"/"1.92", never a locale-dependent "53,8 Bio.".
 const NUM_LOCALE = "en-US";
 
-// Format a KPI value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
+// Format a KPI / table value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
+// Delegates to the Rust formatter (wasm `format_number`) so the browser and the
+// headless renderer print identical numbers ("$12,400", "$53.8M", "1.2K", "46%");
+// see src/format.rs for the spec + shared test vectors. A non-numeric value is
+// shown verbatim (callers HTML-escape it).
 function fmtNum(v, fmt) {
-  const n = typeof v === "number" ? v : parseFloat(v);
   if (v == null) return "–";
+  const n = typeof v === "number" ? v : parseFloat(v);
   if (Number.isNaN(n)) return String(v);
-  if (fmt === "MONEY")
-    return n.toLocaleString(NUM_LOCALE, {
-      style: "currency",
-      currency: "USD",
-      notation: Math.abs(n) >= 1e6 ? "compact" : "standard",
-      maximumFractionDigits: Math.abs(n) >= 1e6 ? 1 : 0,
-    });
-  if (fmt === "PERCENT") return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 }) + "%";
-  if (fmt === "COMPACT")
-    return new Intl.NumberFormat(NUM_LOCALE, { notation: "compact", maximumFractionDigits: 1 }).format(n);
-  return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
+  try {
+    return format_number(n, fmt || "METRIC");
+  } catch (_) {
+    return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
+  }
 }
 
+// Escape for HTML text AND attribute contexts (& < > " ').
 function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+// A URL safe to put in href/src: http(s), mailto, or relative (no scheme);
+// images may also be data:image/*. Anything else (javascript:, vbscript:,
+// data:text/html, …) returns "" — callers fall back to no link/image.
+function safeUrl(u, { image = false } = {}) {
+  const s = String(u ?? "").trim();
+  // Browsers ignore ASCII whitespace/control chars inside a scheme ("java\tscript:").
+  const probe = s.replace(/[\u0000-\u0020]/g, "").toLowerCase();
+  const m = probe.match(/^([a-z][a-z0-9+.-]*):/);
+  if (!m) return s.startsWith("//") ? "https:" + s : s; // relative (or protocol-relative)
+  if (["http", "https", "mailto"].includes(m[1])) return s;
+  if (image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);/.test(probe)) return s;
+  return "";
 }
 
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
@@ -3093,7 +3133,14 @@ function renderMarkdown(src) {
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${t}</a>`);
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => {
+        // `u` is already HTML-escaped by esc(s) above; undo that to check the
+        // scheme, then re-escape for the attribute.
+        const unesc = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
+        const raw = u.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => unesc[e]);
+        const href = safeUrl(raw);
+        return href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${t}</a>` : t;
+      });
   const lines = String(src ?? "").replace(/\r/g, "").split("\n");
   let html = "",
     i = 0,
@@ -3189,7 +3236,7 @@ function csvOf(table) {
 
 // ::TEXT_SMALL/_MEDIUM/_LARGE → "small" | "medium" | "large" (or null).
 function textSizeOf(s) {
-  const t = s.roles.find((r) => ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"].includes(r[1]));
+  const t = s.roles.find((r) => TEXT_SIZES.includes(r[1]));
   return t ? t[1].split("_")[1].toLowerCase() : null;
 }
 
@@ -3535,7 +3582,7 @@ function attachHover() {
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
       tip.innerHTML =
         (dx ? `<div class="tip-head">${escapeHtml(dx)}</div>` : "") +
-        `<div class="tip-row"><span><span class="tip-dot" style="background:${fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+        `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
@@ -4053,7 +4100,7 @@ function attachAxisPointer() {
             const i = p.tip.lastIndexOf(": ");
             const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
             const val = i >= 0 ? p.tip.slice(i + 2) : "";
-            return `<div class="tip-row"><span><span class="tip-dot" style="background:${p.fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+            return `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(p.fill)}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
           })
           .join("");
       tip.classList.add("show");
