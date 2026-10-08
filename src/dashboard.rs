@@ -20,7 +20,10 @@
 //! ```
 
 use crate::format::{escape_xml as esc, format_number};
-use crate::{render_with, roles, sql, value_str, Column, RenderOptions, Role};
+use crate::{
+    error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
+    Role,
+};
 use ggplot_rs::prelude::Value;
 
 /// A data source for headless rendering. Implement this over your engine
@@ -103,7 +106,7 @@ fn render_inner(
     let mut columns = opts.columns.max(1);
     let mut default_span = (12 / columns).max(1);
 
-    // A placed panel: (x, y, w, h, inner svg).
+    // A placed panel: (x, y, w, h, nested svg fragment positioned at x, y).
     let mut placed: Vec<(f64, f64, f64, f64, String)> = Vec::new();
     let mut x = pad;
     let mut row_y = pad;
@@ -186,7 +189,13 @@ fn render_inner(
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
             let h = 34.0;
-            placed.push((pad, row_y, content_w, h, heading_svg(&text, content_w, h)));
+            placed.push((
+                pad,
+                row_y,
+                content_w,
+                h,
+                heading_svg(Place::At(pad, row_y), &text, content_w, h),
+            ));
             row_y += h + gap;
             continue;
         }
@@ -215,7 +224,7 @@ fn render_inner(
             brand: opts.brand,
             ..RenderOptions::default()
         };
-        let inner = render_panel_svg(&rows, roles, cw, ch, &ropts);
+        let inner = render_panel_svg(&rows, roles, Place::At(x, row_y), cw, ch, &ropts);
         placed.push((x, row_y, cw, ch, inner));
 
         x += unit_w * span as f64;
@@ -238,8 +247,8 @@ fn render_inner(
             "<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"14\" \
              fill=\"#ffffff\" stroke=\"#e6e9f1\" stroke-width=\"1\"/>"
         ));
-        // nest the inner svg at (px,py) — it is already sized (pw? no: cw,ch=pw,ph)
-        out.push_str(&inner.replacen("<svg ", &format!("<svg x=\"{px:.1}\" y=\"{py:.1}\" "), 1));
+        // the panel itself: a nested <svg> already positioned at (px, py)
+        out.push_str(inner);
     }
     out.push_str("</svg>");
     Ok(out)
@@ -250,6 +259,7 @@ fn render_inner(
 fn render_panel_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
+    place: Place,
     w: f64,
     h: f64,
     ropts: &RenderOptions,
@@ -289,9 +299,9 @@ fn render_panel_svg(
             .unwrap_or_default();
         let cy = h / 2.0;
         return format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\">\
-             <text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"system-ui,sans-serif\" font-size=\"34\" font-weight=\"800\" fill=\"#1f2937\">{v}</text>\
+            "{open}<text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"system-ui,sans-serif\" font-size=\"34\" font-weight=\"800\" fill=\"#1f2937\">{v}</text>\
              <text x=\"{pad}\" y=\"{cy2:.0}\" font-family=\"system-ui,sans-serif\" font-size=\"13\" font-weight=\"600\" fill=\"#667085\">{c}</text></svg>",
+            open = svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
             ty = cy,
             cy2 = cy + 24.0,
             v = esc(&val),
@@ -304,32 +314,30 @@ fn render_panel_svg(
         .iter()
         .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
     {
-        return table_svg(rows, roles, w, h, title.as_deref());
+        return table_svg(rows, roles, place, w, h, title.as_deref());
     }
 
     // Otherwise a chart — render at the content area, then wrap with a title.
     let body_h = (h - title_h - pad).max(30.0);
-    let chart = render_with(&cols, w as u32, body_h as u32, ropts)
-        .unwrap_or_else(|e| crate::error_svg(&e.to_string(), w as u32));
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\">"
-    );
+    // The chart is nested below the title as a positioned fragment.
+    let chart = render_with_at(&cols, 0.0, title_h, w as u32, body_h as u32, ropts)
+        .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
+    let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(t) = &title {
         svg.push_str(&format!(
             "<text x=\"{pad}\" y=\"20\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
             esc(t)
         ));
     }
-    // nest the chart svg below the title
-    svg.push_str(&chart.replacen("<svg ", &format!("<svg y=\"{title_h}\" "), 1));
+    svg.push_str(&chart);
     svg.push_str("</svg>");
     svg
 }
 
-fn heading_svg(text: &str, w: f64, h: f64) -> String {
+fn heading_svg(place: Place, text: &str, w: f64, h: f64) -> String {
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\">\
-         <text x=\"2\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"19\" font-weight=\"700\" fill=\"#1f2430\">{}</text></svg>",
+        "{}<text x=\"2\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"19\" font-weight=\"700\" fill=\"#1f2430\">{}</text></svg>",
+        svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
         esc(text)
     )
 }
@@ -338,6 +346,7 @@ fn heading_svg(text: &str, w: f64, h: f64) -> String {
 fn table_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
+    place: Place,
     w: f64,
     h: f64,
     title: Option<&str>,
@@ -370,10 +379,8 @@ fn table_svg(
     let row_h = 22.0;
     let max_rows = (((h - top - 24.0) / row_h).floor().max(0.0) as usize).min(nrow);
 
-    let mut s = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.0} {h:.0}\" \
-         font-family=\"system-ui,sans-serif\" font-size=\"12\">"
-    );
+    let mut s = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
+    s.push_str("<g font-family=\"system-ui,sans-serif\" font-size=\"12\">");
     if let Some(t) = title {
         s.push_str(&format!(
             "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
@@ -418,6 +425,6 @@ fn table_svg(
             y = top + 22.0 + (max_rows as f64 + 1.0) * row_h
         ));
     }
-    s.push_str("</svg>");
+    s.push_str("</g></svg>");
     s
 }

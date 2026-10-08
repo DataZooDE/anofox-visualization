@@ -31,7 +31,13 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
             // literally be "inf"); geometry and numeric attributes must be finite.
             if !matches!(
                 name.as_str(),
-                "data-x" | "data-series" | "data-xlevels" | "data-ylevels" | "class" | "id"
+                "data-x"
+                    | "data-series"
+                    | "data-xlevels"
+                    | "data-ylevels"
+                    | "data-warnings"
+                    | "class"
+                    | "id"
             ) {
                 for bad in ["NaN", "inf"] {
                     assert!(

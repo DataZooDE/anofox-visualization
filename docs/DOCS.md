@@ -300,6 +300,7 @@ dashboard --check mydash.sql            # (add --json for machine output)
 #   silent-setup  a query with ::ROLE casts outside its main SELECT list
 #   sql-error     the query failed         render-error  missing required aesthetic
 #   empty-panel   query returned 0 rows (blank card)
+#   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer)
 
 # Ground on the data before writing SQL: types, cardinality, min/max, null %.
 dashboard --describe 'sales.parquet'    # or a table name, read_csv(...), --db file.db
@@ -397,10 +398,17 @@ deployment (reverse proxy, TLS, auth), see
 
 ## 3. Interactivity
 
-Rendered panels carry an SVG `<title>` per mark. Both the CLI output and the
-browser builder attach a small hover layer that shows a styled tooltip
-(`web: 22`) and highlights the mark. It’s pure DOM — no chart runtime, works on
-static HTML.
+Rendered panels carry an SVG `<title>` per mark plus ggplot-rs's hover
+metadata: `data-x` (the mark's x), `data-series` (its colour/fill/group level)
+and `data-value` (the raw measured value; a stacked segment's own value). Both
+the CLI output and the browser builder attach a small hover layer that shows a
+styled tooltip (`web: 22`) and highlights the mark; the browser keys its
+cross-filter / series highlight / legend toggle on `data-series` and reads the
+value from `data-value`, falling back to the `"series: value"` title text only
+for marks without them (map features). The root `<svg>` carries the drawn
+domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
+`data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
+runtime, works on static HTML.
 
 ---
 
@@ -425,8 +433,9 @@ wasm exports (`src/wasm.rs`):
 |--------|---------|
 | `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
 | `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
-| `map_bounds(rows_json, roles_json)` / `panel_bounds(…)` | data extents for the zoom UI |
-| `roles_json()` | the role registry + derived role sets (the browser's single source) |
+| `map_bounds(rows_json, roles_json)` | a map's lon/lat extent for the zoom UI |
+| `panel_bounds(…)` | *deprecated* raw data extent of a cartesian panel; the UI now reads the rendered SVG's `data-domain` / `data-flip` attributes (ggplot-rs) and the `zoomable` role set instead |
+| `roles_json()` | the role registry + derived role sets (inputs, metrics, directives, table formats, text sizes, zoomable chart kinds — the browser's single source) |
 | `format_number(value, fmt)` | KPI/table number formatting shared with the headless renderer |
 
 The SQL parsing in `src/sql.rs` is shared with every native host, so the CLI,
@@ -444,6 +453,18 @@ guarantee is that the core never panics on user input (fuzz-tested).
 - `render_with(&cols, w, h, &RenderOptions)` — brand colour, zoom window,
   category cap and LTTB threshold passed explicitly (`render(&cols, w, h)` and
   `set_brand`/`set_panel_zoom` remain as compatibility wrappers).
+- `render_with_warnings(…) -> Result<Rendered { svg, warnings }, RenderError>`
+  — also returns ggplot-rs's build warnings (rows dropped for non-finite
+  positions, a layer whose stat produced no data, …): the chart renders, but
+  data went missing. Every SVG document (`render_with`, `render_spec*`, the
+  wasm `render_panel`) also records them on its root as
+  `data-warnings="[…]"` (escaped JSON; absent when there are none; the
+  browser logs them to the console), and `dashboard --check` reports each as
+  a `render-warning` diagnostic.
+- `render_with_at(&cols, x, y, w, h, &RenderOptions)` — a nested,
+  positioned `<svg x y width height viewBox>` fragment (no `xmlns`) for
+  composing pages; `dashboard::render_dashboard_svg` uses it. Fragments carry
+  no warnings (lint with `render_with_warnings`).
 - `sql::plan`, `sql::rewrite`, `sql::parse_rows_json` (DuckDB JSON with bare
   `NaN` tolerated), `sql::sanitize_json_numbers`, and the shared lexer
   `sql::lex` (`tokenize`, `split_statements`, `split_top_commas`,
