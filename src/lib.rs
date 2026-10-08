@@ -894,53 +894,31 @@ fn render_inner(
     let mut plot = GGPlot::new(data).aes(aes);
 
     // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
-    // [min, max] of the mark column's x-values, full plot height.
+    // [min, max] of the mark column's x-values, the full panel height
+    // (ymin/ymax = ∓Inf reach the panel edges and don't train the y scale).
     if let Some(ma) = cols.iter().find(|c| c.role == Role::MarkArea) {
-        let key = |v: &&Value| v.as_f64();
-        let lo = ma
-            .values
-            .iter()
-            .filter(|v| v.as_f64().is_some())
-            .min_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        let hi = ma
-            .values
-            .iter()
-            .filter(|v| v.as_f64().is_some())
-            .max_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        let ys: Vec<f64> = value
-            .values
-            .iter()
-            .chain(extras.iter().flat_map(|e| e.values.iter()))
-            .filter_map(|v| v.as_f64())
-            .collect();
-        if let (Some(x0), Some(x1)) = (lo, hi) {
-            let ymin = ys.iter().cloned().fold(f64::INFINITY, f64::min);
-            let ymax = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            if ymin.is_finite() && ymax.is_finite() {
-                let frame = vec![
-                    ("mx0".to_string(), vec![x0.clone()]),
-                    ("mx1".to_string(), vec![x1.clone()]),
-                    ("my0".to_string(), vec![Value::Float(ymin)]),
-                    ("my1".to_string(), vec![Value::Float(ymax)]),
-                ];
-                plot = plot
-                    .geom_rect_with(GeomRect {
-                        fill: (148, 160, 178),
-                        color: (148, 160, 178),
-                        alpha: 0.14,
-                        line_width: 0.0,
-                    })
-                    .layer_data(frame)
-                    .layer_aes(Aes::new().xmin("mx0").xmax("mx1").ymin("my0").ymax("my1"));
-            }
+        let xs = ma.values.iter().filter(|v| v.as_f64().is_some());
+        let by_x = |a: &&Value, b: &&Value| {
+            a.as_f64()
+                .partial_cmp(&b.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        if let (Some(x0), Some(x1)) = (xs.clone().min_by(by_x), xs.max_by(by_x)) {
+            let frame = vec![
+                ("mx0".to_string(), vec![x0.clone()]),
+                ("mx1".to_string(), vec![x1.clone()]),
+                ("my0".to_string(), vec![Value::Float(f64::NEG_INFINITY)]),
+                ("my1".to_string(), vec![Value::Float(f64::INFINITY)]),
+            ];
+            plot = plot
+                .geom_rect_with(GeomRect {
+                    fill: (148, 160, 178),
+                    color: (148, 160, 178),
+                    alpha: 0.14,
+                    line_width: 0.0,
+                })
+                .layer_data(frame)
+                .layer_aes(Aes::new().xmin("mx0").xmax("mx1").ymin("my0").ymax("my1"));
         }
     }
 
