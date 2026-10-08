@@ -743,7 +743,7 @@ fn render_inner(
         Kind::Candlestick => {
             return render_candlestick(value, cols, title.as_deref(), width, height)
         }
-        Kind::Radar => return render_radar(value, cols, title.as_deref(), width, height),
+        Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, width, height),
         _ => {}
     }
@@ -1368,28 +1368,15 @@ fn render_heatmap(
         .map_err(|e| format!("render failed: {e:?}"))
 }
 
-/// Civil (year, month, day) from days since 1970-01-01 — Hinnant's algorithm.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 /// Max span a calendar heatmap draws (one column per week; beyond this the
-/// cells are sub-pixel and the SVG explodes).
-pub const MAX_CALENDAR_YEARS: i64 = 50;
+/// cells are sub-pixel). Longer spans are rejected with a clear error rather
+/// than silently clipped (ggplot-rs would clip to the most recent years).
+pub const MAX_CALENDAR_YEARS: i64 = ggplot_rs::stat::calendar::MAX_CALENDAR_YEARS;
 
-/// A GitHub/ECharts-style calendar heatmap: a date `::XAXIS` + a measure laid out
-/// as week-columns × weekday-rows, with month labels along the top and weekday
-/// labels down the left; cells are coloured light→brand by value. Spans longer
-/// than [`MAX_CALENDAR_YEARS`] are rejected with a clear error.
+/// A GitHub-style calendar heatmap (`geom_calendar`): a date `::XAXIS` + a
+/// measure laid out as week-columns × weekday-rows (month labels on top,
+/// Mon/Wed/Fri down the left), cells coloured light → brand by value. Spans
+/// longer than [`MAX_CALENDAR_YEARS`] are rejected with a clear error.
 fn render_calendar(
     o: &RenderOptions,
     value: &Column,
@@ -1398,142 +1385,63 @@ fn render_calendar(
     width: u32,
     height: u32,
 ) -> Result<String, String> {
+    use ggplot_rs::stat::calendar::day_number;
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
         .ok_or("calendar needs an XAXIS date column")?;
-    // Days since the epoch (clamped so absurd values can't overflow; the span
-    // check below rejects them).
-    let mut pts: Vec<(i64, f64)> = Vec::new();
+    // Days since the epoch. ggplot-rs ignores out-of-range epoch numbers; count
+    // them here (clamped, so they can't overflow) so the span check rejects
+    // them instead of silently dropping the row.
+    let day_of = |v: &Value| {
+        day_number(v).or_else(|| {
+            v.as_f64()
+                .filter(|f| f.is_finite())
+                .map(|secs| (secs / 86_400.0).floor().clamp(-1e12, 1e12) as i64)
+        })
+    };
+    // Only rows with a date and a finite measure become cells.
+    let (mut dates, mut vals, mut days) = (Vec::new(), Vec::new(), Vec::new());
     for (dv, vv) in x.values.iter().zip(value.values.iter()) {
-        if let (Some(secs), Some(val)) = (dv.as_f64(), vv.as_f64()) {
-            if secs.is_finite() && val.is_finite() {
-                let day = (secs / 86_400.0).floor().clamp(-1e12, 1e12);
-                pts.push((day as i64, val));
-            }
+        if let (Some(day), Some(val)) = (day_of(dv), vv.as_f64().filter(|f| f.is_finite())) {
+            dates.push(dv.clone());
+            vals.push(Value::Float(val));
+            days.push(day);
         }
     }
-    if pts.is_empty() {
+    let (Some(min_day), Some(max_day)) = (days.iter().min(), days.iter().max()) else {
         return Ok(note_svg(title, "calendar needs a date axis", width, height));
-    }
-    let min_day = pts.iter().map(|(d, _)| *d).min().unwrap_or(0);
-    let max_day = pts.iter().map(|(d, _)| *d).max().unwrap_or(0);
+    };
     let span_years = (max_day - min_day) / 365;
     if span_years > MAX_CALENDAR_YEARS {
         return Err(format!(
             "calendar spans {span_years} years — at most {MAX_CALENDAR_YEARS} are drawn; filter the date range"
         ));
     }
-    let vmin = pts.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let vmax = pts
-        .iter()
-        .map(|(_, v)| *v)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let vspan = if (vmax - vmin).abs() < 1e-9 || !(vmax - vmin).is_finite() {
-        1.0
-    } else {
-        vmax - vmin
-    };
-
-    // Sunday = 0 … Saturday = 6 (1970-01-01 was a Thursday → 4).
-    let weekday = |d: i64| (d + 4).rem_euclid(7);
-    let first_sun = min_day - weekday(min_day);
-    let col_of = |d: i64| (d - first_sun) / 7;
-    let n_cols = (col_of(max_day) + 1).max(1) as f64;
-
-    let (w, h) = (width as f64, height as f64);
-    let tpad = title_pad(title);
-    let (left, top, right, bottom) = (30.0, 18.0 + tpad, 10.0, 6.0);
-    let cell = ((w - left - right) / n_cols)
-        .min((h - top - bottom) / 7.0)
-        .max(1.0);
-    let gap = (cell * 0.14).clamp(0.0, 2.5);
-    let sz = (cell - gap).max(0.5);
-    let (x0, y0) = (left, top);
-
-    let lo = (0xebu8, 0xf1u8, 0xf7u8);
-    let hi = o.brand();
-    let mix = |t: f64| {
-        let t = if t.is_finite() {
-            t.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let m = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
-        format!(
-            "#{:02x}{:02x}{:02x}",
-            m(lo.0, hi.0),
-            m(lo.1, hi.1),
-            m(lo.2, hi.2)
-        )
-    };
-
-    let mut body = title_text(title, w);
-    for (row, lbl) in [(1u32, "Mon"), (3, "Wed"), (5, "Fri")] {
-        let cy = y0 + row as f64 * cell + sz / 2.0;
-        body += &format!(
-            "<text x=\"{:.1}\" y=\"{cy:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{lbl}</text>",
-            x0 - 5.0
-        );
-    }
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    let labels: Vec<Value> = vals.iter().map(|v| Value::Str(fmt_label(v))).collect();
+    let data = vec![
+        ("x".to_string(), dates),
+        ("fill".to_string(), vals),
+        ("label".to_string(), labels),
     ];
-    // One label per month start, computed directly (≤ 12 × MAX_CALENDAR_YEARS),
-    // instead of walking every day of the span.
-    let (mut yr, mut mo, _) = civil_from_days(min_day);
-    let mut first = true;
-    loop {
-        let start = if first {
-            min_day
-        } else {
-            sql::days_from_civil(yr, mo, 1)
-        };
-        if start > max_day {
-            break;
-        }
-        body += &format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
-            x0 + col_of(start) as f64 * cell,
-            top - 6.0,
-            MONTHS[(mo as usize).clamp(1, 12) - 1]
-        );
-        first = false;
-        if mo == 12 {
-            mo = 1;
-            yr += 1;
-        } else {
-            mo += 1;
-        }
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").fill("fill").label("label"))
+        .geom_calendar()
+        .scale_fill_gradient(rgba((0xeb, 0xf1, 0xf7)), rgba(o.brand()))
+        .xlab("")
+        .ylab("")
+        .theme_minimal();
+    if let Some(t) = title {
+        plot = plot.title(t);
     }
-    let round = (sz * 0.18).min(2.5);
-    for &(d, v) in &pts {
-        let cx = x0 + col_of(d) as f64 * cell;
-        let cy = y0 + weekday(d) as f64 * cell;
-        let (yr, mo, dom) = civil_from_days(d);
-        let tip = format!("{yr:04}-{mo:02}-{dom:02}: {}", fmt_label(&Value::Float(v)));
-        body += &format!(
-            "<rect class=\"dp-hit\" x=\"{cx:.1}\" y=\"{cy:.1}\" width=\"{sz:.1}\" height=\"{sz:.1}\" rx=\"{round:.1}\" fill=\"{}\" stroke=\"#e3e8ef\" stroke-width=\"0.5\"><title>{}</title></rect>",
-            mix((v - vmin) / vspan),
-            format::escape_xml(&tip)
-        );
-    }
-
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
 }
 
-/// A date `::XAXIS` value as a calendar date, otherwise its plain string.
-fn date_or_str(v: &Value) -> String {
-    match v {
-        Value::DateTime(s) => ggplot_rs::data::format_epoch_secs(*s),
-        other => value_str(other),
-    }
-}
-
-/// An OHLC candlestick chart: `::XAXIS` period, `::OPEN`/`::HIGH`/`::LOW` prices,
-/// and the close as the measure (`::CANDLESTICK`). Up candles green, down red.
+/// An OHLC candlestick chart (`geom_candlestick`): `::XAXIS` period,
+/// `::OPEN`/`::HIGH`/`::LOW` prices and the close as the measure
+/// (`::CANDLESTICK`). Up candles green, down red; each candle's hover reads
+/// "period — O … H … L … C …".
 fn render_candlestick(
     value: &Column,
     cols: &[Column],
@@ -1541,110 +1449,56 @@ fn render_candlestick(
     width: u32,
     height: u32,
 ) -> Result<String, String> {
-    let x = cols
-        .iter()
-        .find(|c| c.role == Role::X)
-        .ok_or("candlestick needs an XAXIS column")?;
-    let open = cols
-        .iter()
-        .find(|c| c.role == Role::Open)
-        .ok_or("candlestick needs an ::OPEN column")?;
-    let high = cols
-        .iter()
-        .find(|c| c.role == Role::High)
-        .ok_or("candlestick needs a ::HIGH column")?;
-    let low = cols
-        .iter()
-        .find(|c| c.role == Role::Low)
-        .ok_or("candlestick needs a ::LOW column")?;
-    let n = value.values.len();
-    if n == 0 {
-        return Ok(heading_svg("candlestick needs data", width));
+    let find = |role: Role, msg: &'static str| cols.iter().find(|c| c.role == role).ok_or(msg);
+    let x = find(Role::X, "candlestick needs an XAXIS column")?;
+    let open = find(Role::Open, "candlestick needs an ::OPEN column")?;
+    let high = find(Role::High, "candlestick needs a ::HIGH column")?;
+    let low = find(Role::Low, "candlestick needs a ::LOW column")?;
+    let complete = (0..value.values.len()).any(|i| {
+        [open, high, low, value]
+            .iter()
+            .all(|c| c.values.get(i).and_then(|v| v.as_f64()).is_some())
+    });
+    if !complete {
+        return Ok(note_svg(
+            title,
+            "candlestick needs numeric OHLC",
+            width,
+            height,
+        ));
     }
-    let getf = |c: &Column, i: usize| c.values.get(i).and_then(|v| v.as_f64());
-    let mut ylo = f64::INFINITY;
-    let mut yhi = f64::NEG_INFINITY;
-    for i in 0..n {
-        if let Some(l) = getf(low, i) {
-            ylo = ylo.min(l);
-        }
-        if let Some(hv) = getf(high, i) {
-            yhi = yhi.max(hv);
-        }
+    let data = vec![
+        ("x".to_string(), x.values.clone()),
+        ("open".to_string(), open.values.clone()),
+        ("high".to_string(), high.values.clone()),
+        ("low".to_string(), low.values.clone()),
+        ("close".to_string(), value.values.clone()),
+    ];
+    let mut plot = GGPlot::new(data)
+        .aes(
+            Aes::new()
+                .x("x")
+                .open("open")
+                .high("high")
+                .low("low")
+                .close("close"),
+        )
+        .geom_candlestick()
+        .xlab("")
+        .ylab("")
+        .theme_minimal();
+    if let Some(t) = title {
+        plot = plot.title(t);
     }
-    if !ylo.is_finite() || !yhi.is_finite() {
-        return Ok(heading_svg("candlestick needs numeric OHLC", width));
-    }
-    let pad = ((yhi - ylo) * 0.05).max(1e-9);
-    let (ylo, yhi) = (ylo - pad, yhi + pad);
-    let yspan = if (yhi - ylo).abs() < 1e-9 {
-        1.0
-    } else {
-        yhi - ylo
-    };
-
-    let (w, h) = (width as f64, height as f64);
-    let (left, top, right, bottom) = (46.0, 8.0 + title_pad(title), 10.0, 22.0);
-    let pw = w - left - right;
-    let ph = h - top - bottom;
-    let x_px = |i: usize| left + (i as f64 + 0.5) / n as f64 * pw;
-    let y_px = |v: f64| top + (1.0 - (v - ylo) / yspan) * ph;
-    let bw = (pw / n as f64 * 0.6).clamp(1.0, 18.0);
-    let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
-    let up = (0x0c, 0xa6, 0x78);
-    let down = (0xe0, 0x31, 0x31);
-
-    let mut body = title_text(title, w);
-    for k in 0..=4 {
-        let v = ylo + (yhi - ylo) * k as f64 / 4.0;
-        let py = y_px(v);
-        body += &format!(
-            "<line x1=\"{left:.1}\" y1=\"{py:.1}\" x2=\"{:.1}\" y2=\"{py:.1}\" stroke=\"#ececec\" stroke-width=\"1\"/><text x=\"{:.1}\" y=\"{py:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{}</text>",
-            left + pw, left - 5.0, format::escape_xml(&fmt_label(&Value::Float(v)))
-        );
-    }
-    let xstep = (n / 8).max(1);
-    for i in (0..n).step_by(xstep) {
-        body += &format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"8\" fill=\"#7a8496\">{}</text>",
-            x_px(i), h - 7.0, format::escape_xml(&date_or_str(&x.values[i]))
-        );
-    }
-    for i in 0..n {
-        let (Some(o), Some(c), Some(hv), Some(lv)) = (
-            getf(open, i),
-            value.values[i].as_f64(),
-            getf(high, i),
-            getf(low, i),
-        ) else {
-            continue;
-        };
-        let cx = x_px(i);
-        let col = if c >= o { up } else { down };
-        let ch = hex(col);
-        let yt = y_px(o.max(c));
-        let bh = (y_px(o.min(c)) - yt).max(1.0);
-        let tip = format!(
-            "{} — O {} H {} L {} C {}",
-            date_or_str(&x.values[i]),
-            fmt_label(&Value::Float(o)),
-            fmt_label(&Value::Float(hv)),
-            fmt_label(&Value::Float(lv)),
-            fmt_label(&Value::Float(c))
-        );
-        body += &format!(
-            "<line x1=\"{cx:.1}\" y1=\"{:.1}\" x2=\"{cx:.1}\" y2=\"{:.1}\" stroke=\"{ch}\" stroke-width=\"1\"/><rect class=\"dp-hit\" x=\"{:.1}\" y=\"{yt:.1}\" width=\"{bw:.1}\" height=\"{bh:.1}\" fill=\"{ch}\" stroke=\"{ch}\"><title>{}</title></rect>",
-            y_px(hv), y_px(lv), cx - bw / 2.0, format::escape_xml(&tip)
-        );
-    }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
 }
 
-/// A radar / spider chart: axes from the `::XAXIS` (metric names), values from
-/// the measure (`::RADAR`), one filled polygon per `::CATEGORY` series.
+/// A radar / spider chart (`coord_radar`): axes from the `::XAXIS` (metric
+/// names), values from the measure (`::RADAR`), one translucent polygon (+
+/// vertex markers) per `::CATEGORY` series.
 fn render_radar(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
@@ -1656,28 +1510,16 @@ fn render_radar(
         .find(|c| c.role == Role::X)
         .ok_or("radar needs an XAXIS (axis) column")?;
     let category = cols.iter().find(|c| c.role == Role::Category);
-    // First-seen order, O(n) via an index map (was a quadratic Vec::contains).
-    let index_of = |vals: &[Value]| {
-        let mut order: Vec<String> = Vec::new();
-        let mut idx: std::collections::HashMap<String, usize> = Default::default();
-        let mut per_row = Vec::with_capacity(vals.len());
-        for v in vals {
-            let s = value_str(v);
-            let k = match idx.get(&s) {
-                Some(k) => *k,
-                None => {
-                    idx.insert(s.clone(), order.len());
-                    order.push(s);
-                    order.len() - 1
-                }
-            };
-            per_row.push(k);
+    // Spokes in first-seen order (the order the query lists the metrics).
+    let mut axes: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in &x.values {
+        let s = value_str(v);
+        if seen.insert(s.clone()) {
+            axes.push(s);
         }
-        (order, per_row)
-    };
-    let (axes, ax_of_row) = index_of(&x.values);
-    let n_ax = axes.len();
-    if n_ax < 3 {
+    }
+    if axes.len() < 3 {
         return Ok(note_svg(
             title,
             "radar needs at least 3 axes",
@@ -1685,118 +1527,64 @@ fn render_radar(
             height,
         ));
     }
-    let (series, se_of_row) = match category {
-        Some(c) => index_of(&c.values),
-        None => (vec![String::new()], vec![0; value.values.len()]),
-    };
-    let mut mat: std::collections::HashMap<(usize, usize), f64> = Default::default();
-    let mut gmax = 1e-9f64;
-    for (i, v) in value.values.iter().enumerate() {
-        if let (Some(ax), Some(se), Some(v)) = (ax_of_row.get(i), se_of_row.get(i), v.as_f64()) {
-            mat.insert((*se, *ax), v);
-            gmax = gmax.max(v.abs());
+    let x_str: Vec<Value> = x.values.iter().map(|v| Value::Str(value_str(v))).collect();
+    let mut data = vec![
+        ("x".to_string(), x_str),
+        ("y".to_string(), value.values.clone()),
+    ];
+    let mut aes = Aes::new().x("x").y("y").label("label");
+    let label = match category {
+        Some(cat) => {
+            data.push(("cat".to_string(), cat.values.clone()));
+            aes = aes.color("cat").fill("cat");
+            cat.values.clone()
         }
-    }
-
-    let (w, h) = (width as f64, height as f64);
-    let cx = w / 2.0;
-    let tp = title_pad(title);
-    let cy = (h + tp) / 2.0 + 6.0;
-    let radius = ((w.min(h - tp)) / 2.0 - 42.0).max(20.0);
-    let pi = std::f64::consts::PI;
-    let angle = |k: usize| -pi / 2.0 + 2.0 * pi * k as f64 / n_ax as f64;
-    let pt = |k: usize, frac: f64| {
-        (
-            cx + radius * frac * angle(k).cos(),
-            cy + radius * frac * angle(k).sin(),
+        None => x.values.clone(),
+    };
+    data.push(("label".to_string(), label));
+    let brand = o.brand();
+    let mut plot = GGPlot::new(data)
+        .aes(aes)
+        .geom_polygon_with(GeomPolygon {
+            fill: brand,
+            color: brand,
+            alpha: 0.18,
+            line_width: 1.6,
+        })
+        .geom_point_with(GeomPoint {
+            size: 2.6,
+            color: brand,
+            alpha: 1.0,
+        })
+        .scale_x_discrete(
+            ggplot_rs::scale::discrete::ScaleDiscrete::new()
+                .with_limits(axes.iter().map(String::as_str).collect()),
         )
-    };
-    let hexc =
-        |c: ggplot_rs::scale::color::RGBAColor| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        .coord_radar_with(ggplot_rs::coord::radar::CoordRadar::new().radius_frac(0.86))
+        .xlab("")
+        .ylab("")
+        .theme_minimal()
+        .legend_position(ggplot_rs::theme::LegendPosition::Top);
+    if let Some(cat) = category {
+        let levels = distinct_labels(cat);
+        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
+            .collect();
+        plot = plot
+            .scale_color_manual(pairs.clone())
+            .scale_fill_manual(pairs);
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
+}
 
-    let mut body = title_text(title, w);
-    for ring in 1..=4 {
-        let frac = ring as f64 / 4.0;
-        let pts: Vec<String> = (0..n_ax)
-            .map(|k| {
-                let (px, py) = pt(k, frac);
-                format!("{px:.1},{py:.1}")
-            })
-            .collect();
-        body += &format!(
-            "<polygon points=\"{}\" fill=\"none\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>",
-            pts.join(" ")
-        );
-    }
-    for (k, axname) in axes.iter().enumerate() {
-        let (px, py) = pt(k, 1.0);
-        body += &format!(
-            "<line x1=\"{cx:.1}\" y1=\"{cy:.1}\" x2=\"{px:.1}\" y2=\"{py:.1}\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>"
-        );
-        let (lx, ly) = pt(k, 1.14);
-        let anchor = if (lx - cx).abs() < radius * 0.05 {
-            "middle"
-        } else if lx > cx {
-            "start"
-        } else {
-            "end"
-        };
-        body += &format!(
-            "<text x=\"{lx:.1}\" y=\"{ly:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
-            format::escape_xml(axname)
-        );
-    }
-    for (si, sname) in series.iter().enumerate() {
-        let ch = hexc(dz_color(si));
-        let pts: Vec<String> = (0..n_ax)
-            .map(|k| {
-                let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
-                let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
-                format!("{px:.1},{py:.1}")
-            })
-            .collect();
-        body += &format!(
-            "<polygon points=\"{}\" fill=\"{ch}\" fill-opacity=\"0.18\" stroke=\"{ch}\" stroke-width=\"1.6\"/>",
-            pts.join(" ")
-        );
-        for (k, axname) in axes.iter().enumerate() {
-            let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
-            let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
-            let tip = if sname.is_empty() {
-                format!("{}: {}", axname, fmt_label(&Value::Float(v)))
-            } else {
-                format!("{sname} · {}: {}", axname, fmt_label(&Value::Float(v)))
-            };
-            body += &format!(
-                "<circle class=\"dp-hit\" cx=\"{px:.1}\" cy=\"{py:.1}\" r=\"2.6\" fill=\"{ch}\"><title>{}</title></circle>",
-                format::escape_xml(&tip)
-            );
-        }
-    }
-    if series.iter().any(|s| !s.is_empty()) {
-        let mut lx = 12.0;
-        for (si, sname) in series.iter().enumerate() {
-            if sname.is_empty() {
-                continue;
-            }
-            if lx > w - 20.0 {
-                break; // the legend ran out of room; the hover titles still name them
-            }
-            let ch = hexc(dz_color(si));
-            body += &format!(
-                "<rect x=\"{lx:.1}\" y=\"{:.1}\" width=\"9\" height=\"9\" rx=\"2\" fill=\"{ch}\"/>",
-                6.0 + tp
-            );
-            body += &format!(
-                "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#39424f\">{}</text>",
-                lx + 12.0, 14.0 + tp, format::escape_xml(sname)
-            );
-            lx += 12.0 + sname.chars().count() as f64 * 6.0 + 14.0;
-        }
-    }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
+    ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
 
 /// A minimal inline trend line (no axes) — a sparkline over the row order: a
@@ -1926,8 +1714,13 @@ fn parse_hex(s: &str) -> Option<ggplot_rs::scale::color::RGBAColor> {
     ))
 }
 
-/// A gauge: a 270° arc showing a single value's progress through a `min,max`
-/// `::RANGE` (default `0,100`). Optional `::COLORS` paints threshold zones.
+/// A gauge: a 270° arc (opening downward) showing a single value within a
+/// `min,max` `::RANGE` (default `0,100`) — `geom_rect` bands under
+/// `CoordPolar::with_span`, a `geom_segment` needle at the value and the value
+/// in the centre. Optional `::COLORS` paints equal threshold zones (else a
+/// light track with a brand-coloured progress band); optional `::LABELS`
+/// names the zones (drawn outside the arc; without `::COLORS` they still split
+/// the arc into equal zones).
 fn render_gauge(
     o: &RenderOptions,
     value: &Column,
@@ -1936,31 +1729,25 @@ fn render_gauge(
     width: u32,
     height: u32,
 ) -> Result<String, String> {
+    use ggplot_rs::scale::continuous::ScaleContinuous;
     let val = value
         .values
         .iter()
         .find_map(|v| v.as_f64().filter(|f| f.is_finite()))
         .unwrap_or(0.0);
     let (min, max) = gauge_range(cols);
-    let span = if (max - min).abs() < 1e-9 {
-        1.0
-    } else {
-        max - min
-    };
-    let frac = ((val - min) / span).clamp(0.0, 1.0);
-    let frac = if frac.is_finite() { frac } else { 0.0 };
+    let span = max - min;
+    let at = |frac: f64| min + span * frac;
+    let shown = val.clamp(min, max);
 
-    // Optional zone colours (comma-separated hex); default single steel arc.
-    let zone_cols: Vec<ggplot_rs::scale::color::RGBAColor> = cols
+    // Optional zone colours (comma-separated hex) and labels (`'low,ok,high'`).
+    let zone_cols: Vec<(u8, u8, u8)> = cols
         .iter()
         .find(|c| c.role == Role::GaugeColors)
         .and_then(|c| c.values.first())
         .map(value_str)
-        .map(|s| s.split(',').filter_map(parse_hex).take(64).collect())
+        .map(|s| s.split(',').filter_map(parse_rgb).take(64).collect())
         .unwrap_or_default();
-    // Optional zone labels (`::LABELS 'low,ok,high'`), one per zone — drawn
-    // outside the arc at each zone's midpoint. Without ::COLORS they still split
-    // the arc into equal zones.
     let zone_labels: Vec<String> = cols
         .iter()
         .find(|c| c.role == Role::GaugeLabels)
@@ -1979,116 +1766,180 @@ fn render_gauge(
         zone_cols.len()
     };
 
-    // Geometry: a 270° arc (135° … 405°), opening downward, centred.
-    let w = width as f64;
-    let h = height as f64;
-    let cx = w / 2.0;
-    let title_pad = if title.is_some() { 12.0 } else { 0.0 };
-    let cy = h * 0.55 + title_pad;
-    let r = (w * 0.30).min(h * 0.42).max(20.0);
-    let thick = r * 0.16;
-    let start = 135.0_f64.to_radians();
-    let sweep = 270.0_f64.to_radians();
-    let pt = |frac: f64, rad: f64| {
-        let a = start + sweep * frac;
-        (cx + rad * a.cos(), cy + rad * a.sin())
+    // Radius (y) layout in 0..1: the band, the needle across it, labels
+    // outside it; the centre (y = 0) holds the value.
+    let (band0, band1, label_r) = (0.64, 0.80, 0.93);
+    let num = |vals: Vec<f64>| vals.into_iter().map(Value::Float).collect::<Vec<_>>();
+    let text = |vals: Vec<String>| vals.into_iter().map(Value::Str).collect::<Vec<_>>();
+
+    // Bands: the zones, or a light track + a brand progress band.
+    let (mut x0, mut x1, mut fill, mut pairs) = (vec![], vec![], vec![], vec![]);
+    if zone_cols.is_empty() {
+        x0.extend([min, min]);
+        x1.extend([max, shown]);
+        fill.extend(["track".to_string(), "value".to_string()]);
+        pairs.push(("track".to_string(), lighten(o.brand(), 0.87)));
+        pairs.push(("value".to_string(), o.brand()));
+    } else {
+        for (i, c) in zone_cols.iter().enumerate() {
+            let n = zone_cols.len() as f64;
+            x0.push(at(i as f64 / n));
+            x1.push(at((i + 1) as f64 / n));
+            fill.push(format!("z{i}"));
+            pairs.push((format!("z{i}"), *c));
+        }
+    }
+    let n_bands = x0.len();
+    let bands = vec![
+        ("x0".to_string(), num(x0)),
+        ("x1".to_string(), num(x1)),
+        ("y0".to_string(), num(vec![band0; n_bands])),
+        ("y1".to_string(), num(vec![band1; n_bands])),
+        ("fill".to_string(), text(fill)),
+    ];
+    let mut plot = GGPlot::new(bands)
+        .geom_rect_with(GeomRect {
+            line_width: 0.0,
+            alpha: 1.0,
+            ..Default::default()
+        })
+        .layer_aes(
+            Aes::new()
+                .xmin("x0")
+                .xmax("x1")
+                .ymin("y0")
+                .ymax("y1")
+                .fill("fill"),
+        );
+    // Zone boundaries: thin white separators across the band (label-only zones).
+    if zone_cols.is_empty() && n_zones > 1 {
+        let xs: Vec<f64> = (1..n_zones)
+            .map(|i| at(i as f64 / n_zones as f64))
+            .collect();
+        let k = xs.len();
+        plot = plot
+            .geom_segment_with(GeomSegment {
+                color: (255, 255, 255),
+                width: 2.0,
+                alpha: 1.0,
+            })
+            .layer_data(vec![
+                ("x".to_string(), num(xs.clone())),
+                ("y".to_string(), num(vec![band0 - 0.04; k])),
+                ("yend".to_string(), num(vec![band1 + 0.04; k])),
+            ])
+            .layer_aes(Aes::new().x("x").xend("x").y("y").yend("yend"));
+    }
+    // The needle: a dark bar across the band at the (clamped) value.
+    plot = plot
+        .geom_segment_with(GeomSegment {
+            color: (31, 41, 55),
+            width: 3.5,
+            alpha: 1.0,
+        })
+        .layer_data(vec![
+            ("x".to_string(), num(vec![shown])),
+            ("y".to_string(), num(vec![band0 - 0.08])),
+            ("yend".to_string(), num(vec![band1 + 0.05])),
+        ])
+        .layer_aes(Aes::new().x("x").xend("x").y("y").yend("yend"));
+
+    // Text: zone labels outside the arc, min/max under the arc ends, the value
+    // and an "of max" caption in the centre.
+    let text_layer = |plot: GGPlot, xs: Vec<f64>, r: f64, labels: Vec<String>, t: GeomText| {
+        let k = xs.len();
+        plot.geom_text_with(t)
+            .layer_data(vec![
+                ("x".to_string(), num(xs)),
+                ("y".to_string(), num(vec![r; k])),
+                ("label".to_string(), text(labels)),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
     };
-    let arc = |f0: f64, f1: f64, col: &str, wdt: f64| {
-        let (x0, y0) = pt(f0, r);
-        let (x1, y1) = pt(f1, r);
-        let large = if (f1 - f0) * 270.0 > 180.0 { 1 } else { 0 };
-        format!(
-            "<path d=\"M {x0:.1} {y0:.1} A {r:.1} {r:.1} 0 {large} 1 {x1:.1} {y1:.1}\" \
-             fill=\"none\" stroke=\"{col}\" stroke-width=\"{wdt:.1}\" stroke-linecap=\"round\"/>"
+    let grey = (0x5a, 0x64, 0x72);
+    if n_zones > 0 {
+        let (xs, ls): (Vec<f64>, Vec<String>) = zone_labels
+            .iter()
+            .take(n_zones)
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty())
+            .map(|(i, l)| (at((i as f64 + 0.5) / n_zones as f64), l.clone()))
+            .unzip();
+        if !xs.is_empty() {
+            plot = text_layer(
+                plot,
+                xs,
+                label_r,
+                ls,
+                GeomText {
+                    size: 10.0,
+                    color: grey,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let ends = GeomText {
+        size: 11.0,
+        color: (0x8a, 0x93, 0xa6),
+        // Shift below the arc ends (text is centred on its anchor).
+        vjust: 0.5 + 16.0 / 11.0,
+        ..Default::default()
+    };
+    plot = text_layer(
+        plot,
+        vec![min, max],
+        (band0 + band1) / 2.0,
+        vec![fmt_g(min), fmt_g(max)],
+        ends,
+    );
+    let big = (width.min(height) as f64 * 0.17).clamp(14.0, 64.0);
+    plot = plot.annotate(Annotation::Text {
+        label: fmt_g(val),
+        x: at(0.5),
+        y: 0.0,
+        size: big,
+        color: (0x1f, 0x29, 0x37),
+    });
+    let caption = GeomText {
+        size: 11.0,
+        color: (0x8a, 0x93, 0xa6),
+        vjust: 0.5 + (big * 0.8) / 11.0,
+        ..Default::default()
+    };
+    plot = text_layer(
+        plot,
+        vec![at(0.5)],
+        0.0,
+        vec![format!("of {}", fmt_g(max))],
+        caption,
+    );
+
+    let fills: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
+        pairs.iter().map(|(k, c)| (k.as_str(), rgba(*c))).collect();
+    let quarter = std::f64::consts::FRAC_PI_4;
+    plot = plot
+        .scale_fill_manual(fills)
+        .scale_x_continuous(
+            ScaleContinuous::new()
+                .with_limits(min, max)
+                .with_expand(0.0, 0.0),
         )
-    };
-    // The value arc takes the colour of the zone the value falls into (a
-    // traffic-light gauge); a single steel arc when no ::COLORS are given.
-    let (sr, sg, sb) = o.brand();
-    let vcol = if zone_cols.is_empty() {
-        format!("rgb({sr},{sg},{sb})")
-    } else {
-        let zi = ((frac * zone_cols.len() as f64).floor() as usize).min(zone_cols.len() - 1);
-        let c = zone_cols[zi];
-        format!("rgb({},{},{})", c.r, c.g, c.b)
-    };
-    let (tr, tg, tb) = lighten(o.brand(), 0.87);
-    let track = format!("rgb({tr},{tg},{tb})");
-    let mut body = String::new();
-    // Light full-arc track, then the value arc on top.
-    body.push_str(&arc(0.0, 1.0, &track, thick));
-    body.push_str(&arc(0.0, frac.max(0.001), &vcol, thick));
-    // Zone-boundary ticks across the arc.
-    if n_zones > 1 {
-        for i in 1..n_zones {
-            let f = i as f64 / n_zones as f64;
-            let (x0, y0) = pt(f, r - thick * 0.75);
-            let (x1, y1) = pt(f, r + thick * 0.75);
-            body.push_str(&format!(
-                "<line x1=\"{x0:.1}\" y1=\"{y0:.1}\" x2=\"{x1:.1}\" y2=\"{y1:.1}\" stroke=\"#fff\" stroke-width=\"2\"/>"
-            ));
-        }
-    }
-    // Zone labels at each zone's midpoint, just outside the arc.
-    for (i, lbl) in zone_labels.iter().enumerate().take(n_zones) {
-        if lbl.is_empty() {
-            continue;
-        }
-        let f = (i as f64 + 0.5) / n_zones as f64;
-        let (lx, ly) = pt(f, r + thick + 9.0);
-        let anchor = if (lx - cx).abs() < r * 0.15 {
-            "middle"
-        } else if lx > cx {
-            "start"
-        } else {
-            "end"
-        };
-        body.push_str(&format!(
-            "<text x=\"{lx:.1}\" y=\"{ly:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"10\" fill=\"#5a6472\">{}</text>",
-            format::escape_xml(lbl)
-        ));
-    }
-    // A marker dot at the current value.
-    let (dx, dy) = pt(frac, r);
-    body.push_str(&format!(
-        "<circle cx=\"{dx:.1}\" cy=\"{dy:.1}\" r=\"{:.1}\" fill=\"{vcol}\" stroke=\"#fff\" stroke-width=\"2.5\"/>",
-        thick * 0.6
-    ));
-    // Big value + "of max" caption.
-    let num = if (val - val.round()).abs() < 1e-9 {
-        format!("{}", val.round() as i64)
-    } else {
-        format!("{val:.1}")
-    };
-    body.push_str(&format!(
-        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" \
-         font-size=\"{:.0}\" font-weight=\"800\" fill=\"#1f2937\">{num}</text>",
-        cy - r * 0.02,
-        r * 0.5
-    ));
-    body.push_str(&format!(
-        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" font-weight=\"600\" fill=\"#8a93a6\">of {}</text>",
-        cy + r * 0.24,
-        format::escape_xml(&fmt_g(max))
-    ));
-    // Min / max labels at the arc ends.
-    let (minx, miny) = pt(0.0, r);
-    let (maxx, maxy) = pt(1.0, r);
-    body.push_str(&format!(
-        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>\
-         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>",
-        minx, miny + 15.0, format::escape_xml(&fmt_g(min)),
-        maxx, maxy + 15.0, format::escape_xml(&fmt_g(max)),
-    ));
+        .scale_y_continuous(
+            ScaleContinuous::new()
+                .with_limits(0.0, 1.0)
+                .with_expand(0.0, 0.0),
+        )
+        .coord_polar_with(
+            ggplot_rs::coord::polar::CoordPolar::new().with_span(-3.0 * quarter, 3.0 * quarter),
+        )
+        .theme_void()
+        .legend_position(ggplot_rs::theme::LegendPosition::None);
     if let Some(t) = title {
-        body.push_str(&format!(
-            "<text x=\"{cx:.1}\" y=\"20\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
-            format::escape_xml(t)
-        ));
+        plot = plot.title(t);
     }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+    plot.render_svg_native_with_size(width, height)
+        .map_err(|e| format!("render failed: {e:?}"))
 }
 
 /// A gauge's `::RANGE` — `'min,max'` (or `'min;max'`, or a 2-element list).
@@ -2275,8 +2126,8 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> String 
     )
 }
 
-/// The `<text>` title strip used by the hand-drawn renderers (calendar,
-/// candlestick, radar, gauge, notes), or `""` without a title.
+/// The `<text>` title strip of a [`note_svg`] placeholder, or `""` without a
+/// title.
 fn title_text(title: Option<&str>, w: f64) -> String {
     match title.filter(|t| !t.is_empty()) {
         Some(t) => format!(
@@ -2285,15 +2136,6 @@ fn title_text(title: Option<&str>, w: f64) -> String {
             format::escape_xml(t)
         ),
         None => String::new(),
-    }
-}
-
-/// Vertical space the [`title_text`] strip takes.
-fn title_pad(title: Option<&str>) -> f64 {
-    if title.is_some_and(|t| !t.is_empty()) {
-        24.0
-    } else {
-        0.0
     }
 }
 
