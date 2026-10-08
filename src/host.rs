@@ -72,8 +72,10 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
             limits.max_spec_bytes
         ));
     }
-    let spec: serde_json::Value = serde_json::from_str(spec_json)
-        .map_err(|e| format!("anofox_render: bad spec JSON: {e}"))?;
+    // DuckDB's to_json emits bare NaN/Infinity; map them to null like the core.
+    let clean = crate::sql::sanitize_json_numbers(spec_json);
+    let spec: serde_json::Value =
+        serde_json::from_str(&clean).map_err(|e| format!("anofox_render: bad spec JSON: {e}"))?;
     let obj = spec
         .as_object()
         .ok_or("anofox_render: spec must be a JSON object")?;
@@ -135,17 +137,12 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
             }
         }
     }
-    let out = catch_panic(|| Ok(crate::render_spec(spec_json)));
+    // The core's checked entry point catches panics itself and reports
+    // failures as typed errors (no `<pre>` scraping).
+    let out = crate::render_spec_checked(spec_json).map_err(|e| format!("anofox_render: {e}"));
     // A panic may have left a per-thread brand override behind; reset it.
     crate::set_brand(None);
-    let out = out?;
-    match out.strip_prefix("<pre>") {
-        Some(rest) => Err(format!(
-            "anofox_render: {}",
-            rest.trim_end_matches("</pre>")
-        )),
-        None => Ok(out),
-    }
+    out
 }
 
 #[cfg(test)]

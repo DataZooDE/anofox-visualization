@@ -534,18 +534,7 @@ fn render_dashboard_page(
             continue; // read-only mode: setup is done once at --init, not per request
         }
         // Skip interactive/layout-only directives (params drive re-render instead).
-        if panel.roles.iter().any(|(_, r)| {
-            matches!(
-                r,
-                Role::Input(_)
-                    | Role::Columns
-                    | Role::GroupStart
-                    | Role::GroupEnd
-                    | Role::Span
-                    | Role::Tab
-                    | Role::SubTab
-            )
-        }) {
+        if anofox_visualization::roles::is_directive_panel(&panel.roles) {
             continue;
         }
         let q = format!(
@@ -555,7 +544,7 @@ fn render_dashboard_page(
         );
         let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
         let rows: Vec<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(json.trim()).unwrap_or_default();
+            sql::parse_rows_json(json.trim())?;
         if rows.len() > st.max_rows {
             return Err(format!(
                 "a panel of '{}' returned more than {} rows",
