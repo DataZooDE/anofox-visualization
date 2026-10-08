@@ -77,15 +77,17 @@ example dashboard under `examples/regression/`.
 
 ## Dependencies on other repos
 
+anofox-statistics issue numbers refer to DataZooDE/anofox-statistics; tracking issue #161.
+
 | Need | Repo | Blocks |
 |---|---|---|
 | U1–U7 (below) | ggplot-rs | Phase 1 roles marked "upstream" |
-| `<model>_augment_by` with cooks_d/leverage/std/stud residuals, `row_id` | anofox-statistics | diagnostics, influence |
-| `tidy()` long (WIP) + `conf_low/conf_high` unified + intercept row | anofox-statistics | terms |
-| `glance()` with stable fields, `model_type/family/link` | anofox-statistics | summary, model dispatch |
-| `roc_agg/pr_agg/calibration_agg`, `*_path_agg/_cv_agg`, `kaplan_meier_agg`, `acf_agg` emitting `curve`/`terms` | anofox-statistics | curves |
-| Unified test-result struct (WIP) + pairwise post-hoc table | anofox-statistics | tests |
-| tags + descriptions on table macros | statistics, forecast | discovery |
+| `<model>_augment_by` with cooks_d/leverage/std/stud residuals, `row_id` (#151) | anofox-statistics | diagnostics, influence |
+| `tidy()` long (WIP) + `conf_low/conf_high` unified + intercept row (#152) | anofox-statistics | terms |
+| `glance()` with stable fields, `model_type/family/link` (#152) | anofox-statistics | summary, model dispatch |
+| `roc_agg/pr_agg/calibration_agg`, `*_path_agg/_cv_agg`, `kaplan_meier_agg`, `acf_agg` emitting `curve`/`terms` (#153–#157) | anofox-statistics | curves |
+| Unified test-result struct (WIP) + pairwise post-hoc table (#159) | anofox-statistics | tests |
+| tags + descriptions on table macros (#160) | statistics, forecast | discovery |
 | forecast in-sample residuals in `obs` schema; `model_name` ↔ `model_id` | anofox-forecast | shared diagnostics |
 
 ### Bugs found in anofox-statistics v0.10.0 (filed: DataZooDE/anofox-statistics#142–#150)
