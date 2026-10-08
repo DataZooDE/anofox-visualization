@@ -400,6 +400,34 @@ fn distinct_labels(col: &Column) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// The DataZoo discrete colour/fill scale for a series column: levels in
+/// sorted order, so a series gets the same palette colour in every chart that
+/// contains it. A level that is itself a hex colour (`#rrggbb`) is drawn in
+/// that colour (an extension convention ggplot-rs doesn't have), so such
+/// columns pin their levels with a per-level palette.
+fn dz_scale(aesthetic: Aesthetic, col: &Column) -> ScaleColorDiscrete {
+    let scale = ScaleColorDiscrete::new(aesthetic).sorted();
+    let hex_level = |v: &Value| matches!(v, Value::Str(s) if parse_hex(s).is_some());
+    if !col.values.iter().any(hex_level) {
+        return scale.with_palette((0..DZ_COLORS.len()).map(dz_color).collect());
+    }
+    let levels = distinct_labels(col);
+    let palette = levels
+        .iter()
+        .enumerate()
+        .map(|(i, s)| parse_hex(s).unwrap_or_else(|| dz_color(i)))
+        .collect();
+    scale.with_levels(levels).with_palette(palette)
+}
+
+/// The colour [`dz_scale`] gives the last (sorted) level of `col`.
+fn last_level_color(col: &Column) -> Option<(u8, u8, u8)> {
+    let levels = distinct_labels(col);
+    let i = levels.len().checked_sub(1)?;
+    let c = parse_hex(&levels[i]).unwrap_or_else(|| dz_color(i));
+    Some((c.r, c.g, c.b))
+}
+
 /// Turn a caught panic payload into a message.
 fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     p.downcast_ref::<&str>()
@@ -797,21 +825,21 @@ fn render_inner(
 
     // Colour dimension: an explicit CATEGORY, or — for a bar chart with no
     // category — the (discrete) X itself, so a "total per channel" bar matches
-    // the same channel's colour in the other charts. `color_levels` are the
-    // stable palette keys; `x_coloured` suppresses the then-redundant legend.
+    // the same channel's colour in the other charts. `color_col` holds the
+    // series levels; `x_coloured` suppresses the then-redundant legend.
     let mut x_coloured = false;
-    let color_levels: Option<Vec<String>> = if let Some(cat) = category {
+    let color_col: Option<&Column> = if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = if by_colour {
             aes.color("cat")
         } else {
             aes.fill("cat")
         };
-        Some(distinct_labels(cat))
+        Some(cat)
     } else if bar && x_discrete {
         aes = aes.fill("x");
         x_coloured = true;
-        Some(distinct_labels(x))
+        Some(x)
     } else {
         None
     };
@@ -891,7 +919,10 @@ fn render_inner(
         Vec::new()
     };
 
-    let mut plot = GGPlot::new(data).aes(aes);
+    // Single-series marks take the brand colour (geoms added with explicit
+    // `geom_*_with` styles below set it themselves; mapped colours win).
+    let brand = o.brand();
+    let mut plot = GGPlot::new(data).aes(aes).primary_color(brand);
 
     // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
     // [min, max] of the mark column's x-values, the full panel height
@@ -924,16 +955,7 @@ fn render_inner(
 
     // A ::BAND (prediction interval) matches the forecast — the last coloured
     // series — at half opacity, so it reads as that series' uncertainty.
-    let band_color: (u8, u8, u8) = color_levels
-        .as_ref()
-        .filter(|lv| !lv.is_empty())
-        .map(|lv| {
-            let i = lv.len() - 1;
-            parse_hex(&lv[i])
-                .map(|c| (c.r, c.g, c.b))
-                .unwrap_or(DZ_COLORS[i % DZ_COLORS.len()])
-        })
-        .unwrap_or_else(|| o.brand());
+    let band_color: (u8, u8, u8) = color_col.and_then(last_level_color).unwrap_or(brand);
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
@@ -946,10 +968,12 @@ fn render_inner(
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
     // don't get swamped by the dots.
     let thin_line = || GeomLine {
+        color: brand,
         width: 1.0,
         ..Default::default()
     };
     let small_point = || GeomPoint {
+        color: brand,
         size: 1.8,
         ..Default::default()
     };
@@ -964,6 +988,7 @@ fn render_inner(
             .geom_point_with(small_point()),
         Kind::Step => plot
             .geom_step_with(ggplot_rs::geom::step::GeomStep {
+                color: brand,
                 width: 1.2,
                 ..Default::default()
             })
@@ -972,6 +997,7 @@ fn render_inner(
         Kind::Smooth => plot
             .geom_point_with(small_point())
             .geom_smooth_with(GeomSmooth {
+                color: brand,
                 se: false,
                 line_width: 2.0,
                 method: ggplot_rs::stat::smooth::SmoothMethod::Loess { span: 0.75 },
@@ -980,6 +1006,8 @@ fn render_inner(
         Kind::Area => plot.geom_area().geom_point_with(small_point()),
         Kind::AreaStacked => plot
             .geom_area_with(GeomArea {
+                fill: brand,
+                color: brand,
                 alpha: 0.85,
                 ..Default::default()
             })
@@ -1041,6 +1069,7 @@ fn render_inner(
                 // A point overlay (e.g. detected changepoints/peaks) reads as a
                 // marker on the base line, so make it a touch larger.
                 Kind::Point => plot.geom_point_with(GeomPoint {
+                    color: brand,
                     size: 3.4,
                     ..Default::default()
                 }),
@@ -1062,29 +1091,23 @@ fn render_inner(
             plot = plot.geom_vline(v);
         }
     }
-    if let Some(levels) = &color_levels {
-        // Explicit hex values (`#rrggbb`) are used verbatim; otherwise the levels
-        // map to the DataZoo palette in stable/sorted order so a given series is
-        // the same colour in every chart.
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-            .collect();
+    if let Some(col) = color_col {
+        // DataZoo palette, levels sorted so a series keeps its colour across
+        // charts; `#rrggbb` levels are drawn in that colour.
         plot = if by_colour {
-            plot.scale_color_manual(pairs)
+            plot.scale_color(dz_scale(Aesthetic::Color, col))
         } else {
-            plot.scale_fill_manual(pairs)
+            plot.scale_fill(dz_scale(Aesthetic::Fill, col))
         };
     }
     if !combo_names.is_empty() {
-        // Combo measures → distinct palette colours, keyed by column header.
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = combo_names
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), dz_color(i)))
-            .collect();
-        plot = plot.scale_color_manual(pairs);
+        // Combo measures → distinct palette colours in column order, keyed by
+        // column header.
+        plot = plot.scale_color(
+            ScaleColorDiscrete::new(Aesthetic::Color)
+                .with_levels(combo_names.clone())
+                .with_palette((0..DZ_COLORS.len()).map(dz_color).collect()),
+        );
     }
     if x_coloured {
         plot = plot.show_legend(false); // the x axis already labels the colours
@@ -1130,15 +1153,7 @@ fn render_inner(
             plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
         }
     }
-    // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
-    // preset — presets replace the whole theme. Box plots opt out so they stay
-    // unfilled (primary would re-colour the box fill).
     plot = plot.theme_minimal();
-    // A combo already colours each measure explicitly via the manual scale; the
-    // brand primary would flatten them all back to one colour, so skip it there.
-    if !matches!(kind, Kind::Boxplot | Kind::Violin) && combo_names.is_empty() {
-        plot = plot.primary_color(o.brand());
-    }
     plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
@@ -1185,20 +1200,14 @@ fn render_density(
     if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = aes.fill("cat").color("cat");
-        let levels = distinct_labels(cat);
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-            .collect();
         plot = GGPlot::new(data)
             .aes(aes)
             .geom_density_with(GeomDensity {
                 alpha: 0.4,
                 ..Default::default()
             })
-            .scale_fill_manual(pairs.clone())
-            .scale_color_manual(pairs)
+            .scale_fill(dz_scale(Aesthetic::Fill, cat))
+            .scale_color(dz_scale(Aesthetic::Color, cat))
             .theme_minimal()
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     } else {
@@ -1524,15 +1533,9 @@ fn render_radar(
         .theme_minimal()
         .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(cat) = category {
-        let levels = distinct_labels(cat);
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-            .collect();
         plot = plot
-            .scale_color_manual(pairs.clone())
-            .scale_fill_manual(pairs);
+            .scale_color(dz_scale(Aesthetic::Color, cat))
+            .scale_fill(dz_scale(Aesthetic::Fill, cat));
     }
     if let Some(t) = title {
         plot = plot.title(t);
@@ -2015,17 +2018,11 @@ fn render_pie(
         ("cat".to_string(), category.values.clone()),
         ("label".to_string(), category.values.clone()),
     ];
-    let levels = distinct_labels(category);
-    let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-        .collect();
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
         .geom_col()
         .position(PositionStack)
-        .scale_fill_manual(pairs)
+        .scale_fill(dz_scale(Aesthetic::Fill, category))
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0),
