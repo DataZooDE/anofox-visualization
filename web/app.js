@@ -780,12 +780,57 @@ function syncHL() {
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
-// Served (locked) mode: the server owns the SQL and gates /query. To stay
-// stateless (multi-user safe — no shared session variables), we don't SET
-// VARIABLE on the connection; we capture each one here and inline them into the
-// front of every data query, so each /query call is self-contained.
+// Served (locked) mode: the server owns the SQL — there is no SQL endpoint.
+// The client names a statement of the served dashboard by its plan index and
+// sends variable VALUES (JSON), which the server binds as typed literals:
+//   POST /api/panel {dashboard, panel, vars, page?}
+// SET VARIABLE statements are captured here (never sent), so every request is
+// self-contained (multi-user safe — no shared session state).
 let servedMode = false;
 const servedVars = {};
+let servedIndex = null; // planned statement SQL -> plan index
+
+// Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
+// TRUE/FALSE/NULL) back into a JSON value for /api/panel.
+function sqlLiteralToJson(lit) {
+  const t = String(lit).trim();
+  if (/^null$/i.test(t)) return null;
+  if (/^true$/i.test(t)) return true;
+  if (/^false$/i.test(t)) return false;
+  if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
+  if (t.startsWith("[") && t.endsWith("]")) {
+    const inner = t.slice(1, -1).trim();
+    if (!inner) return [];
+    const strs = [...inner.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+    if (strs.length) return strs;
+    return inner.split(",").map((x) => sqlLiteralToJson(x));
+  }
+  const n = Number(t);
+  return t !== "" && Number.isFinite(n) ? n : t;
+}
+
+async function servedRequest(sql, page) {
+  if (!servedIndex) {
+    servedIndex = new Map();
+    JSON.parse(plan(window.__served.sql)).forEach((st, i) => {
+      if (!servedIndex.has(st.sql)) servedIndex.set(st.sql, i);
+    });
+  }
+  const idx = servedIndex.get(page ? page.base : sql);
+  if (idx === undefined) throw new Error("this dashboard is served locked: only its own statements can run");
+  const body = { dashboard: window.__served.id, panel: idx, vars: servedVars };
+  if (page) {
+    const { base, ...rest } = page;
+    body.page = rest;
+  }
+  const r = await fetch("/api/panel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.text()) || "[]";
+}
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 
 // The map examples read remote GeoJSON with DuckDB's `spatial` extension. Load
@@ -877,22 +922,21 @@ async function ensureForecast(sql) {
 }
 
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
-async function runSql(sql) {
+// `page` (served mode only) describes a ::PAGED request structurally —
+// {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
+// builds the paging SQL itself.
+async function runSql(sql, page) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
   if (servedMode) {
-    // Capture a SET VARIABLE (don't touch the connection) …
+    // Capture a SET VARIABLE (never sent as SQL) …
     const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
     if (m) {
-      servedVars[m[1]] = m[2].trim();
+      servedVars[m[1]] = sqlLiteralToJson(m[2]);
       return "[]";
     }
-    // … and inline all current variables into each data query, so the request
-    // is self-contained (the gated, stateless server needs no session state).
-    const prefix = Object.entries(servedVars)
-      .map(([k, v]) => `SET VARIABLE ${k} = ${v}; `)
-      .join("");
-    sql = prefix + sql;
+    // … and send the statement's plan index + the variable values.
+    return servedRequest(sql, page);
   }
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
@@ -946,10 +990,13 @@ async function boot() {
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
-  try {
-    const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
-    if (r.ok) backend = "live";
-  } catch (_) {}
+  // A locked served dashboard always uses its server (/api/panel, no SQL).
+  if (window.__served) backend = "live";
+  else
+    try {
+      const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
+      if (r.ok) backend = "live";
+    } catch (_) {}
 
   if (backend !== "live") {
     const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm");
@@ -2058,7 +2105,13 @@ async function run(fresh = true) {
           const where = whereClause();
           if (cachedTotal == null) {
             try {
-              const c = JSON.parse(await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`));
+              const c = JSON.parse(
+                await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`, {
+                  base,
+                  count: true,
+                  filter: (dpFilterText[idx] || "").trim(),
+                })
+              );
               cachedTotal = Number(c[0] && c[0].n) || 0;
             } catch (_) {
               cachedTotal = 0;
@@ -2067,7 +2120,16 @@ async function run(fresh = true) {
           const order = sort && sort.col ? ` ORDER BY ${qident(sort.col)} ${sort.dir > 0 ? "ASC" : "DESC"}` : "";
           let rows = [];
           try {
-            rows = JSON.parse(await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`));
+            rows = JSON.parse(
+              await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`, {
+                base,
+                limit: pageSize,
+                offset: page * pageSize,
+                sort: sort && sort.col ? sort.col : null,
+                desc: !!(sort && sort.col && sort.dir < 0),
+                filter: (dpFilterText[idx] || "").trim(),
+              })
+            );
           } catch (e) {
             holder.innerHTML = "";
             showError(holder, String(e));
