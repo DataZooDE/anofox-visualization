@@ -27,7 +27,12 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     .starts_with("javascript:"),
                 "{ctx}: javascript: URL in {name}"
             );
-            if !matches!(name.as_str(), "data-x" | "class" | "id") {
+            // Label-carrying attributes hold category text (a category may
+            // literally be "inf"); geometry and numeric attributes must be finite.
+            if !matches!(
+                name.as_str(),
+                "data-x" | "data-series" | "data-xlevels" | "data-ylevels" | "class" | "id"
+            ) {
                 for bad in ["NaN", "inf"] {
                     assert!(
                         !v.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '.'))

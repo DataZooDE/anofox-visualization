@@ -30,7 +30,7 @@ crate-type = ["cdylib", "rlib"]
 # (legend_position, CoordPolar::inner_radius, geom hover…). Makes the build
 # self-contained (no ggplot-rs sibling checkout needed). Bump the rev to update;
 # for local ggplot-rs work, `[patch]` it to a path. See duckext/DISTRIBUTING.md.
-ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37a5b6405328fe14e82b7c7fe845ce80901", default-features = false, features = ["sf"] }
+ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", tag = "v0.16.0", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
@@ -42,7 +42,7 @@ open = { version = "5", optional = true }
 [features]
 default = []
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
-wasm = ["dep:wasm-bindgen", "ggplot-rs/wasm"]
+wasm = ["dep:wasm-bindgen"]
 # `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.
 serve = ["dep:tiny_http", "dep:include_dir", "dep:open"]
 
