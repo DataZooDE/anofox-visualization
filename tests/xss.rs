@@ -171,3 +171,21 @@ fn dashboard_text_channels_are_escaped() {
         assert_safe_svg(&svg, &format!("dashboard / {p}"));
     }
 }
+
+/// Quotes in data reach the SVG verbatim (escaped as `&quot;`/`&#39;` by the
+/// writers), not substituted — and the result stays well-formed and inert.
+#[test]
+fn quotes_in_data_are_kept_and_escaped() {
+    let spec = r#"{"rows":[{"c0":"say \"hi\"","c1":3},{"c0":"it's","c1":4}],
+                  "roles":[[0,"XAXIS"],[1,"BARCHART"]],"width":400,"height":300}"#;
+    let svg = render_spec_checked(spec).unwrap();
+    assert_safe_svg(&svg, "quotes");
+    assert!(!svg.contains('”'), "quote was substituted");
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let xs: Vec<&str> = doc
+        .descendants()
+        .filter_map(|n| n.attribute("data-x"))
+        .collect();
+    assert!(xs.contains(&"say \"hi\""), "data-x keeps the quote: {xs:?}");
+    assert!(xs.contains(&"it's"), "data-x keeps the apostrophe: {xs:?}");
+}

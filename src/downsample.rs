@@ -3,9 +3,10 @@
 //! 1. **Shape**: pad every column to the longest one with missing values, so
 //!    row-indexed renderers can never index out of bounds.
 //! 2. **Sanitise**: non-finite floats (NaN/±inf) become missing; control
-//!    characters are dropped from strings; `"` becomes `”` (the plotting engine
-//!    writes some strings into SVG attributes without escaping quotes — this
-//!    keeps a crafted category from breaking out of an attribute).
+//!    characters (other than tab/LF/CR) are dropped from strings so the
+//!    extension's own SVG/HTML text stays well-formed XML. Quotes are kept
+//!    verbatim: every writer escapes them (`format::escape_xml`, and ggplot-rs
+//!    ≥ 0.16 escapes `"`/`'` in attributes).
 //! 3. **Category cap**: a discrete x axis (bars, box/violin/jitter) or a
 //!    `::CATEGORY` with more than [`RenderOptions::max_categories`] levels keeps
 //!    the largest `max − 1` (by total |measure|, or row count for raw-row
@@ -63,12 +64,11 @@ fn sanitize(v: &Value) -> Value {
         Value::Float(f) if !f.is_finite() => Value::Na,
         Value::Str(s) => {
             if s.chars()
-                .any(|c| c == '"' || (c.is_control() && !matches!(c, '\t' | '\n' | '\r')))
+                .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
             {
                 Value::Str(
                     s.chars()
                         .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
-                        .map(|c| if c == '"' { '”' } else { c })
                         .collect(),
                 )
             } else {
