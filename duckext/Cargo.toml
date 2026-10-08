@@ -4,7 +4,7 @@
 # collide with the core `anofox-visualization` library it depends on.
 [package]
 name = "anofox-visualization-duckdb"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "BUSL-1.1"
 description = "DuckDB C-API extension — SELECT anofox_render(...) → SVG via the anofox-visualization renderer. Wasm side-module compatible (no libduckdb linking)."
@@ -24,10 +24,9 @@ serde_json = "1"
 open = "5"
 
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "0.72"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+# NOTE: no `panic = "abort"` — every `extern "C"` entry point wraps its body in
+# `catch_unwind` and turns a panic into a SQL error, which requires unwinding.
+# Profiles live in the workspace root (Cargo ignores member profiles). For the
+# experimental wasm side-module build pass `-C panic=abort` via RUSTFLAGS.

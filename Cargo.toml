@@ -1,6 +1,21 @@
+# One workspace, one Cargo.lock (committed; CI builds with --locked). The
+# extension crates share the core's version via `version.workspace = true`, so
+# this is the single version source of truth (CalVer YYYY.M.D) — see BUILD.md.
+[workspace]
+members = [".", "duckext", "crates/anofox-viz-ffi"]
+# `cargo build`/`cargo test` at the root keep meaning "the core crate"; the
+# extension crates are built explicitly (-p …), duckext needs libclang (bindgen).
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "2026.9.26"
+edition = "2021"
+license = "BUSL-1.1"
+
 [package]
 name = "anofox-visualization"
-version = "2026.9.26"
+version.workspace = true
 edition = "2021"
 description = "SQL-defined dashboards: column-role annotations rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
 license = "BUSL-1.1"
