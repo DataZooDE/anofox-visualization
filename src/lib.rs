@@ -886,6 +886,41 @@ fn render_placed(
     })
 }
 
+/// The ggplot of one panel, for composing into a [`PlotGrid`] (`None` when
+/// the panel is one of the extension's own SVGs, e.g. a "No data" note).
+pub(crate) fn panel_plot(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<Option<GGPlot>, String> {
+    let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+    let cols = downsample::prepare(cols, o);
+    Ok(match render_inner(&cols, w, h, o)? {
+        Panel::Plot { plot, .. } => Some(*plot),
+        Panel::Own { .. } => None,
+    })
+}
+
+/// Write a [`PlotGrid`] at `place` (with its sub-plots' warnings for a
+/// standalone document).
+pub(crate) fn finish_grid(
+    grid: PlotGrid,
+    place: Place,
+    width: u32,
+    height: u32,
+) -> Result<(String, Vec<String>), String> {
+    let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+    match place {
+        Place::Doc => grid.render_svg_native_with_warnings(w, h),
+        Place::At(x, y) => grid
+            .render_svg_native_at(x, y, w, h)
+            .map(|s| (s, Vec::new())),
+    }
+    .map(|(s, warnings)| (strip_nonfinite_marks(s), warnings))
+    .map_err(|e| format!("render failed: {e:?}"))
+}
+
 /// Geometry attributes whose values must be finite numbers.
 const GEOMETRY_ATTRS: &[&str] = &[
     "x",

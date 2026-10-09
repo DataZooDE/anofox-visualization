@@ -219,7 +219,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_curve(tbl)` | **curve_type, x, y**, y_low, y_high, model_id \| series, n_censor \| censored (km) | roc/calibration: line + diagonal; pr/pdp/lift/null_dist: line (+ band); km: step + step-ribbon band + `+` censoring marks; acf/pacf: lollipops + bounds; lambda_cv: point ± range on log x; qq: points + identity (+ y_low/y_high band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl)` | **model_id, metric, value**, conf_low, conf_high | one panel per metric (own y scale), a dot (± interval) per model |
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`), `cooks` (4/n line); the `label_top` largest-Cook's rows are labelled by `row_id` |
-| `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG |
+| `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
 | `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,

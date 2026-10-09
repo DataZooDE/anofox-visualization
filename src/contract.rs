@@ -70,7 +70,9 @@ pub(crate) fn render(
             obs(&t, &kind, label_top(options))
         }
         "diagnostics" => {
-            return diagnostics(&t, label_top(options), width, height, o, place).map_err(fail)
+            return crate::guard(|| {
+                diagnostics(&t, label_top(options), width, height, o, place).map_err(fail)
+            })
         }
         _ => unreachable!("checked above"),
     }
@@ -616,10 +618,8 @@ fn obs(t: &Table, kind: &str, k: usize) -> Result<Vec<Column>, String> {
 }
 
 /// The plot.lm 2×2: residuals vs fitted, normal QQ, scale-location and
-/// residuals vs leverage (Cook's distance when there is no leverage),
-/// composed from positioned fragments.
-///
-/// TODO(ggplot-rs 0.17): compose::PlotGrid (shared legend, panel tags).
+/// residuals vs leverage (Cook's distance when there is no leverage), as a
+/// patchwork-style `PlotGrid` (one legend when several models are compared).
 fn diagnostics(
     t: &Table,
     k: usize,
@@ -644,34 +644,18 @@ fn diagnostics(
     if !last.1.is_empty() {
         panels.push(last);
     }
-    let head = 22.0;
-    let (w, h) = (width as f64 / 2.0, height as f64 / 2.0);
-    let mut body = String::new();
-    let mut warnings = Vec::new();
-    for (i, (kind, title)) in panels.iter().enumerate() {
-        let (x, y) = ((i % 2) as f64 * w, (i / 2) as f64 * h);
+    let (w, h) = (width / 2, height / 2);
+    let mut grid = ggplot_rs::compose::PlotGrid::new()
+        .ncol(2)
+        .collect_legends(true);
+    for (kind, title) in &panels {
         let cols = obs(t, kind, k)?;
-        let (svg, warns) = crate::render_placed(
-            &cols,
-            Place::At(x, y + head),
-            w.max(32.0) as u32,
-            (h - head).max(32.0) as u32,
-            o,
-        )
-        .map_err(|e| e.to_string())?;
-        body.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" font-weight=\"600\" fill=\"#1f2430\">{}</text>",
-            x + w / 2.0,
-            y + 16.0,
-            crate::format::escape_xml(title)
-        ));
-        body.push_str(&svg);
-        warnings.extend(warns.into_iter().map(|m| format!("{title}: {m}")));
+        grid = match crate::panel_plot(&cols, w, h, o)? {
+            Some(plot) => grid.add(plot.title(title)),
+            None => grid.add_spacer(),
+        };
     }
-    Ok((
-        format!("{}{body}</svg>", crate::svg_open(place, width, height)),
-        warnings,
-    ))
+    crate::finish_grid(grid, place, width, height)
 }
 
 #[cfg(test)]

@@ -603,6 +603,11 @@ fn contract_auto_dispatch_and_errors() {
     )
     .unwrap();
     assert!(s.contains("Normal Q-Q") && s.contains("Residuals vs fitted"));
+    // A 2×2 PlotGrid of nested sub-plots.
+    assert!(
+        s.contains("data-grid=\"2 2\"") && s.contains("data-panel=\"3\""),
+        "{s}"
+    );
     let e = spec("auto", r#"[{"a":1}]"#, "{}").unwrap_err();
     assert!(e.contains("match no plottable schema"), "{e}");
     let e = spec("bogus", "[]", "{}").unwrap_err();
