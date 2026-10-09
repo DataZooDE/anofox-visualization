@@ -128,9 +128,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ggplot-rs"
-version = "0.16.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f57de4dcb80a3be2511efac36bd66bf3ef7e891ba91c24782a9c050ac5ae298a"
+checksum = "aaeb2adcec7b814a6f123b835027752bfa14185ec69ddcff116c4aa5a651ad7b"
 dependencies = [
  "indexmap",
 ]

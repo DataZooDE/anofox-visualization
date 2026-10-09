@@ -35,14 +35,22 @@ terminal.
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
 | `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area) |
+| `::YMIN` | `::Y_MIN` | encoding | lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars |
+| `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
+| `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
+| `::XMAX` | `::X_MAX` | encoding | upper end of a horizontal interval (see ::XMIN) |
+| `::FACET` | `::FACET_WRAP`, `::PANEL_BY` | encoding | small multiples: one panel per distinct value, shared axes |
+| `::FACET_FREE` | `::FACET_WRAP_FREE` | encoding | small multiples with independent axes per panel (y only on a discrete x) |
+| `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
+| `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
-| `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars, percent y-axis |
+| `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars as % of each x's total (fractions ≤ 1 are drawn as given) |
 | `::BARCHART_STACKED_PERCENT` | `::BAR_STACKED_PERCENT` | chart | bars normalised to 100% per x |
 | `::LINECHART` | `::LINE` | chart | line chart |
 | `::LINECHART_PERCENT` | `::LINE_PERCENT` | chart | line chart, percent y-axis |
 | `::STEP` | `::STEPLINE`, `::STEP_LINE` | chart | step line |
-| `::SMOOTH` | `::TRENDLINE`, `::TREND_LINE` | chart | scatter + LOESS trend line |
+| `::SMOOTH` | `::TRENDLINE`, `::TREND_LINE` | chart | scatter + trend line (LOESS; ::SMOOTH_METHOD 'lm'/'gam') |
 | `::AREACHART` | `::AREA` | chart | area chart |
 | `::AREACHART_STACKED` | `::AREA_STACKED`, `::STACKED_AREA` | chart | stacked areas (by CATEGORY) |
 | `::SCATTER` | `::POINT`, `::SCATTERCHART` | chart | scatter; add a ::SIZE column for a bubble chart |
@@ -56,7 +64,7 @@ terminal.
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
-| `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot |
+| `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
 | `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
@@ -65,13 +73,21 @@ terminal.
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value |
 | `::XLINE` |  | annotation | vertical reference line at an x |
+| `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
 | `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark (value = font size) |
+| `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
+| `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
+| `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | y-axis tick format: '€', '$', 'percent', 'comma', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
+| `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
+| `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
+| `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
+| `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
@@ -139,6 +155,111 @@ FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
+
+### Statistical graphics (intervals, facets, scales, reference lines)
+
+Roles for model output — coefficient forests, residual diagnostics, CV curves:
+
+| Need | SQL | Notes |
+|---|---|---|
+| point ± interval | `term::XAXIS, est::SCATTER, lo::YMIN, hi::YMAX` | a `::SCATTER` becomes a pointrange; a bar/line gets capped error bars |
+| horizontal forest | `… , 1::FLIP, 0::REFLINE` | `::FLIP` turns the intervals horizontal, `::REFLINE` the zero line vertical |
+| several models | `… , model::CATEGORY` | pointranges (and `::BARCHART` bars) on a discrete x are dodged side by side |
+| x interval | `x::XAXIS, y::SCATTER, a::XMIN, b::XMAX` | a horizontal error bar through each point (numeric x) |
+| straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
+| small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
+| axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
+| label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
+| trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
+
+```sql
+-- Coefficient forest of two models
+SELECT term::XAXIS, model_id::CATEGORY, estimate::SCATTER,
+       conf_low::YMIN, conf_high::YMAX, 1::FLIP, 0::REFLINE
+FROM coefficients;
+
+-- Residuals vs fitted with a GAM trend, top-3 influential rows labelled
+SELECT fitted::XAXIS, residual::SMOOTH, 'gam'::SMOOTH_METHOD, 0::REFLINE,
+       row_id::LABEL, 3::LABEL_TOP, cooks_d::RANK
+FROM augmented;
+```
+
+`::BARCHART_PERCENT` draws each bar's share of its x's total (of the grand
+total without a `::CATEGORY`); values already given as fractions (all within
+±1) are drawn as they are. `::LINECHART_PERCENT` formats fractions ×100 and
+treats larger values as percentages already.
+
+Dodged marks keep their discrete x level in `data-x`. The one exception is a
+grouped chart with `::DATALABELS` (labels cannot follow a discrete dodge), drawn
+on numeric x slots: its SVG root carries `data-xticks` (`{"1":"W1",…}`) so hosts
+can map a mark's numeric `data-x` back to its level.
+
+For whole model outputs there are ready-made plot macros — see
+[Plotting model output](#plotting-model-output-contract-macros).
+
+### Plotting model output (contract macros)
+
+The DuckDB extension bundles one plot macro per *shape* of model output, the
+long-table schemas of the [anofox integration
+contract](plans/integration-contract.md) shared by anofox-statistics,
+anofox-forecast and friends. They are aggregate macros over **whole rows**:
+name the table with an alias and pass the alias — DuckDB hands each row over
+as a STRUCT, so the macro sees the column names:
+
+```sql
+SELECT anofox_plot_terms(c) FROM coefficients c;                    -- one SVG
+SELECT model_id, anofox_plot_terms(c) FROM coefficients c GROUP BY ALL;  -- one per model
+SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoETS', 14, '1d') f;
+```
+
+| Macro | Schema (required **bold**) | Draws |
+|---|---|---|
+| `anofox_plot_terms(tbl)` | **term, estimate**, conf_low, conf_high, model_id, index_name, index_value | coefficient forest (models dodged + coloured, zero line); with `index_value`: estimate + band over the index, one panel per term (log x for a λ path) |
+| `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id | observed points, fitted/forecast line and band, coloured by split (train/test/future — from `split`, else `is_training`, else a missing y = future) or by model when one panel has several; several `id`s become panels |
+| `anofox_plot_curve(tbl)` | **curve_type, x, y**, y_low, y_high, model_id \| series, n_censor \| censored (km) | roc/calibration: line + diagonal; pr/pdp/lift/null_dist: line (+ band); km: step + step-ribbon band + `+` censoring marks; acf/pacf: lollipops + bounds; lambda_cv: point ± range on log x; qq: points + identity (+ y_low/y_high band). One `curve_type` per call (`GROUP BY curve_type`) |
+| `anofox_plot_summary(tbl)` | **model_id, metric, value**, conf_low, conf_high | one panel per metric (own y scale), a dot (± interval) per model |
+| `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`), `cooks` (4/n line); the `label_top` largest-Cook's rows are labelled by `row_id` |
+| `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary |
+
+Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
+`anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
+and `anofox_xyc(x, y, series, kind := …)` chart two or three columns.
+
+All take `width := 640, height := 400` (diagnostics 820×640). Missing
+required columns, non-numeric values, an unknown `kind`/`curve_type` or a
+mixed `curve_type` are SQL errors naming the problem; no rows give a "No data"
+SVG.
+
+**Adapting producer output.** `*_fit_predict_by` (anofox-statistics) keeps
+the input columns: `anofox_plot_prediction(p, x := 'x1', facet := 'grp')`.
+`ts_forecast_by` (anofox-forecast) has no `y`; union the history to draw it:
+
+```sql
+SELECT anofox_plot_prediction(p) FROM (
+  SELECT id, ds, y, NULL AS yhat, NULL AS yhat_lower, NULL AS yhat_upper FROM sales
+  UNION ALL BY NAME
+  SELECT id, ds, NULL AS y, yhat, yhat_lower, yhat_upper
+  FROM ts_forecast_by('sales', id, ds, y, 'AutoETS', 14, '1d')) p;
+```
+
+See `examples/regression/` (fixtures for every schema, plus scripts against
+the real anofox-statistics / anofox-forecast extensions) and
+`python3 examples/regression/render.py <script.sql> <out_dir>`.
+
+**Why row macros.** DuckDB macros cannot take a table *name* and return a
+scalar (that needs a table function per build), and positional column
+arguments (`anofox_plot_terms(term, estimate, conf_low, …)`) would be long,
+order-sensitive and differ per schema. Passing the row struct needs no
+introspection, keeps the contract's column names (so one renderer serves every
+producer), aggregates like any other aggregate (`GROUP BY`, `FILTER`, window-free)
+and works the same in the render-only community build and the C-API build.
+The macro bodies live once in `src/macros.rs`; the C++ build registers them
+through the FFI with descriptions and `tags` (`anofox.consumes`,
+`anofox.contract`), the C-API build with `CREATE MACRO` (no descriptions — a
+limitation of that API). Under the hood a macro builds `{"plot": "terms",
+"rows": [...], "options": {...}}` for `anofox_render`, which maps the columns
+onto the roles above (`term::XAXIS, estimate::SCATTER, conf_low::YMIN, …`).
 
 ### Combo charts, auto-refresh, dark mode
 
@@ -446,6 +567,7 @@ guarantee is that the core never panics on user input (fuzz-tested).
 
 ### Host API (Rust)
 
+- `render_spec_checked(json)` also accepts `{"plot": "terms"|"prediction"|"curve"|"summary"|"obs"|"diagnostics"|"auto", "rows": [...], "options": {...}}` — a contract plot over named columns (`contract` module); `macros::MACROS` is the bundled macro table.
 - `render_spec_checked(json) -> Result<String, RenderError>` — the checked
   entry point for hosts (the DuckDB extension's FFI): `BadSpec` / `Render` /
   `Panic` (a caught internal panic). `render_spec(json) -> String` keeps the old

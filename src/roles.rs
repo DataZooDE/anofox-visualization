@@ -72,13 +72,27 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
     e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area)"),
+    e("YMIN", &["Y_MIN"], R::YMin, "encoding", true,
+      "lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars"),
+    e("YMAX", &["Y_MAX"], R::YMax, "encoding", true, "upper end of a y interval (see ::YMIN)"),
+    e("XMIN", &["X_MIN"], R::XMin, "encoding", true,
+      "lower end of a horizontal interval through each point"),
+    e("XMAX", &["X_MAX"], R::XMax, "encoding", true, "upper end of a horizontal interval (see ::XMIN)"),
+    e("FACET", &["FACET_WRAP", "PANEL_BY"], R::Facet, "encoding", true,
+      "small multiples: one panel per distinct value, shared axes"),
+    e("FACET_FREE", &["FACET_WRAP_FREE"], R::FacetFree, "encoding", true,
+      "small multiples with independent axes per panel (y only on a discrete x)"),
+    e("RANK", &["LABEL_RANK"], R::Rank, "encoding", true,
+      "score ranking points for ::LABEL_TOP (higher = labelled first)"),
+    e("CENSOR", &["CENSORED", "N_CENSOR"], R::Censor, "encoding", true,
+      "censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier)"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),
     e("BARCHART_STACKED", &["BAR_STACKED", "STACKED_BAR"], R::Value(Kind::BarStacked), "chart", true,
       "stacked bars (by CATEGORY)"),
     e("BARCHART_PERCENT", &["BAR_PERCENT"], R::Value(Kind::BarPercent), "chart", true,
-      "dodged bars, percent y-axis"),
+      "dodged bars as % of each x's total (fractions ≤ 1 are drawn as given)"),
     e("BARCHART_STACKED_PERCENT", &["BAR_STACKED_PERCENT"], R::Value(Kind::BarStackedPercent),
       "chart", true, "bars normalised to 100% per x"),
     e("LINECHART", &["LINE"], R::Value(Kind::Line), "chart", true, "line chart"),
@@ -86,7 +100,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "line chart, percent y-axis"),
     e("STEP", &["STEPLINE", "STEP_LINE"], R::Value(Kind::Step), "chart", true, "step line"),
     e("SMOOTH", &["TRENDLINE", "TREND_LINE"], R::Value(Kind::Smooth), "chart", true,
-      "scatter + LOESS trend line"),
+      "scatter + trend line (LOESS; ::SMOOTH_METHOD 'lm'/'gam')"),
     e("AREACHART", &["AREA"], R::Value(Kind::Area), "chart", true, "area chart"),
     e("AREACHART_STACKED", &["AREA_STACKED", "STACKED_AREA"], R::Value(Kind::AreaStacked), "chart",
       true, "stacked areas (by CATEGORY)"),
@@ -111,7 +125,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "box plot — XAXIS groups, measure on y (raw rows)"),
     e("VIOLIN", &["VIOLINPLOT"], R::Value(Kind::Violin), "chart", true,
       "violin plot — XAXIS groups, measure on y (raw rows)"),
-    e("QQ", &["QQPLOT"], R::Value(Kind::QQ), "chart", true, "normal quantile-quantile plot"),
+    e("QQ", &["QQPLOT"], R::Value(Kind::QQ), "chart", true, "normal quantile-quantile plot with a 95% pointwise band"),
     e("HEATMAP", &["TILE", "TILES"], R::Value(Kind::Heatmap), "chart", true,
       "tiles at XAXIS×YAXIS coloured by the measure"),
     e("CALENDAR", &["CALENDAR_HEATMAP", "CAL_HEATMAP"], R::Value(Kind::Calendar), "chart", true,
@@ -128,6 +142,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
       "horizontal reference line per distinct value"),
     e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
+    e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
+      "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,
       "lower edge of a shaded band around a line"),
     e("BAND_UPPER", &["BANDUPPER"], R::BandUpper, "annotation", true,
@@ -136,6 +152,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "shade the x-region [min, max] of this column"),
     e("DATALABELS", &["DATALABEL", "VALUELABELS", "SHOWLABELS"], R::DataLabels, "annotation", true,
       "draw the value on each mark (value = font size)"),
+    e("ABLINE", &["AB_LINE"], R::AbLine, "annotation", true,
+      "straight line y = slope·x + intercept per distinct 'slope,intercept' value"),
+    e("IDENTITY", &["DIAGONAL", "IDENTITY_LINE"], R::Identity, "annotation", true,
+      "dashed grey y = x line (predicted vs actual, calibration, QQ)"),
+    e("LABEL_TOP", &["LABELTOP", "TOPLABELS"], R::LabelTop, "annotation", true,
+      "label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or |y|"),
     // ── chart modifiers ────────────────────────────────────────────────────
     e("FLIP", &["COORD_FLIP", "HORIZONTAL"], R::Flip, "modifier", true,
       "swap the axes (horizontal bars)"),
@@ -143,6 +165,14 @@ pub static REGISTRY: &[RoleSpec] = &[
       "y-axis tick format: '€', '$', 'percent', 'comma', ' kg'…"),
     e("XFORMAT", &["XAXISFORMAT", "XUNIT", "XCURRENCY"], R::XFormat, "modifier", true,
       "x-axis tick format (continuous x), like ::YFORMAT"),
+    e("XSCALE", &["XTRANS"], R::XScale, "modifier", true,
+      "x-axis transform: 'log10', 'sqrt' or 'reverse'"),
+    e("YSCALE", &["YTRANS"], R::YScale, "modifier", true,
+      "y-axis transform: 'log10', 'sqrt' or 'reverse'"),
+    e("FACET_NCOL", &["NCOL"], R::FacetCols, "modifier", true,
+      "panels per row of a ::FACET / ::FACET_FREE"),
+    e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
+      "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100)"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
@@ -557,6 +587,22 @@ mod tests {
             Role::Open,
             Role::High,
             Role::Low,
+            Role::YMin,
+            Role::YMax,
+            Role::XMin,
+            Role::XMax,
+            Role::Facet,
+            Role::FacetFree,
+            Role::FacetCols,
+            Role::XScale,
+            Role::YScale,
+            Role::AbLine,
+            Role::Identity,
+            Role::LabelTop,
+            Role::Rank,
+            Role::Censor,
+            Role::CooksContour,
+            Role::SmoothMethod,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -609,7 +655,23 @@ mod tests {
                 | Role::Markdown
                 | Role::Open
                 | Role::High
-                | Role::Low => {}
+                | Role::Low
+                | Role::YMin
+                | Role::YMax
+                | Role::XMin
+                | Role::XMax
+                | Role::Facet
+                | Role::FacetFree
+                | Role::FacetCols
+                | Role::XScale
+                | Role::YScale
+                | Role::AbLine
+                | Role::Identity
+                | Role::LabelTop
+                | Role::Rank
+                | Role::Censor
+                | Role::CooksContour
+                | Role::SmoothMethod => {}
             }
         }
         v

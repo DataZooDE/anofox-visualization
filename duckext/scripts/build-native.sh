@@ -47,7 +47,7 @@ echo "== smoke test =="
 LOAD '$OUT';
 WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
 SELECT CASE WHEN anofox_render(json_object(
-  'rows',  (SELECT to_json(list({ch: ch, n: n})) FROM d),
+  'rows',  (SELECT to_json(list({c0: ch, c1: n})) FROM d),
   'roles', json('[[0,\"XAXIS\"],[1,\"BARCHART\"]]'),
   'width', 400, 'height', 260)) LIKE '<svg%<rect%'
   THEN 'OK: rendered a bar chart' ELSE 'FAIL' END;"

@@ -59,9 +59,9 @@ Unifying them was evaluated and not done:
 
 What *is* shared, so the two cannot drift: the renderer, the FFI-boundary
 render entry point (`anofox_visualization::host::render_spec_checked` — spec
-validation, size caps, panic → error), the macro bodies (kept identical in
-`csrc/anofox_visualization_extension.cpp` and `duckext/src/lib.rs`), the
-version, and `Cargo.lock`.
+validation, size caps, panic → error), the macro table (`src/macros.rs` —
+the C++ build reads it through the FFI accessors `anofox_viz_macro_*`, the
+C-API build runs `CREATE MACRO` from it), the version, and `Cargo.lock`.
 
 ### C-API build: macro caveat
 

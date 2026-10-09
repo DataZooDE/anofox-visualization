@@ -1,0 +1,164 @@
+# name: test/sql/anofox_plot_contract.test
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics, anofox_plot) render SVG and reject bad input
+# group: [anofox_visualization]
+
+require anofox_visualization
+
+require json
+
+statement ok
+LOAD anofox_visualization
+
+# ── terms ────────────────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE coefs AS SELECT * FROM (VALUES
+  ('ols', '(Intercept)', 1.2, 0.8, 1.6), ('ols', 'price', -0.52, -0.71, -0.33),
+  ('ridge', '(Intercept)', 1.1, 0.78, 1.42), ('ridge', 'price', -0.41, -0.57, -0.25)
+) t(model_id, term, estimate, conf_low, conf_high);
+
+# The whole row is passed: one SVG, a horizontal (flipped) forest.
+query I
+SELECT anofox_plot_terms(c) LIKE '<svg%data-flip="true"%' FROM coefs c;
+----
+true
+
+# One SVG per group.
+query I
+SELECT count(*) FROM (SELECT anofox_plot_terms(c) AS svg FROM coefs c GROUP BY model_id) WHERE svg LIKE '<svg%';
+----
+2
+
+# With index_value: an estimate path, one panel per term.
+query I
+SELECT anofox_plot_terms(p) LIKE '%>price</text>%' FROM (
+  SELECT 'lasso' AS model_id, term, 'lambda' AS index_name, lam AS index_value, b * lam AS estimate
+  FROM (VALUES ('price', -0.6), ('promo', 0.4)) v(term, b), (SELECT pow(10, -i) AS lam FROM range(5) r(i))) p;
+----
+true
+
+statement error
+SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 0.2)) c(term, coef);
+----
+needs column(s) estimate
+
+statement error
+SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 'big')) c(term, estimate);
+----
+must be numeric
+
+# No rows: a "No data" note, not an error.
+query I
+SELECT anofox_plot_terms(c) LIKE '<svg%No data%' FROM (SELECT * FROM coefs WHERE false) c;
+----
+true
+
+# ── prediction ───────────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE pred AS SELECT i AS x, CASE WHEN i < 8 THEN i + 0.5 END AS y, i::DOUBLE AS yhat,
+  i - 1.0 AS yhat_lower, i + 1.0 AS yhat_upper, i < 6 AS is_training FROM range(10) r(i);
+
+query I
+SELECT anofox_plot_prediction(p) LIKE '<svg%>future</text>%>test</text>%>train</text>%' FROM pred p;
+----
+true
+
+# A *_fit_predict_by output: name the x column, panel by the group column.
+query I
+SELECT anofox_plot_prediction(p, x := 'x1', facet := 'grp') LIKE '%>g1</text>%'
+FROM (SELECT x AS x1, y, yhat, yhat_lower, yhat_upper, is_training, 'g' || (x % 2) AS grp FROM pred) p;
+----
+true
+
+# A ts_forecast_by output (ds, no y).
+query I
+SELECT anofox_plot_prediction(f) LIKE '<svg%' FROM (
+  SELECT 'A' AS id, h AS forecast_step, TIMESTAMP '2024-01-01' + INTERVAL (h) DAY AS ds,
+         10.0 + h AS yhat, 8.0 + h AS yhat_lower, 12.0 + h AS yhat_upper, 'AutoETS' AS model_name
+  FROM range(1, 8) r(h)) f;
+----
+true
+
+statement error
+SELECT anofox_plot_prediction(p) FROM (VALUES (1, 2.0)) p(t, yhat);
+----
+needs an x position
+
+statement error
+SELECT anofox_plot_prediction(p, facet := 'nope') FROM pred p;
+----
+facet column `nope` not found
+
+# ── curve ────────────────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE curves AS
+SELECT 'roc' AS curve_type, i / 10.0 AS x, sqrt(i / 10.0) AS y, NULL::DOUBLE AS y_low, NULL::DOUBLE AS y_high FROM range(11) r(i)
+UNION ALL SELECT 'acf', i, power(0.5, i), -0.2, 0.2 FROM range(1, 11) r(i)
+UNION ALL SELECT 'km', i, exp(-i / 5.0), NULL, NULL FROM range(10) r(i);
+
+query I
+SELECT count(*) FROM (SELECT anofox_plot_curve(c) AS svg FROM curves c GROUP BY curve_type) WHERE svg LIKE '<svg%';
+----
+3
+
+statement error
+SELECT anofox_plot_curve(c) FROM curves c;
+----
+GROUP BY curve_type
+
+statement error
+SELECT anofox_plot_curve(c) FROM (VALUES ('spiral', 1.0, 2.0)) c(curve_type, x, y);
+----
+unknown curve_type 'spiral'
+
+# ── summary ──────────────────────────────────────────────────────────────────
+query I
+SELECT anofox_plot_summary(s) LIKE '<svg%>rmse</text>%' FROM (VALUES
+  ('ols', 'r2', 0.81), ('ridge', 'r2', 0.79), ('ols', 'rmse', 1.9), ('ridge', 'rmse', 2.0)) s(model_id, metric, value);
+----
+true
+
+# ── obs / diagnostics ────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE aug AS SELECT i AS row_id, 5 + i * 0.2 AS fitted, sin(i * 1.7) AS residual,
+  sin(i * 1.7) / 0.7 AS std_residual, 0.02 + i / 400.0 AS leverage, abs(sin(i)) / 20 AS cooks_d, 3 AS n_params
+FROM range(40) r(i);
+
+query I
+SELECT count(*) FROM (
+  SELECT anofox_plot_obs(a, kind := k) AS svg
+  FROM aug a, (VALUES ('resid_fitted'), ('qq'), ('scale_location'), ('leverage'), ('cooks')) v(k) GROUP BY k)
+WHERE svg LIKE '<svg%';
+----
+5
+
+statement error
+SELECT anofox_plot_obs(a, kind := 'cooks_distance') FROM aug a;
+----
+kind 'cooks_distance' is not one of
+
+query I
+SELECT anofox_plot_diagnostics(a) LIKE '<svg%Residuals vs fitted%Normal Q-Q%Scale-location%Residuals vs leverage%' FROM aug a;
+----
+true
+
+# ── anofox_plot: dispatch on the column signature ────────────────────────────
+query I
+SELECT anofox_plot(c) LIKE '<svg%data-flip="true"%' FROM coefs c;
+----
+true
+
+query I
+SELECT anofox_plot(a) LIKE '%Normal Q-Q%' FROM aug a;
+----
+true
+
+statement error
+SELECT anofox_plot(t) FROM (VALUES (1, 2)) t(a, b);
+----
+match no plottable schema
+
+# Sizes are validated like everywhere else.
+statement error
+SELECT anofox_plot_terms(c, width := 100000) FROM coefs c;
+----
+outside [16, 8192]

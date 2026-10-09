@@ -3640,6 +3640,20 @@ function markInfo(attr, tip) {
   return { series, value, x: attr("data-x") || "", detail: plain ? "" : tip };
 }
 
+// A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
+// `data-xticks` map {slot: level} on its root <svg>: show "W1", not "1.225".
+function xTickLabel(el, x) {
+  const root = el.closest && el.closest("svg[data-xticks]");
+  if (!root || x === "") return x;
+  try {
+    const ticks = JSON.parse(root.getAttribute("data-xticks"));
+    const slot = String(Math.round(Number(x)));
+    return ticks[x] ?? ticks[slot] ?? x;
+  } catch (_) {
+    return x;
+  }
+}
+
 // Styled hover tooltips + click-to-highlight LINKING across all panels.
 // Every mark carrying a `<title>` becomes hoverable; its series key (ggplot's
 // `data-series`, else the title part before ": ") is the selection key.
@@ -3679,6 +3693,7 @@ function attachHover() {
     const t = el.querySelector("title");
     const txt = t.textContent;
     const info = markInfo((k) => el.getAttribute(k), txt);
+    info.x = xTickLabel(el, info.x);
     const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);

@@ -26,10 +26,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
-# From crates.io (0.16 = the first release with every API used here: escaped
-# host attributes, data-domain/series/value, fragments, candlestick/radar/
-# gauge/calendar). For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.16", default-features = false, features = ["sf"] }
+# From crates.io (0.17: escaped host attributes, data-domain/series/value,
+# fragments, candlestick/radar/gauge/calendar, plus the statistical geoms —
+# discrete dodge, flip-safe intervals, mapped reference lines, QQ bands, Cook's
+# contours, step ribbons, label repel, PlotGrid). For local ggplot-rs work,
+# `[patch.crates-io]` it to a path.
+ggplot-rs = { version = "0.17", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

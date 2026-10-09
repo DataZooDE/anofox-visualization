@@ -97,6 +97,19 @@ title bar). Combo chart = extra measure columns, e.g.
 `::REFLINE`/`::YLINE` (horizontal line at the value) · `::XLINE` (vertical) ·
 `::BAND_LOWER` + `::BAND_UPPER` (shaded band around a line).
 
+### Statistical graphics (model output)
+`::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars/lines → error bars; with
+`::CATEGORY` dodged; `1::FLIP` + `0::REFLINE` = coefficient forest) · `::XMIN` +
+`::XMAX` · `'slope,intercept'::ABLINE` · `1::IDENTITY` (y = x) · `g::FACET` /
+`g::FACET_FREE` (+ `n::FACET_NCOL`) · `'log10'|'sqrt'|'reverse'::XSCALE`/`::YSCALE`
+· `name::LABEL, k::LABEL_TOP [, score::RANK]` (label top-k points) ·
+`y::SMOOTH, 'lm'|'gam'::SMOOTH_METHOD` · `s::STEP` + `::BAND_LOWER`/`::BAND_UPPER`
+(step ribbon) + `n_censor::CENSOR` (`+` marks) = Kaplan–Meier · `p::COOKS_CONTOUR` on
+leverage × std. residual (Cook's distance 0.5/1). For whole contract tables
+(anofox-statistics/-forecast output) prefer the SQL macros
+`anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics(tbl)` and
+`anofox_plot(tbl)` — `SELECT anofox_plot_terms(c) FROM coefs c` (docs/DOCS.md).
+
 ### KPIs & text
 `::METRIC` (plain big number) · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) ·
 `::DELTA` (a comparison value → trend arrow) · `::TEXT_SMALL`/`_MEDIUM`/`_LARGE`

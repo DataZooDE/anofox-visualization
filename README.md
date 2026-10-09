@@ -81,6 +81,11 @@ SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
 --        anofox_xy(x, y, kind := 'VIOLIN', width := 640, height := 400),
 --        anofox_xyc(x, y, series)   -- coloured by series
 
+-- 1b) Model output: pass the whole row of an anofox-statistics/-forecast table.
+SELECT anofox_plot_terms(c) FROM coefficients c;     -- coefficient forest
+--   also anofox_plot_prediction / _curve / _summary / _obs / _diagnostics,
+--        anofox_plot(tbl) picks one from the columns (docs/DOCS.md)
+
 -- 2) The raw spec (rows + role annotations) — the same JSON the browser uses:
 SELECT anofox_render('{"rows":[{"c0":"a","c1":3}],"roles":[[0,"XAXIS"],[1,"BARCHART"]]}');
 
@@ -93,7 +98,8 @@ FROM sessions GROUP BY ALL ORDER BY ALL;
 
 > [!NOTE]
 > The **community extension** you install (below) provides **rendering only** —
-> `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc` macros that
+> `anofox_render`, the `anofox_bar/_line/_scatter/_area/_xy/_xyc` macros and the
+> `anofox_plot_*` model-output macros that
 > turn SQL into SVG. The **serving and builder features** below embed a web UI +
 > HTTP server and are **not** in the community binary — they come with a
 > **from-source build** (see [Installation → From source](#from-source)).
