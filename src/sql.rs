@@ -513,6 +513,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 | Role::XMin
                 | Role::XMax
                 | Role::Rank
+                | Role::Censor
                 | Role::Trend
                 | Role::Reload => {
                     // A charted measure remembers a human name (explicit

@@ -406,9 +406,15 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
             }
         }
         "km" => {
-            // TODO(ggplot-rs 0.17): geom_stepribbon for the KM confidence band
-            // and geom_censor_marks.
+            // Step curve, confidence step ribbon, censoring marks.
             cols.push(col("y", Role::Value(Kind::Step), yv));
+            if band {
+                cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
+                cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
+            }
+            if let Some(c) = ["n_censor", "censored"].into_iter().find(|c| t.has(c)) {
+                cols.push(col(c, Role::Censor, t.num(c)?));
+            }
         }
         "acf" | "pacf" => {
             // Lollipops from 0, ± significance bounds from y_low / y_high.

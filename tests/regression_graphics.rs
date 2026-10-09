@@ -508,6 +508,36 @@ fn contract_prediction_splits_and_options() {
     assert!(e.contains("needs an x position"), "{e}");
 }
 
+// Kaplan–Meier: one step line per group, a step-ribbon band per group in its
+// colour, and `+` censoring marks.
+#[test]
+fn contract_km_band_and_censor_marks() {
+    let mut rows = Vec::new();
+    for (g, s) in [("a", 5.0f64), ("b", 9.0)] {
+        for t in 0..6 {
+            let y = (-(t as f64) / s).exp();
+            rows.push(format!(
+                r#"{{"curve_type":"km","series":"{g}","x":{t},"y":{y},"y_low":{},"y_high":{},"n_censor":{}}}"#,
+                y * 0.9,
+                (y * 1.1).min(1.0),
+                (t == 3) as u8
+            ));
+        }
+    }
+    let s = spec("curve", &format!("[{}]", rows.join(",")), "{}").unwrap();
+    assert!(s.contains("Kaplan-Meier"));
+    // Two step ribbons, filled in the two series colours.
+    let ribbons: Vec<&str> = s
+        .split("<polygon ")
+        .skip(1)
+        .filter(|t| t.contains("fill-opacity=\"0.200\""))
+        .collect();
+    assert_eq!(ribbons.len(), 2, "{s}");
+    assert!(ribbons[0].contains("#456481") && ribbons[1].contains("#E86433"));
+    // A `+` censoring mark per group (stroked paths).
+    assert_eq!(s.matches("<path ").count(), 2, "{s}");
+}
+
 #[test]
 fn contract_auto_dispatch_and_errors() {
     let s = spec(

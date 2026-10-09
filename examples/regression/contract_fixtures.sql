@@ -39,19 +39,20 @@ SELECT 'prediction' AS name, anofox_plot_prediction(p) AS svg FROM pred p;
 
 -- curve: ROC, calibration, ACF, lambda CV, Kaplan-Meier, QQ -----------------
 CREATE TABLE curves AS
-SELECT 'roc' AS curve_type, m AS model_id, f AS x, power(f, k) AS y, NULL::DOUBLE AS y_low, NULL::DOUBLE AS y_high
+SELECT 'roc' AS curve_type, m AS model_id, f AS x, power(f, k) AS y, NULL::DOUBLE AS y_low, NULL::DOUBLE AS y_high, NULL::INTEGER AS n_censor
 FROM (VALUES ('logit', 0.35), ('tree', 0.55)) v(m, k), (SELECT i / 20.0 AS f FROM range(21) r(i))
 UNION ALL
-SELECT 'calibration', 'logit', p, least(1, p * 0.9 + 0.08 * sin(p * 6)), NULL, NULL
+SELECT 'calibration', 'logit', p, least(1, p * 0.9 + 0.08 * sin(p * 6)), NULL, NULL, NULL
 FROM (SELECT i / 10.0 AS p FROM range(11) r(i))
 UNION ALL
-SELECT 'acf', 'resid', lag, power(0.6, lag) * cos(lag), -0.2, 0.2 FROM range(1, 21) r(lag)
+SELECT 'acf', 'resid', lag, power(0.6, lag) * cos(lag), -0.2, 0.2, NULL FROM range(1, 21) r(lag)
 UNION ALL
-SELECT 'lambda_cv', 'lasso', pow(10, -3 + i / 4.0), 1 + power((i - 7) / 6.0, 2), 1 + power((i - 7) / 6.0, 2) - 0.1, 1 + power((i - 7) / 6.0, 2) + 0.1 FROM range(13) r(i)
+SELECT 'lambda_cv', 'lasso', pow(10, -3 + i / 4.0), 1 + power((i - 7) / 6.0, 2), 1 + power((i - 7) / 6.0, 2) - 0.1, 1 + power((i - 7) / 6.0, 2) + 0.1, NULL FROM range(13) r(i)
 UNION ALL
-SELECT 'km', g, t, exp(-t / s), NULL, NULL FROM (VALUES ('control', 8.0), ('treated', 14.0)) v(g, s), range(0, 25, 2) r(t)
+SELECT 'km', g, t, exp(-t / s), greatest(0, exp(-t / s) - 0.04 * sqrt(t)), least(1, exp(-t / s) + 0.04 * sqrt(t)),
+       CASE WHEN t % 6 = 4 THEN 1 ELSE 0 END FROM (VALUES ('control', 8.0), ('treated', 14.0)) v(g, s), range(0, 25, 2) r(t)
 UNION ALL
-SELECT 'qq', 'resid', q, q * 1.1 + 0.1 * q * q * q, NULL, NULL FROM (SELECT (i - 15) / 6.0 AS q FROM range(31) r(i));
+SELECT 'qq', 'resid', q, q * 1.1 + 0.1 * q * q * q, NULL, NULL, NULL FROM (SELECT (i - 15) / 6.0 AS q FROM range(31) r(i));
 SELECT 'curve_' || curve_type AS name, anofox_plot_curve(c, width := 480, height := 340) AS svg
 FROM curves c GROUP BY curve_type ORDER BY curve_type;
 

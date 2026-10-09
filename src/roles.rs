@@ -84,6 +84,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "small multiples with independent axes per panel (y only on a discrete x)"),
     e("RANK", &["LABEL_RANK"], R::Rank, "encoding", true,
       "score ranking points for ::LABEL_TOP (higher = labelled first)"),
+    e("CENSOR", &["CENSORED", "N_CENSOR"], R::Censor, "encoding", true,
+      "censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier)"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),
@@ -596,6 +598,7 @@ mod tests {
             Role::Identity,
             Role::LabelTop,
             Role::Rank,
+            Role::Censor,
             Role::SmoothMethod,
         ]);
         for r in &v {
@@ -663,6 +666,7 @@ mod tests {
                 | Role::Identity
                 | Role::LabelTop
                 | Role::Rank
+                | Role::Censor
                 | Role::SmoothMethod => {}
             }
         }

@@ -103,7 +103,8 @@ title bar). Combo chart = extra measure columns, e.g.
 `::XMAX` · `'slope,intercept'::ABLINE` · `1::IDENTITY` (y = x) · `g::FACET` /
 `g::FACET_FREE` (+ `n::FACET_NCOL`) · `'log10'|'sqrt'|'reverse'::XSCALE`/`::YSCALE`
 · `name::LABEL, k::LABEL_TOP [, score::RANK]` (label top-k points) ·
-`y::SMOOTH, 'lm'|'gam'::SMOOTH_METHOD`. For whole contract tables
+`y::SMOOTH, 'lm'|'gam'::SMOOTH_METHOD` · `s::STEP` + `::BAND_LOWER`/`::BAND_UPPER`
+(step ribbon) + `n_censor::CENSOR` (`+` marks) = Kaplan–Meier. For whole contract tables
 (anofox-statistics/-forecast output) prefer the SQL macros
 `anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics(tbl)` and
 `anofox_plot(tbl)` — `SELECT anofox_plot_terms(c) FROM coefs c` (docs/DOCS.md).

@@ -294,6 +294,9 @@ pub enum Role {
     LabelTop,
     /// Ranking score for `::LABEL_TOP` (`::RANK`): higher = labelled first.
     Rank,
+    /// Censoring marks (`::CENSOR`): a `+` on a ::STEP curve at every row
+    /// whose value is > 0 / true (Kaplan–Meier `n_censor`).
+    Censor,
     /// Trend-line method for `::SMOOTH` (`::SMOOTH_METHOD`): `'loess'`
     /// (default), `'lm'`, `'gam'`; `'glm'` draws the Gaussian GLM (= lm).
     SmoothMethod,
@@ -1414,6 +1417,11 @@ fn cartesian(
         data.push(("bandlo".to_string(), lo.values.clone()));
         data.push(("bandhi".to_string(), hi.values.clone()));
     }
+    // Censoring marks on a step curve (`::CENSOR`).
+    let censor = kind == Kind::Step
+        && find_role(cols, Role::Censor)
+            .map(|c| data.push(("censor".to_string(), c.values.clone())))
+            .is_some();
     // Small multiples (`::FACET` / `::FACET_FREE`): one panel per level.
     let facet = cols
         .iter()
@@ -1600,8 +1608,23 @@ fn cartesian(
         .and_then(|c| band_series_color(c, &x.values, band_lo))
         .or_else(|| color_col.and_then(last_level_color))
         .unwrap_or(brand);
-    // The band is drawn first so the line sits on top of it.
-    if band_lo.is_some() && band_hi.is_some() {
+    // The band is drawn first so the line sits on top of it; one band per
+    // series. A step chart (Kaplan–Meier) gets a step ribbon in each series'
+    // colour.
+    let step_band = kind == Kind::Step && band_lo.is_some() && band_hi.is_some();
+    if step_band {
+        let mut aes = Aes::new().x("x").ymin("bandlo").ymax("bandhi");
+        if category.is_some() {
+            aes = aes.fill("cat");
+        }
+        plot = plot
+            .geom_stepribbon_with(GeomStepribbon {
+                fill: band_color,
+                alpha: 0.2,
+                direction: StepDirection::Hv,
+            })
+            .layer_aes(aes);
+    } else if band_lo.is_some() && band_hi.is_some() {
         plot = plot
             .geom_ribbon_with(GeomRibbon {
                 fill: band_color,
@@ -1636,20 +1659,26 @@ fn cartesian(
         Kind::Line | Kind::LinePercent => plot
             .geom_line_with(thin_line())
             .geom_point_with(small_point()),
+        // One step line per series (+ `::CENSOR` marks).
         Kind::Step => {
-            // One step line per series: 0.16's geom_step joins all rows of a
-            // layer into a single path, so each category gets its own layer.
-            // TODO(ggplot-rs 0.17): a grouped geom_step (and geom_stepribbon for
-            // Kaplan–Meier bands) — then one layer again.
-            let step = || ggplot_rs::geom::step::GeomStep {
-                color: brand,
-                width: 1.2,
-                ..Default::default()
-            };
-            for rows in &series_rows {
-                plot = plot.geom_step_with(step()).layer_data(subset(&data, rows));
+            plot = plot
+                .geom_step_with(GeomStep {
+                    color: brand,
+                    width: 1.2,
+                    ..Default::default()
+                })
+                .geom_point_with(small_point());
+            if censor {
+                plot = plot.geom_censor_marks_with(
+                    GeomCensorMarks {
+                        color: brand,
+                        size: 4.0,
+                        ..Default::default()
+                    },
+                    "censor",
+                );
             }
-            plot.geom_point_with(small_point())
+            plot
         }
         // Scatter + a trend line (no CI ribbon) — an analytical "smooth".
         Kind::Smooth => {
@@ -1955,6 +1984,9 @@ fn cartesian(
         } else {
             plot.scale_fill(dz_scale(Aesthetic::Fill, col))
         };
+        if step_band && category.is_some() {
+            plot = plot.scale_fill(dz_scale(Aesthetic::Fill, col));
+        }
     }
     if !combo_names.is_empty() {
         // Combo measures → distinct palette colours in column order, keyed by

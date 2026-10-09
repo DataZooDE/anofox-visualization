@@ -101,6 +101,7 @@ fn row_aligned(r: Role) -> bool {
             | Role::Facet
             | Role::FacetFree
             | Role::Rank
+            | Role::Censor
     )
 }
 
