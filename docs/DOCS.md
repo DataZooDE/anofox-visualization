@@ -73,6 +73,7 @@ terminal.
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value |
 | `::XLINE` |  | annotation | vertical reference line at an x |
+| `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
@@ -217,7 +218,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id | observed points, fitted/forecast line and band, coloured by split (train/test/future — from `split`, else `is_training`, else a missing y = future) or by model when one panel has several; several `id`s become panels |
 | `anofox_plot_curve(tbl)` | **curve_type, x, y**, y_low, y_high, model_id \| series, n_censor \| censored (km) | roc/calibration: line + diagonal; pr/pdp/lift/null_dist: line (+ band); km: step + step-ribbon band + `+` censoring marks; acf/pacf: lollipops + bounds; lambda_cv: point ± range on log x; qq: points + identity (+ y_low/y_high band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl)` | **model_id, metric, value**, conf_low, conf_high | one panel per metric (own y scale), a dot (± interval) per model |
-| `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (2p/n line), `cooks` (4/n line); the `label_top` largest-Cook's rows are labelled by `row_id` |
+| `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`), `cooks` (4/n line); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG |
 | `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary |
 

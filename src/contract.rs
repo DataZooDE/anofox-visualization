@@ -580,10 +580,9 @@ fn obs(t: &Table, kind: &str, k: usize) -> Result<Vec<Column>, String> {
             cols.push(col("leverage", Role::X, t.num("leverage")?));
             cols.push(col("std_residual", Role::Value(Kind::Point), std_resid(t)?));
             cols.push(konst("zero", Role::RefLine, Value::Float(0.0)));
-            // High-leverage rule of thumb 2p/n.
-            // TODO(ggplot-rs 0.17): stat_cooks_contour(p, levels = c(0.5, 1)).
+            // Cook's distance contours at 0.5 and 1 (plot.lm's which = 5).
             if let Some(p) = t.num("n_params")?.iter().find_map(|v| v.as_f64()) {
-                cols.push(konst("lev", Role::VLine, Value::Float(2.0 * p / n as f64)));
+                cols.push(konst("p", Role::CooksContour, Value::Float(p)));
             }
             top(&mut cols, cooks);
         }

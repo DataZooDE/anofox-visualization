@@ -142,6 +142,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
       "horizontal reference line per distinct value"),
     e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
+    e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
+      "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,
       "lower edge of a shaded band around a line"),
     e("BAND_UPPER", &["BANDUPPER"], R::BandUpper, "annotation", true,
@@ -599,6 +601,7 @@ mod tests {
             Role::LabelTop,
             Role::Rank,
             Role::Censor,
+            Role::CooksContour,
             Role::SmoothMethod,
         ]);
         for r in &v {
@@ -667,6 +670,7 @@ mod tests {
                 | Role::LabelTop
                 | Role::Rank
                 | Role::Censor
+                | Role::CooksContour
                 | Role::SmoothMethod => {}
             }
         }

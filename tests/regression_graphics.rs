@@ -463,6 +463,26 @@ fn smooth_methods() {
     assert!(e.contains("::SMOOTH_METHOD 'spline'"), "{e}");
 }
 
+// ── Residuals vs leverage: Cook's distance contours ─────────────────────
+#[test]
+fn cooks_contours_on_leverage() {
+    let h: Vec<f64> = (1..30)
+        .map(|i| 0.01 + 0.4 * (i as f64 / 30.0).powi(3))
+        .collect();
+    let r: Vec<f64> = (1..30).map(|i| ((i as f64) * 0.9).sin() * 2.0).collect();
+    let s = svg(vec![
+        Column::new("h", Role::X, nums(&h)),
+        Column::new("r", Role::Value(Kind::Point), nums(&r)),
+        Column::new("p", Role::CooksContour, nums(&[3.0])),
+    ]);
+    assert!(s.contains("0.5") && s.contains("stroke-dasharray"), "{s}");
+    let dashed = polylines(&s)
+        .into_iter()
+        .filter(|p| p.contains("stroke-dasharray"))
+        .count();
+    assert!(dashed >= 2, "±contours: {dashed}");
+}
+
 // ── QQ: points on a pointwise envelope ───────────────────────────────────
 #[test]
 fn qq_has_a_band() {

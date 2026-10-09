@@ -294,6 +294,10 @@ pub enum Role {
     LabelTop,
     /// Ranking score for `::LABEL_TOP` (`::RANK`): higher = labelled first.
     Rank,
+    /// Cook's-distance contours at 0.5 and 1 on a residuals-vs-leverage
+    /// scatter (`::COOKS_CONTOUR p`, p = the model's parameter count; x =
+    /// leverage, y = standardised residual), as R's `plot.lm(which = 5)`.
+    CooksContour,
     /// Censoring marks (`::CENSOR`): a `+` on a ::STEP curve at every row
     /// whose value is > 0 / true (Kaplan–Meier `n_censor`).
     Censor,
@@ -1930,6 +1934,10 @@ fn cartesian(
             plot.geom_hline_aes(Aes::new().yintercept(col))
         }
         .layer_data(frame);
+    }
+    // Cook's-distance contours (`::COOKS_CONTOUR p`) on residuals vs leverage.
+    if let Some(p) = role_num(cols, Role::CooksContour).filter(|p| *p >= 1.0) {
+        plot = plot.stat_cooks_contour(p.min(1e6) as usize, &[0.5, 1.0]);
     }
     // Straight lines in data units, across the panel: `::ABLINE
     // 'slope,intercept'` and `::IDENTITY` (y = x, dashed).

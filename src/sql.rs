@@ -514,6 +514,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 | Role::XMax
                 | Role::Rank
                 | Role::Censor
+                | Role::CooksContour
                 | Role::Trend
                 | Role::Reload => {
                     // A charted measure remembers a human name (explicit
