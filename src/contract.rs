@@ -452,9 +452,15 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
             }
         }
         "qq" => {
-            // TODO(ggplot-rs 0.17): stat_qq_band envelope.
+            // Precomputed (theoretical, sample) pairs: the producer's envelope
+            // (y_low/y_high) is drawn as given — stat_qq_band would recompute
+            // the theoretical quantiles for a normal reference only.
             cols.push(col("y", Role::Value(Kind::Point), yv));
             cols.push(konst("id", Role::Identity, Value::Float(1.0)));
+            if band {
+                cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
+                cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
+            }
         }
         other => {
             return Err(format!(
@@ -553,7 +559,7 @@ fn obs(t: &Table, kind: &str, k: usize) -> Result<Vec<Column>, String> {
             top(&mut cols, cooks);
         }
         "qq" => {
-            // TODO(ggplot-rs 0.17): stat_qq_band envelope.
+            // Normal QQ with a 95 % pointwise envelope (see `render_qq`).
             cols.push(col("std_residual", Role::Value(Kind::QQ), std_resid(t)?));
             return Ok(cols);
         }

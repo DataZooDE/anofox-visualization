@@ -125,7 +125,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "box plot — XAXIS groups, measure on y (raw rows)"),
     e("VIOLIN", &["VIOLINPLOT"], R::Value(Kind::Violin), "chart", true,
       "violin plot — XAXIS groups, measure on y (raw rows)"),
-    e("QQ", &["QQPLOT"], R::Value(Kind::QQ), "chart", true, "normal quantile-quantile plot"),
+    e("QQ", &["QQPLOT"], R::Value(Kind::QQ), "chart", true, "normal quantile-quantile plot with a 95% pointwise band"),
     e("HEATMAP", &["TILE", "TILES"], R::Value(Kind::Heatmap), "chart", true,
       "tiles at XAXIS×YAXIS coloured by the measure"),
     e("CALENDAR", &["CALENDAR_HEATMAP", "CAL_HEATMAP"], R::Value(Kind::Calendar), "chart", true,

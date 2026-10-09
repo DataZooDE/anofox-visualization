@@ -52,7 +52,7 @@ UNION ALL
 SELECT 'km', g, t, exp(-t / s), greatest(0, exp(-t / s) - 0.04 * sqrt(t)), least(1, exp(-t / s) + 0.04 * sqrt(t)),
        CASE WHEN t % 6 = 4 THEN 1 ELSE 0 END FROM (VALUES ('control', 8.0), ('treated', 14.0)) v(g, s), range(0, 25, 2) r(t)
 UNION ALL
-SELECT 'qq', 'resid', q, q * 1.1 + 0.1 * q * q * q, NULL, NULL, NULL FROM (SELECT (i - 15) / 6.0 AS q FROM range(31) r(i));
+SELECT 'qq', 'resid', q, q * 1.1 + 0.1 * q * q * q, q - 0.3 * (1 + abs(q)), q + 0.3 * (1 + abs(q)), NULL FROM (SELECT (i - 15) / 6.0 AS q FROM range(31) r(i));
 SELECT 'curve_' || curve_type AS name, anofox_plot_curve(c, width := 480, height := 340) AS svg
 FROM curves c GROUP BY curve_type ORDER BY curve_type;
 

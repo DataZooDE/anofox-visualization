@@ -64,7 +64,7 @@ terminal.
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
-| `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot |
+| `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
 | `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
@@ -215,7 +215,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 |---|---|---|
 | `anofox_plot_terms(tbl)` | **term, estimate**, conf_low, conf_high, model_id, index_name, index_value | coefficient forest (models dodged + coloured, zero line); with `index_value`: estimate + band over the index, one panel per term (log x for a λ path) |
 | `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id | observed points, fitted/forecast line and band, coloured by split (train/test/future — from `split`, else `is_training`, else a missing y = future) or by model when one panel has several; several `id`s become panels |
-| `anofox_plot_curve(tbl)` | **curve_type, x, y**, y_low, y_high, model_id \| series, n_censor \| censored (km) | roc/calibration: line + diagonal; pr/pdp/lift/null_dist: line (+ band); km: step + step-ribbon band + `+` censoring marks; acf/pacf: lollipops + bounds; lambda_cv: point ± range on log x; qq: points + identity. One `curve_type` per call (`GROUP BY curve_type`) |
+| `anofox_plot_curve(tbl)` | **curve_type, x, y**, y_low, y_high, model_id \| series, n_censor \| censored (km) | roc/calibration: line + diagonal; pr/pdp/lift/null_dist: line (+ band); km: step + step-ribbon band + `+` censoring marks; acf/pacf: lollipops + bounds; lambda_cv: point ± range on log x; qq: points + identity (+ y_low/y_high band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl)` | **model_id, metric, value**, conf_low, conf_high | one panel per metric (own y scale), a dot (± interval) per model |
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (2p/n line), `cooks` (4/n line); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG |

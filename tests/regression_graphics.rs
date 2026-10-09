@@ -463,6 +463,15 @@ fn smooth_methods() {
     assert!(e.contains("::SMOOTH_METHOD 'spline'"), "{e}");
 }
 
+// ── QQ: points on a pointwise envelope ───────────────────────────────────
+#[test]
+fn qq_has_a_band() {
+    let y: Vec<f64> = (0..30).map(|i| ((i as f64) * 0.37).sin() * 2.0).collect();
+    let s = svg(vec![Column::new("r", Role::Value(Kind::QQ), nums(&y))]);
+    assert_eq!(s.matches("<polygon ").count(), 1, "one envelope: {s}");
+    assert_eq!(s.matches("<circle ").count(), 30);
+}
+
 // ── Contract plots (`{"plot": …}` specs, what the anofox_plot_* macros send) ──
 fn spec(plot: &str, rows: &str, options: &str) -> Result<String, String> {
     anofox_visualization::host::render_spec_checked(

@@ -2228,8 +2228,16 @@ fn render_qq(
     height: u32,
 ) -> Result<Panel, String> {
     let data = vec![("y".to_string(), value.values.clone())];
+    // Points on a 95 % pointwise envelope around the quartile line (qqplotr).
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().y("y"))
+        .geom_qq_band_with(
+            GeomQQBand {
+                fill: o.brand(),
+                alpha: 0.18,
+            },
+            StatQQBand::default(),
+        )
         .geom_qq()
         .geom_qq_line()
         .xlab("Theoretical")
