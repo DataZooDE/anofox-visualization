@@ -504,8 +504,8 @@ fn summary(t: &Table) -> Result<Vec<Column>, String> {
         cols.push(col("conf_low", Role::YMin, t.num("conf_low")?));
         cols.push(col("conf_high", Role::YMax, t.num("conf_high")?));
     }
-    // Free scales: every metric has its own unit. (Not flipped: 0.16's
-    // coord_flip does not swap free facet scales.)
+    // Free scales: every metric has its own unit. (Not flipped: ggplot-rs's
+    // coord_flip — still in 0.17 — does not swap free facet scales.)
     cols.push(col("metric", Role::FacetFree, t.text("metric")));
     Ok(cols)
 }

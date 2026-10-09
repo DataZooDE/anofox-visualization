@@ -1736,8 +1736,9 @@ fn cartesian(
             match method.as_deref() {
                 None | Some("loess") => fit(plot, SmoothMethod::Loess { span: 0.75 }),
                 // A Gaussian GLM with identity link is ordinary least squares.
-                // TODO(ggplot-rs 0.17): GeomSmooth::glm(SmoothFamily::binomial() …)
-                // for the other families.
+                // ggplot-rs's GeomSmooth::glm (binomial/gamma/negative-binomial
+                // families) needs its `regression` feature — not used here, see
+                // `smooth`.
                 Some("lm") | Some("glm") | Some("linear") => fit(plot, SmoothMethod::Lm),
                 Some("gam") => {
                     // P-spline per series (see `smooth::pspline`).
@@ -2104,10 +2105,10 @@ fn cartesian(
         }
     }
     if let Some(f) = facet {
-        // ggplot-rs 0.16 draws free y-axis labels only on the left-most
-        // panels, so free facets stack in one column unless ::FACET_NCOL says
-        // otherwise. TODO(ggplot-rs 0.17): drop the default once every free
-        // panel carries its own axis labels.
+        // ggplot-rs (still 0.17) draws free y-axis labels only on the
+        // left-most panels, so free facets stack in one column unless
+        // ::FACET_NCOL says otherwise. TODO(ggplot-rs): drop the default once
+        // every free panel carries its own axis labels.
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
             .map(|n| n.min(64.0) as usize)

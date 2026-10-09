@@ -1,16 +1,19 @@
 //! A small, dependency-free penalized-spline (P-spline) smoother — the
 //! `::SMOOTH_METHOD 'gam'` trend line.
 //!
-//! ggplot-rs 0.16 only offers `method = "gam"` behind its `regression` feature,
-//! which pulls ~200 crates (faer, anofox-regression) and does not build for
-//! `wasm32-unknown-unknown`. A one-dimensional GAM smooth is just a cubic
-//! B-spline basis with a second-order difference penalty (Eilers & Marx), λ
-//! chosen by generalised cross-validation — a few dense k×k solves, so it is
-//! computed here and drawn as a line layer.
+//! ggplot-rs offers `method = "gam"` and the GLM families
+//! (`GeomSmooth::glm(SmoothFamily::binomial() | gamma() | NegativeBinomial)`)
+//! only behind its `regression` feature. As of 0.17 that feature takes the
+//! core's dependency tree from 11 to ~100 crates (anofox-regression, faer,
+//! nalgebra, statrs, rand) and does not build for `wasm32-unknown-unknown`
+//! (getrandom without its `js` backend), so the core keeps it off: `'glm'`
+//! draws the Gaussian GLM (= `lm`), and a one-dimensional GAM smooth is
+//! computed here — a cubic B-spline basis with a second-order difference
+//! penalty (Eilers & Marx), λ chosen by generalised cross-validation, a few
+//! dense k×k solves — and drawn as a line layer.
 //!
-//! TODO(ggplot-rs 0.17): switch to the upstream `SmoothMethod::Gam` (and the GLM
-//! families) once the regression-backed smoothers build for wasm without the
-//! heavy dependency tree.
+//! TODO(ggplot-rs): switch to the upstream smoothers once the
+//! regression-backed ones build for wasm with a small dependency tree.
 
 /// Fit a P-spline to `(x, y)` and evaluate it on `n_out` evenly spaced x
 /// values. `None` when there are fewer than 4 distinct finite x values.
