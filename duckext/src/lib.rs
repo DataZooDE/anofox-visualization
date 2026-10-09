@@ -251,26 +251,14 @@ mod serve_fns {
 }
 
 /// Convenience SQL macros bundled with the extension, so callers don't hand-write
-/// the JSON spec. Bodies are kept identical to the C++ build
-/// (csrc/anofox_visualization_extension.cpp, ANOFOX_XY_BODY/_XYC_BODY): the role
-/// list is built with `json_array()` so `kind` is JSON-quoted (never spliced
-/// into a JSON string), a NULL kind is rejected by anofox_render, and
-/// `list(... ORDER BY ...)` makes row order deterministic.
-const MACRO_XY: &str = "anofox_render(json_object('rows', to_json(list({c0: x, c1: y} ORDER BY x, y)), \
-'roles', json_array(json_array(0, 'XAXIS'), json_array(1, kind)), 'width', width, 'height', height))";
-const MACRO_XYC: &str = "anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series} ORDER BY x, series, y)), \
-'roles', json_array(json_array(0, 'XAXIS'), json_array(1, kind), json_array(2, 'CATEGORY')), \
-'width', width, 'height', height))";
-
+/// the JSON spec. The table lives in the core (`anofox_visualization::macros`)
+/// and is shared with the C++ build, which reads it through the FFI crate — the
+/// bodies cannot drift between the builds.
 fn macros() -> Vec<(&'static str, String)> {
-    vec![
-        ("anofox_xy", format!("(x, y, kind := 'BARCHART', width := 640, height := 400) AS {MACRO_XY}")),
-        ("anofox_xyc", format!("(x, y, series, kind := 'BARCHART_STACKED', width := 640, height := 400) AS {MACRO_XYC}")),
-        ("anofox_bar", "(x, y) AS anofox_xy(x, y, kind := 'BARCHART')".into()),
-        ("anofox_line", "(x, y) AS anofox_xy(x, y, kind := 'LINECHART')".into()),
-        ("anofox_scatter", "(x, y) AS anofox_xy(x, y, kind := 'SCATTER')".into()),
-        ("anofox_area", "(x, y) AS anofox_xy(x, y, kind := 'AREACHART')".into()),
-    ]
+    anofox_visualization::macros::MACROS
+        .iter()
+        .map(|m| (m.name, m.create_sql()))
+        .collect()
 }
 
 /// Define the macros. The C extension API has no way to register *internal*

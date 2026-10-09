@@ -22,11 +22,13 @@
 pub use ggplot_rs::prelude::Value;
 use ggplot_rs::prelude::*;
 
+pub mod contract;
 pub mod dashboard;
 mod downsample;
 pub mod format;
 pub mod host;
 pub mod lint;
+pub mod macros;
 pub mod roles;
 mod smooth;
 pub mod sql;
@@ -484,6 +486,22 @@ fn last_level_color(col: &Column) -> Option<(u8, u8, u8)> {
     Some((c.r, c.g, c.b))
 }
 
+/// The [`dz_scale`] colour of the series (`col`'s level) of the row with the
+/// largest x among rows that carry a band value.
+fn band_series_color(col: &Column, x: &[Value], band: Option<&Column>) -> Option<(u8, u8, u8)> {
+    let band = band?;
+    let row = (0..col.values.len())
+        .filter(|&i| band.values.get(i).and_then(|v| v.as_f64()).is_some())
+        .filter_map(|i| Some((i, x.get(i)?.as_f64()?)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?
+        .0;
+    let level = value_str(&col.values[row]);
+    let levels = distinct_labels(col);
+    let i = levels.iter().position(|l| *l == level)?;
+    let c = parse_hex(&level).unwrap_or_else(|| dz_color(i));
+    Some((c.r, c.g, c.b))
+}
+
 /// Turn a caught panic payload into a message.
 fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     p.downcast_ref::<&str>()
@@ -565,8 +583,14 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             Some(v) => serde_json::from_value(v.clone())
                 .map_err(|_| RenderError::BadSpec("`rows` must be an array of objects".into()))?,
         };
+        let plot = match spec.get("plot") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(p)) => Some(p.clone()),
+            Some(_) => return Err(RenderError::BadSpec("`plot` must be a string".into())),
+        };
         let entries = match spec.get("roles") {
             None => Vec::new(),
+            Some(_) if plot.is_some() => Vec::new(),
             Some(v) => parse_role_entries(v).map_err(RenderError::BadSpec)?,
         };
         let dim = |key: &str, default: u64| -> Result<u32, RenderError> {
@@ -595,6 +619,18 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             max_categories: count("max_categories", DEFAULT_MAX_CATEGORIES),
             max_line_points: count("max_line_points", DEFAULT_MAX_LINE_POINTS),
         };
+        if let Some(plot) = plot {
+            // A contract plot (`terms`, `prediction`, …) over named columns.
+            let options = match spec.get("options") {
+                Some(serde_json::Value::Object(m)) => m.clone(),
+                None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+                Some(_) => return Err(RenderError::BadSpec("`options` must be an object".into())),
+            };
+            return guard(|| {
+                contract::render(&plot, &rows, &options, width, height, &opts, Place::Doc)
+                    .map(|(svg, w)| with_warnings_attr(strip_nonfinite_marks(svg), &w))
+            });
+        }
         let cols = columns_from_entries(&rows, &entries);
         render_with(&cols, width, height, &opts)
     })
@@ -1485,6 +1521,20 @@ fn render_cartesian(
         }
         group_rows(n_rows, &keys)
     };
+    // A missing measure is a gap: as NaN the plotting engine drops the row
+    // for that layer (a `Value::Na` y would be drawn at the bottom edge) — e.g.
+    // a forecast's history rows have no yhat but do have y.
+    for (name, vals) in data.iter_mut() {
+        let measure = matches!(
+            name.as_str(),
+            "y" | "ilo" | "ihi" | "jlo" | "jhi" | "bandlo" | "bandhi"
+        ) || (name.starts_with('y') && name[1..].chars().all(|c| c.is_ascii_digit()));
+        if measure {
+            for v in vals.iter_mut().filter(|v| **v == Value::Na) {
+                *v = Value::Float(f64::NAN);
+            }
+        }
+    }
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
     // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
@@ -1516,9 +1566,13 @@ fn render_cartesian(
         }
     }
 
-    // A ::BAND (prediction interval) matches the forecast — the last coloured
-    // series — at half opacity, so it reads as that series' uncertainty.
-    let band_color: (u8, u8, u8) = color_col.and_then(last_level_color).unwrap_or(brand);
+    // A ::BAND (prediction interval) matches the forecast at half opacity, so it
+    // reads as that series' uncertainty: the series of the right-most row that
+    // carries a band (else the last coloured series).
+    let band_color: (u8, u8, u8) = color_col
+        .and_then(|c| band_series_color(c, &x.values, band_lo))
+        .or_else(|| color_col.and_then(last_level_color))
+        .unwrap_or(brand);
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
@@ -1839,7 +1893,7 @@ fn render_cartesian(
             .unwrap_or(f64::NEG_INFINITY)
         };
         let mut idx: Vec<usize> = (0..n_rows)
-            .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some())
+            .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some_and(f64::is_finite))
             .collect();
         idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
         idx.truncate(k);
@@ -2054,11 +2108,22 @@ fn render_cartesian(
         }
     }
     if let Some(f) = facet {
+        // ggplot-rs 0.16 draws free y-axis labels only on the left-most
+        // panels, so free facets stack in one column unless ::FACET_NCOL says
+        // otherwise. TODO(ggplot-rs 0.17): drop the default once every free
+        // panel carries its own axis labels.
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize);
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
         plot = if f.role == Role::FacetFree {
-            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+            // A discrete x is the same set of levels in every panel: free y only.
+            let scales = if x_discrete {
+                FacetScales::FreeY
+            } else {
+                FacetScales::Free
+            };
+            plot.facet_wrap_free("facet", ncol, scales)
         } else {
             plot.facet_wrap("facet", ncol)
         };

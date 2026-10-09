@@ -385,3 +385,76 @@ fn smooth_methods() {
     .unwrap_err();
     assert!(e.contains("::SMOOTH_METHOD 'spline'"), "{e}");
 }
+
+// ── Contract plots (`{"plot": …}` specs, what the anofox_plot_* macros send) ──
+fn spec(plot: &str, rows: &str, options: &str) -> Result<String, String> {
+    anofox_visualization::host::render_spec_checked(
+        &format!(
+            r#"{{"plot":"{plot}","rows":{rows},"options":{options},"width":640,"height":400}}"#
+        ),
+        &anofox_visualization::host::RenderLimits::default(),
+    )
+}
+
+#[test]
+fn contract_terms_forest_and_path() {
+    let s = spec(
+        "terms",
+        r#"[{"model_id":"a","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
+            {"model_id":"b","term":"x1","estimate":"0.4","conf_low":0.2,"conf_high":0.6}]"#,
+        "{}",
+    )
+    .unwrap();
+    assert!(s.contains("data-flip=\"true\"") && s.contains(">x1</text>"));
+    let s = spec(
+        "terms",
+        r#"[{"term":"x1","estimate":0.5,"index_name":"lambda","index_value":0.01},
+            {"term":"x1","estimate":0.2,"index_name":"lambda","index_value":0.1},
+            {"term":"x2","estimate":0.1,"index_name":"lambda","index_value":0.01},
+            {"term":"x2","estimate":0.0,"index_name":"lambda","index_value":0.1}]"#,
+        "{}",
+    )
+    .unwrap();
+    assert!(s.contains(">x2</text>") && s.contains("estimate by lambda"));
+}
+
+#[test]
+fn contract_prediction_splits_and_options() {
+    let rows = r#"[{"x1":1,"y":1.0,"yhat":1.1,"yhat_lower":0.5,"yhat_upper":1.5,"is_training":true},
+                   {"x1":2,"y":2.0,"yhat":1.9,"yhat_lower":1.4,"yhat_upper":2.4,"is_training":false},
+                   {"x1":3,"y":null,"yhat":3.0,"yhat_lower":2.4,"yhat_upper":3.6,"is_training":false}]"#;
+    let s = spec("prediction", rows, r#"{"x":"x1"}"#).unwrap();
+    for split in ["train", "test", "future"] {
+        assert!(s.contains(&format!(">{split}</text>")), "{split}");
+    }
+    let e = spec("prediction", rows, "{}").unwrap_err();
+    assert!(e.contains("needs an x position"), "{e}");
+}
+
+#[test]
+fn contract_auto_dispatch_and_errors() {
+    let s = spec(
+        "auto",
+        r#"[{"row_id":1,"fitted":1.0,"residual":0.2},{"row_id":2,"fitted":2.0,"residual":-0.1},
+            {"row_id":3,"fitted":3.0,"residual":0.0},{"row_id":4,"fitted":4.0,"residual":0.3}]"#,
+        "{}",
+    )
+    .unwrap();
+    assert!(s.contains("Normal Q-Q") && s.contains("Residuals vs fitted"));
+    let e = spec("auto", r#"[{"a":1}]"#, "{}").unwrap_err();
+    assert!(e.contains("match no plottable schema"), "{e}");
+    let e = spec("bogus", "[]", "{}").unwrap_err();
+    assert!(e.contains("unknown plot 'bogus'"), "{e}");
+}
+
+#[test]
+fn every_macro_is_documented() {
+    let doc = include_str!("../docs/DOCS.md");
+    for m in anofox_visualization::macros::MACROS {
+        assert!(
+            doc.contains(m.name),
+            "docs/DOCS.md does not mention {}",
+            m.name
+        );
+    }
+}

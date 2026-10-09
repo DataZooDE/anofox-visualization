@@ -28,11 +28,25 @@ WHERE function_name LIKE 'anofox_%'
 ----
 0
 
-# One scalar plus six macros.
+# One scalar, six column macros and seven contract plot macros.
 query I
 SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'anofox_%';
 ----
+14
+
+# The contract macros say which schema they consume (duckdb_functions().tags).
+query I
+SELECT count(*) FROM duckdb_functions()
+WHERE function_name LIKE 'anofox_plot%'
+  AND list_contains(map_keys(tags), 'anofox.consumes')
+  AND list_contains(map_keys(tags), 'anofox.contract');
+----
 7
+
+query I
+SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_plot_prediction';
+----
+[tbl, x, y, facet, width, height]
 
 # ============================================================================
 # The macros are documented, which is the part that needed the rewrite

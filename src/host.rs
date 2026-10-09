@@ -95,9 +95,22 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
         }
         Some(_) => return Err("anofox_render: 'rows' must be a JSON array".into()),
     }
-    let roles = obj.get("roles").and_then(|v| v.as_array()).ok_or(
-        "anofox_render: spec needs a 'roles' array, e.g. [[0,\"XAXIS\"],[1,\"BARCHART\"]]",
-    )?;
+    // A contract plot (`"plot": "terms"`, …) names its columns; no roles.
+    let roles: &[serde_json::Value] = match obj.get("plot") {
+        Some(serde_json::Value::String(p)) => {
+            if !crate::contract::PLOTS.contains(&p.as_str()) {
+                return Err(format!(
+                    "anofox_render: unknown plot '{p}' (one of {})",
+                    crate::contract::PLOTS.join(", ")
+                ));
+            }
+            &[]
+        }
+        Some(serde_json::Value::Null) | None => obj.get("roles").and_then(|v| v.as_array()).ok_or(
+            "anofox_render: spec needs a 'roles' array, e.g. [[0,\"XAXIS\"],[1,\"BARCHART\"]]",
+        )?,
+        Some(_) => return Err("anofox_render: 'plot' must be a string".into()),
+    };
     for r in roles {
         let e = r
             .as_array()

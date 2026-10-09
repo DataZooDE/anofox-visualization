@@ -13,6 +13,14 @@ extern "C" {
  * unwinds: Rust panics are caught and reported as ANOFOX_VIZ_ERROR. */
 int anofox_viz_render(const char *spec, size_t len, char **out);
 void anofox_viz_free(char *p);
+/* The bundled SQL macros (single source: src/macros.rs). All returned strings
+ * are static: never free them. */
+size_t anofox_viz_macro_count(void);
+/* field: 0 name, 1 body, 2 description, 3 example; NULL when out of range. */
+const char *anofox_viz_macro_field(size_t i, int field);
+/* list: 0 positional params, 1 named params (*second = default SQL),
+ * 2 tags (*second = value); NULL past the end. */
+const char *anofox_viz_macro_item(size_t i, int list, size_t j, const char **second);
 #ifdef __cplusplus
 }
 #endif

@@ -97,7 +97,7 @@ pub fn columns_from_rows(
             // continuous datetime scale, so ggplot-rs picks sensible (e.g. yearly)
             // breaks instead of drawing one overlapping label per value.
             if matches!(role, Role::X) {
-                values = maybe_datetime(values);
+                values = maybe_decimal(maybe_datetime(values));
             }
             Column::new(key, *role, values)
         })
@@ -199,9 +199,42 @@ pub fn parse_rows_json(s: &str) -> Result<Vec<serde_json::Map<String, serde_json
     serde_json::from_str(&sanitize_json_numbers(t)).map_err(|e| format!("bad result JSON: {e}"))
 }
 
+/// DuckDB's JSON writes DECIMAL values as strings (`"5.2"`): an x column whose
+/// values are all such decimal strings is numeric (a continuous axis), not a
+/// list of category labels. Integer-looking strings (`"2019"`) stay discrete.
+fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
+    let mut saw_point = false;
+    for v in &vals {
+        match v {
+            Value::Str(s) => {
+                let t = s.trim();
+                if t.parse::<f64>().map_or(true, |f| !f.is_finite())
+                    || !t
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+                {
+                    return vals;
+                }
+                saw_point |= t.contains('.');
+            }
+            Value::Na => {}
+            _ => return vals,
+        }
+    }
+    if !saw_point {
+        return vals;
+    }
+    vals.into_iter()
+        .map(|v| match v {
+            Value::Str(s) => s.trim().parse::<f64>().map_or(Value::Na, Value::Float),
+            other => other,
+        })
+        .collect()
+}
+
 /// If every non-null value is an ISO date/timestamp string, reinterpret the
 /// column as [`Value::DateTime`] (epoch seconds); otherwise leave it unchanged.
-fn maybe_datetime(vals: Vec<Value>) -> Vec<Value> {
+pub(crate) fn maybe_datetime(vals: Vec<Value>) -> Vec<Value> {
     let mut saw_date = false;
     for v in &vals {
         match v {
@@ -553,5 +586,26 @@ mod alias_tests {
         // Nested CAST(.. AS ..) must not be mistaken for a trailing alias.
         let (s4, _, _) = rewrite("SELECT ds ::XAXIS, CAST(y AS INT) ::LINECHART FROM d");
         assert!(s4.contains("CAST(CAST(y AS INT) AS DOUBLE) AS c1"), "{s4}");
+    }
+}
+
+#[cfg(test)]
+mod decimal_x_tests {
+    use super::*;
+
+    #[test]
+    fn decimal_strings_on_x_are_numeric() {
+        let s = |v: &[&str]| {
+            v.iter()
+                .map(|x| Value::Str(x.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            maybe_decimal(s(&["5.0", "5.2", "-1.5"])),
+            vec![Value::Float(5.0), Value::Float(5.2), Value::Float(-1.5)]
+        );
+        assert_eq!(maybe_decimal(s(&["2019", "2020"])), s(&["2019", "2020"]));
+        assert_eq!(maybe_decimal(s(&["1.5", "app"])), s(&["1.5", "app"]));
+        assert_eq!(maybe_decimal(s(&["1e3", "2.0"])), s(&["1e3", "2.0"]));
     }
 }

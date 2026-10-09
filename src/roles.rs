@@ -81,7 +81,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("FACET", &["FACET_WRAP", "PANEL_BY"], R::Facet, "encoding", true,
       "small multiples: one panel per distinct value, shared axes"),
     e("FACET_FREE", &["FACET_WRAP_FREE"], R::FacetFree, "encoding", true,
-      "small multiples with independent axes per panel"),
+      "small multiples with independent axes per panel (y only on a discrete x)"),
     e("RANK", &["LABEL_RANK"], R::Rank, "encoding", true,
       "score ranking points for ::LABEL_TOP (higher = labelled first)"),
     // ── charts (cast the measure column) ───────────────────────────────────
