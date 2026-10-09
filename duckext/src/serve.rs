@@ -1,518 +1,898 @@
-//! In-process HTTP server behind `SELECT anofox_serve(port)`. Serves the
-//! embedded browser builder and a `/query` bridge backed by the **live** DuckDB
-//! session — a fresh `duckdb_connect` per request (connections aren't
-//! thread-safe), all via the C API (no libduckdb linking).
+//! In-process HTTP servers behind the extension's serving functions.
+//!
+//! * `anofox_serve(port)` — **authoring**: the embedded browser builder plus a
+//!   `/query` bridge that runs SQL on the *live, read-write* session. Because it
+//!   runs arbitrary SQL it is locked to the author: loopback bind only, the
+//!   `Host` must be loopback (DNS rebinding), cross-origin requests are refused
+//!   (CSRF — incl. pages on other localhost ports), and every request needs the
+//!   random per-server token from the printed/opened URL (kept in an
+//!   `HttpOnly; SameSite=Strict` cookie, or sent as `X-Anofox-Token`).
+//! * `anofox_serve_dashboards(dir, port[, options])` — **locked**: serves the
+//!   dashboards in `dir` to untrusted viewers. The client never sends SQL: it
+//!   POSTs `{dashboard, panel, vars, page}` to `/api/panel`; the server runs its
+//!   own panel SQL, with variable values bound as typed literals and the paging
+//!   filter as a prepared-statement parameter. Queries run on a private
+//!   read-only snapshot with external access, extension loading and config
+//!   changes disabled, one fresh connection per request (no variable leakage
+//!   between viewers), under a row cap and a query timeout.
+//! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
+//!
+//! Each server's state is owned by the server (no process-wide "last load
+//! wins" globals besides the port registry), and startup is transactional:
+//! nothing is registered until the snapshot is built and the port is bound.
 
-use crate::api;
-use crate::ffi::*;
+use crate::db::{json_rows, Conn, Database};
+use anofox_visualization::host::serving::{
+    self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
+    AuthoringGuard, RequestMeta,
+};
 use include_dir::{include_dir, Dir};
-use std::ffi::{CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread;
-use tiny_http::{Header, Method, Response, Server};
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+use tiny_http::{Header, Method, Request, Response, Server};
 
-// The browser builder, embedded at compile time (needs web/pkg from wasm-pack).
+// The browser builder, embedded at compile time (needs web/pkg from wasm-pack —
+// build-native.sh and CI build it first).
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/../web");
-static STARTED: AtomicBool = AtomicBool::new(false);
-static CONN: AtomicUsize = AtomicUsize::new(0);
 
-/// Stash a live connection at load time. The server processes requests serially,
-/// so reusing one connection is safe (and the init-time handle is known-good —
-/// re-`connect`ing the raw db handle from a worker thread doesn't work).
-pub unsafe fn set_conn(conn: duckdb_connection) {
-    CONN.store(conn as usize, Ordering::SeqCst);
+/// Per-database context handed to the serving functions as extra_info: the
+/// connection opened at LOAD time on *that* database (so two databases that
+/// load the extension each serve their own data).
+pub struct DbCtx {
+    pub conn: Mutex<Conn>,
 }
 
-/// Start the server (once) on a background thread and open the browser.
-pub fn start(port: u16) -> String {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return "anofox-visualization is already serving".to_string();
-    }
-    let addr = format!("127.0.0.1:{port}");
-    let server = match Server::http(&addr) {
-        Ok(s) => s,
-        Err(e) => {
-            STARTED.store(false, Ordering::SeqCst);
-            return format!("anofox-visualization: could not bind {addr}: {e}");
-        }
+/// A running server, keyed by port in [`SERVERS`].
+struct Running {
+    kind: &'static str,
+    server: Arc<Server>,
+    stop: Arc<AtomicBool>,
+    workers: Vec<JoinHandle<()>>,
+    /// Dropped after the workers have exited (closes the snapshot DB and
+    /// deletes its directory for locked servers).
+    _state: Box<dyn Send>,
+}
+
+static SERVERS: Mutex<BTreeMap<u16, Running>> = Mutex::new(BTreeMap::new());
+
+fn lock_servers() -> std::sync::MutexGuard<'static, BTreeMap<u16, Running>> {
+    SERVERS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Stop the server on `port` (unblocks and joins its workers, then releases
+/// its state — for a locked server that closes and deletes the snapshot).
+pub fn stop(port: u16) -> Result<String, String> {
+    let running = lock_servers().remove(&port);
+    let Some(mut r) = running else {
+        return Err(format!(
+            "anofox-visualization: nothing is serving on port {port}"
+        ));
     };
-    let url = format!("http://{addr}/");
-    let open_url = url.clone();
-    thread::spawn(move || {
-        let _ = open::that(&open_url);
-        for req in server.incoming_requests() {
-            handle(req);
-        }
-    });
-    format!("anofox-visualization serving {url} — open it in your browser")
+    r.stop.store(true, Ordering::SeqCst);
+    for _ in 0..r.workers.len() {
+        r.server.unblock();
+    }
+    for w in r.workers.drain(..) {
+        let _ = w.join();
+    }
+    Ok(format!(
+        "anofox-visualization: stopped the {} server on port {port}",
+        r.kind
+    ))
 }
 
-fn handle(mut req: tiny_http::Request) {
+fn spawn_workers(
+    server: &Arc<Server>,
+    stop: &Arc<AtomicBool>,
+    n: usize,
+    handler: Arc<dyn Fn(Request) + Send + Sync>,
+) -> Vec<JoinHandle<()>> {
+    (0..n.max(1))
+        .map(|_| {
+            let (server, stop, handler) = (server.clone(), stop.clone(), handler.clone());
+            std::thread::spawn(move || loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match server.recv() {
+                    Ok(req) => {
+                        // A panic in one request must not take the worker down.
+                        let h = handler.clone();
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h(req)));
+                    }
+                    Err(_) => {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- helpers ---
+
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header")
+}
+
+fn req_header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str())
+}
+
+fn meta(req: &Request) -> RequestMeta<'_> {
+    RequestMeta {
+        host: req_header(req, "Host"),
+        origin: req_header(req, "Origin"),
+        cookie: req_header(req, "Cookie"),
+        token_header: req_header(req, sv::TOKEN_HEADER),
+    }
+}
+
+fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    let resp = Response::from_data(body.into())
+        .with_status_code(status)
+        .with_header(header("Content-Type", ctype))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"));
+    let _ = req.respond(resp);
+}
+
+fn text(req: Request, status: u16, msg: &str) {
+    respond(
+        req,
+        status,
+        "text/plain; charset=utf-8",
+        msg.as_bytes().to_vec(),
+    );
+}
+
+/// Read the request body, refusing anything larger than `limit` bytes.
+fn read_body(req: &mut Request, limit: usize) -> Result<String, (u16, String)> {
+    if req.body_length().is_some_and(|n| n > limit) {
+        return Err((413, format!("request body exceeds {limit} bytes")));
+    }
+    let mut buf = Vec::new();
+    req.as_reader()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| (400, format!("could not read body: {e}")))?;
+    if buf.len() > limit {
+        return Err((413, format!("request body exceeds {limit} bytes")));
+    }
+    String::from_utf8(buf).map_err(|_| (400, "request body is not UTF-8".to_string()))
+}
+
+fn serve_asset(req: Request, path: &str) {
+    let asset = path.trim_start_matches('/');
+    let asset = if asset.is_empty() {
+        "index.html"
+    } else {
+        asset
+    };
+    match WEB.get_file(asset) {
+        Some(f) => respond(req, 200, content_type(asset), f.contents().to_vec()),
+        None => text(req, 404, "not found"),
+    }
+}
+
+// -------------------------------------------------------- authoring mode ---
+
+struct Authoring {
+    ctx: Arc<DbCtx>,
+    guard: AuthoringGuard,
+    max_body: usize,
+}
+
+/// `anofox_serve(port)`: start the authoring server on 127.0.0.1:`port`.
+pub fn start_authoring(ctx: Arc<DbCtx>, port: u16) -> Result<String, String> {
+    let mut servers = lock_servers();
+    if servers.contains_key(&port) {
+        return Err(format!(
+            "anofox-visualization is already serving on port {port}"
+        ));
+    }
+    // Authoring runs arbitrary SQL on the live session: loopback only, always.
+    let addr = format!("127.0.0.1:{port}");
+    let server = Arc::new(
+        Server::http(&addr)
+            .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
+    );
+    let state = Arc::new(Authoring {
+        ctx,
+        guard: AuthoringGuard::new(port),
+        max_body: 4 << 20,
+    });
+    let url = state.guard.login_url("127.0.0.1");
+    let stop = Arc::new(AtomicBool::new(false));
+    let st = state.clone();
+    // One worker: the live connection is used serially anyway.
+    let workers = spawn_workers(
+        &server,
+        &stop,
+        1,
+        Arc::new(move |req| handle_authoring(&st, req)),
+    );
+    servers.insert(
+        port,
+        Running {
+            kind: "authoring",
+            server,
+            stop,
+            workers,
+            _state: Box::new(state),
+        },
+    );
+    drop(servers);
+    let _ = open::that(&url);
+    Ok(format!(
+        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token)"
+    ))
+}
+
+fn handle_authoring(st: &Authoring, mut req: Request) {
     let url = req.url().to_string();
-    if req.method() == &Method::Post && url.starts_with("/query") {
-        let mut sql = String::new();
-        let _ = std::io::Read::read_to_string(req.as_reader(), &mut sql);
-        let resp = match unsafe { query_json(&sql) } {
-            Ok(json) => Response::from_string(json).with_header(ct("application/json")),
-            Err(e) => Response::from_string(e).with_header(ct("text/plain")).with_status_code(400),
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let m = meta(&req);
+    // Token hand-over: /?token=… → cookie + redirect to the clean URL.
+    if st.guard.check_origin(&m).is_ok() {
+        if let Some((location, cookie)) = st.guard.bootstrap(&url) {
+            let resp = Response::empty(303)
+                .with_header(header("Location", &location))
+                .with_header(header("Set-Cookie", &cookie))
+                .with_header(header("Cache-Control", "no-store"));
+            let _ = req.respond(resp);
+            return;
+        }
+    }
+    if let Err(d) = st.guard.check(&m) {
+        return text(req, d.status(), d.message());
+    }
+    if path == "/query" {
+        if req.method() != &Method::Post {
+            return text(req, 405, "POST only");
+        }
+        let sql = match read_body(&mut req, st.max_body) {
+            Ok(b) => b,
+            Err((code, e)) => return text(req, code, &e),
         };
-        let _ = req.respond(resp);
+        let conn = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        match authoring_query(&conn, &sql) {
+            Ok(json) => respond(req, 200, "application/json", json.into_bytes()),
+            Err(e) => text(req, 400, &e),
+        }
         return;
     }
-    // static asset
-    let path = url.trim_start_matches('/').split('?').next().unwrap_or("");
-    let path = if path.is_empty() { "index.html" } else { path };
-    match WEB.get_file(path) {
-        Some(f) => {
-            let _ = req.respond(Response::from_data(f.contents()).with_header(ctype(path)));
-        }
-        None => {
-            let _ = req.respond(Response::from_string("not found").with_status_code(404));
-        }
+    if req.method() != &Method::Get {
+        return text(req, 405, "method not allowed");
     }
+    serve_asset(req, &path);
 }
 
-/// Run SQL on a fresh connection to the live DB. `SELECT`s are wrapped so DuckDB
-/// itself emits the rows as a JSON array (typed — numbers stay numeric); other
-/// statements (setup like `CREATE`) run for effect and return `[]`.
-unsafe fn query_json(sql: &str) -> Result<String, String> {
-    let conn = CONN.load(Ordering::SeqCst) as duckdb_connection;
-    if conn.is_null() {
-        return Err("no live connection".into());
+/// Authoring `/query`: run the body on the live connection. Statements are
+/// split by DuckDB's own parser; all but the last run for effect. The last one
+/// is returned as JSON rows when it is a query (by DuckDB's statement type, so
+/// `FROM t`, `VALUES`, `PIVOT`, `SUMMARIZE`, comment-led queries… all count),
+/// otherwise it runs for effect and `[]` is returned.
+fn authoring_query(conn: &Conn, sql: &str) -> Result<String, String> {
+    let ex = conn.extract(sql)?;
+    if ex.count == 0 {
+        return Ok("[]".into());
     }
-    // The client inlines its variables, so a body can be `SET VARIABLE …; SELECT
-    // …`. Run the leading statements for effect on this (serially-used)
-    // connection, then operate on the final one — so the request is self-contained.
-    let stmts = split_statements(sql);
-    let (last, lead) = match stmts.split_last() {
-        Some(x) => x,
-        None => return Ok("[]".into()),
-    };
-    for s in lead {
-        let cs = CString::new(s.as_str()).map_err(|_| "sql contains NUL")?;
-        let mut r: duckdb_result = std::mem::zeroed();
-        let rc = (api().duckdb_query.unwrap())(conn, cs.as_ptr(), &mut r);
-        (api().duckdb_destroy_result.unwrap())(&mut r);
-        if rc != duckdb_state::DuckDBSuccess {
-            return Err(format!("statement failed: {s}"));
-        }
+    for i in 0..ex.count - 1 {
+        ex.prepare(conn, i)?.execute()?;
     }
-    let trimmed = last.trim().trim_end_matches(';');
-    let head = trimmed.get(..6).unwrap_or("").to_ascii_uppercase();
-    let is_select = head.starts_with("SELECT") || head.starts_with("WITH") || trimmed.starts_with('(');
-    let wrapped = if is_select {
-        format!("SELECT COALESCE(to_json(array_agg(__t)), '[]')::VARCHAR FROM ({trimmed}) __t")
-    } else {
-        trimmed.to_string()
-    };
-
-    let c_sql = CString::new(wrapped).map_err(|_| "sql contains NUL")?;
-    let mut result: duckdb_result = std::mem::zeroed();
-    let rc = (api().duckdb_query.unwrap())(conn, c_sql.as_ptr(), &mut result);
-    if rc != duckdb_state::DuckDBSuccess {
-        let err = (api().duckdb_result_error.unwrap())(&mut result);
-        let msg = if err.is_null() {
-            "query failed".into()
+    let last = ex.prepare(conn, ex.count - 1)?;
+    let is_query =
+        last.statement_type() == crate::ffi::duckdb_statement_type::DUCKDB_STATEMENT_TYPE_SELECT;
+    if is_query {
+        // We need the statement's text to wrap it; with one statement that is
+        // the whole body. With several, recover it with the core splitter and
+        // only trust it if it agrees with DuckDB's statement count.
+        let text = if ex.count == 1 {
+            Some(sql.to_string())
         } else {
-            CStr::from_ptr(err).to_string_lossy().into_owned()
+            let clean = anofox_visualization::sql::strip_line_comments(sql);
+            let parts: Vec<String> = anofox_visualization::sql::split_statements(&clean)
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            (parts.len() == ex.count).then(|| parts[parts.len() - 1].clone())
         };
-        (api().duckdb_destroy_result.unwrap())(&mut result);
-        return Err(msg);
-    }
-
-    let mut json = "[]".to_string();
-    if is_select {
-        let chunk = (api().duckdb_fetch_chunk.unwrap())(result);
-        if !chunk.is_null() {
-            if (api().duckdb_data_chunk_get_size.unwrap())(chunk) > 0 {
-                let vec = (api().duckdb_data_chunk_get_vector.unwrap())(chunk, 0);
-                let data = (api().duckdb_vector_get_data.unwrap())(vec) as *const duckdb_string_t;
-                if !data.is_null() {
-                    json = read_duckdb_string(&*data);
+        if let Some(t) = text {
+            // Try the text as-is, then without `--` comments (a trailing
+            // `; -- note` would otherwise end up inside the wrapper).
+            let stripped = anofox_visualization::sql::strip_line_comments(&t);
+            for cand in [t.as_str(), stripped.as_str()] {
+                match json_rows(
+                    conn,
+                    strip_trailing_semicolons(cand),
+                    &[],
+                    AUTHORING_MAX_ROWS,
+                ) {
+                    Ok(json) => return Ok(json),
+                    Err(e) if e.contains("row limit") => return Err(e),
+                    Err(_) => {}
                 }
             }
-            let mut ch = chunk;
-            (api().duckdb_destroy_data_chunk.unwrap())(&mut ch);
         }
     }
-    (api().duckdb_destroy_result.unwrap())(&mut result);
-    Ok(json)
+    last.execute()?;
+    Ok("[]".into())
 }
 
-/// Read a `duckdb_string_t` (short strings are inlined, ≤12 bytes).
-unsafe fn read_duckdb_string(s: &duckdb_string_t) -> String {
-    let len = s.value.pointer.length as usize;
-    let ptr = if len <= 12 {
-        s.value.inlined.inlined.as_ptr() as *const u8
-    } else {
-        s.value.pointer.ptr as *const u8
-    };
-    String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned()
+/// Row cap for authoring `/query` results (they all go to the browser).
+const AUTHORING_MAX_ROWS: usize = 1_000_000;
+
+fn strip_trailing_semicolons(s: &str) -> &str {
+    s.trim()
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
 }
 
-/// Run a statement for effect, surfacing DuckDB's error text on failure.
-unsafe fn exec(conn: duckdb_connection, sql: &str) -> Result<(), String> {
-    let c = CString::new(sql).map_err(|_| "sql contains NUL".to_string())?;
-    let mut r: duckdb_result = std::mem::zeroed();
-    let rc = (api().duckdb_query.unwrap())(conn, c.as_ptr(), &mut r);
-    let res = if rc == duckdb_state::DuckDBSuccess {
-        Ok(())
-    } else {
-        let err = (api().duckdb_result_error.unwrap())(&mut r);
-        Err(if err.is_null() {
-            format!("statement failed: {sql}")
-        } else {
-            CStr::from_ptr(err).to_string_lossy().into_owned()
-        })
-    };
-    (api().duckdb_destroy_result.unwrap())(&mut r);
-    res
+// ----------------------------------------------------------- locked mode ---
+
+/// Tunables of a locked server (`options` JSON of anofox_serve_dashboards).
+#[derive(Clone, Debug)]
+pub struct LockedOptions {
+    pub max_rows: usize,
+    pub timeout: Duration,
+    pub max_body: usize,
+    pub threads: usize,
+    /// Snapshot the session's other attached DuckDB databases too.
+    pub attach: bool,
+    /// Extra extensions to LOAD into the snapshot (before it is locked).
+    pub load: Vec<String>,
 }
 
-/// Fetch the first cell of a query as a String (for `current_database()`).
-unsafe fn scalar_string(conn: duckdb_connection, sql: &str) -> Option<String> {
-    let c = CString::new(sql).ok()?;
-    let mut result: duckdb_result = std::mem::zeroed();
-    if (api().duckdb_query.unwrap())(conn, c.as_ptr(), &mut result) != duckdb_state::DuckDBSuccess {
-        (api().duckdb_destroy_result.unwrap())(&mut result);
-        return None;
+impl Default for LockedOptions {
+    fn default() -> Self {
+        LockedOptions {
+            max_rows: 100_000,
+            timeout: Duration::from_secs(30),
+            max_body: 64 << 10,
+            threads: 4,
+            attach: true,
+            load: Vec::new(),
+        }
     }
-    let mut out = None;
-    let chunk = (api().duckdb_fetch_chunk.unwrap())(result);
-    if !chunk.is_null() {
-        if (api().duckdb_data_chunk_get_size.unwrap())(chunk) > 0 {
-            let vec = (api().duckdb_data_chunk_get_vector.unwrap())(chunk, 0);
-            let data = (api().duckdb_vector_get_data.unwrap())(vec) as *const duckdb_string_t;
-            if !data.is_null() {
-                out = Some(read_duckdb_string(&*data));
+}
+
+impl LockedOptions {
+    pub fn parse(json: Option<&str>) -> Result<LockedOptions, String> {
+        let mut o = LockedOptions::default();
+        let Some(json) = json.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(o);
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("options: bad JSON: {e}"))?;
+        let m = v.as_object().ok_or("options must be a JSON object")?;
+        for (k, val) in m {
+            let num = || {
+                val.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("options.{k} must be a positive integer"))
+            };
+            match k.as_str() {
+                "max_rows" => o.max_rows = num()?.min(10_000_000) as usize,
+                "timeout_ms" => o.timeout = Duration::from_millis(num()?),
+                "max_body_bytes" => o.max_body = num()?.min(64 << 20) as usize,
+                "threads" => o.threads = num()?.min(64) as usize,
+                "attach" => o.attach = val.as_bool().ok_or("options.attach must be a boolean")?,
+                "load" => {
+                    let arr = val.as_array().ok_or("options.load must be a list of extension names")?;
+                    for e in arr {
+                        let e = e.as_str().filter(|e| sv::valid_ident(e)).ok_or("options.load: invalid extension name")?;
+                        o.load.push(e.to_string());
+                    }
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load)")),
             }
         }
-        let mut ch = chunk;
-        (api().duckdb_destroy_data_chunk.unwrap())(&mut ch);
+        Ok(o)
     }
-    (api().duckdb_destroy_result.unwrap())(&mut result);
-    out
 }
-
-/// Defense-in-depth for the locked serve mode: replace the served connection
-/// with a genuinely **read-only** one. `access_mode` can't be flipped at runtime
-/// and a read-only `ATTACH` would leave the original writable DB reachable by
-/// qualified name — so instead we snapshot the live database to a temp file
-/// (`COPY FROM DATABASE`) and reopen *that* through a fresh read-only handle with
-/// no writable database attached. A gate bypass therefore still cannot write.
-/// Returns the snapshot path. (Serves a snapshot; re-run to refresh.)
-unsafe fn switch_to_readonly_snapshot(port: u16) -> Result<String, String> {
-    let rw = CONN.load(Ordering::SeqCst) as duckdb_connection;
-    if rw.is_null() {
-        return Err("no live connection to snapshot".into());
-    }
-    let src = scalar_string(rw, "SELECT current_database()").unwrap_or_else(|| "memory".into());
-    let snap = std::env::temp_dir().join(format!("anofox_ro_snap_{port}.db"));
-    let snap = snap.to_string_lossy().into_owned();
-    let _ = std::fs::remove_file(&snap);
-    let _ = std::fs::remove_file(format!("{snap}.wal"));
-
-    // Snapshot on the live (read-write) connection.
-    exec(rw, &format!("ATTACH '{snap}' AS __anofox_ro_snap__"))?;
-    exec(rw, &format!("COPY FROM DATABASE \"{src}\" TO __anofox_ro_snap__"))?;
-    exec(rw, "DETACH __anofox_ro_snap__")?;
-
-    // Open the snapshot in a brand-new database handle, read-only.
-    let mut cfg: duckdb_config = std::ptr::null_mut();
-    if (api().duckdb_create_config.unwrap())(&mut cfg) != duckdb_state::DuckDBSuccess {
-        return Err("could not create db config".into());
-    }
-    let key = CString::new("access_mode").unwrap();
-    let val = CString::new("READ_ONLY").unwrap();
-    (api().duckdb_set_config.unwrap())(cfg, key.as_ptr(), val.as_ptr());
-    let path_c = CString::new(snap.clone()).map_err(|_| "bad snapshot path".to_string())?;
-    let mut db: duckdb_database = std::ptr::null_mut();
-    let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
-    let rc = (api().duckdb_open_ext.unwrap())(path_c.as_ptr(), &mut db, cfg, &mut err);
-    (api().duckdb_destroy_config.unwrap())(&mut cfg);
-    if rc != duckdb_state::DuckDBSuccess {
-        let msg = if err.is_null() {
-            "read-only open failed".into()
-        } else {
-            CStr::from_ptr(err).to_string_lossy().into_owned()
-        };
-        return Err(msg);
-    }
-    let mut roconn: duckdb_connection = std::ptr::null_mut();
-    if (api().duckdb_connect.unwrap())(db, &mut roconn) != duckdb_state::DuckDBSuccess {
-        return Err("could not connect to read-only snapshot".into());
-    }
-    // The server now runs every /query on this read-only connection; keep the db
-    // + connection for the process lifetime (the server never stops).
-    set_conn(roconn);
-    Ok(snap)
-}
-
-// ---------- gated served mode (server owns the SQL; consumers pick id + params) ----------
 
 struct Dash {
     id: String,
     title: String,
     sql: String,
-}
-static DASHBOARDS: std::sync::OnceLock<Vec<Dash>> = std::sync::OnceLock::new();
-static ALLOWED: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
-
-/// `SELECT anofox_serve_dashboards(dir, port)` — serve the real browser client
-/// LOCKED: dashboards (`.sql` files in `dir`) live server-side; the client can
-/// render everything but only *run* the queries the server registered (plus the
-/// `SET VARIABLE`s it inlines). Stateless per request → multi-user safe.
-pub fn start_dashboards(port: u16, dir: &str) -> String {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return "anofox-visualization is already serving".to_string();
-    }
-    let mut dashboards = Vec::new();
-    let mut allowed = std::collections::HashSet::new();
-    allowed.insert("SELECT 1 AS ok".to_string()); // the client's backend probe
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("sql") {
-                continue;
-            }
-            let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let Ok(sql) = std::fs::read_to_string(&p) else { continue };
-            let title = sql
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("-- @title "))
-                .map(|t| t.trim().to_string())
-                .unwrap_or_else(|| id.clone());
-            // Register every planned statement's SQL as an allowed query.
-            for panel in anofox_visualization::sql::plan(&sql) {
-                allowed.insert(panel.sql.trim().to_string());
-            }
-            dashboards.push(Dash { id, title, sql });
-        }
-    }
-    dashboards.sort_by(|a, b| a.id.cmp(&b.id));
-    let n = dashboards.len();
-    let _ = DASHBOARDS.set(dashboards);
-    let _ = ALLOWED.set(allowed);
-
-    // Defense-in-depth: serve from a read-only snapshot, not the live read-write
-    // session. If we can't establish that, refuse to serve rather than silently
-    // exposing a writable database to consumers.
-    if let Err(e) = unsafe { switch_to_readonly_snapshot(port) } {
-        STARTED.store(false, Ordering::SeqCst);
-        return format!(
-            "anofox-visualization: refusing to serve — could not establish a read-only snapshot: {e}"
-        );
-    }
-
-    let addr = format!("127.0.0.1:{port}");
-    let server = match Server::http(&addr) {
-        Ok(s) => s,
-        Err(e) => {
-            STARTED.store(false, Ordering::SeqCst);
-            return format!("anofox-visualization: could not bind {addr}: {e}");
-        }
-    };
-    let url = format!("http://{addr}/");
-    thread::spawn(move || {
-        for req in server.incoming_requests() {
-            handle_served(req);
-        }
-    });
-    format!("anofox-visualization serving {n} locked, read-only dashboard(s) at {url} — server owns the SQL")
+    /// Planned statements: (is_setup, sql), indexed like the client's plan().
+    stmts: Vec<(bool, String)>,
 }
 
-fn handle_served(mut req: tiny_http::Request) {
-    let url = req.url().to_string();
-    let path = url.split('?').next().unwrap_or("/").to_string();
-    // Access log: one line per request (method + path) for observability.
-    eprintln!("[anofox-serve] {} {}", req.method(), path);
+/// A private, randomly named 0700 directory holding the snapshot files;
+/// removed on Drop (i.e. when the server stops or startup fails).
+struct SnapshotDir(PathBuf);
 
-    // Liveness/readiness probe for supervisors (systemd, Docker, k8s, LBs).
-    if path == "/health" || path == "/healthz" {
-        let n = DASHBOARDS.get().map(|d| d.len()).unwrap_or(0);
-        let body = format!("{{\"status\":\"ok\",\"dashboards\":{n}}}");
-        let _ = req.respond(Response::from_string(body).with_header(ct("application/json")));
-        return;
-    }
-    if req.method() == &Method::Post && path == "/query" {
-        let mut sql = String::new();
-        let _ = std::io::Read::read_to_string(req.as_reader(), &mut sql);
-        let resp = if gate(&sql) {
-            match unsafe { query_json(&sql) } {
-                Ok(json) => Response::from_string(json).with_header(ct("application/json")),
+impl SnapshotDir {
+    fn create() -> Result<SnapshotDir, String> {
+        let base = std::env::temp_dir();
+        for _ in 0..8 {
+            let p = base.join(format!("anofox-snap-{}", sv::random_token()));
+            let mut b = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            match b.create(&p) {
+                Ok(()) => return Ok(SnapshotDir(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
-                    eprintln!("[anofox-serve] 400 query error: {e}");
-                    Response::from_string(e).with_header(ct("text/plain")).with_status_code(400)
+                    return Err(format!(
+                        "could not create snapshot dir {}: {e}",
+                        p.display()
+                    ))
                 }
             }
-        } else {
-            eprintln!("[anofox-serve] 403 query not permitted (not in allow-list)");
-            Response::from_string("query not permitted").with_status_code(403)
-        };
-        let _ = req.respond(resp);
-        return;
-    }
-    if path == "/" {
-        let _ = req.respond(Response::from_string(list_page()).with_header(ct("text/html; charset=utf-8")));
-        return;
-    }
-    if let Some(id) = path.strip_prefix("/d/") {
-        let id = id.trim_end_matches('/');
-        match DASHBOARDS.get().and_then(|d| d.iter().find(|x| x.id == id)) {
-            Some(dash) => {
-                let _ = req.respond(Response::from_data(served_index(dash)).with_header(ct("text/html; charset=utf-8")));
-            }
-            None => {
-                let _ = req.respond(Response::from_string("no such dashboard").with_status_code(404));
-            }
         }
-        return;
-    }
-    let asset = path.trim_start_matches('/');
-    match WEB.get_file(asset) {
-        Some(f) => {
-            let _ = req.respond(Response::from_data(f.contents()).with_header(ctype(asset)));
-        }
-        None => {
-            let _ = req.respond(Response::from_string("not found").with_status_code(404));
-        }
+        Err("could not create a unique snapshot directory".into())
     }
 }
 
-/// Serve index.html with `window.__served = {id,title,sql}` injected before the
-/// app script runs. serde_json handles the escaping.
-fn served_index(dash: &Dash) -> Vec<u8> {
+impl Drop for SnapshotDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The read-only snapshot a locked server queries.
+struct Snapshot {
+    // Field order = drop order: close the database before deleting its files.
+    db: Database,
+    /// The source session's default database (each request connection `USE`s it).
+    default_db: String,
+    _dir: SnapshotDir,
+}
+
+struct Locked {
+    dashboards: Vec<Dash>,
+    snap: Snapshot,
+    opts: LockedOptions,
+}
+
+/// `anofox_serve_dashboards(dir, port[, options])`.
+pub fn start_locked(
+    ctx: Arc<DbCtx>,
+    dir: &str,
+    port: u16,
+    opts: LockedOptions,
+) -> Result<String, String> {
+    let mut servers = lock_servers();
+    if servers.contains_key(&port) {
+        return Err(format!(
+            "anofox-visualization is already serving on port {port}"
+        ));
+    }
+    let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
+    loads.extend(opts.load.iter().cloned());
+    let (snap, warnings) = {
+        let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        build_snapshot(&conn, opts.attach, &loads)?
+    };
+    // Validate every statement with DuckDB's parser: exactly one each.
+    {
+        let c = snap.db.connect()?;
+        for d in &dashboards {
+            for (i, (_, sql)) in d.stmts.iter().enumerate() {
+                match c.count_statements(sql) {
+                    Ok(1) => {}
+                    Ok(n) => {
+                        return Err(format!(
+                            "dashboard '{}' statement {i}: expected 1 statement, found {n}",
+                            d.id
+                        ))
+                    }
+                    Err(e) => return Err(format!("dashboard '{}' statement {i}: {e}", d.id)),
+                }
+            }
+        }
+    }
+    let addr = format!("127.0.0.1:{port}");
+    let server = Arc::new(
+        Server::http(&addr)
+            .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
+    );
+    let n = dashboards.len();
+    let threads = opts.threads;
+    let state = Arc::new(Locked {
+        dashboards,
+        snap,
+        opts,
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let st = state.clone();
+    let workers = spawn_workers(
+        &server,
+        &stop,
+        threads,
+        Arc::new(move |req| handle_locked(&st, req)),
+    );
+    servers.insert(
+        port,
+        Running {
+            kind: "locked",
+            server,
+            stop,
+            workers,
+            _state: Box::new(state),
+        },
+    );
+    let warn = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" (warnings: {})", warnings.join("; "))
+    };
+    Ok(format!(
+        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{warn}"
+    ))
+}
+
+/// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
+/// `-- @load` extensions.
+fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read dashboard dir '{}': {e}", dir.display()))?;
+    let mut out = Vec::new();
+    let mut loads = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("sql") {
+            continue;
+        }
+        let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        if !sv::valid_dashboard_id(&id) {
+            continue; // ids end up in URLs: only [A-Za-z0-9_.-]
+        }
+        let sql =
+            std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+        let meta = sv::parse_dashboard_meta(&id, &sql);
+        loads.extend(meta.loads.iter().cloned());
+        let stmts = anofox_visualization::sql::plan(&sql)
+            .into_iter()
+            .map(|p| (p.setup, p.sql.trim().to_string()))
+            .collect();
+        out.push(Dash {
+            id,
+            title: meta.title,
+            sql,
+            stmts,
+        });
+    }
+    if out.is_empty() {
+        return Err(format!("no .sql dashboards found in '{}'", dir.display()));
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    loads.sort();
+    loads.dedup();
+    Ok((out, loads))
+}
+
+/// Snapshot the live session into a private directory and open it through a
+/// fresh, locked-down DuckDB instance:
+/// * every DuckDB database attached to the session (or just the default one
+///   with `attach: false`) is copied (`COPY FROM DATABASE`) and re-attached
+///   READ_ONLY under its original name; other catalog types (postgres, …) are
+///   skipped with a warning;
+/// * extensions loaded in the session (and `-- @load`/`options.load`) are
+///   loaded, best-effort, while that is still allowed;
+/// * then `enable_external_access = false` (no file / network access: no
+///   `COPY … TO`, `read_text`, `ATTACH`, `INSTALL`, `LOAD`), extension
+///   auto-install/-load off, and `lock_configuration = true` so no request can
+///   undo any of it.
+fn build_snapshot(
+    live: &Conn,
+    attach_all: bool,
+    extra_loads: &[String],
+) -> Result<(Snapshot, Vec<String>), String> {
+    let mut warnings = Vec::new();
+    let dir = SnapshotDir::create()?;
+    let current = live
+        .query("SELECT current_database()::VARCHAR")?
+        .string_rows(1)?
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .ok_or("could not determine current_database()")?;
+    let dbs = live
+        .query(
+            "SELECT database_name::VARCHAR, type::VARCHAR FROM duckdb_databases() \
+             WHERE NOT internal AND database_name NOT IN ('system', 'temp') ORDER BY database_name",
+        )?
+        .string_rows(10_000)?;
+    let mut copied: Vec<(String, PathBuf)> = Vec::new();
+    for row in dbs {
+        let (Some(name), ty) = (row[0].clone(), row[1].clone().unwrap_or_default()) else {
+            continue;
+        };
+        if name != current && !attach_all {
+            continue;
+        }
+        if ty != "duckdb" {
+            warnings.push(format!("database '{name}' ({ty}) not snapshotted"));
+            continue;
+        }
+        let file = dir.0.join(format!("db{}.duckdb", copied.len()));
+        let alias = format!("__anofox_snap_{}", sv::random_token());
+        let f = file.to_string_lossy().into_owned();
+        live.exec(&format!(
+            "ATTACH {} AS {}",
+            sql_string_literal(&f),
+            quote_ident(&alias)
+        ))?;
+        let r = live.exec(&format!(
+            "COPY FROM DATABASE {} TO {}",
+            quote_ident(&name),
+            quote_ident(&alias)
+        ));
+        let d = live.exec(&format!("DETACH {}", quote_ident(&alias)));
+        r.and(d)
+            .map_err(|e| format!("snapshot of '{name}' failed: {e}"))?;
+        copied.push((name, file));
+    }
+    if !copied.iter().any(|(n, _)| *n == current) {
+        return Err(format!(
+            "could not snapshot the current database '{current}'"
+        ));
+    }
+    let loaded: Vec<String> = live
+        .query(
+            "SELECT extension_name::VARCHAR FROM duckdb_extensions() \
+             WHERE loaded AND extension_name <> 'anofox_visualization' \
+             AND install_mode IS DISTINCT FROM 'STATICALLY_LINKED'",
+        )?
+        .string_rows(10_000)?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    let allow_unsigned = live
+        .query("SELECT current_setting('allow_unsigned_extensions')::VARCHAR")
+        .and_then(|mut r| r.string_rows(1))
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .and_then(|r| r.into_iter().next().flatten())
+        .is_some_and(|v| v == "true");
+
+    let tmp = dir.0.join("tmp");
+    let tmp_s = tmp.to_string_lossy().into_owned();
+    let mut cfg: Vec<(&str, &str)> = vec![
+        ("autoinstall_known_extensions", "false"),
+        ("autoload_known_extensions", "false"),
+        ("allow_community_extensions", "false"),
+        ("temp_directory", &tmp_s),
+    ];
+    if allow_unsigned {
+        cfg.push(("allow_unsigned_extensions", "true"));
+    }
+    // A host in-memory DB (named so it cannot clash with a source called
+    // "memory") with the snapshots attached READ_ONLY under their own names.
+    let db = Database::open(":memory:anofox_snapshot_host", &cfg)?;
+    {
+        let c = db.connect()?;
+        for (name, file) in &copied {
+            let f = file.to_string_lossy().into_owned();
+            c.exec(&format!(
+                "ATTACH {} AS {} (READ_ONLY)",
+                sql_string_literal(&f),
+                quote_ident(name)
+            ))?;
+            // On unix the open file stays readable after unlinking: drop the
+            // snapshot from the filesystem right away.
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(file);
+        }
+        let mut exts: Vec<&String> = loaded.iter().chain(extra_loads.iter()).collect();
+        exts.sort();
+        exts.dedup();
+        for e in exts {
+            if !sv::valid_ident(e) {
+                continue;
+            }
+            if let Err(err) = c.exec(&format!("LOAD {}", quote_ident(e))) {
+                let first = err.lines().next().unwrap_or("").to_string();
+                warnings.push(format!("LOAD {e}: {first}"));
+            }
+        }
+        c.exec("SET enable_external_access = false")?;
+        c.exec("SET lock_configuration = true")?;
+    }
+    Ok((
+        Snapshot {
+            db,
+            default_db: current,
+            _dir: dir,
+        },
+        warnings,
+    ))
+}
+
+fn handle_locked(st: &Locked, mut req: Request) {
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let m = meta(&req);
+    eprintln!("[anofox-serve] {} {}", req.method(), path);
+    // CSRF: a browser request from another origin is refused outright.
+    if !sv::origin_matches_host(m.origin, m.host) {
+        return text(req, 403, "forbidden: cross-origin request");
+    }
+    match (req.method(), path.as_str()) {
+        (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
+            let body = format!(
+                "{{\"status\":\"ok\",\"dashboards\":{}}}",
+                st.dashboards.len()
+            );
+            respond(req, 200, "application/json", body.into_bytes())
+        }
+        (&Method::Post, "/api/panel") => {
+            let body = match read_body(&mut req, st.opts.max_body) {
+                Ok(b) => b,
+                Err((code, e)) => return text(req, code, &e),
+            };
+            match locked_panel(st, &body) {
+                Ok(json) => respond(req, 200, "application/json", json.into_bytes()),
+                Err((code, e)) => {
+                    eprintln!("[anofox-serve] {code}: {e}");
+                    text(req, code, &e)
+                }
+            }
+        }
+        (_, "/query") => text(
+            req,
+            410,
+            "this server is locked: there is no SQL endpoint (use POST /api/panel)",
+        ),
+        (&Method::Get, "/") => respond(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            list_page(st).into_bytes(),
+        ),
+        (&Method::Get, p) if p.starts_with("/d/") => {
+            let id = p["/d/".len()..].trim_end_matches('/');
+            match st.dashboards.iter().find(|d| d.id == id) {
+                Some(d) => respond(req, 200, "text/html; charset=utf-8", served_index(st, d)),
+                None => text(req, 404, "no such dashboard"),
+            }
+        }
+        (&Method::Get, p) => serve_asset(req, p),
+        _ => text(req, 405, "method not allowed"),
+    }
+}
+
+/// Run one panel of one dashboard for a viewer. Fresh connection per request
+/// (variables and temp objects never leak between viewers), variables set as
+/// typed literals, the dashboard's preceding setup statements re-run (only
+/// TEMP objects can be created — the snapshot is read-only), and the panel
+/// query executed as a single prepared statement under the row cap + timeout.
+fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
+    let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    let dash = st
+        .dashboards
+        .iter()
+        .find(|d| d.id == r.dashboard)
+        .ok_or((404, "no such dashboard".to_string()))?;
+    let (is_setup, panel_sql) = dash
+        .stmts
+        .get(r.panel)
+        .ok_or((404, "no such panel".to_string()))?;
+    if *is_setup {
+        return Ok("[]".into()); // setup runs server-side, per request (below)
+    }
+    let conn = st.snap.db.connect().map_err(|e| (500, e))?;
+    conn.with_deadline(st.opts.timeout, |c| {
+        c.exec(&format!("USE {}", quote_ident(&st.snap.default_db)))?;
+        for (name, lit) in &r.vars {
+            c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
+        }
+        for (setup, sql) in &dash.stmts[..r.panel] {
+            if *setup {
+                // Best effort, like the browser: a failing setup statement is
+                // reported in the log, the panel still runs.
+                if let Err(e) = c.execute_prepared(sql, &[]) {
+                    eprintln!(
+                        "[anofox-serve] setup statement failed in '{}': {e}",
+                        dash.id
+                    );
+                }
+            }
+        }
+        match &r.page {
+            Some(p) => {
+                let (q, filter) = sv::page_sql(panel_sql, p);
+                let params: Vec<&str> = filter.as_deref().into_iter().collect();
+                json_rows(c, &q, &params, st.opts.max_rows)
+            }
+            None => json_rows(c, panel_sql, &[], st.opts.max_rows),
+        }
+    })
+    .map_err(|e| (if e.contains("row limit") { 413 } else { 400 }, e))
+}
+
+/// index.html with `window.__served = {id,title,sql,nav,locked}` injected
+/// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
+/// dashboard's SQL cannot break out).
+fn served_index(st: &Locked, dash: &Dash) -> Vec<u8> {
     let html = WEB
         .get_file("index.html")
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
         .unwrap_or_default();
-    // The full dashboard list (id + title) so the client can draw a persistent
-    // cross-dashboard nav bar linking each `/d/<id>`.
-    let nav: Vec<serde_json::Value> = DASHBOARDS
-        .get()
-        .map(|ds| {
-            ds.iter()
-                .map(|d| serde_json::json!({ "id": d.id, "title": d.title }))
-                .collect()
-        })
-        .unwrap_or_default();
-    let cfg = serde_json::json!({
-        "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav
-    })
-    .to_string();
-    // <base href="/"> so ./app.js and ./pkg/… resolve to the root (the page lives
-    // at /d/<id>); the script hands the dashboard to the client.
+    let nav: Vec<serde_json::Value> = st
+        .dashboards
+        .iter()
+        .map(|d| serde_json::json!({ "id": d.id, "title": d.title }))
+        .collect();
+    let cfg = json_for_script(&serde_json::json!({
+        "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav, "locked": true
+    }));
     html.replacen("<head>", "<head><base href=\"/\">", 1)
-        .replacen("</head>", &format!("<script>window.__served={cfg};</script></head>"), 1)
+        .replacen(
+            "</head>",
+            &format!("<script>window.__served={cfg};</script></head>"),
+            1,
+        )
         .into_bytes()
 }
 
-fn list_page() -> String {
-    let items: String = DASHBOARDS
-        .get()
-        .map(|ds| {
-            ds.iter()
-                .map(|d| format!("<li><a href=\"/d/{}\">{}</a></li>", d.id, html_esc(&d.title)))
-                .collect()
+fn list_page(st: &Locked) -> String {
+    let items: String = st
+        .dashboards
+        .iter()
+        .map(|d| {
+            format!(
+                "<li><a href=\"/d/{}\">{}</a></li>",
+                html_escape(&d.id),
+                html_escape(&d.title)
+            )
         })
-        .unwrap_or_default();
+        .collect();
     format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Dashboards</title>\
 <body style=\"font:15px system-ui;padding:2rem\"><h1>Dashboards</h1><ul>{items}</ul>"
     )
 }
 
-fn html_esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Allow a `/query` body only if it's `‹validated SET VARIABLEs›; ‹registered
-/// query›` (or a lone validated SET VARIABLE / the probe). The client inlines its
-/// variables, so this is the whole surface — no arbitrary SQL runs.
-fn gate(sql: &str) -> bool {
-    let Some(allowed) = ALLOWED.get() else { return false };
-    let stmts = split_statements(sql);
-    let Some((last, lead)) = stmts.split_last() else { return false };
-    if !lead.iter().all(|s| is_set_variable(s)) {
-        return false;
+    #[test]
+    fn options() {
+        let o = LockedOptions::parse(Some(
+            r#"{"max_rows":5,"timeout_ms":100,"load":["spatial"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(o.max_rows, 5);
+        assert_eq!(o.timeout, Duration::from_millis(100));
+        assert_eq!(o.load, vec!["spatial".to_string()]);
+        assert!(LockedOptions::parse(Some(r#"{"nope":1}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"load":["x; DROP"]}"#)).is_err());
+        assert!(LockedOptions::parse(None).is_ok());
     }
-    is_set_variable(last) || allowed.contains(last.trim())
-}
 
-/// A single `SET VARIABLE <name> = <literal>` — value must be a literal (string,
-/// number, bool/null, or a bracketed list), never a subquery.
-fn is_set_variable(s: &str) -> bool {
-    let s = s.trim();
-    let up = s.to_ascii_uppercase();
-    let Some(rest) = up.strip_prefix("SET VARIABLE ") else { return false };
-    let Some(eq) = rest.find('=') else { return false };
-    let name = rest[..eq].trim();
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return false;
-    }
-    let val = s[s.find('=').unwrap() + 1..].trim();
-    matches!(val.chars().next(), Some('\'') | Some('[') | Some('-') | Some('0'..='9'))
-        || val == "TRUE"
-        || val == "FALSE"
-        || val == "NULL"
-}
-
-/// Split on `;` that are outside string literals (`'…''…'`) and bracket lists.
-fn split_statements(sql: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_str = false;
-    let mut depth = 0i32;
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' if in_str => {
-                if chars.peek() == Some(&'\'') {
-                    cur.push(c);
-                    cur.push(chars.next().unwrap());
-                } else {
-                    in_str = false;
-                    cur.push(c);
-                }
-            }
-            '\'' => {
-                in_str = true;
-                cur.push(c);
-            }
-            '[' if !in_str => {
-                depth += 1;
-                cur.push(c);
-            }
-            ']' if !in_str => {
-                depth -= 1;
-                cur.push(c);
-            }
-            ';' if !in_str && depth == 0 => {
-                if !cur.trim().is_empty() {
-                    out.push(cur.trim().to_string());
-                }
-                cur.clear();
-            }
-            _ => cur.push(c),
+    #[test]
+    fn snapshot_dir_is_private_and_removed() {
+        let d = SnapshotDir::create().unwrap();
+        let p = d.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
+        drop(d);
+        assert!(!p.exists());
     }
-    if !cur.trim().is_empty() {
-        out.push(cur.trim().to_string());
-    }
-    out
-}
-
-fn ct(v: &str) -> Header {
-    Header::from_bytes(&b"Content-Type"[..], v.as_bytes()).unwrap()
-}
-
-fn ctype(path: &str) -> Header {
-    ct(match path.rsplit('.').next() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript",
-        Some("wasm") => "application/wasm",
-        Some("css") => "text/css",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    })
 }

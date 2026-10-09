@@ -31,7 +31,7 @@ impl DataProvider for Mock {
             ]);
         }
         // heading: one string
-        if sql.contains("::") == false && sql.matches("AS c").count() == 1 && sql.contains("'") {
+        if !sql.contains("::") && sql.matches("AS c").count() == 1 && sql.contains("'") {
             return Ok(vec![("c0".into(), s(&["Section"]))]);
         }
         // default: a bar-shaped result (x strings, y numbers, title)

@@ -7,8 +7,9 @@
 //! The SQL parsing (`::ROLE` casts, comments, statement splitting) lives in
 //! `anofox_visualization::sql`, shared with the wasm browser build.
 
+use anofox_visualization::format::escape_xml;
 use anofox_visualization::lint::{self, Severity};
-use anofox_visualization::{render, sql, Role};
+use anofox_visualization::{error_pre, render, sql, Role};
 use std::process::Command;
 
 fn main() {
@@ -17,6 +18,8 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
+        // The DOCS.md role table (generated from the registry).
+        Some("--roles-md") => print!("{}", anofox_visualization::roles::markdown_table()),
         None | Some("--help") | Some("-h") => {
             eprintln!(
                 "usage:\n  \
@@ -52,23 +55,22 @@ fn cmd_render(args: &[String]) {
             continue;
         }
         // Inputs + layout directives are interactive — the browser builder /
-        // `serve` handle them; the static CLI output skips them.
-        if p.roles.iter().any(|(_, r)| {
-            matches!(
-                r,
-                Role::Input(_)
-                    | Role::Columns
-                    | Role::GroupStart
-                    | Role::GroupEnd
-                    | Role::Span
-                    | Role::Tab
-            )
-        }) {
+        // `serve` handle them; the static CLI output skips them (role registry).
+        if anofox_visualization::roles::is_directive_panel(&p.roles) {
             continue;
         }
         let json = run(&db, &p.sql, true);
-        let rows: Vec<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(json.trim()).unwrap_or_default();
+        let rows = match sql::parse_rows_json(&json) {
+            Ok(r) => r,
+            Err(e) => {
+                panels.push_str(&format!(
+                    "<figure class=\"panel\">{}</figure>",
+                    error_pre(&e)
+                ));
+                n += 1;
+                continue;
+            }
+        };
         // A label-only panel is a spanning section heading, not a card.
         if p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label) {
             let text = rows
@@ -76,15 +78,11 @@ fn cmd_render(args: &[String]) {
                 .and_then(|r| r.values().next())
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let esc = text
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            panels.push_str(&format!("<h2 class=\"section\">{esc}</h2>"));
+            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(text)));
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &p.roles);
-        let svg = render(&cols, 460, 300).unwrap_or_else(|e| format!("<pre>error: {e}</pre>"));
+        let svg = render(&cols, 460, 300).unwrap_or_else(|e| error_pre(&format!("error: {e}")));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }
@@ -244,7 +242,7 @@ fn run_query(
     if s.is_empty() {
         return Ok(Vec::new());
     }
-    serde_json::from_str(s).map_err(|e| format!("parse duckdb json: {e}"))
+    sql::parse_rows_json(s).map_err(|e| format!("parse duckdb json: {e}"))
 }
 
 fn run(db: &str, sql: &str, json: bool) -> String {
@@ -274,9 +272,10 @@ fn page(path: &str, n: usize, panels: &str) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <title>anofox-visualization dashboard</title><style>{STYLE}</style></head>\
-<body><h1>anofox-visualization dashboard</h1><div class=\"src\">rendered from <code>{path}</code> · {n} panels</div>\
+<body><h1>anofox-visualization dashboard</h1><div class=\"src\">rendered from <code>{}</code> · {n} panels</div>\
 <div class=\"grid\">{panels}</div><div id=\"dp-tip\" class=\"dp-tip\"></div>\
-<script>{SCRIPT}</script></body></html>"
+<script>{SCRIPT}</script></body></html>",
+        escape_xml(path)
     )
 }
 

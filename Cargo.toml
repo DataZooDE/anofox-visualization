@@ -1,6 +1,21 @@
+# One workspace, one Cargo.lock (committed; CI builds with --locked). The
+# extension crates share the core's version via `version.workspace = true`, so
+# this is the single version source of truth (CalVer YYYY.M.D) — see BUILD.md.
+[workspace]
+members = [".", "duckext", "crates/anofox-viz-ffi"]
+# `cargo build`/`cargo test` at the root keep meaning "the core crate"; the
+# extension crates are built explicitly (-p …), duckext needs libclang (bindgen).
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "2026.9.26"
+edition = "2021"
+license = "BUSL-1.1"
+
 [package]
 name = "anofox-visualization"
-version = "2026.9.26"
+version.workspace = true
 edition = "2021"
 description = "SQL-defined dashboards: column-role annotations rendered to SVG by ggplot-rs. Core is dependency-light and wasm-compatible; DuckDB extension packaging on top."
 license = "BUSL-1.1"
@@ -11,12 +26,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The rendering engine. No polars — keep the core small and wasm-compatible.
-# Pinned to a git rev because it uses ggplot-rs APIs newer than crates.io v0.12.0
-# (legend_position, CoordPolar::inner_radius, geom hover…). Makes the build
-# self-contained (no ggplot-rs sibling checkout needed). Bump the rev to update;
-# for local ggplot-rs work, `[patch]` it to a path. See duckext/DISTRIBUTING.md.
-ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37a5b6405328fe14e82b7c7fe845ce80901", default-features = false, features = ["sf"] }
-serde_json = "1"
+# From crates.io (0.16 = the first release with every API used here: escaped
+# host attributes, data-domain/series/value, fragments, candlestick/radar/
+# gauge/calendar). For local ggplot-rs work, `[patch.crates-io]` it to a path.
+ggplot-rs = { version = "0.16", default-features = false, features = ["sf"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
 # against a live DuckDB, incl. from the extension later.
@@ -27,10 +41,14 @@ open = { version = "5", optional = true }
 [features]
 default = []
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
-wasm = ["dep:wasm-bindgen", "ggplot-rs/wasm"]
+wasm = ["dep:wasm-bindgen"]
 # `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.
 serve = ["dep:tiny_http", "dep:include_dir", "dep:open"]
 
 [[bin]]
 name = "serve"
 required-features = ["serve"]
+
+[dev-dependencies]
+# Tests parse every rendered SVG as XML (well-formedness + XSS checks).
+roxmltree = "0.21"

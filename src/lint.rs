@@ -1,9 +1,9 @@
 //! Lint an annotated dashboard script — the feedback an author (human or AI)
 //! needs to self-correct.
 //!
-//! Dashboards fail *silently*: a panel that starts with `WITH` loses its
-//! `::ROLE` casts and is quietly treated as a setup statement (no panel, no
-//! error); a filter that returns no rows draws a blank card. The linter runs
+//! Dashboards fail *silently*: role casts inside a `CREATE … AS SELECT` or a
+//! subquery are ignored and the statement is quietly treated as setup (no
+//! panel, no error); a filter that returns no rows draws a blank card. The linter runs
 //! each statement and reports these, so a generate → validate → repair loop can
 //! fix them instead of shipping a broken dashboard.
 //!
@@ -11,7 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
-use crate::{render, sql, InputKind, Kind, Role};
+use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,9 @@ pub struct Diagnostic {
     /// 1-based statement index in the script.
     pub stmt: usize,
     /// Stable machine code. Correctness: `sql-error` | `silent-setup` |
-    /// `render-error` | `empty-panel` | `unknown-cast`. Design advisories
+    /// `render-error` | `render-warning` (the plotting engine dropped data,
+    /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
+    /// `unknown-cast`. Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -123,10 +125,10 @@ where
                     stmt,
                     code: "silent-setup",
                     message: "this looks like a chart panel but its ::ROLE casts weren't \
-                              recognised, so it renders nothing. A panel must NOT start with \
-                              WITH (the detector keys off the first SELECT) — move the CTE \
-                              into a FROM (SELECT …) subquery, or put the ::ROLE casts on the \
-                              outer SELECT list."
+                              recognised, so it renders nothing. Role casts are read only from \
+                              the main (outermost) SELECT list of a query statement — put them \
+                              on the outer SELECT, not inside a subquery or CTE body. (A \
+                              leading WITH is fine.)"
                         .into(),
                     sql: short.clone(),
                 });
@@ -152,7 +154,7 @@ where
         if let Some(kind) = input_kind(&p.roles) {
             match run_query(&format!("{prelude}{};", p.sql)) {
                 Ok(rows) => {
-                    for setv in input_defaults(kind, &rows) {
+                    for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
                     }
@@ -197,7 +199,7 @@ where
         }
 
         // Layout directives don't render a chart — nothing to check.
-        if p.roles.iter().any(|(_, r)| is_non_render(r)) {
+        if roles::is_directive_panel(&p.roles) {
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -226,14 +228,23 @@ where
         // Let the render engine validate the role/column combination (this
         // catches missing required aesthetics, e.g. a bar chart with no x).
         let cols = sql::columns_from_rows(&rows, &p.roles);
-        if let Err(e) = render(&cols, 460, 300) {
-            diags.push(Diagnostic {
+        match render_with_warnings(&cols, 460, 300, &RenderOptions::default()) {
+            Err(e) => diags.push(Diagnostic {
                 severity: Severity::Error,
                 stmt,
                 code: "render-error",
-                message: one_line(&e),
+                message: one_line(&e.to_string()),
                 sql: short.clone(),
-            });
+            }),
+            // The plotting engine's build warnings: the panel renders, but some
+            // data was dropped (non-finite positions, a layer with no data).
+            Ok(r) => diags.extend(r.warnings.iter().map(|w| Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "render-warning",
+                message: one_line(w),
+                sql: short.clone(),
+            })),
         }
 
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
@@ -386,30 +397,30 @@ fn looks_like_query(sql: &str) -> bool {
     u.starts_with("SELECT") || u.starts_with("WITH") || u.starts_with('(') || u.starts_with("FROM ")
 }
 
+/// Every `::TOKEN` cast in a statement (outside literals and comments), in order.
+fn cast_tokens(sql: &str) -> Vec<String> {
+    use sql::lex::{tokenize, TokKind};
+    let toks: Vec<_> = tokenize(sql)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    toks.windows(3)
+        .filter(|w| {
+            w[0].is_punct(sql, ':')
+                && w[1].is_punct(sql, ':')
+                && w[0].end == w[1].start
+                && w[2].kind == TokKind::Word
+        })
+        .map(|w| w[2].text(sql).to_ascii_uppercase())
+        .collect()
+}
+
 /// Does the statement carry a `::ROLE` cast (a recognised role token, not a SQL
 /// type cast like `::INT`)? Distinguishes a lost-roles panel from real setup.
 fn has_role_cast(sql: &str) -> bool {
-    let b = sql.as_bytes();
-    let mut i = 0;
-    while i + 1 < b.len() {
-        if b[i] == b':' && b[i + 1] == b':' {
-            let mut j = i + 2;
-            while j < b.len() && b[j] == b' ' {
-                j += 1;
-            }
-            let start = j;
-            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
-                j += 1;
-            }
-            if j > start && crate::parse_role(&sql[start..j].to_ascii_uppercase()).is_some() {
-                return true;
-            }
-            i = j.max(i + 2);
-        } else {
-            i += 1;
-        }
-    }
-    false
+    cast_tokens(sql)
+        .iter()
+        .any(|t| crate::parse_role(t).is_some() && !roles::is_sql_type_token(t))
 }
 
 /// DuckDB scalar types that are *not* role tokens — so a `::TYPE` cast to one of
@@ -463,50 +474,16 @@ const KNOWN_TYPES: &[&str] = &[
     "NULL",
 ];
 
-/// Trailing `::TOKEN` casts that are neither a recognised role nor a known SQL
-/// type — i.e. probable typo'd roles. Skips single-quoted string literals.
+/// `::TOKEN` casts that are neither a recognised role nor a known SQL type —
+/// i.e. probable typo'd roles. Literals and comments are skipped.
 fn unknown_casts(sql: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let b = sql.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'\'' => {
-                // skip a single-quoted string (with '' escape)
-                i += 1;
-                while i < b.len() {
-                    if b[i] == b'\'' {
-                        if i + 1 < b.len() && b[i + 1] == b'\'' {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            b':' if i + 1 < b.len() && b[i + 1] == b':' => {
-                let mut j = i + 2;
-                while j < b.len() && b[j] == b' ' {
-                    j += 1;
-                }
-                let start = j;
-                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
-                    j += 1;
-                }
-                if j > start {
-                    let up = sql[start..j].to_ascii_uppercase();
-                    if crate::parse_role(&up).is_none()
-                        && !KNOWN_TYPES.contains(&up.as_str())
-                        && !out.contains(&up)
-                    {
-                        out.push(up);
-                    }
-                }
-                i = j.max(i + 2);
-            }
-            _ => i += 1,
+    for up in cast_tokens(sql) {
+        if crate::parse_role(&up).is_none()
+            && !KNOWN_TYPES.contains(&up.as_str())
+            && !out.contains(&up)
+        {
+            out.push(up);
         }
     }
     out
@@ -519,36 +496,57 @@ fn input_kind(roles: &[(usize, Role)]) -> Option<InputKind> {
     })
 }
 
+/// Output position of a panel's input column.
+fn input_index(roles: &[(usize, Role)]) -> usize {
+    roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Input(_)))
+        .map(|(i, _)| *i)
+        .unwrap_or(0)
+}
+
+/// Quote a DuckDB identifier (`"a""b"`).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// `SET VARIABLE` statement(s) that give an input its default value — the first
 /// option for a single input, all options for a multiselect, both ends for a
 /// date range — so downstream `getvariable()` panels have something to read.
-fn input_defaults(kind: InputKind, rows: &[Map<String, Value>]) -> Vec<String> {
+/// `idx` is the input column's output position (rows keep SELECT column order,
+/// via serde_json's `preserve_order`); the variable name is quoted.
+fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> Vec<String> {
     let Some(first) = rows.first() else {
         return Vec::new();
     };
     let keys: Vec<&String> = first.keys().collect();
-    if keys.is_empty() {
+    let Some(k) = keys.get(idx).or(keys.first()).copied() else {
         return Vec::new();
-    }
+    };
     match kind {
         InputKind::DateRange => keys
             .iter()
+            .skip(idx.min(keys.len().saturating_sub(1)))
             .take(2)
             .filter_map(|k| {
                 first
                     .get(*k)
-                    .map(|v| format!("SET VARIABLE {k} = {}", lit(v)))
+                    .map(|v| format!("SET VARIABLE {} = {}", quote_ident(k), lit(v)))
             })
             .collect(),
         InputKind::Multiselect => {
-            let k = keys[0];
             let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
-            vec![format!("SET VARIABLE {k} = [{}]", vals.join(", "))]
+            vec![format!(
+                "SET VARIABLE {} = [{}]",
+                quote_ident(k),
+                vals.join(", ")
+            )]
         }
-        _ => {
-            let k = keys[0];
-            vec![format!("SET VARIABLE {k} = {}", lit(&first[k]))]
-        }
+        _ => vec![format!(
+            "SET VARIABLE {} = {}",
+            quote_ident(k),
+            first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
+        )],
     }
 }
 
@@ -565,21 +563,6 @@ fn lit(v: &Value) -> String {
         }
         _ => "NULL".into(),
     }
-}
-
-fn is_non_render(r: &Role) -> bool {
-    matches!(
-        r,
-        Role::Input(_)
-            | Role::Columns
-            | Role::GroupStart
-            | Role::GroupEnd
-            | Role::Span
-            | Role::Height
-            | Role::Tab
-            | Role::SubTab
-            | Role::Placeholder
-    )
 }
 
 fn one_line(s: &str) -> String {
@@ -622,6 +605,7 @@ fn is_big_chart(k: Kind) -> bool {
             | Kind::Area
             | Kind::AreaStacked
             | Kind::Point
+            | Kind::Bubble
             | Kind::Pie
             | Kind::Donut
             | Kind::Histogram
@@ -872,6 +856,25 @@ mod design_tests {
     }
 
     #[test]
+    fn engine_warnings_become_render_warnings() {
+        // A density per category where every group has one value: the stat
+        // can't estimate anything, so ggplot-rs skips the layer with a warning.
+        let data = rows(2, |i| {
+            let g = ["a", "b"][i];
+            json!({ "c0": g, "c1": 1.0 })
+        });
+        let d = check_opts(
+            "SELECT g::CATEGORY, v::DENSITY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let w: Vec<_> = d.iter().filter(|x| x.code == "render-warning").collect();
+        assert_eq!(w.len(), 1, "{d:?}");
+        assert_eq!(w[0].severity, Severity::Warning);
+        assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
     fn design_pass_can_be_disabled() {
         let data = rows(
             3,
@@ -880,5 +883,50 @@ mod design_tests {
         let flat = "SELECT x::XAXIS, y::BARCHART FROM t;\n".repeat(9);
         let d = check_opts(&flat, |_q| Ok(data.clone()), LintOptions { design: false });
         assert!(!d.iter().any(|x| x.code.starts_with("design/")), "{d:?}");
+    }
+
+    #[test]
+    fn input_priming_uses_the_input_column_and_quotes_it() {
+        // Output order: the input column `zone` first, then the HINT (c1). A
+        // sorted map would pick "c1" — the wrong variable.
+        let opts = rows(2, |i| {
+            let z = ["EU", "US"][i];
+            json!({ "zone": z, "c1": 3 })
+        });
+        let mut seen = Vec::new();
+        let script = "SELECT DISTINCT zone::DROPDOWN, count(*)::HINT FROM t GROUP BY 1;\n\
+                      SELECT x::XAXIS, y::BARCHART, 'T'::TITLE FROM t WHERE z = getvariable('zone');";
+        check(script, |q| {
+            seen.push(q.to_string());
+            Ok(opts.clone())
+        });
+        let last = seen.last().unwrap();
+        assert!(
+            last.contains("SET VARIABLE \"zone\" = 'EU';"),
+            "variable not primed: {last}"
+        );
+        // A weird column name is quoted, not injected.
+        let weird = rows(1, |_| json!({ "a b\"; DROP TABLE t; --": "v" }));
+        let d = input_defaults(InputKind::Dropdown, 0, &weird);
+        assert_eq!(
+            d,
+            vec!["SET VARIABLE \"a b\"\"; DROP TABLE t; --\" = 'v'".to_string()]
+        );
+        // Multiselect: all options as a list.
+        let d = input_defaults(InputKind::Multiselect, 0, &opts);
+        assert_eq!(d, vec!["SET VARIABLE \"zone\" = ['EU', 'US']".to_string()]);
+    }
+
+    #[test]
+    fn cte_panels_lint_clean() {
+        let data = rows(
+            3,
+            |i| json!({ "c0": format!("c{i}"), "c1": (3 - i) as f64 }),
+        );
+        let d = check(
+            "WITH s AS (SELECT 1) SELECT x::XAXIS, y::BARCHART, 'T'::TITLE FROM s;",
+            |_q| Ok(data.clone()),
+        );
+        assert!(!has(&d, "silent-setup"), "{d:?}");
     }
 }

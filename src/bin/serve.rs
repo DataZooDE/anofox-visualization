@@ -1,170 +1,305 @@
 //! `anofox-visualization serve` — two modes:
 //!
 //! **Authoring** (default): `serve [db]` launches the embedded browser builder
-//! wired to a live DuckDB via a `/query` endpoint that runs client-supplied SQL.
-//! Convenient for the author on localhost; the client controls the SQL, so it is
-//! NOT safe to expose to untrusted consumers.
+//! wired to a DuckDB file via a `/query` endpoint that runs client-supplied SQL
+//! (through the `duckdb` CLI). Because it runs arbitrary SQL it is locked to
+//! the author: loopback bind only, the `Host` header must be loopback (DNS
+//! rebinding), cross-origin requests are refused (CSRF), and every request needs
+//! the random per-run token from the printed URL (`?token=` → `HttpOnly;
+//! SameSite=Strict` cookie, or the `X-Anofox-Token` header). Bodies containing
+//! CLI dot-commands (`.shell`, `.read`, …) are refused before reaching the CLI.
 //!
 //! **Serve** (`--dashboards <dir>`): the secure, consumer-facing mode. Dashboards
 //! (annotated `.sql` files) live on the server; the client only selects a
 //! dashboard by id and whitelisted parameter values — it never sends SQL. Queries
-//! run against a **read-only** DuckDB. See `docs/secure-serving.md`.
+//! run `duckdb -readonly` with external access disabled and the configuration
+//! locked after the server-declared `-- @load`s, under a row cap and a timeout.
+//! See `docs/secure-serving.md`.
 
+use anofox_visualization::host::serving::{
+    self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
+};
 use anofox_visualization::{render, sql, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-use std::process::Command;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 // Embedded at compile time (authoring mode) — run `wasm-pack build … --out-dir
 // web/pkg` first.
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/web");
 
-fn main() {
-    let mut port = 8080u16;
-    let mut open_browser = true;
-    let mut db = String::new();
-    let mut dashboards_dir: Option<String> = None;
-    let mut init: Option<String> = None;
-    let mut bind = "127.0.0.1".to_string();
-    let mut cache_secs = 0u64;
+/// Max authoring `/query` body.
+const MAX_BODY: usize = 4 << 20;
+
+struct Opts {
+    port: u16,
+    open_browser: bool,
+    db: String,
+    dashboards_dir: Option<String>,
+    init: Option<String>,
+    bind: String,
+    cache_secs: u64,
+    max_rows: usize,
+    timeout: Duration,
+    threads: usize,
+}
+
+fn usage(msg: &str) -> ! {
+    eprintln!(
+        "error: {msg}\n\nusage: serve [--db] <db> [--port N] [--no-open]                (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N]"
+    );
+    std::process::exit(2)
+}
+
+fn parse_args() -> Opts {
+    let mut o = Opts {
+        port: 8080,
+        open_browser: true,
+        db: String::new(),
+        dashboards_dir: None,
+        init: None,
+        bind: "127.0.0.1".into(),
+        cache_secs: 0,
+        max_rows: 100_000,
+        timeout: Duration::from_secs(30),
+        threads: 4,
+    };
     let mut args = std::env::args().skip(1);
+    let num = |v: Option<String>, what: &str| -> u64 {
+        v.and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| usage(&format!("{what} needs a number")))
+    };
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--port" | "-p" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
-            "--no-open" => open_browser = false,
-            "--dashboards" => dashboards_dir = args.next(),
-            "--init" => init = args.next(),
-            "--bind" => bind = args.next().unwrap_or(bind),
-            "--cache" => cache_secs = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "--db" => db = args.next().unwrap_or(db),
-            _ => db = a,
+            "--port" | "-p" => {
+                let p = num(args.next(), "--port");
+                o.port = u16::try_from(p)
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .unwrap_or_else(|| usage("--port must be 1..=65535"));
+            }
+            "--no-open" => o.open_browser = false,
+            "--dashboards" => o.dashboards_dir = args.next(),
+            "--init" => o.init = args.next(),
+            "--bind" => {
+                o.bind = args
+                    .next()
+                    .unwrap_or_else(|| usage("--bind needs an address"))
+            }
+            "--cache" => o.cache_secs = num(args.next(), "--cache"),
+            "--max-rows" => o.max_rows = num(args.next(), "--max-rows").max(1) as usize,
+            "--timeout" => o.timeout = Duration::from_secs(num(args.next(), "--timeout").max(1)),
+            "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
+            "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
+            s if s.starts_with('-') => usage(&format!("unknown option {s}")),
+            _ => o.db = a,
         }
     }
+    o
+}
 
-    match dashboards_dir {
-        Some(dir) => serve_dashboards(&dir, db, init, &bind, port, Duration::from_secs(cache_secs)),
-        None => authoring_mode(db, &bind, port, open_browser),
+fn main() {
+    let o = parse_args();
+    match o.dashboards_dir.clone() {
+        Some(dir) => serve_dashboards(&dir, &o),
+        None => authoring_mode(&o),
     }
 }
 
-// ---------- authoring mode (client sends SQL — localhost/dev only) ----------
+// ---------- shared helpers ----------
 
-fn authoring_mode(mut db: String, bind: &str, port: u16, open_browser: bool) {
-    if db.is_empty() {
-        db = std::env::temp_dir()
-            .join("anofox_serve.db")
-            .to_string_lossy()
-            .to_string();
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header")
+}
+
+fn req_header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str())
+}
+
+fn meta(req: &Request) -> RequestMeta<'_> {
+    RequestMeta {
+        host: req_header(req, "Host"),
+        origin: req_header(req, "Origin"),
+        cookie: req_header(req, "Cookie"),
+        token_header: req_header(req, sv::TOKEN_HEADER),
     }
-    let addr = format!("{bind}:{port}");
-    let server = Server::http(&addr).unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    let url = format!("http://{addr}/");
-    println!("anofox-visualization serving {url} (authoring — client SQL; localhost only)\n  database: {db}\n  (Ctrl-C to stop)");
-    if open_browser {
+}
+
+fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    let resp = Response::from_data(body.into())
+        .with_status_code(status)
+        .with_header(header("Content-Type", ctype))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"));
+    let _ = req.respond(resp);
+}
+
+fn text(req: Request, status: u16, msg: &str) {
+    respond(
+        req,
+        status,
+        "text/plain; charset=utf-8",
+        msg.as_bytes().to_vec(),
+    );
+}
+
+/// Run `n` worker threads pulling requests off one server.
+fn run_workers(server: Server, n: usize, handler: impl Fn(Request) + Send + Sync + 'static) {
+    let server = Arc::new(server);
+    let handler = Arc::new(handler);
+    let workers: Vec<_> = (0..n.max(1))
+        .map(|_| {
+            let (server, handler) = (server.clone(), handler.clone());
+            std::thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    handler(req);
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        let _ = w.join();
+    }
+}
+
+/// A private (0700), randomly named directory under the temp dir.
+fn private_dir(prefix: &str) -> PathBuf {
+    let base = std::env::temp_dir();
+    for _ in 0..8 {
+        let p = base.join(format!("{prefix}-{}", sv::random_token()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        if b.create(&p).is_ok() {
+            return p;
+        }
+    }
+    eprintln!("error: could not create a private temp directory");
+    std::process::exit(1)
+}
+
+// ---------- authoring mode (client sends SQL — the author only) ----------
+
+fn authoring_mode(o: &Opts) {
+    // Never expose a client-SQL endpoint beyond this machine.
+    if !sv::is_loopback_bind(&o.bind) {
+        eprintln!(
+            "error: authoring mode runs arbitrary SQL and only binds to loopback (127.0.0.1 / ::1); \
+             use `--dashboards <dir>` to serve consumers"
+        );
+        std::process::exit(2);
+    }
+    let db = if o.db.is_empty() {
+        private_dir("anofox-serve")
+            .join("authoring.duckdb")
+            .to_string_lossy()
+            .to_string()
+    } else {
+        o.db.clone()
+    };
+    let addr = format!("{}:{}", o.bind, o.port);
+    let server = Server::http(&addr).unwrap_or_else(|e| {
+        eprintln!("error: bind {addr}: {e}");
+        std::process::exit(1)
+    });
+    let guard = AuthoringGuard::new(o.port);
+    let host = if o.bind.contains(':') {
+        format!("[{}]", o.bind)
+    } else {
+        o.bind.clone()
+    };
+    let url = guard.login_url(&host);
+    println!(
+        "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}\n  (Ctrl-C to stop)"
+    );
+    if o.open_browser {
         let _ = open::that(&url);
     }
-    for req in server.incoming_requests() {
-        if req.method() == &Method::Post && req.url().starts_with("/query") {
-            handle_query(req, &db);
-        } else {
-            handle_static(req);
-        }
-    }
+    run_workers(server, 1, move |req| handle_authoring(&guard, &db, req));
 }
 
-/// POST /query with a SQL body → JSON rows. AUTHORING ONLY — runs arbitrary SQL.
-fn handle_query(mut req: tiny_http::Request, db: &str) {
-    let mut sql = String::new();
-    let _ = std::io::Read::read_to_string(req.as_reader(), &mut sql);
-    match run_duckdb(db, &["-json"], &sql) {
-        Ok(body) => {
-            let body = if body.trim().is_empty() { "[]".into() } else { body.trim().to_string() };
-            let _ = req.respond(Response::from_string(body).with_header(json_header()));
-        }
-        Err(msg) => {
-            let _ = req.respond(Response::from_string(msg).with_status_code(400));
-        }
-    }
-}
-
-fn handle_static(req: tiny_http::Request) {
-    let raw = req.url().trim_start_matches('/').to_string();
-    let path = if raw.is_empty() { "index.html" } else { raw.as_str() };
-    match WEB.get_file(path) {
-        Some(f) => {
-            let resp = Response::from_data(f.contents()).with_header(content_type(path));
+fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let m = meta(&req);
+    if guard.check_origin(&m).is_ok() {
+        if let Some((location, cookie)) = guard.bootstrap(&url) {
+            let resp = Response::empty(303)
+                .with_header(header("Location", &location))
+                .with_header(header("Set-Cookie", &cookie))
+                .with_header(header("Cache-Control", "no-store"));
             let _ = req.respond(resp);
+            return;
         }
-        None => {
-            let _ = req.respond(Response::from_string("not found").with_status_code(404));
+    }
+    if let Err(d) = guard.check(&m) {
+        return text(req, d.status(), d.message());
+    }
+    if path == "/query" {
+        if req.method() != &Method::Post {
+            return text(req, 405, "POST only");
         }
+        let mut buf = Vec::new();
+        let _ = req
+            .as_reader()
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut buf);
+        if buf.len() > MAX_BODY {
+            return text(req, 413, "request body too large");
+        }
+        let Ok(sql) = String::from_utf8(buf) else {
+            return text(req, 400, "body is not UTF-8");
+        };
+        // The CLI treats a line starting with `.` as a meta command (`.shell`,
+        // `.read`, `.output` …). SQL never needs one: refuse before the CLI
+        // ever sees the text.
+        if sv::has_dot_command(&sql) {
+            return text(req, 400, "CLI dot-commands are not allowed");
+        }
+        return match run_duckdb(db, &["-json"], &sql, Duration::ZERO) {
+            Ok(body) => {
+                let body = if body.trim().is_empty() {
+                    "[]".into()
+                } else {
+                    body.trim().to_string()
+                };
+                respond(req, 200, "application/json", body.into_bytes())
+            }
+            Err(msg) => text(req, 400, &msg),
+        };
+    }
+    if req.method() != &Method::Get {
+        return text(req, 405, "method not allowed");
+    }
+    let asset = path.trim_start_matches('/');
+    let asset = if asset.is_empty() {
+        "index.html"
+    } else {
+        asset
+    };
+    match WEB.get_file(asset) {
+        Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
+        None => text(req, 404, "not found"),
     }
 }
 
 // ---------- serve mode (server owns the SQL; consumers pick id + params) ----------
 
-struct Param {
-    name: String,
-    allowed: Vec<String>,
-    default: String,
-}
 struct Dashboard {
     id: String,
-    title: String,
+    meta: sv::DashboardMeta,
     script: String,
-    params: Vec<Param>,
-    refresh: u32,
-    /// DuckDB extensions to `LOAD` per read-only session (e.g. `anofox_forecast`),
-    /// so a panel can call `ts_forecast_by(...)` live. Server-declared, not client.
-    loads: Vec<String>,
-}
-
-/// Parse the header-comment metadata of a dashboard `.sql`:
-/// `-- @title …`, `-- @refresh <seconds>`, `-- @param name [a, b, c] = a`,
-/// `-- @load <extension>`.
-fn parse_dashboard(id: &str, script: &str) -> Dashboard {
-    let mut title = id.to_string();
-    let mut params = Vec::new();
-    let mut refresh = 0u32;
-    let mut loads = Vec::new();
-    for line in script.lines() {
-        let l = line.trim();
-        if let Some(r) = l.strip_prefix("-- @title ") {
-            title = r.trim().to_string();
-        } else if let Some(r) = l.strip_prefix("-- @refresh ") {
-            refresh = r.trim().parse().unwrap_or(0);
-        } else if let Some(r) = l.strip_prefix("-- @load ") {
-            let ext = r.trim();
-            // Server-authored, but keep it an identifier so a stray file can't
-            // smuggle SQL into the LOAD.
-            if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                loads.push(ext.to_string());
-            }
-        } else if let Some(r) = l.strip_prefix("-- @param ") {
-            if let (Some(o), Some(c)) = (r.find('['), r.find(']')) {
-                let name = r[..o].trim().to_string();
-                let allowed: Vec<String> = r[o + 1..c]
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let default = r[c + 1..]
-                    .split('=')
-                    .nth(1)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| allowed.first().cloned())
-                    .unwrap_or_default();
-                if !name.is_empty() && !allowed.is_empty() {
-                    params.push(Param { name, allowed, default });
-                }
-            }
-        }
-    }
-    Dashboard { id: id.to_string(), title, script: script.to_string(), params, refresh, loads }
 }
 
 fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
@@ -173,9 +308,20 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
         for e in entries.flatten() {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) == Some("sql") {
-                let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let id = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !sv::valid_dashboard_id(&id) {
+                    continue;
+                }
                 if let Ok(script) = std::fs::read_to_string(&p) {
-                    out.push(parse_dashboard(&id, &script));
+                    out.push(Dashboard {
+                        meta: sv::parse_dashboard_meta(&id, &script),
+                        id,
+                        script,
+                    });
                 }
             }
         }
@@ -184,90 +330,125 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
     out
 }
 
-fn serve_dashboards(
-    dir: &str,
-    mut db: String,
-    init: Option<String>,
-    bind: &str,
-    port: u16,
+struct ServeState {
+    db: String,
+    dashboards: Vec<Dashboard>,
     cache_ttl: Duration,
-) {
-    if db.is_empty() {
-        db = std::env::temp_dir()
-            .join("anofox_dashboards.db")
+    cache: Mutex<HashMap<String, (Instant, String)>>,
+    max_rows: usize,
+    timeout: Duration,
+}
+
+fn serve_dashboards(dir: &str, o: &Opts) {
+    let db = if o.db.is_empty() {
+        private_dir("anofox-dashboards")
+            .join("dashboards.duckdb")
             .to_string_lossy()
-            .to_string();
-    }
+            .to_string()
+    } else {
+        o.db.clone()
+    };
     // One-time read-write setup (attach sources, create views). After this the
     // server only ever opens the database read-only.
-    if let Some(init) = &init {
-        let script = std::fs::read_to_string(init).unwrap_or_else(|e| panic!("read {init}: {e}"));
-        run_duckdb(&db, &[], &script).unwrap_or_else(|e| panic!("init failed: {e}"));
+    if let Some(init) = &o.init {
+        let script = std::fs::read_to_string(init).unwrap_or_else(|e| {
+            eprintln!("error: read {init}: {e}");
+            std::process::exit(1)
+        });
+        if sv::has_dot_command(&script) {
+            eprintln!("error: {init}: CLI dot-commands are not allowed in --init scripts");
+            std::process::exit(1);
+        }
+        if let Err(e) = run_duckdb(&db, &[], &script, Duration::ZERO) {
+            eprintln!("error: init failed: {e}");
+            std::process::exit(1);
+        }
         println!("  init applied: {init}");
     }
     let dashboards = load_dashboards(Path::new(dir));
-    let addr = format!("{bind}:{port}");
-    let server = Server::http(&addr).unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    let cache_note = if cache_ttl.is_zero() {
+    let addr = format!("{}:{}", o.bind, o.port);
+    let server = Server::http(&addr).unwrap_or_else(|e| {
+        eprintln!("error: bind {addr}: {e}");
+        std::process::exit(1)
+    });
+    let cache_note = if o.cache_secs == 0 {
         "off".to_string()
     } else {
-        format!("{}s", cache_ttl.as_secs())
+        format!("{}s", o.cache_secs)
     };
     println!(
         "anofox-visualization serving {} dashboard(s) at http://{addr}/ (read-only; no client SQL; cache: {cache_note})\n  database: {db}\n  dashboards: {dir}\n  (put TLS + auth in front for public use — docs/secure-serving.md)",
         dashboards.len()
     );
+    if !sv::is_loopback_bind(&o.bind) {
+        println!(
+            "  note: bound to {} — reachable from the network; put a TLS/auth proxy in front",
+            o.bind
+        );
+    }
+    let st = ServeState {
+        db,
+        dashboards,
+        cache_ttl: Duration::from_secs(o.cache_secs),
+        cache: Mutex::new(HashMap::new()),
+        max_rows: o.max_rows,
+        timeout: o.timeout,
+    };
+    run_workers(server, o.threads, move |req| handle_serve(&st, req));
+}
 
-    // Per-(dashboard + resolved params) rendered-page cache. The loop is
-    // single-threaded, so a plain map is fine. TTL doubles as the freshness knob:
-    // within it, N viewers of the same view share one render → no extra DB load.
-    let mut cache: HashMap<String, (Instant, String)> = HashMap::new();
-
-    for req in server.incoming_requests() {
-        let url = req.url().to_string();
-        let path = url.split('?').next().unwrap_or("/");
-        if path == "/" {
-            respond_html(req, &list_page(&dashboards));
-        } else if let Some(rest) = path.strip_prefix("/d/") {
-            let id = rest.trim_end_matches('/');
-            let Some(dash) = dashboards.iter().find(|d| d.id == id) else {
-                let _ = req.respond(Response::from_string("no such dashboard").with_status_code(404));
-                continue;
-            };
-            // Validate params against the whitelist (unknown/disallowed → 400).
-            let resolved = match resolve_params(dash, &parse_query(&url)) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = req.respond(Response::from_string(e).with_status_code(400));
-                    continue;
-                }
-            };
-            let key = cache_key(&dash.id, &resolved);
-            if !cache_ttl.is_zero() {
-                if let Some(html) = cache
-                    .get(&key)
-                    .filter(|(ts, _)| ts.elapsed() < cache_ttl)
-                    .map(|(_, h)| h.clone())
-                {
-                    respond_html(req, &html); // cache hit — no DB touched
-                    continue;
-                }
-            }
-            match render_dashboard_page(&db, dash, &resolved) {
-                Ok(html) => {
-                    if !cache_ttl.is_zero() {
-                        cache.insert(key, (Instant::now(), html.clone()));
-                    }
-                    respond_html(req, &html);
-                }
-                Err(e) => {
-                    let _ = req.respond(Response::from_string(e).with_status_code(400));
-                }
-            }
-        } else {
-            // No /query, no static assets, no SQL — the whole surface is id + params.
-            let _ = req.respond(Response::from_string("not found").with_status_code(404));
+fn handle_serve(st: &ServeState, req: Request) {
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or("/");
+    if req.method() != &Method::Get {
+        return text(req, 405, "method not allowed");
+    }
+    if path == "/" {
+        return respond(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            list_page(&st.dashboards).into_bytes(),
+        );
+    }
+    let Some(rest) = path.strip_prefix("/d/") else {
+        // No /query, no static assets, no SQL — the whole surface is id + params.
+        return text(req, 404, "not found");
+    };
+    let id = rest.trim_end_matches('/');
+    let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
+        return text(req, 404, "no such dashboard");
+    };
+    // Validate params against the whitelist (unknown/disallowed → 400).
+    let resolved = match resolve_params(dash, &sv::parse_query(&url)) {
+        Ok(r) => r,
+        Err(e) => return text(req, 400, &e),
+    };
+    let key = cache_key(&dash.id, &resolved);
+    if !st.cache_ttl.is_zero() {
+        let hit = st
+            .cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .filter(|(ts, _)| ts.elapsed() < st.cache_ttl)
+            .map(|(_, h)| h.clone());
+        if let Some(html) = hit {
+            return respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+            // no DB touched
         }
+    }
+    match render_dashboard_page(st, dash, &resolved) {
+        Ok(html) => {
+            if !st.cache_ttl.is_zero() {
+                st.cache
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(key, (Instant::now(), html.clone()));
+            }
+            respond(req, 200, "text/html; charset=utf-8", html.into_bytes())
+        }
+        Err(e) => text(req, 400, &e),
     }
 }
 
@@ -279,8 +460,11 @@ fn resolve_params(
     chosen: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
-    for p in &dash.params {
-        let val = chosen.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
+    for p in &dash.meta.params {
+        let val = chosen
+            .get(&p.name)
+            .cloned()
+            .unwrap_or_else(|| p.default.clone());
         if !p.allowed.contains(&val) {
             return Err(format!("parameter '{}' = '{}' is not allowed", p.name, val));
         }
@@ -294,16 +478,15 @@ fn cache_key(id: &str, resolved: &[(String, String)]) -> String {
     format!("{id}|{}", params.join("&"))
 }
 
-/// Render one dashboard to a view-only HTML page. Validates every parameter value
-/// against its declared whitelist, binds them as DuckDB variables, and runs each
-/// panel's fixed query READ-ONLY. Rejects any value not in the whitelist.
+/// Render one dashboard to a view-only HTML page: binds the (whitelisted)
+/// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
+/// external access disabled and the configuration locked after the
+/// server-declared `-- @load`s.
 fn render_dashboard_page(
-    db: &str,
+    st: &ServeState,
     dash: &Dashboard,
     resolved: &[(String, String)],
 ) -> Result<String, String> {
-    // Bind the (already whitelisted) values as DuckDB variables, and build a
-    // <select> per param.
     let value_of = |name: &str| -> String {
         resolved
             .iter()
@@ -312,14 +495,18 @@ fn render_dashboard_page(
             .unwrap_or_default()
     };
     let mut prefix = String::new();
-    for ext in &dash.loads {
-        prefix.push_str(&format!("LOAD {ext}; ")); // e.g. anofox_forecast (per session)
+    for ext in &dash.meta.loads {
+        prefix.push_str(&format!("LOAD {ext}; ")); // identifier-validated at parse time
     }
+    prefix.push_str("SET enable_external_access = false; SET lock_configuration = true; ");
     for (name, val) in resolved {
-        prefix.push_str(&format!("SET VARIABLE {} = '{}'; ", name, val.replace('\'', "''")));
+        prefix.push_str(&format!(
+            "SET VARIABLE {name} = {}; ",
+            sql_string_literal(val)
+        ));
     }
     let mut selects = String::new();
-    for p in &dash.params {
+    for p in &dash.meta.params {
         let val = value_of(&p.name);
         selects.push_str(&format!(
             "<label>{}: <select name=\"{}\" onchange=\"this.form.submit()\">",
@@ -332,7 +519,7 @@ fn render_dashboard_page(
         }
         selects.push_str("</select></label> ");
     }
-    let controls = if dash.params.is_empty() {
+    let controls = if dash.meta.params.is_empty() {
         String::new()
     } else {
         format!(
@@ -347,23 +534,23 @@ fn render_dashboard_page(
             continue; // read-only mode: setup is done once at --init, not per request
         }
         // Skip interactive/layout-only directives (params drive re-render instead).
-        if panel.roles.iter().any(|(_, r)| {
-            matches!(
-                r,
-                Role::Input(_)
-                    | Role::Columns
-                    | Role::GroupStart
-                    | Role::GroupEnd
-                    | Role::Span
-                    | Role::Tab
-                    | Role::SubTab
-            )
-        }) {
+        if anofox_visualization::roles::is_directive_panel(&panel.roles) {
             continue;
         }
-        let json = run_duckdb(db, &["-readonly", "-json"], &format!("{prefix}{}", panel.sql))?;
+        let q = format!(
+            "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
+            panel.sql.trim().trim_end_matches(';'),
+            st.max_rows + 1
+        );
+        let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
         let rows: Vec<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(json.trim()).unwrap_or_default();
+            sql::parse_rows_json(json.trim())?;
+        if rows.len() > st.max_rows {
+            return Err(format!(
+                "a panel of '{}' returned more than {} rows",
+                dash.id, st.max_rows
+            ));
+        }
         if panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label) {
             let text = rows
                 .first()
@@ -374,12 +561,16 @@ fn render_dashboard_page(
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &panel.roles);
-        let svg = render(&cols, 460, 300).unwrap_or_else(|e| format!("<pre>error: {e}</pre>"));
+        let svg = anofox_visualization::host::catch_panic(|| render(&cols, 460, 300))
+            .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
-    let meta = if dash.refresh > 0 {
-        format!("<meta http-equiv=\"refresh\" content=\"{}\">", dash.refresh)
+    let meta = if dash.meta.refresh > 0 {
+        format!(
+            "<meta http-equiv=\"refresh\" content=\"{}\">",
+            dash.meta.refresh
+        )
     } else {
         String::new()
     };
@@ -387,14 +578,20 @@ fn render_dashboard_page(
         "<!doctype html><html><head><meta charset=\"utf-8\">{meta}<title>{title}</title><style>{STYLE}</style></head>\
 <body><h1>{title}</h1>{controls}<div class=\"grid\">{panels}</div>\
 <div id=\"dp-tip\" class=\"dp-tip\"></div><script>{SCRIPT}</script></body></html>",
-        title = esc(&dash.title)
+        title = esc(&dash.meta.title)
     ))
 }
 
 fn list_page(dashboards: &[Dashboard]) -> String {
     let items: String = dashboards
         .iter()
-        .map(|d| format!("<li><a href=\"/d/{}\">{}</a></li>", esc(&d.id), esc(&d.title)))
+        .map(|d| {
+            format!(
+                "<li><a href=\"/d/{}\">{}</a></li>",
+                esc(&d.id),
+                esc(&d.meta.title)
+            )
+        })
         .collect();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Dashboards</title><style>{STYLE}</style></head>\
@@ -402,93 +599,48 @@ fn list_page(dashboards: &[Dashboard]) -> String {
     )
 }
 
-// ---------- helpers ----------
-
-/// Run the `duckdb` CLI with flags + a SQL string; stdout on success, stderr on error.
-fn run_duckdb(db: &str, flags: &[&str], sql: &str) -> Result<String, String> {
+/// Run the `duckdb` CLI with flags + a SQL string; stdout on success, stderr on
+/// error. The SQL is passed as one argv element after `-c` (no shell), and
+/// callers refuse dot-command lines first. `timeout` > 0 kills a slow run.
+fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<String, String> {
     let mut cmd = Command::new("duckdb");
-    cmd.arg(db);
-    for f in flags {
-        cmd.arg(f);
-    }
-    let out = cmd
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .map_err(|e| format!("duckdb: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).to_string())
-    }
-}
-
-/// Parse `?a=b&c=d` into a map (percent-decoded). Only used to look up declared
-/// param names; unknown keys are ignored and never reach SQL.
-fn parse_query(url: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    if let Some(q) = url.split_once('?').map(|(_, q)| q) {
-        for pair in q.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                out.insert(url_decode(k), url_decode(v));
+    cmd.arg(db).args(flags).arg("-c").arg(sql);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("duckdb: {e}"))?;
+    let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+    let t_out = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out.read_to_end(&mut b);
+        b
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err.read_to_end(&mut b);
+        b
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("duckdb: {e}"))? {
+            Some(s) => break s,
+            None if !timeout.is_zero() && started.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("query timed out after {}s", timeout.as_secs()));
             }
+            None => std::thread::sleep(Duration::from_millis(5)),
         }
-    }
-    out
-}
-
-fn url_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let h = |b: u8| (b as char).to_digit(16);
-                if let (Some(hi), Some(lo)) = (h(bytes[i + 1]), h(bytes[i + 2])) {
-                    out.push((hi * 16 + lo) as u8);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
-fn respond_html(req: tiny_http::Request, html: &str) {
-    let h = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    let _ = req.respond(Response::from_string(html).with_header(h));
-}
-
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
-fn json_header() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()
-}
-
-fn content_type(path: &str) -> Header {
-    let ct = match path.rsplit('.').next() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript",
-        Some("wasm") => "application/wasm",
-        Some("css") => "text/css",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
     };
-    Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap()
+    let (stdout, stderr) = (
+        t_out.join().unwrap_or_default(),
+        t_err.join().unwrap_or_default(),
+    );
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&stderr).to_string())
+    }
 }
 
 const STYLE: &str = r#"body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f4f6f9;color:#1f2937;margin:0;padding:2rem}

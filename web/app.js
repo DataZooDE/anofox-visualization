@@ -1,7 +1,13 @@
 // Browser dashboard builder — 100% client-side.
 //   DuckDB-Wasm runs the SQL, anofox-visualization (wasm) plans the ::ROLE annotations and
 //   renders each panel to SVG. No server, no DuckDB extension.
-import init, { plan, render_panel, map_bounds, panel_bounds } from "./pkg/anofox_visualization.js";
+import init, {
+  plan,
+  render_panel,
+  map_bounds,
+  roles_json,
+  format_number,
+} from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -780,12 +786,57 @@ function syncHL() {
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
-// Served (locked) mode: the server owns the SQL and gates /query. To stay
-// stateless (multi-user safe — no shared session variables), we don't SET
-// VARIABLE on the connection; we capture each one here and inline them into the
-// front of every data query, so each /query call is self-contained.
+// Served (locked) mode: the server owns the SQL — there is no SQL endpoint.
+// The client names a statement of the served dashboard by its plan index and
+// sends variable VALUES (JSON), which the server binds as typed literals:
+//   POST /api/panel {dashboard, panel, vars, page?}
+// SET VARIABLE statements are captured here (never sent), so every request is
+// self-contained (multi-user safe — no shared session state).
 let servedMode = false;
 const servedVars = {};
+let servedIndex = null; // planned statement SQL -> plan index
+
+// Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
+// TRUE/FALSE/NULL) back into a JSON value for /api/panel.
+function sqlLiteralToJson(lit) {
+  const t = String(lit).trim();
+  if (/^null$/i.test(t)) return null;
+  if (/^true$/i.test(t)) return true;
+  if (/^false$/i.test(t)) return false;
+  if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
+  if (t.startsWith("[") && t.endsWith("]")) {
+    const inner = t.slice(1, -1).trim();
+    if (!inner) return [];
+    const strs = [...inner.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+    if (strs.length) return strs;
+    return inner.split(",").map((x) => sqlLiteralToJson(x));
+  }
+  const n = Number(t);
+  return t !== "" && Number.isFinite(n) ? n : t;
+}
+
+async function servedRequest(sql, page) {
+  if (!servedIndex) {
+    servedIndex = new Map();
+    JSON.parse(plan(window.__served.sql)).forEach((st, i) => {
+      if (!servedIndex.has(st.sql)) servedIndex.set(st.sql, i);
+    });
+  }
+  const idx = servedIndex.get(page ? page.base : sql);
+  if (idx === undefined) throw new Error("this dashboard is served locked: only its own statements can run");
+  const body = { dashboard: window.__served.id, panel: idx, vars: servedVars };
+  if (page) {
+    const { base, ...rest } = page;
+    body.page = rest;
+  }
+  const r = await fetch("/api/panel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.text()) || "[]";
+}
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 
 // The map examples read remote GeoJSON with DuckDB's `spatial` extension. Load
@@ -877,22 +928,21 @@ async function ensureForecast(sql) {
 }
 
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
-async function runSql(sql) {
+// `page` (served mode only) describes a ::PAGED request structurally —
+// {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
+// builds the paging SQL itself.
+async function runSql(sql, page) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
   if (servedMode) {
-    // Capture a SET VARIABLE (don't touch the connection) …
+    // Capture a SET VARIABLE (never sent as SQL) …
     const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
     if (m) {
-      servedVars[m[1]] = m[2].trim();
+      servedVars[m[1]] = sqlLiteralToJson(m[2]);
       return "[]";
     }
-    // … and inline all current variables into each data query, so the request
-    // is self-contained (the gated, stateless server needs no session state).
-    const prefix = Object.entries(servedVars)
-      .map(([k, v]) => `SET VARIABLE ${k} = ${v}; `)
-      .join("");
-    sql = prefix + sql;
+    // … and send the statement's plan index + the variable values.
+    return servedRequest(sql, page);
   }
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
@@ -944,12 +994,16 @@ function toIso(v, dateOnly) {
 
 async function boot() {
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
+  loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
-  try {
-    const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
-    if (r.ok) backend = "live";
-  } catch (_) {}
+  // A locked served dashboard always uses its server (/api/panel, no SQL).
+  if (window.__served) backend = "live";
+  else
+    try {
+      const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
+      if (r.ok) backend = "live";
+    } catch (_) {}
 
   if (backend !== "live") {
     const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm");
@@ -1640,14 +1694,48 @@ async function mdDisconnect() {
 }
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
-const INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+// Role sets come from the Rust role registry (wasm `roles_json()`), so the
+// browser never drifts from the planner. The literals are only a fallback for
+// an older wasm build without that export.
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"];
+let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
+let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
+// Chart kinds whose panel honours a zoom window (plain cartesian charts).
+let ZOOMABLE = [
+  "BARCHART",
+  "BARCHART_STACKED",
+  "BARCHART_PERCENT",
+  "BARCHART_STACKED_PERCENT",
+  "LINECHART",
+  "LINECHART_PERCENT",
+  "STEP",
+  "SMOOTH",
+  "AREACHART",
+  "AREACHART_STACKED",
+  "SCATTER",
+  "BUBBLE",
+  "JITTER",
+  "BOXPLOT",
+  "VIOLIN",
+];
+function loadRoleSets() {
+  try {
+    const sets = JSON.parse(roles_json()).sets;
+    INPUTS = sets.inputs;
+    METRICS = sets.metrics;
+    DIRECTIVES = sets.directives;
+    TFMT = sets.table_formats;
+    TEXT_SIZES = sets.text_sizes;
+    if (sets.zoomable) ZOOMABLE = sets.zoomable;
+  } catch (_) {}
+}
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
-const METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) =>
-  ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"].find((d) => role(s, d));
+const directive = (s) => DIRECTIVES.find((d) => role(s, d));
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -2026,7 +2114,6 @@ async function run(fresh = true) {
         const fig = document.createElement("figure");
         fig.className = "panel";
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
-        const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
         const fmtByIdx = {};
         for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
         const titleRole = s.roles.find((r) => r[1] === "TITLE");
@@ -2058,7 +2145,13 @@ async function run(fresh = true) {
           const where = whereClause();
           if (cachedTotal == null) {
             try {
-              const c = JSON.parse(await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`));
+              const c = JSON.parse(
+                await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`, {
+                  base,
+                  count: true,
+                  filter: (dpFilterText[idx] || "").trim(),
+                })
+              );
               cachedTotal = Number(c[0] && c[0].n) || 0;
             } catch (_) {
               cachedTotal = 0;
@@ -2067,7 +2160,16 @@ async function run(fresh = true) {
           const order = sort && sort.col ? ` ORDER BY ${qident(sort.col)} ${sort.dir > 0 ? "ASC" : "DESC"}` : "";
           let rows = [];
           try {
-            rows = JSON.parse(await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`));
+            rows = JSON.parse(
+              await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`, {
+                base,
+                limit: pageSize,
+                offset: page * pageSize,
+                sort: sort && sort.col ? sort.col : null,
+                desc: !!(sort && sort.col && sort.dir < 0),
+                filter: (dpFilterText[idx] || "").trim(),
+              })
+            );
           } catch (e) {
             holder.innerHTML = "";
             showError(holder, String(e));
@@ -2150,14 +2252,17 @@ async function run(fresh = true) {
         } else if (role(s, "HEADER_IMAGE")) {
           const img = document.createElement("img");
           img.className = "header-image";
-          img.src = firstCell();
-          container.appendChild(img);
+          const src = safeUrl(firstCell(), { image: true });
+          if (src) {
+            img.src = src;
+            container.appendChild(img);
+          }
         } else if (role(s, "FOOTER_LINK")) {
           const rows = JSON.parse(rowsJson);
           const vals = rows[0] ? Object.values(rows[0]).map((v) => String(v ?? "")) : [""];
           const a = document.createElement("a");
           a.className = "footer-link";
-          a.href = vals[0];
+          a.href = safeUrl(vals[0].replace(/^"|"$/g, "")) || "#";
           a.textContent = (vals[1] || vals[0]).replace(/^"|"$/g, "");
           a.target = "_blank";
           a.rel = "noopener";
@@ -2201,7 +2306,6 @@ async function run(fresh = true) {
           // Per-column formatting (::MONEY/::PERCENT/::COMPACT/::METRIC number
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
-          const TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i));
@@ -2223,11 +2327,11 @@ async function run(fresh = true) {
               const up = pct >= 0;
               deltaHtml =
                 `<div class="metric-delta ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
-                `${Math.abs(pct).toLocaleString(undefined, { maximumFractionDigits: 1 })}%</div>`;
+                `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
             }
           }
           fig.innerHTML =
-            `<div class="metric-value">${fmtNum(r0["c" + mr[0]], mr[1])}</div>` +
+            `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
           container.appendChild(fig);
@@ -2250,6 +2354,10 @@ async function run(fresh = true) {
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
             holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, dpPrimary || "", "");
+            // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
+            // SVG root as data-warnings — surface them for debugging.
+            const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
+            if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
@@ -2639,7 +2747,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
   const colMax = {};
   for (const c of cols) {
     const nums = rows.map((r) => cleanNum(r[c]));
-    const numFmt = ["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
+    const numFmt = [...METRICS, "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
     numeric[c] = numFmt || (nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v)));
     maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
     const fin = nums.filter((v) => v != null);
@@ -2757,7 +2865,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           if (n != null) {
             td.innerHTML =
               `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
-              `${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>`;
+              `${Math.abs(n).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 })}</span>`;
           }
           continue;
         }
@@ -2768,12 +2876,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           td.style.fontVariantNumeric = "tabular-nums";
           continue;
         }
-        if (["MONEY", "PERCENT", "COMPACT", "METRIC", "COLORSCALE"].includes(f)) {
+        if ([...METRICS, "COLORSCALE"].includes(f)) {
           const n = cleanNum(v);
           td.style.textAlign = "right";
           td.style.fontVariantNumeric = "tabular-nums";
           td.textContent =
-            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : fmtNum(n, f);
+            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? fmtNum(n, "METRIC") : fmtNum(n, f);
           if (f === "COLORSCALE" && n != null) {
             td.style.background = heatColor((n - colMin[c]) / (colMax[c] - colMin[c] || 1));
             td.style.fontWeight = "600";
@@ -3060,26 +3168,42 @@ function cellSpark(v) {
 // same for everyone: "$53.8T"/"1.92", never a locale-dependent "53,8 Bio.".
 const NUM_LOCALE = "en-US";
 
-// Format a KPI value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
+// Format a KPI / table value. fmt: METRIC (plain), MONEY, PERCENT, COMPACT.
+// Delegates to the Rust formatter (wasm `format_number`) so the browser and the
+// headless renderer print identical numbers ("$12,400", "$53.8M", "1.2K", "46%");
+// see src/format.rs for the spec + shared test vectors. A non-numeric value is
+// shown verbatim (callers HTML-escape it).
 function fmtNum(v, fmt) {
-  const n = typeof v === "number" ? v : parseFloat(v);
   if (v == null) return "–";
+  const n = typeof v === "number" ? v : parseFloat(v);
   if (Number.isNaN(n)) return String(v);
-  if (fmt === "MONEY")
-    return n.toLocaleString(NUM_LOCALE, {
-      style: "currency",
-      currency: "USD",
-      notation: Math.abs(n) >= 1e6 ? "compact" : "standard",
-      maximumFractionDigits: Math.abs(n) >= 1e6 ? 1 : 0,
-    });
-  if (fmt === "PERCENT") return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 }) + "%";
-  if (fmt === "COMPACT")
-    return new Intl.NumberFormat(NUM_LOCALE, { notation: "compact", maximumFractionDigits: 1 }).format(n);
-  return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
+  try {
+    return format_number(n, fmt || "METRIC");
+  } catch (_) {
+    return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
+  }
 }
 
+// Escape for HTML text AND attribute contexts (& < > " ').
 function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+// A URL safe to put in href/src: http(s), mailto, or relative (no scheme);
+// images may also be data:image/*. Anything else (javascript:, vbscript:,
+// data:text/html, …) returns "" — callers fall back to no link/image.
+function safeUrl(u, { image = false } = {}) {
+  const s = String(u ?? "").trim();
+  // Browsers ignore ASCII whitespace/control chars inside a scheme ("java\tscript:").
+  const probe = s.replace(/[\u0000-\u0020]/g, "").toLowerCase();
+  const m = probe.match(/^([a-z][a-z0-9+.-]*):/);
+  if (!m) return s.startsWith("//") ? "https:" + s : s; // relative (or protocol-relative)
+  if (["http", "https", "mailto"].includes(m[1])) return s;
+  if (image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);/.test(probe)) return s;
+  return "";
 }
 
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
@@ -3093,7 +3217,14 @@ function renderMarkdown(src) {
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${t}</a>`);
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => {
+        // `u` is already HTML-escaped by esc(s) above; undo that to check the
+        // scheme, then re-escape for the attribute.
+        const unesc = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
+        const raw = u.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => unesc[e]);
+        const href = safeUrl(raw);
+        return href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${t}</a>` : t;
+      });
   const lines = String(src ?? "").replace(/\r/g, "").split("\n");
   let html = "",
     i = 0,
@@ -3189,7 +3320,7 @@ function csvOf(table) {
 
 // ::TEXT_SMALL/_MEDIUM/_LARGE → "small" | "medium" | "large" (or null).
 function textSizeOf(s) {
-  const t = s.roles.find((r) => ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"].includes(r[1]));
+  const t = s.roles.find((r) => TEXT_SIZES.includes(r[1]));
   return t ? t[1].split("_")[1].toLowerCase() : null;
 }
 
@@ -3483,10 +3614,37 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   });
 }
 
+// A mark's tooltip value for display: ggplot-rs writes `data-value` raw, so
+// round numbers like its own tooltip formatter (3 decimals).
+function fmtTipValue(v) {
+  const f = Number(v);
+  return v !== "" && Number.isFinite(f) ? String(Math.round(f * 1000) / 1000) : v;
+}
+
+// Hover / selection metadata of a mark. ggplot-rs (>= 0.16) writes
+// `data-series` (colour/fill/group level), `data-value` (the raw measured value)
+// and `data-x`; marks without them (maps, older SVGs) fall back to parsing the
+// "series: value" `<title>` text `tip`. `attr` reads an attribute (null if
+// absent). `detail` is the full tooltip when it says more than "series: value"
+// (box-plot stats, OHLC, bin ranges, …), else "".
+function markInfo(attr, tip) {
+  const i = tip.lastIndexOf(": ");
+  const tSeries = i >= 0 ? tip.slice(0, i) : tip;
+  const tValue = i >= 0 ? tip.slice(i + 2) : "";
+  const ds = attr("data-series");
+  const dv = attr("data-value");
+  const series = ds !== null && ds !== "" ? ds : tSeries;
+  const value = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
+  const plain =
+    tip === value || tip === series || tip === `${series}: ${value}` || tip === `${tSeries}: ${value}`;
+  return { series, value, x: attr("data-x") || "", detail: plain ? "" : tip };
+}
+
 // Styled hover tooltips + click-to-highlight LINKING across all panels.
-// Every mark carrying a `<title>` ("series: value") becomes hoverable; its series
-// (the part before ": ") is stored on the element. Clicking a mark highlights
-// that series everywhere and dims the rest; click again (or the background) clears.
+// Every mark carrying a `<title>` becomes hoverable; its series key (ggplot's
+// `data-series`, else the title part before ": ") is the selection key.
+// Clicking a mark highlights that series everywhere and dims the rest; click
+// again (or the background) clears.
 let dpSelected = null;
 
 function attachHover() {
@@ -3520,7 +3678,8 @@ function attachHover() {
   marks.forEach((el) => {
     const t = el.querySelector("title");
     const txt = t.textContent;
-    const series = txt.includes(": ") ? txt.slice(0, txt.lastIndexOf(": ")) : txt;
+    const info = markInfo((k) => el.getAttribute(k), txt);
+    const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);
     el.setAttribute("data-tip", txt);
@@ -3528,14 +3687,8 @@ function attachHover() {
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
       if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
-      const dx = el.getAttribute("data-x") || "";
-      const i = txt.lastIndexOf(": ");
-      const label = i >= 0 ? txt.slice(0, i) : txt;
-      const val = i >= 0 ? txt.slice(i + 2) : "";
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
-      tip.innerHTML =
-        (dx ? `<div class="tip-head">${escapeHtml(dx)}</div>` : "") +
-        `<div class="tip-row"><span><span class="tip-dot" style="background:${fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
+      tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
@@ -3560,6 +3713,15 @@ function attachHover() {
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
+}
+
+// One tooltip row: colour swatch + series + value (+ the full tooltip text
+// when it carries more, e.g. box-plot stats or OHLC).
+function tipRow(info, fill) {
+  return (
+    `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(info.series)}</span><b>${escapeHtml(info.value)}</b></div>` +
+    (info.detail ? `<div class="tip-row"><span>${escapeHtml(info.detail)}</span></div>` : "")
+  );
 }
 
 // ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
@@ -3696,9 +3858,11 @@ function showDataView(panel) {
   document.body.appendChild(back);
 }
 
-// Parse the measure out of a mark's tooltip — the last number in "label: 22",
-// "web: 22", or "(3, 22)" (else null).
+// A mark's measure: ggplot's `data-value`, else the last number in its
+// tooltip ("label: 22", "web: 22", "(3, 22)"); null if none.
 function markValue(el) {
+  const dv = parseFloat(el.getAttribute("data-value"));
+  if (Number.isFinite(dv)) return dv;
   const m = (el.getAttribute("data-tip") || "").match(/-?\d[\d,]*\.?\d*(?:[eE][+-]?\d+)?/g);
   if (!m) return null;
   const n = parseFloat(m[m.length - 1].replace(/,/g, ""));
@@ -4016,8 +4180,7 @@ function attachAxisPointer() {
       const pts = circles.map((el) => ({
         el,
         cx: +el.getAttribute("cx"),
-        tip: el.getAttribute("data-tip") || "",
-        dx: el.getAttribute("data-x") || "",
+        info: markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip") || ""),
         fill: el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff",
       }));
       const vb = svg.viewBox.baseVal;
@@ -4045,17 +4208,8 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
-      const head = colPts[0] && colPts[0].dx ? `<div class="tip-head">${escapeHtml(colPts[0].dx)}</div>` : "";
-      tip.innerHTML =
-        head +
-        colPts
-          .map((p) => {
-            const i = p.tip.lastIndexOf(": ");
-            const label = i >= 0 ? p.tip.slice(0, i) : p.tip;
-            const val = i >= 0 ? p.tip.slice(i + 2) : "";
-            return `<div class="tip-row"><span><span class="tip-dot" style="background:${p.fill}"></span>${escapeHtml(label)}</span><b>${escapeHtml(val)}</b></div>`;
-          })
-          .join("");
+      const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
+      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("");
       tip.classList.add("show");
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
@@ -4070,19 +4224,27 @@ function attachAxisPointer() {
   });
 }
 
+// The position domain a rendered chart SVG actually shows: ggplot-rs writes the
+// trained, expanded `data-domain="x0 x1 y0 y1"` on the root <svg> when both
+// axes are continuous (absent for a discrete axis). null when unusable.
+function svgDomain(svg) {
+  const d = ((svg && svg.getAttribute("data-domain")) || "").trim().split(/\s+/).map(Number);
+  if (d.length !== 4 || !d.every(Number.isFinite) || !(d[1] > d[0]) || !(d[3] > d[2])) return null;
+  return { x0: d[0], x1: d[1], y0: d[2], y1: d[3] };
+}
+
 // Scroll-to-zoom / drag-to-pan for a continuous cartesian chart (double-click
-// resets). Uses the SVG's data-plot rect (panel area in viewBox units) to map
-// the cursor accurately to data coords, and re-renders with a zoom window.
+// resets). Uses the SVG's data-plot rect (panel area in viewBox units) and its
+// data-domain (the domain drawn there) to map the cursor accurately to data
+// coords, and re-renders with a zoom window.
 function attachCartZoom(holder, rowsJson, roles, ph) {
-  let b;
-  try {
-    b = JSON.parse(panel_bounds(rowsJson, JSON.stringify(roles)));
-  } catch (_) {
-    b = [];
-  }
-  if (b.length !== 4) return; // not a continuous-x chart → no zoom
+  // Only plain cartesian kinds honour a zoom window; flipped panels don't.
+  if (!roles.some((r) => ZOOMABLE.includes(r[1]))) return;
+  const svg0 = holder.querySelector("svg");
+  if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
+  const full = svgDomain(svg0);
+  if (!full) return; // not a continuous x/y chart → no zoom
   const W = 460;
-  const full = { x0: b[0], x1: b[1], y0: b[2], y1: b[3] };
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -4108,6 +4270,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   const toData = (e, v) => {
     const m = plotMap();
     if (!m) return null;
+    v = svgDomain(holder.querySelector("svg")) || v; // the domain actually drawn
     const vx = (e.clientX - m.r.left) / m.scale;
     const vy = (e.clientY - m.r.top) / m.scale;
     const fx = (vx - m.pa[0]) / m.pa[2];

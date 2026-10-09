@@ -1,202 +1,155 @@
-# Secure multi-user serving — design & plan
+# Secure serving — trust model
 
 **Goal.** Serve a fixed, live dashboard to *untrusted* consumers: they see
 current data, but they cannot run arbitrary SQL or reach anything beyond the
-dashboard they were given.
+dashboard they were given — while the author keeps a convenient authoring UI
+that nobody else can drive.
 
-This document is the plan to get from today's single-developer serving to that.
+There are three serving modes. Two run client SQL only for the author; the
+other two never accept SQL from the client at all.
 
-## Status
+| | **Authoring** | **Locked, full UI (A)** | **Static render (B)** |
+|---|---|---|---|
+| Entry | `anofox_serve(port)` / `serve <db>` | `anofox_serve_dashboards(dir, port[, options])` | `serve --dashboards <dir>` |
+| Audience | the author, on this machine | untrusted consumers (interactive) | untrusted consumers (static) |
+| UI | full builder + editor | real client, editor removed | server-side SVG only |
+| What the client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
+| Database | the live read-write session / file | private read-only snapshot, locked config | `duckdb -readonly`, locked config |
+| Bind | loopback only (enforced) | `127.0.0.1` | `--bind` (default `127.0.0.1`) |
+| Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; put auth/TLS in a proxy | put auth/TLS in a proxy |
 
-Two serving implementations exist, **both read-only**. Pick by whether consumers
-need the interactive UI (A) or just a static picture (B).
-
-### A. Gated full-UI serving — the extension
-
-`SELECT anofox_serve_dashboards('<dir>', <port>);` serves the *real* browser
-client, locked down: the editor is removed and `POST /query` is **gated** to the
-panel SQL each dashboard declares (an `sql::plan` allow-list) plus validated
-`SET VARIABLE`s — anything else is `403`. So consumers get the whole feature set
-(charts, rich tables, KPIs, inputs, hover) without the client being able to run
-arbitrary SQL.
-
-- ✅ **Server owns the SQL** — allow-list built from the checked-in `.sql`; a
-  request that isn't a registered panel query (or a valid `SET VARIABLE`) → `403`.
-- ✅ **Read-only, by construction** — `access_mode` can't be flipped at runtime
-  and a read-only `ATTACH` would leave the original DB reachable by qualified
-  name, so at startup it **snapshots the live database to a temp file** (`COPY
-  FROM DATABASE`) and serves through a **fresh read-only DuckDB handle** with no
-  writable database attached. Even a gate bypass can't write — *verified*: an
-  allow-listed `INSERT` is rejected `"… attached in read-only mode"`.
-- ✅ **Multi-user safe** — each request is self-contained (the client inlines its
-  own input variables), so concurrent viewers never clobber one another's state.
-- ✅ **Multi-page** — `::TAB`/`::PAGE` are pages within a dashboard; a folder of
-  `.sql` files is a linked set, served with a shared **cross-dashboard nav bar**
-  and `?tab=` **deep-links** (a reload / shared link restores the page).
-- ⬜ **Least-privilege scoping** — it snapshots the *whole* current database; a
-  dedicated read-only view-scoped source is still the operator's job (point it at
-  a database that only exposes the dashboards' views).
-- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front.
-- **Caveat:** it serves the snapshot taken at startup — re-run
-  `anofox_serve_dashboards` to refresh (per-request refresh on the read-only
-  handle is a follow-up).
-
-### B. Static server-side render — the `serve` bin
-
-`serve --dashboards <dir> [--init setup.sql]` — the most locked-down option: **no
-client `/query` at all**, server-side SVG only. Consumers pick a dashboard id and
-whitelisted params.
-
-- ✅ **Server owns the SQL** — id + parameter *values* only; no client SQL.
-- ✅ **Whitelisted params** — declared per dashboard (`-- @param region [EU, US]
-  = EU`); a value outside the list is rejected with `400`.
-- ✅ **Read-only queries** — runs `duckdb --readonly`.
-- ✅ **Result caching** — `--cache <seconds>` shares one render across N viewers
-  of the same view and doubles as the freshness knob. Off by default.
-- ⬜ **Full capability lockdown** — a dedicated read-only role / disabling
-  `ATTACH`/file reads is the operator's job via `--init` + DuckDB config.
-- ⬜ **Auth + TLS** — deployment; put a reverse proxy in front.
-
-Try B: `serve --dashboards examples/serve-dashboards/dash --init
-examples/serve-dashboards/init.sql` → open `http://127.0.0.1:8080/`.
-
-The authoring mode (`anofox_serve` — embedded builder + free-form `/query`) is
-unchanged and localhost-only.
+Available in the **from-source build** only (`duckext/`, see
+[`BUILD.md`](../BUILD.md)); the community extension is render-only.
 
 ---
 
-## Where we are today (v0 — authoring mode)
+## Authoring — `anofox_serve(port)` and `serve <db>`
 
-`SELECT anofox_serve(port)` starts an in-process HTTP server that:
+Runs whatever SQL the builder sends, against your live data. That is the point,
+so the protection is about making sure *only you* can send it:
 
-- serves the **full builder** (with the SQL editor), and
-- exposes `POST /query`, which runs **whatever SQL the client sends** against the
-  live DuckDB session.
+- **Loopback only.** The extension always binds `127.0.0.1`; the `serve` bin
+  refuses a non-loopback `--bind` in authoring mode.
+- **Per-server token.** A random 128-bit token is generated at start. The URL
+  that is printed (and opened) carries it once — `http://127.0.0.1:8080/?token=…`;
+  the server answers with a redirect that stores it in an `HttpOnly;
+  SameSite=Strict` cookie (`anofox_token_<port>`). Every request needs the
+  cookie or an `X-Anofox-Token` header; otherwise `401`.
+- **DNS rebinding.** The `Host` header must be a loopback name for this port
+  (`127.0.0.1`, `localhost`, `[::1]`); anything else is `403`.
+- **CSRF.** A request whose `Origin` differs from the `Host` it was sent to is
+  `403` — including pages on *other* localhost ports (cookies are shared across
+  ports, origins are not). A `text/plain` form/fetch POST from a web page
+  therefore never reaches the SQL endpoint.
+- **No CLI meta commands** (`serve` bin). It executes SQL through the `duckdb`
+  CLI; a body (or `--init` script) containing a line that starts with `.` is
+  refused, so `.shell`, `.read`, `.output`, … never reach the CLI.
+- Body limit 4 MiB; authoring results are capped at 1,000,000 rows.
 
-This is great for the author on `localhost`, and we keep it — but renamed in
-intent to **admin / authoring mode**. It is *not* safe to expose to untrusted
-consumers: the client controls the SQL. "View-only" (`?embed=1`) only hides the
-editor in the UI; it is presentation, not an access boundary.
+`SELECT anofox_serve_stop(port)` stops an extension server.
 
----
+## A. Locked, full UI — `anofox_serve_dashboards(dir, port[, options])`
 
-## What it looks like
+Serves the real browser client for every `.sql` file in `dir`
+(`/` lists them, `/d/<id>` opens one; ids are restricted to `[A-Za-z0-9_.-]`).
 
-Rendered server-side from a **read-only DuckDB** — no editor, no client SQL.
+**The server owns the SQL.** The dashboards are planned on the server at
+startup; the client never sends SQL. To run statement *n* of dashboard *id* it
+POSTs
 
-A parameterised dashboard (the `region` dropdown is whitelisted; the server runs
-the fixed query):
+```json
+{"dashboard": "sales", "panel": 3, "vars": {"region": "EU"},
+ "page": {"limit": 10, "offset": 20, "sort": "Region", "desc": false, "filter": "app"}}
+```
+
+- `vars` values must be JSON strings, numbers, booleans, `null` or flat lists of
+  those; they become **typed SQL literals** (`'EU'`, `5`, `TRUE`, `['a','b']`) in
+  `SET VARIABLE <name> = <literal>`; names must be identifiers. Objects, nested
+  lists, NUL bytes and oversize values are rejected — there is no way to turn a
+  value into an expression or a subquery.
+- `page` (for `::PAGED` tables) is structural: the server builds the
+  `COUNT(*)` / `ORDER BY` / `LIMIT` / `OFFSET` query itself; the sort column is
+  quoted as an identifier and the full-text filter is bound as a
+  **prepared-statement parameter**.
+- Unknown fields, dashboards or panels are rejected (`400`/`404`). There is no
+  `/query` endpoint (`410`).
+- Every statement of every dashboard is checked with DuckDB's own parser at
+  startup (exactly one statement each); panels execute as single prepared
+  statements.
+
+**Read-only, locked-down snapshot.** At startup the server copies the session's
+databases (`COPY FROM DATABASE`) into a **private, randomly named `0700`
+directory** and opens them in a **separate DuckDB instance**:
+
+- every attached DuckDB database (not just the current one) is re-attached
+  `READ_ONLY` under its original name; non-DuckDB catalogs (Postgres, SQLite, …)
+  are *not* snapshotted and are reported as warnings — expose what you need
+  through tables in a DuckDB database (pass `'{"attach": false}'` to snapshot only
+  the current database);
+- extensions loaded in the session, `-- @load <ext>` header lines and
+  `options.load` are loaded first;
+- then `enable_external_access = false` (no file or network access — `COPY … TO`,
+  `read_text`/`read_csv`, `ATTACH`, `INSTALL`, `LOAD` are all refused), extension
+  auto-install/auto-load and community extensions are off, and
+  `lock_configuration = true`, so no statement can undo any of it;
+- on unix the snapshot files are unlinked as soon as they are attached (the open
+  handles keep working); the directory is removed when the server stops
+  (`anofox_serve_stop`) or a start fails. On Windows the files remain until stop.
+
+The snapshot is taken at startup: stop and re-start to refresh.
+
+**Per-request isolation and limits.**
+
+- A fresh connection per request: one viewer's variables or temp objects never
+  leak into another's. Setup statements (`CREATE TEMP …`) of the dashboard are
+  re-run per request; only TEMP objects can be created (the data is read-only),
+  so materialise anything heavy before serving.
+- Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
+  an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
+  with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
+  `threads` (worker pool, default 4), `attach`, `load`.
+- Cross-origin `POST`s are refused (CSRF).
+- The injected page config is script-safe JSON (`<` is emitted as `<`),
+  titles and ids are HTML-escaped.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095,
+  '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8}');
+SELECT anofox_serve_stop(8095);
+```
+
+## B. Static render — `serve --dashboards <dir>`
+
+The most locked-down option: **no client data API at all**, server-side SVG only.
+Consumers pick a dashboard id and whitelisted params
+(`-- @param region [EU, US] = EU`; a value outside the list is `400`).
+
+- Panels run `duckdb -readonly`; after the server-declared `-- @load`s, each
+  session sets `enable_external_access = false` and `lock_configuration = true`.
+- `--max-rows` (default 100,000), `--timeout` seconds (default 30; the CLI is
+  killed), `--threads` (default 4), `--cache <seconds>` (shared render cache,
+  doubles as the freshness knob).
+- `--init setup.sql` runs once, read-write, before serving (attach sources,
+  create views/tables). CLI dot-commands are refused there too.
+
+Try it: `serve --dashboards examples/serve-dashboards/dash --init
+examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
 
 ![serve mode — sales dashboard with a whitelisted region param](img/serve-sales.png)
 
-A live forecast — `ts_forecast_by(...)` runs inline, read-only, per request
-(`-- @load anofox_forecast`), bounded by `--cache`:
-
-![serve mode — live forecast (Actual + Forecast)](img/serve-forecast.png)
-
-## Target (v1 — serve mode)
-
-Three changes, in priority order. **Note:** #1 (server owns the SQL) and #2
-(read-only) are **already delivered** by the gated extension mode (A) above —
-via an allow-listed `/query` plus a read-only snapshot, rather than the
-per-panel-endpoint design sketched below. That design remains a valid
-alternative; the remaining real gaps are **least-privilege view-scoping** and
-**#3 (auth + TLS)**.
-
-### 1. The server owns the SQL (the architectural flip)
-
-The single most important change. The client stops sending SQL; it selects a
-**dashboard** and supplies **whitelisted parameters**.
-
-- **Register dashboards server-side.** A dashboard is
-  `{ id, title, panels: [ { id, sql_template, params } ], refresh }`. Each
-  `sql_template` is the annotated (`::ROLE`) SQL, fixed at registration, with
-  only typed `:param` placeholders.
-  - Source: a directory of `.sql` files loaded at startup, and/or
-    `CALL anofox_register_dashboard('sales', $$ … $$)`.
-  - The server parses/plans each template **once**.
-- **Endpoints (no SQL crosses the wire):**
-  - `GET  /d/<id>` → the view-only dashboard shell (no editor).
-  - `POST /d/<id>/panel/<n>` with a JSON body of **only** declared params →
-    the server binds them and returns the rendered SVG (or rows).
-  - `GET  /d` → list of dashboards the caller may see.
-- **Parameters are typed + whitelisted** (enum of allowed values, or a numeric
-  range/date window) and **bound as query parameters** — never string-
-  concatenated — so there is no injection surface. A param that isn't declared
-  is rejected.
-
-Result: a consumer can pick `region=EU` from a dropdown, but cannot change the
-query, add a column, `ATTACH`, read a file, or reach another table.
-
-### 2. Read-only, least-privilege connection
-
-Defence in depth, so even a bug in param handling is bounded.
-
-- Serve from a DuckDB connection that can only **read the specific views** the
-  dashboards expose (not base tables): `CREATE VIEW dash_sales AS SELECT … ;`
-  and grant/scope to those.
-- Lock the session down: no `ATTACH`/`INSTALL`/`COPY`/file reads
-  (`SET enable_external_access = false;`, disable the relevant functions), and
-  run the process as an OS user with no filesystem access beyond what it needs.
-- For MotherDuck/Postgres, use a **read-only role** on the upstream too.
-
-### 3. Auth + TLS (deployment)
-
-- Bind address is configurable (default `127.0.0.1`; opt in to `0.0.0.0` only
-  behind a proxy).
-- Terminate **TLS + authentication at a reverse proxy** (nginx / Caddy /
-  Cloudflare) in front of the serving process.
-- Optional: signed dashboard links or per-consumer tokens for finer access.
-
 ---
 
-## Three modes
+## What remains the operator's job
 
-| | **Admin / authoring** | **Gated serve (A)** | **Static serve (B)** |
-|---|---|---|---|
-| Entry | `anofox_serve(port)` | `anofox_serve_dashboards(dir, port)` | `serve --dashboards <dir>` |
-| UI | full builder + editor | real client, editor removed | server-side SVG only |
-| SQL source | free-form `/query` | **allow-listed** `/query` (panel SQL + `SET VARIABLE`) | id + whitelisted params only |
-| DB connection | read-write session | **read-only snapshot** | `duckdb --readonly` |
-| Multi-page / nav | n/a | tabs + folder + shared nav + `?tab=` | one dashboard per URL |
-| Bind / auth | localhost, dev token | proxy + TLS + auth | proxy + TLS + auth |
-| Audience | the author | untrusted consumers (interactive) | untrusted consumers (static) |
-
-Admin mode stays for development; A and B are what you expose to consumers.
-
----
-
-## Freshness & concurrency
-
-- Each panel request runs its stored query on the live read-only connection → the
-  data is always current.
-- Add **per-panel result caching with a TTL** so N consumers refreshing don't
-  become N× load on the upstream DB; the TTL doubles as the freshness knob.
-- Bake a default **auto-refresh interval** into the served dashboard.
-
----
-
-## Where it should live
-
-Today the server is embedded in the DuckDB extension. For v1, a **small
-standalone service** (the core renderer + a DuckDB connection it owns + the HTTP
-layer above) is cleaner than a server inside an extension, and it can `ATTACH`
-MotherDuck/PostgreSQL itself. The extension keeps `anofox_serve` for local
-authoring.
-
----
-
-## Steps
-
-1. Split `anofox_serve` into **admin** vs **serve** modes; move free-form
-   `/query` behind admin + localhost + a token.
-2. **Dashboard registry** — parse annotated SQL → stored plan + declared params
-   (from `.sql` files and/or a `register` call).
-3. **Typed param binding** — whitelist + bind as query params; reject unknowns.
-4. `GET /d/<id>` view-only shell + `POST /d/<id>/panel/<n>` param endpoint.
-5. **Read-only, view-scoped connection** + capability lockdown.
-6. **Deployment guide** — reverse proxy (TLS/auth), bind address; optional
-   result caching + default refresh interval.
-
-Step 1 removes the immediate footgun (free-form SQL on a network-exposed port);
-steps 2–4 are the server-owns-the-SQL flip; 5–6 harden and productionize.
+- **Authentication + TLS** for consumer-facing modes: terminate both at a reverse
+  proxy (nginx / Caddy / Cloudflare) in front of the server; bind the server to
+  loopback and let only the proxy reach it.
+- **Least privilege on the data**: the snapshot contains everything in the
+  session's DuckDB databases. Serve from a session (or `--db`) that only holds
+  the tables/views the dashboards need.
+- **Variable values are not whitelisted in mode A**: a viewer can set any
+  identifier-named variable to any literal. Panels see them only through
+  `getvariable()`, so write panel SQL that treats variables as untrusted
+  *values* (they cannot change the query's structure).
+- **Process isolation**: run the server as an OS user without access to more
+  than it needs.

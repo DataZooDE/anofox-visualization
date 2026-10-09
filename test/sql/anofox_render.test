@@ -1,0 +1,75 @@
+# name: test/sql/anofox_render.test
+# description: anofox_render actually renders, NULL in -> NULL out, bad specs are SQL errors
+# group: [anofox_visualization]
+
+require anofox_visualization
+
+statement ok
+LOAD anofox_visualization
+
+# ----------------------------------------------------------------------------
+# Rendering
+# ----------------------------------------------------------------------------
+
+query I
+SELECT anofox_render('{"rows":[{"c0":"a","c1":3},{"c0":"b","c1":5}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"width":320,"height":200}') LIKE '<svg%';
+----
+true
+
+# One SVG per row, vectorised over a column of specs.
+query I
+SELECT count(*) FROM (
+  SELECT anofox_render('{"rows":[{"c0":' || i || ',"c1":' || i * 2 || '}],"roles":[[0,"XAXIS"],[1,"SCATTER"]]}') AS svg
+  FROM range(5) t(i)
+) WHERE svg LIKE '<svg%';
+----
+5
+
+# ----------------------------------------------------------------------------
+# NULL in -> NULL out (not an empty string)
+# ----------------------------------------------------------------------------
+
+query I
+SELECT anofox_render(NULL) IS NULL;
+----
+true
+
+query I
+SELECT anofox_render(s) IS NULL FROM (VALUES (NULL::VARCHAR)) t(s);
+----
+true
+
+# ----------------------------------------------------------------------------
+# Bad specs are real SQL errors, not '<pre>error</pre>' results
+# ----------------------------------------------------------------------------
+
+statement error
+SELECT anofox_render('nope');
+----
+bad spec JSON
+
+statement error
+SELECT anofox_render('{"rows":[]}');
+----
+needs a 'roles' array
+
+statement error
+SELECT anofox_render('{"rows":[],"roles":[[0,"NOT_A_ROLE"]]}');
+----
+unknown role 'NOT_A_ROLE'
+
+statement error
+SELECT anofox_render('{"rows":[],"roles":[[0,null]]}');
+----
+role name is NULL
+
+# Size caps at the boundary.
+statement error
+SELECT anofox_render('{"rows":[],"roles":[[0,"XAXIS"]],"width":100000}');
+----
+outside [16, 8192]
+
+statement error
+SELECT anofox_render('{"rows":"x","roles":[]}');
+----
+'rows' must be a JSON array

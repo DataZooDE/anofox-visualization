@@ -1,0 +1,58 @@
+name: CI
+
+# Rust checks for the whole workspace (core, crates/anofox-viz-ffi, duckext).
+# The C++ extension's sqllogictests (test/sql) run in
+# MainDistributionPipeline.yml via extension-ci-tools (`make test`).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lockfile is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy (core incl. serve, ffi, duckext)
+        run: cargo clippy --locked --workspace --all-targets --features anofox-visualization/serve -- -D warnings
+
+      - name: test (core incl. serve)
+        run: cargo test --locked --features serve
+
+      - name: test (ffi + duckext)
+        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb
+
+      - name: Install DuckDB CLI (pinned) for the extension smoke test
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/duckdb"
+          "$HOME/.local/bin/duckdb" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: C-API extension smoke test (render, NULL, errors)
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh

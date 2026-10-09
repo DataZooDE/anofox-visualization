@@ -4,7 +4,7 @@
 # collide with the core `anofox-visualization` library it depends on.
 [package]
 name = "anofox-visualization-duckdb"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "BUSL-1.1"
 description = "DuckDB C-API extension — SELECT anofox_render(...) → SVG via the anofox-visualization renderer. Wasm side-module compatible (no libduckdb linking)."
@@ -15,8 +15,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anofox-visualization = { path = ".." }
-# Same git rev as the core crate (both must resolve to one ggplot-rs).
-ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", rev = "91ebc37a5b6405328fe14e82b7c7fe845ce80901", default-features = false }
+# Same version as the core crate (both must resolve to one ggplot-rs).
+ggplot-rs = { version = "0.16", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"
@@ -24,10 +24,9 @@ serde_json = "1"
 open = "5"
 
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "0.72"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+# NOTE: no `panic = "abort"` — every `extern "C"` entry point wraps its body in
+# `catch_unwind` and turns a panic into a SQL error, which requires unwinding.
+# Profiles live in the workspace root (Cargo ignores member profiles). For the
+# experimental wasm side-module build pass `-C panic=abort` via RUSTFLAGS.

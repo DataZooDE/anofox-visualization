@@ -9,15 +9,17 @@ source ~/emsdk/emsdk_env.sh 2>/dev/null
 
 echo "== build (emscripten side-module) =="
 cd "$HERE"
-rm -rf target/wasm32-unknown-emscripten
-RUSTFLAGS="-C link-arg=-sSIDE_MODULE=1" cargo build --target wasm32-unknown-emscripten \
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$HERE/../Cargo.toml" | head -1)"
+T="$HERE/../target/wasm32-unknown-emscripten"   # workspace target dir
+rm -rf "$T"
+RUSTFLAGS="-C panic=abort -C link-arg=-sSIDE_MODULE=1" cargo build -p anofox-visualization-duckdb --target wasm32-unknown-emscripten \
   | grep -iE "error|Finished" || true
-wasm-opt -Oz --strip-debug target/wasm32-unknown-emscripten/debug/anofox_visualization.wasm -o /tmp/ggext.wasm
+wasm-opt -Oz --strip-debug "$T/debug/anofox_visualization_ext.wasm" -o /tmp/ggext.wasm
 
 echo "== package (duckdb_signature custom section) =="
 REPO="$GG/web/extrepo/v1.1.1/wasm_eh"; mkdir -p "$REPO"
 python3 "$HERE/scripts/append_extension_metadata.py" -l /tmp/ggext.wasm -n anofox_visualization \
-  -o "$REPO/anofox_visualization.duckdb_extension.wasm" -p wasm_eh -dv v0.0.1 -ev v0.1.0 >/dev/null
+  -o "$REPO/anofox_visualization.duckdb_extension.wasm" -p wasm_eh -dv v0.0.1 -ev "v$VERSION" >/dev/null
 python3 -c "import gzip;d=open('$REPO/anofox_visualization.duckdb_extension.wasm','rb').read();open('$REPO/anofox_visualization.duckdb_extension.wasm.gz','wb').write(gzip.compress(d))"
 
 echo "== serve + load in DuckDB-Wasm (headless Chromium) =="

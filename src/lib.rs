@@ -17,9 +17,15 @@
 //! assert!(svg.contains("<svg"));
 //! ```
 
+/// The cell value type of a [`Column`] (re-exported so callers don't need a
+/// direct `ggplot-rs` dependency).
+pub use ggplot_rs::prelude::Value;
 use ggplot_rs::prelude::*;
 
 pub mod dashboard;
+mod downsample;
+pub mod format;
+pub mod host;
 pub mod lint;
 pub mod roles;
 pub mod sql;
@@ -78,6 +84,33 @@ pub enum Kind {
     /// A radar / spider chart — axes from `::XAXIS`, values as `::RADAR`, one
     /// polygon per `::CATEGORY` series.
     Radar,
+    /// `::BUBBLE` — context-dependent so both documented forms work: alone it is
+    /// the scatter's y measure (sized by a `::SIZE` column); next to another
+    /// chart measure (`y::SCATTER, pop::BUBBLE`) it is that chart's size.
+    /// Resolved before rendering (never reaches a geom).
+    Bubble,
+}
+
+impl Kind {
+    /// Drawn on plain cartesian axes by the main renderer, which honours a
+    /// [`RenderOptions::zoom`] window (bars, lines, areas, scatters, box/violin
+    /// plots). The browser only offers scroll/drag zoom for these.
+    pub fn zoomable(self) -> bool {
+        !matches!(
+            self,
+            Kind::Pie
+                | Kind::Donut
+                | Kind::Gauge
+                | Kind::Histogram
+                | Kind::Density
+                | Kind::QQ
+                | Kind::Heatmap
+                | Kind::Calendar
+                | Kind::Candlestick
+                | Kind::Radar
+                | Kind::Sparkline
+        )
+    }
 }
 
 /// Font size for a single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
@@ -249,99 +282,9 @@ impl Column {
 
 /// Parse a role annotation (the part after `::`) into a [`Role`].
 /// Case-insensitive; returns `None` for unknown annotations (plain columns).
+/// Backed by the [`roles::REGISTRY`] — the single source of the vocabulary.
 pub fn parse_role(annotation: &str) -> Option<Role> {
-    match annotation.trim().to_ascii_uppercase().as_str() {
-        "XAXIS" | "X" => Some(Role::X),
-        "YAXIS" | "Y" => Some(Role::Y),
-        "CATEGORY" | "SERIES" | "COLOR" | "COLOUR" => Some(Role::Category),
-        "LABEL" => Some(Role::Label),
-        "TITLE" | "HEADING" => Some(Role::Title),
-        "BARCHART" | "BAR" => Some(Role::Value(Kind::Bar)),
-        "BARCHART_STACKED" | "BAR_STACKED" | "STACKED_BAR" => Some(Role::Value(Kind::BarStacked)),
-        "BARCHART_PERCENT" | "BAR_PERCENT" => Some(Role::Value(Kind::BarPercent)),
-        "BARCHART_STACKED_PERCENT" | "BAR_STACKED_PERCENT" => {
-            Some(Role::Value(Kind::BarStackedPercent))
-        }
-        "LINECHART" | "LINE" => Some(Role::Value(Kind::Line)),
-        "LINECHART_PERCENT" | "LINE_PERCENT" => Some(Role::Value(Kind::LinePercent)),
-        "STEP" | "STEPLINE" | "STEP_LINE" => Some(Role::Value(Kind::Step)),
-        "SMOOTH" | "TRENDLINE" | "TREND_LINE" => Some(Role::Value(Kind::Smooth)),
-        "AREACHART" | "AREA" => Some(Role::Value(Kind::Area)),
-        "AREACHART_STACKED" | "AREA_STACKED" | "STACKED_AREA" => {
-            Some(Role::Value(Kind::AreaStacked))
-        }
-        "SCATTER" | "POINT" | "SCATTERCHART" => Some(Role::Value(Kind::Point)),
-        "JITTER" | "JITTERCHART" | "STRIP" => Some(Role::Value(Kind::Jitter)),
-        "CANDLESTICK" | "CANDLE" | "OHLC" => Some(Role::Value(Kind::Candlestick)),
-        "RADAR" | "SPIDER" => Some(Role::Value(Kind::Radar)),
-        "OPEN" => Some(Role::Open),
-        "HIGH" => Some(Role::High),
-        "LOW" => Some(Role::Low),
-        "SIZE" | "BUBBLE" => Some(Role::Size),
-        "DATALABELS" | "DATALABEL" | "VALUELABELS" | "SHOWLABELS" => Some(Role::DataLabels),
-        "MARKAREA" | "MARK_AREA" | "SHADE" => Some(Role::MarkArea),
-        "MARKDOWN" | "MD" | "TEXTBOX" | "RICHTEXT" => Some(Role::Markdown),
-        "PIE" | "PIECHART" | "PIECHART_PERCENT" => Some(Role::Value(Kind::Pie)),
-        "DONUT" | "DONUTCHART" | "DONUTCHART_PERCENT" => Some(Role::Value(Kind::Donut)),
-        "GAUGE" | "GAUGE_PERCENT" => Some(Role::Value(Kind::Gauge)),
-        "HISTOGRAM" | "HIST" => Some(Role::Value(Kind::Histogram)),
-        "BOXPLOT" | "BOX_PLOT" => Some(Role::Value(Kind::Boxplot)),
-        "VIOLIN" | "VIOLINPLOT" => Some(Role::Value(Kind::Violin)),
-        "DENSITY" | "KDE" => Some(Role::Value(Kind::Density)),
-        "QQ" | "QQPLOT" => Some(Role::Value(Kind::QQ)),
-        "HEATMAP" | "TILE" | "TILES" => Some(Role::Value(Kind::Heatmap)),
-        "CALENDAR" | "CALENDAR_HEATMAP" | "CAL_HEATMAP" => Some(Role::Value(Kind::Calendar)),
-        "SPARKLINE" | "SPARK" => Some(Role::Value(Kind::Sparkline)),
-        "REFLINE" | "TARGET" | "GOAL" | "YLINE" => Some(Role::RefLine),
-        "XLINE" => Some(Role::VLine),
-        "BAND_LOWER" | "BANDLOWER" => Some(Role::BandLower),
-        "BAND_UPPER" | "BANDUPPER" => Some(Role::BandUpper),
-        "TREND" => Some(Role::Trend),
-        "COLORSCALE" | "COLOURSCALE" | "HEAT" | "GRADIENT" => Some(Role::ColorScale),
-        "BADGE" | "STATUS" | "PILL" => Some(Role::Badge),
-        "PLAIN" | "NOBAR" => Some(Role::Plain),
-        "HINT" => Some(Role::Hint),
-        "TEXT_SMALL" => Some(Role::Text(TextSize::Small)),
-        "TEXT_MEDIUM" => Some(Role::Text(TextSize::Medium)),
-        "TEXT_LARGE" => Some(Role::Text(TextSize::Large)),
-        "PLACEHOLDER" => Some(Role::Placeholder),
-        "HEADER_IMAGE" | "HEADERIMAGE" => Some(Role::HeaderImage),
-        "FOOTER_LINK" | "FOOTERLINK" => Some(Role::FooterLink),
-        "DOWNLOAD_CSV" => Some(Role::Download(DownloadFmt::Csv)),
-        "DOWNLOAD_XLSX" | "DOWNLOAD_EXCEL" => Some(Role::Download(DownloadFmt::Xlsx)),
-        "DOWNLOAD_PDF" => Some(Role::Download(DownloadFmt::Pdf)),
-        "RELOAD" | "REFRESH" => Some(Role::Reload),
-        "RANGE" => Some(Role::Range),
-        "LABELS" => Some(Role::GaugeLabels),
-        "COLORS" | "COLOURS" => Some(Role::GaugeColors),
-        "MAP" | "GEOMETRY" | "GEO" | "CHOROPLETH" => Some(Role::Geometry),
-        "BASEMAP" | "MAPBASE" | "BACKDROP" => Some(Role::Basemap),
-        "FLIP" | "COORD_FLIP" | "HORIZONTAL" => Some(Role::Flip),
-        "YFORMAT" | "YAXISFORMAT" | "YUNIT" | "YCURRENCY" => Some(Role::YFormat),
-        "XFORMAT" | "XAXISFORMAT" | "XUNIT" | "XCURRENCY" => Some(Role::XFormat),
-        "ALPHA" | "OPACITY" => Some(Role::Alpha),
-        "TABLE" | "GRID" => Some(Role::Table),
-        "PAGED" | "TABLE_PAGED" | "PAGINATED" => Some(Role::PagedTable),
-        "METRIC" | "KPI" | "BIGNUMBER" => Some(Role::Metric(MetricFmt::Plain)),
-        "MONEY" | "DOLLAR" | "CURRENCY" => Some(Role::Metric(MetricFmt::Money)),
-        "PERCENT" | "PCT" => Some(Role::Metric(MetricFmt::Percent)),
-        "COMPACT" => Some(Role::Metric(MetricFmt::Compact)),
-        "DELTA" | "COMPARE" | "PREVIOUS" => Some(Role::Delta),
-        "MULTISELECT" | "MULTI" => Some(Role::Input(InputKind::Multiselect)),
-        "DATERANGE" | "DATE_RANGE" => Some(Role::Input(InputKind::DateRange)),
-        "TAB" | "PAGE" => Some(Role::Tab),
-        "SUBTAB" | "SUB_TAB" => Some(Role::SubTab),
-        "DROPDOWN" | "OPTIONS" | "SELECT_INPUT" => Some(Role::Input(InputKind::Dropdown)),
-        "NUMBER" | "SLIDER" | "NUMERIC" => Some(Role::Input(InputKind::Number)),
-        "DATE" | "DATEPICKER" => Some(Role::Input(InputKind::Date)),
-        "TEXT" | "SEARCH" | "STRING" => Some(Role::Input(InputKind::Text)),
-        "COLUMNS" | "COLS" => Some(Role::Columns),
-        "GROUP" | "BOX" | "ROW" => Some(Role::GroupStart),
-        "ENDGROUP" | "ENDBOX" | "ENDROW" => Some(Role::GroupEnd),
-        "SPAN" | "WIDTH" | "COL" => Some(Role::Span),
-        "HEIGHT" | "TALL" => Some(Role::Height),
-        _ => None,
-    }
+    roles::lookup(annotation).map(|s| s.role)
 }
 
 fn value_str(v: &Value) -> String {
@@ -379,114 +322,577 @@ fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
     ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
 
-thread_local! {
-    /// Per-render brand/primary colour override (e.g. `?primary=` in the UI, or a
-    /// theme from an embedding host). `None` = the DataZoo default.
-    static BRAND: std::cell::Cell<Option<(u8, u8, u8)>> = const { std::cell::Cell::new(None) };
-}
-/// Set the brand/primary colour for subsequent `render()` calls on this thread.
-pub fn set_brand(color: Option<(u8, u8, u8)>) {
-    BRAND.with(|b| b.set(color));
-}
-/// The active brand/primary colour (DataZoo steel by default).
-fn brand() -> (u8, u8, u8) {
-    BRAND.with(|b| b.get()).unwrap_or(DZ_COLORS[0])
-}
-
 /// A map zoom window: `((x0, x1), (y0, y1))` in geometry (lon/lat) coordinates.
 pub type ZoomWindow = ((f64, f64), (f64, f64));
 
+/// Default cap on distinct levels of a discrete axis / colour category before
+/// the smallest are folded into an "Other" bucket (see [`RenderOptions`]).
+pub const DEFAULT_MAX_CATEGORIES: usize = 30;
+/// Default cap on points per series for line/area/step charts before LTTB
+/// downsampling kicks in (see [`RenderOptions`]).
+pub const DEFAULT_MAX_LINE_POINTS: usize = 5_000;
+/// Rendered width/height are clamped into `MIN_DIM..=MAX_DIM` px.
+pub const MIN_DIM: u32 = 32;
+/// See [`MIN_DIM`].
+pub const MAX_DIM: u32 = 8_192;
+
+/// Per-render options — passed explicitly (no hidden thread state).
+#[derive(Clone, Debug)]
+pub struct RenderOptions {
+    /// Brand/primary colour for single-series marks (`None` = DataZoo steel).
+    pub brand: Option<(u8, u8, u8)>,
+    /// Zoom window for a `::MAP` / continuous cartesian panel (`None` = auto-fit).
+    pub zoom: Option<ZoomWindow>,
+    /// Max distinct levels on a discrete x axis or `::CATEGORY` before the
+    /// smallest (by total |measure|) fold into "Other". `0` disables the cap.
+    pub max_categories: usize,
+    /// Max points per series for line/area/step charts before LTTB
+    /// downsampling. `0` disables it.
+    pub max_line_points: usize,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions {
+            brand: None,
+            zoom: None,
+            max_categories: DEFAULT_MAX_CATEGORIES,
+            max_line_points: DEFAULT_MAX_LINE_POINTS,
+        }
+    }
+}
+
+impl RenderOptions {
+    /// The effective brand colour.
+    pub fn brand(&self) -> (u8, u8, u8) {
+        self.brand.unwrap_or(DZ_COLORS[0])
+    }
+}
+
+/// Why a render failed — so hosts (the DuckDB extension, services) can surface
+/// a real error instead of an SVG.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenderError {
+    /// The JSON spec could not be parsed / has the wrong shape.
+    BadSpec(String),
+    /// The roles/columns can't make this chart (e.g. no `::XAXIS`).
+    Render(String),
+    /// An internal panic was caught (a bug — please report the spec).
+    Panic(String),
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderError::BadSpec(m) => write!(f, "bad spec: {m}"),
+            RenderError::Render(m) => write!(f, "{m}"),
+            RenderError::Panic(m) => write!(f, "internal render error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// Legacy per-thread `(brand, zoom)` defaults.
+type LegacyDefaults = (Option<(u8, u8, u8)>, Option<ZoomWindow>);
+
 thread_local! {
-    /// Per-render map zoom window. `None` = the default equal-aspect `coord_sf` fit.
-    static PANEL_ZOOM: std::cell::Cell<Option<ZoomWindow>> = const { std::cell::Cell::new(None) };
+    /// Legacy per-thread defaults behind [`set_brand`]/[`set_panel_zoom`]; only
+    /// read by the compatibility wrapper [`render`].
+    static LEGACY: std::cell::Cell<LegacyDefaults> =
+        const { std::cell::Cell::new((None, None)) };
 }
-/// Set the map zoom window for the next `render()` (a `::MAP` panel). `None`
-/// restores the auto-fit view.
+
+/// Set the brand colour used by subsequent [`render`] calls on this thread.
+/// Prefer passing [`RenderOptions::brand`] to [`render_with`].
+pub fn set_brand(color: Option<(u8, u8, u8)>) {
+    LEGACY.with(|c| c.set((color, c.get().1)));
+}
+
+/// Set the zoom window used by subsequent [`render`] calls on this thread.
+/// Prefer passing [`RenderOptions::zoom`] to [`render_with`].
 pub fn set_panel_zoom(window: Option<ZoomWindow>) {
-    PANEL_ZOOM.with(|z| z.set(window));
-}
-fn panel_zoom() -> Option<ZoomWindow> {
-    PANEL_ZOOM.with(|z| z.get())
+    LEGACY.with(|c| c.set((c.get().0, window)));
 }
 
 /// Distinct category labels in a **stable (sorted) order**, so a given series
 /// gets the same DataZoo colour in every chart that contains it.
 fn distinct_labels(col: &Column) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for v in &col.values {
-        let s = value_str(v);
-        if !seen.iter().any(|x| x == &s) {
-            seen.push(s);
-        }
-    }
-    seen.sort();
-    seen
+    let set: std::collections::BTreeSet<String> = col.values.iter().map(value_str).collect();
+    set.into_iter().collect()
 }
 
-/// Render a panel from a single JSON spec — the entry point used by hosts that
-/// pass everything as one string (the DuckDB extension, CLI, services). The spec:
-/// `{"rows":[{col:val,…},…], "roles":[[idx,"ROLE","name"],…], "width":W,
-/// "height":H, "primary":"rrggbb"}`. Returns the SVG (or `<pre>error</pre>`).
-pub fn render_spec(spec_json: &str) -> String {
-    let spec: serde_json::Value = match serde_json::from_str(spec_json) {
-        Ok(v) => v,
-        Err(e) => return format!("<pre>bad spec JSON: {e}</pre>"),
-    };
-    let rows: Vec<serde_json::Map<String, serde_json::Value>> = spec
-        .get("rows")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let entries: Vec<(usize, String, String)> = spec
-        .get("roles")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| {
-                    let e = e.as_array()?;
-                    let i = e.first()?.as_u64()? as usize;
-                    let role = e.get(1)?.as_str()?.to_string();
-                    let name = e.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    Some((i, role, name))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let roles: Vec<(usize, Role)> = entries
+/// The DataZoo discrete colour/fill scale for a series column: levels in
+/// sorted order, so a series gets the same palette colour in every chart that
+/// contains it. A level that is itself a hex colour (`#rrggbb`) is drawn in
+/// that colour (an extension convention ggplot-rs doesn't have), so such
+/// columns pin their levels with a per-level palette.
+fn dz_scale(aesthetic: Aesthetic, col: &Column) -> ScaleColorDiscrete {
+    let scale = ScaleColorDiscrete::new(aesthetic).sorted();
+    let hex_level = |v: &Value| matches!(v, Value::Str(s) if parse_hex(s).is_some());
+    if !col.values.iter().any(hex_level) {
+        return scale.with_palette((0..DZ_COLORS.len()).map(dz_color).collect());
+    }
+    let levels = distinct_labels(col);
+    let palette = levels
         .iter()
-        .filter_map(|(i, s, _)| parse_role(s).map(|r| (*i, r)))
+        .enumerate()
+        .map(|(i, s)| parse_hex(s).unwrap_or_else(|| dz_color(i)))
         .collect();
-    let mut cols = sql::columns_from_rows(&rows, &roles);
-    for (i, _, name) in &entries {
+    scale.with_levels(levels).with_palette(palette)
+}
+
+/// The colour [`dz_scale`] gives the last (sorted) level of `col`.
+fn last_level_color(col: &Column) -> Option<(u8, u8, u8)> {
+    let levels = distinct_labels(col);
+    let i = levels.len().checked_sub(1)?;
+    let c = parse_hex(&levels[i]).unwrap_or_else(|| dz_color(i));
+    Some((c.r, c.g, c.b))
+}
+
+/// Turn a caught panic payload into a message.
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
+}
+
+/// Run `f`, converting a panic into [`RenderError::Panic`].
+pub(crate) fn guard<T>(f: impl FnOnce() -> Result<T, RenderError>) -> Result<T, RenderError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(p) => Err(RenderError::Panic(panic_message(p))),
+    }
+}
+
+/// Parse `[index, "ROLE", name?]` entries (a spec's / plan's `roles` array).
+/// Unknown role tokens are reported (`Err`) instead of silently dropped.
+pub fn parse_role_entries(v: &serde_json::Value) -> Result<Vec<(usize, Role, String)>, String> {
+    let Some(arr) = v.as_array() else {
+        return Err("`roles` must be an array of [index, \"ROLE\", name?]".into());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for e in arr {
+        let (Some(i), Some(tok)) = (
+            e.get(0).and_then(|x| x.as_u64()),
+            e.get(1).and_then(|x| x.as_str()),
+        ) else {
+            return Err(format!(
+                "bad role entry {e} (want [index, \"ROLE\", name?])"
+            ));
+        };
+        let role = parse_role(tok).ok_or_else(|| format!("unknown role ::{tok}"))?;
+        let name = e.get(2).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        out.push((usize::try_from(i).unwrap_or(usize::MAX), role, name));
+    }
+    Ok(out)
+}
+
+/// Build columns from JSON rows + role entries, applying the display names
+/// (combo legends read these).
+pub fn columns_from_entries(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    entries: &[(usize, Role, String)],
+) -> Vec<Column> {
+    let roles: Vec<(usize, Role)> = entries.iter().map(|(i, r, _)| (*i, *r)).collect();
+    let mut cols = sql::columns_from_rows(rows, &roles);
+    for (c, (_, _, name)) in cols.iter_mut().zip(entries) {
         if !name.is_empty() {
-            if let Some(c) = cols.iter_mut().find(|c| c.name == format!("c{i}")) {
-                c.name = name.clone();
-            }
+            c.name = name.clone();
         }
     }
-    let width = spec.get("width").and_then(|v| v.as_u64()).unwrap_or(640) as u32;
-    let height = spec.get("height").and_then(|v| v.as_u64()).unwrap_or(400) as u32;
-    let primed = spec
-        .get("primary")
-        .and_then(|v| v.as_str())
-        .map(|p| p.trim().trim_start_matches('#').to_string())
-        .filter(|h| h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit()));
-    if let Some(h) = &primed {
-        let px = |a, b| u8::from_str_radix(&h[a..b], 16).unwrap_or(0);
-        set_brand(Some((px(0, 2), px(2, 4), px(4, 6))));
+    cols
+}
+
+/// Clamp a requested size into `MIN_DIM..=MAX_DIM`.
+pub fn clamp_dim(v: u64) -> u32 {
+    v.clamp(MIN_DIM as u64, MAX_DIM as u64) as u32
+}
+
+/// Render a panel from a single JSON spec — the **checked** entry point for
+/// hosts that pass everything as one string (the DuckDB extension, CLI,
+/// services):
+/// `{"rows":[{c0:…,c1:…},…], "roles":[[idx,"ROLE","name"],…], "width":W,
+/// "height":H, "primary":"rrggbb", "max_categories":N, "max_line_points":N}`.
+///
+/// Never panics (a caught panic becomes [`RenderError::Panic`]). Bare
+/// `NaN`/`Infinity` tokens (as DuckDB's JSON may emit) are read as `null`.
+pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
+    guard(|| {
+        let clean = sql::sanitize_json_numbers(spec_json);
+        let spec: serde_json::Value =
+            serde_json::from_str(&clean).map_err(|e| RenderError::BadSpec(format!("JSON: {e}")))?;
+        if !spec.is_object() {
+            return Err(RenderError::BadSpec("spec must be a JSON object".into()));
+        }
+        let rows: Vec<serde_json::Map<String, serde_json::Value>> = match spec.get("rows") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|_| RenderError::BadSpec("`rows` must be an array of objects".into()))?,
+        };
+        let entries = match spec.get("roles") {
+            None => Vec::new(),
+            Some(v) => parse_role_entries(v).map_err(RenderError::BadSpec)?,
+        };
+        let dim = |key: &str, default: u64| -> Result<u32, RenderError> {
+            match spec.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(clamp_dim(default)),
+                Some(v) => v
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| clamp_dim(f.max(0.0) as u64))
+                    .ok_or_else(|| RenderError::BadSpec(format!("`{key}` must be a number"))),
+            }
+        };
+        let (width, height) = (dim("width", 640)?, dim("height", 400)?);
+        let count = |key: &str, default: usize| {
+            spec.get(key)
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(1_000_000) as usize)
+                .unwrap_or(default)
+        };
+        let opts = RenderOptions {
+            brand: spec
+                .get("primary")
+                .and_then(|v| v.as_str())
+                .and_then(parse_rgb),
+            zoom: None,
+            max_categories: count("max_categories", DEFAULT_MAX_CATEGORIES),
+            max_line_points: count("max_line_points", DEFAULT_MAX_LINE_POINTS),
+        };
+        let cols = columns_from_entries(&rows, &entries);
+        render_with(&cols, width, height, &opts)
+    })
+}
+
+/// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
+/// SVG, or an HTML-escaped `<pre>message</pre>` on error — kept for hosts that
+/// want a string either way.
+pub fn render_spec(spec_json: &str) -> String {
+    render_spec_checked(spec_json).unwrap_or_else(|e| error_pre(&e.to_string()))
+}
+
+/// An HTML-escaped `<pre>` error block.
+pub fn error_pre(msg: &str) -> String {
+    format!("<pre>{}</pre>", format::escape_xml(msg))
+}
+
+/// A small SVG showing an (escaped) error message — for hosts that need an
+/// image either way (the wasm entry points).
+pub fn error_svg(msg: &str, width: u32) -> String {
+    error_svg_at(Place::Doc, msg, width)
+}
+
+/// [`error_svg`] at `place` (a dashboard nests it as a fragment).
+pub(crate) fn error_svg_at(place: Place, msg: &str, width: u32) -> String {
+    format!(
+        "{}<text x=\"4\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#b42318\">{}</text></svg>",
+        svg_open(place, clamp_dim(width as u64), 40),
+        format::escape_xml(msg)
+    )
+}
+
+/// Where a rendered panel goes: a standalone SVG document, or a nested
+/// `<svg x y …>` fragment at `(x, y)` in a parent SVG (no `xmlns`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Place {
+    Doc,
+    At(f64, f64),
+}
+
+/// The opening `<svg>` tag of a `width`×`height` panel at `place`.
+pub(crate) fn svg_open(
+    place: Place,
+    width: impl std::fmt::Display,
+    height: impl std::fmt::Display,
+) -> String {
+    match place {
+        Place::Doc => format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+        ),
+        Place::At(x, y) => format!(
+            "<svg x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+        ),
     }
-    let svg = render(&cols, width, height).unwrap_or_else(|e| format!("<pre>{e}</pre>"));
-    if primed.is_some() {
-        set_brand(None);
+}
+
+/// A panel ready to be written: a ggplot (rendered by ggplot-rs) or one of
+/// the extension's own small SVGs (notes, headings, errors).
+pub(crate) enum Panel {
+    Plot {
+        plot: Box<GGPlot>,
+        width: u32,
+        height: u32,
+    },
+    Own {
+        width: u32,
+        height: u32,
+        /// The SVG content (without the `<svg>` wrapper).
+        body: String,
+    },
+}
+
+impl Panel {
+    fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
+        Panel::Plot {
+            plot: Box::new(plot),
+            width,
+            height,
+        }
+    }
+
+    /// Write the panel at `place`: the SVG plus the plotting engine's build
+    /// warnings (rows dropped for non-finite values, empty layers, …).
+    pub(crate) fn finish(self, place: Place) -> Result<(String, Vec<String>), String> {
+        match self {
+            Panel::Plot {
+                plot,
+                width,
+                height,
+            } => {
+                let svg = match place {
+                    Place::Doc => plot.render_svg_native_with_warnings(width, height),
+                    Place::At(x, y) => plot
+                        .render_svg_native_at(x, y, width, height)
+                        .map(|s| (s, Vec::new())),
+                };
+                svg.map_err(|e| format!("render failed: {e:?}"))
+            }
+            Panel::Own {
+                width,
+                height,
+                body,
+            } => Ok((
+                format!("{}{body}</svg>", svg_open(place, width, height)),
+                Vec::new(),
+            )),
+        }
+    }
+}
+
+/// Parse `rrggbb` / `#rrggbb`.
+pub fn parse_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    parse_hex(s).map(|c| (c.r, c.g, c.b))
+}
+
+/// Render an annotated result set to SVG using the legacy thread defaults (see
+/// [`set_brand`]). Prefer [`render_with`].
+pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String> {
+    let (brand, zoom) = LEGACY.with(|c| c.get());
+    let opts = RenderOptions {
+        brand,
+        zoom,
+        ..RenderOptions::default()
+    };
+    render_with(cols, width, height, &opts).map_err(|e| e.to_string())
+}
+
+/// Render an annotated result set to an SVG panel.
+///
+/// Recognises one `X` column, an optional `Category` column, an optional `Label`
+/// (→ title), and one `Value(kind)` column that selects the geom. A result with
+/// only a `Label` renders as a heading. Never panics: sizes are clamped to
+/// [`MIN_DIM`]`..=`[`MAX_DIM`], non-finite numbers become missing, discrete
+/// axes are capped at [`RenderOptions::max_categories`], long lines are
+/// LTTB-downsampled, and an internal panic becomes [`RenderError::Panic`].
+///
+/// Build warnings from the plotting engine (see [`render_with_warnings`]) are
+/// also recorded on the SVG root as `data-warnings="[…]"` (a JSON array).
+pub fn render_with(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<String, RenderError> {
+    render_with_warnings(cols, width, height, o).map(|r| r.svg)
+}
+
+/// A rendered panel and the plotting engine's build warnings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    /// The SVG document (carrying `data-warnings` when `warnings` is non-empty).
+    pub svg: String,
+    /// ggplot-rs build warnings, e.g. `"geom_point: removed 3 rows containing
+    /// non-finite values"` or a layer whose stat produced no data and was
+    /// skipped — things that render fine but silently drop data.
+    pub warnings: Vec<String>,
+}
+
+/// [`render_with`], also returning the plotting engine's build warnings
+/// (`dashboard --check` reports them as `render-warning` diagnostics).
+pub fn render_with_warnings(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<Rendered, RenderError> {
+    let (svg, warnings) = render_placed(cols, Place::Doc, width, height, o)?;
+    Ok(Rendered {
+        svg: with_warnings_attr(svg, &warnings),
+        warnings,
+    })
+}
+
+/// Record `warnings` on the SVG root as `data-warnings="[…]"` (escaped JSON).
+/// The root start tag ends at the first `>`: every writer escapes `>` inside
+/// attribute values.
+fn with_warnings_attr(mut svg: String, warnings: &[String]) -> String {
+    if warnings.is_empty() || !svg.starts_with("<svg") {
+        return svg;
+    }
+    if let Some(end) = svg.find('>') {
+        let at = if svg[..end].ends_with('/') {
+            end - 1
+        } else {
+            end
+        };
+        let json = serde_json::to_string(warnings).unwrap_or_default();
+        svg.insert_str(
+            at,
+            &format!(" data-warnings=\"{}\"", format::escape_xml(&json)),
+        );
     }
     svg
 }
 
-/// Render an annotated result set to an SVG dashboard element.
-///
-/// Recognises one `X` column, an optional `Category` column, an optional `Label`
-/// (→ title), and one `Value(kind)` column that selects the geom. A result with
-/// only a `Label` renders as a heading.
-pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String> {
+/// Like [`render_with`], but renders a nested `<svg x y width height
+/// viewBox>` fragment (no `xmlns`) positioned at `(x, y)` in a parent SVG —
+/// for composing dashboards without string surgery. (ggplot-rs reports no
+/// build warnings for fragments; use [`render_with_warnings`] to lint.)
+pub fn render_with_at(
+    cols: &[Column],
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<String, RenderError> {
+    let (x, y) = (
+        if x.is_finite() { x } else { 0.0 },
+        if y.is_finite() { y } else { 0.0 },
+    );
+    render_placed(cols, Place::At(x, y), width, height, o).map(|(svg, _)| svg)
+}
+
+fn render_placed(
+    cols: &[Column],
+    place: Place,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<(String, Vec<String>), RenderError> {
+    guard(|| {
+        let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+        let cols = downsample::prepare(cols, o);
+        let (svg, warnings) = render_inner(&cols, w, h, o)
+            .and_then(|p| p.finish(place))
+            .map_err(RenderError::Render)?;
+        Ok((strip_nonfinite_marks(svg), warnings))
+    })
+}
+
+/// Geometry attributes whose values must be finite numbers.
+const GEOMETRY_ATTRS: &[&str] = &[
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "width",
+    "height",
+    "points",
+    "d",
+    "transform",
+    "stroke-width",
+    "font-size",
+    "opacity",
+    "fill-opacity",
+    "viewBox",
+];
+
+/// Does a start tag carry `NaN`/`inf` in a geometry attribute?
+fn tag_has_nonfinite(tag: &str) -> bool {
+    let mut rest = tag;
+    while let Some(eq) = rest.find("=\"") {
+        let name = rest[..eq]
+            .rsplit(|c: char| c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        let after = &rest[eq + 2..];
+        let Some(end) = after.find('"') else {
+            return false;
+        };
+        let val = &after[..end];
+        if GEOMETRY_ATTRS.contains(&name)
+            && val
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+                .any(|t| {
+                    let t = t.trim_start_matches('-').to_ascii_lowercase();
+                    t == "nan" || t == "inf" || t == "infinity"
+                })
+        {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
+}
+
+/// Safety net: drop any element whose geometry contains a non-finite number
+/// (the plotting engine can emit `NaN` for degenerate inputs, e.g. a violin of
+/// a constant group). The SVG we write never contains a raw `>` inside an
+/// attribute, so a tag scan is exact.
+fn strip_nonfinite_marks(svg: String) -> String {
+    if !(svg.contains("NaN") || svg.contains("inf")) {
+        return svg;
+    }
+    let mut out = String::with_capacity(svg.len());
+    let mut i = 0;
+    while let Some(lt) = svg[i..].find('<') {
+        let start = i + lt;
+        out.push_str(&svg[i..start]);
+        let Some(gt) = svg[start..].find('>') else {
+            out.push_str(&svg[start..]);
+            return out;
+        };
+        let tag_end = start + gt + 1;
+        let tag = &svg[start..tag_end];
+        if !tag.starts_with("</") && !tag.starts_with("<svg") && tag_has_nonfinite(tag) {
+            if tag.ends_with("/>") {
+                i = tag_end;
+                continue;
+            }
+            let name: String = tag[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            let close = format!("</{name}>");
+            i = svg[tag_end..]
+                .find(&close)
+                .map(|p| tag_end + p + close.len())
+                .unwrap_or(tag_end);
+            continue;
+        }
+        out.push_str(tag);
+        i = tag_end;
+    }
+    out.push_str(&svg[i..]);
+    out
+}
+
+fn render_inner(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<Panel, String> {
     let title = cols
         .iter()
         .find(|c| c.role == Role::Label)
@@ -494,8 +900,15 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         .map(value_str);
 
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
-    if cols.iter().any(|c| c.role == Role::Geometry) {
-        return render_map(cols, title.as_deref(), width, height);
+    if let Some(g) = cols.iter().find(|c| c.role == Role::Geometry) {
+        if !g
+            .values
+            .iter()
+            .any(|v| matches!(v, Value::Str(s) if !s.is_empty()))
+        {
+            return Ok(note_svg(None, "No data", width, height));
+        }
+        return render_map(o, cols, title.as_deref(), width, height);
     }
     let value = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let Some(value) = value else {
@@ -503,22 +916,48 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         return Ok(heading_svg(title.as_deref().unwrap_or(""), width));
     };
     let Role::Value(kind) = value.role else {
-        unreachable!()
+        return Err("no measure column".into());
     };
+    // Empty / too-small inputs get a clear note instead of a confusing
+    // "requires aesthetic 'x'" error from the plotting engine.
+    let n_ok = value.values.iter().filter(|v| v.as_f64().is_some()).count();
+    if value.values.is_empty() {
+        return Ok(note_svg(title.as_deref(), "No data", width, height));
+    }
+    if n_ok == 0 {
+        return Ok(note_svg(
+            title.as_deref(),
+            "No numeric values to plot",
+            width,
+            height,
+        ));
+    }
+    let need = min_values(kind);
+    if n_ok < need {
+        return Ok(note_svg(
+            title.as_deref(),
+            &format!(
+                "::{} needs at least {need} values (got {n_ok})",
+                value.role.token()
+            ),
+            width,
+            height,
+        ));
+    }
     match kind {
         Kind::Pie => return render_pie(value, cols, title.as_deref(), 0.0, width, height),
         Kind::Donut => return render_pie(value, cols, title.as_deref(), 0.55, width, height),
-        Kind::Gauge => return render_gauge(value, cols, title.as_deref(), width, height),
-        Kind::Histogram => return render_histogram(value, title.as_deref(), width, height),
-        Kind::Density => return render_density(value, cols, title.as_deref(), width, height),
-        Kind::QQ => return render_qq(value, title.as_deref(), width, height),
-        Kind::Heatmap => return render_heatmap(value, cols, title.as_deref(), width, height),
-        Kind::Calendar => return render_calendar(value, cols, width, height),
+        Kind::Gauge => return render_gauge(o, value, cols, title.as_deref(), width, height),
+        Kind::Histogram => return render_histogram(o, value, title.as_deref(), width, height),
+        Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
+        Kind::QQ => return render_qq(o, value, title.as_deref(), width, height),
+        Kind::Heatmap => return render_heatmap(o, value, cols, title.as_deref(), width, height),
+        Kind::Calendar => return render_calendar(o, value, cols, title.as_deref(), width, height),
         Kind::Candlestick => {
             return render_candlestick(value, cols, title.as_deref(), width, height)
         }
-        Kind::Radar => return render_radar(value, cols, title.as_deref(), width, height),
-        Kind::Sparkline => return render_sparkline(value, width, height),
+        Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
+        Kind::Sparkline => return render_sparkline(o, value, width, height),
         _ => {}
     }
     let x = cols
@@ -542,7 +981,13 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     }
     let by_colour = matches!(
         kind,
-        Kind::Line | Kind::LinePercent | Kind::Point | Kind::Step | Kind::Smooth | Kind::Jitter
+        Kind::Line
+            | Kind::LinePercent
+            | Kind::Point
+            | Kind::Bubble
+            | Kind::Step
+            | Kind::Smooth
+            | Kind::Jitter
     );
     let bar = matches!(
         kind,
@@ -565,21 +1010,21 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
 
     // Colour dimension: an explicit CATEGORY, or — for a bar chart with no
     // category — the (discrete) X itself, so a "total per channel" bar matches
-    // the same channel's colour in the other charts. `color_levels` are the
-    // stable palette keys; `x_coloured` suppresses the then-redundant legend.
+    // the same channel's colour in the other charts. `color_col` holds the
+    // series levels; `x_coloured` suppresses the then-redundant legend.
     let mut x_coloured = false;
-    let color_levels: Option<Vec<String>> = if let Some(cat) = category {
+    let color_col: Option<&Column> = if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = if by_colour {
             aes.color("cat")
         } else {
             aes.fill("cat")
         };
-        Some(distinct_labels(cat))
+        Some(cat)
     } else if bar && x_discrete {
         aes = aes.fill("x");
         x_coloured = true;
-        Some(distinct_labels(x))
+        Some(x)
     } else {
         None
     };
@@ -659,71 +1104,43 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Vec::new()
     };
 
-    let mut plot = GGPlot::new(data).aes(aes);
+    // Single-series marks take the brand colour (geoms added with explicit
+    // `geom_*_with` styles below set it themselves; mapped colours win).
+    let brand = o.brand();
+    let mut plot = GGPlot::new(data).aes(aes).primary_color(brand);
 
     // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
-    // [min, max] of the mark column's x-values, full plot height.
+    // [min, max] of the mark column's x-values, the full panel height
+    // (ymin/ymax = ∓Inf reach the panel edges and don't train the y scale).
     if let Some(ma) = cols.iter().find(|c| c.role == Role::MarkArea) {
-        let key = |v: &&Value| v.as_f64();
-        let lo = ma
-            .values
-            .iter()
-            .filter(|v| v.as_f64().is_some())
-            .min_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        let hi = ma
-            .values
-            .iter()
-            .filter(|v| v.as_f64().is_some())
-            .max_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        let ys: Vec<f64> = value
-            .values
-            .iter()
-            .chain(extras.iter().flat_map(|e| e.values.iter()))
-            .filter_map(|v| v.as_f64())
-            .collect();
-        if let (Some(x0), Some(x1)) = (lo, hi) {
-            let ymin = ys.iter().cloned().fold(f64::INFINITY, f64::min);
-            let ymax = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            if ymin.is_finite() && ymax.is_finite() {
-                let frame = vec![
-                    ("mx0".to_string(), vec![x0.clone()]),
-                    ("mx1".to_string(), vec![x1.clone()]),
-                    ("my0".to_string(), vec![Value::Float(ymin)]),
-                    ("my1".to_string(), vec![Value::Float(ymax)]),
-                ];
-                plot = plot
-                    .geom_rect_with(GeomRect {
-                        fill: (148, 160, 178),
-                        color: (148, 160, 178),
-                        alpha: 0.14,
-                        line_width: 0.0,
-                    })
-                    .layer_data(frame)
-                    .layer_aes(Aes::new().xmin("mx0").xmax("mx1").ymin("my0").ymax("my1"));
-            }
+        let xs = ma.values.iter().filter(|v| v.as_f64().is_some());
+        let by_x = |a: &&Value, b: &&Value| {
+            a.as_f64()
+                .partial_cmp(&b.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        if let (Some(x0), Some(x1)) = (xs.clone().min_by(by_x), xs.max_by(by_x)) {
+            let frame = vec![
+                ("mx0".to_string(), vec![x0.clone()]),
+                ("mx1".to_string(), vec![x1.clone()]),
+                ("my0".to_string(), vec![Value::Float(f64::NEG_INFINITY)]),
+                ("my1".to_string(), vec![Value::Float(f64::INFINITY)]),
+            ];
+            plot = plot
+                .geom_rect_with(GeomRect {
+                    fill: (148, 160, 178),
+                    color: (148, 160, 178),
+                    alpha: 0.14,
+                    line_width: 0.0,
+                })
+                .layer_data(frame)
+                .layer_aes(Aes::new().xmin("mx0").xmax("mx1").ymin("my0").ymax("my1"));
         }
     }
 
     // A ::BAND (prediction interval) matches the forecast — the last coloured
     // series — at half opacity, so it reads as that series' uncertainty.
-    let band_color: (u8, u8, u8) = color_levels
-        .as_ref()
-        .filter(|lv| !lv.is_empty())
-        .map(|lv| {
-            let i = lv.len() - 1;
-            parse_hex(&lv[i])
-                .map(|c| (c.r, c.g, c.b))
-                .unwrap_or(DZ_COLORS[i % DZ_COLORS.len()])
-        })
-        .unwrap_or_else(brand);
+    let band_color: (u8, u8, u8) = color_col.and_then(last_level_color).unwrap_or(brand);
     // The band is drawn first so the line sits on top of it.
     if band_lo.is_some() && band_hi.is_some() {
         plot = plot
@@ -736,10 +1153,12 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
     // don't get swamped by the dots.
     let thin_line = || GeomLine {
+        color: brand,
         width: 1.0,
         ..Default::default()
     };
     let small_point = || GeomPoint {
+        color: brand,
         size: 1.8,
         ..Default::default()
     };
@@ -754,6 +1173,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             .geom_point_with(small_point()),
         Kind::Step => plot
             .geom_step_with(ggplot_rs::geom::step::GeomStep {
+                color: brand,
                 width: 1.2,
                 ..Default::default()
             })
@@ -762,6 +1182,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Smooth => plot
             .geom_point_with(small_point())
             .geom_smooth_with(GeomSmooth {
+                color: brand,
                 se: false,
                 line_width: 2.0,
                 method: ggplot_rs::stat::smooth::SmoothMethod::Loess { span: 0.75 },
@@ -770,11 +1191,13 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
         Kind::Area => plot.geom_area().geom_point_with(small_point()),
         Kind::AreaStacked => plot
             .geom_area_with(GeomArea {
+                fill: brand,
+                color: brand,
                 alpha: 0.85,
                 ..Default::default()
             })
             .position(PositionStack),
-        Kind::Point => plot.geom_point(),
+        Kind::Point | Kind::Bubble => plot.geom_point(),
         Kind::Jitter => plot.geom_jitter(),
         // Box plots are unfilled by default (white box, dark whiskers/outline) —
         // the ggplot idiom; a CATEGORY still colours the outline via the border.
@@ -831,6 +1254,7 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
                 // A point overlay (e.g. detected changepoints/peaks) reads as a
                 // marker on the base line, so make it a touch larger.
                 Kind::Point => plot.geom_point_with(GeomPoint {
+                    color: brand,
                     size: 3.4,
                     ..Default::default()
                 }),
@@ -852,29 +1276,23 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
             plot = plot.geom_vline(v);
         }
     }
-    if let Some(levels) = &color_levels {
-        // Explicit hex values (`#rrggbb`) are used verbatim; otherwise the levels
-        // map to the DataZoo palette in stable/sorted order so a given series is
-        // the same colour in every chart.
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-            .collect();
+    if let Some(col) = color_col {
+        // DataZoo palette, levels sorted so a series keeps its colour across
+        // charts; `#rrggbb` levels are drawn in that colour.
         plot = if by_colour {
-            plot.scale_color_manual(pairs)
+            plot.scale_color(dz_scale(Aesthetic::Color, col))
         } else {
-            plot.scale_fill_manual(pairs)
+            plot.scale_fill(dz_scale(Aesthetic::Fill, col))
         };
     }
     if !combo_names.is_empty() {
-        // Combo measures → distinct palette colours, keyed by column header.
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = combo_names
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), dz_color(i)))
-            .collect();
-        plot = plot.scale_color_manual(pairs);
+        // Combo measures → distinct palette colours in column order, keyed by
+        // column header.
+        plot = plot.scale_color(
+            ScaleColorDiscrete::new(Aesthetic::Color)
+                .with_levels(combo_names.clone())
+                .with_palette((0..DZ_COLORS.len()).map(dz_color).collect()),
+        );
     }
     if x_coloured {
         plot = plot.show_legend(false); // the x axis already labels the colours
@@ -916,56 +1334,48 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     // Scroll/drag-zoom window (from the UI) — clip a continuous cartesian panel to
     // the given data rectangle. The UI only sets it for continuous/datetime x.
     if !flipped {
-        if let Some((xlim, ylim)) = panel_zoom() {
+        if let Some((xlim, ylim)) = o.zoom {
             plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
         }
     }
-    // DataZoo steel blue for single-series marks. Set the primary AFTER the theme
-    // preset — presets replace the whole theme. Box plots opt out so they stay
-    // unfilled (primary would re-colour the box fill).
     plot = plot.theme_minimal();
-    // A combo already colours each measure explicitly via the manual scale; the
-    // brand primary would flatten them all back to one colour, so skip it there.
-    if !matches!(kind, Kind::Boxplot | Kind::Violin) && combo_names.is_empty() {
-        plot = plot.primary_color(brand());
-    }
     plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A histogram of the measure column (ggplot bins + counts).
 fn render_histogram(
+    o: &RenderOptions,
     value: &Column,
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let data = vec![("x".to_string(), value.values.clone())];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x"))
         .geom_histogram()
         .theme_minimal()
-        .primary_color(brand());
+        .primary_color(o.brand());
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A kernel-density curve of the measure column. An optional `CATEGORY` splits
 /// it into one filled curve per group (overlaid, semi-transparent).
 fn render_density(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let category = cols.iter().find(|c| c.role == Role::Category);
     let mut data: Vec<(String, Vec<Value>)> = vec![("x".to_string(), value.values.clone())];
     let mut aes = Aes::new().x("x");
@@ -973,20 +1383,14 @@ fn render_density(
     if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = aes.fill("cat").color("cat");
-        let levels = distinct_labels(cat);
-        let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-            .collect();
         plot = GGPlot::new(data)
             .aes(aes)
             .geom_density_with(GeomDensity {
                 alpha: 0.4,
                 ..Default::default()
             })
-            .scale_fill_manual(pairs.clone())
-            .scale_color_manual(pairs)
+            .scale_fill(dz_scale(Aesthetic::Fill, cat))
+            .scale_color(dz_scale(Aesthetic::Color, cat))
             .theme_minimal()
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     } else {
@@ -994,13 +1398,12 @@ fn render_density(
             .aes(aes)
             .geom_density()
             .theme_minimal()
-            .primary_color(brand());
+            .primary_color(o.brand());
     }
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// Build an axis tick formatter from a short spec — a keyword or a currency
@@ -1009,7 +1412,7 @@ fn render_density(
 /// otherwise the spec is a prefix ("€" → "€1,200", "CHF " → "CHF 1,200").
 fn axis_formatter(spec: &str) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
     use ggplot_rs::scale::format::{label_comma, label_dollar};
-    let s = spec.trim_end_matches(|c: char| c == ';');
+    let s = spec.trim_end_matches(';');
     let low = s.trim().to_ascii_lowercase();
     if low.is_empty() {
         return None;
@@ -1054,11 +1457,12 @@ fn axis_formatter(spec: &str) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>
 /// reference line) — points on the line ⇒ roughly normal; systematic bowing ⇒
 /// skew/heavy tails. Handy for checking a model's residuals.
 fn render_qq(
+    o: &RenderOptions,
     value: &Column,
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let data = vec![("y".to_string(), value.values.clone())];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().y("y"))
@@ -1067,22 +1471,22 @@ fn render_qq(
         .xlab("Theoretical")
         .ylab("Sample")
         .theme_minimal()
-        .primary_color(brand());
+        .primary_color(o.brand());
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A heatmap: `x` × `y` tiles coloured by the measure (light → steel blue).
 fn render_heatmap(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
@@ -1102,427 +1506,233 @@ fn render_heatmap(
         .geom_tile()
         .scale_fill_gradient(
             ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-            ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
+            ggplot_rs::scale::color::RGBAColor::new(o.brand().0, o.brand().1, o.brand().2),
         )
         .theme_minimal();
-    // A gridded heatmap with numeric axes should tick on the tile positions, not
-    // at generic "nice" breaks (0, 2.5, 5…) that fall between tiles. Use the
-    // distinct data values (thinned) as breaks so labels sit under each tile.
-    // Tiles are 1 unit wide/tall (± 0.5), so expand the domain by half a tile —
-    // otherwise the edge tiles spill past the axis and cover the tick labels.
-    use ggplot_rs::scale::continuous::ScaleContinuous;
-    if let Some(bx) = tile_breaks(&x.values) {
-        plot = plot.scale_x_continuous(
-            ScaleContinuous::new()
-                .with_breaks(bx)
-                .with_expand(0.0, 0.55),
-        );
-    }
-    if let Some(by) = tile_breaks(&y.values) {
-        plot = plot.scale_y_continuous(
-            ScaleContinuous::new()
-                .with_breaks(by)
-                .with_expand(0.0, 0.55),
-        );
-    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
-/// Civil (year, month, day) from days since 1970-01-01 — Hinnant's algorithm.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
+/// Max span a calendar heatmap draws (one column per week; beyond this the
+/// cells are sub-pixel). Longer spans are rejected with a clear error rather
+/// than silently clipped (ggplot-rs would clip to the most recent years).
+pub const MAX_CALENDAR_YEARS: i64 = ggplot_rs::stat::calendar::MAX_CALENDAR_YEARS;
 
-/// A GitHub/ECharts-style calendar heatmap: a date `::XAXIS` + a measure laid out
-/// as week-columns × weekday-rows, with month labels along the top and weekday
-/// labels down the left; cells are coloured light→brand by value.
+/// A GitHub-style calendar heatmap (`geom_calendar`): a date `::XAXIS` + a
+/// measure laid out as week-columns × weekday-rows (month labels on top,
+/// Mon/Wed/Fri down the left), cells coloured light → brand by value. Spans
+/// longer than [`MAX_CALENDAR_YEARS`] are rejected with a clear error.
 fn render_calendar(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
+    title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
+    use ggplot_rs::stat::calendar::day_number;
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
         .ok_or("calendar needs an XAXIS date column")?;
-    let mut pts: Vec<(i64, f64)> = Vec::new();
+    // Days since the epoch. ggplot-rs ignores out-of-range epoch numbers; count
+    // them here (clamped, so they can't overflow) so the span check rejects
+    // them instead of silently dropping the row.
+    let day_of = |v: &Value| {
+        day_number(v).or_else(|| {
+            v.as_f64()
+                .filter(|f| f.is_finite())
+                .map(|secs| (secs / 86_400.0).floor().clamp(-1e12, 1e12) as i64)
+        })
+    };
+    // Only rows with a date and a finite measure become cells.
+    let (mut dates, mut vals, mut days) = (Vec::new(), Vec::new(), Vec::new());
     for (dv, vv) in x.values.iter().zip(value.values.iter()) {
-        if let (Some(secs), Some(val)) = (dv.as_f64(), vv.as_f64()) {
-            pts.push(((secs as i64).div_euclid(86_400), val));
+        if let (Some(day), Some(val)) = (day_of(dv), vv.as_f64().filter(|f| f.is_finite())) {
+            dates.push(dv.clone());
+            vals.push(Value::Float(val));
+            days.push(day);
         }
     }
-    if pts.is_empty() {
-        return Ok(heading_svg("calendar needs a date axis", width));
-    }
-    let min_day = pts.iter().map(|(d, _)| *d).min().unwrap();
-    let max_day = pts.iter().map(|(d, _)| *d).max().unwrap();
-    let vmin = pts.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let vmax = pts
-        .iter()
-        .map(|(_, v)| *v)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let vspan = if (vmax - vmin).abs() < 1e-9 {
-        1.0
-    } else {
-        vmax - vmin
+    let (Some(min_day), Some(max_day)) = (days.iter().min(), days.iter().max()) else {
+        return Ok(note_svg(title, "calendar needs a date axis", width, height));
     };
-
-    // Sunday = 0 … Saturday = 6 (1970-01-01 was a Thursday → 4).
-    let weekday = |d: i64| ((d % 7) + 4).rem_euclid(7);
-    let first_sun = min_day - weekday(min_day);
-    let col_of = |d: i64| (d - first_sun) / 7;
-    let n_cols = (col_of(max_day) + 1).max(1) as f64;
-
-    let (w, h) = (width as f64, height as f64);
-    let (left, top, right, bottom) = (30.0, 18.0, 10.0, 6.0);
-    let cell = ((w - left - right) / n_cols)
-        .min((h - top - bottom) / 7.0)
-        .max(3.0);
-    let gap = (cell * 0.14).clamp(0.5, 2.5);
-    let sz = cell - gap;
-    let (x0, y0) = (left, top);
-
-    let lo = (0xebu8, 0xf1u8, 0xf7u8);
-    let hi = brand();
-    let mix = |t: f64| {
-        let t = t.clamp(0.0, 1.0);
-        let m = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
-        format!(
-            "#{:02x}{:02x}{:02x}",
-            m(lo.0, hi.0),
-            m(lo.1, hi.1),
-            m(lo.2, hi.2)
-        )
-    };
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
-
-    let mut body = String::new();
-    for (row, lbl) in [(1u32, "Mon"), (3, "Wed"), (5, "Fri")] {
-        let cy = y0 + row as f64 * cell + sz / 2.0;
-        body += &format!(
-            "<text x=\"{:.1}\" y=\"{cy:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{lbl}</text>",
-            x0 - 5.0
-        );
+    let span_years = (max_day - min_day) / 365;
+    if span_years > MAX_CALENDAR_YEARS {
+        return Err(format!(
+            "calendar spans {span_years} years — at most {MAX_CALENDAR_YEARS} are drawn; filter the date range"
+        ));
     }
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    let labels: Vec<Value> = vals.iter().map(|v| Value::Str(fmt_label(v))).collect();
+    let data = vec![
+        ("x".to_string(), dates),
+        ("fill".to_string(), vals),
+        ("label".to_string(), labels),
     ];
-    let mut last_month = 0u32;
-    for d in min_day..=max_day {
-        let (_, m, _) = civil_from_days(d);
-        if m != last_month {
-            let col = col_of(d) as f64;
-            body += &format!(
-                "<text x=\"{:.1}\" y=\"12\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
-                x0 + col * cell,
-                MONTHS[(m - 1) as usize]
-            );
-            last_month = m;
-        }
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").fill("fill").label("label"))
+        .geom_calendar()
+        .scale_fill_gradient(rgba((0xeb, 0xf1, 0xf7)), rgba(o.brand()))
+        .xlab("")
+        .ylab("")
+        .theme_minimal();
+    if let Some(t) = title {
+        plot = plot.title(t);
     }
-    let round = (sz * 0.18).min(2.5);
-    for &(d, v) in &pts {
-        let cx = x0 + col_of(d) as f64 * cell;
-        let cy = y0 + weekday(d) as f64 * cell;
-        let (yr, mo, dom) = civil_from_days(d);
-        let tip = format!("{yr:04}-{mo:02}-{dom:02}: {}", fmt_label(&Value::Float(v)));
-        body += &format!(
-            "<rect class=\"dp-hit\" x=\"{cx:.1}\" y=\"{cy:.1}\" width=\"{sz:.1}\" height=\"{sz:.1}\" rx=\"{round:.1}\" fill=\"{}\" stroke=\"#e3e8ef\" stroke-width=\"0.5\"><title>{}</title></rect>",
-            mix((v - vmin) / vspan),
-            esc(&tip)
-        );
-    }
-
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+    Ok(Panel::plot(plot, width, height))
 }
 
-/// A date `::XAXIS` value as a calendar date, otherwise its plain string.
-fn date_or_str(v: &Value) -> String {
-    match v {
-        Value::DateTime(s) => ggplot_rs::data::format_epoch_secs(*s),
-        other => value_str(other),
-    }
-}
-
-/// An OHLC candlestick chart: `::XAXIS` period, `::OPEN`/`::HIGH`/`::LOW` prices,
-/// and the close as the measure (`::CANDLESTICK`). Up candles green, down red.
+/// An OHLC candlestick chart (`geom_candlestick`): `::XAXIS` period,
+/// `::OPEN`/`::HIGH`/`::LOW` prices and the close as the measure
+/// (`::CANDLESTICK`). Up candles green, down red; each candle's hover reads
+/// "period — O … H … L … C …".
 fn render_candlestick(
     value: &Column,
     cols: &[Column],
-    _title: Option<&str>,
+    title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
-    let x = cols
-        .iter()
-        .find(|c| c.role == Role::X)
-        .ok_or("candlestick needs an XAXIS column")?;
-    let open = cols
-        .iter()
-        .find(|c| c.role == Role::Open)
-        .ok_or("candlestick needs an ::OPEN column")?;
-    let high = cols
-        .iter()
-        .find(|c| c.role == Role::High)
-        .ok_or("candlestick needs a ::HIGH column")?;
-    let low = cols
-        .iter()
-        .find(|c| c.role == Role::Low)
-        .ok_or("candlestick needs a ::LOW column")?;
-    let n = value.values.len();
-    if n == 0 {
-        return Ok(heading_svg("candlestick needs data", width));
+) -> Result<Panel, String> {
+    let find = |role: Role, msg: &'static str| cols.iter().find(|c| c.role == role).ok_or(msg);
+    let x = find(Role::X, "candlestick needs an XAXIS column")?;
+    let open = find(Role::Open, "candlestick needs an ::OPEN column")?;
+    let high = find(Role::High, "candlestick needs a ::HIGH column")?;
+    let low = find(Role::Low, "candlestick needs a ::LOW column")?;
+    let complete = (0..value.values.len()).any(|i| {
+        [open, high, low, value]
+            .iter()
+            .all(|c| c.values.get(i).and_then(|v| v.as_f64()).is_some())
+    });
+    if !complete {
+        return Ok(note_svg(
+            title,
+            "candlestick needs numeric OHLC",
+            width,
+            height,
+        ));
     }
-    let getf = |c: &Column, i: usize| c.values.get(i).and_then(|v| v.as_f64());
-    let mut ylo = f64::INFINITY;
-    let mut yhi = f64::NEG_INFINITY;
-    for i in 0..n {
-        if let Some(l) = getf(low, i) {
-            ylo = ylo.min(l);
-        }
-        if let Some(hv) = getf(high, i) {
-            yhi = yhi.max(hv);
-        }
+    let data = vec![
+        ("x".to_string(), x.values.clone()),
+        ("open".to_string(), open.values.clone()),
+        ("high".to_string(), high.values.clone()),
+        ("low".to_string(), low.values.clone()),
+        ("close".to_string(), value.values.clone()),
+    ];
+    let mut plot = GGPlot::new(data)
+        .aes(
+            Aes::new()
+                .x("x")
+                .open("open")
+                .high("high")
+                .low("low")
+                .close("close"),
+        )
+        .geom_candlestick()
+        .xlab("")
+        .ylab("")
+        .theme_minimal();
+    if let Some(t) = title {
+        plot = plot.title(t);
     }
-    if !ylo.is_finite() || !yhi.is_finite() {
-        return Ok(heading_svg("candlestick needs numeric OHLC", width));
-    }
-    let pad = ((yhi - ylo) * 0.05).max(1e-9);
-    let (ylo, yhi) = (ylo - pad, yhi + pad);
-    let yspan = if (yhi - ylo).abs() < 1e-9 {
-        1.0
-    } else {
-        yhi - ylo
-    };
-
-    let (w, h) = (width as f64, height as f64);
-    let (left, top, right, bottom) = (46.0, 8.0, 10.0, 22.0);
-    let pw = w - left - right;
-    let ph = h - top - bottom;
-    let x_px = |i: usize| left + (i as f64 + 0.5) / n as f64 * pw;
-    let y_px = |v: f64| top + (1.0 - (v - ylo) / yspan) * ph;
-    let bw = (pw / n as f64 * 0.6).clamp(1.0, 18.0);
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
-    let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
-    let up = (0x0c, 0xa6, 0x78);
-    let down = (0xe0, 0x31, 0x31);
-
-    let mut body = String::new();
-    for k in 0..=4 {
-        let v = ylo + (yhi - ylo) * k as f64 / 4.0;
-        let py = y_px(v);
-        body += &format!(
-            "<line x1=\"{left:.1}\" y1=\"{py:.1}\" x2=\"{:.1}\" y2=\"{py:.1}\" stroke=\"#ececec\" stroke-width=\"1\"/><text x=\"{:.1}\" y=\"{py:.1}\" text-anchor=\"end\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#7a8496\">{}</text>",
-            left + pw, left - 5.0, esc(&fmt_label(&Value::Float(v)))
-        );
-    }
-    let xstep = (n / 8).max(1);
-    for i in (0..n).step_by(xstep) {
-        body += &format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"8\" fill=\"#7a8496\">{}</text>",
-            x_px(i), h - 7.0, esc(&date_or_str(&x.values[i]))
-        );
-    }
-    for i in 0..n {
-        let (Some(o), Some(c), Some(hv), Some(lv)) = (
-            getf(open, i),
-            value.values[i].as_f64(),
-            getf(high, i),
-            getf(low, i),
-        ) else {
-            continue;
-        };
-        let cx = x_px(i);
-        let col = if c >= o { up } else { down };
-        let ch = hex(col);
-        let yt = y_px(o.max(c));
-        let bh = (y_px(o.min(c)) - yt).max(1.0);
-        let tip = format!(
-            "{} — O {} H {} L {} C {}",
-            date_or_str(&x.values[i]),
-            fmt_label(&Value::Float(o)),
-            fmt_label(&Value::Float(hv)),
-            fmt_label(&Value::Float(lv)),
-            fmt_label(&Value::Float(c))
-        );
-        body += &format!(
-            "<line x1=\"{cx:.1}\" y1=\"{:.1}\" x2=\"{cx:.1}\" y2=\"{:.1}\" stroke=\"{ch}\" stroke-width=\"1\"/><rect class=\"dp-hit\" x=\"{:.1}\" y=\"{yt:.1}\" width=\"{bw:.1}\" height=\"{bh:.1}\" fill=\"{ch}\" stroke=\"{ch}\"><title>{}</title></rect>",
-            y_px(hv), y_px(lv), cx - bw / 2.0, esc(&tip)
-        );
-    }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+    Ok(Panel::plot(plot, width, height))
 }
 
-/// A radar / spider chart: axes from the `::XAXIS` (metric names), values from
-/// the measure (`::RADAR`), one filled polygon per `::CATEGORY` series.
+/// A radar / spider chart (`coord_radar`): axes from the `::XAXIS` (metric
+/// names), values from the measure (`::RADAR`), one translucent polygon (+
+/// vertex markers) per `::CATEGORY` series.
 fn render_radar(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
-    _title: Option<&str>,
+    title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let x = cols
         .iter()
         .find(|c| c.role == Role::X)
         .ok_or("radar needs an XAXIS (axis) column")?;
     let category = cols.iter().find(|c| c.role == Role::Category);
+    // Spokes in first-seen order (the order the query lists the metrics).
     let mut axes: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for v in &x.values {
         let s = value_str(v);
-        if !axes.contains(&s) {
+        if seen.insert(s.clone()) {
             axes.push(s);
         }
     }
-    let n_ax = axes.len();
-    if n_ax < 3 {
-        return Ok(heading_svg("radar needs at least 3 axes", width));
+    if axes.len() < 3 {
+        return Ok(note_svg(
+            title,
+            "radar needs at least 3 axes",
+            width,
+            height,
+        ));
     }
-    let series: Vec<String> = match category {
-        Some(c) => {
-            let mut s = Vec::new();
-            for v in &c.values {
-                let k = value_str(v);
-                if !s.contains(&k) {
-                    s.push(k);
-                }
-            }
-            s
+    let x_str: Vec<Value> = x.values.iter().map(|v| Value::Str(value_str(v))).collect();
+    let mut data = vec![
+        ("x".to_string(), x_str),
+        ("y".to_string(), value.values.clone()),
+    ];
+    let mut aes = Aes::new().x("x").y("y").label("label");
+    let label = match category {
+        Some(cat) => {
+            data.push(("cat".to_string(), cat.values.clone()));
+            aes = aes.color("cat").fill("cat");
+            cat.values.clone()
         }
-        None => vec![String::new()],
+        None => x.values.clone(),
     };
-    let mut mat: std::collections::HashMap<(usize, usize), f64> = Default::default();
-    let mut gmax = 1e-9f64;
-    for i in 0..value.values.len() {
-        let ax = axes.iter().position(|a| *a == value_str(&x.values[i]));
-        let se = match category {
-            Some(c) => series.iter().position(|s| *s == value_str(&c.values[i])),
-            None => Some(0),
-        };
-        if let (Some(ax), Some(se), Some(v)) = (ax, se, value.values[i].as_f64()) {
-            mat.insert((se, ax), v);
-            gmax = gmax.max(v.abs());
-        }
-    }
-
-    let (w, h) = (width as f64, height as f64);
-    let cx = w / 2.0;
-    let cy = h / 2.0 + 6.0;
-    let radius = (w.min(h) / 2.0 - 42.0).max(20.0);
-    let pi = std::f64::consts::PI;
-    let angle = |k: usize| -pi / 2.0 + 2.0 * pi * k as f64 / n_ax as f64;
-    let pt = |k: usize, frac: f64| {
-        (
-            cx + radius * frac * angle(k).cos(),
-            cy + radius * frac * angle(k).sin(),
+    data.push(("label".to_string(), label));
+    let brand = o.brand();
+    let mut plot = GGPlot::new(data)
+        .aes(aes)
+        .geom_polygon_with(GeomPolygon {
+            fill: brand,
+            color: brand,
+            alpha: 0.18,
+            line_width: 1.6,
+        })
+        .geom_point_with(GeomPoint {
+            size: 2.6,
+            color: brand,
+            alpha: 1.0,
+        })
+        .scale_x_discrete(
+            ggplot_rs::scale::discrete::ScaleDiscrete::new()
+                .with_limits(axes.iter().map(String::as_str).collect()),
         )
-    };
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
-    let hexc =
-        |c: ggplot_rs::scale::color::RGBAColor| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        .coord_radar_with(ggplot_rs::coord::radar::CoordRadar::new().radius_frac(0.86))
+        .xlab("")
+        .ylab("")
+        .theme_minimal()
+        .legend_position(ggplot_rs::theme::LegendPosition::Top);
+    if let Some(cat) = category {
+        plot = plot
+            .scale_color(dz_scale(Aesthetic::Color, cat))
+            .scale_fill(dz_scale(Aesthetic::Fill, cat));
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
 
-    let mut body = String::new();
-    for ring in 1..=4 {
-        let frac = ring as f64 / 4.0;
-        let pts: Vec<String> = (0..n_ax)
-            .map(|k| {
-                let (px, py) = pt(k, frac);
-                format!("{px:.1},{py:.1}")
-            })
-            .collect();
-        body += &format!(
-            "<polygon points=\"{}\" fill=\"none\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>",
-            pts.join(" ")
-        );
-    }
-    for (k, axname) in axes.iter().enumerate() {
-        let (px, py) = pt(k, 1.0);
-        body += &format!(
-            "<line x1=\"{cx:.1}\" y1=\"{cy:.1}\" x2=\"{px:.1}\" y2=\"{py:.1}\" stroke=\"#e6eaf0\" stroke-width=\"1\"/>"
-        );
-        let (lx, ly) = pt(k, 1.14);
-        let anchor = if (lx - cx).abs() < radius * 0.05 {
-            "middle"
-        } else if lx > cx {
-            "start"
-        } else {
-            "end"
-        };
-        body += &format!(
-            "<text x=\"{lx:.1}\" y=\"{ly:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#5a6472\">{}</text>",
-            esc(axname)
-        );
-    }
-    for (si, sname) in series.iter().enumerate() {
-        let ch = hexc(dz_color(si));
-        let pts: Vec<String> = (0..n_ax)
-            .map(|k| {
-                let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
-                let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
-                format!("{px:.1},{py:.1}")
-            })
-            .collect();
-        body += &format!(
-            "<polygon points=\"{}\" fill=\"{ch}\" fill-opacity=\"0.18\" stroke=\"{ch}\" stroke-width=\"1.6\"/>",
-            pts.join(" ")
-        );
-        for (k, axname) in axes.iter().enumerate() {
-            let v = mat.get(&(si, k)).copied().unwrap_or(0.0);
-            let (px, py) = pt(k, (v / gmax).clamp(0.0, 1.0));
-            let tip = if sname.is_empty() {
-                format!("{}: {}", axname, fmt_label(&Value::Float(v)))
-            } else {
-                format!("{sname} · {}: {}", axname, fmt_label(&Value::Float(v)))
-            };
-            body += &format!(
-                "<circle class=\"dp-hit\" cx=\"{px:.1}\" cy=\"{py:.1}\" r=\"2.6\" fill=\"{ch}\"><title>{}</title></circle>",
-                esc(&tip)
-            );
-        }
-    }
-    if series.iter().any(|s| !s.is_empty()) {
-        let mut lx = 12.0;
-        for (si, sname) in series.iter().enumerate() {
-            if sname.is_empty() {
-                continue;
-            }
-            let ch = hexc(dz_color(si));
-            body += &format!(
-                "<rect x=\"{lx:.1}\" y=\"6\" width=\"9\" height=\"9\" rx=\"2\" fill=\"{ch}\"/>"
-            );
-            body += &format!(
-                "<text x=\"{:.1}\" y=\"14\" font-family=\"system-ui,sans-serif\" font-size=\"9\" fill=\"#39424f\">{}</text>",
-                lx + 12.0, esc(sname)
-            );
-            lx += 12.0 + sname.len() as f64 * 6.0 + 14.0;
-        }
-    }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
+    ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
 
 /// A minimal inline trend line (no axes) — a sparkline over the row order: a
 /// light steel area under a crisp line, with a marker on the latest value.
-fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, String> {
+fn render_sparkline(
+    o: &RenderOptions,
+    value: &Column,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
     let n = value.values.len();
     let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
     let data = vec![
@@ -1530,7 +1740,7 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
         ("y".to_string(), value.values.clone()),
     ];
 
-    let steel = brand();
+    let steel = o.brand();
     let fill = lighten(steel, 0.62); // wash under the line
     let last = n.saturating_sub(1);
     // A single-point layer marking the most recent value (the eye-catching dot).
@@ -1542,7 +1752,7 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
         ),
     ];
 
-    GGPlot::new(data)
+    let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
         .geom_area_with(GeomArea {
             fill,
@@ -1564,11 +1774,10 @@ fn render_sparkline(value: &Column, width: u32, height: u32) -> Result<String, S
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0),
         )
-        .theme_void()
-        // Render at a compact width so strokes stay crisp when the inline
-        // sparkline is scaled down into a narrow panel column.
-        .render_svg_native_with_size(width.min(240), height)
-        .map_err(|e| format!("render failed: {e:?}"))
+        .theme_void();
+    // Render at a compact width so strokes stay crisp when the inline
+    // sparkline is scaled down into a narrow panel column.
+    Ok(Panel::plot(plot, width.min(240), height))
 }
 
 /// Blend a colour toward white by `t` (0 = unchanged, 1 = white).
@@ -1577,31 +1786,21 @@ fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     (f(r), f(g), f(b))
 }
 
-/// Break positions for a numeric heatmap axis: the distinct data values (sorted,
-/// thinned to ≤ ~13) so tick labels align with tile centres. `None` when the
-/// column isn't fully numeric (a categorical axis handles its own alignment).
-fn tile_breaks(vals: &[Value]) -> Option<Vec<f64>> {
-    let mut xs: Vec<f64> = Vec::with_capacity(vals.len());
-    for v in vals {
-        xs.push(v.as_f64()?); // any non-numeric → treat the axis as discrete
-    }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    if xs.is_empty() {
-        return None;
-    }
-    let step = (xs.len() as f64 / 13.0).ceil().max(1.0) as usize;
-    Some(xs.iter().step_by(step).copied().collect())
-}
-
 /// Distinct finite numeric values from a column, in first-seen order — used to
 /// draw one reference line per value.
 fn distinct_nums(vals: &[Value]) -> Vec<f64> {
+    // O(n) dedup on the exact bit pattern (+0.0 normalised); capped so a
+    // pathological column can't draw thousands of reference lines.
+    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<f64> = Vec::new();
     for v in vals {
         if let Some(f) = v.as_f64() {
-            if f.is_finite() && !out.iter().any(|&e| (e - f).abs() < f64::EPSILON) {
+            let key = if f == 0.0 { 0u64 } else { f.to_bits() };
+            if f.is_finite() && seen.insert(key) {
                 out.push(f);
+                if out.len() >= 64 {
+                    break;
+                }
             }
         }
     }
@@ -1635,135 +1834,255 @@ fn parse_hex(s: &str) -> Option<ggplot_rs::scale::color::RGBAColor> {
     ))
 }
 
-/// A gauge: a 270° arc showing a single value's progress through a `min,max`
-/// `::RANGE` (default `0,100`). Optional `::COLORS` paints threshold zones.
+/// A gauge: a 270° arc (opening downward) showing a single value within a
+/// `min,max` `::RANGE` (default `0,100`) — `geom_rect` bands under
+/// `CoordPolar::with_span`, a `geom_segment` needle at the value and the value
+/// in the centre. Optional `::COLORS` paints equal threshold zones (else a
+/// light track with a brand-coloured progress band); optional `::LABELS`
+/// names the zones (drawn outside the arc; without `::COLORS` they still split
+/// the arc into equal zones).
 fn render_gauge(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
-    let val = value.values.iter().find_map(|v| v.as_f64()).unwrap_or(0.0);
-    // Range "min,max" (default 0..100).
-    let (min, max) = cols
+) -> Result<Panel, String> {
+    use ggplot_rs::scale::continuous::ScaleContinuous;
+    let val = value
+        .values
+        .iter()
+        .find_map(|v| v.as_f64().filter(|f| f.is_finite()))
+        .unwrap_or(0.0);
+    let (min, max) = gauge_range(cols);
+    let span = max - min;
+    let at = |frac: f64| min + span * frac;
+    let shown = val.clamp(min, max);
+
+    // Optional zone colours (comma-separated hex) and labels (`'low,ok,high'`).
+    let zone_cols: Vec<(u8, u8, u8)> = cols
+        .iter()
+        .find(|c| c.role == Role::GaugeColors)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .map(|s| s.split(',').filter_map(parse_rgb).take(64).collect())
+        .unwrap_or_default();
+    let zone_labels: Vec<String> = cols
+        .iter()
+        .find(|c| c.role == Role::GaugeLabels)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .take(64)
+                .collect()
+        })
+        .unwrap_or_default();
+    let n_zones = if zone_cols.is_empty() {
+        zone_labels.len()
+    } else {
+        zone_cols.len()
+    };
+
+    // Radius (y) layout in 0..1: the band, the needle across it, labels
+    // outside it; the centre (y = 0) holds the value.
+    let (band0, band1, label_r) = (0.64, 0.80, 0.93);
+    let num = |vals: Vec<f64>| vals.into_iter().map(Value::Float).collect::<Vec<_>>();
+    let text = |vals: Vec<String>| vals.into_iter().map(Value::Str).collect::<Vec<_>>();
+
+    // Bands: the zones, or a light track + a brand progress band.
+    let (mut x0, mut x1, mut fill, mut pairs) = (vec![], vec![], vec![], vec![]);
+    if zone_cols.is_empty() {
+        x0.extend([min, min]);
+        x1.extend([max, shown]);
+        fill.extend(["track".to_string(), "value".to_string()]);
+        pairs.push(("track".to_string(), lighten(o.brand(), 0.87)));
+        pairs.push(("value".to_string(), o.brand()));
+    } else {
+        for (i, c) in zone_cols.iter().enumerate() {
+            let n = zone_cols.len() as f64;
+            x0.push(at(i as f64 / n));
+            x1.push(at((i + 1) as f64 / n));
+            fill.push(format!("z{i}"));
+            pairs.push((format!("z{i}"), *c));
+        }
+    }
+    let n_bands = x0.len();
+    let bands = vec![
+        ("x0".to_string(), num(x0)),
+        ("x1".to_string(), num(x1)),
+        ("y0".to_string(), num(vec![band0; n_bands])),
+        ("y1".to_string(), num(vec![band1; n_bands])),
+        ("fill".to_string(), text(fill)),
+    ];
+    let mut plot = GGPlot::new(bands)
+        .geom_rect_with(GeomRect {
+            line_width: 0.0,
+            alpha: 1.0,
+            ..Default::default()
+        })
+        .layer_aes(
+            Aes::new()
+                .xmin("x0")
+                .xmax("x1")
+                .ymin("y0")
+                .ymax("y1")
+                .fill("fill"),
+        );
+    // Zone boundaries: thin white separators across the band (label-only zones).
+    if zone_cols.is_empty() && n_zones > 1 {
+        let xs: Vec<f64> = (1..n_zones)
+            .map(|i| at(i as f64 / n_zones as f64))
+            .collect();
+        let k = xs.len();
+        plot = plot
+            .geom_segment_with(GeomSegment {
+                color: (255, 255, 255),
+                width: 2.0,
+                alpha: 1.0,
+            })
+            .layer_data(vec![
+                ("x".to_string(), num(xs.clone())),
+                ("y".to_string(), num(vec![band0 - 0.04; k])),
+                ("yend".to_string(), num(vec![band1 + 0.04; k])),
+            ])
+            .layer_aes(Aes::new().x("x").xend("x").y("y").yend("yend"));
+    }
+    // The needle: a dark bar across the band at the (clamped) value.
+    plot = plot
+        .geom_segment_with(GeomSegment {
+            color: (31, 41, 55),
+            width: 3.5,
+            alpha: 1.0,
+        })
+        .layer_data(vec![
+            ("x".to_string(), num(vec![shown])),
+            ("y".to_string(), num(vec![band0 - 0.08])),
+            ("yend".to_string(), num(vec![band1 + 0.05])),
+        ])
+        .layer_aes(Aes::new().x("x").xend("x").y("y").yend("yend"));
+
+    // Text: zone labels outside the arc, min/max under the arc ends, the value
+    // and an "of max" caption in the centre.
+    let text_layer = |plot: GGPlot, xs: Vec<f64>, r: f64, labels: Vec<String>, t: GeomText| {
+        let k = xs.len();
+        plot.geom_text_with(t)
+            .layer_data(vec![
+                ("x".to_string(), num(xs)),
+                ("y".to_string(), num(vec![r; k])),
+                ("label".to_string(), text(labels)),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
+    };
+    let grey = (0x5a, 0x64, 0x72);
+    if n_zones > 0 {
+        let (xs, ls): (Vec<f64>, Vec<String>) = zone_labels
+            .iter()
+            .take(n_zones)
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty())
+            .map(|(i, l)| (at((i as f64 + 0.5) / n_zones as f64), l.clone()))
+            .unzip();
+        if !xs.is_empty() {
+            plot = text_layer(
+                plot,
+                xs,
+                label_r,
+                ls,
+                GeomText {
+                    size: 10.0,
+                    color: grey,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let ends = GeomText {
+        size: 11.0,
+        color: (0x8a, 0x93, 0xa6),
+        // Shift below the arc ends (text is centred on its anchor).
+        vjust: 0.5 + 16.0 / 11.0,
+        ..Default::default()
+    };
+    plot = text_layer(
+        plot,
+        vec![min, max],
+        (band0 + band1) / 2.0,
+        vec![fmt_g(min), fmt_g(max)],
+        ends,
+    );
+    let big = (width.min(height) as f64 * 0.17).clamp(14.0, 64.0);
+    plot = plot.annotate(Annotation::Text {
+        label: fmt_g(val),
+        x: at(0.5),
+        y: 0.0,
+        size: big,
+        color: (0x1f, 0x29, 0x37),
+    });
+    let caption = GeomText {
+        size: 11.0,
+        color: (0x8a, 0x93, 0xa6),
+        vjust: 0.5 + (big * 0.8) / 11.0,
+        ..Default::default()
+    };
+    plot = text_layer(
+        plot,
+        vec![at(0.5)],
+        0.0,
+        vec![format!("of {}", fmt_g(max))],
+        caption,
+    );
+
+    let fills: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> =
+        pairs.iter().map(|(k, c)| (k.as_str(), rgba(*c))).collect();
+    let quarter = std::f64::consts::FRAC_PI_4;
+    plot = plot
+        .scale_fill_manual(fills)
+        .scale_x_continuous(
+            ScaleContinuous::new()
+                .with_limits(min, max)
+                .with_expand(0.0, 0.0),
+        )
+        .scale_y_continuous(
+            ScaleContinuous::new()
+                .with_limits(0.0, 1.0)
+                .with_expand(0.0, 0.0),
+        )
+        .coord_polar_with(
+            ggplot_rs::coord::polar::CoordPolar::new().with_span(-3.0 * quarter, 3.0 * quarter),
+        )
+        .theme_void()
+        .legend_position(ggplot_rs::theme::LegendPosition::None);
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
+/// A gauge's `::RANGE` — `'min,max'` (or `'min;max'`, or a 2-element list).
+/// Anything else (a single number, NULL, NaN, min == max) falls back to
+/// `0..100`; a reversed range is swapped.
+fn gauge_range(cols: &[Column]) -> (f64, f64) {
+    let parsed = cols
         .iter()
         .find(|c| c.role == Role::Range)
         .and_then(|c| c.values.first())
         .map(value_str)
         .and_then(|s| {
-            let p: Vec<f64> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-            (p.len() == 2).then_some((p[0], p[1]))
-        })
-        .unwrap_or((0.0, 100.0));
-    let span = if (max - min).abs() < 1e-9 {
-        1.0
-    } else {
-        max - min
-    };
-    let frac = ((val - min) / span).clamp(0.0, 1.0);
-
-    // Optional zone colours (comma-separated hex); default single steel arc.
-    let zone_cols: Vec<ggplot_rs::scale::color::RGBAColor> = cols
-        .iter()
-        .find(|c| c.role == Role::GaugeColors)
-        .and_then(|c| c.values.first())
-        .map(value_str)
-        .map(|s| s.split(',').filter_map(parse_hex).collect())
-        .unwrap_or_default();
-
-    // Geometry: a 270° arc (135° … 405°), opening downward, centred.
-    let w = width as f64;
-    let h = height as f64;
-    let cx = w / 2.0;
-    let title_pad = if title.is_some() { 12.0 } else { 0.0 };
-    let cy = h * 0.55 + title_pad;
-    let r = (w * 0.30).min(h * 0.42).max(20.0);
-    let thick = r * 0.16;
-    let start = 135.0_f64.to_radians();
-    let sweep = 270.0_f64.to_radians();
-    let pt = |frac: f64, rad: f64| {
-        let a = start + sweep * frac;
-        (cx + rad * a.cos(), cy + rad * a.sin())
-    };
-    let arc = |f0: f64, f1: f64, col: &str, wdt: f64| {
-        let (x0, y0) = pt(f0, r);
-        let (x1, y1) = pt(f1, r);
-        let large = if (f1 - f0) * 270.0 > 180.0 { 1 } else { 0 };
-        format!(
-            "<path d=\"M {x0:.1} {y0:.1} A {r:.1} {r:.1} 0 {large} 1 {x1:.1} {y1:.1}\" \
-             fill=\"none\" stroke=\"{col}\" stroke-width=\"{wdt:.1}\" stroke-linecap=\"round\"/>"
-        )
-    };
-    // The value arc takes the colour of the zone the value falls into (a
-    // traffic-light gauge); a single steel arc when no ::COLORS are given.
-    let (sr, sg, sb) = brand();
-    let vcol = if zone_cols.is_empty() {
-        format!("rgb({sr},{sg},{sb})")
-    } else {
-        let zi = ((frac * zone_cols.len() as f64).floor() as usize).min(zone_cols.len() - 1);
-        let c = zone_cols[zi];
-        format!("rgb({},{},{})", c.r, c.g, c.b)
-    };
-    let (tr, tg, tb) = lighten(brand(), 0.87);
-    let track = format!("rgb({tr},{tg},{tb})");
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;");
-    let mut body = String::new();
-    // Light full-arc track, then the value arc on top.
-    body.push_str(&arc(0.0, 1.0, &track, thick));
-    body.push_str(&arc(0.0, frac.max(0.001), &vcol, thick));
-    // Zone-boundary ticks across the arc.
-    if zone_cols.len() > 1 {
-        for i in 1..zone_cols.len() {
-            let f = i as f64 / zone_cols.len() as f64;
-            let (x0, y0) = pt(f, r - thick * 0.75);
-            let (x1, y1) = pt(f, r + thick * 0.75);
-            body.push_str(&format!(
-                "<line x1=\"{x0:.1}\" y1=\"{y0:.1}\" x2=\"{x1:.1}\" y2=\"{y1:.1}\" stroke=\"#fff\" stroke-width=\"2\"/>"
-            ));
-        }
-    }
-    // A marker dot at the current value.
-    let (dx, dy) = pt(frac, r);
-    body.push_str(&format!(
-        "<circle cx=\"{dx:.1}\" cy=\"{dy:.1}\" r=\"{:.1}\" fill=\"{vcol}\" stroke=\"#fff\" stroke-width=\"2.5\"/>",
-        thick * 0.6
-    ));
-    // Big value + "of max" caption.
-    let num = if (val - val.round()).abs() < 1e-9 {
-        format!("{}", val.round() as i64)
-    } else {
-        format!("{val:.1}")
-    };
-    body.push_str(&format!(
-        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" \
-         font-size=\"{:.0}\" font-weight=\"800\" fill=\"#1f2937\">{num}</text>",
-        cy - r * 0.02,
-        r * 0.5
-    ));
-    body.push_str(&format!(
-        "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" font-weight=\"600\" fill=\"#8a93a6\">of {}</text>",
-        cy + r * 0.24,
-        esc(&fmt_g(max))
-    ));
-    // Min / max labels at the arc ends.
-    let (minx, miny) = pt(0.0, r);
-    let (maxx, maxy) = pt(1.0, r);
-    body.push_str(&format!(
-        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>\
-         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"11\" fill=\"#8a93a6\">{}</text>",
-        minx, miny + 15.0, esc(&fmt_g(min)),
-        maxx, maxy + 15.0, esc(&fmt_g(max)),
-    ));
-    if let Some(t) = title {
-        body.push_str(&format!(
-            "<text x=\"{cx:.1}\" y=\"20\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
-            esc(t)
-        ));
-    }
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{body}</svg>"
-    ))
+            let p: Vec<f64> = s
+                .trim_matches(|c| c == '[' || c == ']')
+                .split([',', ';'])
+                .filter_map(|t| t.trim().parse::<f64>().ok())
+                .filter(|f| f.is_finite())
+                .collect();
+            match p.as_slice() {
+                [a, b] if (a - b).abs() > 1e-12 => Some((a.min(*b), a.max(*b))),
+                _ => None,
+            }
+        });
+    parsed.unwrap_or((0.0, 100.0))
 }
 
 /// Compact number formatting for gauge range labels.
@@ -1778,11 +2097,12 @@ fn fmt_g(v: f64) -> String {
 /// A choropleth map from a WKT `::MAP` geometry column, optionally coloured by a
 /// measure (light → steel blue).
 fn render_map(
+    o: &RenderOptions,
     cols: &[Column],
     _title: Option<&str>,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let geom = cols
         .iter()
         .find(|c| c.role == Role::Geometry)
@@ -1831,7 +2151,7 @@ fn render_map(
         alpha,
         ..Default::default()
     });
-    let mut plot = match panel_zoom() {
+    let mut plot = match o.zoom {
         Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
         None => plot.coord_sf(),
     };
@@ -1844,12 +2164,11 @@ fn render_map(
         } else {
             plot.scale_fill_gradient(
                 ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-                ggplot_rs::scale::color::RGBAColor::new(brand().0, brand().1, brand().2),
+                ggplot_rs::scale::color::RGBAColor::new(o.brand().0, o.brand().1, o.brand().2),
             )
         };
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
@@ -1861,7 +2180,7 @@ fn render_pie(
     inner: f64,
     width: u32,
     height: u32,
-) -> Result<String, String> {
+) -> Result<Panel, String> {
     let category = cols
         .iter()
         .find(|c| c.role == Role::Category)
@@ -1873,17 +2192,11 @@ fn render_pie(
         ("cat".to_string(), category.values.clone()),
         ("label".to_string(), category.values.clone()),
     ];
-    let levels = distinct_labels(category);
-    let pairs: Vec<(&str, ggplot_rs::scale::color::RGBAColor)> = levels
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.as_str(), parse_hex(s).unwrap_or_else(|| dz_color(i))))
-        .collect();
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
         .geom_col()
         .position(PositionStack)
-        .scale_fill_manual(pairs)
+        .scale_fill(dz_scale(Aesthetic::Fill, category))
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0),
@@ -1898,54 +2211,57 @@ fn render_pie(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    plot.render_svg_native_with_size(width, height)
-        .map_err(|e| format!("render failed: {e:?}"))
-}
-
-// ── C ABI (for the DuckDB extension side-module) ───────────────────────────
-use std::ffi::CString;
-use std::os::raw::c_char;
-
-/// C-ABI smoke test: render a fixed bar chart and return a heap SVG string
-/// (free it with [`anofox_free`]). Exercises the whole render path through FFI
-/// — the shape the DuckDB extension entrypoint will use.
-#[no_mangle]
-pub extern "C" fn anofox_smoke() -> *mut c_char {
-    let cols = vec![
-        Column::new(
-            "x",
-            Role::X,
-            vec![Value::Str("a".into()), Value::Str("b".into())],
-        ),
-        Column::new(
-            "n",
-            Role::Value(Kind::Bar),
-            vec![Value::Float(3.0), Value::Float(7.0)],
-        ),
-    ];
-    let svg = render(&cols, 300, 200).unwrap_or_default();
-    CString::new(svg)
-        .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
-}
-
-/// Free a string returned by the C ABI.
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn anofox_free(p: *mut c_char) {
-    if !p.is_null() {
-        unsafe { drop(CString::from_raw(p)) };
-    }
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A minimal SVG heading (for a `::LABEL`-only result).
-fn heading_svg(text: &str, width: u32) -> String {
-    let esc = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"40\" viewBox=\"0 0 {width} 40\">\
-         <text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"#1f2430\">{esc}</text></svg>"
-    )
+fn heading_svg(text: &str, width: u32) -> Panel {
+    Panel::Own {
+        width,
+        height: 40,
+        body: format!(
+            "<text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"#1f2430\">{}</text>",
+            format::escape_xml(text)
+        ),
+    }
+}
+
+/// A full-size placeholder panel with a centred note ("No data", "needs ≥ 2
+/// values", …) and the optional title — instead of a confusing ggplot error.
+fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
+    let (w, h) = (width as f64, height as f64);
+    Panel::Own {
+        width,
+        height,
+        body: format!(
+            "{}<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"#8a93a6\">{}</text>",
+            title_text(title, w),
+            w / 2.0,
+            h / 2.0,
+            format::escape_xml(note)
+        ),
+    }
+}
+
+/// The `<text>` title strip of a [`note_svg`] placeholder, or `""` without a
+/// title.
+fn title_text(title: Option<&str>, w: f64) -> String {
+    match title.filter(|t| !t.is_empty()) {
+        Some(t) => format!(
+            "<text x=\"{:.1}\" y=\"18\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
+            w / 2.0,
+            format::escape_xml(t)
+        ),
+        None => String::new(),
+    }
+}
+
+/// Minimum number of non-missing measure values a chart kind needs to draw
+/// something meaningful (`None` = no requirement beyond "some data").
+fn min_values(kind: Kind) -> usize {
+    match kind {
+        Kind::Density | Kind::Violin | Kind::QQ | Kind::Boxplot => 2,
+        Kind::Smooth => 3,
+        _ => 1,
+    }
 }

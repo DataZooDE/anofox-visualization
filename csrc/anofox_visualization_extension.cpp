@@ -10,10 +10,15 @@
 // The build stamps EXT_VERSION_ANOFOX_VISUALIZATION from the git tag; the
 // fallback keeps the banner honest in local builds that do not, and matches
 // what AnofoxVisualizationExtension::Version() reports below.
+// ANOFOX_VIZ_CARGO_VERSION is injected by CMakeLists.txt from the workspace
+// Cargo.toml — the single version source of truth.
+#ifndef ANOFOX_VIZ_CARGO_VERSION
+#define ANOFOX_VIZ_CARGO_VERSION "unknown"
+#endif
 #ifdef EXT_VERSION_ANOFOX_VISUALIZATION
 #define ANOFOX_VISUALIZATION_BANNER_VERSION EXT_VERSION_ANOFOX_VISUALIZATION
 #else
-#define ANOFOX_VISUALIZATION_BANNER_VERSION "0.1.0"
+#define ANOFOX_VISUALIZATION_BANNER_VERSION ANOFOX_VIZ_CARGO_VERSION
 #endif
 
 // Deliberately outside namespace duckdb: the banner library is DuckDB-agnostic
@@ -25,14 +30,21 @@ const datazoo::BannerInfo ANOFOX_VISUALIZATION_BANNER {
 namespace duckdb {
 
 // anofox_render(spec VARCHAR) -> VARCHAR (SVG). Delegates to the Rust FFI.
+// NULL in -> NULL out (UnaryExecutor skips invalid rows). A bad spec, an
+// oversize spec (rows / width / height caps) or an internal renderer failure is
+// a real SQL error, not an error string disguised as a result.
 static void AnofoxRenderFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t spec) {
-		char *svg = anofox_viz_render(spec.GetString().c_str());
-		std::string out = svg ? std::string(svg) : std::string();
-		if (svg) {
-			anofox_viz_free(svg);
+		char *out = nullptr;
+		int rc = anofox_viz_render(spec.GetData(), spec.GetSize(), &out);
+		std::string text = out ? std::string(out) : std::string("anofox_render: out of memory");
+		if (out) {
+			anofox_viz_free(out);
 		}
-		return StringVector::AddString(result, out);
+		if (rc != ANOFOX_VIZ_OK) {
+			throw InvalidInputException(text);
+		}
+		return StringVector::AddString(result, text);
 	});
 }
 
@@ -55,13 +67,26 @@ struct AnofoxMacro {
 	const char *example;
 };
 
+// Macro bodies — kept byte-identical with duckext/src/lib.rs (MACRO_XY/_XYC).
+// The role list is built with json_array(), so `kind` is JSON-quoted rather
+// than spliced into a JSON string (a quote in `kind` cannot break the spec); a
+// NULL kind becomes a JSON null, which anofox_render rejects with an error.
+// list(... ORDER BY ...) makes the row order deterministic under parallel
+// aggregation.
+#define ANOFOX_XY_BODY                                                                                               \
+	"anofox_render(json_object('rows', to_json(list({c0: x, c1: y} ORDER BY x, y)), "                                 \
+	"'roles', json_array(json_array(0, 'XAXIS'), json_array(1, kind)), 'width', width, 'height', height))"
+#define ANOFOX_XYC_BODY                                                                                              \
+	"anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series} ORDER BY x, series, y)), "             \
+	"'roles', json_array(json_array(0, 'XAXIS'), json_array(1, kind), json_array(2, 'CATEGORY')), "                   \
+	"'width', width, 'height', height))"
+
 static const AnofoxMacro ANOFOX_MACROS[] = {
     {{DEFAULT_SCHEMA,
       "anofox_xy",
       {"x", "y", nullptr},
       {{"kind", "'BARCHART'"}, {"width", "640"}, {"height", "400"}, {nullptr, nullptr}},
-      "anofox_render(json_object('rows', to_json(list({c0: x, c1: y})), "
-      "'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"]]')::JSON, 'width', width, 'height', height))"},
+      ANOFOX_XY_BODY},
      "Aggregate two columns into a single-series chart and render it as SVG. 'kind' selects the mark "
      "(BARCHART, LINECHART, SCATTER, AREACHART); x becomes the axis and y the value.",
      "SELECT anofox_xy(x, y, kind := 'LINECHART') FROM (VALUES ('Jan', 10), ('Feb', 20)) t(x, y)"},
@@ -69,9 +94,7 @@ static const AnofoxMacro ANOFOX_MACROS[] = {
       "anofox_xyc",
       {"x", "y", "series", nullptr},
       {{"kind", "'BARCHART_STACKED'"}, {"width", "640"}, {"height", "400"}, {nullptr, nullptr}},
-      "anofox_render(json_object('rows', to_json(list({c0: x, c1: y, c2: series})), "
-      "'roles', ('[[0,\"XAXIS\"],[1,\"' || kind || '\"],[2,\"CATEGORY\"]]')::JSON, 'width', width, 'height', "
-      "height))"},
+      ANOFOX_XYC_BODY},
      "Aggregate three columns into a multi-series chart and render it as SVG, with 'series' splitting the "
      "data into categories.",
      "SELECT anofox_xyc(x, y, s) FROM (VALUES ('Jan', 10, 'EU'), ('Jan', 8, 'US')) t(x, y, s)"},
@@ -143,7 +166,7 @@ std::string AnofoxVisualizationExtension::Version() const {
 #ifdef EXT_VERSION_ANOFOX_VISUALIZATION
 	return EXT_VERSION_ANOFOX_VISUALIZATION;
 #else
-	return "0.1.0";
+	return ANOFOX_VIZ_CARGO_VERSION;
 #endif
 }
 

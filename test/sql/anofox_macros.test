@@ -1,0 +1,59 @@
+# name: test/sql/anofox_macros.test
+# description: the convenience macros render, quote `kind`, and reject a NULL kind
+# group: [anofox_visualization]
+
+require anofox_visualization
+
+# The macro bodies call json_object/json_array. extension_config.cmake links
+# json statically into the test build, so this `require` is satisfied there.
+require json
+
+statement ok
+LOAD anofox_visualization
+
+statement ok
+CREATE TABLE sales AS SELECT * FROM (VALUES ('app', 30), ('web', 22), ('api', 12)) t(ch, n);
+
+query I
+SELECT anofox_bar(ch, n) LIKE '<svg%<rect%' FROM sales;
+----
+true
+
+query I
+SELECT anofox_line(ch, n) LIKE '<svg%' FROM sales;
+----
+true
+
+query I
+SELECT anofox_xy(ch, n, kind := 'SCATTER', width := 300, height := 200) LIKE '<svg%' FROM sales;
+----
+true
+
+query I
+SELECT anofox_xyc(ch, n, ch) LIKE '<svg%' FROM sales;
+----
+true
+
+# One SVG per group.
+query I
+SELECT count(*) FROM (SELECT anofox_bar(ch, n) AS svg FROM sales GROUP BY ch) WHERE svg LIKE '<svg%';
+----
+3
+
+# `kind` is JSON-quoted by json_array, never spliced into the spec text: a quote
+# in it cannot break out of the role string -- it is just an unknown role.
+statement error
+SELECT anofox_xy(ch, n, kind := 'BAR"],[0,"XAXIS') FROM sales;
+----
+unknown role
+
+statement error
+SELECT anofox_xy(ch, n, kind := NULL) FROM sales;
+----
+role name is NULL
+
+# Size limits apply through the macros too.
+statement error
+SELECT anofox_xy(ch, n, width := 1000000) FROM sales;
+----
+outside [16, 8192]
