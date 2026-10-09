@@ -426,6 +426,32 @@ fn label_top_k() {
     assert!(s.contains(">p3</text>") && !s.contains(">p7</text>"));
 }
 
+// Labels of nearby points are repelled apart rather than dropped.
+#[test]
+fn label_top_k_repels_close_labels() {
+    let x: Vec<f64> = (0..10)
+        .map(|i| {
+            if i >= 8 {
+                9.0 + 0.01 * i as f64
+            } else {
+                i as f64
+            }
+        })
+        .collect();
+    let y: Vec<f64> = (0..10)
+        .map(|i| if i >= 8 { 50.0 } else { i as f64 })
+        .collect();
+    let names: Vec<String> = (0..10).map(|i| format!("p{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, nums(&x)),
+        Column::new("y", Role::Value(Kind::Point), nums(&y)),
+        Column::new("n", Role::Label, strs(&names)),
+        Column::new("k", Role::LabelTop, nums(&[2.0])),
+    ]);
+    assert!(s.contains(">p8</text>") && s.contains(">p9</text>"), "{s}");
+}
+
 // ── B6: smoothing methods ────────────────────────────────────────────────
 #[test]
 fn smooth_methods() {

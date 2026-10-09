@@ -1863,8 +1863,8 @@ fn cartesian(
             .layer_aes(lay);
         }
     }
-    // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or |y|).
-    // TODO(ggplot-rs 0.17): geom_text_repel instead of check_overlap.
+    // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or
+    // |y|), repelled from each other and from their points.
     if let Some(k) = label_top {
         let xs = col_of(&data, "x");
         let ys = col_of(&data, "y");
@@ -1896,11 +1896,13 @@ fn cartesian(
                     .collect(),
             ));
             plot = plot
-                .geom_text_with(GeomText {
+                .geom_text_repel_with(GeomTextRepel {
                     size: 10.0,
                     color: (55, 62, 75),
-                    vjust: -0.6,
-                    check_overlap: true,
+                    repel: RepelParams {
+                        segment_color: Some((150, 156, 168)),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 })
                 .layer_data(frame)
