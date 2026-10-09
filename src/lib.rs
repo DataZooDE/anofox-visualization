@@ -1233,82 +1233,6 @@ fn axis_transform(
     }
 }
 
-/// The segment of `y = slope·x + intercept` inside the data box
-/// `[x0, x1] × [y0, y1]` (`None` if the line misses it). Drawn instead of
-/// `geom_abline`, which in ggplot-rs 0.16 works in normalised panel units.
-///
-/// TODO(ggplot-rs 0.17): data-mapped `geom_abline(aes(slope, intercept))` in
-/// data units spanning the whole panel.
-fn clip_line(
-    slope: f64,
-    intercept: f64,
-    xb: (f64, f64),
-    yb: (f64, f64),
-) -> Option<[(f64, f64); 2]> {
-    let (x0, x1) = xb;
-    let (y0, y1) = yb;
-    let (lo, hi) = if slope == 0.0 {
-        if intercept < y0 || intercept > y1 {
-            return None;
-        }
-        (x0, x1)
-    } else {
-        let (a, b) = ((y0 - intercept) / slope, (y1 - intercept) / slope);
-        (x0.max(a.min(b)), x1.min(a.max(b)))
-    };
-    (lo < hi && lo.is_finite() && hi.is_finite())
-        .then_some([(lo, slope * lo + intercept), (hi, slope * hi + intercept)])
-}
-
-/// Finite extent of the numeric values in `cols`.
-fn extent<'a>(cols: impl IntoIterator<Item = &'a [Value]>) -> Option<(f64, f64)> {
-    let mut r: Option<(f64, f64)> = None;
-    for vals in cols {
-        for f in vals
-            .iter()
-            .filter_map(|v| v.as_f64())
-            .filter(|f| f.is_finite())
-        {
-            r = Some(r.map_or((f, f), |(a, b)| (a.min(f), b.max(f))));
-        }
-    }
-    r
-}
-
-/// A reference line at `v` on the x (`vertical`) or y axis spanning the panel,
-/// as a zero-width `geom_rect` with ±Inf ends — 0.16's geom_hline/geom_vline
-/// collapse to a point under coord_flip.
-/// TODO(ggplot-rs 0.17): data-mapped geom_hline/geom_vline (flip-safe).
-/// `span` is the data range of that axis: the rule is 0.2 % of it thick
-/// (SVG does not draw a zero-width rect).
-fn ref_rule(plot: GGPlot, vertical: bool, v: f64, span: f64) -> GGPlot {
-    let (inf, ninf) = (Value::Float(f64::INFINITY), Value::Float(f64::NEG_INFINITY));
-    let eps = if span.is_finite() && span > 0.0 {
-        span * 0.001
-    } else {
-        v.abs().max(1.0) * 1e-3
-    };
-    let (lo, hi) = (Value::Float(v - eps), Value::Float(v + eps));
-    let (x0, x1, y0, y1) = if vertical {
-        (lo, hi, ninf, inf)
-    } else {
-        (ninf, inf, lo, hi)
-    };
-    plot.geom_rect_with(GeomRect {
-        fill: (60, 60, 60),
-        color: (60, 60, 60),
-        alpha: 0.9,
-        line_width: 0.8,
-    })
-    .layer_data(vec![
-        ("rx0".to_string(), vec![x0]),
-        ("rx1".to_string(), vec![x1]),
-        ("ry0".to_string(), vec![y0]),
-        ("ry1".to_string(), vec![y1]),
-    ])
-    .layer_aes(Aes::new().xmin("rx0").xmax("rx1").ymin("ry0").ymax("ry1"))
-}
-
 /// Rows `idx` of a plot frame (for per-group / subset layers).
 fn subset(data: &[(String, Vec<Value>)], idx: &[usize]) -> Vec<(String, Vec<Value>)> {
     data.iter()
@@ -1950,42 +1874,36 @@ fn cartesian(
                 .layer_aes(Aes::new().x("x").y("y").label("txt"));
         }
     }
-    // Horizontal reference/target lines (`::REFLINE`/`::YLINE`) — one per distinct
-    // value in the column (an average line, min/max bands, several thresholds…).
+    // Reference lines, one per distinct value of the column: horizontal
+    // (`::REFLINE`/`::YLINE` — an average line, min/max bands, thresholds…)
+    // and vertical (`::XLINE`, a continuous x). Data-mapped hlines/vlines:
+    // they train their axis, appear in every facet panel and survive
+    // coord_flip.
     let flipped = cols.iter().any(|c| c.role == Role::Flip);
-    let span_of = |keys: &[&str]| -> f64 {
-        let vals: Vec<&[Value]> = data
-            .iter()
-            .filter(|(n, _)| keys.contains(&n.as_str()))
-            .map(|(_, v)| v.as_slice())
-            .collect();
-        extent(vals).map_or(f64::NAN, |(a, b)| b - a)
-    };
-    if let Some(rl) = find_role(cols, Role::RefLine) {
-        for v in distinct_nums(&rl.values) {
-            plot = if flipped {
-                ref_rule(
-                    plot,
-                    false,
-                    v,
-                    span_of(&["y", "ilo", "ihi", "bandlo", "bandhi"]),
-                )
-            } else {
-                plot.geom_hline(v)
-            };
+    for (role, col, vertical) in [
+        (Role::RefLine, "yintercept", false),
+        (Role::VLine, "xintercept", true),
+    ] {
+        let Some(c) = find_role(cols, role) else {
+            continue;
+        };
+        let vals = distinct_nums(&c.values);
+        if vals.is_empty() {
+            continue;
         }
-    }
-    // Vertical reference lines (`::XLINE`) — only meaningful on a continuous x.
-    if let Some(vl) = find_role(cols, Role::VLine) {
-        for v in distinct_nums(&vl.values) {
-            plot = if flipped {
-                ref_rule(plot, true, v, span_of(&["x", "jlo", "jhi"]))
-            } else {
-                plot.geom_vline(v)
-            };
+        let frame = vec![(
+            col.to_string(),
+            vals.into_iter().map(Value::Float).collect(),
+        )];
+        plot = if vertical {
+            plot.geom_vline_aes(Aes::new().xintercept(col))
+        } else {
+            plot.geom_hline_aes(Aes::new().yintercept(col))
         }
+        .layer_data(frame);
     }
-    // Straight lines in data units: `::ABLINE 'slope,intercept'` and `::IDENTITY`.
+    // Straight lines in data units, across the panel: `::ABLINE
+    // 'slope,intercept'` and `::IDENTITY` (y = x, dashed).
     let mut lines: Vec<(f64, f64)> = Vec::new();
     if let Some(ab) = find_role(cols, Role::AbLine) {
         let mut seen = std::collections::HashSet::new();
@@ -2007,57 +1925,26 @@ fn cartesian(
             }
         }
     }
-    let identity = find_role(cols, Role::Identity).is_some();
-    if (identity || !lines.is_empty()) && !x_discrete {
-        let xcols: Vec<&[Value]> = ["x", "jlo", "jhi"]
-            .iter()
-            .filter_map(|k| data.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_slice()))
-            .collect();
-        let ycols: Vec<&[Value]> = data
-            .iter()
-            .filter(|(n, _)| {
-                n == "y" || n == "ilo" || n == "ihi" || n.starts_with("band") || {
-                    n.starts_with('y') && n[1..].chars().all(|c| c.is_ascii_digit())
-                }
-            })
-            .map(|(_, v)| v.as_slice())
-            .collect();
-        if let (Some(xb), Some(yb)) = (extent(xcols), extent(ycols)) {
-            let draw = |plot: GGPlot, seg: [(f64, f64); 2], colour, dashed: bool| {
-                let lt = if dashed { "dash" } else { "solid" };
-                plot.geom_line_with(GeomLine {
-                    color: colour,
-                    width: 1.1,
-                    alpha: 0.9,
-                })
-                .layer_data(vec![
-                    (
-                        "x".to_string(),
-                        vec![Value::Float(seg[0].0), Value::Float(seg[1].0)],
-                    ),
-                    (
-                        "y".to_string(),
-                        vec![Value::Float(seg[0].1), Value::Float(seg[1].1)],
-                    ),
-                    ("lt".to_string(), vec![Value::Str(lt.into()); 2]),
-                ])
-                .layer_aes(Aes::new().x("x").y("y").linetype("lt"))
-                .show_legend(false)
-            };
-            if identity {
-                if let Some(seg) = clip_line(1.0, 0.0, xb, yb) {
-                    plot = draw(plot, seg, (130, 136, 148), true);
-                }
-            }
-            for (slope, intercept) in &lines {
-                if let Some(seg) = clip_line(*slope, *intercept, xb, yb) {
-                    plot = draw(plot, seg, (90, 98, 112), false);
-                }
-            }
-            plot = plot.scale_linetype_manual(vec![
-                ("dash", ggplot_rs::render::backend::Linetype::Dashed),
-                ("solid", ggplot_rs::render::backend::Linetype::Solid),
-            ]);
+    if !x_discrete {
+        use ggplot_rs::render::backend::Linetype;
+        let identity = find_role(cols, Role::Identity).is_some();
+        let styled = identity
+            .then_some((1.0, 0.0, (130, 136, 148), Linetype::Dashed))
+            .into_iter()
+            .chain(
+                lines
+                    .iter()
+                    .map(|&(b, a)| (b, a, (90, 98, 112), Linetype::Solid)),
+            );
+        for (slope, intercept, color, linetype) in styled {
+            plot = plot.geom_abline_with(GeomAbline {
+                slope,
+                intercept,
+                color,
+                width: 1.1,
+                linetype,
+                alpha: 0.9,
+            });
         }
     }
     if let Some(col) = color_col {

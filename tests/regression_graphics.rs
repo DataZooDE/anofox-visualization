@@ -228,8 +228,17 @@ fn ymin_ymax_pointrange_flipped_and_dodged() {
     ys.sort();
     ys.dedup();
     assert_eq!(ys.len(), 4, "every interval on its own row");
-    // The zero reference line survives coord_flip.
-    assert!(s.contains("<rect") && s.contains("fill=\"#3C3C3C\""));
+    // The zero reference line survives coord_flip: a vertical rule.
+    let zero = polylines(&s)
+        .into_iter()
+        .find(|p| p.contains("data-value=\"0\""))
+        .expect("zero line");
+    let pts = &zero[zero.find("points=\"").unwrap() + 8..];
+    let xs: Vec<&str> = pts[..pts.find('"').unwrap()]
+        .split(' ')
+        .map(|xy| xy.split(',').next().unwrap())
+        .collect();
+    assert!(xs.windows(2).all(|w| w[0] == w[1]), "vertical: {zero}");
 }
 
 #[test]
@@ -344,6 +353,18 @@ fn facet_wrap_and_free() {
             );
         }
     }
+    // A reference line is drawn in every panel.
+    let s = svg(vec![
+        Column::new("x", Role::X, nums(&x)),
+        Column::new("y", Role::Value(Kind::Line), nums(&y)),
+        Column::new("g", Role::Facet, strs(&g)),
+        Column::new("r", Role::RefLine, nums(&[50.0])),
+    ]);
+    let rules = polylines(&s)
+        .into_iter()
+        .filter(|p| p.contains("data-value=\"50\""))
+        .count();
+    assert_eq!(rules, 3, "one per panel");
 }
 
 // ── B4: axis transforms ──────────────────────────────────────────────────
