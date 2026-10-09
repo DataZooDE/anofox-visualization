@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 [dependencies]
 anofox-visualization = { path = ".." }
 # Same version as the core crate (both must resolve to one ggplot-rs).
-ggplot-rs = { version = "0.16", default-features = false }
+ggplot-rs = { version = "0.17", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"
