@@ -3640,7 +3640,7 @@ function markInfo(attr, tip) {
   return { series, value, x: attr("data-x") || "", detail: plain ? "" : tip };
 }
 
-// A discrete x drawn on numeric slots (dodged bars / intervals) carries a
+// A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
 // `data-xticks` map {slot: level} on its root <svg>: show "W1", not "1.225".
 function xTickLabel(el, x) {
   const root = el.closest && el.closest("svg[data-xticks]");

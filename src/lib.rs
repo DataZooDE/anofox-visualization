@@ -300,6 +300,7 @@ pub enum Role {
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
+#[derive(Clone)]
 pub struct Column {
     pub name: String,
     pub role: Role,
@@ -1070,12 +1071,27 @@ fn role_num(cols: &[Column], role: Role) -> Option<f64> {
     })
 }
 
+/// Whether grouped marks on a discrete x sit side by side: bars, and point
+/// ranges (a point measure with ::YMIN/::YMAX), dodged by ::CATEGORY.
+fn discrete_dodge(kind: Kind, cols: &[Column]) -> bool {
+    let x_discrete = find_role(cols, Role::X)
+        .is_some_and(|x| x.values.iter().any(|v| matches!(v, Value::Str(_))));
+    let category =
+        find_role(cols, Role::Category).is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
+    let interval = find_role(cols, Role::YMin).is_some() && find_role(cols, Role::YMax).is_some();
+    x_discrete
+        && category
+        && (matches!(kind, Kind::Bar | Kind::BarPercent)
+            || (matches!(kind, Kind::Point | Kind::Bubble) && interval))
+}
+
 /// A discrete x axis turned into numeric slots `1, 2, …` with each group
-/// offset inside its slot, so grouped marks sit side by side.
+/// offset inside its slot — only for grouped marks with ::DATALABELS, which
+/// cannot follow ggplot-rs's discrete `position_dodge` (geom_text ignores the
+/// stored dodge offset).
 ///
-/// TODO(ggplot-rs 0.17): `position_dodge(w)` places grouped marks on a
-/// discrete x (0.16's `PositionDodge` only shifts numeric x, so bars and
-/// pointranges overlapped). Switch bars and pointranges to it and drop this.
+/// TODO(ggplot-rs): drop once geom_text honours `position_dodge` on a
+/// discrete x.
 struct Dodged {
     x: Vec<Value>,
     breaks: Vec<f64>,
@@ -1116,6 +1132,46 @@ fn dodge_discrete(x: &[Value], group: &[Value], width: f64) -> Dodged {
         breaks: (1..=labels.len()).map(|i| i as f64).collect(),
         labels,
         step,
+    }
+}
+
+/// Half-width of error-bar caps in normalized panel units: 18 % of one bar
+/// (`slot` x units wide) on a discrete x, else 20 % of the smallest gap
+/// between x values.
+fn cap_half_width(
+    x: &[Value],
+    levels: Option<&[String]>,
+    dodged: &Option<Dodged>,
+    slot: f64,
+) -> f64 {
+    if let Some(d) = dodged {
+        // Slots 1..=n on limits [0.4, n + 0.6].
+        return 0.18 * d.step / (d.labels.len() as f64 + 0.2);
+    }
+    if x.iter().any(|v| matches!(v, Value::Str(_))) {
+        let n = levels.map_or_else(
+            || distinct_labels(&Column::new("", Role::X, x.to_vec())).len(),
+            <[String]>::len,
+        );
+        return 0.18 * slot / n.max(1) as f64;
+    }
+    let mut v: Vec<f64> = x
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .filter(|f| f.is_finite())
+        .collect();
+    v.sort_by(f64::total_cmp);
+    v.dedup();
+    let gap = v
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f64::INFINITY, f64::min);
+    match (v.first(), v.last()) {
+        // The default 5 % expansion on each side.
+        (Some(lo), Some(hi)) if gap.is_finite() && hi > lo => {
+            (0.2 * gap / ((hi - lo) * 1.1)).min(0.03)
+        }
+        _ => 0.03,
     }
 }
 
@@ -1282,6 +1338,11 @@ fn group_rows(n: usize, keys: &[&[Value]]) -> Vec<Vec<usize>> {
 
 /// The cartesian chart kinds (bars, lines, areas, points, box/violin plots)
 /// with every encoding/annotation/modifier role.
+///
+/// Grouped marks on a discrete x (see [`discrete_dodge`]) are drawn with
+/// `position_dodge`, which orders the groups by first appearance: the rows
+/// are reordered by ::CATEGORY (the sorted legend order) and rows without an
+/// x dropped, and the x levels keep their original first-seen order.
 fn render_cartesian(
     o: &RenderOptions,
     kind: Kind,
@@ -1290,6 +1351,50 @@ fn render_cartesian(
     title: Option<String>,
     width: u32,
     height: u32,
+) -> Result<Panel, String> {
+    let (Some(x), Some(cat)) = (find_role(cols, Role::X), find_role(cols, Role::Category)) else {
+        return cartesian(o, kind, value, cols, title, width, height, None);
+    };
+    if !discrete_dodge(kind, cols) || find_role(cols, Role::DataLabels).is_some() {
+        return cartesian(o, kind, value, cols, title, width, height, None);
+    }
+    let n = x.values.len();
+    let mut levels: Vec<String> = Vec::new();
+    for v in x.values.iter().filter(|v| **v != Value::Na) {
+        let s = value_str(v);
+        if !levels.contains(&s) {
+            levels.push(s);
+        }
+    }
+    let mut order: Vec<usize> = (0..n).filter(|&i| x.values[i] != Value::Na).collect();
+    order.sort_by_cached_key(|&i| cat.values.get(i).map(value_str).unwrap_or_default());
+    let reorder = |c: &Column| -> Column {
+        if c.values.len() != n {
+            return c.clone();
+        }
+        let values = order.iter().map(|&i| c.values[i].clone()).collect();
+        Column::new(c.name.clone(), c.role, values)
+    };
+    let sorted: Vec<Column> = cols.iter().map(reorder).collect();
+    let value = match cols.iter().position(|c| std::ptr::eq(c, value)) {
+        Some(i) => sorted[i].clone(),
+        None => reorder(value),
+    };
+    cartesian(o, kind, &value, &sorted, title, width, height, Some(levels))
+}
+
+/// [`render_cartesian`]; `x_levels` (the discrete x levels in order) is set
+/// when grouped marks are dodged.
+#[allow(clippy::too_many_arguments)]
+fn cartesian(
+    o: &RenderOptions,
+    kind: Kind,
+    value: &Column,
+    cols: &[Column],
+    title: Option<String>,
+    width: u32,
+    height: u32,
+    x_levels: Option<Vec<String>>,
 ) -> Result<Panel, String> {
     let x = find_role(cols, Role::X).ok_or("no XAXIS column")?;
     // A ::CATEGORY that is entirely missing (e.g. a macro's NULL default) is
@@ -1320,20 +1425,18 @@ fn render_cartesian(
     let y_interval = interval(Role::YMin, Role::YMax)?;
     let x_interval = interval(Role::XMin, Role::XMax)?;
 
-    // A discrete x is drawn on numeric slots when grouped bars / pointranges
-    // must sit side by side, or when intervals need x offsets for their caps.
-    let dodge_kind = matches!(kind, Kind::Bar | Kind::BarPercent) || point_kind;
-    let slotted = x_discrete
-        && (y_interval.is_some()
-            || x_interval.is_some()
-            || (category.is_some() && matches!(kind, Kind::Bar | Kind::BarPercent)));
-    let dodged = slotted.then(|| {
-        let groups = match category {
-            Some(cat) if dodge_kind => cat.values.clone(),
-            _ => vec![Value::Na; x.values.len()],
-        };
-        dodge_discrete(&x.values, &groups, if bar { 0.9 } else { 0.6 })
-    });
+    if x_discrete && x_interval.is_some() {
+        return Err("::XMIN/::XMAX need a numeric ::XAXIS".into());
+    }
+    // Grouped marks on a discrete x sit side by side: `position_dodge` (rows
+    // already ordered by `render_cartesian`), or — with ::DATALABELS, which
+    // cannot follow it — numeric slots.
+    let dodge_width = if bar { 0.9 } else { 0.6 };
+    let dodge = x_levels.is_some();
+    let dodged = (discrete_dodge(kind, cols) && !dodge)
+        .then_some(category)
+        .flatten()
+        .map(|cat| dodge_discrete(&x.values, &cat.values, dodge_width));
     let xvals = dodged
         .as_ref()
         .map(|d| d.x.clone())
@@ -1597,8 +1700,10 @@ fn render_cartesian(
     // A light brand wash for box/violin bodies (unless a CATEGORY fills them).
     let body_fill = lighten(brand, 0.72);
     plot = match kind {
-        // Dodged bars: the x is already slotted per category (see
-        // `dodge_discrete`), so the bars are placed as given.
+        Kind::Bar | Kind::BarPercent if dodge => {
+            plot.geom_col().position(position_dodge(dodge_width))
+        }
+        // (A slotted x is already dodged, see `dodge_discrete`.)
         Kind::Bar | Kind::BarPercent => plot.geom_col(),
         Kind::BarStacked => plot.geom_col().position(PositionStack),
         Kind::BarStackedPercent => plot.geom_col().position(PositionFill),
@@ -1728,120 +1833,43 @@ fn render_cartesian(
             unreachable!("handled above")
         }
     };
-    // Intervals, drawn from segments (0.16's geom_pointrange/geom_errorbar
-    // collapse under coord_flip): a point measure becomes a pointrange; any
-    // other measure gets capped error bars. An x interval is a horizontal
-    // segment through y. The ymin/ymax (xmin/xmax) mappings only train the
-    // position scale on both ends.
-    // TODO(ggplot-rs 0.17): geom_pointrange / geom_errorbar / geom_errorbarh
-    // with position_dodge once they are flip-safe.
+    // Intervals: a point measure becomes a pointrange; any other measure gets
+    // capped error bars; an x interval is a horizontal error bar through y.
     if y_interval.is_some() {
-        if point_kind {
-            plot = plot
-                .geom_segment_with(GeomSegment {
-                    color: brand,
-                    width: 1.4,
-                    alpha: 1.0,
-                })
-                .layer_aes(
-                    Aes::new()
-                        .x("x")
-                        .xend("x")
-                        .y("ilo")
-                        .yend("ihi")
-                        .ymin("ilo")
-                        .ymax("ihi"),
-                )
-                .geom_point_with(GeomPoint {
-                    color: brand,
-                    size: 2.6,
-                    ..Default::default()
-                });
+        let span = Aes::new().x("x").ymin("ilo").ymax("ihi");
+        plot = if point_kind {
+            plot.geom_pointrange_with(GeomPointrange {
+                color: brand,
+                width: 1.4,
+                size: 2.6,
+                alpha: 1.0,
+            })
+            .layer_aes(span.y("y"))
         } else {
-            let grey = GeomSegment {
+            plot.geom_errorbar_with(GeomErrorbar {
                 color: (60, 60, 60),
                 width: 1.0,
+                cap_width: cap_half_width(&col_of(&data, "x"), x_levels.as_deref(), &dodged, {
+                    let groups = category.map_or(1, |c| distinct_labels(c).len());
+                    dodge_width / if dodge { groups.max(1) as f64 } else { 1.0 }
+                }),
                 alpha: 1.0,
-            };
-            plot = plot.geom_segment_with(grey).layer_aes(
-                Aes::new()
-                    .x("x")
-                    .xend("x")
-                    .y("ilo")
-                    .yend("ihi")
-                    .ymin("ilo")
-                    .ymax("ihi"),
-            );
-            // Caps: short horizontal segments at both ends.
-            let xs = col_of(&data, "x");
-            let half = match &dodged {
-                Some(d) => 0.18 * d.step,
-                None => {
-                    let mut v: Vec<f64> = xs.iter().filter_map(|v| v.as_f64()).collect();
-                    v.sort_by(f64::total_cmp);
-                    v.dedup();
-                    let gap = v
-                        .windows(2)
-                        .map(|w| w[1] - w[0])
-                        .fold(f64::INFINITY, f64::min);
-                    if gap.is_finite() {
-                        0.2 * gap
-                    } else {
-                        0.0
-                    }
-                }
-            };
-            if half > 0.0 {
-                let cap = |plot: GGPlot, end: &str| {
-                    let ys = col_of(&data, end);
-                    let mut frame = vec![
-                        (
-                            "cx0".to_string(),
-                            xs.iter()
-                                .map(|v| v.as_f64().map_or(Value::Na, |f| Value::Float(f - half)))
-                                .collect(),
-                        ),
-                        (
-                            "cx1".to_string(),
-                            xs.iter()
-                                .map(|v| v.as_f64().map_or(Value::Na, |f| Value::Float(f + half)))
-                                .collect(),
-                        ),
-                        ("cy".to_string(), ys),
-                    ];
-                    let fac = col_of(&data, "facet");
-                    if !fac.is_empty() {
-                        frame.push(("facet".to_string(), fac));
-                    }
-                    plot.geom_segment_with(GeomSegment {
-                        color: (60, 60, 60),
-                        width: 1.0,
-                        alpha: 1.0,
-                    })
-                    .layer_data(frame)
-                    .layer_aes(Aes::new().x("cx0").xend("cx1").y("cy").yend("cy"))
-                };
-                plot = cap(plot, "ilo");
-                plot = cap(plot, "ihi");
-            }
+            })
+            .layer_aes(span)
+        };
+        if dodge {
+            plot = plot.position(position_dodge(dodge_width));
         }
     }
     if x_interval.is_some() {
         plot = plot
-            .geom_segment_with(GeomSegment {
+            .geom_errorbarh_with(GeomErrorbarh {
                 color: brand,
                 width: 1.4,
+                cap_height: 0.012,
                 alpha: 1.0,
             })
-            .layer_aes(
-                Aes::new()
-                    .x("jlo")
-                    .xend("jhi")
-                    .y("y")
-                    .yend("y")
-                    .xmin("jlo")
-                    .xmax("jhi"),
-            );
+            .layer_aes(Aes::new().y("y").xmin("jlo").xmax("jhi"));
     }
     // Data labels (`::DATALABELS`): draw the measure value just above each mark.
     if show_labels {
@@ -2083,7 +2111,11 @@ fn render_cartesian(
     }
     // An x formatter/transform only makes sense on a continuous x (numeric/date),
     // not on the discrete category axis of a bar chart.
-    if let Some(d) = &dodged {
+    if let Some(levels) = &x_levels {
+        plot = plot.scale_x_discrete(
+            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
+        );
+    } else if let Some(d) = &dodged {
         plot = plot.scale_x_continuous(
             ScaleContinuous::new()
                 .with_limits(0.4, d.labels.len() as f64 + 0.6)

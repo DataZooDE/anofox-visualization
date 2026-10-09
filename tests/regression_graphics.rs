@@ -56,8 +56,36 @@ fn bar_with_category_is_dodged() {
             "app bar left of web bar: {a:?} {w:?}"
         );
     }
-    // Hosts can map the numeric slot back to the x level.
+    // A real discrete x (position_dodge): every bar names its x level.
+    assert!(s.contains("data-x=\"W1\"") && !s.contains("data-xticks="));
+    // Data labels cannot follow a discrete dodge: that chart keeps numeric
+    // slots, and hosts map a slot back to its x level.
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W1", "W2", "W2"])),
+        Column::new("c", Role::Category, strs(&["app", "web", "app", "web"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 22.0, 41.0, 28.0])),
+        Column::new("l", Role::DataLabels, nums(&[11.0])),
+    ]);
+    let (app, web) = (bars(&s, "app"), bars(&s, "web"));
+    assert!(app[0].0 + app[0].1 <= web[0].0 + 0.01, "{app:?} {web:?}");
     assert!(s.contains("data-xticks="), "x level map on the root");
+}
+
+// Dodged groups follow the legend (sorted) order, whatever the row order, and
+// the x levels keep their first-seen order.
+#[test]
+fn dodge_order_follows_legend() {
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W2", "W2", "W1", "W1"])),
+        Column::new("c", Role::Category, strs(&["web", "app", "web", "app"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 22.0, 41.0, 28.0])),
+    ]);
+    let (app, web) = (bars(&s, "app"), bars(&s, "web"));
+    for (a, w) in app.iter().zip(&web) {
+        assert!(a.0 + a.1 <= w.0 + 0.01, "{a:?} {w:?}");
+    }
+    let (w2, w1) = (s.find(">W2</text>").unwrap(), s.find(">W1</text>").unwrap());
+    assert!(w2 < w1, "W2 is the first x level");
 }
 
 // ── A2: ::BARCHART_PERCENT shows shares, not count × 100 ──────────────────
@@ -207,12 +235,40 @@ fn ymin_ymax_pointrange_flipped_and_dodged() {
 #[test]
 fn ymin_ymax_on_bars_are_error_bars() {
     let s = svg(coef(Kind::Bar, vec![]));
-    // 4 bars from 0 (not from ymin) + 4 whiskers + 8 caps.
-    let grey = polylines(&s)
+    // 4 bars from 0 (not from ymin) + 4 capped whiskers (cap–bar–cap), each
+    // centred on its dodged bar.
+    let grey: Vec<String> = polylines(&s)
         .into_iter()
         .filter(|p| p.contains("#3C3C3C"))
-        .count();
-    assert_eq!(grey, 12, "{s}");
+        .collect();
+    assert_eq!(grey.len(), 4, "{s}");
+    let mut centres: Vec<f64> = bars(&s, "m1")
+        .into_iter()
+        .chain(bars(&s, "m2"))
+        .map(|(x, w)| x + w / 2.0)
+        .collect();
+    centres.sort_by(f64::total_cmp);
+    let mut whiskers: Vec<f64> = grey
+        .iter()
+        .map(|p| {
+            let pts = &p[p.find("points=\"").unwrap() + 8..];
+            pts.split(' ')
+                .nth(2)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    whiskers.sort_by(f64::total_cmp);
+    for (c, w) in centres.iter().zip(&whiskers) {
+        assert!(
+            (c - w).abs() < 0.5,
+            "whisker on its bar: {centres:?} {whiskers:?}"
+        );
+    }
     assert_eq!(bars(&s, "m1").len() + bars(&s, "m2").len(), 4);
 }
 

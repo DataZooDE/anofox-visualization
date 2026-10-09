@@ -163,7 +163,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | point ± interval | `term::XAXIS, est::SCATTER, lo::YMIN, hi::YMAX` | a `::SCATTER` becomes a pointrange; a bar/line gets capped error bars |
 | horizontal forest | `… , 1::FLIP, 0::REFLINE` | `::FLIP` turns the intervals horizontal, `::REFLINE` the zero line vertical |
 | several models | `… , model::CATEGORY` | pointranges (and `::BARCHART` bars) on a discrete x are dodged side by side |
-| x interval | `x::XAXIS, y::SCATTER, a::XMIN, b::XMAX` | a horizontal segment through each point |
+| x interval | `x::XAXIS, y::SCATTER, a::XMIN, b::XMAX` | a horizontal error bar through each point (numeric x) |
 | straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
 | small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
@@ -187,8 +187,10 @@ total without a `::CATEGORY`); values already given as fractions (all within
 ±1) are drawn as they are. `::LINECHART_PERCENT` formats fractions ×100 and
 treats larger values as percentages already.
 
-On a dodged/slotted discrete x the SVG root carries `data-xticks`
-(`{"1":"W1",…}`) so hosts can map a mark's numeric `data-x` back to its level.
+Dodged marks keep their discrete x level in `data-x`. The one exception is a
+grouped chart with `::DATALABELS` (labels cannot follow a discrete dodge), drawn
+on numeric x slots: its SVG root carries `data-xticks` (`{"1":"W1",…}`) so hosts
+can map a mark's numeric `data-x` back to its level.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).
