@@ -551,6 +551,14 @@ fn render_dashboard_page(
                 dash.id, st.max_rows
             ));
         }
+        if let Some(cp) = &panel.contract {
+            for (_, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+                let svg =
+                    r.unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e.to_string())));
+                panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+            }
+            continue;
+        }
         if panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label) {
             let text = rows
                 .first()

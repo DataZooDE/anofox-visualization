@@ -71,6 +71,15 @@ fn cmd_render(args: &[String]) {
                 continue;
             }
         };
+        // A contract plot call: one figure per result row (GROUP BY key).
+        if let Some(cp) = &p.contract {
+            for (_, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+                let svg = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+                panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+                n += 1;
+            }
+            continue;
+        }
         // A label-only panel is a spanning section heading, not a card.
         if p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label) {
             let text = rows

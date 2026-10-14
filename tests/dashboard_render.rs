@@ -67,3 +67,35 @@ fn composes_a_dashboard_svg() {
         &svg[..svg.len().min(400)]
     );
 }
+
+// A contract plot call (`SELECT anofox_plot_terms(t) FROM … t`) runs as
+// `to_json(list(t))` and renders through the contract renderer — one panel per
+// result row, titled by ::TITLE + the GROUP BY key.
+struct ContractMock;
+impl DataProvider for ContractMock {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        assert!(sql.contains("to_json(list("), "{sql}");
+        let rows = r#"[{"term":"price","estimate":-18.2,"conf_low":-20.1,"conf_high":-16.3},
+                       {"term":"promo","estimate":14.1,"conf_low":12.0,"conf_high":16.2}]"#;
+        Ok(vec![
+            ("c0".into(), s(&["ols", "huber"])),
+            ("c1".into(), s(&[rows, rows])),
+            ("c2".into(), s(&["{}", "{}"])),
+            ("c3".into(), s(&["Coefficients", "Coefficients"])),
+        ])
+    }
+}
+
+#[test]
+fn renders_contract_calls() {
+    let script = "SELECT model_id, anofox_plot_terms(t), 'Coefficients'::TITLE \
+                  FROM tidy t GROUP BY model_id;";
+    let svg =
+        render_dashboard_svg(script, &mut ContractMock, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains("Coefficients — ols"), "{svg}");
+    assert!(svg.contains("Coefficients — huber"));
+    assert!(svg.contains("promo"));
+}

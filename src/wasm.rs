@@ -16,9 +16,14 @@ use crate::{
 use wasm_bindgen::prelude::*;
 
 /// Plan a dashboard script into JSON:
-/// `[{ "setup": bool, "sql": string, "roles": [[colIdx, "ROLE", name], …] }]`.
+/// `[{ "setup": bool, "sql": string, "roles": [[colIdx, "ROLE", name], …],
+///    "contract": null | {"macro": name, "rows": k, "args": k+1,
+///                        "groups": [[colIdx, name], …]} }]`.
 /// The caller runs each `sql` through DuckDB-Wasm (setup statements for effect,
-/// panels with `-json`) and passes the rows back to [`render_panel`].
+/// panels with `-json`) and passes the rows back to [`render_panel`] — or, for
+/// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
+/// [`sql::contract_call`]), each result row's `c{rows}` / `c{args}` cells to
+/// [`render_contract`].
 #[wasm_bindgen]
 pub fn plan(script: &str) -> String {
     guard(|| Ok(plan_json(script))).unwrap_or_else(|_| "[]".into())
@@ -38,6 +43,12 @@ fn plan_json(script: &str) -> String {
                     let name = p.names.iter().find(|(j, _)| j == i).map(|(_, n)| n.as_str()).unwrap_or("");
                     serde_json::json!([i, r.token(), name])
                 }).collect::<Vec<_>>(),
+                "contract": p.contract.as_ref().map(|c| serde_json::json!({
+                    "macro": c.macro_name,
+                    "rows": c.rows,
+                    "args": c.args,
+                    "groups": c.groups.iter().map(|(i, n)| serde_json::json!([i, n])).collect::<Vec<_>>(),
+                })),
             })
         })
         .collect();
@@ -84,6 +95,27 @@ pub fn render_panel_checked(
         };
         render_with(&cols, width, height, &opts)
     })
+}
+
+/// Render a contract plot call to SVG: `macro_name` = the planned
+/// `contract.macro` (`anofox_plot_terms`, …), `rows_json` = the rows as a JSON
+/// array (or JSON text of one — the `to_json(list(alias))` cell as DuckDB-Wasm
+/// returns it), `args_json` = the named arguments as a JSON object keyed by
+/// parameter name (the `json_object(…)` cell). Errors come back as a small
+/// error SVG; a macro this build does not know yet renders as a note.
+#[wasm_bindgen]
+pub fn render_contract(
+    macro_name: &str,
+    rows_json: &str,
+    args_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> String {
+    guard(|| {
+        sql::contract_call::render_call(macro_name, rows_json, args_json, width, height, primary)
+    })
+    .unwrap_or_else(|e| error_svg(&e.to_string(), width))
 }
 
 /// Bounds `[x0, x1, y0, y1]` of a map panel's geometry (the `MAP` + `BASEMAP`

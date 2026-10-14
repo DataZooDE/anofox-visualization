@@ -20,6 +20,7 @@
 //! ```
 
 use crate::format::{escape_xml as esc, format_number};
+use crate::sql::contract_call;
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
     Role,
@@ -178,6 +179,56 @@ fn render_inner(
             Err(_) => continue,
         };
 
+        // A contract plot call → one panel per result row (GROUP BY key).
+        if let Some(cp) = &panel.contract {
+            let span = if next_span == 0 {
+                default_span
+            } else {
+                next_span.clamp(1, 12)
+            };
+            let ch = if next_height > 0 {
+                next_height as f64
+            } else {
+                opts.panel_height as f64
+            };
+            next_span = 0;
+            next_height = 0;
+            let cw = (unit_w * span as f64) - gap;
+            let title = roles
+                .iter()
+                .find(|(_, r)| matches!(r, Role::Title))
+                .and_then(|(i, _)| column_at(&rows, *i))
+                .and_then(|(_, v)| v.first())
+                .map(value_str)
+                .unwrap_or_default();
+            let maps = json_rows(&rows);
+            let title_h = 26.0;
+            let body_h = (ch - title_h).max(30.0);
+            for (label, r) in contract_call::render_rows(cp, &maps, cw as u32, body_h as u32, "") {
+                if row_units + span > 12 {
+                    new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+                }
+                let svg = r.unwrap_or_else(|e| error_svg_at(Place::Doc, &e.to_string(), cw as u32));
+                let t = match (title.is_empty(), label.is_empty()) {
+                    (false, false) => format!("{title} — {label}"),
+                    (false, true) => title.clone(),
+                    (true, _) => label,
+                };
+                let inner = format!(
+                    "{open}<text x=\"14\" y=\"20\" font-family=\"system-ui,sans-serif\" \
+                     font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{t}</text>\
+                     <g transform=\"translate(0,{title_h})\">{svg}</g></svg>",
+                    open = svg_open(Place::At(x, row_y), format!("{cw:.0}"), format!("{ch:.0}")),
+                    t = esc(&t),
+                );
+                placed.push((x, row_y, cw, ch, inner));
+                x += unit_w * span as f64;
+                row_units += span;
+                row_h = row_h.max(ch);
+            }
+            continue;
+        }
+
         // Heading (::LABEL alone) → full-width section title, own row.
         if roles.len() == 1 && matches!(roles[0].1, Role::Label) {
             let text = rows
@@ -252,6 +303,29 @@ fn render_inner(
     }
     out.push_str("</svg>");
     Ok(out)
+}
+
+/// A column result as JSON row maps keyed by output column name (`c{i}`).
+fn json_rows(result: &[(String, Vec<Value>)]) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let n = result.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    (0..n)
+        .map(|r| {
+            result
+                .iter()
+                .map(|(name, vals)| {
+                    let v = match vals.get(r) {
+                        Some(Value::Str(s)) => serde_json::Value::String(s.clone()),
+                        Some(v) => v
+                            .as_f64()
+                            .and_then(serde_json::Number::from_f64)
+                            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                        None => serde_json::Value::Null,
+                    };
+                    (name.clone(), v)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// One panel body → an inner `<svg>` sized (w, h). Charts go through the normal
