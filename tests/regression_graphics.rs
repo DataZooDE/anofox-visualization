@@ -567,6 +567,18 @@ fn contract_prediction_splits_and_options() {
     assert!(e.contains("needs an x position"), "{e}");
 }
 
+// A forecast with its history unioned in: history rows have no yhat, future
+// rows no y. Both are part of the schema, so the SVG carries no render warning.
+#[test]
+fn contract_prediction_history_and_future_no_warnings() {
+    let rows = r#"[{"id":"a","ds":1,"y":1.0,"yhat":null},{"id":"a","ds":2,"y":2.0,"yhat":null},
+                   {"id":"a","ds":3,"y":null,"yhat":3.0,"yhat_lower":2.5,"yhat_upper":3.5},
+                   {"id":"a","ds":4,"y":null,"yhat":4.0,"yhat_lower":3.2,"yhat_upper":4.8}]"#;
+    let s = spec("prediction", rows, "{}").unwrap();
+    assert!(!s.contains("data-warnings"), "{}", &s[..s.len().min(400)]);
+    assert!(s.contains(" forecast</text>"));
+}
+
 // Kaplan–Meier: one step line per group, a step-ribbon band per group in its
 // colour, and `+` censoring marks.
 #[test]
