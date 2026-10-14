@@ -2886,6 +2886,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
   cols.forEach((c) => {
     const th = document.createElement("th");
     th.style.cursor = "pointer";
+    // Numeric cells are right-aligned (below); align their header the same way
+    // so the label sits over the numbers rather than over the gap before them.
+    if (numeric[c] && !["BADGE", "SPARKLINE"].includes(colFmt[c])) th.style.textAlign = "right";
     th.onclick = (e) => {
       if (server) {
         e.stopPropagation();
