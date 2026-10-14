@@ -625,3 +625,36 @@ fn every_macro_is_documented() {
         );
     }
 }
+
+/// A term without inference (NULL interval, e.g. ridge) is still drawn as a
+/// point — it used to be dropped as non-finite with the whole pointrange.
+#[test]
+fn interval_rows_without_bounds_keep_their_point() {
+    let s = svg(vec![
+        Column::new("term", Role::X, strs(&["a", "b", "a", "b"])),
+        Column::new("m", Role::Category, strs(&["ols", "ols", "ridge", "ridge"])),
+        Column::new(
+            "est",
+            Role::Value(Kind::Point),
+            nums(&[1.0, -0.5, 0.8, -0.2]),
+        ),
+        Column::new(
+            "lo",
+            Role::YMin,
+            vec![Value::Float(0.5), Value::Float(-1.0), Value::Na, Value::Na],
+        ),
+        Column::new(
+            "hi",
+            Role::YMax,
+            vec![Value::Float(1.5), Value::Float(0.0), Value::Na, Value::Na],
+        ),
+        Column::new("f", Role::Flip, nums(&[1.0])),
+    ]);
+    assert!(
+        !s.contains("data-warnings"),
+        "no rows dropped: {}",
+        &s[..s.len().min(400)]
+    );
+    let ridge = s.matches("data-series=\"ridge\"").count();
+    assert!(ridge >= 2, "both ridge terms drawn, found {ridge}");
+}

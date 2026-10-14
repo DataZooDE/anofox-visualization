@@ -258,8 +258,7 @@ FROM (SELECT * FROM ols_tidy_by('nw_sales', chain, sales, [price, promo, season,
       UNION ALL BY NAME
       SELECT * FROM huber_tidy_by('nw_sales', chain, sales, [price, promo, season, temp, t], names := ['price', 'promo', 'season', 'temp', 'trend'])
       UNION ALL BY NAME
-      SELECT * REPLACE (coalesce(conf_low, estimate) AS conf_low, coalesce(conf_high, estimate) AS conf_high)
-      FROM ridge_tidy_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'alpha': 5.0}, names := ['price', 'promo', 'season', 'temp', 'trend'])
+      SELECT * FROM ridge_tidy_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'alpha': 5.0}, names := ['price', 'promo', 'season', 'temp', 'trend'])
       UNION ALL BY NAME
       SELECT * FROM quantile_tidy_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'tau': 0.5}, names := ['price', 'promo', 'season', 'temp', 'trend'])) t
 WHERE term <> '(Intercept)';

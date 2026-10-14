@@ -1426,9 +1426,22 @@ fn cartesian(
     }
     // Interval ends under non-canonical names: a column called `ymin` would be
     // read by geom_col as a stacked bar's base.
+    // A missing interval end (e.g. a ridge coefficient, which has no
+    // inference) collapses to the estimate: the mark is still drawn, just
+    // without whiskers, instead of being dropped as non-finite.
     if let Some((lo, hi)) = y_interval {
-        data.push(("ilo".to_string(), lo.values.clone()));
-        data.push(("ihi".to_string(), hi.values.clone()));
+        let y = &value.values;
+        let or_y = |v: &[Value]| -> Vec<Value> {
+            v.iter()
+                .zip(y)
+                .map(|(e, yv)| match e.as_f64() {
+                    Some(f) if f.is_finite() => e.clone(),
+                    _ => yv.clone(),
+                })
+                .collect()
+        };
+        data.push(("ilo".to_string(), or_y(&lo.values)));
+        data.push(("ihi".to_string(), or_y(&hi.values)));
     }
     if let Some((lo, hi)) = x_interval {
         data.push(("jlo".to_string(), lo.values.clone()));

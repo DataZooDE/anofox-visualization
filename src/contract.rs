@@ -520,15 +520,8 @@ fn prediction(t: &Table, options: &Row) -> Result<Pred, String> {
             cols.push(col("split", Role::Category, split));
         }
     }
-    if t.has("focal") {
-        let f = t
-            .num("focal")?
-            .iter()
-            .find_map(|v| v.as_f64())
-            .map(|f| format!("marginal effect of feature {f}"))
-            .unwrap_or_else(|| "marginal effect".into());
-        cols.push(konst("title", Role::Label, Value::Str(f)));
-    }
+    // An effects table (`focal`) gets no inner title: `focal` is only the
+    // feature's index, and the panel caption names the effect.
     if let Some(f) = facet {
         cols.push(col(&f, Role::FacetFree, t.text(&f)));
     }
