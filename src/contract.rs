@@ -129,7 +129,13 @@ pub(crate) fn render(
         _ => unreachable!("checked above"),
     }
     .map_err(fail)?;
-    crate::render_placed(&cols, place, width, height, o)
+    let (svg, mut warnings) = crate::render_placed(&cols, place, width, height, o)?;
+    if name == "prediction" {
+        // A missing y (future rows) or yhat (history rows) is part of the
+        // schema, not lost data: the point layer skipping them is no warning.
+        warnings.retain(|w| !w.contains("non-finite"));
+    }
+    Ok((svg, warnings))
 }
 
 /// Rows whose only nested column is a STRUCT, or a LIST of STRUCTs (a test

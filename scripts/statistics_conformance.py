@@ -177,6 +177,7 @@ EXTRA = {
     "summary_metrics": "SELECT anofox_plot_summary(t, metrics := ['r_squared', 'aic']) FROM (SELECT * FROM ols_glance_by('d', grp, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_glance_by('d', grp, y, [x1, x2])) t",
     "prediction_two_models": "SELECT anofox_plot_prediction(t) FROM (SELECT * FROM ols_prediction_by('d', grp, id, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_prediction_by('d', grp, id, y, [x1, x2])) t WHERE grp = 'A'",
     "prediction_two_models_facets": "SELECT anofox_plot_prediction(t) FROM (SELECT * FROM ols_prediction_by('d', grp, id, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_prediction_by('d', grp, id, y, [x1, x2])) t",
+    "prediction_future": "CREATE TABLE dfut AS SELECT * REPLACE (CASE WHEN id > 54 THEN NULL ELSE y END AS y) FROM d; SELECT anofox_plot_prediction(t) FROM ols_prediction_by('dfut', grp, id, y, [x1, x2], split := CASE WHEN id BETWEEN 49 AND 54 THEN 'test' END) t",
     "fit_predict_by": "SELECT anofox_plot_prediction(t, x := 'x1', facet := 'grp') FROM ols_fit_predict_by('d', grp, y, [x1, x2]) t",
     "obs_leverage": "SELECT anofox_plot_obs(t, kind := 'leverage') FROM ols_augment_by('d', grp, y, [x1, x2]) t WHERE grp = 'A'",
     "obs_cooks": "SELECT anofox_plot_obs(t, kind := 'cooks') FROM ols_augment_by('d', grp, y, [x1, x2]) t WHERE grp = 'A'",
@@ -207,12 +208,17 @@ def run(duckdb: str, ext: str, sql: str, mode: str = "-list") -> tuple[bool, str
 
 
 def svgs_of(out: str) -> list[str]:
-    """Every SVG cell of a `-json` result (grids nest <svg> elements)."""
-    try:
-        rows = json.loads(out)
-    except ValueError:
-        return []
-    return [v for r in rows for v in r.values() if isinstance(v, str) and v.startswith("<svg")]
+    """Every SVG cell of the `-json` results (grids nest <svg> elements)."""
+    dec, i, cells = json.JSONDecoder(), 0, []
+    while (j := out.find("[", i)) >= 0:
+        try:
+            rows, i = dec.raw_decode(out, j)
+        except ValueError:
+            i = j + 1
+            continue
+        cells += [v for r in rows if isinstance(r, dict) for v in r.values()
+                  if isinstance(v, str) and v.startswith("<svg")]
+    return cells
 
 
 def check(ok: bool, out: str) -> tuple[str, list[str], str]:
