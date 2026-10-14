@@ -1,14 +1,14 @@
-# Statistics showcase: Northwind Grocers
+# Statistics showcase: what sets the price of a home?
 
 Every statistics plot anofox-visualization draws for anofox-statistics results,
-in modelling order, on synthetic data for a made-up grocery chain. It's the
-"Statistics showcase" example of the [live demo](https://datazoode.github.io/anofox-visualization/).
+in modelling order, on a synthetic property market in a made-up city
+(2023–2025). It's the "Statistics showcase: property market" example of the [live demo](https://datazoode.github.io/anofox-visualization/).
 
 `showcase.sql` is a link to `web/examples/statistics-showcase.sql`, the single
 source the browser demo loads. It has two parts:
 
-1. **Datasets.** Plain `CREATE OR REPLACE TABLE` statements build six small
-   tables. The noise is a hash of fixed keys, so every run gives the same data,
+1. **Datasets.** Plain `CREATE OR REPLACE TABLE` statements build three small
+   tables (plus helper tables). The noise is a hash of fixed keys, so every run gives the same data,
    and no files are read.
 2. **Dashboard.** Ten tabs of panels that call the anofox_statistics producers
    live (`ols_tidy_by`, `ols_augment_by`, `ridge_cv_by`, `kaplan_meier_by`,
@@ -17,7 +17,7 @@ source the browser demo loads. It has two parts:
 
    ```sql
    SELECT anofox_plot_terms(t), 'Coefficients'::TITLE
-   FROM ols_tidy_by('nw_sales', chain, sales, [price, promo]) t;
+   FROM ols_tidy_by('pm_sales', market, price_k, [area_10, age_10, condition]) t;
    ```
 
 ## Where it runs
@@ -43,10 +43,7 @@ source the browser demo loads. It has two parts:
 
 | Table | Rows | What it is |
 |---|---|---|
-| `nw_sales` | 624 | 6 stores × 104 weeks of sales (k€) with price, promo, season, temp and trend. Airport has 3 weeks entered at 2.5× by mistake, and Riverside has a clearance week at price 1.20. |
-| `nw_online` | 169 | Online-shop weekly sales: 156 observed weeks plus 13 future weeks with `y` NULL. Residuals are AR(1), the price effect drifts from −10 to −25, and `split` is train/test/future. |
-| `nw_mmm` | 200 | Marketing mix: 8 correlated spend channels, of which only tv, search, social and email drive revenue. |
-| `nw_churn` | 1500 | Subscribers with plan, tenure, tickets and fee. Also `churned`, `p_logit` (a logistic fit), `p_rule` (a crude score) and `lifetime_months`/`event` (survival, censored). |
-| `nw_orders` | 1200 | Basket value against discount and membership. The noise is skewed and grows with the discount, so the slope rises with tau. |
-| `nw_ab` | 600 | Checkout experiment with 4 page variants: order value and conversion per session. |
-| `nw_online_obs`, `nw_online_resid`, `nw_churn_scores`, `nw_tests` | | Helper tables: observed weeks, OLS training residuals, the two churn scores stacked long, and a view of the `*_test_agg` results. |
+| `pm_sales` | 900 | Home sales, one per day from Jan 2023 to Dec 2025: price (k€) against living area, rooms, age, condition (1–5), distance to the centre, garden, district (5, dummy-coded with North Park as reference) and agency (4). The price of a m² drifts from 2.4 to 3.6 k€ over the three years, the noise grows with the living area, and neighbouring sales share a market mood (≈ AR(1)). Sales 137, 482 and 771 are Hillside villas keyed in at 2.5× their price (`flagged`), and sale 600 is a 620 m² estate (high leverage, priced on the model). `split` puts one in five sales into a `holdout`. |
+| `pm_flats` | 320 | Three-room flats with ten correlated amenities. Only garage (+20 k€), heat pump (+16), renovated kitchen (+12) and balcony (+8) move the price. |
+| `pm_listings` | 1,400 | Listings followed to 31 Dec 2025: asking-price premium, photos, district, agency, viewings (Poisson), days on the market (Weibull, still-listed homes censored), `sold_30` (sold within 30 days, for listings online at least 30 days), `p_logit` (a logistic fit) and `p_rule` (a rule of thumb). |
+| `pm_homes`, `pm_resid`, `pm_listings_30`, `pm_scores`, `pm_tests` | | Helper tables: the sales without the flagged rows and the estate (plus € per m²), the price model's residuals in sale-date order, the listings with a 30-day outcome, the two 30-day scores stacked long, and a view of the `*_test_agg` results. |
