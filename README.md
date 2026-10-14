@@ -189,6 +189,25 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 - **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving.
 - **[`build-dashboard` skill](.claude/skills/build-dashboard/SKILL.md)** — an agent that authors dashboards from a prompt.
 
+### Conformance with anofox-statistics
+
+`scripts/statistics_conformance.py` calls **every** contract producer of the
+[anofox-statistics](https://github.com/DataZooDE/anofox-statistics) extension
+(the 141 functions tagged `anofox.contract = '1'`: table macros directly, the
+`*_agg` test aggregates through `unnest`), hands each output to
+`anofox_plot(...)` and to its specific macro, and fails on a SQL error, a
+missing SVG or an unexpected render warning. It writes every SVG (and a PNG
+montage when `rsvg-convert` and Pillow are installed) to `--out`:
+
+```bash
+duckdb -unsigned -c "INSTALL anofox_statistics FROM 'https://get.erpl.io'"   # DuckDB v1.5.6
+SKIP_WASM=1 OUT=/tmp/viz.duckdb_extension duckext/scripts/build-native.sh --release
+python3 scripts/statistics_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/stats-viz
+```
+
+CI runs it on every push (`.github/workflows/ci.yml`, job *anofox-statistics
+conformance*).
+
 ## Dependencies
 
 - **DuckDB**: v1.5.x for the CMake / community build (pinned to v1.5.6 in this repo); C-API v1.2.0+ (DuckDB v1.2 or newer) for the `duckext` full-toolkit build

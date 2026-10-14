@@ -78,5 +78,30 @@ FROM aug a, (VALUES ('resid_fitted'), ('qq'), ('scale_location'), ('leverage'), 
 GROUP BY k ORDER BY k;
 SELECT 'diagnostics' AS name, anofox_plot_diagnostics(a) AS svg FROM aug a;
 
+-- test: post-hoc comparisons, and the raw values with brackets ---------------
+CREATE TABLE posthoc AS SELECT * FROM (VALUES
+  ('b-a', 'a', 'b', 1.21, 0.42, 2.00, 0.003, 'Tukey HSD'), ('c-a', 'a', 'c', 0.31, -0.48, 1.10, 0.41, 'Tukey HSD'),
+  ('c-b', 'b', 'c', -0.90, -1.69, -0.11, 0.024, 'Tukey HSD')
+) t(test_id, group1, group2, estimate, conf_low, conf_high, p_adj, method);
+CREATE TABLE groups AS
+SELECT CASE i % 3 WHEN 0 THEN 'a' WHEN 1 THEN 'b' ELSE 'c' END AS g,
+       CASE i % 3 WHEN 0 THEN 1.0 WHEN 1 THEN 2.2 ELSE 1.3 END + 0.6 * sin(i * 2.3) AS y
+FROM range(45) r(i);
+SELECT 'tests' AS name, anofox_plot_tests(t) AS svg FROM posthoc t;
+SELECT 'compare' AS name,
+       anofox_plot_compare(r, value := 'y', factor := 'g', tests := (SELECT list(t) FROM posthoc t)) AS svg
+FROM groups r;
+
+-- partial residuals: component + residual / added-variable ------------------
+CREATE TABLE partial AS
+SELECT CASE WHEN i < 30 THEN 'price' ELSE 'promo' END AS term, (i % 30) / 3.0 AS x,
+       CASE WHEN i < 30 THEN -0.5 ELSE 0.3 END * (i % 30) / 3.0 + 0.4 * sin(i * 1.3) AS partial_residual,
+       CASE WHEN i < 30 THEN -0.5 ELSE 0.3 END * (i % 30) / 3.0 AS component,
+       (i % 30) / 3.0 - 4.83 AS x_residual,
+       CASE WHEN i < 30 THEN -0.5 ELSE 0.3 END * ((i % 30) / 3.0 - 4.83) + 0.4 * sin(i * 1.3) AS y_residual
+FROM range(60) r(i);
+SELECT 'partial' AS name, anofox_plot_partial(p) AS svg FROM partial p;
+SELECT 'added_variable' AS name, anofox_plot_partial(p, kind := 'added_variable') AS svg FROM partial p;
+
 -- anofox_plot: dispatch on the column signature ------------------------------
 SELECT 'auto_terms' AS name, anofox_plot(c) AS svg FROM coefs c;

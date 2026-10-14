@@ -60,7 +60,27 @@ Each macro: description + `tags {'anofox.consumes': '<schema>'}` in
 `duckdb_functions()`, a sqllogictest with a fixture table per schema, and an
 example dashboard under `examples/regression/`.
 
+### Status (2026-10-14, anofox-statistics v0.11.0)
+
+Done: `anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics`,
+`anofox_plot_tests` (comparison forest), `anofox_plot_compare` (groups +
+significance brackets from a test LIST via `geom_bracket_table`),
+`anofox_plot_partial` (component + residual / added-variable) and the
+`anofox_plot` dispatch — every one of the 141 contract producers of
+anofox-statistics v0.11.0 renders through `anofox_plot` and its specific macro
+without SQL errors or render warnings (`scripts/statistics_conformance.py`).
+Not done: `anofox_plot_influence`, `anofox_plot_model(model_struct)` (the
+`_augment_by` / `_tidy_by` tables cover the use), `by :=` on terms (UNION ALL BY
+NAME + `model_id` / `id` does it).
+
 ## Phase 3 — Integration infrastructure
+
+Status: `anofox_contract_version()` = `'1'` in both builds (registered only
+when no anofox extension did already); the CI job *anofox-statistics
+conformance* installs anofox_statistics (DuckDB v1.5.6, get.erpl.io), checks
+the contract version and plots every producer. The build-dashboard skill
+lists the producers and macros. Open: anofox-forecast in the same CI job,
+golden-structure SVG comparison, evals, report templates.
 
 - `anofox_contract_version()`; conformance tests for the consumer side.
 - Cross-extension CI job: install `anofox_statistics` + `anofox_forecast` from

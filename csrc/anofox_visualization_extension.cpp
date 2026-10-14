@@ -124,13 +124,34 @@ void LoadInternal(ExtensionLoader &loader) {
 		desc.description =
 		    "Render a chart specification to an SVG string. The spec is JSON carrying 'rows' (the data), "
 		    "'roles' (which column plays which part: XAXIS, BARCHART, CATEGORY, ...) and optional 'width' "
-		    "and 'height' -- or 'plot' (terms, prediction, curve, summary, obs, diagnostics, auto) with rows "
+		    "and 'height' -- or 'plot' (terms, prediction, curve, summary, obs, diagnostics, tests, compare, "
+		    "partial, auto) with rows "
 		    "named by the anofox contract. The anofox_bar/_xy/... and anofox_plot_* macros build this spec for you.";
 		desc.parameter_names = {"spec"};
 		desc.parameter_types = {LogicalType::VARCHAR};
 		desc.examples = {"anofox_render(json_object('rows', to_json([{c0: 'Jan', c1: 10}]), "
 		                 "'roles', '[[0,\"XAXIS\"],[1,\"BARCHART\"]]'::JSON))"};
 		desc.categories = {"visualization"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
+	}
+
+	// anofox_contract_version() is shared by the anofox family (statistics,
+	// forecast, visualization): whichever extension loads first registers it.
+	// The version itself lives in the Rust core (src/contract.rs).
+	if (!loader.TryGetFunction("anofox_contract_version")) {
+		ScalarFunction version("anofox_contract_version", {}, LogicalType::VARCHAR,
+		                       [](DataChunk &args, ExpressionState &state, Vector &result) {
+			                       result.SetVectorType(VectorType::CONSTANT_VECTOR);
+			                       ConstantVector::GetData<string_t>(result)[0] =
+			                           StringVector::AddString(result, anofox_viz_contract_version());
+		                       });
+		CreateScalarFunctionInfo info(std::move(version));
+		FunctionDescription desc;
+		desc.description = "Returns the version of the anofox integration contract (output schemas and "
+		                   "duckdb_functions() tags) whose tables the anofox_plot_* macros consume.";
+		desc.examples = {"anofox_contract_version()"};
+		desc.categories = {"metadata"};
 		info.descriptions.push_back(std::move(desc));
 		loader.RegisterFunction(std::move(info));
 	}
