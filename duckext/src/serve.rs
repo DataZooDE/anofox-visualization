@@ -675,11 +675,22 @@ fn build_snapshot(
     if allow_unsigned {
         cfg.push(("allow_unsigned_extensions", "true"));
     }
-    // A host in-memory DB (named so it cannot clash with a source called
-    // "memory") with the snapshots attached READ_ONLY under their own names.
-    let db = Database::open(":memory:anofox_snapshot_host", &cfg)?;
+    // A host in-memory DB with the snapshots attached READ_ONLY under their own
+    // names. (Opening ":memory:<name>" through the C API creates a FILE of that
+    // name in the working directory, so open a plain ":memory:"; its default
+    // catalog is called "memory", which only matters if a source has that name.)
+    let db = Database::open(":memory:", &cfg)?;
     {
         let c = db.connect()?;
+        if copied
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("memory"))
+        {
+            // Move the host's default catalog out of the way first.
+            c.exec("ATTACH ':memory:' AS anofox_snapshot_host")?;
+            c.exec("USE anofox_snapshot_host")?;
+            c.exec("DETACH memory")?;
+        }
         for (name, file) in &copied {
             let f = file.to_string_lossy().into_owned();
             c.exec(&format!(
