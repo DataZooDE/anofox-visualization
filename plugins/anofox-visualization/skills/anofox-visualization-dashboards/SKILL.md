@@ -1,0 +1,260 @@
+---
+name: anofox-visualization-dashboards
+description: >
+  Build an interactive SQL dashboard with anofox-visualization from a
+  plain-text request (the build-dashboard workflow). Use when the user asks
+  to "build / make / create a dashboard", "visualize this data", "turn this
+  query into a dashboard", or describes the charts, KPIs, tables or filters
+  they want. Covers the ::ROLE cast annotation model (each annotated SELECT
+  is a panel, unannotated statements are setup), every role token of the
+  registry (chart kinds, axes, intervals, facets, scales, reference lines,
+  KPIs and number formats, tables, inputs), layout (::COLUMNS, ::COL /
+  ::SPAN, ::HEIGHT, ::GROUP / ::ENDGROUP, ::TAB / ::SUBTAB), inputs bound to
+  DuckDB variables with getvariable(), click cross-filter
+  (getvariable('selected')), anofox_plot_* contract plots as panels, the
+  `dashboard --describe` / `dashboard --check` generate-validate-repair loop
+  with its lint codes (sql-error, silent-setup, render-error,
+  render-warning, empty-panel, unknown-cast, design/*), the design contract,
+  templates and the authoring gotchas that silently break a panel.
+version: 2026.9.26
+user-invocable: false
+---
+
+# Anofox Visualization — ::ROLE Dashboards (build-dashboard)
+
+**Extension:** `anofox_visualization` (CalVer 2026.9.26) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
+
+A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel (chart, KPI, table, input). Statements without a role (`CREATE TABLE`, `SET`, `LOAD`, …) run as setup, in order, on one session. Your output is one SQL script.
+
+## Workflow
+
+1. **Ground on the schema (required).** Never invent columns. `dashboard --describe <table | 'file.parquet' | read_csv(…)> [--db file.duckdb]` prints each column's type, min / max, approx-distinct (low = discrete → bar / category; high = search / paged) and null %.
+2. **Pick panels**: KPIs for headline numbers, a line for trends, bars for category comparisons, a table for detail, inputs for filtering (table *Pick the chart* below).
+3. **Lay it out**: `SELECT n::COLUMNS;`, `::COL` per panel, KPIs in a `::GROUP` box, `::TAB` / `::SUBTAB` for sections.
+4. **Write the SQL**: one annotated `SELECT` per panel, top to bottom.
+5. **Wire interactivity** if asked: inputs and cross-filter.
+6. **Validate and repair (required).** `dashboard --check file.sql [--json] [--strict] [--no-design] [--db prebuilt.duckdb]` runs every statement in a fresh session. Repeat until it prints clean (exit 0). Do not finish on unvalidated SQL.
+7. **Self-critique against the design contract** below, re-check.
+8. **Visual review (required for a finished dashboard).** `--check` never looks at the render: `scripts/shoot.sh --dash <dir> [--init <file> --workdir <dir>] --tabs "A,B" --out <dir>` screenshots each tab; grade the PNGs against `docs/dashboard-visual-review.md` (clipped labels, colliding colours, broken number formats, empty panels, no hierarchy) and fix every blocker / major.
+
+### `dashboard --check` diagnostics
+
+| Code | Severity | Meaning / fix |
+|---|---|---|
+| `sql-error` | error | the statement failed (message from DuckDB) |
+| `silent-setup` | error | a query with `::ROLE` casts outside its main SELECT list ran as setup: the panel vanished (casts in a CTE body / subquery) |
+| `render-error` | error | the chart cannot be drawn (missing required aesthetic, e.g. `::HEATMAP` without `::YAXIS`) |
+| `render-warning` | warning | renders, but the engine dropped data: non-finite values (`NaN`, `±Inf`, `log` of ≤ 0), a stat layer with too little data (density of one value, smooth on two points). Filter in SQL (`WHERE isfinite(x)`, `NULLIF`) |
+| `empty-panel` | warning | 0 rows: a blank card (often a filter on an unset variable) |
+| `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
+| `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
+
+`--check` gives each input a default (`SET VARIABLE`: the first option of a single input, every option of a `::MULTISELECT`, both ends of a `::DATERANGE`), so filtered panels are checked with real data. Variables nothing sets (`selected`, a clicked table's key) are unset: guard them with `COALESCE` / `NULLIF` as in the master-detail example. `--json` prints `{"ok": …, "diagnostics": [{"severity", "stmt", "code", "message", "sql"}]}`.
+
+## Roles
+
+`dashboard --roles` prints the authoritative list from the registry (`src/roles.rs`); `dashboard --roles-md` the table of `docs/DOCS.md`. Unknown casts are flagged by `--check`.
+
+| Group | Roles (aliases in brackets) |
+|---|---|
+| Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) |
+| Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble) · `::OPEN` `::HIGH` `::LOW` (candles) |
+| Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
+| Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` · `::BAND_LOWER` + `::BAND_UPPER` · `::MARKAREA` · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
+| Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
+| KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
+| Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
+| Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::HINT` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+
+A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name, for an input it is the variable name, in a table the header.
+
+## Inputs and cross-filter
+
+- The **output column name of an input is a DuckDB variable**: `SELECT region AS region ::DROPDOWN FROM t GROUP BY 1 ORDER BY 1;` → `getvariable('region')`. A `::MULTISELECT` is a list: `list_contains(getvariable('channel'), channel)`; "nothing selected = all": `(len(getvariable('channel')) = 0 OR list_contains(getvariable('channel'), channel))`.
+- **Cross-filter**: a click on a mark or a table row sets `getvariable('selected')` (the clicked value) and `getvariable('<first column of the clicked table>')`. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
+- Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render skips them.
+
+## Contract plots as panels
+
+`anofox_plot_*` calls (statistics-plots skill) are panels too: the planner rewrites `SELECT anofox_plot_terms(t, …), 'Title'::TITLE FROM producer(…) t` to `to_json(list(t))` and draws it with the same renderer, so the panel works in the browser builder (DuckDB-Wasm, no extension needed) and with `dashboard` / `serve`. Extra unannotated columns (`SELECT method, anofox_plot_tests(t) … GROUP BY method`) give one panel per result row. `width :=` / `height :=` are ignored (the layout sizes panels).
+
+## Worked examples
+
+```sql dashboard
+-- Weekly revenue and sessions, KPIs, filterable by channel
+CREATE TABLE sales AS
+SELECT 'W' || lpad((w + 1)::VARCHAR, 2, '0') AS week, c.channel,
+       (40 + 9 * w + 7 * c.k + (hash(w, c.channel) % 15)::INTEGER) AS n,
+       round((40 + 9 * w + 7 * c.k) * c.price, 2) AS revenue
+FROM range(12) r(w), (VALUES ('app', 1, 2.5), ('web', 2, 3.1), ('store', 3, 4.0)) c(channel, k, price);
+
+SELECT 'Filter'::GROUP;
+SELECT DISTINCT channel::MULTISELECT FROM sales ORDER BY channel;
+SELECT 1::ENDGROUP;
+
+SELECT 'Weekly performance'::GROUP;
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales
+WHERE list_contains(getvariable('channel'), channel);
+SELECT sum(n)::COMPACT, 'Sessions'::LABEL FROM sales
+WHERE list_contains(getvariable('channel'), channel);
+SELECT 1::ENDGROUP;
+
+SELECT 12::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT,
+       'Revenue grows every week'::TITLE
+FROM sales WHERE list_contains(getvariable('channel'), channel)
+GROUP BY ALL ORDER BY week, channel;
+```
+
+```sql dashboard
+-- Cross-filter: click a channel bar, the trend narrows to it
+CREATE TABLE sessions AS SELECT * FROM (VALUES
+  ('W1', 'app', 30), ('W1', 'web', 22), ('W2', 'app', 41), ('W2', 'web', 28), ('W3', 'app', 38), ('W3', 'web', 35)) t(week, channel, n);
+
+SELECT channel::XAXIS, sum(n)::BARCHART, 'App brings most sessions (click a bar)'::TITLE
+FROM sessions GROUP BY channel ORDER BY 2 DESC;
+SELECT week::XAXIS, sum(n)::LINECHART, 'Sessions per week'::TITLE
+FROM sessions WHERE COALESCE(getvariable('selected'), '') IN ('', channel)
+GROUP BY ALL ORDER BY week;
+```
+
+```sql dashboard
+-- A gauge of goal completion and a donut of spend by category
+CREATE TABLE tasks AS SELECT 72 AS done;
+CREATE TABLE expenses AS SELECT * FROM (VALUES ('rent', 1200), ('travel', 400), ('tools', 250)) t(category, spend);
+
+SELECT 6::COL;
+SELECT sum(done)::GAUGE, '0,100'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Completion at 72%'::TITLE FROM tasks;
+SELECT 6::COL;
+SELECT category::CATEGORY, sum(spend)::DONUTCHART, 'Rent is two thirds of spend'::TITLE FROM expenses GROUP BY ALL;
+```
+
+```sql dashboard
+-- Master-detail: click a SKU row, plot its monthly series
+CREATE TABLE ts AS
+SELECT 'SKU-' || s AS sku, DATE '2024-01-01' + to_months(m::INTEGER) AS month,
+       (20 * s + 3 * m + (hash(s, m) % 9)::INTEGER) AS sales
+FROM range(1, 6) a(s), range(12) b(m);
+
+SELECT 5::COL;
+SELECT sku AS "SKU" ::TABLE, sum(sales) AS "Total" FROM ts GROUP BY sku ORDER BY "Total" DESC;
+SELECT 7::COL;
+SELECT month::XAXIS, sales::LINECHART, 'Monthly sales of the selected SKU'::TITLE FROM ts
+WHERE sku = COALESCE(NULLIF(getvariable('SKU'), ''),
+                     (SELECT sku FROM ts GROUP BY sku ORDER BY sum(sales) DESC LIMIT 1))
+ORDER BY month;
+```
+
+```sql dashboard
+-- Model output from roles: coefficient forest, residuals with a GAM trend
+CREATE TABLE coefs AS SELECT * FROM (VALUES
+  ('area', 'ols', 3.3, 2.9, 3.7), ('area', 'huber', 3.1, 2.8, 3.4),
+  ('age', 'ols', -0.9, -1.4, -0.4), ('age', 'huber', -0.8, -1.2, -0.4)) t(term, model_id, estimate, conf_low, conf_high);
+CREATE TABLE fit AS SELECT i AS row_id, i::DOUBLE AS fitted, sin(i / 3.0) + (i % 5 - 2) / 4.0 AS residual,
+  abs(sin(i / 7.0)) / 4 AS cooks_d FROM range(1, 60) r(i);
+
+SELECT term::XAXIS, model_id::CATEGORY, estimate::SCATTER, conf_low::YMIN, conf_high::YMAX,
+       1::FLIP, 0::REFLINE, 'Area raises the price, age lowers it'::TITLE FROM coefs;
+SELECT fitted::XAXIS, residual::SMOOTH, 'gam'::SMOOTH_METHOD, 0::REFLINE,
+       row_id::LABEL, 3::LABEL_TOP, cooks_d::RANK, 'Residuals vs fitted'::TITLE FROM fit;
+```
+
+```sql dashboard
+-- Tabs, a 2-up row with equal heights, a formatted detail table
+CREATE TABLE orders AS
+SELECT DATE '2024-01-01' + INTERVAL (i) DAY AS day, (ARRAY['EU', 'US', 'APAC'])[1 + i % 3] AS region,
+       100 + (hash(i) % 50)::INTEGER AS amount, (i % 7 = 0) AS late
+FROM range(90) r(i);
+
+SELECT 'Overview'::TAB;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT region::XAXIS, sum(amount)::BARCHART, 'EU leads on revenue'::TITLE FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT amount::HISTOGRAM, 'Order values cluster at 100–150'::TITLE FROM orders;
+SELECT 'Detail'::TAB;
+SELECT region AS "Region" ::TABLE, sum(amount) AS "Revenue" ::MONEY,
+       avg(late::INTEGER) AS "Late share" ::PERCENT, list(amount ORDER BY day) AS "Trend" ::SPARKLINE,
+       'Revenue by region'::TITLE
+FROM orders GROUP BY region ORDER BY "Revenue" DESC;
+```
+
+## Design contract
+
+Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`design/*`).
+
+| You have | Use |
+|---|---|
+| one headline number | `::METRIC` / `::MONEY` / `::PERCENT` + a `::LABEL` caption |
+| a number over time | `::LINECHART` (+ `::SMOOTH` for a trend); ≤ ~6 series |
+| a number by a discrete category | `::BARCHART` sorted by value; part of whole → `::BARCHART_STACKED` or `::DONUTCHART` (≤ 6 slices) |
+| a distribution | `::HISTOGRAM`, or `::BOXPLOT` / `::VIOLIN` by a category |
+| two numbers | `::SCATTER` (third as `::BUBBLE` / `::SIZE`) |
+| two categories + a measure | `::HEATMAP` |
+| progress toward a goal | `::GAUGE` + `::RANGE` |
+| geography (WKT) | `::MAP` |
+| row-level detail | `::TABLE` (`::PAGED` if large / remote) |
+
+- **Inverted pyramid**: KPI strip of 2–6 tiles inside `::GROUP … ::ENDGROUP` **[lint: ungrouped-kpis]** → the primary full-width chart → 2-up breakdowns → a detail table.
+- **Title every chart with the takeaway** (`'Revenue up 12% YoY'`, not `'Revenue'`) **[lint: untitled-chart]**; format money / percent axes (`'€'::YFORMAT`).
+- **Sort bars by value** unless x is time **[lint: unsorted-bars]**; long labels → `1::FLIP`.
+- **No pie / donut past ~6 slices** **[lint: pie-slices]**; ≤ ~7 colour series (top-N + "Other") **[lint: many-series]**.
+- **≤ ~7 panels per view**, split topics with `::TAB` **[lint: too-many-panels]**.
+- **Don't dump raw rows**: aggregate or top-N a big detail table **[lint: raw-table]**.
+- **Placement** (`docs/dashboard-design.md` §7): default to 2-up (`6::COL`), full width for time series and tables; equalise a 2-up row with `::HEIGHT`; title 2-up panels with a `::TITLE` column (a lone `::LABEL` heading forces a new row); a `::GROUP` is always full width (use it for KPI strips and filter boxes, not for side by side); keep the top to one slim row (a bare `::DROPDOWN` filter, no banner repeating the KPIs).
+- **Colour is discrete**: band a continuous value with `CASE` before `::COLOR`.
+
+Complete references: `examples/dashboards/sales-overview.sql` (self-contained, lints clean), `examples/sp500-dashboard/sp500.sql` (cross-filtered), `web/examples/statistics-showcase.sql` (contract plots in ten tabs).
+
+## Templates
+
+Fill the `<placeholders>` from `--describe`, then `--check`.
+
+```sql skip
+-- Overview: filter → KPIs → trend → breakdown → table
+SELECT <cat> AS <cat> ::DROPDOWN FROM <t> GROUP BY <cat> ORDER BY 1;
+SELECT 'Totals'::GROUP;
+SELECT sum(<measure>)::MONEY, 'Total'::LABEL FROM <t> WHERE <cat> = getvariable('<cat>');
+SELECT count(*)::COMPACT, 'Rows'::LABEL FROM <t> WHERE <cat> = getvariable('<cat>');
+SELECT 1::ENDGROUP;
+SELECT 12::COL;
+SELECT <date>::XAXIS, sum(<measure>)::LINECHART, '€'::YFORMAT, '<takeaway>'::TITLE
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <date> ORDER BY <date>;
+SELECT <cat2>::XAXIS, sum(<measure>)::BARCHART, '<takeaway>'::TITLE
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <cat2> ORDER BY 2 DESC;
+SELECT 12::COL;
+SELECT <cat2> AS "<Cat2>" ::TABLE, sum(<measure>) AS "Total"
+FROM <t> WHERE <cat> = getvariable('<cat>') GROUP BY <cat2> ORDER BY "Total" DESC;
+
+-- Distribution: multiselect → histogram + boxplot
+SELECT DISTINCT <cat>::MULTISELECT FROM <t> ORDER BY 1;
+SELECT <measure>::HISTOGRAM, '<takeaway>'::TITLE FROM <t>
+WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat>));
+SELECT <cat>::XAXIS, <measure>::BOXPLOT, '<takeaway>'::TITLE FROM <t>
+WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat>));
+```
+
+## Gotchas
+
+These silently break a panel (it renders wrong or vanishes):
+
+1. **Casts go on the main (outermost) SELECT list.** A leading `WITH` is fine (`WITH s AS (…) SELECT x::XAXIS, n::BARCHART FROM s`); casts inside a CTE body or subquery are plain SQL, and DDL / DML (`CREATE … AS SELECT`, `INSERT … SELECT`) is always setup.
+2. **`::DATE`, `::TEXT`, `::STRING`, `::NUMERIC` are also SQL types.** They make an input only in an input statement; in a chart they stay casts. Cast and tag by chaining: `ts::DATE::XAXIS`.
+3. **One `::TABLE` marker per table**, not one per column; the other columns keep their `AS "Header"` aliases.
+4. **`::CATEGORY` / `::COLOR` is discrete**: a raw continuous column gives one legend entry per value.
+5. **A KPI caption is `::LABEL`, not `::TITLE`** (`::TITLE` is a title bar).
+6. **Don't pre-alias a chart column** (`x AS a ::BARCHART` names the legend entry) unless you mean it; for inputs the alias is the variable name.
+7. **Aggregating charts need `GROUP BY ALL`**; a `::ROLE` must be in the SELECT list, not after `FROM`.
+8. **Large or remote sources** (parquet, MotherDuck): `::PAGED` instead of `::TABLE`.
+9. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
+
+## Running it
+
+| Where | How |
+|---|---|
+| Static HTML | `dashboard file.sql [out.html]` (inputs, tabs and directives are skipped) |
+| Browser builder | the live demo or `web/` (DuckDB-Wasm, no server): paste the script, **Run**; **Share** puts the SQL in the URL, **⤓ HTML** saves a standalone file |
+| Live DuckDB, authoring | `SELECT anofox_serve(8080);` (from-source build) or the `serve <db>` binary |
+| To consumers, locked | `SELECT anofox_serve_dashboards('<dir>', 8095);` — each `.sql` file of the folder is a page `/d/<name>` with a shared nav bar; `::TAB` pages deep-link via `?tab=<name>` |
+
+Trust model, options and limits: the serving skill.
