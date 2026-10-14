@@ -56,3 +56,55 @@ jobs:
 
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
+
+  statistics-conformance:
+    # Every anofox-statistics contract producer (141 functions: tagged
+    # anofox.contract = '1') → anofox_plot(...) and its specific macro, on the
+    # C-API build. DuckDB is pinned to v1.5.6 (get.erpl.io serves stale
+    # anofox_statistics builds for older DuckDB releases).
+    name: anofox-statistics conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install DuckDB CLI v1.5.6
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/duckdb"
+          "$HOME/.local/bin/duckdb" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install anofox_statistics from get.erpl.io
+        run: |
+          for i in 1 2 3; do
+            duckdb -unsigned -c "FORCE INSTALL anofox_statistics FROM 'https://get.erpl.io'" && break
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          duckdb -unsigned -c "LOAD anofox_statistics;
+            SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'anofox_statistics';
+            SELECT CASE WHEN anofox_contract_version() = '1' THEN 'contract 1'
+                        ELSE error('anofox_statistics implements contract ' || anofox_contract_version() || ', expected 1') END;"
+
+      - name: Build the C-API extension
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh --release
+
+      - name: Conformance (every producer → anofox_plot + specific macro)
+        run: |
+          python3 scripts/statistics_conformance.py --duckdb duckdb \
+            --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" \
+            --out "$RUNNER_TEMP/statistics-conformance" --jobs 4 --no-montage
+
+      - name: Upload the SVGs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: statistics-conformance-svgs
+          path: ${{ runner.temp }}/statistics-conformance
+          if-no-files-found: ignore
