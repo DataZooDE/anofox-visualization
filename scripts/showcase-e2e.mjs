@@ -4,7 +4,7 @@
 //   python3 serve_nocache.py 8791 &          # serves web/ (after wasm-pack build
 //                                            # + scripts/fetch-wasm-extensions.sh)
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/showcase-e2e.mjs \
-//       [--url http://127.0.0.1:8791/] [--dashboard "Statistics showcase (live anofox-statistics)"] \
+//       [--url http://127.0.0.1:8791/] [--dashboard "Statistics showcase: property market (live anofox-statistics)"] \
 //       [--out ~/.cache/stats-showcase]
 import { createRequire } from "module";
 import { mkdirSync } from "fs";
@@ -18,7 +18,7 @@ const arg = (k, d) => {
   return i > 0 ? process.argv[i + 1] : d;
 };
 const base = arg("--url", "http://127.0.0.1:8791/");
-const dash = arg("--dashboard", "Statistics showcase (live anofox-statistics)");
+const dash = arg("--dashboard", "Statistics showcase: property market (live anofox-statistics)");
 const out = arg("--out", path.join(os.homedir(), ".cache/stats-showcase"));
 mkdirSync(out, { recursive: true });
 
