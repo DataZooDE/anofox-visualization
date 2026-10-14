@@ -14,7 +14,7 @@ use ggplot_rs::prelude::*;
 use serde_json::Value as J;
 use std::collections::{BTreeMap, HashMap};
 
-type Frame = Vec<(String, Vec<Value>)>;
+pub(super) type Frame = Vec<(String, Vec<Value>)>;
 /// A significance bracket: x of the left / right group, p, test_id.
 type Bracket = (f64, f64, Option<f64>, Option<String>);
 /// A λ marker: x, label, colour, label height.
@@ -22,25 +22,23 @@ type Mark = (f64, &'static str, (u8, u8, u8), f64);
 pub(super) type Out = Result<(String, Vec<String>), String>;
 
 /// "Not significant" / secondary marks.
-const GREY: (u8, u8, u8) = (0x7a, 0x8b, 0x99);
+pub(super) const GREY: (u8, u8, u8) = (0x7a, 0x8b, 0x99);
 /// Significant / best / highlighted marks (DataZoo orange).
-const ACCENT: (u8, u8, u8) = DZ_COLORS[1];
+pub(super) const ACCENT: (u8, u8, u8) = DZ_COLORS[1];
 /// Annotation text.
-const INK: (u8, u8, u8) = (55, 62, 75);
-/// Reference lines.
-const RULE: (u8, u8, u8) = (130, 136, 148);
+pub(super) const INK: (u8, u8, u8) = (55, 62, 75);
 
 // ── shared kit ──────────────────────────────────────────────────────────────
 
-fn fin(v: &Value) -> Option<f64> {
+pub(super) fn fin(v: &Value) -> Option<f64> {
     v.as_f64().filter(|f| f.is_finite())
 }
 
-fn s(v: impl Into<String>) -> Value {
+pub(super) fn s(v: impl Into<String>) -> Value {
     Value::Str(v.into())
 }
 
-fn text_of(v: &Value) -> Option<String> {
+pub(super) fn text_of(v: &Value) -> Option<String> {
     match v {
         Value::Na => None,
         Value::Str(s) => Some(s.clone()),
@@ -102,26 +100,22 @@ pub(super) fn stars(p: f64) -> &'static str {
     }
 }
 
-/// The house theme; `small` shrinks titles for grid cells.
-fn styled(plot: GGPlot, o: &RenderOptions, small: bool) -> GGPlot {
-    let mut th = ggplot_rs::theme::presets::theme_minimal();
-    if small {
-        th.title.size = (th.title.size * 0.8).max(10.0);
-        th.axis_title_x.size = (th.axis_title_x.size * 0.85).max(9.0);
-        th.axis_title_y.size = (th.axis_title_y.size * 0.85).max(9.0);
-    }
-    plot.primary_color(o.brand())
-        .theme(th)
-        .legend_position(ggplot_rs::theme::LegendPosition::Top)
-}
+use super::look::{self, styled, Labels};
 
-fn finish(plot: GGPlot, w: u32, h: u32, place: Place) -> Out {
+pub(super) fn finish(plot: GGPlot, w: u32, h: u32, place: Place) -> Out {
     let (w, h) = (crate::clamp_dim(w as u64), crate::clamp_dim(h as u64));
     crate::Panel::plot(plot, w, h).finish(place)
 }
 
 /// Several plots in a patchwork-style grid with one shared legend.
-fn grid(plots: Vec<GGPlot>, ncol: usize, title: Option<&str>, w: u32, h: u32, place: Place) -> Out {
+pub(super) fn grid(
+    plots: Vec<GGPlot>,
+    ncol: usize,
+    title: Option<&str>,
+    w: u32,
+    h: u32,
+    place: Place,
+) -> Out {
     let mut g = PlotGrid::new().ncol(ncol.max(1)).collect_legends(true);
     for p in plots {
         g = g.add(p);
@@ -133,7 +127,7 @@ fn grid(plots: Vec<GGPlot>, ncol: usize, title: Option<&str>, w: u32, h: u32, pl
 }
 
 /// Columns of `cols` grid cells for `n` panels.
-fn grid_cols(n: usize, max: usize) -> usize {
+pub(super) fn grid_cols(n: usize, max: usize) -> usize {
     match n {
         0..=1 => 1,
         2 => 2,
@@ -150,7 +144,7 @@ fn dz(aesthetic: Aesthetic) -> ScaleColorDiscrete {
 }
 
 /// Distinct non-null text values of `k`, first-seen order.
-fn levels(t: &Table, k: &str) -> Vec<String> {
+pub(super) fn levels(t: &Table, k: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in t.text(k) {
         if let Value::Str(s) = v {
@@ -185,7 +179,7 @@ fn combo(t: &Table, keys: &[&str]) -> Option<Vec<Value>> {
 }
 
 /// A numeric y axis carrying category `labels` at 1..n, top to bottom.
-fn label_axis(labels: &[String]) -> ScaleContinuous {
+pub(super) fn label_axis(labels: &[String]) -> ScaleContinuous {
     let n = labels.len();
     ScaleContinuous::new()
         .with_limits(0.4, n as f64 + 0.6)
@@ -195,7 +189,7 @@ fn label_axis(labels: &[String]) -> ScaleContinuous {
 }
 
 /// Row `i` of `n` labels → its y slot (first label on top).
-fn slot(i: usize, n: usize) -> f64 {
+pub(super) fn slot(i: usize, n: usize) -> f64 {
     (n - i) as f64
 }
 
@@ -315,10 +309,7 @@ pub(super) fn tests(
     );
     let rows: Vec<TestRow> = (0..t.rows.len())
         .map(|i| {
-            let label = text_of(&tid[i]).or_else(|| match (text_of(&g1[i]), text_of(&g2[i])) {
-                (Some(a), Some(b)) => Some(format!("{a} vs {b}")),
-                _ => None,
-            });
+            let label = pair_label(text_of(&tid[i]), text_of(&g1[i]), text_of(&g2[i]));
             TestRow {
                 label,
                 group: gvals.as_ref().and_then(|g| text_of(&g[i])),
@@ -331,6 +322,8 @@ pub(super) fn tests(
             }
         })
         .collect();
+    let labels = Labels::from(options);
+    let explicit = opt_str(options, "value").is_some();
     let mode = match opt_str(options, "value").as_deref() {
         Some("estimate") => "estimate",
         Some("statistic") => "statistic",
@@ -362,7 +355,14 @@ pub(super) fn tests(
         }
         m
     };
-    let title = (methods.len() == 1).then(|| methods[0].clone());
+    // Estimates without any interval (pairwise_t_test_by until
+    // anofox-statistics#198): bare points say little — draw −log10(p) bars
+    // with the significance line instead.
+    let no_ci = !rows.iter().any(|r| r.lo.is_some() && r.hi.is_some());
+    let fallback = !explicit && mode == "estimate" && no_ci && rows.iter().any(|r| r.p.is_some());
+    let mode = if fallback { "p" } else { mode };
+    let adjusted = rows.iter().any(|r| r.p.is_some()) && p_adj.iter().any(|v| fin(v).is_some());
+    let note_style = opt_str(options, "label").unwrap_or_else(|| "p".into());
     // Odds ratios (Fisher's exact test, …) are compared with 1, not 0.
     let ratio = methods
         .iter()
@@ -396,21 +396,30 @@ pub(super) fn tests(
         .and_then(|v| v.iter().find_map(fin))
         .map(|l| format!("{:.0}% CI", l * 100.0))
         .unwrap_or_else(|| "CI".into());
+    let pname = if adjusted { "adjusted p" } else { "p" };
     let xlab = match mode {
-        "estimate" if rows.iter().any(|r| r.lo.is_some()) => format!("estimate ({level})"),
-        "estimate" => "estimate".to_string(),
+        "estimate" if rows.iter().any(|r| r.lo.is_some()) => format!("difference ({level})"),
+        "estimate" => "difference".to_string(),
         "statistic" => "test statistic".to_string(),
-        _ => "−log10(p)".to_string(),
+        _ if fallback => format!("−log10({pname}) — no CI reported"),
+        _ => format!("−log10({pname})"),
     };
     let small = panels.len() > 1;
     let mut plots = Vec::new();
     for (g, prs) in &panels {
-        let mut plot = test_panel(prs, mode, ratio, alpha, &label_of, o, small)?
-            .xlab(&xlab)
-            .ylab("");
+        // The automatic −log10(p) fallback has its own axis: an x_label
+        // written for the estimate would mislabel it.
+        let xl = if fallback {
+            xlab.clone()
+        } else {
+            labels.x_or(&xlab)
+        };
+        let mut plot = test_panel(prs, mode, ratio, alpha, &note_style, &label_of, o, small)?
+            .xlab(&xl)
+            .ylab(&labels.y_or(""));
         if let Some(g) = g {
             plot = plot.title(g);
-        } else if let Some(tt) = &title {
+        } else if let Some(tt) = &labels.title {
             plot = plot.title(tt);
         }
         plots.push(plot);
@@ -420,7 +429,50 @@ pub(super) fn tests(
         return finish(plot, w, h, place);
     }
     let n = plots.len();
-    grid(plots, grid_cols(n, 3), title.as_deref(), w, h, place)
+    grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
+}
+
+/// "B − A" for a test whose id spells the two groups (`B-A`), else
+/// "group1 vs group2", else the id.
+pub(super) fn pair_label(
+    id: Option<String>,
+    g1: Option<String>,
+    g2: Option<String>,
+) -> Option<String> {
+    if let (Some(id), Some(a), Some(b)) = (&id, &g1, &g2) {
+        for (x, y) in [(a, b), (b, a)] {
+            if *id == format!("{x}-{y}") || *id == format!("{x} - {y}") {
+                return Some(format!("{x} − {y}"));
+            }
+        }
+    }
+    match (g1, g2) {
+        (Some(a), Some(b)) if id.is_none() => Some(format!("{a} vs {b}")),
+        (Some(a), Some(b)) => match id.as_deref() {
+            Some(i) if i.contains('-') && !i.contains(' ') => {
+                let parts: Vec<&str> = i.splitn(2, '-').collect();
+                Some(format!("{} − {}", parts[0], parts[1]))
+            }
+            _ => Some(format!("{a} vs {b}")),
+        },
+        _ => id,
+    }
+}
+
+/// The note beside a test: `p = 0.012 *` (`label := 'p'`, forests) or the
+/// stars only (`'stars'`).
+fn p_note(p: f64, style: &str) -> String {
+    match style {
+        "stars" => stars(p).to_string(),
+        _ => {
+            let st = stars(p);
+            if st == "ns" {
+                fmt_p(p)
+            } else {
+                format!("{} {st}", fmt_p(p))
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -429,6 +481,7 @@ fn test_panel(
     mode: &str,
     ratio: bool,
     alpha: f64,
+    note_style: &str,
     label_of: &dyn Fn(&TestRow) -> String,
     o: &RenderOptions,
     small: bool,
@@ -494,17 +547,32 @@ fn test_panel(
         GGPlot::new(data).aes(Aes::new().x("x").y("y").color("significance").label("tip"));
     let in_view = reference.filter(|r| *r >= xlo && *r <= xhi);
     if let Some(r) = in_view {
-        plot = plot.geom_vline_with(GeomVline {
-            xintercept: r,
-            color: RULE,
-            width: 1.0,
-            linetype: if mode == "p" {
-                Linetype::Dashed
-            } else {
-                Linetype::Solid
-            },
-            alpha: 0.9,
-        });
+        if mode == "p" {
+            // The significance line is semantic: drawn and labelled.
+            plot = plot
+                .geom_vline_with(GeomVline {
+                    xintercept: r,
+                    color: ACCENT,
+                    width: 1.1,
+                    linetype: Linetype::Dashed,
+                    alpha: 0.9,
+                })
+                .geom_text_with(GeomText {
+                    size: 9.5,
+                    color: ACCENT,
+                    hjust: 0.0,
+                    vjust: 0.0,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".into(), vec![Value::Float(r + (xhi - xlo) * 0.01)]),
+                    ("y".into(), vec![Value::Float(n as f64 + 0.42)]),
+                    ("note".into(), vec![s(format!("p = {}", fmt_num(alpha)))]),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("note"));
+        } else {
+            plot = look::vline(plot, r);
+        }
     }
     if interval {
         let (los, his): (Vec<Value>, Vec<Value>) = rows
@@ -545,8 +613,8 @@ fn test_panel(
         plot = plot
             .geom_segment_with(GeomSegment {
                 color: INK,
-                width: 2.0,
-                alpha: 1.0,
+                width: if mode == "p" { 9.0 } else { 2.0 },
+                alpha: if mode == "p" { 0.85 } else { 1.0 },
             })
             .layer_data(vec![
                 ("x".into(), vec![Value::Float(base); n]),
@@ -567,16 +635,18 @@ fn test_panel(
                     .color("significance"),
             );
     }
-    plot = plot.geom_point_with(GeomPoint {
-        size: 3.2,
-        color: INK,
-        alpha: 1.0,
-    });
+    if mode != "p" {
+        plot = plot.geom_point_with(GeomPoint {
+            size: 3.2,
+            color: INK,
+            alpha: 1.0,
+        });
+    }
     // The p-value (and stars) beside each row, right of everything.
     let notes: Vec<Value> = rows
         .iter()
         .map(|r| match r.p {
-            Some(p) => s(format!("{} {}", fmt_p(p), stars(p))),
+            Some(p) => s(p_note(p, note_style)),
             None => s(r
                 .stat
                 .map(|v| format!("stat = {}", fmt_num(v)))
@@ -617,7 +687,7 @@ fn test_panel(
     Ok(styled(plot, o, small))
 }
 
-fn rgba((r, g, b): (u8, u8, u8)) -> RGBAColor {
+pub(super) fn rgba((r, g, b): (u8, u8, u8)) -> RGBAColor {
     RGBAColor::new(r, g, b)
 }
 
@@ -656,6 +726,7 @@ pub(super) fn compare(
         .or_else(|| opt_str(options, "by"))
         .ok_or_else(|| format!("needs factor := '<group column>' (got: {})", t.keys()))?;
     t.need(&[value.as_str(), factor.as_str()])?;
+    let labels = Labels::from(options);
     let kind = opt_str(options, "kind").unwrap_or_else(|| "box".into());
     if !["box", "violin", "points"].contains(&kind.as_str()) {
         return Err(format!(
@@ -791,7 +862,11 @@ pub(super) fn compare(
                     .into(),
             );
         }
-        let hide_ns = options.get("hide_ns").and_then(J::as_bool).unwrap_or(false);
+        // Many groups → many brackets: only the significant ones by default.
+        let hide_ns = options
+            .get("hide_ns")
+            .and_then(J::as_bool)
+            .unwrap_or(lv.len() > 3);
         // (x1, x2, p, test_id) per drawable bracket, narrow spans first.
         let mut br: Vec<Bracket> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
@@ -838,7 +913,11 @@ pub(super) fn compare(
                 hi.abs().max(1.0) * 0.11
             };
             let at = |k: usize| hi + step * (k as f64 + 0.8);
-            let user_label = opt_str(options, "label");
+            // label := 'stars' (default) | 'p' | a ggpubr template ("{p.adj}").
+            let style = opt_str(options, "label").unwrap_or_else(|| "stars".into());
+            // ggpubr spells the adjusted p `{p.adj}`; ggplot-rs reads columns.
+            let user_label = (!matches!(style.as_str(), "stars" | "p"))
+                .then(|| style.replace("{p.adj}", "{p_adj}"));
             let mut frame: Frame = vec![
                 (
                     "group1".into(),
@@ -850,6 +929,12 @@ pub(super) fn compare(
                 ),
                 (
                     "p_value".into(),
+                    br.iter()
+                        .map(|b| b.2.map_or(Value::Na, Value::Float))
+                        .collect(),
+                ),
+                (
+                    "p_adj".into(),
                     br.iter()
                         .map(|b| b.2.map_or(Value::Na, Value::Float))
                         .collect(),
@@ -882,7 +967,7 @@ pub(super) fn compare(
                 let notes: Vec<Value> = br
                     .iter()
                     .map(|b| match b.2 {
-                        Some(p) => s(format!("{} {}", fmt_p(p), stars(p))),
+                        Some(p) => s(p_note(p, &style)),
                         None => s(""),
                     })
                     .collect();
@@ -931,10 +1016,11 @@ pub(super) fn compare(
                 .with_breaks((1..=k).map(|i| i as f64).collect())
                 .with_labels(lv.clone()),
         )
-        .xlab(&factor)
-        .ylab(&value);
-    if let Some(m) = method {
-        plot = plot.title(&m);
+        .xlab(&labels.x_or(&look::humanize(&factor)))
+        .ylab(&labels.y_or(&look::humanize(&value)));
+    let _ = method;
+    if let Some(t) = &labels.title {
+        plot = plot.title(t);
     }
     let (svg, mut w0) = finish(styled(plot, o, false), w, h, place)?;
     w0.extend(warnings);
@@ -956,6 +1042,7 @@ pub(super) fn partial(
     o: &RenderOptions,
     place: Place,
 ) -> Out {
+    let labels = Labels::from(options);
     let kind = opt_str(options, "kind").unwrap_or_else(|| "component".into());
     let av = match kind.as_str() {
         "component" | "component_residual" | "cr" => false,
@@ -1000,13 +1087,72 @@ pub(super) fn partial(
             data.push(("model".into(), pick(sv)));
             aes = aes.color("model").group("model");
         }
-        let mut plot = GGPlot::new(data.clone())
-            .aes(aes)
-            .geom_point_with(GeomPoint {
+        // A binary / few-level term (≤ 3 distinct x, a dummy): jittered
+        // points and the group means — a smoother through 2–3 columns of
+        // points only draws noise.
+        let distinct_x: Vec<f64> = {
+            let mut v: Vec<f64> = idx.iter().filter_map(|&i| fin(&xs[i])).collect();
+            v.sort_by(f64::total_cmp);
+            v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            v
+        };
+        let few = !av && distinct_x.len() <= 3;
+        let mut plot = GGPlot::new(data.clone()).aes(aes);
+        plot = if few {
+            let span = distinct_x
+                .last()
+                .zip(distinct_x.first())
+                .map(|(a, b)| a - b)
+                .filter(|d| *d > 0.0)
+                .unwrap_or(1.0);
+            plot.geom_jitter_with(GeomJitter {
+                size: 1.6,
+                color: brand,
+                alpha: 0.45,
+                width: Some(span * 0.07),
+                height: Some(0.0),
+            })
+        } else {
+            plot.geom_point_with(GeomPoint {
                 size: 1.8,
                 color: brand,
                 alpha: 0.7,
-            });
+            })
+        };
+        if few && series.is_none() {
+            let means: Vec<(f64, f64)> = distinct_x
+                .iter()
+                .filter_map(|&x0| {
+                    let v: Vec<f64> = idx
+                        .iter()
+                        .filter(|&&i| fin(&xs[i]).is_some_and(|x| (x - x0).abs() < 1e-9))
+                        .filter_map(|&i| fin(&ys[i]))
+                        .collect();
+                    (!v.is_empty()).then(|| (x0, v.iter().sum::<f64>() / v.len() as f64))
+                })
+                .collect();
+            plot = plot
+                .geom_point_with(GeomPoint {
+                    size: 5.0,
+                    color: ACCENT,
+                    alpha: 1.0,
+                })
+                .layer_data(vec![
+                    (
+                        "x".into(),
+                        means.iter().map(|m| Value::Float(m.0)).collect(),
+                    ),
+                    (
+                        "y".into(),
+                        means.iter().map(|m| Value::Float(m.1)).collect(),
+                    ),
+                ])
+                .layer_aes(Aes::new().x("x").y("y"));
+            if distinct_x.len() > 1 {
+                plot =
+                    plot.scale_x_continuous(ScaleContinuous::new().with_breaks(distinct_x.clone()));
+            }
+        }
         let mut panel_title = term.clone();
         if av {
             // Least squares through the origin, per series.
@@ -1067,7 +1213,9 @@ pub(super) fn partial(
                     None => format!("slope = {}", fmt_num(slope)),
                 });
             }
-            plot = plot.xlab(&format!("{term} | others")).ylab("y | others");
+            plot = plot
+                .xlab(&format!("{term} | others"))
+                .ylab(&labels.y_or("y | others"));
             if !notes.is_empty() {
                 panel_title = format!("{term} ({})", notes.join(", "));
             }
@@ -1103,7 +1251,7 @@ pub(super) fn partial(
                     })
                     .layer_data(frame);
             }
-            if idx.len() >= 6 && series.is_none() {
+            if idx.len() >= 6 && series.is_none() && !few {
                 plot = plot.geom_smooth_with(GeomSmooth {
                     color: ACCENT,
                     se: false,
@@ -1112,7 +1260,9 @@ pub(super) fn partial(
                     ..Default::default()
                 });
             }
-            plot = plot.xlab(term).ylab("component + residual");
+            plot = plot
+                .xlab(&labels.x_or(term))
+                .ylab(&labels.y_or("component + residual"));
         }
         if series.is_some() {
             plot = plot.scale_color(dz(Aesthetic::Color));
@@ -1123,20 +1273,17 @@ pub(super) fn partial(
     if plots.is_empty() {
         return crate::note_svg(None, "No data", w, h).finish(place);
     }
-    let title = if av {
-        "Added-variable plots"
-    } else {
-        "Component + residual plots"
-    };
     if plots.len() == 1 {
-        let p = plots
-            .pop()
-            .expect("one plot")
-            .title(&format!("{title}: {}", titles[0]));
+        // One term: its name (and slope) as the title only when asked.
+        let p = plots.pop().expect("one plot");
+        let p = match &labels.title {
+            Some(t) => p.title(&format!("{t}: {}", titles[0])),
+            None => p.title(&titles[0]),
+        };
         return finish(p, w, h, place);
     }
     let n = plots.len();
-    grid(plots, grid_cols(n, 3), Some(title), w, h, place)
+    grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
 }
 
 // ── summary: one scale per metric ───────────────────────────────────────────
@@ -1289,6 +1436,43 @@ pub(super) fn summary(
             }
         }
     };
+    let labels_opt = Labels::from(options);
+    let baseline = opt_str(options, "baseline").unwrap_or_else(|| "range".into());
+    if !matches!(baseline.as_str(), "range" | "zero") {
+        return Err(format!(
+            "baseline := '{baseline}' is not one of 'range', 'zero'"
+        ));
+    }
+    // One model order for every panel: best first by the first metric (when
+    // its direction is known), models without it last.
+    let label_levels: Vec<String> = {
+        let m0 = &wanted[0];
+        let dir = if HIGHER_BETTER.contains(&m0.as_str()) {
+            -1.0
+        } else if LOWER_BETTER.contains(&m0.as_str()) {
+            1.0
+        } else {
+            0.0
+        };
+        let score = |l: &String| -> Option<f64> {
+            (0..t.rows.len())
+                .find(|&i| {
+                    matches!(&metric[i], Value::Str(s) if s == m0)
+                        && text_of(&labels[i]).as_ref() == Some(l)
+                })
+                .and_then(|i| fin(&value[i]))
+        };
+        let mut l = label_levels;
+        if dir != 0.0 {
+            l.sort_by(|a, b| match (score(a), score(b)) {
+                (Some(x), Some(y)) => (dir * x).total_cmp(&(dir * y)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+        }
+        l
+    };
     let n = label_levels.len();
     let many = wanted.len() > 1;
     let ncol = grid_cols(wanted.len(), 4);
@@ -1321,6 +1505,15 @@ pub(super) fn summary(
                     .flat_map(|&i| [fin(&clo[i]), fin(&chi[i])])
                     .flatten(),
             );
+        }
+        let spread = vals
+            .iter()
+            .copied()
+            .reduce(f64::max)
+            .zip(vals.iter().copied().reduce(f64::min))
+            .map(|(a, b)| a - b);
+        if baseline == "zero" {
+            extent.push(0.0);
         }
         // Differences below ~3 % of the values' size are not stretched across
         // the panel (R² 0.9934 vs 0.9929 should look alike).
@@ -1440,9 +1633,38 @@ pub(super) fn summary(
             .layer_aes(Aes::new().x("x").y("y").label("note"))
             .scale_x_continuous(ScaleContinuous::new().with_limits(xlo, xhi))
             .scale_y_continuous(label_axis(&label_levels))
-            .title(&metric_title(m))
+            .title(&match spread {
+                // The range of the panel, so a stretched tiny difference is
+                // not over-read.
+                Some(d) if baseline == "range" && vals.len() > 1 => {
+                    format!("{}  (Δ = {})", metric_title(m), fmt_num(d))
+                }
+                _ => metric_title(m),
+            })
             .xlab("")
             .ylab("");
+        // Models without this metric: "n/a".
+        let missing: Vec<usize> = (0..n)
+            .filter(|&r| !idx.iter().any(|&i| rank_of(i) == r))
+            .collect();
+        if !missing.is_empty() {
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 9.0,
+                    color: (150, 156, 168),
+                    hjust: 0.0,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".into(), vec![Value::Float(xlo + pad); missing.len()]),
+                    (
+                        "y".into(),
+                        missing.iter().map(|&r| Value::Float(slot(r, n))).collect(),
+                    ),
+                    ("note".into(), vec![s("n/a"); missing.len()]),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("note"));
+        }
         // The values are written beside the dots: no x tick labels (tiny
         // differences between models would crowd them); model labels once
         // per row of panels.
@@ -1459,139 +1681,390 @@ pub(super) fn summary(
         plots.push(plot);
     }
     if plots.len() == 1 {
-        return finish(plots.pop().expect("one plot"), w, h, place);
+        let p = plots.pop().expect("one plot");
+        let p = match &labels_opt.title {
+            Some(t) => p.title(t),
+            None => p,
+        };
+        return finish(p, w, h, place);
     }
-    // Equal panel widths would waste the first column on labels; give it room.
-    grid(plots, ncol, Some("Model comparison"), w, h, place)
+    grid(plots, ncol, labels_opt.title.as_deref(), w, h, place)
 }
 
-// ── prediction with several models ──────────────────────────────────────────
+// ── prediction ──────────────────────────────────────────────────────────────
 
-/// `prediction` with several models in one panel: one coloured yhat line (and
-/// band) per model; the observed y once, in grey, shaped by split.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn prediction_models(
+/// Per-row split: `split`, else from `is_training` (false + y → test, false
+/// without y → future), else y → train, no y → future.
+fn splits(t: &Table, yv: &[Value]) -> Vec<String> {
+    t.rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let has_y = yv.get(i).is_some_and(|v| fin(v).is_some());
+            match (r.get("split"), r.get("is_training")) {
+                (Some(J::String(s)), _) => s.clone(),
+                (_, Some(J::Bool(true))) => "train".into(),
+                (_, Some(J::Bool(false))) if has_y => "test".into(),
+                (_, Some(J::Bool(false))) => "future".into(),
+                _ if has_y => "train".into(),
+                _ => "future".into(),
+            }
+        })
+        .collect()
+}
+
+fn split_label(s: &str) -> String {
+    match s.to_ascii_lowercase().as_str() {
+        "test" | "holdout" | "hold_out" | "validation" => "hold-out".into(),
+        "future" | "forecast" => "forecast".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// `prediction`: observed y as neutral grey points, the fit as a coloured
+/// line with a light band, split boundaries as labelled vertical lines.
+/// Several models in a panel: one band (`band := 'model'`, default `ols` or
+/// the first model) and a line per model — or `kind := 'difference'`: each
+/// model minus the reference.
+pub(super) fn prediction(
     t: &Table,
-    x: &str,
-    y: &str,
-    model: &str,
-    facet: Option<&str>,
+    options: &Row,
     w: u32,
     h: u32,
     o: &RenderOptions,
     place: Place,
 ) -> Out {
-    let xs = t.xpos(x);
-    let yhat = t.num("yhat")?;
-    let models = t.text(model);
-    let fac = facet.map(|f| t.text(f));
-    let n = t.rows.len();
-    let nan = |v: &Value| fin(v).map_or(Value::Float(f64::NAN), Value::Float);
-    let mut data: Frame = vec![
-        ("x".into(), xs.clone()),
-        ("yhat".into(), yhat.iter().map(nan).collect()),
-        ("model".into(), models.clone()),
-    ];
-    if let Some(f) = &fac {
-        data.push(("facet".into(), f.clone()));
+    let labels = Labels::from(options);
+    let x = opt_str(options, "x")
+        .or_else(|| {
+            ["x", "ds", "date"]
+                .into_iter()
+                .find(|k| t.has(k))
+                .map(String::from)
+        })
+        .ok_or_else(|| {
+            format!(
+                "needs an x position: a column `x` or `ds`, or x := '<column>' (got: {})",
+                t.keys()
+            )
+        })?;
+    let y = opt_str(options, "y").unwrap_or_else(|| "y".into());
+    t.need(&[x.as_str(), "yhat"])?;
+    let facet = opt_str(options, "facet").or_else(|| (t.distinct("id") > 1).then(|| "id".into()));
+    if let Some(f) = &facet {
+        if !t.has(f) {
+            return Err(format!("facet column `{f}` not found (got: {})", t.keys()));
+        }
     }
-    let mut plot = GGPlot::new(data).aes(Aes::new().x("x").y("yhat").color("model").group("model"));
-    if t.has("yhat_lower") && t.has("yhat_upper") {
-        let (lo, hi) = (t.num("yhat_lower")?, t.num("yhat_upper")?);
+    let n = t.rows.len();
+    let xs = t.xpos(&x);
+    let yhat = t.num("yhat")?;
+    let has_y = t.has(&y);
+    let yv = if has_y {
+        t.num(&y)?
+    } else {
+        vec![Value::Na; n]
+    };
+    let fac = facet.as_deref().map(|f| t.text(f));
+    let fkey = |i: usize| {
+        fac.as_ref()
+            .map(|f| format!("{:?}", f[i]))
+            .unwrap_or_default()
+    };
+    // Models per panel.
+    let model_key = t.model_key().filter(|m| {
+        let mut per: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (i, r) in t.rows.iter().enumerate() {
+            if let Some(v) = r.get(*m).filter(|v| !v.is_null()) {
+                per.entry(fkey(i)).or_default().insert(v.to_string());
+            }
+        }
+        per.values().any(|s| s.len() > 1)
+    });
+    let models: Vec<Value> = match model_key {
+        Some(m) => t.text(m),
+        None => vec![s(""); n],
+    };
+    let mlevels: Vec<String> = match model_key {
+        Some(m) => levels(t, m),
+        None => Vec::new(),
+    };
+    let several = mlevels.len() > 1;
+    let reference: Option<String> = several.then(|| {
+        opt_str(options, "band")
+            .filter(|b| mlevels.contains(b))
+            .or_else(|| {
+                mlevels
+                    .iter()
+                    .find(|m| m.eq_ignore_ascii_case("ols"))
+                    .cloned()
+            })
+            .unwrap_or_else(|| mlevels[0].clone())
+    });
+    let kind = opt_str(options, "kind").unwrap_or_else(|| "fit".into());
+    if !matches!(kind.as_str(), "fit" | "difference") {
+        return Err(format!(
+            "kind := '{kind}' is not one of 'fit', 'difference'"
+        ));
+    }
+    let difference = kind == "difference" && several;
+    let effects = t.has("focal");
+    // Axis labels: effects tables name the response by the model family.
+    let family = mlevels
+        .first()
+        .cloned()
+        .or_else(|| t.model_key().and_then(|k| levels(t, k).into_iter().next()))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let ydefault = if effects {
+        if ["logistic", "binomial", "probit", "logit"]
+            .iter()
+            .any(|f| family.contains(f))
+        {
+            "P(y = 1)".to_string()
+        } else if ["poisson", "negbinom", "negative"]
+            .iter()
+            .any(|f| family.contains(f))
+        {
+            "expected count".to_string()
+        } else {
+            format!("predicted {}", look::humanize(&y))
+        }
+    } else {
+        look::humanize(if has_y { &y } else { "yhat" })
+    };
+    let is_date = xs.iter().any(|v| matches!(v, Value::DateTime(_)));
+    let xdefault = if is_date && matches!(x.as_str(), "x" | "ds") {
+        "date".to_string()
+    } else if effects {
+        levels(t, "focal_name")
+            .into_iter()
+            .next()
+            .map(|f| look::humanize(&f))
+            .unwrap_or_else(|| look::humanize(&x))
+    } else {
+        look::humanize(&x)
+    };
+    let nan = |v: &Value| fin(v).map_or(Value::Float(f64::NAN), Value::Float);
+    let brand = o.brand();
+    let ycol: Vec<Value>;
+    let ylab: String;
+    let mut plot;
+    if difference {
+        let rf = reference.clone().unwrap_or_default();
+        let mut base: HashMap<String, f64> = HashMap::new();
+        for i in 0..n {
+            if text_of(&models[i]).as_deref() == Some(rf.as_str()) {
+                if let Some(v) = fin(&yhat[i]) {
+                    base.insert(format!("{}|{:?}", fkey(i), xs[i]), v);
+                }
+            }
+        }
         let keep: Vec<usize> = (0..n)
-            .filter(|&i| fin(&lo[i]).is_some() && fin(&hi[i]).is_some())
+            .filter(|&i| text_of(&models[i]).as_deref() != Some(rf.as_str()))
+            .filter(|&i| fin(&yhat[i]).is_some())
+            .filter(|&i| base.contains_key(&format!("{}|{:?}", fkey(i), xs[i])))
             .collect();
-        let pick = |v: &[Value]| keep.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
-        let mut frame: Frame = vec![
-            ("x".into(), pick(&xs)),
-            ("lo".into(), pick(&lo)),
-            ("hi".into(), pick(&hi)),
-            ("model".into(), pick(&models)),
+        ycol = keep
+            .iter()
+            .map(|&i| {
+                Value::Float(
+                    fin(&yhat[i]).unwrap_or(0.0) - base[&format!("{}|{:?}", fkey(i), xs[i])],
+                )
+            })
+            .collect();
+        let others: Vec<String> = mlevels.iter().filter(|m| **m != rf).cloned().collect();
+        let mut data: Frame = vec![
+            ("x".into(), keep.iter().map(|&i| xs[i].clone()).collect()),
+            ("yhat".into(), ycol.clone()),
+            (
+                "model".into(),
+                keep.iter().map(|&i| models[i].clone()).collect(),
+            ),
         ];
         if let Some(f) = &fac {
-            frame.push(("facet".into(), pick(f)));
+            data.push(("facet".into(), keep.iter().map(|&i| f[i].clone()).collect()));
         }
-        plot = plot
-            .geom_ribbon_with(GeomRibbon {
-                fill: o.brand(),
-                alpha: 0.15,
-            })
-            .layer_data(frame)
-            .layer_aes(
-                Aes::new()
-                    .x("x")
-                    .ymin("lo")
-                    .ymax("hi")
-                    .fill("model")
-                    .group("model"),
-            );
-    }
-    plot = plot.geom_line_with(GeomLine {
-        color: o.brand(),
-        width: 1.4,
-        alpha: 1.0,
-    });
-    if t.has(y) {
-        // Observed values once per (facet, x).
-        let yv = t.num(y)?;
-        let split: Vec<Value> = t
-            .rows
-            .iter()
-            .map(|r| match (r.get("split"), r.get("is_training")) {
-                (Some(J::String(s)), _) => Value::Str(s.clone()),
-                (_, Some(J::Bool(false))) => s("test"),
-                _ => s("train"),
-            })
-            .collect();
-        let mut seen = std::collections::HashSet::new();
-        let keep: Vec<usize> = (0..n)
-            .filter(|&i| fin(&yv[i]).is_some())
-            .filter(|&i| {
-                let f = fac
-                    .as_ref()
-                    .map(|f| format!("{:?}", f[i]))
-                    .unwrap_or_default();
-                seen.insert(format!("{f}|{:?}|{:?}", xs[i], yv[i]))
-            })
-            .collect();
-        let pick = |v: &[Value]| keep.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
-        let splits: Vec<Value> = pick(&split);
-        let several = {
-            let mut l: Vec<String> = splits.iter().filter_map(text_of).collect();
-            l.sort();
-            l.dedup();
-            l.len() > 1
-        };
-        let mut frame: Frame = vec![("x".into(), pick(&xs)), ("y".into(), pick(&yv))];
+        plot = GGPlot::new(data).aes(Aes::new().x("x").y("yhat").color("model").group("model"));
+        plot = look::hline(plot, 0.0).geom_line_with(GeomLine {
+            color: brand,
+            width: 1.6,
+            alpha: 1.0,
+        });
+        plot = plot.scale_color(look::series_scale(Aesthetic::Color, &others));
+        ylab = format!("difference vs {rf}");
+    } else {
+        ycol = yhat.iter().map(nan).collect();
+        let mut data: Frame = vec![
+            ("x".into(), xs.clone()),
+            ("yhat".into(), ycol.clone()),
+            ("model".into(), models.clone()),
+        ];
         if let Some(f) = &fac {
-            frame.push(("facet".into(), pick(f)));
+            data.push(("facet".into(), f.clone()));
         }
-        let mut aes = Aes::new().x("x").y("y");
+        let mut aes = Aes::new().x("x").y("yhat");
         if several {
-            frame.push(("split".into(), splits));
-            aes = aes.shape("split");
+            aes = aes.color("model").group("model");
         }
-        plot = plot
-            .geom_point_with(GeomPoint {
-                size: 2.0,
-                color: INK,
-                alpha: 0.6,
-            })
-            .layer_data(frame)
-            .layer_aes(aes);
+        plot = GGPlot::new(data).aes(aes);
+        if t.has("yhat_lower") && t.has("yhat_upper") {
+            let (lo, hi) = (t.num("yhat_lower")?, t.num("yhat_upper")?);
+            let keep: Vec<usize> = (0..n)
+                .filter(|&i| fin(&lo[i]).is_some() && fin(&hi[i]).is_some())
+                .filter(|&i| match &reference {
+                    Some(r) => text_of(&models[i]).as_deref() == Some(r.as_str()),
+                    None => true,
+                })
+                .collect();
+            let pick = |v: &[Value]| keep.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
+            let mut frame: Frame = vec![
+                ("x".into(), pick(&xs)),
+                ("lo".into(), pick(&lo)),
+                ("hi".into(), pick(&hi)),
+            ];
+            if let Some(f) = &fac {
+                frame.push(("facet".into(), pick(f)));
+            }
+            let fill = match &reference {
+                Some(r) => look::model_color(r),
+                None => brand,
+            };
+            // One ribbon per facet / split run: group by facet.
+            let mut a = Aes::new().x("x").ymin("lo").ymax("hi");
+            if fac.is_some() {
+                a = a.group("facet");
+            }
+            plot = plot
+                .geom_ribbon_with(GeomRibbon { fill, alpha: 0.16 })
+                .layer_data(frame)
+                .layer_aes(a);
+        }
+        if has_y {
+            // Observed values once per (facet, x): neutral dark grey.
+            let mut seen = std::collections::HashSet::new();
+            let keep: Vec<usize> = (0..n)
+                .filter(|&i| fin(&yv[i]).is_some())
+                .filter(|&i| seen.insert(format!("{}|{:?}|{:?}", fkey(i), xs[i], yv[i])))
+                .collect();
+            let pick = |v: &[Value]| keep.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
+            let mut frame: Frame = vec![("x".into(), pick(&xs)), ("yhat".into(), pick(&yv))];
+            if let Some(f) = &fac {
+                frame.push(("facet".into(), pick(f)));
+            }
+            plot = plot
+                .geom_point_with(GeomPoint {
+                    size: 1.9,
+                    color: (88, 94, 106),
+                    alpha: 0.6,
+                })
+                .layer_data(frame)
+                .layer_aes(Aes::new().x("x").y("yhat"));
+        }
+        plot = plot.geom_line_with(GeomLine {
+            color: brand,
+            width: 1.7,
+            alpha: 1.0,
+        });
         if several {
-            plot = plot.scale_shape_manual(vec![
-                ("train", PointShape::Circle),
-                ("test", PointShape::Triangle),
-                ("future", PointShape::Diamond),
-            ]);
+            plot = plot.scale_color(look::series_scale(Aesthetic::Color, &mlevels));
+        }
+        ylab = ydefault.clone();
+    }
+    // Split boundaries: labelled vertical lines where the split changes
+    // along x (the first panel's rows).
+    if !effects {
+        let sp = splits(t, &yv);
+        let mut order: Vec<usize> = (0..n)
+            .filter(|&i| fin(&xs[i]).is_some())
+            .filter(|&i| fac.as_ref().is_none_or(|f| f[i] == f[0]))
+            .collect();
+        order.sort_by(|&a, &b| {
+            fin(&xs[a])
+                .unwrap_or(0.0)
+                .total_cmp(&fin(&xs[b]).unwrap_or(0.0))
+        });
+        let mut marks: Vec<(f64, String)> = Vec::new();
+        let mut last: Option<(&str, f64)> = None;
+        for &i in &order {
+            let xv = fin(&xs[i]).unwrap_or(0.0);
+            if let Some((ls, lx)) = last {
+                if ls != sp[i] && !marks.iter().any(|m| m.1 == split_label(&sp[i])) {
+                    marks.push(((lx + xv) / 2.0, split_label(&sp[i])));
+                }
+            }
+            last = Some((sp[i].as_str(), xv));
+        }
+        // Splits interleaved along x (x is not time, e.g. observed vs
+        // predicted): no boundaries — the non-train points are marked instead.
+        let changes = order.windows(2).filter(|w| sp[w[0]] != sp[w[1]]).count();
+        let mut kinds: Vec<&str> = order.iter().map(|&i| sp[i].as_str()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        if changes + 1 > kinds.len() {
+            marks.clear();
+            let other: Vec<usize> = (0..n)
+                .filter(|&i| sp[i] != "train" && fin(&yv[i]).is_some())
+                .collect();
+            if has_y && !other.is_empty() && other.len() < n {
+                let names: Vec<String> = {
+                    let mut v: Vec<String> = other.iter().map(|&i| split_label(&sp[i])).collect();
+                    v.sort();
+                    v.dedup();
+                    v
+                };
+                let mut frame: Frame = vec![
+                    ("x".into(), other.iter().map(|&i| xs[i].clone()).collect()),
+                    (
+                        "yhat".into(),
+                        other.iter().map(|&i| yv[i].clone()).collect(),
+                    ),
+                ];
+                if let Some(f) = &fac {
+                    frame.push((
+                        "facet".into(),
+                        other.iter().map(|&i| f[i].clone()).collect(),
+                    ));
+                }
+                plot = plot
+                    .geom_point_with(GeomPoint {
+                        size: 2.2,
+                        color: ACCENT,
+                        alpha: 0.8,
+                    })
+                    .layer_data(frame)
+                    .layer_aes(Aes::new().x("x").y("yhat"))
+                    .caption(&format!("orange: {} rows", names.join(", ")));
+            }
+        }
+        if !marks.is_empty() {
+            let top = ycol
+                .iter()
+                .chain(yv.iter())
+                .filter_map(fin)
+                .fold(f64::NEG_INFINITY, f64::max);
+            for (xv, label) in &marks {
+                plot = look::vline(plot, *xv);
+                if top.is_finite() {
+                    plot = plot
+                        .geom_text_with(GeomText {
+                            size: 10.0,
+                            color: (110, 116, 128),
+                            hjust: 0.0,
+                            vjust: 1.0,
+                            ..Default::default()
+                        })
+                        .layer_data(vec![
+                            ("x".into(), vec![Value::Float(*xv)]),
+                            ("yhat".into(), vec![Value::Float(top)]),
+                            ("note".into(), vec![s(format!(" {label}"))]),
+                        ])
+                        .layer_aes(Aes::new().x("x").y("yhat").label("note"));
+                }
+            }
         }
     }
-    plot = plot
-        .scale_color(dz(Aesthetic::Color))
-        .scale_fill(dz(Aesthetic::Fill))
-        .xlab(x)
-        .ylab(if t.has(y) { y } else { "yhat" });
+    let mut plot = labels.apply(plot, &xdefault, &ylab);
     if fac.is_some() {
         plot = plot.facet_wrap_free("facet", Some(1), FacetScales::FreeY);
     }
@@ -1602,7 +2075,7 @@ pub(super) fn prediction_models(
 
 /// The series key of a curve table: the first of `series` / `model_id` /
 /// `id` that varies.
-fn curve_series(t: &Table) -> Option<&'static str> {
+pub(super) fn curve_series(t: &Table) -> Option<&'static str> {
     ["series", "model_id", "id"]
         .into_iter()
         .find(|k| t.has(k) && t.distinct(k) > 1)
@@ -1612,7 +2085,8 @@ fn curve_series(t: &Table) -> Option<&'static str> {
 /// confidence step ribbon where the producer has one (the undefined
 /// Greenwood band of the last step is left out, the line is kept), `+`
 /// censoring marks from `n_censor`, and n_risk / n_event in the hover text.
-pub(super) fn km(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Place) -> Out {
+pub(super) fn km(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Place) -> Out {
+    let labels = Labels::from(options);
     t.need(&["x", "y"])?;
     let key = curve_series(t);
     let keyv = key.map(|k| t.text(k));
@@ -1705,7 +2179,7 @@ pub(super) fn km(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Place) -> 
         }
     }
     if fx.is_empty() {
-        return crate::note_svg(Some("Kaplan-Meier survival"), "No data", w, h).finish(place);
+        return crate::note_svg(None, "No data", w, h).finish(place);
     }
     let brand = o.brand();
     let mut data: Frame = vec![
@@ -1750,27 +2224,135 @@ pub(super) fn km(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Place) -> 
         .geom_censor_marks_with(
             GeomCensorMarks {
                 color: brand,
-                size: 4.0,
+                size: 2.6,
+                alpha: 0.75,
                 ..Default::default()
             },
             "censor",
         );
+    let strata: Vec<String> = by.keys().cloned().collect();
+    let colors = look::level_colors(&strata);
+    let xmax = x.iter().filter_map(fin).fold(0.0, f64::max);
+    // The median: a dashed 50 % line, drops at each stratum's median.
+    plot = look::hline(plot, 0.5);
+    for (si, (_, rows)) in by.iter().enumerate() {
+        let med = rows
+            .iter()
+            .find(|&&i| fin(&y[i]).is_some_and(|v| v <= 0.5))
+            .and_then(|&i| fin(&x[i]));
+        if let Some(m) = med {
+            plot = plot
+                .geom_segment_with(GeomSegment {
+                    color: if key.is_some() { colors[si] } else { brand },
+                    width: 1.0,
+                    alpha: 0.7,
+                })
+                .layer_data(vec![
+                    ("x".into(), vec![Value::Float(m)]),
+                    ("xend".into(), vec![Value::Float(m)]),
+                    ("y".into(), vec![Value::Float(0.5)]),
+                    ("yend".into(), vec![Value::Float(0.0)]),
+                ])
+                .layer_aes(Aes::new().x("x").xend("xend").y("y").yend("yend"));
+        }
+    }
+    // Number at risk under the curves at regular time ticks.
+    let ticks = nice_ticks(0.0, xmax, 6);
+    let has_risk = risk.iter().any(|v| fin(v).is_some());
+    let k = by.len();
+    let row_h = 0.075;
+    if has_risk && !ticks.is_empty() {
+        let (mut tx, mut ty, mut tl, mut tk) = (vec![], vec![], vec![], vec![]);
+        for (si, (name, rows)) in by.iter().enumerate() {
+            for &tk0 in &ticks {
+                // At risk at t: n_risk of the first time ≥ t; past the last
+                // time, what is left after it.
+                let n = match rows.iter().find(|&&i| fin(&x[i]).is_some_and(|v| v >= tk0)) {
+                    Some(&i) => fin(&risk[i]).unwrap_or(0.0),
+                    None => rows
+                        .last()
+                        .map(|&i| {
+                            fin(&risk[i]).unwrap_or(0.0)
+                                - fin(&events[i]).unwrap_or(0.0)
+                                - fin(&cens[i]).unwrap_or(0.0)
+                        })
+                        .unwrap_or(0.0)
+                        .max(0.0),
+                };
+                tx.push(Value::Float(tk0));
+                ty.push(Value::Float(-row_h * (si as f64 + 1.2)));
+                tl.push(s(fmt_num(n.round())));
+                tk.push(s(name.clone()));
+            }
+        }
+        // One text layer per stratum, in its colour.
+        for (si, name) in strata.iter().enumerate() {
+            let pick: Vec<usize> = (0..tk.len())
+                .filter(|&i| text_of(&tk[i]).as_deref() == Some(name.as_str()))
+                .collect();
+            let sel = |v: &[Value]| pick.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 9.5,
+                    color: if key.is_some() { colors[si] } else { INK },
+                    hjust: 0.5,
+                    vjust: 0.5,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".into(), sel(&tx)),
+                    ("y".into(), sel(&ty)),
+                    ("note".into(), sel(&tl)),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("note"));
+        }
+        plot = plot
+            .geom_text_with(GeomText {
+                size: 9.0,
+                color: (120, 126, 138),
+                hjust: 0.0,
+                vjust: 0.5,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("x".into(), vec![Value::Float(0.0)]),
+                ("y".into(), vec![Value::Float(-row_h * 0.35)]),
+                ("note".into(), vec![s("number at risk")]),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("note"));
+    }
     if key.is_some() {
         plot = plot
-            .scale_color(dz(Aesthetic::Color))
-            .scale_fill(dz(Aesthetic::Fill));
+            .scale_color(look::series_scale(Aesthetic::Color, &strata))
+            .scale_fill(look::series_scale(Aesthetic::Fill, &strata));
     }
+    let ylo = if has_risk {
+        -row_h * (k as f64 + 0.8)
+    } else {
+        0.0
+    };
     plot = plot
-        .scale_y_continuous(ScaleContinuous::new().with_limits(0.0, 1.0))
-        .xlab("time")
-        .ylab("survival probability")
-        .title("Kaplan-Meier survival");
+        .scale_y_continuous(
+            ScaleContinuous::new()
+                .with_limits(ylo, 1.0)
+                .with_breaks(vec![0.0, 0.25, 0.5, 0.75, 1.0]),
+        )
+        .scale_x_continuous(ScaleContinuous::new().with_breaks(ticks.clone()));
+    let plot = labels.apply(plot, "time", "survival probability");
     finish(styled(plot, o, false), w, h, place)
 }
 
 /// `curve_type = 'lambda_cv'`: CV error ± 1 SE over λ (log x), with dashed
 /// lines at λ.min (`is_min`) and λ.1se (`is_1se`); one panel per model / id.
-pub(super) fn lambda_cv(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Place) -> Out {
+pub(super) fn lambda_cv(
+    t: &Table,
+    options: &Row,
+    w: u32,
+    h: u32,
+    o: &RenderOptions,
+    place: Place,
+) -> Out {
+    let labels = Labels::from(options);
     t.need(&["x", "y"])?;
     let (x, y) = (t.num("x")?, t.num("y")?);
     let band = t.has("y_low") && t.has("y_high");
@@ -1803,8 +2385,7 @@ pub(super) fn lambda_cv(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Pla
         }
     }
     if groups.is_empty() {
-        return crate::note_svg(Some("Cross-validation error by lambda"), "No data", w, h)
-            .finish(place);
+        return crate::note_svg(None, "No data", w, h).finish(place);
     }
     let log = x.iter().filter_map(fin).all(|f| f > 0.0);
     let small = groups.len() > 1;
@@ -1917,12 +2498,12 @@ pub(super) fn lambda_cv(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Pla
             );
         }
         plot = plot
-            .xlab(if log { "lambda (log scale)" } else { "lambda" })
-            .ylab(if band { "CV error ± 1 SE" } else { "CV error" });
+            .xlab(&labels.x_or(if log { "λ (log scale)" } else { "λ" }))
+            .ylab(&labels.y_or(if band { "CV error ± 1 SE" } else { "CV error" }));
         if let Some(g) = g {
             plot = plot.title(g);
-        } else {
-            plot = plot.title("Cross-validation error by lambda");
+        } else if let Some(tt) = &labels.title {
+            plot = plot.title(tt);
         }
         plots.push(styled(plot, o, small));
     }
@@ -1930,19 +2511,55 @@ pub(super) fn lambda_cv(t: &Table, w: u32, h: u32, o: &RenderOptions, place: Pla
         return finish(plots.pop().expect("one plot"), w, h, place);
     }
     let n = plots.len();
-    grid(
-        plots,
-        grid_cols(n, 3),
-        Some("Cross-validation error by lambda"),
-        w,
-        h,
-        place,
-    )
+    grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
+}
+
+/// About `n` round tick positions covering [lo, hi].
+pub(super) fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
+    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) || n == 0 {
+        return Vec::new();
+    }
+    let raw = (hi - lo) / n as f64;
+    let mag = 10f64.powf(raw.log10().floor());
+    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .iter()
+        .map(|m| m * mag)
+        .find(|st| *st >= raw)
+        .unwrap_or(10.0 * mag);
+    let mut v = Vec::new();
+    let mut t = (lo / step).ceil() * step;
+    while t <= hi + step * 1e-9 {
+        v.push(if t.abs() < step * 1e-9 { 0.0 } else { t });
+        t += step;
+    }
+    v
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ticks_are_round() {
+        assert_eq!(
+            nice_ticks(0.0, 60.0, 6),
+            vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+        );
+        assert!(nice_ticks(1.0, 1.0, 5).is_empty());
+    }
+
+    #[test]
+    fn pair_labels() {
+        let l = |i: &str, a: &str, b: &str| {
+            pair_label(Some(i.into()), Some(a.into()), Some(b.into())).unwrap()
+        };
+        assert_eq!(l("B-A", "A", "B"), "B − A");
+        assert_eq!(l("low-high", "high", "low"), "low − high");
+        assert_eq!(
+            pair_label(None, Some("A".into()), Some("B".into())).unwrap(),
+            "A vs B"
+        );
+    }
 
     #[test]
     fn formats() {

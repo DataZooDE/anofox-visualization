@@ -537,7 +537,8 @@ fn contract_terms_forest_and_path() {
         "{}",
     )
     .unwrap();
-    assert!(s.contains("data-flip=\"true\"") && s.contains(">x1</text>"));
+    assert!(s.contains(">x1</text>") && s.contains(">a</text>") && s.contains(">b</text>"));
+    assert!(s.contains("estimate (CI)"), "default x label");
     let s = spec(
         "terms",
         r#"[{"term":"x1","estimate":0.5,"index_name":"lambda","index_value":0.01},
@@ -547,7 +548,9 @@ fn contract_terms_forest_and_path() {
         "{}",
     )
     .unwrap();
-    assert!(s.contains(">x2</text>") && s.contains("estimate by lambda"));
+    // One panel, direct labels, a log-λ axis; no inner title.
+    assert!(s.contains(">x2</text>") && s.contains("λ (log scale)"));
+    assert!(!s.contains("estimate by"));
 }
 
 #[test]
@@ -556,8 +559,9 @@ fn contract_prediction_splits_and_options() {
                    {"x1":2,"y":2.0,"yhat":1.9,"yhat_lower":1.4,"yhat_upper":2.4,"is_training":false},
                    {"x1":3,"y":null,"yhat":3.0,"yhat_lower":2.4,"yhat_upper":3.6,"is_training":false}]"#;
     let s = spec("prediction", rows, r#"{"x":"x1"}"#).unwrap();
-    for split in ["train", "test", "future"] {
-        assert!(s.contains(&format!(">{split}</text>")), "{split}");
+    // Split boundaries as labelled vertical lines.
+    for split in ["hold-out", "forecast"] {
+        assert!(s.contains(&format!(" {split}</text>")), "{split}");
     }
     let e = spec("prediction", rows, "{}").unwrap_err();
     assert!(e.contains("needs an x position"), "{e}");
@@ -580,7 +584,7 @@ fn contract_km_band_and_censor_marks() {
         }
     }
     let s = spec("curve", &format!("[{}]", rows.join(",")), "{}").unwrap();
-    assert!(s.contains("Kaplan-Meier"));
+    assert!(!s.contains("Kaplan-Meier") && s.contains("survival probability"));
     // Two step ribbons, filled in the two series colours.
     let ribbons: Vec<&str> = s
         .split("<polygon ")
@@ -657,4 +661,271 @@ fn interval_rows_without_bounds_keep_their_point() {
     );
     let ridge = s.matches("data-series=\"ridge\"").count();
     assert!(ridge >= 2, "both ridge terms drawn, found {ridge}");
+}
+
+// ── statistics-plot polish (titles, labels, colours, per-plot details) ────
+
+fn path_rows(name: &str, model: &str) -> String {
+    let mut r = Vec::new();
+    for (i, x) in [0.01f64, 0.1, 1.0, 10.0].iter().enumerate() {
+        for (t, b) in [("tv", 2.0), ("radio", 0.5), ("search", 1.5)] {
+            r.push(format!(
+                r#"{{"model_id":"{model}","term":"{t}","estimate":{},"index_name":"{name}","index_value":{x}}}"#,
+                b / (1.0 + i as f64)
+            ));
+        }
+    }
+    format!("[{}]", r.join(","))
+}
+
+#[test]
+fn contract_default_titles_dropped_and_options_apply() {
+    let roc = r#"[{"curve_type":"roc","x":0,"y":0},{"curve_type":"roc","x":0.5,"y":0.8},{"curve_type":"roc","x":1,"y":1}]"#;
+    let s = spec("curve", roc, "{}").unwrap();
+    assert!(!s.contains("ROC curve"), "no inner title by default");
+    assert!(s.contains("false positive rate") && s.contains("true positive rate"));
+    let s = spec(
+        "curve",
+        roc,
+        r#"{"title":"My ROC","x_label":"FPR","y_label":"TPR"}"#,
+    )
+    .unwrap();
+    assert!(s.contains("My ROC") && s.contains(">FPR<") && s.contains(">TPR<"));
+    let glance = r#"[{"model_id":"ols","metric":"r_squared","value":0.81},{"model_id":"ridge","metric":"r_squared","value":0.80},
+        {"model_id":"ols","metric":"aic","value":72.4}]"#;
+    let s = spec("summary", glance, "{}").unwrap();
+    assert!(!s.contains("Model comparison"));
+}
+
+#[test]
+fn contract_roc_auc_in_legend_and_pr_base_rate() {
+    let roc = r#"[{"curve_type":"roc","model_id":"logistic","x":0,"y":0},{"curve_type":"roc","model_id":"logistic","x":0,"y":1},{"curve_type":"roc","model_id":"logistic","x":1,"y":1},
+                  {"curve_type":"roc","model_id":"rule","x":0,"y":0},{"curve_type":"roc","model_id":"rule","x":1,"y":1}]"#;
+    let s = spec("curve", roc, "{}").unwrap();
+    assert!(
+        s.contains("logistic · AUC 1.00") && s.contains("rule · AUC 0.50"),
+        "{s}"
+    );
+    let pr = r#"[{"curve_type":"pr","x":0.0,"y":1.0,"threshold":0.9},{"curve_type":"pr","x":0.5,"y":0.6,"threshold":0.5},
+                 {"curve_type":"pr","x":1.0,"y":0.3,"threshold":0.1}]"#;
+    let s = spec("curve", pr, "{}").unwrap();
+    assert!(s.contains("base rate 0.3"), "inferred base rate");
+    let s = spec("curve", pr, r#"{"base_rate":0.25}"#).unwrap();
+    assert!(s.contains("base rate 0.25"));
+}
+
+#[test]
+fn contract_acf_drops_lag_zero() {
+    let acf = r#"[{"curve_type":"acf","x":0,"y":1.0,"y_low":-0.2,"y_high":0.2},{"curve_type":"acf","x":1,"y":0.5,"y_low":-0.2,"y_high":0.2},
+                  {"curve_type":"acf","x":2,"y":0.25,"y_low":-0.2,"y_high":0.2}]"#;
+    let s = spec("curve", acf, "{}").unwrap();
+    // Two lollipop heads (lags 1, 2), not three.
+    assert_eq!(s.matches("<circle ").count(), 2, "{s}");
+    assert!(s.contains(">lag<") && s.contains(">autocorrelation<"));
+}
+
+#[test]
+fn contract_lambda_path_one_panel_with_marks() {
+    let rows = path_rows("lambda", "ridge");
+    let s = spec(
+        "terms",
+        &rows,
+        r#"{"lambda_min":0.1,"lambda_1se":1.0,"highlight":["tv"]}"#,
+    )
+    .unwrap();
+    assert!(s.contains("λ.min") && s.contains("λ.1se"));
+    assert!(s.contains(">tv<") && s.contains(">radio<") && s.contains(">search<"));
+    assert!(s.contains(">coefficient<"));
+    // One panel: a single `<svg` document (no grid).
+    assert_eq!(s.matches("<svg").count(), 1);
+    // facet := true keeps the panel-per-term layout.
+    let f = spec("terms", &rows, r#"{"facet":true}"#).unwrap();
+    assert!(f.matches("<svg").count() > 1, "grid of term panels");
+}
+
+#[test]
+fn contract_lars_path_on_l1_fraction() {
+    let s = spec("terms", &path_rows("alpha", "lars"), "{}").unwrap();
+    assert!(s.contains("fraction of L1 norm") && !s.contains("glmnet"));
+}
+
+#[test]
+fn contract_quantile_process_with_ols_reference_and_rolling_dates() {
+    let mut r = Vec::new();
+    for tau in [0.1, 0.5, 0.9] {
+        r.push(format!(
+            r#"{{"model_id":"quantile","term":"x1","estimate":{tau},"conf_low":0,"conf_high":1,"index_name":"tau","index_value":{tau}}}"#
+        ));
+    }
+    r.push(
+        r#"{"model_id":"ols","term":"x1","estimate":0.45,"conf_low":0.4,"conf_high":0.5}"#.into(),
+    );
+    let s = spec("terms", &format!("[{}]", r.join(",")), "{}").unwrap();
+    assert!(s.contains("τ (quantile)") && s.contains("full-sample estimate"));
+    let rolling = r#"[{"term":"price","estimate":-1.0,"index_name":"window_end","index_value":20,"window_end":"2024-05-20 00:00:00"},
+                      {"term":"price","estimate":-1.5,"index_name":"window_end","index_value":21,"window_end":"2024-05-27 00:00:00"},
+                      {"term":"price","estimate":-2.0,"index_name":"window_end","index_value":22,"window_end":"2024-06-03 00:00:00"}]"#;
+    let s = spec(
+        "terms",
+        rolling,
+        r#"{"reference":[{"term":"price","estimate":-1.4}]}"#,
+    )
+    .unwrap();
+    assert!(s.contains("window end") && s.contains("2024"), "date axis");
+}
+
+#[test]
+fn contract_forest_marks_rows_without_ci() {
+    let rows = r#"[{"model_id":"ols","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
+                   {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":null,"conf_high":null}]"#;
+    let s = spec("terms", rows, "{}").unwrap();
+    assert!(s.contains("no interval reported") && s.contains("(no CI)"));
+}
+
+#[test]
+fn contract_model_colours_are_stable_across_charts() {
+    // The same model id keeps its colour whatever else is plotted.
+    let one = r#"[{"model_id":"ols","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
+                  {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
+    let two = r#"[{"model_id":"huber","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
+                  {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
+    let ridge = "#3FA66F";
+    for rows in [one, two] {
+        let s = spec("terms", rows, "{}").unwrap();
+        assert!(
+            s.to_uppercase().contains(ridge),
+            "ridge is green in every chart"
+        );
+    }
+}
+
+#[test]
+fn contract_summary_order_na_and_baseline() {
+    let glance = r#"[{"model_id":"a","metric":"r_squared","value":0.70},{"model_id":"b","metric":"r_squared","value":0.80},
+        {"model_id":"b","metric":"aic","value":10.0}]"#;
+    let s = spec("summary", glance, "{}").unwrap();
+    assert!(s.contains(">n/a<") && s.contains("Δ = 0.1"));
+    assert!(spec("summary", glance, r#"{"baseline":"zero"}"#).is_ok());
+    assert!(spec("summary", glance, r#"{"baseline":"nope"}"#).is_err());
+}
+
+#[test]
+fn contract_prediction_band_and_difference() {
+    let p = r#"[{"x":1,"y":1.0,"yhat":1.1,"yhat_lower":0.8,"yhat_upper":1.4,"model_id":"ols"},
+        {"x":2,"y":2.0,"yhat":1.9,"yhat_lower":1.6,"yhat_upper":2.2,"model_id":"ols"},
+        {"x":1,"y":1.0,"yhat":1.0,"yhat_lower":0.7,"yhat_upper":1.3,"model_id":"huber"},
+        {"x":2,"y":2.0,"yhat":2.0,"yhat_lower":1.7,"yhat_upper":2.3,"model_id":"huber"}]"#;
+    let s = spec("prediction", p, "{}").unwrap();
+    assert_eq!(s.matches("<polygon ").count(), 1, "one band: {s}");
+    let d = spec("prediction", p, r#"{"kind":"difference"}"#).unwrap();
+    assert!(d.contains("difference vs ols"));
+    let effects = r#"[{"model_id":"logistic","focal":1,"focal_name":"tenure_months","x":1,"yhat":0.4},
+                      {"model_id":"logistic","focal":1,"focal_name":"tenure_months","x":2,"yhat":0.3}]"#;
+    let s = spec("prediction", effects, "{}").unwrap();
+    assert!(s.contains("P(y = 1)") && s.contains("tenure months"));
+}
+
+#[test]
+fn contract_tests_fallback_without_ci_and_pair_labels() {
+    let rows = r#"[{"test_id":"B-A","group1":"A","group2":"B","estimate":1.2,"p_adj":0.01,"method":"t tests"},
+                   {"test_id":"C-A","group1":"A","group2":"C","estimate":0.2,"p_adj":0.6,"method":"t tests"}]"#;
+    let s = spec("tests", rows, "{}").unwrap();
+    assert!(s.contains("no CI reported") && s.contains("B − A"));
+    assert!(s.contains("p = 0.05"), "significance line labelled");
+    let s = spec("tests", rows, r#"{"label":"stars"}"#).unwrap();
+    assert!(s.contains(">*<") || s.contains(">**<"));
+}
+
+#[test]
+fn contract_partial_binary_term_has_group_means() {
+    let mut r = Vec::new();
+    for i in 0..20 {
+        let x = (i % 2) as f64;
+        r.push(format!(
+            r#"{{"term":"promo","x":{x},"partial_residual":{},"component":{}}}"#,
+            x * 2.0 + (i as f64 * 0.37).sin(),
+            x * 2.0
+        ));
+    }
+    let s = spec("partial", &format!("[{}]", r.join(",")), "{}").unwrap();
+    // No smoother path through two columns of points; two mean dots.
+    assert!(!s.contains("loess"));
+    assert!(s.matches("<circle ").count() >= 22, "points + means");
+}
+
+#[test]
+fn contract_km_median_and_number_at_risk() {
+    let km = r#"[{"curve_type":"km","series":"a","x":2,"y":0.8,"n_risk":10,"n_event":2,"n_censor":0},
+                 {"curve_type":"km","series":"a","x":5,"y":0.4,"n_risk":8,"n_event":4,"n_censor":1},
+                 {"curve_type":"km","series":"b","x":3,"y":0.6,"n_risk":10,"n_event":4,"n_censor":0}]"#;
+    let s = spec("curve", km, "{}").unwrap();
+    assert!(s.contains("number at risk") && s.contains(">10<"));
+}
+
+#[test]
+fn contract_cooks_index_labels_and_reference() {
+    let mut r = Vec::new();
+    for i in 1..=20 {
+        let d = if i == 7 { 0.9 } else { 0.01 * (i % 3) as f64 };
+        r.push(format!(
+            r#"{{"row_id":{i},"fitted":{i},"residual":0.1,"cooks_d":{d}}}"#
+        ));
+    }
+    let s = spec(
+        "obs",
+        &format!("[{}]", r.join(",")),
+        r#"{"kind":"cooks","label_top":1}"#,
+    )
+    .unwrap();
+    assert!(
+        s.contains(">4/n<") && s.contains(">7<") && s.contains("Cook"),
+        "{s}"
+    );
+}
+
+#[test]
+fn contract_rolling_accepts_a_date_index_and_compare_stars() {
+    let rows = r#"[{"term":"price","estimate":-1.0,"conf_low":-2,"conf_high":0,"index_name":"window_end","index_value":"2024-05-20"},
+                   {"term":"price","estimate":-1.5,"conf_low":-2.5,"conf_high":-0.5,"index_name":"window_end","index_value":"2024-05-27"}]"#;
+    let s = spec("terms", rows, "{}").unwrap();
+    assert!(s.contains("window end"));
+    let data = r#"[{"g":"a","y":1.0},{"g":"a","y":1.4},{"g":"b","y":2.1},{"g":"b","y":2.6}]"#;
+    let t = r#"[{"group1":"a","group2":"b","p_adj":0.004}]"#;
+    let s = spec(
+        "compare",
+        data,
+        &format!(r#"{{"value":"y","factor":"g","label":"stars","tests":{t}}}"#),
+    )
+    .unwrap();
+    assert!(s.contains(">**<") && !s.contains(">stars<"));
+    // A ggpubr template still works.
+    let s = spec(
+        "compare",
+        data,
+        &format!(r#"{{"value":"y","factor":"g","label":"p = {{p.adj}}","tests":{t}}}"#),
+    )
+    .unwrap();
+    assert!(s.contains("p = 0.004"), "{s}");
+}
+
+#[test]
+fn plain_bars_with_intervals_are_one_colour() {
+    let s = svg(vec![
+        Column::new(
+            "x",
+            Role::X,
+            vec![
+                Value::Str("a".into()),
+                Value::Str("b".into()),
+                Value::Str("c".into()),
+            ],
+        ),
+        Column::new("y", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0])),
+        Column::new("lo", Role::YMin, nums(&[0.5, 1.5, 2.5])),
+        Column::new("hi", Role::YMax, nums(&[1.5, 2.5, 3.5])),
+    ]);
+    assert!(
+        !s.contains("#E86433") && !s.contains("#e86433"),
+        "no per-bar palette"
+    );
 }

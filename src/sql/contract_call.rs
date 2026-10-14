@@ -520,10 +520,19 @@ mod tests {
 
     #[test]
     fn binds_macro_options() {
-        assert_eq!(
-            macro_binding("anofox_plot_terms"),
-            ("terms".into(), Some(vec![]))
-        );
+        let (plot, b) = macro_binding("anofox_plot_terms");
+        assert_eq!(plot, "terms");
+        let b = b.unwrap();
+        for k in [
+            "highlight",
+            "lambda_min",
+            "reference",
+            "title",
+            "x_label",
+            "y_label",
+        ] {
+            assert!(b.contains(&(k.into(), k.into())), "{k}");
+        }
         let (plot, b) = macro_binding("anofox_plot_obs");
         assert_eq!(plot, "obs");
         let b = b.unwrap();
