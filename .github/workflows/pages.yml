@@ -34,6 +34,11 @@ jobs:
       - name: Build wasm module (→ web/pkg)
         run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
 
+      # The anofox DuckDB-Wasm extensions, served same-origin from
+      # web/localext/ (get.erpl.io has no CORS + needs a signature fix, #192).
+      - name: Fetch wasm extensions (→ web/localext)
+        run: scripts/fetch-wasm-extensions.sh v1.5.6
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3

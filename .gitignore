@@ -7,3 +7,5 @@
 /web/pkg
 /crates/anofox-viz-ffi/target
 /build
+/web/localext/v1.5.6
+/tests/web/node_modules

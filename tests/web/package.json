@@ -1,0 +1,8 @@
+{
+  "name": "anofox-visualization-web-tests",
+  "private": true,
+  "description": "Optional deps of tests/web (npm install --prefix tests/web): DuckDB-Wasm for the wasm-extension smoke test.",
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev65.0"
+  }
+}
