@@ -765,7 +765,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 const FILE_SAMPLES = [
   {
     group: STATS_GROUP,
-    name: "Statistics showcase (live anofox-statistics)",
+    name: "Statistics showcase: property market (live anofox-statistics)",
     url: "examples/statistics-showcase.sql",
   },
 ];
