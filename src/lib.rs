@@ -361,7 +361,7 @@ pub const DZ_COLORS: [(u8, u8, u8); 12] = [
     (0x7a, 0x8b, 0x99), // slate grey
 ];
 
-fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
+pub(crate) fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
     let (r, g, b) = DZ_COLORS[i % DZ_COLORS.len()];
     ggplot_rs::scale::color::RGBAColor::new(r, g, b)
 }
@@ -714,7 +714,7 @@ pub(crate) enum Panel {
 }
 
 impl Panel {
-    fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
+    pub(crate) fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
         Panel::Plot {
             plot: Box::new(plot),
             width,
@@ -1651,6 +1651,21 @@ fn cartesian(
     // series. A step chart (Kaplan–Meier) gets a step ribbon in each series'
     // colour.
     let step_band = kind == Kind::Step && band_lo.is_some() && band_hi.is_some();
+    // Several series each with their own band (e.g. coefficient paths of two
+    // models): each band takes its series' colour. A forecast's band, carried
+    // by one series only, keeps the single band colour.
+    let multi_band = match (category, band_lo) {
+        (Some(cat), Some(lo)) if band_hi.is_some() => {
+            let mut with_band = std::collections::HashSet::new();
+            for (c, b) in cat.values.iter().zip(&lo.values) {
+                if b.as_f64().is_some_and(f64::is_finite) {
+                    with_band.insert(value_str(c));
+                }
+            }
+            with_band.len() > 1
+        }
+        _ => false,
+    };
     if step_band {
         let mut aes = Aes::new().x("x").ymin("bandlo").ymax("bandhi");
         if category.is_some() {
@@ -1664,12 +1679,16 @@ fn cartesian(
             })
             .layer_aes(aes);
     } else if band_lo.is_some() && band_hi.is_some() {
+        let mut aes = Aes::new().x("x").ymin("bandlo").ymax("bandhi");
+        if multi_band {
+            aes = aes.fill("cat");
+        }
         plot = plot
             .geom_ribbon_with(GeomRibbon {
                 fill: band_color,
-                alpha: 0.25,
+                alpha: if multi_band { 0.18 } else { 0.25 },
             })
-            .layer_aes(Aes::new().x("x").ymin("bandlo").ymax("bandhi"));
+            .layer_aes(aes);
     }
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
     // don't get swamped by the dots.
@@ -2030,7 +2049,7 @@ fn cartesian(
         } else {
             plot.scale_fill(dz_scale(Aesthetic::Fill, col))
         };
-        if step_band && category.is_some() {
+        if (step_band && category.is_some()) || multi_band {
             plot = plot.scale_fill(dz_scale(Aesthetic::Fill, col));
         }
     }
@@ -2599,13 +2618,13 @@ fn render_sparkline(
 }
 
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
-fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+pub(crate) fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 * (1.0 - t)).round() as u8;
     (f(r), f(g), f(b))
 }
 
 /// Blend a colour toward white by `t` (0 = unchanged, 1 = white).
-fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+pub(crate) fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
     (f(r), f(g), f(b))
 }

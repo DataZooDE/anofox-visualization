@@ -117,6 +117,15 @@ fn c_macros() -> &'static [CMacro] {
     })
 }
 
+/// The anofox integration-contract version (`anofox_contract_version()`),
+/// NUL-terminated. Static — do not free.
+#[no_mangle]
+pub extern "C" fn anofox_viz_contract_version() -> *const c_char {
+    static V: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+    V.get_or_init(|| cstr(anofox_visualization::macros::CONTRACT_VERSION))
+        .as_ptr()
+}
+
 /// Number of bundled macros.
 #[no_mangle]
 pub extern "C" fn anofox_viz_macro_count() -> usize {
@@ -200,6 +209,12 @@ mod tests {
         let (rc, msg) = call(b"\xff\xfe");
         assert_eq!(rc, ANOFOX_VIZ_ERROR);
         assert!(msg.contains("UTF-8"), "{msg}");
+    }
+
+    #[test]
+    fn contract_version() {
+        let v = unsafe { CStr::from_ptr(anofox_viz_contract_version()) };
+        assert_eq!(v.to_str().unwrap(), "1");
     }
 
     #[test]

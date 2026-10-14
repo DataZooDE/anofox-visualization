@@ -1,7 +1,9 @@
 //! Contract plots — one chart per *shape* of model output
 //! (`docs/plans/integration-contract.md`): `terms`, `prediction`, `curve`,
-//! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`), and
-//! an `auto` dispatch on the column signature.
+//! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
+//! `test` (`tests`: a comparison forest; `compare`: groups with significance
+//! brackets), partial-residual plots (`partial`) and an `auto` dispatch on the
+//! column signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -15,7 +17,13 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod stats;
+
 type Row = Map<String, J>;
+
+/// The anofox integration-contract version these plots implement
+/// (`anofox_contract_version()`).
+pub const CONTRACT_VERSION: &str = "1";
 
 /// The plot names a spec's `"plot"` may carry.
 pub const PLOTS: &[&str] = &[
@@ -25,6 +33,9 @@ pub const PLOTS: &[&str] = &[
     "summary",
     "obs",
     "diagnostics",
+    "tests",
+    "compare",
+    "partial",
     "auto",
 ];
 
@@ -32,7 +43,9 @@ pub const PLOTS: &[&str] = &[
 pub const OBS_KINDS: &[&str] = &["resid_fitted", "qq", "scale_location", "leverage", "cooks"];
 
 /// Render a contract plot. `place` positions it (a nested fragment for the
-/// 2×2 diagnostics).
+/// 2×2 diagnostics). This is the single entry point for every plot kind:
+/// `plot` is the macro's kind (`anofox_plot_<plot>`), `options` its named
+/// arguments.
 pub(crate) fn render(
     plot: &str,
     rows: &[Row],
@@ -42,6 +55,19 @@ pub(crate) fn render(
     o: &RenderOptions,
     place: Place,
 ) -> Result<(String, Vec<String>), RenderError> {
+    // A column holding the test STRUCT (or LIST of them) of a `*_agg`
+    // aggregate: one row per test.
+    let flat;
+    let rows = match plot {
+        "tests" | "auto" => match flatten(rows) {
+            Some(f) if plot == "tests" || detect(rows).is_err() => {
+                flat = f;
+                &flat[..]
+            }
+            _ => rows,
+        },
+        _ => rows,
+    };
     let name = match plot {
         "auto" => detect(rows)?,
         p if PLOTS.contains(&p) => p,
@@ -58,13 +84,39 @@ pub(crate) fn render(
             .finish(place)
             .map_err(RenderError::Render);
     }
-    let fail = |e: String| RenderError::Render(format!("anofox_plot_{name}: {e}"));
+    let fail = |e: String| {
+        RenderError::Render(if plot == "auto" {
+            format!("anofox_plot (anofox contract v{CONTRACT_VERSION}, drawn as {name}): {e}")
+        } else {
+            format!("anofox_plot_{name}: {e}")
+        })
+    };
     let t = Table { rows };
+    let (w, h) = (
+        crate::clamp_dim(width as u64),
+        crate::clamp_dim(height as u64),
+    );
+    // Plots drawn directly with ggplot-rs (see `stats`).
+    let direct = |f: &dyn Fn() -> stats::Out| crate::guard(|| f().map_err(fail));
     let cols = match name {
         "terms" => terms(&t),
-        "prediction" => prediction(&t, options),
-        "curve" => curve(&t),
-        "summary" => summary(&t),
+        "prediction" => match prediction(&t, options).map_err(fail)? {
+            Pred::Cols(c) => Ok(c),
+            Pred::Models { x, y, model, facet } => {
+                return direct(&|| {
+                    stats::prediction_models(&t, &x, &y, model, facet.as_deref(), w, h, o, place)
+                })
+            }
+        },
+        "curve" => match curve_type(&t).map_err(fail)?.as_str() {
+            "km" => return direct(&|| stats::km(&t, w, h, o, place)),
+            "lambda_cv" => return direct(&|| stats::lambda_cv(&t, w, h, o, place)),
+            _ => curve(&t),
+        },
+        "summary" => return direct(&|| stats::summary(&t, options, w, h, o, place)),
+        "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
+        "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
+        "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -78,6 +130,47 @@ pub(crate) fn render(
     }
     .map_err(fail)?;
     crate::render_placed(&cols, place, width, height, o)
+}
+
+/// Rows whose only nested column is a STRUCT, or a LIST of STRUCTs (a test
+/// aggregate's result: `SELECT grp, tukey_hsd_agg(y, g) AS r … GROUP BY
+/// grp`), expanded to one row per STRUCT with the other columns repeated.
+fn flatten(rows: &[Row]) -> Option<Vec<Row>> {
+    let nested = |v: &J| match v {
+        J::Object(_) => true,
+        J::Array(a) => !a.is_empty() && a.iter().all(J::is_object),
+        _ => false,
+    };
+    let first = rows.first()?;
+    let keys: Vec<&String> = first
+        .iter()
+        .filter(|(_, v)| nested(v))
+        .map(|(k, _)| k)
+        .collect();
+    let [key] = keys.as_slice() else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for r in rows {
+        let base: Row = r
+            .iter()
+            .filter(|(k, _)| k != key)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let items: Vec<&Row> = match r.get(*key) {
+            Some(J::Object(o)) => vec![o],
+            Some(J::Array(a)) => a.iter().filter_map(J::as_object).collect(),
+            _ => Vec::new(),
+        };
+        for it in items {
+            let mut m = base.clone();
+            for (k, v) in it {
+                m.insert(k.clone(), v.clone());
+            }
+            out.push(m);
+        }
+    }
+    Some(out)
 }
 
 fn label_top(options: &Row) -> usize {
@@ -110,15 +203,21 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "diagnostics"
     } else if has("metric") && has("value") {
         "summary"
+    } else if has("partial_residual") || has("x_residual") && has("y_residual") {
+        "partial"
+    } else if has("p_value") || has("test_id") || has("statistic") && has("method") {
+        "tests"
     } else {
         let keys: Vec<&str> = rows
             .first()
             .map(|r| r.keys().map(String::as_str).collect())
             .unwrap_or_default();
         return Err(RenderError::Render(format!(
-            "anofox_plot: the columns ({}) match no plottable schema — expected terms \
-             (term, estimate), prediction (yhat), curve (curve_type, x, y), summary \
-             (model_id, metric, value) or obs (fitted, residual)",
+            "anofox_plot (anofox contract v{CONTRACT_VERSION}): the columns ({}) match no \
+             plottable schema — expected terms (term, estimate), prediction (yhat), curve \
+             (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
+             test (p_value / statistic, method) or partial residuals (term, x, \
+             partial_residual)",
             keys.join(", ")
         )));
     })
@@ -230,8 +329,28 @@ fn konst(name: &str, role: Role, v: Value) -> Column {
 /// quantile process, rolling coefficients), one panel per term.
 fn terms(t: &Table) -> Result<Vec<Column>, String> {
     t.need(&["term", "estimate"])?;
-    let model = t.model_key().filter(|k| t.distinct(k) > 1);
+    // Several models and/or several groups (`id`): colour by what varies; a
+    // forest with both puts each group in its own panel.
+    let model_key = t.model_key().filter(|k| t.distinct(k) > 1);
+    let ids = t.has("id") && t.distinct("id") > 1;
     let ci = t.has("conf_low") && t.has("conf_high");
+    let series: Option<(String, Vec<Value>)> = match (model_key, ids) {
+        (Some(m), true) if t.has("index_value") => Some((
+            "model".into(),
+            t.text(m)
+                .into_iter()
+                .zip(t.text("id"))
+                .map(|(a, b)| match (a, b) {
+                    (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a} · {b}")),
+                    (a, _) => a,
+                })
+                .collect(),
+        )),
+        (Some(m), _) => Some((m.to_string(), t.text(m))),
+        (None, true) => Some(("id".into(), t.text("id"))),
+        (None, false) => None,
+    };
+    let forest_facet = model_key.is_some() && ids;
     let mut cols = Vec::new();
     if t.has("index_value") {
         cols.push(col("index_value", Role::X, t.xpos("index_value")));
@@ -243,8 +362,8 @@ fn terms(t: &Table) -> Result<Vec<Column>, String> {
         if t.distinct("term") > 1 {
             cols.push(col("term", Role::FacetFree, t.text("term")));
         }
-        if let Some(m) = model {
-            cols.push(col(m, Role::Category, t.text(m)));
+        if let Some((name, v)) = &series {
+            cols.push(col(name, Role::Category, v.clone()));
         }
         // A λ path reads on a log axis.
         let idx = t.text("index_name");
@@ -260,11 +379,13 @@ fn terms(t: &Table) -> Result<Vec<Column>, String> {
         }
         cols.push(konst("zero", Role::RefLine, Value::Float(0.0)));
         if let Some(Value::Str(n)) = idx.iter().find(|v| **v != Value::Na) {
-            cols.push(konst(
-                "title",
-                Role::Label,
-                Value::Str(format!("estimate by {n}")),
-            ));
+            // LARS reports upstream's alpha, not glmnet's lambda: say so.
+            let title = if n.eq_ignore_ascii_case("alpha") {
+                "estimate by alpha (LARS; not on the glmnet lambda scale)".to_string()
+            } else {
+                format!("estimate by {n}")
+            };
+            cols.push(konst("title", Role::Label, Value::Str(title)));
         }
         return Ok(cols);
     }
@@ -280,8 +401,15 @@ fn terms(t: &Table) -> Result<Vec<Column>, String> {
         cols.push(col("conf_low", Role::YMin, rev(t.num("conf_low")?)));
         cols.push(col("conf_high", Role::YMax, rev(t.num("conf_high")?)));
     }
-    if let Some(m) = model {
-        cols.push(col(m, Role::Category, rev(t.text(m))));
+    if let Some((name, v)) = series {
+        let (name, v) = if forest_facet {
+            let m = model_key.unwrap_or("model_id");
+            cols.push(col("id", Role::Facet, rev(t.text("id"))));
+            (m.to_string(), t.text(m))
+        } else {
+            (name, v)
+        };
+        cols.push(col(&name, Role::Category, rev(v)));
     }
     cols.push(konst("flip", Role::Flip, Value::Float(1.0)));
     cols.push(konst("zero", Role::RefLine, Value::Float(0.0)));
@@ -291,7 +419,18 @@ fn terms(t: &Table) -> Result<Vec<Column>, String> {
 /// `prediction`: observed `y` points, the `yhat` line and its
 /// `yhat_lower`/`yhat_upper` band over `x` (or `ds`), coloured by `split`
 /// (train/test/future) — or by model when several models are present.
-fn prediction(t: &Table, options: &Row) -> Result<Vec<Column>, String> {
+enum Pred {
+    Cols(Vec<Column>),
+    /// Several models share a panel: drawn by [`stats::prediction_models`].
+    Models {
+        x: String,
+        y: String,
+        model: &'static str,
+        facet: Option<String>,
+    },
+}
+
+fn prediction(t: &Table, options: &Row) -> Result<Pred, String> {
     let x = opt_str(options, "x")
         .or_else(|| ["x", "ds"].into_iter().find(|k| t.has(k)).map(String::from))
         .ok_or_else(|| {
@@ -338,8 +477,14 @@ fn prediction(t: &Table, options: &Row) -> Result<Vec<Column>, String> {
         per.values().any(|s| s.len() > 1)
     });
     if let Some(m) = model {
-        cols.push(col(m, Role::Category, t.text(m)));
-    } else {
+        return Ok(Pred::Models {
+            x,
+            y,
+            model: m,
+            facet,
+        });
+    } else if !t.has("focal") {
+        // (An effects table — `focal` — has no train/test split to show.)
         // split, else from is_training, else: no y → future, y → train.
         let yv = if has_y { t.num(&y)? } else { Vec::new() };
         let split: Vec<Value> = t
@@ -363,16 +508,29 @@ fn prediction(t: &Table, options: &Row) -> Result<Vec<Column>, String> {
                 Value::Str(s)
             })
             .collect();
-        cols.push(col("split", Role::Category, split));
+        // One split (all train, all future): a legend of one says nothing.
+        let one = split.windows(2).all(|w| w[0] == w[1]);
+        if !one {
+            cols.push(col("split", Role::Category, split));
+        }
+    }
+    if t.has("focal") {
+        let f = t
+            .num("focal")?
+            .iter()
+            .find_map(|v| v.as_f64())
+            .map(|f| format!("marginal effect of feature {f}"))
+            .unwrap_or_else(|| "marginal effect".into());
+        cols.push(konst("title", Role::Label, Value::Str(f)));
     }
     if let Some(f) = facet {
         cols.push(col(&f, Role::FacetFree, t.text(&f)));
     }
-    Ok(cols)
+    Ok(Pred::Cols(cols))
 }
 
-/// `curve`: the geom and reference line follow `curve_type`.
-fn curve(t: &Table) -> Result<Vec<Column>, String> {
+/// The one `curve_type` of a curve table (an error when rows mix types).
+fn curve_type(t: &Table) -> Result<String, String> {
     t.need(&["curve_type", "x", "y"])?;
     let types: std::collections::BTreeSet<String> = t
         .text("curve_type")
@@ -388,11 +546,17 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
             types.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    let ty = types.into_iter().next().unwrap_or_default();
+    Ok(types.into_iter().next().unwrap_or_default())
+}
+
+/// `curve`: the geom and reference line follow `curve_type` (km and
+/// lambda_cv are drawn by [`stats`]).
+fn curve(t: &Table) -> Result<Vec<Column>, String> {
+    let ty = curve_type(t)?;
     let yv = t.num("y")?;
     let band = t.has("y_low") && t.has("y_high");
     let mut cols = vec![col("x", Role::X, t.xpos("x"))];
-    let series = ["model_id", "series"]
+    let series = ["model_id", "series", "id"]
         .into_iter()
         .find(|k| t.distinct(k) > 1);
     match ty.as_str() {
@@ -405,17 +569,6 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
             if band {
                 cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
                 cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
-            }
-        }
-        "km" => {
-            // Step curve, confidence step ribbon, censoring marks.
-            cols.push(col("y", Role::Value(Kind::Step), yv));
-            if band {
-                cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
-                cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
-            }
-            if let Some(c) = ["n_censor", "censored"].into_iter().find(|c| t.has(c)) {
-                cols.push(col(c, Role::Censor, t.num(c)?));
             }
         }
         "acf" | "pacf" => {
@@ -439,18 +592,19 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
                 Role::RefLine,
                 refs.into_iter().map(Value::Float).collect(),
             ));
-        }
-        "lambda_cv" => {
-            cols.push(col("y", Role::Value(Kind::Point), yv));
-            if band {
-                cols.push(col("y_low", Role::YMin, t.num("y_low")?));
-                cols.push(col("y_high", Role::YMax, t.num("y_high")?));
-            }
-            if t.num("x")?
-                .iter()
-                .all(|v| v.as_f64().is_none_or(|f| f > 0.0))
-            {
-                cols.push(konst("xs", Role::XScale, Value::Str("log10".into())));
+            // Several series' lollipops at the same lags would overlap: one
+            // panel each.
+            if let Some(s) = series {
+                cols.push(col(s, Role::FacetFree, t.text(s)));
+                cols.push(konst(
+                    "title",
+                    Role::Label,
+                    Value::Str(match ty.as_str() {
+                        "acf" => "Autocorrelation (ACF)".into(),
+                        _ => "Partial autocorrelation (PACF)".into(),
+                    }),
+                ));
+                return Ok(cols);
             }
         }
         "qq" => {
@@ -489,24 +643,6 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         other => other.to_string(),
     };
     cols.push(konst("title", Role::Label, Value::Str(title)));
-    Ok(cols)
-}
-
-/// `summary`: one panel per metric, a value dot (± interval) per model.
-fn summary(t: &Table) -> Result<Vec<Column>, String> {
-    let model = t.model_key().unwrap_or("model_id");
-    t.need(&[model, "metric", "value"])?;
-    let mut cols = vec![
-        col(model, Role::X, t.text(model)),
-        col("value", Role::Value(Kind::Point), t.num("value")?),
-    ];
-    if t.has("conf_low") && t.has("conf_high") {
-        cols.push(col("conf_low", Role::YMin, t.num("conf_low")?));
-        cols.push(col("conf_high", Role::YMax, t.num("conf_high")?));
-    }
-    // Free scales: every metric has its own unit. (Not flipped: ggplot-rs's
-    // coord_flip — still in 0.17 — does not swap free facet scales.)
-    cols.push(col("metric", Role::FacetFree, t.text("metric")));
     Ok(cols)
 }
 
@@ -720,6 +856,144 @@ mod tests {
         .to_string();
         assert!(e.contains("GROUP BY curve_type"), "{e}");
         assert!(go("nope", "[]", "{}").is_err());
+    }
+
+    #[test]
+    fn detects_tests_and_partial() {
+        let d = |j: &str| detect(&rows(j)).unwrap();
+        assert_eq!(d(r#"[{"test_id":"b-a","p_value":0.1}]"#), "tests");
+        assert_eq!(
+            d(r#"[{"method":"Durbin-Watson","statistic":2.1}]"#),
+            "tests"
+        );
+        assert_eq!(
+            d(r#"[{"term":"x1","x":1,"partial_residual":0.2}]"#),
+            "partial"
+        );
+        let e = detect(&rows(r#"[{"a":1}]"#)).unwrap_err().to_string();
+        assert!(e.contains("contract v1"), "{e}");
+    }
+
+    const TUKEY: &str = r#"[
+        {"grp":"A","test_id":"b-a","group1":"a","group2":"b","estimate":1.2,"conf_low":0.4,"conf_high":2.0,"p_adj":0.003,"method":"Tukey"},
+        {"grp":"A","test_id":"c-a","group1":"a","group2":"c","estimate":0.3,"conf_low":-0.5,"conf_high":1.1,"p_adj":0.41,"method":"Tukey"},
+        {"grp":"B","test_id":"b-a","group1":"a","group2":"b","estimate":0.2,"conf_low":-0.4,"conf_high":0.9,"p_adj":0.6,"method":"Tukey"}]"#;
+
+    #[test]
+    fn tests_forest() {
+        let svg = go("tests", TUKEY, "{}").unwrap();
+        assert!(svg.contains("p = 0.003 **"), "p annotation");
+        assert!(svg.contains("p ≤ 0.05"), "significance legend");
+        // Two groups (grp) → a grid with one panel per group.
+        assert!(svg.matches("<svg").count() > 2);
+        // One test without an estimate: the statistic as a lollipop.
+        let svg = go(
+            "tests",
+            r#"[{"grp":"A","statistic":2.1,"p_value":0.04,"method":"Shapiro-Wilk"},
+                {"grp":"B","statistic":1.1,"p_value":0.4,"method":"Shapiro-Wilk"}]"#,
+            r#"{"alpha":0.01}"#,
+        )
+        .unwrap();
+        assert!(svg.contains("Shapiro-Wilk") && svg.contains("p = 0.04 *"));
+        let e = go("tests", r#"[{"method":"m"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no estimate, statistic or p_value"), "{e}");
+        // A column holding the aggregate's LIST of STRUCTs is expanded.
+        let nested = format!(r#"[{{"r":{TUKEY}}}]"#);
+        assert!(go("tests", &nested, "{}").is_ok());
+        assert!(go("auto", &nested, "{}").is_ok());
+    }
+
+    #[test]
+    fn compare_brackets() {
+        let data = r#"[{"g":"a","y":1.0},{"g":"a","y":1.4},{"g":"a","y":0.8},
+            {"g":"b","y":2.1},{"g":"b","y":2.6},{"g":"b","y":2.2},
+            {"g":"c","y":1.1},{"g":"c","y":1.5},{"g":"c","y":1.2}]"#;
+        let tests = format!(r#"{{"value":"y","factor":"g","tests":{TUKEY}}}"#);
+        let svg = go("compare", data, &tests).unwrap();
+        assert!(
+            svg.contains("p = 0.003 **") && svg.contains("data-series=\"b-a\""),
+            "bracket + label"
+        );
+        // A two-sample STRUCT for two groups.
+        let two = r#"[{"g":"a","y":1.0},{"g":"a","y":1.4},{"g":"b","y":2.1},{"g":"b","y":2.6}]"#;
+        let svg = go(
+            "compare",
+            two,
+            r#"{"value":"y","factor":"g","kind":"violin","tests":{"p_value":0.02,"method":"Welch t-test"}}"#,
+        )
+        .unwrap();
+        assert!(svg.contains("Welch t-test") && svg.contains("p = 0.02 *"));
+        let e = go("compare", two, r#"{"value":"y"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("factor :="), "{e}");
+        // Tests naming other groups: a warning, not silence.
+        let r = crate::render_spec_checked(&format!(
+            r#"{{"plot":"compare","rows":{two},"options":{{"value":"y","factor":"g","tests":[{{"group1":"a","group2":"z","p_adj":0.1}}]}}}}"#
+        ))
+        .unwrap();
+        assert!(
+            r.contains("data-warnings") && r.contains("z"),
+            "unknown group warned"
+        );
+    }
+
+    #[test]
+    fn partial_and_summary() {
+        let pr = r#"[{"term":"x1","x":1,"partial_residual":0.4,"component":0.5,"x_residual":-1,"y_residual":-0.4},
+            {"term":"x1","x":2,"partial_residual":1.1,"component":1.0,"x_residual":0,"y_residual":0.1},
+            {"term":"x1","x":3,"partial_residual":1.4,"component":1.5,"x_residual":1,"y_residual":0.5},
+            {"term":"x2","x":1,"partial_residual":0.1,"component":0.2,"x_residual":-1,"y_residual":0.2},
+            {"term":"x2","x":2,"partial_residual":0.3,"component":0.4,"x_residual":0,"y_residual":0.0},
+            {"term":"x2","x":3,"partial_residual":0.7,"component":0.6,"x_residual":1,"y_residual":-0.1}]"#;
+        assert!(go("partial", pr, "{}")
+            .unwrap()
+            .contains("Component + residual"));
+        let av = go("partial", pr, r#"{"kind":"added_variable"}"#).unwrap();
+        assert!(av.contains("slope"), "slope in the panel title");
+        assert!(go("partial", pr, r#"{"kind":"nope"}"#).is_err());
+        let glance = r#"[{"model_id":"ols","metric":"r_squared","value":0.81},
+            {"model_id":"ridge","metric":"r_squared","value":0.79},
+            {"model_id":"ols","metric":"aic","value":72.4},
+            {"model_id":"ridge","metric":"aic","value":75.0},
+            {"model_id":"ols","metric":"n_observations","value":30},
+            {"model_id":"ridge","metric":"n_observations","value":30}]"#;
+        let svg = go("summary", glance, "{}").unwrap();
+        assert!(svg.contains("R²") && svg.contains("AIC") && !svg.contains("n observations"));
+        let svg = go("summary", glance, r#"{"metrics":["n_observations"]}"#).unwrap();
+        assert!(svg.contains(">30<"), "asked-for bookkeeping metric");
+        let e = go("summary", glance, r#"{"metrics":["auc"]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("matches none"), "{e}");
+    }
+
+    #[test]
+    fn prediction_models_and_curves() {
+        let p = r#"[{"x":1,"y":1.0,"yhat":1.1,"yhat_lower":0.8,"yhat_upper":1.4,"model_id":"ols","split":"train"},
+            {"x":2,"y":2.0,"yhat":1.9,"yhat_lower":1.6,"yhat_upper":2.2,"model_id":"ols","split":"test"},
+            {"x":1,"y":1.0,"yhat":1.0,"yhat_lower":0.7,"yhat_upper":1.3,"model_id":"huber","split":"train"},
+            {"x":2,"y":2.0,"yhat":2.0,"yhat_lower":1.7,"yhat_upper":2.3,"model_id":"huber","split":"test"}]"#;
+        let svg = go("prediction", p, "{}").unwrap();
+        assert!(
+            svg.contains("huber") && svg.contains("ols"),
+            "models in the legend"
+        );
+        let km = r#"[{"curve_type":"km","model_id":"A","x":2,"y":0.9,"y_low":0.8,"y_high":1.0,"n_censor":0,"n_risk":10},
+            {"curve_type":"km","model_id":"A","x":5,"y":0.5,"y_low":null,"y_high":null,"n_censor":1,"n_risk":4},
+            {"curve_type":"km","model_id":"B","x":3,"y":0.7,"y_low":0.5,"y_high":0.9,"n_censor":0,"n_risk":8}]"#;
+        let r = crate::render_spec_checked(&format!(r#"{{"plot":"curve","rows":{km}}}"#)).unwrap();
+        assert!(
+            r.contains("Kaplan-Meier") && !r.contains("data-warnings"),
+            "{r}"
+        );
+        let cv = r#"[{"curve_type":"lambda_cv","x":0.1,"y":2.0,"y_low":1.8,"y_high":2.2,"is_min":true,"is_1se":false},
+            {"curve_type":"lambda_cv","x":1.0,"y":2.1,"y_low":1.9,"y_high":2.3,"is_min":false,"is_1se":true},
+            {"curve_type":"lambda_cv","x":10.0,"y":3.0,"y_low":2.7,"y_high":3.3,"is_min":false,"is_1se":false}]"#;
+        let svg = go("curve", cv, "{}").unwrap();
+        assert!(svg.contains("λ.min") && svg.contains("λ.1se"));
     }
 
     #[test]
