@@ -164,8 +164,9 @@ SELECT i::INTEGER AS listing_id, 'all' AS market, listed_date, district, agency,
        (district = 'Old Town')::INTEGER::DOUBLE AS old_town, (district = 'Harbour')::INTEGER::DOUBLE AS harbour,
        (district = 'Hillside')::INTEGER::DOUBLE AS hillside, (district = 'West End')::INTEGER::DOUBLE AS west_end,
        greatest(0, round(view_rate + sqrt(view_rate) * pm_rnorm('list', i, 'views')))::DOUBLE AS viewings,
-       greatest(1, ceil(least(dom, followup)))::INTEGER AS days_on_market,
-       dom <= followup AS sold,
+       -- The study follows each listing for at most a year (or until 31 Dec 2025).
+       greatest(1, ceil(least(dom, followup, 365)))::INTEGER AS days_on_market,
+       dom <= least(followup, 365) AS sold,
        CASE WHEN followup >= 30 THEN dom <= 30 END AS sold_30
 FROM t ORDER BY i;
 -- The logistic fit (p_logit) and a rule of thumb (p_rule) for every listing online ≥ 30 days
@@ -537,7 +538,7 @@ ORDER BY CASE curve_type WHEN 'roc' THEN 1 WHEN 'pr' THEN 2 ELSE 3 END;
 SELECT '9 Survival'::TAB;
 
 SELECT 12::COL;
-SELECT 'How long does a home stay on the market? `kaplan_meier_by` estimates, per district, the share of listings **still unsold** after each day — from times that are partly **censored**: the 93 homes still listed on 31 Dec 2025 (marked +) only tell us they took *at least* that long. **What to look for:** a curve that drops faster sells faster; where it crosses 50% is the **median time on market** — about 37 days in the Old Town against 99 in the West End. The **log-rank** test confirms the districts differ.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'How long does a home stay on the market? `kaplan_meier_by` estimates, per district, the share of listings **still unsold** after each day — from times that are partly **censored**: homes still listed after a year, or at the end of the study on 31 Dec 2025 (marked +), only tell us they took *at least* that long. **What to look for:** a curve that drops faster sells faster; where it crosses 50% is the **median time on market** — about 37 days in the Old Town against 99 in the West End. The **log-rank** test confirms the districts differ.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 8::COL;
 SELECT 400::HEIGHT;
