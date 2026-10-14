@@ -264,6 +264,144 @@ limitation of that API). Under the hood a macro builds `{"plot": "terms",
 "rows": [...], "options": {...}}` for `anofox_render`, which maps the columns
 onto the roles above (`term::XAXIS, estimate::SCATTER, conf_low::YMIN, …`).
 
+### Plotting anofox-statistics results
+
+[anofox-statistics](https://github.com/DataZooDE/anofox-statistics) v0.11
+emits every plot-ready result as a long table (or, for the hypothesis-test
+aggregates, a STRUCT) of the anofox integration contract — version
+`anofox_contract_version()` = `'1'`, shared by both extensions. Every
+producer carries `duckdb_functions()` tags, so you can list them:
+
+```sql
+SELECT DISTINCT function_name, tags['anofox.output'] AS output
+FROM duckdb_functions() WHERE tags['anofox.contract'] = '1' ORDER BY output, function_name;
+```
+
+Native: `INSTALL anofox_statistics FROM 'https://get.erpl.io'` in `duckdb
+-unsigned` on **DuckDB v1.5.6** (get.erpl.io serves stale builds for v1.5.5 /
+v1.5.4). The plot macros are the same in the browser builder (DuckDB-Wasm), so
+a dashboard query written against the CLI renders unchanged there.
+
+| Producer (per group of `source`) | `anofox.output` | Plot |
+|---|---|---|
+| `<model>_tidy_by` (21 models) | terms | `anofox_plot_terms(t)` — forest; several models (`UNION ALL BY NAME`) or groups (`id`) dodged + coloured |
+| `<model>_rolling_tidy_by`, `ridge_path_by`, `elasticnet_path_by`, `lars_path_by`, `quantile_process_by` | terms (with `index_name` / `index_value`) | `anofox_plot_terms(t)` — estimate (+ band) over the index, one panel per term; λ on a log axis; LARS `alpha` is labelled (not glmnet's λ) |
+| `<model>_glance_by` (21) | summary | `anofox_plot_summary(s, metrics := NULL)` — one panel per metric |
+| `ols/wls/<glm>_augment_by` | obs | `anofox_plot_diagnostics(o)` (plot.lm 2×2), `anofox_plot_obs(o, kind := …)` |
+| `<model>_prediction_by` (19), `<model>_effects_by` (9) | prediction | `anofox_plot_prediction(p)` — fit + band per `id`, split as colour; several models: a line + band each |
+| `roc_curve_by`, `pr_curve_by`, `calibration_curve_by`, `kaplan_meier_by`, `acf_by`, `pacf_by`, `ridge_cv_by`, `elasticnet_cv_by` | curve | `anofox_plot_curve(c)` — one `curve_type` per call |
+| `tukey_hsd_by`, `pairwise_t_test_by`, `dunn_test_by`, and the 40 `*_agg` tests (`t_test_agg`, `shapiro_wilk_agg`, `pearson_agg`, …) | test | `anofox_plot_tests(t)` — comparison forest; `anofox_plot_compare(r, …, tests := …)` — the raw values with significance brackets |
+| `<model>_partial_residuals_by` (8) | — (not a contract schema) | `anofox_plot_partial(p, kind := 'component' \| 'added_variable')` |
+
+`anofox_plot(t)` picks the chart from the columns for all of them. The
+examples use the table `d` of `examples/regression/anofox_statistics.sql`
+(groups `grp` A/B, features `x1`, `x2`, responses `y`, `y_count`, `score`, a
+classifier `label`/`prob`, survival `time`/`event`, factors `level3`, `g2`):
+
+```sql
+-- terms: OLS vs Huber coefficients for group A
+SELECT anofox_plot_terms(t)
+FROM (SELECT * FROM ols_tidy_by('d', grp, y, [x1, x2], names := ['trend', 'cycle'])
+      UNION ALL BY NAME
+      SELECT * FROM huber_tidy_by('d', grp, y, [x1, x2], names := ['trend', 'cycle'])) t
+WHERE grp = 'A';
+
+-- summary: R², AIC, … of three models — each metric on its own scale
+SELECT anofox_plot_summary(s)
+FROM (SELECT * FROM ols_glance_by('d', grp, y, [x1, x2])
+      UNION ALL BY NAME SELECT * FROM huber_glance_by('d', grp, y, [x1, x2])
+      UNION ALL BY NAME SELECT * FROM ridge_glance_by('d', grp, y, [x1, x2])) s
+WHERE grp = 'A';
+SELECT anofox_plot_summary(s, metrics := ['r_squared', 'aic', 'n_observations'])
+FROM ols_glance_by('d', grp, y, [x1, x2]) s;            -- one row per group (id)
+
+-- obs: plot.lm 2×2 of a Poisson GLM
+SELECT anofox_plot_diagnostics(o) FROM poisson_augment_by('d', grp, y_count, [x1, x2]) o WHERE grp = 'A';
+
+-- prediction: 90 % band per group, rows after id 50 held out ('test')
+SELECT anofox_plot_prediction(p)
+FROM ols_prediction_by('d', grp, id, y, [x1, x2], level := 0.9,
+                       split := CASE WHEN id > 50 THEN 'test' END) p;
+-- … two models in one panel; marginal effect of x1
+SELECT anofox_plot_prediction(p)
+FROM (SELECT * FROM ols_prediction_by('d', grp, id, y_count, [x1, x2])
+      UNION ALL BY NAME SELECT * FROM poisson_prediction_by('d', grp, id, y_count, [x1, x2])) p
+WHERE grp = 'A';
+SELECT anofox_plot_prediction(p) FROM poisson_effects_by('d', grp, y_count, [x1, x2], focal := 1) p;
+
+-- curve: one plot per curve_type; KM with censoring marks; CV with λ.min / λ.1se
+SELECT curve_type, anofox_plot_curve(c)
+FROM (SELECT * FROM roc_curve_by('d', grp, label, prob)
+      UNION ALL SELECT * FROM calibration_curve_by('d', grp, label, prob, n_bins := 5)) c
+GROUP BY curve_type;
+SELECT anofox_plot_curve(c) FROM kaplan_meier_by('d', grp, time, event) c;
+SELECT anofox_plot_curve(c) FROM ridge_cv_by('d', grp, y, [x1, x2]) c WHERE grp = 'A';
+
+-- test: post-hoc comparisons as a forest (one panel per group) …
+SELECT anofox_plot_tests(t) FROM tukey_hsd_by('d', grp, score, level3) t;
+SELECT anofox_plot_tests(t, alpha := 0.01, value := 'p') FROM pairwise_t_test_by('d', grp, score, level3) t;
+-- … a one-row test per group (unnest the aggregate's STRUCT) …
+SELECT anofox_plot_tests(t) FROM (SELECT grp, unnest(shapiro_wilk_agg(y)) FROM d GROUP BY grp) t;
+-- … or pass the STRUCT / LIST column as it is
+SELECT anofox_plot_tests(s) FROM (SELECT grp, tukey_hsd_agg(score, level3) AS r FROM d GROUP BY grp) s;
+
+-- compare: raw values per level with significance brackets from the tests
+SELECT anofox_plot_compare(r, value := 'score', factor := 'level3',
+         tests := (SELECT list(t) FROM tukey_hsd_by('d', grp, score, level3) t WHERE t.grp = 'A'))
+FROM d r WHERE grp = 'A';
+SELECT anofox_plot_compare(r, value := 'score', factor := 'level3', kind := 'violin',
+         tests := pairwise_t_test_agg(score, level3)) FROM d r;    -- the aggregate inline
+SELECT grp, anofox_plot_compare(r, value := 'y', factor := 'level3', kind := 'points',
+         tests := (SELECT list(t) FROM dunn_test_by('d', grp, y, level3) t WHERE t.grp = r.grp))
+FROM d r GROUP BY grp;                                             -- correlated: one per group
+SELECT anofox_plot_compare(r, value := 'y', factor := 'g2', tests := t_test_agg(y, g2)) FROM d r;
+
+-- partial residuals: component + residual, added-variable
+SELECT anofox_plot_partial(p) FROM ols_partial_residuals_by('d', grp, y, [x1, x2]) p WHERE grp = 'A';
+SELECT anofox_plot_partial(p, kind := 'added_variable')
+FROM ols_partial_residuals_by('d', grp, y, [x1, x2]) p WHERE grp = 'A';
+```
+
+**`tests :=` and `factor :=`.** A macro argument can be any expression, so
+the test table goes in as a LIST of STRUCTs: a scalar subquery `(SELECT
+list(t) FROM tukey_hsd_by(…) t WHERE …)` (correlate it with the outer row's
+group for one plot per group), a list literal, or the aggregate itself
+(`tukey_hsd_agg(y, g)` returns that LIST; a two-sample STRUCT such as
+`t_test_agg(y, g)` brackets the two groups). The column naming the groups is
+`factor :=` (the anofox-statistics name for it) because `group` is a reserved
+word in SQL — `group := 'g'` is a syntax error. `value :=` / `factor :=` name
+columns of the aliased rows. Brackets are drawn with ggplot-rs's
+`geom_bracket_table`, narrow spans lowest, labelled `p = … **` from `p_adj`
+(else `p_value`); `label := '{p.signif}'` uses a ggpubr-style template
+instead, `hide_ns := true` drops pairs with p > 0.05. Tests naming groups
+that are not in the rows are not drawn and reported as a render warning
+(`data-warnings`).
+
+**Gotchas.**
+
+1. **Alias the row.** The plot macros aggregate whole rows: `SELECT
+   anofox_plot_terms(t) FROM ols_tidy_by(…) t` — not `anofox_plot_terms(*)`.
+2. **One `curve_type` per curve plot.** ROC and calibration rows stack with
+   `UNION ALL`, but plot them separately (`GROUP BY curve_type`); mixing them
+   is an error.
+3. **Compare models with `UNION ALL BY NAME`.** Same schema, `model_id` tells
+   the methods apart, `id` the groups: filter (`WHERE grp = 'A'`), facet
+   (`GROUP BY grp` for one SVG each) or let the macro colour / panel them.
+4. **Groups.** Several `id`s become panels (prediction), colours (terms,
+   summary labels `model · id`) or grid cells (tests, lambda_cv); `_augment_by`
+   has no `id` — filter it to one group for a clean 2×2.
+5. **LARS paths are on upstream's `alpha` scale**, not glmnet's λ: do not
+   overlay `lars_path_by` with `ridge_path_by`.
+6. **`*_fit_predict_by` is not the `prediction` schema**: name the position
+   column (`anofox_plot_prediction(p, x := 'x1', facet := 'grp')`) or use
+   `<model>_prediction_by`.
+7. **Bookkeeping metrics** (`n_observations`, `n_features`, `iterations`) are
+   hidden in `anofox_plot_summary` unless `metrics := [...]` asks for them.
+
+`examples/regression/anofox_statistics.sql` renders one example per family;
+`scripts/statistics_conformance.py` renders the output of every producer
+(see the README).
+
 ### Combo charts, auto-refresh, dark mode
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
