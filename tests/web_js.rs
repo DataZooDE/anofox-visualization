@@ -29,3 +29,16 @@ fn web_html_sinks_are_inert() {
 fn web_reads_svg_metadata() {
     run_node("svg_attrs_test.mjs");
 }
+
+#[test]
+fn web_contract_plot_glue() {
+    run_node("contract_test.mjs");
+}
+
+/// Loads the fetched anofox wasm extensions in DuckDB-Wasm (Node); skips
+/// itself unless `scripts/fetch-wasm-extensions.sh` and
+/// `npm install --prefix tests/web` have been run.
+#[test]
+fn web_wasm_extensions_load() {
+    run_node("wasm_extensions_test.mjs");
+}

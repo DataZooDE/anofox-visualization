@@ -1426,9 +1426,22 @@ fn cartesian(
     }
     // Interval ends under non-canonical names: a column called `ymin` would be
     // read by geom_col as a stacked bar's base.
+    // A missing interval end (e.g. a ridge coefficient, which has no
+    // inference) collapses to the estimate: the mark is still drawn, just
+    // without whiskers, instead of being dropped as non-finite.
     if let Some((lo, hi)) = y_interval {
-        data.push(("ilo".to_string(), lo.values.clone()));
-        data.push(("ihi".to_string(), hi.values.clone()));
+        let y = &value.values;
+        let or_y = |v: &[Value]| -> Vec<Value> {
+            v.iter()
+                .zip(y)
+                .map(|(e, yv)| match e.as_f64() {
+                    Some(f) if f.is_finite() => e.clone(),
+                    _ => yv.clone(),
+                })
+                .collect()
+        };
+        data.push(("ilo".to_string(), or_y(&lo.values)));
+        data.push(("ihi".to_string(), or_y(&hi.values)));
     }
     if let Some((lo, hi)) = x_interval {
         data.push(("jlo".to_string(), lo.values.clone()));
@@ -1478,11 +1491,9 @@ fn cartesian(
     }
     let mut aes = Aes::new().x("x").y("y");
 
-    // Colour dimension: an explicit CATEGORY, or — for a bar chart with no
-    // category — the (discrete) X itself, so a "total per channel" bar matches
-    // the same channel's colour in the other charts. `color_col` holds the
-    // series levels; `x_coloured` suppresses the then-redundant legend.
-    let mut x_coloured = false;
+    // Colour dimension: an explicit CATEGORY only. A bar chart without one
+    // is drawn in the single brand colour — colouring each bar by its own x
+    // level encodes nothing the axis does not already say.
     let color_col: Option<&Column> = if let Some(cat) = category {
         data.push(("cat".to_string(), cat.values.clone()));
         aes = if by_colour {
@@ -1491,12 +1502,6 @@ fn cartesian(
             aes.fill("cat")
         };
         Some(cat)
-    } else if bar && x_discrete {
-        // Fill by the x level (the slotted x is numeric).
-        data.push(("xlev".to_string(), x.values.clone()));
-        aes = aes.fill("xlev");
-        x_coloured = true;
-        Some(x)
     } else {
         None
     };
@@ -2062,8 +2067,9 @@ fn cartesian(
                 .with_palette((0..DZ_COLORS.len()).map(dz_color).collect()),
         );
     }
-    if x_coloured {
-        plot = plot.show_legend(false); // the x axis already labels the colours
+    if bar && category.is_none() && combo_names.is_empty() {
+        // A plain bar chart is one series: a legend of one says nothing.
+        plot = plot.show_legend(false);
     }
     // One continuous scale per axis, combining tick format (`::YFORMAT`,
     // percent kinds), transform (`::YSCALE`) and — for a dodged discrete x —

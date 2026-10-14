@@ -30,8 +30,10 @@
 //!
 //! Chain a role after a type cast to get both: `ts::DATE::XAXIS`.
 
+pub mod contract_call;
 pub mod lex;
 
+pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
 
 use crate::roles::is_sql_type_token;
@@ -48,6 +50,9 @@ pub struct Panel {
     /// Human display name per charted-measure column (`AS alias`, or the bare
     /// column name) keyed by output position — used to label combo legends.
     pub names: Vec<(usize, String)>,
+    /// A contract plot call (`SELECT anofox_plot_terms(t) FROM … t`), rewritten
+    /// to return the rows + arguments as JSON — see [`contract_call`].
+    pub contract: Option<ContractPanel>,
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
@@ -60,6 +65,9 @@ pub fn plan(script: &str) -> Vec<Panel> {
             if stmt.is_empty() {
                 return None;
             }
+            if let Some((panel, _)) = contract_call::plan_contract(stmt) {
+                return Some(panel);
+            }
             let (sql, roles, names) = rewrite(stmt);
             Some(if roles.is_empty() {
                 Panel {
@@ -67,6 +75,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     sql: stmt.to_string(),
                     roles,
                     names: Vec::new(),
+                    contract: None,
                 }
             } else {
                 Panel {
@@ -74,6 +83,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     sql,
                     roles,
                     names,
+                    contract: None,
                 }
             })
         })

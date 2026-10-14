@@ -17,7 +17,10 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod curves;
+mod look;
 mod stats;
+mod terms;
 
 type Row = Map<String, J>;
 
@@ -98,19 +101,19 @@ pub(crate) fn render(
     );
     // Plots drawn directly with ggplot-rs (see `stats`).
     let direct = |f: &dyn Fn() -> stats::Out| crate::guard(|| f().map_err(fail));
+    let labels = look::Labels::from(options);
     let cols = match name {
-        "terms" => terms(&t),
-        "prediction" => match prediction(&t, options).map_err(fail)? {
-            Pred::Cols(c) => Ok(c),
-            Pred::Models { x, y, model, facet } => {
-                return direct(&|| {
-                    stats::prediction_models(&t, &x, &y, model, facet.as_deref(), w, h, o, place)
-                })
-            }
-        },
+        "terms" => return direct(&|| terms::terms(&t, options, w, h, o, place)),
+        "prediction" => return direct(&|| stats::prediction(&t, options, w, h, o, place)),
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
-            "km" => return direct(&|| stats::km(&t, w, h, o, place)),
-            "lambda_cv" => return direct(&|| stats::lambda_cv(&t, w, h, o, place)),
+            "km" => return direct(&|| stats::km(&t, options, w, h, o, place)),
+            "lambda_cv" => return direct(&|| stats::lambda_cv(&t, options, w, h, o, place)),
+            "roc" => return direct(&|| curves::roc(&t, options, w, h, o, place)),
+            "pr" => return direct(&|| curves::pr(&t, options, w, h, o, place)),
+            "calibration" => return direct(&|| curves::calibration(&t, options, w, h, o, place)),
+            ty @ ("acf" | "pacf") => {
+                return direct(&|| curves::acf(&t, ty, options, w, h, o, place))
+            }
             _ => curve(&t),
         },
         "summary" => return direct(&|| stats::summary(&t, options, w, h, o, place)),
@@ -123,19 +126,264 @@ pub(crate) fn render(
         }
         "diagnostics" => {
             return crate::guard(|| {
-                diagnostics(&t, label_top(options), width, height, o, place).map_err(fail)
+                diagnostics(&t, label_top(options), &labels, width, height, o, place).map_err(fail)
             })
         }
         _ => unreachable!("checked above"),
     }
     .map_err(fail)?;
-    let (svg, mut warnings) = crate::render_placed(&cols, place, width, height, o)?;
-    if name == "prediction" {
-        // A missing y (future rows) or yhat (history rows) is part of the
-        // schema, not lost data: the point layer skipping them is no warning.
-        warnings.retain(|w| !w.contains("non-finite"));
+    // Role-rendered panels (obs, the remaining curves): house look, default
+    // axis labels, quiet reference lines.
+    let (xl, yl) = match name {
+        "curve" => match curve_type(&t).unwrap_or_default().as_str() {
+            "qq" => ("theoretical quantile".into(), "sample quantile".into()),
+            "pdp" => ("feature value".into(), "partial dependence".into()),
+            "lift" => ("fraction targeted".into(), "lift".into()),
+            "null_dist" => ("statistic".into(), "density".into()),
+            _ => ("x".into(), "y".into()),
+        },
+        _ => axis_labels(&cols),
+    };
+    let refs = take_refs(&cols);
+    let cols: Vec<Column> = cols
+        .into_iter()
+        .filter(|c| !matches!(c.role, Role::RefLine | Role::Identity))
+        .filter(|c| {
+            refs.tips.is_empty() || !matches!(c.role, Role::LabelTop | Role::Label | Role::Rank)
+        })
+        .collect();
+    match crate::panel_plot(&cols, w, h, o).map_err(fail)? {
+        Some(plot) => {
+            let plot = tweak(plot, &refs, &labels, &xl, &yl, false);
+            crate::guard(|| stats::finish(plot, w, h, place).map_err(fail))
+        }
+        None => crate::render_placed(&cols, place, width, height, o),
     }
-    Ok((svg, warnings))
+}
+
+/// Reference lines taken off role columns (drawn in the quiet style by
+/// [`tweak`]): horizontal y values, and whether the identity is wanted.
+#[derive(Default)]
+struct Refs {
+    h: Vec<f64>,
+    identity: bool,
+    /// Label the first horizontal line (Cook's 4/n) at this x.
+    note: Option<String>,
+    note_x: Option<f64>,
+    /// Make the y range symmetric around 0 to this |y| at x (both signs of
+    /// the Cook's contours in view).
+    sym_y: Option<(f64, f64)>,
+    /// Text above stem tips (Cook's index plot): (x, y, text).
+    tips: Vec<(f64, f64, String)>,
+}
+
+fn take_refs(cols: &[Column]) -> Refs {
+    let mut r = Refs::default();
+    for c in cols {
+        match c.role {
+            Role::RefLine => {
+                for v in &c.values {
+                    if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
+                        if !r.h.iter().any(|x| (x - f).abs() < 1e-12) {
+                            r.h.push(f);
+                        }
+                    }
+                }
+                if c.name == "cut" {
+                    r.note = Some("4/n".into());
+                    r.note_x = cols
+                        .iter()
+                        .find(|c| c.role == Role::X)
+                        .and_then(|c| c.values.iter().filter_map(|v| v.as_f64()).reduce(f64::max));
+                }
+            }
+            Role::Identity => r.identity = true,
+            Role::CooksContour => {
+                let x = cols
+                    .iter()
+                    .find(|c| c.role == Role::X)
+                    .and_then(|c| c.values.iter().filter_map(|v| v.as_f64()).reduce(f64::min));
+                let m = cols
+                    .iter()
+                    .find(|c| matches!(c.role, Role::Value(_)))
+                    .and_then(|c| {
+                        c.values
+                            .iter()
+                            .filter_map(|v| v.as_f64())
+                            .filter(|f| f.is_finite())
+                            .map(f64::abs)
+                            .reduce(f64::max)
+                    });
+                if let (Some(x), Some(m)) = (x, m) {
+                    r.sym_y = Some((x, m));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Cook's index plot: the top-k labels sit above their stems.
+    let is_cooks = cols
+        .iter()
+        .any(|c| c.name == "cooks_d" && matches!(c.role, Role::Value(_)));
+    let k = cols
+        .iter()
+        .find(|c| c.role == Role::LabelTop)
+        .and_then(|c| c.values.first()?.as_f64());
+    if let (true, Some(k)) = (is_cooks, k) {
+        let get = |pred: &dyn Fn(&Column) -> bool| cols.iter().find(|c| pred(c));
+        if let (Some(x), Some(y), Some(l)) = (
+            get(&|c| c.role == Role::X),
+            get(&|c| c.name == "cooks_d"),
+            get(&|c| c.role == Role::Label),
+        ) {
+            let mut idx: Vec<usize> = (0..y.values.len())
+                .filter(|&i| y.values[i].as_f64().is_some_and(f64::is_finite))
+                .collect();
+            idx.sort_by(|&a, &b| {
+                let (p, q) = (y.values[a].as_f64(), y.values[b].as_f64());
+                q.unwrap_or(0.0).total_cmp(&p.unwrap_or(0.0))
+            });
+            idx.truncate(k.max(0.0) as usize);
+            for i in idx {
+                if let (Some(xv), Some(yv)) = (
+                    x.values.get(i).and_then(|v| v.as_f64()),
+                    y.values[i].as_f64(),
+                ) {
+                    let t = match l.values.get(i) {
+                        Some(Value::Str(s)) => s.clone(),
+                        Some(v) => v.as_f64().map(stats::fmt_num).unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    r.tips.push((xv, yv, t));
+                }
+            }
+        }
+    }
+    r
+}
+
+/// Default axis labels of a role-rendered contract panel, from its x / value
+/// column names.
+fn axis_labels(cols: &[Column]) -> (String, String) {
+    let x = cols
+        .iter()
+        .find(|c| c.role == Role::X)
+        .map(|c| c.name.as_str())
+        .unwrap_or("");
+    let y = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Value(_)))
+        .map(|c| c.name.as_str())
+        .unwrap_or("");
+    let name = |n: &str| -> String {
+        match n {
+            "fitted" => "fitted".into(),
+            "residual" => "residual".into(),
+            "std_residual" => "standardised residual".into(),
+            "sqrt_abs_std_residual" => "√|standardised residual|".into(),
+            "leverage" => "leverage".into(),
+            "cooks_d" => "Cook's distance".into(),
+            "row_id" => "observation".into(),
+            other => look::humanize(other),
+        }
+    };
+    (name(x), name(y))
+}
+
+/// The house look over a role-rendered plot.
+fn tweak(
+    plot: ggplot_rs::prelude::GGPlot,
+    refs: &Refs,
+    labels: &look::Labels,
+    xl: &str,
+    yl: &str,
+    small: bool,
+) -> ggplot_rs::prelude::GGPlot {
+    use ggplot_rs::prelude::*;
+    let mut plot = plot.theme_update(look::theme_update(small));
+    for (i, y) in refs.h.iter().enumerate() {
+        plot = look::hline(plot, *y);
+        if i == 0 {
+            if let (Some(n), Some(nx)) = (&refs.note, refs.note_x) {
+                plot = plot
+                    .geom_text_with(GeomText {
+                        size: 10.0,
+                        color: (120, 126, 138),
+                        hjust: 1.0,
+                        vjust: 0.0,
+                        ..Default::default()
+                    })
+                    .layer_data(vec![
+                        ("x".to_string(), vec![Value::Float(nx)]),
+                        ("y".to_string(), vec![Value::Float(*y)]),
+                        ("note".to_string(), vec![Value::Str(n.clone())]),
+                    ])
+                    .layer_aes(Aes::new().x("x").y("y").label("note"));
+            }
+        }
+    }
+    if let Some((x, m)) = refs.sym_y {
+        plot = plot
+            .geom_blank()
+            .layer_data(vec![
+                ("x".to_string(), vec![Value::Float(x), Value::Float(x)]),
+                (
+                    "y".to_string(),
+                    vec![Value::Float(-m * 1.05), Value::Float(m * 1.05)],
+                ),
+            ])
+            .layer_aes(Aes::new().x("x").y("y"));
+    }
+    if !refs.tips.is_empty() {
+        let top = refs.tips.iter().map(|t| t.1).fold(0.0, f64::max);
+        plot = plot
+            .geom_text_with(GeomText {
+                size: 10.0,
+                color: (55, 62, 75),
+                hjust: 0.5,
+                vjust: 0.0,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                (
+                    "x".to_string(),
+                    refs.tips.iter().map(|t| Value::Float(t.0)).collect(),
+                ),
+                (
+                    "y".to_string(),
+                    refs.tips
+                        .iter()
+                        .map(|t| Value::Float(t.1 + top * 0.025))
+                        .collect(),
+                ),
+                (
+                    "note".to_string(),
+                    refs.tips.iter().map(|t| Value::Str(t.2.clone())).collect(),
+                ),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("note"))
+            .geom_blank()
+            .layer_data(vec![
+                ("x".to_string(), vec![Value::Float(refs.tips[0].0)]),
+                ("y".to_string(), vec![Value::Float(top * 1.1)]),
+            ])
+            .layer_aes(Aes::new().x("x").y("y"));
+    }
+    if refs.identity {
+        plot = plot.geom_abline_with(GeomAbline {
+            slope: 1.0,
+            intercept: 0.0,
+            color: look::REF,
+            width: look::REF_WIDTH,
+            linetype: Linetype::Dashed,
+            alpha: 1.0,
+        });
+    }
+    let plot = plot.xlab(&labels.x_or(xl)).ylab(&labels.y_or(yl));
+    match &labels.title {
+        Some(t) => plot.title(t),
+        None => plot,
+    }
 }
 
 /// Rows whose only nested column is a STRUCT, or a LIST of STRUCTs (a test
@@ -329,212 +577,6 @@ fn konst(name: &str, role: Role, v: Value) -> Column {
     Column::new(name, role, vec![v])
 }
 
-/// `terms`: a coefficient forest (term on the vertical axis, estimate ±
-/// interval, zero line, models dodged/coloured) — or, when `index_value` is
-/// set, each term's estimate + band over the index (regularisation path,
-/// quantile process, rolling coefficients), one panel per term.
-fn terms(t: &Table) -> Result<Vec<Column>, String> {
-    t.need(&["term", "estimate"])?;
-    // Several models and/or several groups (`id`): colour by what varies; a
-    // forest with both puts each group in its own panel.
-    let model_key = t.model_key().filter(|k| t.distinct(k) > 1);
-    let ids = t.has("id") && t.distinct("id") > 1;
-    let ci = t.has("conf_low") && t.has("conf_high");
-    let series: Option<(String, Vec<Value>)> = match (model_key, ids) {
-        (Some(m), true) if t.has("index_value") => Some((
-            "model".into(),
-            t.text(m)
-                .into_iter()
-                .zip(t.text("id"))
-                .map(|(a, b)| match (a, b) {
-                    (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a} · {b}")),
-                    (a, _) => a,
-                })
-                .collect(),
-        )),
-        (Some(m), _) => Some((m.to_string(), t.text(m))),
-        (None, true) => Some(("id".into(), t.text("id"))),
-        (None, false) => None,
-    };
-    let forest_facet = model_key.is_some() && ids;
-    let mut cols = Vec::new();
-    if t.has("index_value") {
-        cols.push(col("index_value", Role::X, t.xpos("index_value")));
-        cols.push(col("estimate", Role::Value(Kind::Line), t.num("estimate")?));
-        if ci {
-            cols.push(col("conf_low", Role::BandLower, t.num("conf_low")?));
-            cols.push(col("conf_high", Role::BandUpper, t.num("conf_high")?));
-        }
-        if t.distinct("term") > 1 {
-            cols.push(col("term", Role::FacetFree, t.text("term")));
-        }
-        if let Some((name, v)) = &series {
-            cols.push(col(name, Role::Category, v.clone()));
-        }
-        // A λ path reads on a log axis.
-        let idx = t.text("index_name");
-        let lambda = idx
-            .iter()
-            .any(|v| matches!(v, Value::Str(s) if s.to_ascii_lowercase().contains("lambda")));
-        let positive = t
-            .num("index_value")?
-            .iter()
-            .all(|v| v.as_f64().is_none_or(|f| f > 0.0));
-        if lambda && positive {
-            cols.push(konst("xs", Role::XScale, Value::Str("log10".into())));
-        }
-        cols.push(konst("zero", Role::RefLine, Value::Float(0.0)));
-        if let Some(Value::Str(n)) = idx.iter().find(|v| **v != Value::Na) {
-            // LARS reports upstream's alpha, not glmnet's lambda: say so.
-            let title = if n.eq_ignore_ascii_case("alpha") {
-                "estimate by alpha (LARS; not on the glmnet lambda scale)".to_string()
-            } else {
-                format!("estimate by {n}")
-            };
-            cols.push(konst("title", Role::Label, Value::Str(title)));
-        }
-        return Ok(cols);
-    }
-    // Forest: the first term on top (a flipped axis grows upward).
-    let rev = |v: Vec<Value>| v.into_iter().rev().collect::<Vec<_>>();
-    cols.push(col("term", Role::X, rev(t.text("term"))));
-    cols.push(col(
-        "estimate",
-        Role::Value(Kind::Point),
-        rev(t.num("estimate")?),
-    ));
-    if ci {
-        cols.push(col("conf_low", Role::YMin, rev(t.num("conf_low")?)));
-        cols.push(col("conf_high", Role::YMax, rev(t.num("conf_high")?)));
-    }
-    if let Some((name, v)) = series {
-        let (name, v) = if forest_facet {
-            let m = model_key.unwrap_or("model_id");
-            cols.push(col("id", Role::Facet, rev(t.text("id"))));
-            (m.to_string(), t.text(m))
-        } else {
-            (name, v)
-        };
-        cols.push(col(&name, Role::Category, rev(v)));
-    }
-    cols.push(konst("flip", Role::Flip, Value::Float(1.0)));
-    cols.push(konst("zero", Role::RefLine, Value::Float(0.0)));
-    Ok(cols)
-}
-
-/// `prediction`: observed `y` points, the `yhat` line and its
-/// `yhat_lower`/`yhat_upper` band over `x` (or `ds`), coloured by `split`
-/// (train/test/future) — or by model when several models are present.
-enum Pred {
-    Cols(Vec<Column>),
-    /// Several models share a panel: drawn by [`stats::prediction_models`].
-    Models {
-        x: String,
-        y: String,
-        model: &'static str,
-        facet: Option<String>,
-    },
-}
-
-fn prediction(t: &Table, options: &Row) -> Result<Pred, String> {
-    let x = opt_str(options, "x")
-        .or_else(|| ["x", "ds"].into_iter().find(|k| t.has(k)).map(String::from))
-        .ok_or_else(|| {
-            format!(
-                "needs an x position: a column `x` or `ds`, or x := '<column>' (got: {})",
-                t.keys()
-            )
-        })?;
-    let y = opt_str(options, "y").unwrap_or_else(|| "y".into());
-    t.need(&[x.as_str(), "yhat"])?;
-    let has_y = t.has(&y);
-    let mut cols = vec![
-        col(&x, Role::X, t.xpos(&x)),
-        col("yhat", Role::Value(Kind::Line), t.num("yhat")?),
-    ];
-    if has_y {
-        cols.push(col(&y, Role::Value(Kind::Point), t.num(&y)?));
-    }
-    if t.has("yhat_lower") && t.has("yhat_upper") {
-        cols.push(col("yhat_lower", Role::BandLower, t.num("yhat_lower")?));
-        cols.push(col("yhat_upper", Role::BandUpper, t.num("yhat_upper")?));
-    }
-    let facet = opt_str(options, "facet").or_else(|| (t.distinct("id") > 1).then(|| "id".into()));
-    if let Some(f) = &facet {
-        if !t.has(f) {
-            return Err(format!("facet column `{f}` not found (got: {})", t.keys()));
-        }
-    }
-    // Colour by model only when one panel holds several models (forecast's
-    // model_name is often one per series, e.g. "AutoETS(A,A,N)").
-    let model = t.model_key().filter(|m| {
-        let mut per: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
-        for r in t.rows {
-            let key = facet
-                .as_deref()
-                .and_then(|f| r.get(f))
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            if let Some(v) = r.get(*m).filter(|v| !v.is_null()) {
-                per.entry(key).or_default().insert(v.to_string());
-            }
-        }
-        per.values().any(|s| s.len() > 1)
-    });
-    if let Some(m) = model {
-        return Ok(Pred::Models {
-            x,
-            y,
-            model: m,
-            facet,
-        });
-    } else if !t.has("focal") {
-        // (An effects table — `focal` — has no train/test split to show.)
-        // split, else from is_training, else: no y → future, y → train.
-        let yv = if has_y { t.num(&y)? } else { Vec::new() };
-        let split: Vec<Value> = t
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let s = match (r.get("split"), r.get("is_training")) {
-                    (Some(J::String(s)), _) => s.clone(),
-                    (_, Some(J::Bool(true))) => "train".into(),
-                    (_, Some(J::Bool(false))) => {
-                        if yv.get(i).is_some_and(|v| *v != Value::Na) {
-                            "test".into()
-                        } else {
-                            "future".into()
-                        }
-                    }
-                    _ if yv.get(i).is_some_and(|v| *v != Value::Na) => "train".into(),
-                    _ => "future".into(),
-                };
-                Value::Str(s)
-            })
-            .collect();
-        // One split (all train, all future): a legend of one says nothing.
-        let one = split.windows(2).all(|w| w[0] == w[1]);
-        if !one {
-            cols.push(col("split", Role::Category, split));
-        }
-    }
-    if t.has("focal") {
-        let f = t
-            .num("focal")?
-            .iter()
-            .find_map(|v| v.as_f64())
-            .map(|f| format!("marginal effect of feature {f}"))
-            .unwrap_or_else(|| "marginal effect".into());
-        cols.push(konst("title", Role::Label, Value::Str(f)));
-    }
-    if let Some(f) = facet {
-        cols.push(col(&f, Role::FacetFree, t.text(&f)));
-    }
-    Ok(Pred::Cols(cols))
-}
-
 /// The one `curve_type` of a curve table (an error when rows mix types).
 fn curve_type(t: &Table) -> Result<String, String> {
     t.need(&["curve_type", "x", "y"])?;
@@ -555,8 +597,9 @@ fn curve_type(t: &Table) -> Result<String, String> {
     Ok(types.into_iter().next().unwrap_or_default())
 }
 
-/// `curve`: the geom and reference line follow `curve_type` (km and
-/// lambda_cv are drawn by [`stats`]).
+/// `curve` types drawn by the role renderer: qq (points + identity +
+/// envelope), null_dist / pdp / lift (line ± band). roc, pr, calibration,
+/// acf / pacf ([`curves`]), km and lambda_cv ([`stats`]) are drawn directly.
 fn curve(t: &Table) -> Result<Vec<Column>, String> {
     let ty = curve_type(t)?;
     let yv = t.num("y")?;
@@ -566,63 +609,14 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         .into_iter()
         .find(|k| t.distinct(k) > 1);
     match ty.as_str() {
-        "roc" | "calibration" => {
+        "pdp" | "lift" | "null_dist" => {
             cols.push(col("y", Role::Value(Kind::Line), yv));
-            cols.push(konst("id", Role::Identity, Value::Float(1.0)));
-        }
-        "pr" | "pdp" | "lift" | "null_dist" => {
-            cols.push(col("y", Role::Value(Kind::Line), yv));
-            if band {
-                cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
-                cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
-            }
-        }
-        "acf" | "pacf" => {
-            // Lollipops from 0, ± significance bounds from y_low / y_high.
-            let zeros = vec![Value::Float(0.0); t.rows.len()];
-            cols.push(col("y", Role::Value(Kind::Point), yv.clone()));
-            cols.push(col("zero", Role::YMin, zeros));
-            cols.push(col("y2", Role::YMax, yv));
-            let mut refs = vec![0.0];
-            if band {
-                for v in t.num("y_low")?.into_iter().chain(t.num("y_high")?) {
-                    if let Some(f) = v.as_f64() {
-                        if !refs.iter().any(|r: &f64| (r - f).abs() < 1e-12) && refs.len() < 16 {
-                            refs.push(f);
-                        }
-                    }
-                }
-            }
-            cols.push(col(
-                "bounds",
-                Role::RefLine,
-                refs.into_iter().map(Value::Float).collect(),
-            ));
-            // Several series' lollipops at the same lags would overlap: one
-            // panel each.
-            if let Some(s) = series {
-                cols.push(col(s, Role::FacetFree, t.text(s)));
-                cols.push(konst(
-                    "title",
-                    Role::Label,
-                    Value::Str(match ty.as_str() {
-                        "acf" => "Autocorrelation (ACF)".into(),
-                        _ => "Partial autocorrelation (PACF)".into(),
-                    }),
-                ));
-                return Ok(cols);
-            }
         }
         "qq" => {
             // Precomputed (theoretical, sample) pairs: the producer's envelope
-            // (y_low/y_high) is drawn as given — stat_qq_band would recompute
-            // the theoretical quantiles for a normal reference only.
+            // (y_low/y_high) is drawn as given.
             cols.push(col("y", Role::Value(Kind::Point), yv));
             cols.push(konst("id", Role::Identity, Value::Float(1.0)));
-            if band {
-                cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
-                cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
-            }
         }
         other => {
             return Err(format!(
@@ -631,24 +625,13 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
             ))
         }
     }
+    if band {
+        cols.push(col("y_low", Role::BandLower, t.num("y_low")?));
+        cols.push(col("y_high", Role::BandUpper, t.num("y_high")?));
+    }
     if let Some(s) = series {
         cols.push(col(s, Role::Category, t.text(s)));
     }
-    let title = match ty.as_str() {
-        "roc" => "ROC curve".to_string(),
-        "pr" => "Precision-recall".into(),
-        "calibration" => "Calibration".into(),
-        "km" => "Kaplan-Meier survival".into(),
-        "acf" => "Autocorrelation (ACF)".into(),
-        "pacf" => "Partial autocorrelation (PACF)".into(),
-        "lambda_cv" => "Cross-validation error by lambda".into(),
-        "qq" => "Normal Q-Q".into(),
-        "null_dist" => "Null distribution".into(),
-        "pdp" => "Partial dependence".into(),
-        "lift" => "Lift".into(),
-        other => other.to_string(),
-    };
-    cols.push(konst("title", Role::Label, Value::Str(title)));
     Ok(cols)
 }
 
@@ -765,6 +748,7 @@ fn obs(t: &Table, kind: &str, k: usize) -> Result<Vec<Column>, String> {
 fn diagnostics(
     t: &Table,
     k: usize,
+    labels: &look::Labels,
     width: u32,
     height: u32,
     o: &RenderOptions,
@@ -792,10 +776,32 @@ fn diagnostics(
         .collect_legends(true);
     for (kind, title) in &panels {
         let cols = obs(t, kind, k)?;
+        let (xl, yl) = axis_labels(&cols);
+        let refs = take_refs(&cols);
+        let cols: Vec<Column> = cols
+            .into_iter()
+            .filter(|c| !matches!(c.role, Role::RefLine | Role::Identity))
+            .filter(|c| {
+                refs.tips.is_empty() || !matches!(c.role, Role::LabelTop | Role::Label | Role::Rank)
+            })
+            .collect();
+        let (xl, yl) = if *kind == "qq" {
+            (
+                "theoretical quantile".to_string(),
+                "standardised residual".to_string(),
+            )
+        } else {
+            (xl, yl)
+        };
         grid = match crate::panel_plot(&cols, w, h, o)? {
-            Some(plot) => grid.add(plot.title(title)),
+            Some(plot) => {
+                grid.add(tweak(plot, &refs, &look::Labels::default(), &xl, &yl, true).title(title))
+            }
             None => grid.add_spacer(),
         };
+    }
+    if let Some(t) = &labels.title {
+        grid = grid.title(t);
     }
     crate::finish_grid(grid, place, width, height)
 }
@@ -900,7 +906,7 @@ mod tests {
             r#"{"alpha":0.01}"#,
         )
         .unwrap();
-        assert!(svg.contains("Shapiro-Wilk") && svg.contains("p = 0.04 *"));
+        assert!(svg.contains("p = 0.04 *") && !svg.contains("Shapiro-Wilk"));
         let e = go("tests", r#"[{"method":"m"}]"#, "{}")
             .unwrap_err()
             .to_string();
@@ -919,9 +925,13 @@ mod tests {
         let tests = format!(r#"{{"value":"y","factor":"g","tests":{TUKEY}}}"#);
         let svg = go("compare", data, &tests).unwrap();
         assert!(
-            svg.contains("p = 0.003 **") && svg.contains("data-series=\"b-a\""),
-            "bracket + label"
+            svg.contains(">**<") && svg.contains("data-series=\"b-a\""),
+            "bracket + stars label"
         );
+        let with_p = format!(r#"{{"value":"y","factor":"g","label":"p","tests":{TUKEY}}}"#);
+        assert!(go("compare", data, &with_p)
+            .unwrap()
+            .contains("p = 0.003 **"));
         // A two-sample STRUCT for two groups.
         let two = r#"[{"g":"a","y":1.0},{"g":"a","y":1.4},{"g":"b","y":2.1},{"g":"b","y":2.6}]"#;
         let svg = go(
@@ -930,7 +940,7 @@ mod tests {
             r#"{"value":"y","factor":"g","kind":"violin","tests":{"p_value":0.02,"method":"Welch t-test"}}"#,
         )
         .unwrap();
-        assert!(svg.contains("Welch t-test") && svg.contains("p = 0.02 *"));
+        assert!(!svg.contains("Welch t-test") && svg.contains(">*<"));
         let e = go("compare", two, r#"{"value":"y"}"#)
             .unwrap_err()
             .to_string();
@@ -954,9 +964,8 @@ mod tests {
             {"term":"x2","x":1,"partial_residual":0.1,"component":0.2,"x_residual":-1,"y_residual":0.2},
             {"term":"x2","x":2,"partial_residual":0.3,"component":0.4,"x_residual":0,"y_residual":0.0},
             {"term":"x2","x":3,"partial_residual":0.7,"component":0.6,"x_residual":1,"y_residual":-0.1}]"#;
-        assert!(go("partial", pr, "{}")
-            .unwrap()
-            .contains("Component + residual"));
+        let cr = go("partial", pr, "{}").unwrap();
+        assert!(cr.contains("component + residual") && !cr.contains("Component + residual plots"));
         let av = go("partial", pr, r#"{"kind":"added_variable"}"#).unwrap();
         assert!(av.contains("slope"), "slope in the panel title");
         assert!(go("partial", pr, r#"{"kind":"nope"}"#).is_err());
@@ -992,7 +1001,10 @@ mod tests {
             {"curve_type":"km","model_id":"B","x":3,"y":0.7,"y_low":0.5,"y_high":0.9,"n_censor":0,"n_risk":8}]"#;
         let r = crate::render_spec_checked(&format!(r#"{{"plot":"curve","rows":{km}}}"#)).unwrap();
         assert!(
-            r.contains("Kaplan-Meier") && !r.contains("data-warnings"),
+            r.contains("number at risk")
+                && r.contains("survival probability")
+                && !r.contains("Kaplan-Meier")
+                && !r.contains("data-warnings"),
             "{r}"
         );
         let cv = r#"[{"curve_type":"lambda_cv","x":0.1,"y":2.0,"y_low":1.8,"y_high":2.2,"is_min":true,"is_1se":false},

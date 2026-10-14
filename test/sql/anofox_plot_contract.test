@@ -16,9 +16,10 @@ CREATE TABLE coefs AS SELECT * FROM (VALUES
   ('ridge', '(Intercept)', 1.1, 0.78, 1.42), ('ridge', 'price', -0.41, -0.57, -0.25)
 ) t(model_id, term, estimate, conf_low, conf_high);
 
-# The whole row is passed: one SVG, a horizontal (flipped) forest.
+# The whole row is passed: one SVG, a horizontal forest — the estimate runs
+# along a continuous x axis (data-xdomain), the terms down the y axis.
 query I
-SELECT anofox_plot_terms(c) LIKE '<svg%data-flip="true"%' FROM coefs c;
+SELECT anofox_plot_terms(c) LIKE '<svg%data-xdomain="%' FROM coefs c;
 ----
 true
 
@@ -57,8 +58,10 @@ statement ok
 CREATE TABLE pred AS SELECT i AS x, CASE WHEN i < 8 THEN i + 0.5 END AS y, i::DOUBLE AS yhat,
   i - 1.0 AS yhat_lower, i + 1.0 AS yhat_upper, i < 6 AS is_training FROM range(10) r(i);
 
+# No split legend: each split boundary is a dashed vertical line, labelled
+# with the split it opens (train|hold-out at 5.5, hold-out|forecast at 7.5).
 query I
-SELECT anofox_plot_prediction(p) LIKE '<svg%>future</text>%>test</text>%>train</text>%' FROM pred p;
+SELECT anofox_plot_prediction(p) LIKE '<svg%stroke-dasharray="6,3" data-x="5.5"%> hold-out</text>%stroke-dasharray="6,3" data-x="7.5"%> forecast</text>%' FROM pred p;
 ----
 true
 
@@ -111,8 +114,9 @@ SELECT anofox_plot_curve(c) FROM (VALUES ('spiral', 1.0, 2.0)) c(curve_type, x, 
 unknown curve_type 'spiral'
 
 # ── summary ──────────────────────────────────────────────────────────────────
+# One panel per metric, headed by the humanised metric name and its range.
 query I
-SELECT anofox_plot_summary(s) LIKE '<svg%>RMSE</text>%' FROM (VALUES
+SELECT anofox_plot_summary(s) LIKE '<svg%>RMSE  (Δ = 0.1)</text>%>0.81</text>%' FROM (VALUES
   ('ols', 'r2', 0.81), ('ridge', 'r2', 0.79), ('ols', 'rmse', 1.9), ('ridge', 'rmse', 2.0)) s(model_id, metric, value);
 ----
 true
@@ -142,9 +146,9 @@ SELECT anofox_plot_tests(t) LIKE '<svg%p = 0.003 **%' FROM tests t;
 ----
 true
 
-# anofox_plot dispatches a test table too.
+# anofox_plot dispatches a test table too: the comparison forest.
 query I
-SELECT anofox_plot(t) LIKE '%Tukey%' FROM tests t;
+SELECT anofox_plot(t) LIKE '<svg%>difference (CI)</text>%>b − a</text>%>p = 0.003 **</text>%' FROM tests t;
 ----
 true
 
@@ -157,20 +161,28 @@ statement ok
 CREATE TABLE obs3 AS SELECT CASE i % 3 WHEN 0 THEN 'a' WHEN 1 THEN 'b' ELSE 'c' END AS g,
   (i % 3) * 0.8 + sin(i) AS y FROM range(30) r(i);
 
-# The tests as a LIST subquery …
+# The tests as a LIST subquery … brackets labelled with stars by default,
 query I
 SELECT anofox_plot_compare(r, value := 'y', factor := 'g', tests := (SELECT list(t) FROM tests t))
-  LIKE '<svg%data-series="b-a"%p = 0.003 **%' FROM obs3 r;
+  LIKE '<svg%data-x="1 vs 2" data-series="b-a"%>**</text>%>*</text>%>ns</text>%' FROM obs3 r;
+----
+true
+
+# … or with the p-value (label := 'p').
+query I
+SELECT anofox_plot_compare(r, value := 'y', factor := 'g', label := 'p', tests := (SELECT list(t) FROM tests t))
+  LIKE '<svg%data-series="b-a"%>p = 0.003 **</text>%>p = 0.41</text>%' FROM obs3 r;
 ----
 true
 
 # … or as a literal LIST of STRUCTs; violin; ns hidden.
-query I
-SELECT anofox_plot_compare(r, value := 'y', factor := 'g', kind := 'violin', hide_ns := true,
-  tests := [{'group1': 'a', 'group2': 'b', 'p_adj': 0.01}, {'group1': 'a', 'group2': 'c', 'p_adj': 0.4}])
-  LIKE '%p = 0.01 **%' FROM obs3 r;
+query II
+SELECT svg LIKE '<svg%data-x="1 vs 2"%>**</text>%', svg LIKE '%data-x="1 vs 3"%' FROM (
+  SELECT anofox_plot_compare(r, value := 'y', factor := 'g', kind := 'violin', hide_ns := true,
+    tests := [{'group1': 'a', 'group2': 'b', 'p_adj': 0.01}, {'group1': 'a', 'group2': 'c', 'p_adj': 0.4}]) AS svg
+  FROM obs3 r);
 ----
-true
+true	false
 
 statement error
 SELECT anofox_plot_compare(r, value := 'y') FROM obs3 r;
@@ -183,14 +195,16 @@ CREATE TABLE pres AS SELECT CASE WHEN i < 20 THEN 'x1' ELSE 'x2' END AS term, (i
   (i % 20) * 0.5 + sin(i) AS partial_residual, (i % 20) * 0.5 AS component,
   (i % 20) - 9.5 AS x_residual, ((i % 20) - 9.5) * 0.5 + sin(i) AS y_residual FROM range(40) r(i);
 
+# One panel per term: component + residual on y; added-variable panels carry
+# the fitted slope in their heading.
 query II
-SELECT anofox_plot_partial(p) LIKE '<svg%Component + residual%',
-       anofox_plot_partial(p, kind := 'added_variable') LIKE '<svg%slope%' FROM pres p;
+SELECT anofox_plot_partial(p) LIKE '<svg%>component + residual</text>%>x1</text>%>component + residual</text>%>x2</text>%',
+       anofox_plot_partial(p, kind := 'added_variable') LIKE '<svg%>x1 (slope = %</text>%>x2 (slope = %</text>%' FROM pres p;
 ----
 true	true
 
 query I
-SELECT anofox_plot(p) LIKE '%Component + residual%' FROM pres p;
+SELECT anofox_plot(p) LIKE '<svg%>component + residual</text>%>x2</text>%' FROM pres p;
 ----
 true
 
@@ -226,7 +240,7 @@ true
 
 # ── anofox_plot: dispatch on the column signature ────────────────────────────
 query I
-SELECT anofox_plot(c) LIKE '<svg%data-flip="true"%' FROM coefs c;
+SELECT anofox_plot(c) LIKE '<svg%data-xdomain="%' FROM coefs c;
 ----
 true
 

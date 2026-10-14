@@ -4,6 +4,7 @@
 import init, {
   plan,
   render_panel,
+  render_contract,
   map_bounds,
   roles_json,
   format_number,
@@ -749,10 +750,43 @@ SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP B
 // Present the examples as a learning path: start → the visual vocabulary →
 // making it interactive → tables → page layout → the advanced live-forecasting
 // extension last (so a missing extension never blocks the core demos).
-const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", "Forecasting"];
-SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
+const STATS_GROUP = "Statistics (anofox-statistics)";
+const GROUP_ORDER = ["Start here", STATS_GROUP, "Charts", "Interactivity", "Tables", "Layout", "Forecasting"];
+const sortGroups = () =>
+  SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
+sortGroups();
 
 const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g.items)));
+
+// Examples kept in their own files under web/examples/ — the single source of
+// a dashboard that is also run natively (examples/statistics-showcase/
+// showcase.sql links to it). Fetched once at boot; a missing file just leaves
+// the example out.
+const FILE_SAMPLES = [
+  {
+    group: STATS_GROUP,
+    name: "Statistics showcase: property market (live anofox-statistics)",
+    url: "examples/statistics-showcase.sql",
+  },
+];
+async function loadFileSamples() {
+  await Promise.all(
+    FILE_SAMPLES.map(async (f) => {
+      try {
+        const r = await fetch(f.url);
+        if (!r.ok) return;
+        const sql = await r.text();
+        let g = SAMPLE_GROUPS.find((x) => x.group === f.group);
+        if (!g) SAMPLE_GROUPS.push((g = { group: f.group, items: {} }));
+        g.items[f.name] = sql;
+        SAMPLES[f.name] = sql;
+      } catch (_) {
+        /* offline / file:// — skip the example */
+      }
+    })
+  );
+  sortGroups();
+}
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => ($("status").textContent = t);
@@ -869,15 +903,58 @@ async function ensureGeo() {
   return geoReady;
 }
 
+// The anofox DuckDB-Wasm extensions (anofox_forecast, anofox_statistics) are
+// served same-origin from web/localext/<duckdb version>/<platform>/ — fixed
+// copies of the get.erpl.io builds made by scripts/fetch-wasm-extensions.sh
+// (get.erpl.io sends no CORS headers, and its v1.5.6 files carry a duplicated
+// signature section, DataZooDE/anofox-statistics#192).
+// TODO: INSTALL … FROM 'https://get.erpl.io' once #192 and CORS are fixed.
+// Each extension loads once, on first use by a statement (memoised; a failure
+// is remembered so we don't re-hammer the server for every panel).
+const extReady = {};
+async function ensureExtension(name) {
+  if (backend === "live") return; // the native backend brings its own extensions
+  if (!conn) throw new Error("in-browser DuckDB not ready");
+  if (!extReady[name]) {
+    extReady[name] = (async () => {
+      // json (from the default repo) is needed by some anofox macros.
+      try {
+        await conn.query("INSTALL json; LOAD json;");
+      } catch (_) {
+        /* usually bundled */
+      }
+      const repo = new URL("localext", document.baseURI).href.replace(/\/$/, "");
+      await conn.query(`SET custom_extension_repository='${repo}';`);
+      try {
+        await conn.query(`INSTALL ${name};`);
+        await conn.query(`LOAD ${name};`);
+      } finally {
+        // Restore the default repo so other autoloaded extensions (parquet,
+        // spatial, …) still resolve — ours only hosts the anofox extensions.
+        await conn.query("RESET custom_extension_repository;");
+      }
+    })().catch((e) => {
+      throw new Error(
+        `Couldn't load the ${name} wasm extension in the browser (expected at ` +
+          `localext/<version>/<platform>/${name}.duckdb_extension.wasm — run ` +
+          `scripts/fetch-wasm-extensions.sh). Underlying error: ` +
+          (e.message || e)
+      );
+    });
+  }
+  return extReady[name];
+}
+
+// Statements that call anofox_statistics (its producers, fit/test aggregates).
+const STATS_RE =
+  /\b(?:\w+_(?:tidy|glance|augment|prediction|effects|partial_residuals|rolling_tidy|path|cv|fit_predict)_by|quantile_process_by|(?:roc|pr|calibration)_curve_by|kaplan_meier_by|p?acf_by|tukey_hsd_by|pairwise_t_test_by|dunn_test_by|\w+_fit_agg|\w+_fit_predict_agg|\w+_test_agg|\w+_fit_predict|anofox_contract_version|anofox_statistics)\b/i;
+
 // Forecast example: load a small M5 parquet into the browser DB, and (for
-// statements that need it) INSTALL/LOAD the anofox-forecast COMMUNITY extension
-// so ts_forecast_by() runs client-side. Needs a v1.5.x DuckDB-Wasm engine
-// (matches the community wasm build). The parquet always loads; the extension
-// step is separate because its wasm build currently fails to LOAD in the browser
-// (DataZooDE/anofox-forecast#239) — we surface that clearly instead of a
-// cryptic "function does not exist".
+// statements that need it) load anofox_forecast so ts_forecast_by() runs
+// client-side. The parquet always loads; the extension step is separate so a
+// load failure is reported clearly instead of a cryptic "function does not
+// exist".
 let fcParquet = null;
-let fcExt = null;
 async function ensureForecast(sql) {
   if (backend === "live") return; // native backend resolves paths + extension itself
   if (!db) throw new Error("in-browser DuckDB not ready");
@@ -892,39 +969,8 @@ async function ensureForecast(sql) {
     });
   }
   await fcParquet;
-  // 2. Load the community extension only for statements that use it (memoised;
-  //    a failure is remembered so we don't re-hammer the CDN each panel).
-  if (/\bts_\w+\b|\banofox_forecast\b/i.test(sql)) {
-    if (!fcExt) {
-      fcExt = (async () => {
-        // json (from the default repo) is needed by some anofox macros
-        // (e.g. ts_mstl_decomposition_by parses JSON params).
-        try {
-          await conn.query("INSTALL json; LOAD json;");
-        } catch (_) {
-          /* usually bundled */
-        }
-        // Load our locally-built wasm extension (served from web/localext/ in the
-        // repo layout <version>/<platform>/). The signed community build doesn't
-        // link against this runtime (#239); this local build's imports do.
-        const repo = new URL("localext", document.baseURI).href.replace(/\/$/, "");
-        await conn.query(`SET custom_extension_repository='${repo}';`);
-        await conn.query("INSTALL anofox_forecast;");
-        await conn.query("LOAD anofox_forecast;");
-        // Restore the default repo so other autoloaded extensions (parquet,
-        // spatial, …) still resolve — our repo only hosts anofox_forecast.
-        await conn.query("RESET custom_extension_repository;");
-      })().catch((e) => {
-        throw new Error(
-          "Couldn't load the anofox_forecast wasm extension in the browser. The " +
-            "parquet is loaded and queryable; run ts_forecast_by() on a native backend. " +
-            "Underlying error: " +
-            (e.message || e)
-        );
-      });
-    }
-    await fcExt;
-  }
+  // 2. The extension, only for statements that use it.
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureExtension("anofox_forecast");
 }
 
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
@@ -934,6 +980,7 @@ async function ensureForecast(sql) {
 async function runSql(sql, page) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
+  if (STATS_RE.test(sql)) await ensureExtension("anofox_statistics");
   if (servedMode) {
     // Capture a SET VARIABLE (never sent as SQL) …
     const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
@@ -1006,15 +1053,16 @@ async function boot() {
     } catch (_) {}
 
   if (backend !== "live") {
-    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm");
+    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm");
     const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
     const workerUrl = URL.createObjectURL(
       new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
     );
     db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-    // Allow unsigned extensions so we can load our locally-built anofox_forecast
-    // wasm (the signed community build doesn't link against this runtime — #239).
+    // Allow unsigned extensions: the anofox wasm extensions are served from
+    // web/localext/ (fixed copies of the get.erpl.io builds — see
+    // scripts/fetch-wasm-extensions.sh).
     try {
       await db.open({ allowUnsignedExtensions: true });
     } catch (_) {
@@ -1034,6 +1082,7 @@ async function boot() {
   }
 
   // Sidebar (dashboard list) + app-shell controls
+  await loadFileSamples();
   renderSidebar();
   $("side-new").onclick = () => loadDash("", "");
   $("save").onclick = saveDash;
@@ -2106,6 +2155,52 @@ async function run(fresh = true) {
         nextHeight = 0;
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
+      } else if (s.contract) {
+        // A contract plot call (SELECT anofox_plot_terms(t) FROM … t): the planner
+        // rewrote it to return the rows (+ named args) as JSON; render each
+        // result row (one per GROUP BY key) with the contract renderer.
+        const rows = JSON.parse(await runSql(s.sql));
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const title = titleOf(s, JSON.stringify(rows.slice(0, 1)));
+        const mk = (caption) => {
+          const fig = document.createElement("figure");
+          fig.className = "panel contract-panel";
+          if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+          if (nextHeight) fig.style.minHeight = nextHeight + "px";
+          if (caption) fig.appendChild(mkTitle(caption));
+          return fig;
+        };
+        if (!rows.length) {
+          const fig = mk(title);
+          fig.appendChild(mkNoData());
+          container.appendChild(fig);
+          panels++;
+        }
+        for (const r of rows) {
+          const fig = mk(contractCaption(title, s.contract, r));
+          const ph = nextHeight || contractHeight(s.contract.macro);
+          const holder = document.createElement("div");
+          holder.className = "panel-svg";
+          const rw = Math.max(300, span * 100);
+          const data = contractCell(r, s.contract.rows, "[]");
+          holder.innerHTML = render_contract(
+            s.contract.macro,
+            data,
+            contractCell(r, s.contract.args, "{}"),
+            rw,
+            ph,
+            dpPrimary || ""
+          );
+          const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
+          if (warn) console.warn(`${s.contract.macro}: ${warn}`);
+          fig.appendChild(holder);
+          // Data view (toolbox) lists the rows the plot was drawn from.
+          fig._dp = { rows: data, roles: [], ph, isMap: false, contract: true };
+          container.appendChild(fig);
+          panels++;
+        }
+        nextSpan = 0;
+        nextHeight = 0;
       } else if (role(s, "PAGED")) {
         // SQL-driven pagination: only ONE page (+ a COUNT) is fetched, so the
         // browser never holds the whole table. LIMIT/OFFSET + ORDER BY run in
@@ -2422,6 +2517,10 @@ async function run(fresh = true) {
 // "draw" left-to-right (stroke-dashoffset). Skipped for cross-filter re-runs so
 // interactions feel instant, and honours prefers-reduced-motion via CSS.
 function animateIn() {
+  // Reduced motion: no draw-in at all (the CSS drops the animation, which would
+  // otherwise leave every line at its hidden start dash offset).
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (still) return;
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     panel.classList.remove("dp-in");
     void panel.offsetWidth; // reflow so the animation restarts
@@ -2617,6 +2716,33 @@ function makeControl(meta, bar) {
   return finalizeControl(wrap, bar);
 }
 
+// A contract panel's payload cell (`c{idx}`) as JSON text: DuckDB-Wasm returns
+// the JSON column as a string, a native backend may return it nested.
+function contractCell(row, idx, empty) {
+  const v = row ? row["c" + idx] : null;
+  if (v == null) return empty;
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
+// A contract panel's caption: the ::TITLE plus its GROUP BY key values (one
+// plot per key) — "Coefficients — ols", or just either.
+function contractCaption(title, contract, row) {
+  const keys = (contract.groups || [])
+    .map(([i]) => (row ? row["c" + i] : null))
+    .filter((v) => v != null && v !== "")
+    .map((v) => String(v).replace(/^"|"$/g, ""));
+  const key = keys.join(" · ");
+  if (title && key) return `${title} — ${key}`;
+  return title || key || "";
+}
+
+// Default render height of a contract plot (::HEIGHT overrides): the 2×2
+// diagnostics need room, single panels match the chart default.
+function contractHeight(macro) {
+  const H = { anofox_plot_diagnostics: 560, anofox_plot_summary: 360, anofox_plot_terms: 340 };
+  return H[macro] || 320;
+}
+
 // A per-panel title bar from a ::TITLE column (constant across the result).
 function titleOf(s, rowsJson) {
   const tr = s.roles.find((r) => r[1] === "TITLE");
@@ -2760,6 +2886,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
   cols.forEach((c) => {
     const th = document.createElement("th");
     th.style.cursor = "pointer";
+    // Numeric cells are right-aligned (below); align their header the same way
+    // so the label sits over the numbers rather than over the gap before them.
+    if (numeric[c] && !["BADGE", "SPARKLINE"].includes(colFmt[c])) th.style.textAlign = "right";
     th.onclick = (e) => {
       if (server) {
         e.stopPropagation();

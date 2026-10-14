@@ -60,7 +60,6 @@ const XYC: &str = "anofox_render(json_object('rows', to_json(list({c0: x, c1: y,
 'roles', json_array(json_array(0, 'XAXIS'), json_array(1, kind), json_array(2, 'CATEGORY')), \
 'width', width, 'height', height))";
 
-const SIZE: &[(&str, &str)] = &[("width", "640"), ("height", "400")];
 const CONTRACT_TAG: (&str, &str) = ("anofox.contract", "1");
 
 macro_rules! contract_body {
@@ -144,12 +143,15 @@ data into categories.",
     MacroSpec {
         name: "anofox_plot_terms",
         params: &["tbl"],
-        named: SIZE,
-        body: contract_body!("terms"),
+        named: &[("highlight", "NULL"), ("lambda_min", "NULL"), ("lambda_1se", "NULL"), ("facet", "NULL"), ("reference", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("terms", "'highlight', highlight, 'lambda_min', lambda_min, 'lambda_1se', lambda_1se, 'facet', facet, 'reference', reference, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Coefficient plot of a `terms` (tidy) table, aggregated over its rows: pass the row, \
 `SELECT anofox_plot_terms(c) FROM coefs c`. Columns: term, estimate, conf_low, conf_high (optional), model_id \
 (several models are dodged and coloured). With index_value (+ index_name) it draws each term's estimate and band \
-over the index instead — regularisation path, quantile process, rolling coefficients — one panel per term.",
+over the index instead: a λ path in one panel with direct labels (highlight := [...], lambda_min := / lambda_1se := \
+mark λ.min / λ.1se, facet := true for a panel per term), a LARS path on the |β|₁ fraction, the quantile process \
+and rolling coefficients (window_end dates) per term with a full-sample reference (reference := a terms LIST). \
+title := / x_label := / y_label := label the chart (no inner title by default).",
         example: "SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8), ('x2', -0.3, -0.7, 0.1)) \
 c(term, estimate, conf_low, conf_high)",
         tags: &[("anofox.consumes", "terms"), CONTRACT_TAG],
@@ -157,16 +159,10 @@ c(term, estimate, conf_low, conf_high)",
     MacroSpec {
         name: "anofox_plot_prediction",
         params: &["tbl"],
-        named: &[
-            ("x", "NULL"),
-            ("y", "NULL"),
-            ("facet", "NULL"),
-            ("width", "640"),
-            ("height", "400"),
-        ],
-        body: contract_body!("prediction", "'x', x, 'y', y, 'facet', facet"),
+        named: &[("x", "NULL"), ("y", "NULL"), ("facet", "NULL"), ("band", "NULL"), ("kind", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("prediction", "'x', x, 'y', y, 'facet', facet, 'band', band, 'kind', kind, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Fit / forecast plot of a `prediction` table: observed y as points, the yhat line and the \
-yhat_lower..yhat_upper band over x (or ds), coloured by split (train/test/future; derived from is_training or a \
+yhat_lower..yhat_upper band over x (or ds), split boundaries as labelled vertical lines (train/test/future; derived from is_training or a \
 missing y), or by model_id/model_name when there are several models. x := / y := name other columns (e.g. \
 x := 'x1' for a *_fit_predict_by output); several `id` series become panels (facet := overrides).",
         example: "SELECT anofox_plot_prediction(p) FROM (VALUES (1, 1.0, 1.1, 0.9, 1.3), (2, 2.0, 1.9, 1.6, 2.2), \
@@ -176,8 +172,8 @@ x := 'x1' for a *_fit_predict_by output); several `id` series become panels (fac
     MacroSpec {
         name: "anofox_plot_curve",
         params: &["tbl"],
-        named: SIZE,
-        body: contract_body!("curve"),
+        named: &[("base_rate", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("curve", "'base_rate', base_rate, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot a `curve` table; the geom follows curve_type: roc/calibration (line + diagonal), pr/pdp/lift \
 (line), km (step), acf/pacf (lollipops + bounds from y_low/y_high), lambda_cv (point ± y_low..y_high on a log x), \
 qq (points + identity). One curve_type per call (GROUP BY curve_type); several model_id/series are coloured.",
@@ -188,8 +184,8 @@ r(curve_type, x, y)",
     MacroSpec {
         name: "anofox_plot_summary",
         params: &["tbl"],
-        named: &[("metrics", "NULL"), ("width", "640"), ("height", "400")],
-        body: contract_body!("summary", "'metrics', metrics"),
+        named: &[("metrics", "NULL"), ("baseline", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("summary", "'metrics', metrics, 'baseline', baseline, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Model comparison from a `summary` (glance) table: a grid of small panels, one per metric \
 with its own scale, the models (model_id, or model_id · id for several groups) on the vertical axis, the value as \
 a dot (± conf_low..conf_high) with its number beside it and the best model highlighted for R², AIC, BIC, RMSE, .... \
@@ -202,13 +198,8 @@ Bookkeeping metrics (n_observations, n_features, iterations) are left out unless
     MacroSpec {
         name: "anofox_plot_obs",
         params: &["tbl"],
-        named: &[
-            ("kind", "'resid_fitted'"),
-            ("label_top", "3"),
-            ("width", "640"),
-            ("height", "400"),
-        ],
-        body: contract_body!("obs", "'kind', kind, 'label_top', label_top"),
+        named: &[("kind", "'resid_fitted'"), ("label_top", "3"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("obs", "'kind', kind, 'label_top', label_top, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "One regression diagnostic panel from an `obs` (augment) table. kind: resid_fitted (residual vs \
 fitted + loess), qq (normal QQ of std_residual), scale_location (sqrt|std_residual| vs fitted), leverage \
 (std_residual vs leverage, 2p/n line when n_params is set) or cooks (Cook's distance by row_id with the 4/n line). \
@@ -220,8 +211,8 @@ o(row_id, fitted, residual)",
     MacroSpec {
         name: "anofox_plot_diagnostics",
         params: &["tbl"],
-        named: &[("label_top", "3"), ("width", "820"), ("height", "640")],
-        body: contract_body!("diagnostics", "'label_top', label_top"),
+        named: &[("label_top", "3"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "820"), ("height", "640")],
+        body: contract_body!("diagnostics", "'label_top', label_top, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "The plot.lm 2x2 from an `obs` (augment) table as one SVG: residuals vs fitted, normal QQ, \
 scale-location and residuals vs leverage (or Cook's distance).",
         example: "SELECT anofox_plot_diagnostics(o) FROM (VALUES (1, 1.0, 0.1), (2, 2.0, -0.3), (3, 3.0, 0.2), \
@@ -231,8 +222,8 @@ scale-location and residuals vs leverage (or Cook's distance).",
     MacroSpec {
         name: "anofox_plot_tests",
         params: &["tbl"],
-        named: &[("alpha", "0.05"), ("value", "NULL"), ("width", "640"), ("height", "400")],
-        body: contract_body!("tests", "'alpha', alpha, 'value', value"),
+        named: &[("alpha", "0.05"), ("value", "NULL"), ("label", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("tests", "'alpha', alpha, 'value', value, 'label', label, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Comparison forest of a `test` table (tukey_hsd_by, pairwise_t_test_by, dunn_test_by, or an \
 unnested *_test_agg STRUCT): one row per test (test_id, else 'group1 vs group2', else the group / method), the \
 estimate with conf_low..conf_high when the test has one, else the statistic, else -log10(p), coloured by \
@@ -247,27 +238,15 @@ SELECT anofox_plot_tests(s) FROM (SELECT tukey_hsd_agg(y, g) AS r FROM t) s.",
     MacroSpec {
         name: "anofox_plot_compare",
         params: &["tbl"],
-        named: &[
-            ("value", "NULL"),
-            ("factor", "NULL"),
-            ("tests", "NULL"),
-            ("kind", "'box'"),
-            ("hide_ns", "false"),
-            ("label", "NULL"),
-            ("width", "640"),
-            ("height", "400"),
-        ],
-        body: contract_body!(
-            "compare",
-            "'value', value, 'factor', factor, 'tests', tests, 'kind', kind, 'hide_ns', hide_ns, 'label', label"
-        ),
+        named: &[("value", "NULL"), ("factor", "NULL"), ("tests", "NULL"), ("kind", "'box'"), ("hide_ns", "NULL"), ("label", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("compare", "'value', value, 'factor', factor, 'tests', tests, 'kind', kind, 'hide_ns', hide_ns, 'label', label, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Compare a numeric column across groups with significance brackets (ggpubr's \
 stat_pvalue_manual): pass the raw rows, value := '<numeric column>', factor := '<group column>' and \
 tests := a LIST of test STRUCTs — a subquery (SELECT list(t) FROM tukey_hsd_by(...) t WHERE ...), or the \
 aggregate itself (tukey_hsd_agg(y, g), pairwise_t_test_agg, dunn_test_agg; a two-sample STRUCT such as \
 t_test_agg(y, g) for two groups). kind: box (default), violin or points (jitter + group means). Brackets are \
 labelled '{p.format} {p.signif}' from p_adj (else p_value); label := '{p.signif}' / 'p = {p_adj}' changes it, \
-hide_ns := true drops non-significant pairs.",
+hide_ns drops non-significant pairs (default: above 3 groups); label := 'stars' | 'p' | a template.",
         example: "SELECT anofox_plot_compare(r, value := 'y', factor := 'g', tests := [{'group1': 'a', 'group2': 'b', \
 'p_adj': 0.01}]) FROM (VALUES ('a', 1.0), ('a', 1.4), ('b', 2.1), ('b', 2.6)) r(g, y)",
         tags: &[("anofox.consumes", "test"), CONTRACT_TAG],
@@ -275,8 +254,8 @@ hide_ns := true drops non-significant pairs.",
     MacroSpec {
         name: "anofox_plot_partial",
         params: &["tbl"],
-        named: &[("kind", "'component'"), ("width", "640"), ("height", "400")],
-        body: contract_body!("partial", "'kind', kind"),
+        named: &[("kind", "'component'"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("partial", "'kind', kind, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Partial-residual plots of a <model>_partial_residuals_by table, one panel per term. \
 kind := 'component' (component + residual: partial_residual over x, the term's component line and a loess) or \
 'added_variable' (y_residual over x_residual with the least-squares line through the origin, whose slope is the \
@@ -288,8 +267,8 @@ term's coefficient).",
     MacroSpec {
         name: "anofox_plot",
         params: &["tbl"],
-        named: SIZE,
-        body: contract_body!("auto"),
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
 metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests. Use the \
@@ -319,7 +298,11 @@ mod tests {
             .unwrap();
         assert!(t
             .create_sql()
-            .starts_with("(tbl, width := 640, height := 400) AS anofox_render("));
+            .starts_with("(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL"));
+        let p = MACROS.iter().find(|m| m.name == "anofox_plot").unwrap();
+        assert!(p.create_sql().starts_with(
+            "(tbl, title := NULL, x_label := NULL, y_label := NULL, width := 640, height := 400) AS anofox_render("
+        ));
     }
 
     #[test]
@@ -330,7 +313,7 @@ mod tests {
             assert!(!m.description.is_empty() && m.example.contains(m.name));
             // The C++ build registers macros without DuckDB's fixed-size
             // DefaultMacro arrays (see csrc/), so this is a readability cap.
-            assert!(m.params.len() + m.named.len() <= 10, "{}", m.name);
+            assert!(m.params.len() + m.named.len() <= 14, "{}", m.name);
         }
     }
 }

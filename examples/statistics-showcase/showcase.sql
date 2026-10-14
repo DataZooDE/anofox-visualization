@@ -1,0 +1,1 @@
+../../web/examples/statistics-showcase.sql

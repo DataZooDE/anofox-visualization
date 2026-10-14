@@ -198,6 +198,43 @@ where
             }
         }
 
+        // A contract plot call: render every result row (one plot per group).
+        if let Some(cp) = &p.contract {
+            if rows.is_empty() {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "empty-panel",
+                    message: format!(
+                        "{}() returned no rows — this panel will be blank",
+                        cp.macro_name
+                    ),
+                    sql: short.clone(),
+                });
+            }
+            for (label, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+                if let Err(e) = r {
+                    let at = if label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{label}]")
+                    };
+                    diags.push(Diagnostic {
+                        severity: Severity::Error,
+                        stmt,
+                        code: "render-error",
+                        message: one_line(&format!("{}{at}: {e}", cp.macro_name)),
+                        sql: short.clone(),
+                    });
+                }
+            }
+            if opts.design {
+                rendered_panels += 1;
+                flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
+            }
+            continue;
+        }
+
         // Layout directives don't render a chart — nothing to check.
         if roles::is_directive_panel(&p.roles) {
             continue;
