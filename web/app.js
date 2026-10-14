@@ -2517,6 +2517,10 @@ async function run(fresh = true) {
 // "draw" left-to-right (stroke-dashoffset). Skipped for cross-filter re-runs so
 // interactions feel instant, and honours prefers-reduced-motion via CSS.
 function animateIn() {
+  // Reduced motion: no draw-in at all (the CSS drops the animation, which would
+  // otherwise leave every line at its hidden start dash offset).
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (still) return;
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     panel.classList.remove("dp-in");
     void panel.offsetWidth; // reflow so the animation restarts

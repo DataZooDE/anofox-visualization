@@ -268,7 +268,7 @@ WHERE term <> '(Intercept)';
 SELECT '2 Compare'::TAB;
 
 SELECT 12::COL;
-SELECT 'Six estimators of the same store-sales model, compared on their **glance** statistics (`<model>_glance_by`, the `summary` schema): one panel per metric, one dot per model. **What to look for:** higher **R²** and lower **AIC / BIC / residual standard error** are better — but the differences here are tiny. OLS, Huber, ridge and Theil–Sen fit equally well; the elastic net (a strong penalty) gives up fit for sparsity. Information criteria are only reported by likelihood-based fits, so some models have no AIC dot.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'Five estimators of the same store-sales model, compared on their **glance** statistics (`<model>_glance_by`, the `summary` schema): one panel per metric, one dot per model. **What to look for:** higher **R²** and lower **AIC / BIC / residual standard error** are better — but the differences here are tiny. OLS, Huber, ridge and Theil–Sen fit equally well; the elastic net (a strong penalty) gives up fit for sparsity. Information criteria are only reported by likelihood-based fits, so some models have no AIC dot.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 12::COL;
 SELECT 420::HEIGHT;
@@ -278,8 +278,7 @@ FROM (SELECT * FROM ols_glance_by('nw_sales', chain, sales, [price, promo, seaso
       UNION ALL BY NAME SELECT * FROM huber_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t])
       UNION ALL BY NAME SELECT * FROM ridge_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'alpha': 5.0})
       UNION ALL BY NAME SELECT * FROM theil_sen_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t])
-      UNION ALL BY NAME SELECT * FROM elasticnet_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'alpha': 0.5})
-      UNION ALL BY NAME SELECT * FROM quantile_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'tau': 0.5})) s;
+      UNION ALL BY NAME SELECT * FROM elasticnet_glance_by('nw_sales', chain, sales, [price, promo, season, temp, t], options := {'alpha': 0.5})) s;
 
 SELECT 12::COL;
 SELECT 'Glance statistics'::TITLE, model_id AS "Model" ::TABLE,
@@ -326,7 +325,7 @@ FROM ols_partial_residuals_by('nw_sales', chain, sales, [price, promo, season, t
 SELECT 12::COL;
 SELECT 'Residual tests — the outliers break normality, the variance is fine'::TITLE,
        question AS "Question" ::TABLE, method AS "Test", round(statistic, 3) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value",
+       printf('%.2g', p_value) AS "p-value" ::PLAIN,
        CASE WHEN p_value < 0.05 THEN 'reject' ELSE 'ok' END AS "at 5%" ::BADGE
 FROM nw_tests WHERE model_id = 'sales';
 
@@ -339,17 +338,17 @@ SELECT 'The online shop''s weekly sales, modelled on price, promo, season and tr
 SELECT 12::COL;
 SELECT 400::HEIGHT;
 SELECT anofox_plot_prediction(p), 'Online shop — fit, 26-week hold-out and 13-week forecast (90% band)'::TITLE
-FROM ols_prediction_by('nw_online', chan, t, y, [price, promo, season, t], level := 0.9, split := split) p;
+FROM ols_prediction_by('nw_online', chan, week, y, [price, promo, season, t], level := 0.9, split := split) p;
 
 SELECT 12::COL;
 SELECT 360::HEIGHT;
 SELECT anofox_plot_prediction(p), 'Three estimators on the hold-out and forecast weeks — OLS, Huber and the median line'::TITLE
-FROM (SELECT * FROM ols_prediction_by('nw_online', chan, t, y, [price, promo, season, t], level := 0.9, split := split)
+FROM (SELECT * FROM ols_prediction_by('nw_online', chan, week, y, [price, promo, season, t], level := 0.9, split := split)
       UNION ALL BY NAME
-      SELECT * FROM huber_prediction_by('nw_online', chan, t, y, [price, promo, season, t], level := 0.9, split := split)
+      SELECT * FROM huber_prediction_by('nw_online', chan, week, y, [price, promo, season, t], level := 0.9, split := split)
       UNION ALL BY NAME
-      SELECT * FROM quantile_prediction_by('nw_online', chan, t, y, [price, promo, season, t], split := split)) p
-WHERE x > 120;
+      SELECT * FROM quantile_prediction_by('nw_online', chan, week, y, [price, promo, season, t], split := split)) p
+WHERE x > (SELECT week FROM nw_online WHERE t = 120);
 
 SELECT 4::COL;
 SELECT anofox_plot_prediction(p), 'Churn probability falls with tenure (logistic)'::TITLE
@@ -445,7 +444,7 @@ GROUP BY curve_type ORDER BY curve_type;
 SELECT 12::COL;
 SELECT 'Autocorrelation tests — both reject independence'::TITLE,
        question AS "Question" ::TABLE, method AS "Test", round(statistic, 3) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value",
+       printf('%.2g', p_value) AS "p-value" ::PLAIN,
        CASE WHEN p_value < 0.05 THEN 'reject' ELSE 'ok' END AS "at 5%" ::BADGE
 FROM nw_tests WHERE model_id = 'online';
 
@@ -497,7 +496,7 @@ GROUP BY series ORDER BY 3;
 
 SELECT 12::COL;
 SELECT 'Log-rank test'::TITLE, question AS "Question" ::TABLE, method AS "Test", round(statistic, 1) AS "χ²" ::PLAIN,
-       df1 AS "df" ::PLAIN, printf('%.2g', p_value) AS "p-value",
+       df1 AS "df" ::PLAIN, printf('%.2g', p_value) AS "p-value" ::PLAIN,
        CASE WHEN p_value < 0.05 THEN 'curves differ' ELSE 'no difference' END AS "at 5%" ::BADGE
 FROM nw_tests WHERE model_id = 'churn';
 
@@ -519,12 +518,12 @@ SELECT method, anofox_plot_tests(t), 'Pairwise differences'::TITLE
 FROM (SELECT * FROM tukey_hsd_by('nw_ab', experiment, order_value, variant)
       UNION ALL BY NAME
       SELECT * FROM pairwise_t_test_by('nw_ab', experiment, order_value, variant, options := {'p_adjust': 'holm'})) t
-GROUP BY method ORDER BY method DESC;
+GROUP BY method ORDER BY method;
 
 SELECT 6::COL;
 SELECT 'Omnibus tests'::TITLE, question AS "Question" ::TABLE, method AS "Test", round(statistic, 2) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value",
-       CASE WHEN p_value < 0.05 THEN 'differ' ELSE 'no difference' END AS "at 5%" ::BADGE
+       printf('%.2g', p_value) AS "p-value" ::PLAIN,
+       CASE WHEN p_value < 0.05 THEN 'differ' ELSE 'same' END AS "at 5%" ::BADGE
 FROM nw_tests WHERE model_id = 'checkout';
 SELECT 6::COL;
 SELECT variant::XAXIS, round(100 * avg(converted), 1)::BARCHART, ''::DATALABELS,
