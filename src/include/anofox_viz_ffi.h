@@ -21,6 +21,8 @@ const char *anofox_viz_macro_field(size_t i, int field);
 /* list: 0 positional params, 1 named params (*second = default SQL),
  * 2 tags (*second = value); NULL past the end. */
 const char *anofox_viz_macro_item(size_t i, int list, size_t j, const char **second);
+/* The anofox integration-contract version (anofox_contract_version()). Static. */
+const char *anofox_viz_contract_version(void);
 #ifdef __cplusplus
 }
 #endif

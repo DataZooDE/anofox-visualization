@@ -18,6 +18,12 @@
 //!   SVG per group (`GROUP BY model_id`), no table-name strings, no
 //!   introspection SQL — works in both builds.
 
+/// The anofox integration-contract version the plot macros consume — what
+/// `anofox_contract_version()` returns. Both builds register that scalar from
+/// this constant (unless another anofox extension, e.g. anofox_statistics,
+/// already did: the function is shared by the whole family).
+pub use crate::contract::CONTRACT_VERSION;
+
 /// One bundled macro.
 #[derive(Debug)]
 pub struct MacroSpec {
@@ -182,12 +188,15 @@ r(curve_type, x, y)",
     MacroSpec {
         name: "anofox_plot_summary",
         params: &["tbl"],
-        named: SIZE,
-        body: contract_body!("summary"),
-        description: "Model comparison from a `summary` (glance) table: one panel per metric, model_id on the \
-vertical axis, value as a dot (± conf_low..conf_high).",
-        example: "SELECT anofox_plot_summary(s) FROM (VALUES ('ols', 'r2', 0.81), ('ridge', 'r2', 0.79)) \
-s(model_id, metric, value)",
+        named: &[("metrics", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("summary", "'metrics', metrics"),
+        description: "Model comparison from a `summary` (glance) table: a grid of small panels, one per metric \
+with its own scale, the models (model_id, or model_id · id for several groups) on the vertical axis, the value as \
+a dot (± conf_low..conf_high) with its number beside it and the best model highlighted for R², AIC, BIC, RMSE, .... \
+Bookkeeping metrics (n_observations, n_features, iterations) are left out unless metrics := ['r_squared', \
+'n_observations', ...] picks the panels.",
+        example: "SELECT anofox_plot_summary(s) FROM (VALUES ('ols', 'r_squared', 0.81), ('ridge', 'r_squared', 0.79), \
+('ols', 'aic', 72.4), ('ridge', 'aic', 75.0)) s(model_id, metric, value)",
         tags: &[("anofox.consumes", "summary"), CONTRACT_TAG],
     },
     MacroSpec {
@@ -220,15 +229,76 @@ scale-location and residuals vs leverage (or Cook's distance).",
         tags: &[("anofox.consumes", "obs"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_tests",
+        params: &["tbl"],
+        named: &[("alpha", "0.05"), ("value", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("tests", "'alpha', alpha, 'value', value"),
+        description: "Comparison forest of a `test` table (tukey_hsd_by, pairwise_t_test_by, dunn_test_by, or an \
+unnested *_test_agg STRUCT): one row per test (test_id, else 'group1 vs group2', else the group / method), the \
+estimate with conf_low..conf_high when the test has one, else the statistic, else -log10(p), coloured by \
+significance at alpha, the (adjusted) p-value and stars beside each row. Several groups (id, model_id or the \
+GROUP BY column of an unnested aggregate) get one panel each. value := 'estimate' | 'statistic' | 'p' overrides \
+the measure. A column holding the aggregate's STRUCT or LIST is expanded: \
+SELECT anofox_plot_tests(s) FROM (SELECT tukey_hsd_agg(y, g) AS r FROM t) s.",
+        example: "SELECT anofox_plot_tests(t) FROM (VALUES ('b-a', 'a', 'b', 1.2, 0.4, 2.0, 0.003), \
+('c-a', 'a', 'c', 0.3, -0.5, 1.1, 0.41)) t(test_id, group1, group2, estimate, conf_low, conf_high, p_adj)",
+        tags: &[("anofox.consumes", "test"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_compare",
+        params: &["tbl"],
+        named: &[
+            ("value", "NULL"),
+            ("factor", "NULL"),
+            ("tests", "NULL"),
+            ("kind", "'box'"),
+            ("hide_ns", "false"),
+            ("label", "NULL"),
+            ("width", "640"),
+            ("height", "400"),
+        ],
+        body: contract_body!(
+            "compare",
+            "'value', value, 'factor', factor, 'tests', tests, 'kind', kind, 'hide_ns', hide_ns, 'label', label"
+        ),
+        description: "Compare a numeric column across groups with significance brackets (ggpubr's \
+stat_pvalue_manual): pass the raw rows, value := '<numeric column>', factor := '<group column>' and \
+tests := a LIST of test STRUCTs — a subquery (SELECT list(t) FROM tukey_hsd_by(...) t WHERE ...), or the \
+aggregate itself (tukey_hsd_agg(y, g), pairwise_t_test_agg, dunn_test_agg; a two-sample STRUCT such as \
+t_test_agg(y, g) for two groups). kind: box (default), violin or points (jitter + group means). Brackets are \
+labelled '{p.format} {p.signif}' from p_adj (else p_value); label := '{p.signif}' / 'p = {p_adj}' changes it, \
+hide_ns := true drops non-significant pairs.",
+        example: "SELECT anofox_plot_compare(r, value := 'y', factor := 'g', tests := [{'group1': 'a', 'group2': 'b', \
+'p_adj': 0.01}]) FROM (VALUES ('a', 1.0), ('a', 1.4), ('b', 2.1), ('b', 2.6)) r(g, y)",
+        tags: &[("anofox.consumes", "test"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_partial",
+        params: &["tbl"],
+        named: &[("kind", "'component'"), ("width", "640"), ("height", "400")],
+        body: contract_body!("partial", "'kind', kind"),
+        description: "Partial-residual plots of a <model>_partial_residuals_by table, one panel per term. \
+kind := 'component' (component + residual: partial_residual over x, the term's component line and a loess) or \
+'added_variable' (y_residual over x_residual with the least-squares line through the origin, whose slope is the \
+term's coefficient).",
+        example: "SELECT anofox_plot_partial(p) FROM (VALUES ('x1', 1.0, 0.4, 0.5), ('x1', 2.0, 1.1, 1.0), \
+('x1', 3.0, 1.4, 1.5)) p(term, x, partial_residual, component)",
+        tags: &[("anofox.consumes", "partial_residuals"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot",
         params: &["tbl"],
         named: SIZE,
         body: contract_body!("auto"),
-        description: "Plot any anofox contract table, choosing the chart from its columns: term+estimate -> terms, \
-curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, metric+value -> summary. Use the \
+        description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
+term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
+metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests. Use the \
 specific anofox_plot_* macro for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
-        tags: &[("anofox.consumes", "terms,prediction,curve,summary,obs"), CONTRACT_TAG],
+        tags: &[
+            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals"),
+            CONTRACT_TAG,
+        ],
     },
 ];
 
@@ -258,10 +328,9 @@ mod tests {
         for m in MACROS {
             assert!(seen.insert(m.name), "{}", m.name);
             assert!(!m.description.is_empty() && m.example.contains(m.name));
-            assert!(
-                m.params.len() + m.named.len() <= 7,
-                "C++ DefaultMacro limit"
-            );
+            // The C++ build registers macros without DuckDB's fixed-size
+            // DefaultMacro arrays (see csrc/), so this is a readability cap.
+            assert!(m.params.len() + m.named.len() <= 10, "{}", m.name);
         }
     }
 }

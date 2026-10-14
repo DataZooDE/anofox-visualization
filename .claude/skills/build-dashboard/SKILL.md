@@ -106,9 +106,33 @@ title bar). Combo chart = extra measure columns, e.g.
 `y::SMOOTH, 'lm'|'gam'::SMOOTH_METHOD` · `s::STEP` + `::BAND_LOWER`/`::BAND_UPPER`
 (step ribbon) + `n_censor::CENSOR` (`+` marks) = Kaplan–Meier · `p::COOKS_CONTOUR` on
 leverage × std. residual (Cook's distance 0.5/1). For whole contract tables
-(anofox-statistics/-forecast output) prefer the SQL macros
-`anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics(tbl)` and
-`anofox_plot(tbl)` — `SELECT anofox_plot_terms(c) FROM coefs c` (docs/DOCS.md).
+(anofox-statistics/-forecast output) prefer the SQL macros — see below.
+
+### anofox-statistics results (contract macros)
+When `anofox_statistics` is loaded (DuckDB v1.5.6: `INSTALL anofox_statistics
+FROM 'https://get.erpl.io'` with `-unsigned`), find the plottable producers with
+`SELECT DISTINCT function_name, tags['anofox.output'] FROM duckdb_functions()
+WHERE tags['anofox.contract'] = '1'` (`anofox_contract_version()` = `'1'`) and
+plot their output with one macro per schema. Alias the row and pass the alias:
+
+| Producer | Macro |
+|---|---|
+| `<model>_tidy_by`, `_rolling_tidy_by`, `ridge/elasticnet/lars_path_by`, `quantile_process_by` (terms) | `anofox_plot_terms(t)` |
+| `<model>_glance_by` (summary) | `anofox_plot_summary(s, metrics := NULL)` |
+| `ols/wls/<glm>_augment_by` (obs) | `anofox_plot_diagnostics(o)`, `anofox_plot_obs(o, kind := 'resid_fitted'\|'qq'\|'scale_location'\|'leverage'\|'cooks')` |
+| `<model>_prediction_by`, `<model>_effects_by` (prediction) | `anofox_plot_prediction(p)` |
+| `roc/pr/calibration_curve_by`, `kaplan_meier_by`, `acf_by`, `pacf_by`, `ridge/elasticnet_cv_by` (curve) | `anofox_plot_curve(c)` — one `curve_type` per call |
+| `tukey_hsd_by`, `pairwise_t_test_by`, `dunn_test_by`, `*_agg` tests (test) | `anofox_plot_tests(t, alpha := 0.05)`; raw values + brackets: `anofox_plot_compare(r, value := 'y', factor := 'g', tests := (SELECT list(t) FROM tukey_hsd_by(…) t WHERE …))` or `tests := tukey_hsd_agg(y, g)` |
+| `<model>_partial_residuals_by` | `anofox_plot_partial(p, kind := 'component'\|'added_variable')` |
+
+`anofox_plot(t)` dispatches on the columns. Recipes: compare models with
+`UNION ALL BY NAME` + `WHERE grp = 'A'` (or `GROUP BY grp` for one SVG per
+group); a one-row test per group is `(SELECT grp, unnest(shapiro_wilk_agg(y))
+FROM t GROUP BY grp)`; `group` is reserved — the macro argument is `factor :=`.
+These macros return one SVG string per row — for standalone output (CLI,
+`examples/regression/render.py`, a report); inside a `::ROLE` dashboard draw the
+same chart from the columns with the statistical-graphics roles above (docs/DOCS.md,
+"Plotting anofox-statistics results").
 
 ### KPIs & text
 `::METRIC` (plain big number) · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) ·

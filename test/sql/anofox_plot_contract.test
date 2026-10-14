@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics, anofox_plot) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -112,10 +112,93 @@ unknown curve_type 'spiral'
 
 # ── summary ──────────────────────────────────────────────────────────────────
 query I
-SELECT anofox_plot_summary(s) LIKE '<svg%>rmse</text>%' FROM (VALUES
+SELECT anofox_plot_summary(s) LIKE '<svg%>RMSE</text>%' FROM (VALUES
   ('ols', 'r2', 0.81), ('ridge', 'r2', 0.79), ('ols', 'rmse', 1.9), ('ridge', 'rmse', 2.0)) s(model_id, metric, value);
 ----
 true
+
+# Bookkeeping metrics only on request.
+query II
+SELECT svg LIKE '%n observations%', svg2 LIKE '%n observations%' FROM (
+  SELECT anofox_plot_summary(s) AS svg, anofox_plot_summary(s, metrics := ['r_squared', 'n_observations']) AS svg2
+  FROM (VALUES ('ols', 'r_squared', 0.81), ('ols', 'n_observations', 30)) s(model_id, metric, value));
+----
+false	true
+
+statement error
+SELECT anofox_plot_summary(s, metrics := ['auc']) FROM (VALUES ('ols', 'r_squared', 0.81)) s(model_id, metric, value);
+----
+matches none of the metrics present
+
+# ── test: comparison forest + significance brackets ──────────────────────────
+statement ok
+CREATE TABLE tests AS SELECT * FROM (VALUES
+  ('b-a', 'a', 'b', 1.2, 0.4, 2.0, 0.003, 'Tukey'), ('c-a', 'a', 'c', 0.3, -0.5, 1.1, 0.41, 'Tukey'),
+  ('c-b', 'b', 'c', -0.9, -1.7, -0.1, 0.03, 'Tukey'))
+  t(test_id, group1, group2, estimate, conf_low, conf_high, p_adj, method);
+
+query I
+SELECT anofox_plot_tests(t) LIKE '<svg%p = 0.003 **%' FROM tests t;
+----
+true
+
+# anofox_plot dispatches a test table too.
+query I
+SELECT anofox_plot(t) LIKE '%Tukey%' FROM tests t;
+----
+true
+
+statement error
+SELECT anofox_plot_tests(t, value := 'nope') FROM tests t;
+----
+is not one of 'estimate', 'statistic', 'p'
+
+statement ok
+CREATE TABLE obs3 AS SELECT CASE i % 3 WHEN 0 THEN 'a' WHEN 1 THEN 'b' ELSE 'c' END AS g,
+  (i % 3) * 0.8 + sin(i) AS y FROM range(30) r(i);
+
+# The tests as a LIST subquery …
+query I
+SELECT anofox_plot_compare(r, value := 'y', factor := 'g', tests := (SELECT list(t) FROM tests t))
+  LIKE '<svg%data-series="b-a"%p = 0.003 **%' FROM obs3 r;
+----
+true
+
+# … or as a literal LIST of STRUCTs; violin; ns hidden.
+query I
+SELECT anofox_plot_compare(r, value := 'y', factor := 'g', kind := 'violin', hide_ns := true,
+  tests := [{'group1': 'a', 'group2': 'b', 'p_adj': 0.01}, {'group1': 'a', 'group2': 'c', 'p_adj': 0.4}])
+  LIKE '%p = 0.01 **%' FROM obs3 r;
+----
+true
+
+statement error
+SELECT anofox_plot_compare(r, value := 'y') FROM obs3 r;
+----
+needs factor := '<group column>'
+
+# ── partial residuals ────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE pres AS SELECT CASE WHEN i < 20 THEN 'x1' ELSE 'x2' END AS term, (i % 20)::DOUBLE AS x,
+  (i % 20) * 0.5 + sin(i) AS partial_residual, (i % 20) * 0.5 AS component,
+  (i % 20) - 9.5 AS x_residual, ((i % 20) - 9.5) * 0.5 + sin(i) AS y_residual FROM range(40) r(i);
+
+query II
+SELECT anofox_plot_partial(p) LIKE '<svg%Component + residual%',
+       anofox_plot_partial(p, kind := 'added_variable') LIKE '<svg%slope%' FROM pres p;
+----
+true	true
+
+query I
+SELECT anofox_plot(p) LIKE '%Component + residual%' FROM pres p;
+----
+true
+
+# ── contract version ─────────────────────────────────────────────────────────
+query I
+SELECT anofox_contract_version();
+----
+1
 
 # ── obs / diagnostics ────────────────────────────────────────────────────────
 statement ok
@@ -155,7 +238,7 @@ true
 statement error
 SELECT anofox_plot(t) FROM (VALUES (1, 2)) t(a, b);
 ----
-match no plottable schema
+anofox contract v1
 
 # Sizes are validated like everywhere else.
 statement error

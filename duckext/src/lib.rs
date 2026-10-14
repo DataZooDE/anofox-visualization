@@ -143,6 +143,45 @@ unsafe extern "C" fn anofox_render_fn(
     })
 }
 
+/// `anofox_contract_version()` → the integration-contract version the plot
+/// macros consume (`anofox_visualization::macros::CONTRACT_VERSION`).
+unsafe extern "C" fn anofox_contract_version_fn(
+    info: duckdb_function_info,
+    input: duckdb_data_chunk,
+    output: duckdb_vector,
+) {
+    guarded(info, || {
+        let n = capi!(duckdb_data_chunk_get_size)(input).max(1);
+        for i in 0..n {
+            assign_str(output, i, anofox_visualization::macros::CONTRACT_VERSION)?;
+        }
+        Ok(())
+    })
+}
+
+/// Register `anofox_contract_version()` unless an anofox extension loaded
+/// earlier already did (it is shared by the family; whoever loads first owns
+/// it, as anofox_statistics does).
+unsafe fn define_contract_version(conn: &db::Conn) -> bool {
+    let exists = conn
+        .execute_prepared(
+            "SELECT function_name FROM duckdb_functions() WHERE function_name = ?",
+            &["anofox_contract_version"],
+        )
+        .and_then(|mut r| r.string_rows(1))
+        .is_ok_and(|rows| !rows.is_empty());
+    exists
+        || register_scalar(
+            conn.raw,
+            c"anofox_contract_version",
+            &[&[]],
+            anofox_contract_version_fn,
+            false,
+            None,
+            None,
+        )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod serve_fns {
     use super::*;
@@ -363,6 +402,9 @@ unsafe fn init(
         None,
     ) {
         return Err("could not register anofox_render".into());
+    }
+    if !define_contract_version(&conn) {
+        return Err("could not register anofox_contract_version".into());
     }
     define_macros(&conn);
 

@@ -585,7 +585,7 @@ fn contract_km_band_and_censor_marks() {
     let ribbons: Vec<&str> = s
         .split("<polygon ")
         .skip(1)
-        .filter(|t| t.contains("fill-opacity=\"0.200\""))
+        .filter(|t| t.contains("fill-opacity=\"0.180\""))
         .collect();
     assert_eq!(ribbons.len(), 2, "{s}");
     assert!(ribbons[0].contains("#456481") && ribbons[1].contains("#E86433"));
