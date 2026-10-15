@@ -10,7 +10,7 @@ description: >
   registry (chart kinds, axes, intervals, facets, scales, reference lines,
   KPIs and number formats, tables, inputs), layout (::COLUMNS, ::COL /
   ::SPAN, ::HEIGHT, ::GROUP / ::ENDGROUP, ::TAB / ::SUBTAB), tables (toolbar,
-  ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT, colour scales, ::PAGED),
+  ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT, ::SUBTOTAL, colour scales, ::PAGED),
   heatmaps, inputs bound to DuckDB variables with getvariable(), click
   cross-filter (getvariable('selected')) and opt-in row selection
   (::ROWSELECT), themes / branding / locale, anofox_plot_* contract plots
@@ -67,7 +67,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
 | KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
 | Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` (low = good) `::COLORSCALE_HIGH_GOOD` `::COLORSCALE_DIVERGING` (around 0) `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
-| Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) — see *Tables* |
+| Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) · `'region'::SUBTOTAL` — see *Tables* |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::HINT` |
 | Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` |
@@ -83,7 +83,7 @@ A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue
 
 ## Tables
 
-A `::TABLE` / `::PAGED` panel has a toolbar the viewer drives: row count with filter chips, **search**, **Filters** (a dropdown / `> n` `< n` range / "contains" under each header), **Σ Totals** (over every matching row; each total has a "sum ▾" menu: sum, mean, median, min, max, count), **Columns** (show / hide), **Pages | Scroll** (virtualised), **Compact | Comfortable** density and **⤓ CSV** (matching rows, visible columns). Hovering a header shows min / max / mean, empty and distinct counts.
+A `::TABLE` / `::PAGED` panel has a toolbar the viewer drives: row count with filter chips, **search**, **Filters** (a dropdown / `> n` `< n` range / "contains" under each header), **Σ Totals** (over every matching row; each total has a "sum ▾" menu: sum, mean, median, min, max, count), **Columns** (show / hide), **Pages | Scroll** (virtualised), **Stats** (a strip under the header: histogram per number column, top 3 values per text column), **Compact | Comfortable** density and **⤓ Export** (CSV of the raw values, or an Excel `.xlsx` formatted like the table: units, number formats, live subtotal / total formulas). Hovering a header shows min / max / mean, empty and distinct counts.
 
 Formatting is automatic, so do not pre-format numbers as text: raw names become headers (`load_pct` → "Load %", `avg_mae` → "Avg MAE"; an `AS "Header"` alias is kept), each numeric column gets its own decimals and grouping (ids and years ungrouped), a true minus, muted zeros, "—" for NULL, ✓ / ✗ for booleans, and one unit per `::MONEY` / `::COMPACT` column moved into the header ("Revenue ($M)"). Plain numeric columns get a slim in-cell bar (`::PLAIN` turns it off).
 
@@ -96,6 +96,7 @@ Directives for the **next** table (columns named by raw name or header, case-ins
 | `::COLGROUP` | `'Money: plan, revenue \| Quality: accuracy, bias'` | a grouped header over adjacent columns |
 | `::FLAG` | `'margin < 12, status = breach'` (`>` `>=` `<` `<=` `=` `!=`) | ⚠ + warning tint on matching cells |
 | `::HIGHLIGHT` | `'revenue: top 2, margin: bottom 1'` (`'top 3'` = first numeric column) | bold + rank on the top / bottom n (a `::PAGED` table: within the page) |
+| `::SUBTOTAL` | `'region'` | rows grouped by that column, a subtotal row after each group (each column's total aggregation); `::TABLE` only, not `::PAGED` |
 
 ```sql dashboard
 CREATE TABLE regions AS SELECT * FROM (VALUES
@@ -324,7 +325,7 @@ These silently break a panel (it renders wrong or vanishes):
 6. **Don't pre-alias a chart column** (`x AS a ::BARCHART` names the legend entry) unless you mean it; for inputs the alias is the variable name.
 7. **Aggregating charts need `GROUP BY ALL`**; a `::ROLE` must be in the SELECT list, not after `FROM`.
 8. **Large or remote sources** (parquet, MotherDuck): `::PAGED` instead of `::TABLE`.
-9. **Clickable table rows need `'single'::ROWSELECT` / `'multi'::ROWSELECT`** before the table; without it a click does nothing and `getvariable('<first column>')` stays unset. The first column is the key and must be non-numeric (a text id / name). Table directives (`::ROWSELECT`, `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`) apply to the next table only.
+9. **Clickable table rows need `'single'::ROWSELECT` / `'multi'::ROWSELECT`** before the table; without it a click does nothing and `getvariable('<first column>')` stays unset. The first column is the key and must be non-numeric (a text id / name). Table directives (`::ROWSELECT`, `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`, `::SUBTOTAL`) apply to the next table only.
 10. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
 
 ## Running it
