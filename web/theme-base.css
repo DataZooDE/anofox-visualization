@@ -173,9 +173,9 @@ body.loading #dp-spinner{display:flex}
 .dp-table .row-cb{display:inline-block;width:14px;height:14px;margin-right:.55rem;vertical-align:-2px;border:1.5px solid var(--ax-muted);border-radius:4px;opacity:.7}
 .dp-table .row-cb.on{background:var(--ax-accent);border-color:var(--ax-accent);opacity:1;box-shadow:inset 0 0 0 2px var(--ax-card)}
 .tbl-empty{color:var(--ax-muted);font-size:.85rem;padding:.8rem 0}
-.dp-table{width:100%;border-collapse:collapse;font-size:.84rem}
+.dp-table{width:100%;border-collapse:collapse;font-size:.84rem;table-layout:fixed}
 .dp-table th{text-align:left;font-size:.74rem;font-weight:600;letter-spacing:.01em;line-height:1.25;color:var(--ax-th-ink);background:var(--ax-th-bg);border-bottom:1.5px solid var(--ax-muted);padding:.5rem .75rem;position:sticky;top:0;z-index:1;user-select:none;cursor:pointer;vertical-align:bottom}
-.dp-table th.num{text-align:right;width:1%;min-width:6.5rem}
+.dp-table th.num{text-align:right}
 .dp-table .th-in{display:inline-flex;align-items:flex-end;gap:.3rem;max-width:16rem}
 /* long headers wrap onto two lines instead of widening the column */
 .dp-table .th-l{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
@@ -186,15 +186,15 @@ body.loading #dp-spinner{display:flex}
 .dp-table th.sorted{color:var(--ax-ink)}
 .dp-table th.sorted .th-sort{opacity:1;color:var(--ax-accent)}
 .dp-table tr.tbl-frow th{padding:.3rem .5rem .55rem;cursor:default;font-weight:400;vertical-align:top;top:auto}
-.dp-table td{padding:.55rem .75rem;border-bottom:1px solid var(--ax-line);white-space:nowrap;color:var(--ax-ink);vertical-align:middle}
-.dp-table td.num{text-align:right;font-variant-numeric:tabular-nums;position:relative;width:1%}
+.dp-table td{overflow:hidden;text-overflow:ellipsis;padding:.55rem .75rem;border-bottom:1px solid var(--ax-line);white-space:nowrap;color:var(--ax-ink);vertical-align:middle}
+.dp-table td.num{text-align:right;font-variant-numeric:tabular-nums;position:relative}
 .dp-table td.num.zero{color:var(--ax-muted)}
 .dp-table tbody td:first-child:not(.num){font-weight:600}
 .dp-table.compact td{padding-top:.3rem;padding-bottom:.3rem}
 .dp-table.compact td.spark-cell{padding-top:.1rem;padding-bottom:.1rem}
 .dp-table.compact .spark{height:22px}
 .dp-table td.ctr{text-align:center}
-.dp-table td.long{white-space:normal;min-width:14rem;max-width:34rem;line-height:1.4}
+.dp-table td.long{white-space:normal;line-height:1.4}
 .dp-table td.tbl-none{text-align:center;color:var(--ax-muted);padding:1.3rem .75rem}
 .dp-table tbody tr:nth-child(even) td{background-color:var(--ax-zebra)}
 .dp-table tbody tr.clickable{cursor:pointer}
@@ -213,12 +213,27 @@ body.loading #dp-spinner{display:flex}
 .dp-table .bool.no{color:var(--ax-muted);opacity:.7}
 /* totals: the accounting double rule above, bold, apart from the body */
 .dp-table tfoot td{border-top:3px double var(--ax-ink);border-bottom:0;font-weight:700;background:var(--ax-th-bg);padding:.6rem .75rem;white-space:nowrap}
-.dp-table tfoot td.tot-mean{font-style:italic;font-weight:600}
-.dp-table caption.tot-legend{caption-side:bottom;text-align:left;font-size:.72rem;color:var(--ax-muted);padding:.45rem .1rem 0}
+.tot-legend{font-size:.72rem;color:var(--ax-muted);padding:0 .1rem;margin-top:-.2rem}
+.dp-table caption.tbl-cap{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.dp-table .tot-agg-w{position:relative;display:inline-block;margin-right:.5rem;vertical-align:baseline}
+.dp-table .tot-agg-w::after{content:"▾";position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:.6rem;color:var(--ax-muted);pointer-events:none;opacity:.7}
+.dp-table .tot-agg{appearance:none;-webkit-appearance:none;border:0;background:transparent;font:inherit;font-size:.66rem;font-weight:500;letter-spacing:.04em;text-transform:lowercase;color:var(--ax-muted);padding:0 .7rem 0 0;margin:0;cursor:pointer;border-radius:3px;field-sizing:content}
+.dp-table .tot-agg:hover,.dp-table .tot-agg:focus-visible{color:var(--ax-ink);outline:none;box-shadow:0 1px 0 var(--ax-muted)}
+.dp-table tfoot td.neg .tot-v,.dp-table td.num.neg{color:var(--ax-negative)}
+.dp-table tfoot td{position:sticky;bottom:0;z-index:1}
+.tbl-scroll.long{max-height:min(640px,75vh);overflow-y:auto}
+.dp-table.bars{--ax-zebra:transparent}
+.dp-table tr.th-group th{position:static;border-bottom:0;padding-bottom:.1rem;cursor:default;text-align:center;vertical-align:bottom}
+.dp-table tr.th-group .th-g{display:block;padding-bottom:.25rem;border-bottom:1px solid var(--ax-line);font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;color:var(--ax-muted)}
+.dp-table tbody tr td.flag{background-color:var(--ax-badge-warn-bg);color:var(--ax-badge-warn-ink)}
+.dp-table .flag-i{font-size:.72rem;margin-right:.35rem}
+.dp-table td.hl{font-weight:600}
+.dp-table .hl-r{font-size:.64rem;font-weight:600;color:var(--ax-muted);margin-right:.4rem;letter-spacing:.02em}
 .dp-table tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
 .dp-table .tot-l{font-size:.72rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ax-muted)}
 .dp-table .tot-op{color:var(--ax-muted);font-weight:500;margin-right:.1rem}
-.dp-table .tot-badge{font-size:.72rem;font-weight:600;color:var(--ax-muted);margin-right:.45rem}
+.dp-table tfoot td.tot-badges{white-space:normal;line-height:1.5}
+.dp-table .tot-badge{white-space:nowrap;font-size:.72rem;font-weight:600;color:var(--ax-muted);margin-right:.45rem}
 .table-foot{display:flex;align-items:center;justify-content:flex-end;gap:.3rem}
 .table-info{font-size:.78rem;color:var(--ax-muted);font-variant-numeric:tabular-nums;font-weight:600;padding:0 .35rem}
 .page-btn{background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:var(--ax-radius-sm);min-width:28px;height:28px;padding:0 .3rem;color:var(--ax-ink);font-size:.85rem;cursor:pointer;box-shadow:none;transform:none}
@@ -339,3 +354,13 @@ body.dp-static .dash-list a{color:var(--ax-link);font-weight:600;text-decoration
 body.dp-static .dash-list a:hover{text-decoration:underline}
 body.dp-static .controls select{margin-left:.3rem}
 .dp-table.virtual td,.dp-table.virtual.compact td{padding-top:0;padding-bottom:0}
+/* print / PDF: no controls; every row (client tables); header repeated on each page, totals at the end */
+@media print{
+.tbl-bar,.dp-table tr.tbl-frow,.table-foot,.dp-table .row-cb,.dp-table .th-sort,.dp-table .tot-agg-w::after{display:none}
+.tbl-scroll,.tbl-scroll.virtual,.tbl-scroll.long{max-height:none;overflow:visible}
+.dp-table thead{display:table-header-group}
+.dp-table tfoot{display:table-row-group}
+.dp-table th,.dp-table tfoot td{position:static}
+.dp-table tr{break-inside:avoid}
+.dp-table .tot-agg{padding-right:0}
+}

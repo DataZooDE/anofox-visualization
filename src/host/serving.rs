@@ -362,8 +362,8 @@ pub struct PageRequest {
     pub filters: Vec<ColFilter>,
     /// Return one row of statistics for these columns instead of a page: per
     /// column `i`: `n{i}` non-null count, `d{i}` approximate distinct count and,
-    /// for values that read as numbers, `s{i}` sum, `m{i}` mean, `lo{i}` min,
-    /// `hi{i}` max; plus `n` = the row count.
+    /// for values that read as numbers, `s{i}` sum, `m{i}` mean, `md{i}` median,
+    /// `lo{i}` min, `hi{i}` max; plus `n` = the row count.
     pub stats: Vec<String>,
     /// Return up to [`MAX_DISTINCT`] distinct values `v` of this column (for a
     /// filter dropdown), under every filter except those on the column itself.
@@ -645,7 +645,7 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
             let x = num(&c);
             sel.push(format!(
                 "count({c}) AS n{i}, approx_count_distinct({c}) AS d{i}, sum({x}) AS s{i}, \
-                 avg({x}) AS m{i}, min({x}) AS lo{i}, max({x}) AS hi{i}"
+                 avg({x}) AS m{i}, median({x}) AS md{i}, min({x}) AS lo{i}, max({x}) AS hi{i}"
             ));
         }
         return format!("SELECT {} {from}", sel.join(", "));
@@ -883,6 +883,7 @@ mod tests {
             "SELECT count(*) AS n, count(\"amt\") AS n0, approx_count_distinct(\"amt\") AS d0"
         ));
         assert!(sql.contains("sum(TRY_CAST(CAST(\"region\" AS VARCHAR) AS DOUBLE)) AS s1"));
+        assert!(sql.contains("median(TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE)) AS md0"));
         assert_eq!(params, vec!["5"]);
         // distinct ignores the column's own filter, keeps the others
         let p = page(

@@ -53,6 +53,8 @@ fn paged_requests_run_on_duckdb() {
             < 1e-6
     );
     assert_eq!(s["lo0"], 31.5);
+    // 27 values 31.5, 36, …, 148.5: the median is the 14th
+    assert_eq!(s["md0"], 90.0);
     assert!(s["s1"].is_null());
     // distinct: lists every region although the region filter is on
     let d = run(&format!(r#"{{"distinct":"region",{f}}}"#)).unwrap();

@@ -176,6 +176,10 @@ pub struct ChromeStyle {
     pub kpi_value: String,
     /// Zebra-striped table rows.
     pub table_zebra: bool,
+    /// Negative numbers in tables: `"minus"` (−5) | `"red"` (−5 in red) | `"parens"` ((5)).
+    pub negatives: String,
+    /// Zero in tables: `"muted"` (a grey 0) | `"dash"` (a grey –).
+    pub zero: String,
     /// Card shadow: `"md"` | `"sm"` | `"none"`.
     pub shadow: String,
 }
@@ -341,7 +345,7 @@ fn light_json() -> J {
         },
         "radius": 8,
         "chrome": {"gradient": false, "background": "plain", "kpi_value": "ink",
-                   "table_zebra": false, "shadow": "none"},
+                   "table_zebra": false, "shadow": "none", "negatives": "minus", "zero": "muted"},
         "brand": {},
         "locale": null,
         "dark": dark_overlay()
@@ -751,6 +755,8 @@ fn build(full: &J, name: &str, variant: Variant) -> Result<ResolvedTheme, String
             kpi_value: pick(&chrome, "kpi_value", &["gradient", "accent", "ink"])?,
             table_zebra: flag(&chrome, "table_zebra")?,
             shadow: pick(&chrome, "shadow", &["md", "sm", "none"])?,
+            negatives: pick(&chrome, "negatives", &["minus", "red", "parens"])?,
+            zero: pick(&chrome, "zero", &["muted", "dash"])?,
         },
         brand: Brand {
             title: text(&brand, "title"),
@@ -1240,6 +1246,9 @@ impl ResolvedTheme {
                     "transparent".into()
                 },
             ),
+            // table number style, read by the browser table (not colours)
+            t("table-negatives", self.chrome.negatives.clone()),
+            t("table-zero", self.chrome.zero.clone()),
             t("row-hover", hex(mix(c.card, c.ink, 0.04))),
             t("row-hover-tint", acc_a(0.06)),
             t("row-focus", acc_a(0.16)),

@@ -1,11 +1,15 @@
 # Plan: table formatting
 
-Status (2026-10-15): **T1–T4 done** in the browser (humanised headers, two-line
-headers, inner sort icon; double-ruled totals with a legend, means in italics;
-header rule, density toggle, numeric widths, key-column emphasis; minus sign,
-muted zeros, per-column `::MONEY` / `::COMPACT` units, signed trends with a flat
-band). Still open from T1–T4: units in the header, `::COLGROUP`, sticky totals in
-Pages view, zebra off with bars, `chrome.negatives` / `chrome.zero` options.
+Status (2026-10-15): **T1–T5, T2b and T7 done** in the browser. T1–T4:
+humanised headers, two-line headers, inner sort icon, units once in the header
+(`::MONEY` / scaled `::COMPACT` columns), `::COLGROUP`; double-ruled totals with
+a legend, sticky in Scroll view and on long pages; header rule, density toggle,
+numeric widths, key-column emphasis, no zebra with in-cell bars; minus sign,
+muted zeros, `chrome.negatives` / `chrome.zero`, per-column units, signed trends.
+T2b: `::TOTALS` + a per-cell aggregation picker (SQL stats gained `median`).
+T5: `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`, `::FLAG`, `::HIGHLIGHT`.
+T7: caption / scope / aria-sort / aria-selected, print CSS. **Open**: T6, T8,
+T9, `::SUBTOTAL` (T2b).
 Originally a proposal Follows the table rebuild (toolbar, totals, Scroll
 view, `::ROWSELECT`, SQL-side filters/totals for `::PAGED`). Goal: tables that
 read like a well-set report — clear headers, an unmistakable totals row, quiet
@@ -60,9 +64,12 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   when in-cell bars are shown (bars already guide the eye).
 - **First column emphasis**: the key column in 600 weight; a numeric key (rank)
   in muted tabular figures.
-- **Column widths**: numeric columns shrink to content (`width: 1%` +
-  `white-space: nowrap`), text columns take the rest; a max width with ellipsis
-  for text outside Scroll view only when > 60 ch (tooltip shows all).
+- **Column widths** (done): natural widths from the header (as wrapped on two
+  lines) and the formatted cells, measured once per render (a sample of long
+  tables; `::PAGED`: the loaded page) into a `<colgroup>` with `table-layout:
+  fixed` — stable while paging / scrolling. Long text is capped at ~44 ch and
+  wraps; slack is shared in proportion, and a table spreads to at most ~1.6× its
+  natural width (narrower than a wide card rather than one stretched column).
 
 ## T4 · Numbers that read at a glance
 
@@ -85,6 +92,19 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   outside a target with the warning colour + an icon, so status never relies on
   colour alone (accessibility rule from the dataviz guide).
 - **Top / bottom n** highlight in a column (`::HIGHLIGHT 'top 3'`).
+
+## T2b · Totals with a chosen aggregation (done)
+
+- Each numeric total cell carries a quiet picker ("sum ▾"): sum, mean, median,
+  min, max or count; the pick is kept per table (`persist()`), and the legend
+  says what each column shows ("sum of Revenue · median of Accuracy").
+- `::TOTALS` (aliases `::TOTAL`, `::AGGREGATE`) for the next table: one value for
+  every numeric column (`'median'`), `'none'` (no totals row, no button), or a
+  per-column list `'Revenue: sum, Margin: mean'` (raw name or header). Without
+  it, the heuristic stays (amounts / counts → sum, rate-like → mean).
+- `::PAGED`: the statistics request returns `md{i}` = `median(x)` too, so every
+  aggregation comes from the one SQL statistics row (n, s, m, md, lo, hi).
+- Still open: `::SUBTOTAL`.
 
 ## T6 · Header statistics, visible on demand
 

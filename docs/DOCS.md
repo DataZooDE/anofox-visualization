@@ -104,7 +104,9 @@ terminal.
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
-| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells |
+| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red) |
+| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells, high = green (scores, accuracy) |
+| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells around zero: negative red, positive green (deltas) |
 | `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
 | `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
 | `::DOWNLOAD_CSV` |  | table | CSV export button |
@@ -121,6 +123,10 @@ terminal.
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
 | `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
+| `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum, Margin: mean' |
+| `::COLGROUP` | `::COL_GROUP`, `::HEADER_GROUP` | layout | next table's grouped header: 'Backtest: mae, rmse \| Holdout: mae_h, rmse_h' |
+| `::FLAG` | `::THRESHOLD` | layout | next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5' |
+| `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
@@ -501,12 +507,17 @@ the dashboard follows the dashboard theme.
  "font": {"family": "Inter, system-ui, sans-serif", "display": "Inter, sans-serif"},
  "radius": 10,
  "chrome": {"gradient": false, "background": "plain", "kpi_value": "accent",
-            "table_zebra": true, "shadow": "sm"},
+            "table_zebra": true, "shadow": "sm", "negatives": "parens", "zero": "dash"},
  "brand": {"name": "ACME Analytics", "logo": "logo.svg", "logo_dark": "logo-dark.svg",
            "favicon": "favicon.svg", "title_suffix": " · ACME"},
  "locale": "de-DE",
  "dark": {"colors": {"bg": "#0f1729", "card": "#162033", "ink": "#e5e7eb"}}}
 ```
+
+`chrome.negatives` sets how tables show negative numbers — `"minus"` (−5, the
+default), `"red"` (−5 in the negative colour) or `"parens"` (accounting: (5)) —
+and `chrome.zero` shows zero as a muted `"muted"` 0 (default) or a `"dash"` (–).
+Zebra rows (`table_zebra`) are left out of a table that draws in-cell bars.
 
 Theme JSON is data: colours must be `#rgb`/`#rrggbb`, fonts plain font-family
 lists, logos relative paths, `https:` or `data:image/` URIs; anything else (and
@@ -637,9 +648,11 @@ WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getv
 A `::TABLE` / `::PAGED` panel comes with a toolbar: the row count ("8 of 24
 rows") with a chip per active filter, a **search** box, **Filters** (a filter
 under each header: a dropdown for a column with few values, `> n` / `< n` and a
-range slider for numbers, "contains" for text), **Σ Totals** (a totals row:
-sums of amounts and counts, means ⌀ of rates, shares and scores, counts of badge
-values — over every matching row, not just the page), **Columns** (show / hide),
+range slider for numbers, "contains" for text), **Σ Totals** (a totals row
+over every matching row, not just the page: sums of amounts and counts, means of
+rates, shares and scores, counts of badge values — each numeric total carries a
+small tag, e.g. "sum ▾", to switch it to mean, median, min, max or count; the
+choice is kept per table), **Columns** (show / hide),
 **Pages | Scroll**, **Compact | Comfortable** row density (compact by default
 above 50 rows) and **⤓ CSV** (the matching rows, visible columns). Hovering a
 header shows the column's min / max / mean, empty and distinct counts.
@@ -648,11 +661,45 @@ Formatting: raw column names read as headers (`load_pct` → "Load %", `avg_mae`
 "Avg MAE"; an `AS "Header"` alias is kept as written) and wrap onto two lines;
 numbers are formatted per column — aligned decimals, grouping (ids and years stay
 ungrouped), a true minus sign, muted zeros, and one unit per `::MONEY` /
-`::COMPACT` column ("$5.87M … $1.71M", never "$4M" next to "$5.9M"); `::TREND`
+`::COMPACT` column ("$5.87M … $1.71M", never "$4M" next to "$5.9M"); a currency or K / M / B unit
+moves into the header once ("Revenue ($M)" over plain 4.61, 3.42, …); `::TREND`
 shows a signed change (▲ +2.7, ▼ −3.1, – 0.0). The totals row sits under a double
-rule; sums are upright, means italic, and a line under the table says which is
-which. Plain numeric columns get a slim in-cell bar, empty cells show "—" and
-booleans ✓ / ✗.
+rule and stays in view on a long page; a line under the table says which
+aggregation each column shows ("sum of Revenue · median of Accuracy"). Columns take their natural width (header and formatted cells; long text wraps),
+and a table with few columns stays narrower than a wide card. Plain
+numeric columns get a slim in-cell bar, empty cells show "—" and booleans ✓ / ✗.
+
+Options for the *next* table (directives, like `::ROWSELECT`; columns are named
+by their raw name or their header, case-insensitive):
+
+| Directive | Value | Effect |
+|---|---|---|
+| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum, Margin: mean, Score: median'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); `'none'` hides the row and its button. Without it: sums of amounts and counts, means of rates / shares / scores. The viewer's pick in a cell wins. |
+| `::COLGROUP` (`::COL_GROUP`, `::HEADER_GROUP`) | `'Backtest: mae, rmse \| Holdout: mae_h, rmse_h'` | a header row with a label over adjacent columns (a thin rule under each label) |
+| `::FLAG` (`::THRESHOLD`) | `'mape > 0.2, bias < -5, status = breach'` | cells meeting a condition (`>` `>=` `<` `<=` `=` `!=`) get a ⚠ and the warning tint — never colour alone |
+| `::HIGHLIGHT` (`::TOPN`) | `'Revenue: top 3, Margin: bottom 2'` (`'top 3'` alone: the first numeric column) | the top / bottom n values in bold with their rank (#1, #2 / ↓1, ↓2); a `::PAGED` table ranks within the page |
+
+```sql
+SELECT 'revenue: sum, margin: mean, accuracy: median'::TOTALS;
+SELECT 'Money: plan, revenue | Quality: accuracy, bias'::COLGROUP;
+SELECT 'margin < 12'::FLAG;
+SELECT 'revenue: top 2'::HIGHLIGHT;
+SELECT region::TABLE, plan::MONEY, revenue::MONEY, margin,
+       accuracy::COLORSCALE_HIGH_GOOD, bias::COLORSCALE_DIVERGING
+FROM regions;
+```
+
+Colour scales: `::COLORSCALE` shades low values green and high values red (errors,
+latency); `::COLORSCALE_HIGH_GOOD` the other way round (accuracy, scores);
+`::COLORSCALE_DIVERGING` shades around zero (positive green with a "+", negative
+red, zero neutral) for deltas and biases.
+
+Accessibility and print: each table has a `<caption>` (the panel title, for
+screen readers), `scope` on its headers, `aria-sort` on the sorted column and
+`aria-selected` on selectable rows. Printing (or the browser's PDF) hides the
+toolbar, filters, check marks and pager, prints every matching row of a
+`::TABLE` (a `::PAGED` table prints its page), repeats the header on each page
+and puts the totals at the end.
 
 **Scroll** is a virtualised view: only the rows around the viewport are drawn,
 so it stays smooth over any number of rows.
@@ -661,7 +708,7 @@ so it stays smooth over any number of rows.
 |---|---|---|
 | data in the browser | the whole result | one page (Scroll: 100-row blocks, fetched as you scroll) |
 | sort, search, column filters | in the browser | in DuckDB (`ORDER BY`, `WHERE`) |
-| totals and column statistics | in the browser | one aggregate query in DuckDB |
+| totals and column statistics | in the browser | one aggregate query in DuckDB (count, distinct, sum, mean, median, min, max) |
 | filter dropdown values | from the rows | `SELECT DISTINCT` in DuckDB (under the other filters) |
 | good for | up to ~10k rows | any size: Parquet on S3, MotherDuck, a served database |
 

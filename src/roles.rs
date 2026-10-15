@@ -14,7 +14,7 @@
 //! category, whether a statement carrying it renders a visible panel, and a
 //! one-line description.
 
-use crate::{DownloadFmt, InputKind, Kind, MetricFmt, Role, TextSize};
+use crate::{DownloadFmt, InputKind, Kind, MetricFmt, Role, Scale, TableOpt, TextSize};
 
 /// One registered role.
 #[derive(Debug)]
@@ -201,8 +201,12 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("PAGED", &["TABLE_PAGED", "PAGINATED"], R::PagedTable, "table", true,
       "SQL-paginated table for large/remote data"),
     e("TREND", &[], R::Trend, "table", true, "▲/▼ arrow in a table cell"),
-    e("COLORSCALE", &["COLOURSCALE", "HEAT", "GRADIENT"], R::ColorScale, "table", true,
-      "heatmap-colour a table column's cells"),
+    e("COLORSCALE", &["COLOURSCALE", "HEAT", "GRADIENT"], R::ColorScale(Scale::LowGood), "table", true,
+      "heatmap-colour a table column's cells (low = green, high = red)"),
+    e("COLORSCALE_HIGH_GOOD", &["COLORSCALE_HIGH", "HEAT_HIGH"], R::ColorScale(Scale::HighGood), "table", true,
+      "heatmap-colour a table column's cells, high = green (scores, accuracy)"),
+    e("COLORSCALE_DIVERGING", &["DIVERGING", "HEAT_DIVERGING"], R::ColorScale(Scale::Diverging), "table", true,
+      "colour a table column's cells around zero: negative red, positive green (deltas)"),
     e("BADGE", &["STATUS", "PILL"], R::Badge, "table", true, "render a table column as status pills"),
     e("PLAIN", &["NOBAR"], R::Plain, "table", true, "a plain table column (no in-cell bar)"),
     e("DOWNLOAD_CSV", &[], R::Download(DownloadFmt::Csv), "table", false, "CSV export button"),
@@ -230,6 +234,14 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("HEIGHT", &["TALL"], R::Height, "layout", false, "next panel's height in px"),
     e("ROWSELECT", &["ROW_SELECT", "SELECTABLE"], R::RowSelect, "layout", false,
       "next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>')"),
+    e("TOTALS", &["TOTAL", "AGGREGATE"], R::TableOpt(TableOpt::Totals), "layout", false,
+      "next table's totals: 'sum'|'mean'|'median'|'min'|'max'|'count'|'none', or per column 'Revenue: sum, Margin: mean'"),
+    e("COLGROUP", &["COL_GROUP", "HEADER_GROUP"], R::TableOpt(TableOpt::ColGroup), "layout", false,
+      "next table's grouped header: 'Backtest: mae, rmse | Holdout: mae_h, rmse_h'"),
+    e("FLAG", &["THRESHOLD"], R::TableOpt(TableOpt::Flag), "layout", false,
+      "next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5'"),
+    e("HIGHLIGHT", &["TOPN"], R::TableOpt(TableOpt::Highlight), "layout", false,
+      "next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2'"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
@@ -385,7 +397,7 @@ pub fn roles_json() -> String {
         "directives": tokens(&|r| matches!(
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
-                | Role::RowSelect | Role::Tab | Role::SubTab | Role::Placeholder
+                | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -417,7 +429,7 @@ pub fn is_table_format(r: Role) -> bool {
         r,
         Role::Metric(_)
             | Role::Trend
-            | Role::ColorScale
+            | Role::ColorScale(_)
             | Role::Badge
             | Role::Value(Kind::Sparkline)
             | Role::Plain
@@ -491,6 +503,10 @@ mod tests {
             "SPAN",
             "HEIGHT",
             "ROWSELECT",
+            "TOTALS",
+            "COLGROUP",
+            "FLAG",
+            "HIGHLIGHT",
             "TAB",
             "SUBTAB",
             "PLACEHOLDER",
@@ -585,6 +601,10 @@ mod tests {
             Role::Span,
             Role::Height,
             Role::RowSelect,
+            Role::TableOpt(TableOpt::Totals),
+            Role::TableOpt(TableOpt::ColGroup),
+            Role::TableOpt(TableOpt::Flag),
+            Role::TableOpt(TableOpt::Highlight),
             Role::Table,
             Role::PagedTable,
             Role::Delta,
@@ -593,7 +613,9 @@ mod tests {
             Role::BandLower,
             Role::BandUpper,
             Role::Trend,
-            Role::ColorScale,
+            Role::ColorScale(Scale::LowGood),
+            Role::ColorScale(Scale::HighGood),
+            Role::ColorScale(Scale::Diverging),
             Role::Badge,
             Role::Plain,
             Role::Hint,
@@ -659,6 +681,7 @@ mod tests {
                 | Role::Span
                 | Role::Height
                 | Role::RowSelect
+                | Role::TableOpt(_)
                 | Role::Table
                 | Role::PagedTable
                 | Role::Metric(_)
@@ -668,7 +691,7 @@ mod tests {
                 | Role::BandLower
                 | Role::BandUpper
                 | Role::Trend
-                | Role::ColorScale
+                | Role::ColorScale(_)
                 | Role::Badge
                 | Role::Plain
                 | Role::Hint

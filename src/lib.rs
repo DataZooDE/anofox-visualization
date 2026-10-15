@@ -154,6 +154,30 @@ pub enum MetricFmt {
     Compact,
 }
 
+/// Direction of a table column's colour scale (`::COLORSCALE…`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scale {
+    /// Low values green, high values red (`::COLORSCALE`).
+    LowGood,
+    /// High values green, low values red (`::COLORSCALE_HIGH_GOOD`).
+    HighGood,
+    /// Diverging around zero: negative red, positive green (`::COLORSCALE_DIVERGING`).
+    Diverging,
+}
+
+/// A "next table" option directive; the value configures the next table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableOpt {
+    /// `::TOTALS`: the totals row's aggregation (`'sum'`, …, `'none'`, or per column).
+    Totals,
+    /// `::COLGROUP`: a header row spanning labels over columns.
+    ColGroup,
+    /// `::FLAG`: mark cells meeting a condition (`'MAPE > 0.2'`).
+    Flag,
+    /// `::HIGHLIGHT`: emphasise the top / bottom n of a column (`'Revenue: top 3'`).
+    Highlight,
+}
+
 /// The role a result column plays in the visualization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -186,6 +210,8 @@ pub enum Role {
     /// Layout: `::ROWSELECT` sets how the *next* table's rows can be selected:
     /// `'none'` (default), `'single'` or `'multi'` (the value).
     RowSelect,
+    /// Layout: an option for the *next* table (the value), see [`TableOpt`].
+    TableOpt(TableOpt),
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
     /// A SQL-paginated table (`::PAGED`) — the browser pages it with
@@ -206,8 +232,9 @@ pub enum Role {
     BandUpper,
     /// A trend arrow rendered inside a table cell (`::TREND`).
     Trend,
-    /// Heatmap-colour a table column's cells by value (`::COLORSCALE`).
-    ColorScale,
+    /// Heatmap-colour a table column's cells by value (`::COLORSCALE`,
+    /// `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`).
+    ColorScale(Scale),
     /// Render a table column's text as coloured status pills (`::BADGE`).
     Badge,
     /// A plain table column with no in-cell bar (`::PLAIN`/`::NOBAR`).
