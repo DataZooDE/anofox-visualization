@@ -61,7 +61,7 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 ```json
 {"rows":  [{"c0": "W1", "c1": 30, "c2": 4.5}, …],
  "roles": [[0, "XAXIS"], [1, "BARCHART", "sessions"], [2, "LINECHART", "revenue"]],
- "width": 640, "height": 400, "primary": "0b7285",
+ "width": 640, "height": 400, "primary": "2563eb",
  "theme": "dark", "locale": "de-DE",
  "max_categories": 30, "max_line_points": 5000}
 ```
@@ -71,8 +71,8 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 | `rows` | array of objects; role `[i, …]` reads key `c{i}` |
 | `roles` | `[column_index, "ROLE"(, "legend name")]` — any `::ROLE` of the registry (case-insensitive, aliases allowed) |
 | `width`, `height` | integers in 16–8192 (default 640 × 400) |
-| `primary` | brand colour `rrggbb` for single-series marks |
-| `theme` | `light` (default) · `dark` · `print` · `colorblind` · `high-contrast` · `'a+b'` · a theme JSON object/string; `variant` `light`/`dark` picks the side of an auto theme |
+| `primary` | brand colour `rrggbb` for single-series marks (default: the theme's) |
+| `theme` | `light` (default: graphite + electric blue; alias `default`, `datazoo`) · `dark` · `print` · `colorblind` · `high-contrast` · `'a+b'` · a theme JSON object/string; `variant` `light`/`dark` picks the side of an auto theme |
 | `locale` | `en-US` (default) · `en-GB` · `de-DE` · `fr-FR`: axis/legend numbers, currency and month names |
 | `max_categories` | discrete axis / colour cap (default 30: the largest 29 + "Other"; `0` = off) |
 | `max_line_points` | LTTB downsampling threshold per line series (default 5,000) |
@@ -91,6 +91,10 @@ SELECT anofox_bar(x, y) FROM (VALUES ('Q1', 1200.5), ('Q2', 3400.25)) t(x, y);
 SELECT anofox_xy(x, y, kind := 'LINECHART', theme := 'colorblind', locale := 'en-US')
 FROM (VALUES (1, 10.5), (2, 12.0), (3, 9.75)) t(x, y);
 ```
+
+Charts wear the theme: its font, muted axis text, a hairline grid, a transparent background, card-coloured gaps between bars / slices / tiles. Tooltips (`data-fvalue` / `data-fx` on each mark) and data labels follow the `YFORMAT` / `XFORMAT` roles and the locale (`$1,234.50`, `1.234,50 €`).
+
+**Heatmaps** (`[i, "XAXIS"], [j, "YAXIS"], [k, "HEATMAP"]`): text axes keep the row order of the spec (first `YAXIS` level = top row, so `ORDER BY` in the `list(…)`); the theme's sequential ramp, or its diverging ramp around 0 when the values span zero; `[k, "DATALABELS"]` prints the formatted value in each cell with automatic contrast.
 
 ## Worked examples
 
@@ -126,6 +130,13 @@ SELECT anofox_render(json_object(
          'rows', to_json(list({c0: d, c1: h, c2: n})),
          'roles', json('[[0,"XAXIS"],[1,"YAXIS"],[2,"HEATMAP"]]')))
 FROM (SELECT d, h, (d * 7 + h * 3) % 11 AS n FROM range(7) a(d), range(24) b(h));
+
+-- a diverging heatmap (values span 0) with dollar labels in the cells; rows top-down in SQL order
+SELECT anofox_render(json_object(
+         'rows', to_json(list({c0: q, c1: region, c2: delta, c3: '$', c4: ''} ORDER BY r, q)),
+         'roles', json('[[0,"XAXIS"],[1,"YAXIS"],[2,"HEATMAP"],[3,"YFORMAT"],[4,"DATALABELS"]]')))
+FROM (VALUES (1, 'North', 'Q1', 120.5), (1, 'North', 'Q2', -40.0), (2, 'South', 'Q1', -15.25),
+             (2, 'South', 'Q2', 80.0)) t(r, region, q, delta);
 ```
 
 ```sql
