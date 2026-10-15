@@ -16,7 +16,7 @@ HTML and the contract macros should all produce the same result.
    - Rust applies it to ggplot-rs and to the headless dashboard SVG.
    - The same tokens are emitted as **CSS custom properties** for the builder, `serve`, `duckext` serve / locked pages, the CLI static HTML and the exported HTML/PDF.
    - A dashboard selects or defines it with **`::THEME`** (a name or a JSON object).
-   - White-labelling (logo, brand name, favicon, credit) is part of the theme.
+   - Author branding (logo, brand name, favicon) is part of the theme. The "Powered by DataZoo GmbH" credit is **mandatory** and always shown (owner decision, see T9).
 2. **One generic per-panel options role** **`::OPTS 'key=value; …'`** (JSON
    accepted too). It is backed by an *options registry*, built like the role
    registry, so the parser, lint, DOCS and skills all derive from one table.
@@ -164,7 +164,7 @@ panel options → column cast. We adopt exactly that and document it.
   "chrome": { "header_bg": "card", "accent_bar": true, "gradient": false,
               "kpi_value": "ink", "table_zebra": true, "callout": "accent" },
   "brand": { "name": "ACME Analytics", "logo": "logo.svg", "logo_dark": "logo-dark.svg",
-             "favicon": "favicon.svg", "credit": "none", "title_suffix": " · ACME" },
+             "favicon": "favicon.svg", "title_suffix": " · ACME" },
   "locale": "de-DE",
   "series": { "ols": "#0b5fff", "Berlin": "#e11d48" },
   "defaults": { "legend": "bottom", "grid": "y" },
@@ -310,26 +310,21 @@ Implemented in `src/lint.rs` with pure colour maths (relative luminance, CIEDE20
   - `datazoo` keeps today's pixels within a small tolerance.
   - Headless SVG and browser use identical card/ink colours (parsed-SVG vs computed-style test).
 
-### T9 — White-labelling (P0, S)
+### T9 — Author branding (P0, S)
 
 ```sql
 SELECT 'Sales cockpit'::DASHBOARD_TITLE;            -- <h1>, document.title, export title
 SELECT 'ACME Analytics'::BRAND;                      -- replaces "anofox-visualization" in header/exports
 SELECT 'assets/acme.svg'::LOGO;                      -- header logo (theme brand.logo / logo_dark for dark)
 SELECT 'assets/favicon.svg'::FAVICON;
-SELECT 'none'::CREDIT;                               -- 'none' | 'Powered by ACME' | default
 ```
 
 - All of these are also tokens in the theme `brand` object. The SQL directive wins.
-- The credit is fixed to "Powered by DataZoo GmbH", appended on every render (`web/app.js:2498-2508`). It becomes `brand.credit`:
-  - default: unchanged;
-  - `'none'`: hidden;
-  - text or markdown link: replaced.
-  - Owner decision needed: should hiding it be licence-gated? See Q11.
+- **Owner decision (resolved): the credit is mandatory.** "Powered by DataZoo GmbH" (a link to DataZoo GmbH) renders on every dashboard — browser, embed, exported HTML/PDF, headless dashboard SVG, `serve` and locked pages — under every theme. It follows the theme's colours and fonts so it stays readable (e.g. in dark mode), but its text and link never change. There is **no** `::CREDIT` role and no `brand.credit` token. Author branding (`::DASHBOARD_TITLE`, `::BRAND`, `::LOGO`, `::FAVICON`, themes) is shown *in addition to* the credit.
 - The builder header `<h1>anofox-visualization</h1>` (`index.html:419`) shows `brand.name` only in embed and served mode. The authoring builder keeps the product name (see T12).
 - `document.title` = `{DASHBOARD_TITLE}{title_suffix}`. The favicon is set as a `<link rel=icon>`; today there is none.
 - Logos and favicons are resolved relative to the dashboard file and served same-origin; `data:` URIs are allowed. In locked mode they are read at startup, never from a viewer URL.
-- Exports (`downloadHtml`, CLI HTML, headless SVG header) use the brand name, logo (inlined `data:`) and credit, replacing the fixed "anofox-visualization dashboard" (`web/app.js:3610`, `src/bin/dashboard.rs:280-288`).
+- Exports (`downloadHtml`, CLI HTML, headless SVG header) use the brand name and logo (inlined `data:`) and always carry the DataZoo credit, replacing the fixed "anofox-visualization dashboard" (`web/app.js:3610`, `src/bin/dashboard.rs:280-288`).
 
 ### T10 — Per-tab / per-section accents (P2, S)
 
@@ -344,7 +339,7 @@ SELECT 'Risk'::SECTION, 'warning'::ACCENT;         -- semantic token name or hex
 
 ### T11 — Print styles & PDF (P1, M)
 
-- Fix the stale `@media print` (`web/index.html:276`, which targets `.layout`). Hide the sidebar, toolbar, editor, panel tools, filters (or print their current values as a "Filters: region = EU" line), the served nav and the credit when `credit=none`.
+- Fix the stale `@media print` (`web/index.html:276`, which targets `.layout`). Hide the sidebar, toolbar, editor, panel tools, filters (or print their current values as a "Filters: region = EU" line), and the served nav. The DataZoo credit always prints.
 - Print forces the theme's `print` variant (or `print_variant` token): white, ink, no shadows or gradients, zebra kept. Charts are **re-rendered** with print tokens before `window.print()` (`beforeprint` event), so charts and page match.
 - `@page { size: A4 landscape; margin: 12mm }` comes from `::PAGE_SIZE` (L6). A running header shows logo, title and date; the footer shows the credit and page number (CSS paged-media `@top-left` where supported, otherwise a fixed header).
 - All tabs print sequentially, each starting on a new page (`break-before: page`). `break-inside: avoid` applies to `.panel` and `.group`.
@@ -509,7 +504,7 @@ SELECT region, margin::PERCENT, '<0:negative; 0..0.05:warning; >0.05:positive'::
 | 4 | Locale numbers/dates, € suffix (C3) | P0 | M | `SELECT 'de-DE'::LOCALE;` |
 | 5 | `::OPTS` + options registry (C1) | P0 | M | `'legend=bottom; ylim=0,'::OPTS` |
 | 6 | Legend / limits / subtitle / caption / axis labels (C2 first wave) | P0 | S | `legend=`, `ylim=`, `subtitle=`, `caption=`, `ylabel=` |
-| 7 | White-labelling + header + sections (T9, L1, L2) | P0 | S | `::DASHBOARD_TITLE ::BRAND ::LOGO ::FAVICON ::CREDIT ::SECTION` |
+| 7 | White-labelling + header + sections (T9, L1, L2) | P0 | S | `::DASHBOARD_TITLE ::BRAND ::LOGO ::FAVICON ::SECTION` |
 | 8 | Built-in `print`, `colorblind`, `high-contrast` themes + contrast lint (T2, T7) | P1 | S | `SELECT 'colorblind'::THEME;` `dashboard --check` |
 | 9 | Stable series colours across a dashboard (T5) | P1 | M | `SELECT k::CATEGORY, hex::COLORMAP FROM …;` theme `"series"` |
 | 10 | Print styles/PDF + headless groups/sections (T11, L6, L4) | P1 | M | `'A4 landscape'::PAGE_SIZE`, `::PAGEBREAK` |
@@ -524,7 +519,7 @@ SELECT region, margin::PERCENT, '<0:negative; 0..0.05:warning; >0.05:positive'::
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M1 — Theme foundation, chrome & locale** (≈3–4 wk) | T1, T8 (chrome tokens, shared `theme-base.css`), T3, T4, T9, C3, light/dark built-ins, `dashboard/serve --theme`, upstream U1 | Golden default unchanged; token-only CSS grep test; dark e2e green (charts + chrome); white-label fixture renders without any DataZoo/anofox string; de-DE fixtures identical in browser and CLI; DOCS + skills updated |
+| **M1 — Theme foundation, chrome & locale** (≈3–4 wk) | T1, T8 (chrome tokens, shared `theme-base.css`), T3, T4, T9, C3, light/dark built-ins, `dashboard/serve --theme`, upstream U1 | Golden default unchanged; token-only CSS grep test; dark e2e green (charts + chrome); a branded fixture shows the author's title/logo/brand **and** the DataZoo credit, and a test asserts the credit is present in every output under every built-in theme; de-DE fixtures identical in browser and CLI; DOCS + skills updated |
 | **M2 — Customization & structure** (≈3 wk) | C1, C2 first wave, L1, L2, T2 rest, T6, T7 lint, T12, T5, L3, L5, L4, C6, upstream U2 | `--options` table generated; every option key has a render test; contrast lint on all examples; showcase uses header + sections + colormap |
 | **M3 — Reports & advanced layout** (≈3–4 wk) | T11 + L6 print/PDF, C4, C5, T10, L7–L12, tooltip templates, U4 CSS-var SVG | Print screenshots A4; `report` and `wall` templates as examples; embed demo; single exported HTML works in light and dark |
 
@@ -540,5 +535,5 @@ SELECT region, margin::PERCENT, '<0:negative; 0..0.05:warning; >0.05:positive'::
 8. **Custom CSS:** confirm "no CSS from dashboard SQL"; is an operator-level `serve --css` wanted?
 9. **Fonts:** which corporate fonts must work offline in exported HTML (embedding and licensing)?
 10. **Upstream:** OK to file U1/U2 (and U4 later) against ggplot-rs, and pin the next minor version in M1?
-11. **Credit / white-labelling:** may any dashboard hide "Powered by DataZoo GmbH" (`::CREDIT 'none'`), or only licensed/served deployments? Should the builder itself be re-brandable?
+11. ~~**Credit / white-labelling:** may any dashboard hide "Powered by DataZoo GmbH"?~~ **Resolved (owner):** no — the credit is mandatory in every output and under every theme; there is no `::CREDIT` role. Authors add their own branding alongside it. The builder itself stays product-branded (T12).
 12. **Builder chrome:** agree that the editor/sidebar stay neutral (T12) and only the dashboard canvas follows the theme?
