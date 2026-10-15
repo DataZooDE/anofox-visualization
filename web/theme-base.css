@@ -215,10 +215,15 @@ body.loading #dp-spinner{display:flex}
 .dp-table tfoot td{border-top:3px double var(--ax-ink);border-bottom:0;font-weight:700;background:var(--ax-th-bg);padding:.6rem .75rem;white-space:nowrap}
 .tot-legend{font-size:.72rem;color:var(--ax-muted);padding:0 .1rem;margin-top:-.2rem}
 .dp-table caption.tbl-cap{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.dp-table .tot-agg-w{position:relative;display:inline-block;margin-right:.5rem;vertical-align:baseline}
-.dp-table .tot-agg-w::after{content:"▾";position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:.6rem;color:var(--ax-muted);pointer-events:none;opacity:.7}
-.dp-table .tot-agg{appearance:none;-webkit-appearance:none;border:0;background:transparent;font:inherit;font-size:.66rem;font-weight:500;letter-spacing:.04em;text-transform:lowercase;color:var(--ax-muted);padding:0 .7rem 0 0;margin:0;cursor:pointer;border-radius:3px;field-sizing:content}
-.dp-table .tot-agg:hover,.dp-table .tot-agg:focus-visible{color:var(--ax-ink);outline:none;box-shadow:0 1px 0 var(--ax-muted)}
+/* the total's aggregation: small caps, quiet until hovered; opens .tot-menu */
+.dp-table .tot-agg{font:inherit;font-size:.62rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ax-muted);background:transparent;border:0;border-radius:4px;padding:.1rem .3rem;margin:0 .35rem 0 0;cursor:pointer;vertical-align:1px;box-shadow:none;transform:none}
+.dp-table .tot-agg:hover,.dp-table .tot-agg[aria-expanded="true"],.dp-table .tot-agg:focus-visible{color:var(--ax-accent);background:var(--ax-tab-hover-bg);outline:none;filter:none;transform:none;box-shadow:none}
+.tot-menu{position:fixed;z-index:60;min-width:11.5rem;padding:.3rem;background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:var(--ax-radius-sm);box-shadow:var(--ax-pop-shadow);text-align:left;font-weight:400;font-style:normal}
+.tot-menu .tot-mi{display:flex;width:100%;justify-content:space-between;gap:1.2rem;align-items:baseline;font:inherit;font-size:.8rem;color:var(--ax-ink);background:transparent;border:0;border-radius:5px;padding:.38rem .55rem;cursor:pointer;box-shadow:none;transform:none}
+.tot-menu .tot-mi .v{font-variant-numeric:tabular-nums;color:var(--ax-muted)}
+.tot-menu .tot-mi:hover,.tot-menu .tot-mi:focus-visible{background:var(--ax-row-hover);outline:none;filter:none;transform:none;box-shadow:none}
+.tot-menu .tot-mi.on{color:var(--ax-accent);font-weight:600}
+.tot-menu .tot-mi.on .v{color:var(--ax-accent)}
 .dp-table tfoot td.neg .tot-v,.dp-table td.num.neg{color:var(--ax-negative)}
 .dp-table tfoot td{position:sticky;bottom:0;z-index:1}
 .tbl-scroll.long{max-height:min(640px,75vh);overflow-y:auto}
@@ -356,11 +361,11 @@ body.dp-static .controls select{margin-left:.3rem}
 .dp-table.virtual td,.dp-table.virtual.compact td{padding-top:0;padding-bottom:0}
 /* print / PDF: no controls; every row (client tables); header repeated on each page, totals at the end */
 @media print{
-.tbl-bar,.dp-table tr.tbl-frow,.table-foot,.dp-table .row-cb,.dp-table .th-sort,.dp-table .tot-agg-w::after{display:none}
+.tbl-bar,.dp-table tr.tbl-frow,.table-foot,.dp-table .row-cb,.dp-table .th-sort,.tot-menu{display:none}
 .tbl-scroll,.tbl-scroll.virtual,.tbl-scroll.long{max-height:none;overflow:visible}
 .dp-table thead{display:table-header-group}
 .dp-table tfoot{display:table-row-group}
 .dp-table th,.dp-table tfoot td{position:static}
 .dp-table tr{break-inside:avoid}
-.dp-table .tot-agg{padding-right:0}
+.dp-table .tot-agg{padding:0;cursor:default}
 }

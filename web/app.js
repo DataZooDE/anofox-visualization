@@ -3291,6 +3291,21 @@ const SCROLL_BLOCK = 100; // rows per fetch of a ::PAGED table in Scroll view
 // the aggregations a totals cell can show (::TOTALS, or the viewer's pick)
 const AGGS = ["sum", "mean", "median", "min", "max", "count"];
 const AGG_WORD = { sum: "sum", mean: "mean", median: "median", min: "minimum", max: "maximum", count: "count of values" };
+const AGG_LABEL = { sum: "Sum", mean: "Mean", median: "Median", min: "Min", max: "Max", count: "Count" };
+// The open totals menu closes on a click elsewhere or Esc (one listener for all tables).
+let totMenuWired = false;
+function wireTotMenuClose() {
+  if (totMenuWired) return;
+  totMenuWired = true;
+  const close = () => document.querySelectorAll(".tot-menu").forEach((m) => m.closeMenu());
+  document.addEventListener("mousedown", (e) => {
+    if (!e.target.closest?.(".tot-menu, .tot-agg")) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  window.addEventListener("scroll", close, true); // it is placed at the label: don't let it drift
+}
 // Tables to re-render for print (every matching row of a client table, not one page)
 const dpPrintHooks = new Set();
 for (const ev of ["beforeprint", "afterprint"])
@@ -4353,22 +4368,56 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       if (a === "none") return;
       const v = aggValue(c, a);
       td.classList.add("num");
-      // the aggregation, as a quiet picker in the cell
-      const w = document.createElement("span");
-      w.className = "tot-agg-w";
-      const pick = document.createElement("select");
-      pick.className = "tot-agg";
-      pick.title = `${head(c)}: choose what the total shows`;
-      pick.setAttribute("aria-label", `${head(c)} total`);
-      for (const x of AGGS) pick.add(new Option(x, x, false, x === a));
-      pick.onclick = (e) => e.stopPropagation();
-      pick.onchange = () => {
-        aggPick[c] = pick.value;
-        persist();
-        renderCols();
-        renderTotals();
+      // the aggregation: a quiet small-caps label that opens a menu previewing
+      // every aggregation's value for this column
+      const w = document.createElement("button");
+      w.type = "button";
+      w.className = "tot-agg";
+      w.textContent = a;
+      w.title = `${head(c)}: choose what the total shows`;
+      w.setAttribute("aria-haspopup", "menu");
+      w.setAttribute("aria-expanded", "false");
+      w.onclick = (e) => {
+        e.stopPropagation();
+        const open = w.getAttribute("aria-expanded") === "true";
+        document.querySelectorAll(".tot-menu").forEach((m) => m.closeMenu());
+        if (open) return;
+        wireTotMenuClose();
+        const menu = document.createElement("div");
+        menu.className = "tot-menu";
+        menu.setAttribute("role", "menu");
+        menu.closeMenu = () => {
+          menu.remove();
+          w.setAttribute("aria-expanded", "false");
+        };
+        for (const x of AGGS) {
+          const xv = aggValue(c, x);
+          const it = document.createElement("button");
+          it.type = "button";
+          it.className = "tot-mi" + (x === a ? " on" : "");
+          it.setAttribute("role", "menuitemradio");
+          it.setAttribute("aria-checked", String(x === a));
+          it.innerHTML = `<span class="k">${AGG_LABEL[x]}</span><span class="v">${escapeHtml(xv == null ? "–" : aggText(xv, c, x))}</span>`;
+          it.onclick = (ev) => {
+            ev.stopPropagation();
+            menu.closeMenu();
+            aggPick[c] = x;
+            persist();
+            renderCols();
+            renderTotals();
+          };
+          menu.appendChild(it);
+        }
+        // on the page, not in the (clipping, scrolling) table: above the label,
+        // or below it when there is no room
+        document.body.appendChild(menu);
+        const lb = w.getBoundingClientRect();
+        const mb = menu.getBoundingClientRect();
+        menu.style.left = `${Math.max(8, Math.min(lb.left, window.innerWidth - mb.width - 8))}px`;
+        menu.style.top = `${lb.top - mb.height - 6 >= 8 ? lb.top - mb.height - 6 : lb.bottom + 6}px`;
+        w.setAttribute("aria-expanded", "true");
+        menu.querySelector(".tot-mi.on")?.focus();
       };
-      w.appendChild(pick);
       const val = document.createElement("span");
       val.className = "tot-v";
       val.textContent = v == null ? "–" : aggText(v, c, a);
