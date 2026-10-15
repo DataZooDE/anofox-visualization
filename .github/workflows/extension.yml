@@ -1,11 +1,21 @@
-name: Build full-toolkit extension (C-API)
+name: Release full toolkit
 
-# Build + package the C-API anofox_visualization extension (render + serving,
-# duckext/) for each platform and upload the loadable `.duckdb_extension`
-# artifacts. Mirrors duckext/scripts/build-native.sh. Builds from a clean
-# checkout: the DuckDB C-API header is vendored (duckext/capi_hdr), web/pkg is
-# built with wasm-pack before the extension embeds it, and ggplot-rs is a
-# pinned git dependency resolved through the committed Cargo.lock (--locked).
+# The from-source FULL TOOLKIT (see BUILD.md) as GitHub release assets, per
+# platform:
+#   anofox_visualization.<tag>.duckdb-<duckdb>.<platform>.duckdb_extension
+#       the C-API extension (duckext/): anofox_render + macros + anofox_serve*
+#       with the builder UI (web/pkg, wasm-pack) embedded; unsigned
+#   anofox-visualization-cli-<tag>-<rust target>.tar.gz (.zip on Windows)
+#       the `dashboard` and `serve` binaries + README.md + LICENSE
+#   SHA256SUMS
+# Each platform builds and smoke-tests on its own runner against the DuckDB CLI
+# pinned in .duckdb-version. The logic lives in scripts/release/ (runnable
+# locally); this file only wires runners to it.
+#
+# On a `v*` tag (pushed when a GitHub release is published) the assets are
+# uploaded to that release; workflow_dispatch builds the same assets as
+# workflow artifacts only. pages.yml republishes the extensions as a DuckDB
+# custom extension repository after a successful run here.
 on:
   push:
     tags: ["v*"]
@@ -15,75 +25,98 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Empty on workflow_dispatch → the scripts default to v<Cargo.toml version>.
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+
 jobs:
   build:
-    name: ${{ matrix.name }}
-    timeout-minutes: 30
+    name: ${{ matrix.platform }}
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  name: linux_amd64,   lib: libanofox_visualization_ext.so }
-          - { os: macos-14,       name: osx_arm64,     lib: libanofox_visualization_ext.dylib }
-          - { os: macos-15-intel, name: osx_amd64,     lib: libanofox_visualization_ext.dylib }
-          - { os: windows-latest, name: windows_amd64, lib: anofox_visualization_ext.dll }
+          # Linux: Ubuntu 22.04 runners so the binaries need only glibc >= 2.35.
+          - { os: ubuntu-22.04,     platform: linux_amd64 }
+          - { os: ubuntu-22.04-arm, platform: linux_arm64 }
+          - { os: macos-14,         platform: osx_arm64 }
+          - { os: macos-15-intel,   platform: osx_amd64 }
+          - { os: windows-latest,   platform: windows_amd64 }
     defaults:
       run:
         shell: bash
+    env:
+      PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Tag matches the Cargo.toml version
+        if: env.RELEASE_TAG != ''
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$RELEASE_TAG" = "v$VERSION" ] || { echo "::error::tag $RELEASE_TAG != v$VERSION (Cargo.toml)"; exit 1; }
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install DuckDB (Python, pinned) for the smoke test
-        run: python -m pip install --quiet "duckdb==1.5.*"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+      - name: Install the pinned DuckDB CLI
+        run: echo "DUCKDB=$(scripts/release/install-duckdb-cli.sh)" >> "$GITHUB_ENV"
 
-      - name: Build web/pkg (embedded builder UI)
-        run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+      - name: Build + smoke-test the extension (web/pkg, cdylib, metadata)
+        run: scripts/release/build-extension.sh
 
-      - name: Build (release cdylib)
-        run: cargo build --locked --release -p anofox-visualization-duckdb --lib
-
-      - name: Package (metadata footer)
-        run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          python duckext/scripts/append_extension_metadata.py -l "target/release/${{ matrix.lib }}" \
-            -n anofox_visualization -p ${{ matrix.name }} -dv v1.2.0 -ev "v$VERSION" --abi-type C_STRUCT \
-            -o anofox_visualization.duckdb_extension
-
-      - name: Smoke test (Python DuckDB, unsigned)
-        run: |
-          python - <<'PY'
-          import duckdb
-          con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-          con.execute("LOAD 'anofox_visualization.duckdb_extension'")
-          svg = con.execute("""
-            WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22)) t(ch,n))
-            SELECT anofox_bar(ch, n) FROM d
-          """).fetchone()[0]
-          assert svg.startswith("<svg") and "<rect" in svg, svg[:80]
-          assert con.execute("SELECT anofox_render(NULL)").fetchone()[0] is None
-          try:
-              con.execute("SELECT anofox_render('not json')").fetchone()
-              raise SystemExit("a bad spec must raise an error")
-          except duckdb.Error as e:
-              assert "bad spec JSON" in str(e), e
-          print("OK:", len(svg), "byte SVG")
-          PY
+      - name: Build + smoke-test + package the CLI (dashboard, serve)
+        run: scripts/release/package-cli.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: anofox_visualization-${{ matrix.name }}
-          path: anofox_visualization.duckdb_extension
+          name: full-toolkit-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Upload to the GitHub release
+    needs: build
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: full-toolkit-*
+          merge-multiple: true
+          path: dist
+
+      - name: SHA256SUMS + upload (release only on a v* tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ env.RELEASE_TAG == '' && '1' || '0' }}
+        run: scripts/release/upload-release.sh "${RELEASE_TAG:-manual}" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS

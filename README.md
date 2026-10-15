@@ -102,10 +102,12 @@ FROM sessions GROUP BY ALL ORDER BY ALL;
 > `anofox_render`, the `anofox_bar/_line/_scatter/_area/_xy/_xyc` macros and the
 > `anofox_plot_*` model-output macros that
 > turn SQL into SVG. The **serving and builder features** below embed a web UI +
-> HTTP server and are **not** in the community binary — they come with a
-> **from-source build** (see [Installation → From source](#from-source)).
+> HTTP server and are **not** in the community binary — they come with the
+> **full toolkit**: prebuilt on every GitHub release (see
+> [Installation → From a release](#from-a-release-full-toolkit)) or a
+> [from-source build](#from-source).
 
-From a from-source build you also get an **in-browser builder** and **locked,
+With the full toolkit you also get an **in-browser builder** and **locked,
 read-only serving**:
 
 ```sql
@@ -120,7 +122,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095);
 SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
 ```
 
-…plus a `dashboard` CLI (`cargo run --bin dashboard -- file.sql`) and the
+…plus a `dashboard` CLI (in the release CLI archive, or `cargo run --bin dashboard -- file.sql`) and the
 standalone browser app (`web/`).
 
 ## Installation
@@ -137,6 +139,73 @@ LOAD anofox_visualization;
 
 **Provides: rendering only** — `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc`
 macros (SQL → SVG). Serving and the builder are not included (see below).
+
+### From a release (full toolkit)
+
+Every [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases)
+carries the **full toolkit** — rendering **plus** `anofox_serve`,
+`anofox_serve_dashboards`, `anofox_serve_stop` with the browser builder
+embedded — prebuilt for each platform, together with the `dashboard` / `serve`
+CLIs and a `SHA256SUMS` file:
+
+| Platform | Extension asset | CLI asset |
+|---|---|---|
+| Linux x86_64 (glibc ≥ 2.35) | `anofox_visualization.<tag>.duckdb-v1.5.6.linux_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 (glibc ≥ 2.35) | `anofox_visualization.<tag>.duckdb-v1.5.6.linux_arm64.duckdb_extension` | `anofox-visualization-cli-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `anofox_visualization.<tag>.duckdb-v1.5.6.osx_arm64.duckdb_extension` | `anofox-visualization-cli-<tag>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `anofox_visualization.<tag>.duckdb-v1.5.6.osx_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-apple-darwin.tar.gz` |
+| Windows x64 | `anofox_visualization.<tag>.duckdb-v1.5.6.windows_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-pc-windows-msvc.zip` |
+
+`duckdb-v1.5.6` is the DuckDB release each file is built and smoke-tested
+against; the extension uses DuckDB's stable C extension API (v1.2.0), so it
+also loads in other DuckDB versions ≥ v1.2 for the same platform.
+
+The extensions are **unsigned**: start DuckDB with `-unsigned` (or
+`SET allow_unsigned_extensions = true` before the first `LOAD`, e.g.
+`duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python).
+
+```sh
+TAG=v2026.10.15 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
+EXT=anofox_visualization.$TAG.duckdb-v1.5.6.$PLATFORM.duckdb_extension
+curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/$EXT
+curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing
+duckdb -unsigned -c "LOAD './$EXT'; SELECT anofox_contract_version();"
+```
+
+```sql
+-- in `duckdb -unsigned`
+LOAD './anofox_visualization.v2026.10.15.duckdb-v1.5.6.linux_amd64.duckdb_extension';
+SELECT anofox_serve(8080);      -- the builder UI on the live session
+```
+
+Keep the file name's `anofox_visualization.` prefix when renaming: DuckDB
+derives the extension's name (and entry point) from the file name up to the
+first dot. Or install it like any other extension from the project's DuckDB
+extension repository on GitHub Pages (latest release; DuckDB v1.5.6):
+
+```sql
+-- duckdb -unsigned
+INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
+LOAD anofox_visualization;
+```
+
+The CLI archives contain `dashboard` (render an annotated `.sql` file to HTML,
+or lint it) and `serve` (the builder / locked dashboard server, UI embedded).
+Both run queries through a `duckdb` CLI on your `PATH`:
+
+```sh
+tar xzf anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu.tar.gz
+cd anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu
+./dashboard --version
+./dashboard my_dashboard.sql out.html     # static interactive HTML
+./dashboard --check my_dashboard.sql      # which panels error / are empty
+./serve my.duckdb                         # builder on http://127.0.0.1:8080
+./serve --dashboards dashboards/ --db my.duckdb   # locked serving
+```
+
+On macOS, downloads from a browser are quarantined; clear it with
+`xattr -d com.apple.quarantine <file>` (not needed with `curl`).
 
 ### From source
 

@@ -6,12 +6,12 @@ through different routes.
 | Binary | Built by | Ships via |
 |---|---|---|
 | **Render-only** (`anofox_render` + macros) | `make` at the repo root (C++ shell + `crates/anofox-viz-ffi`) | DuckDB **community extensions** (signed) — `.github/workflows/MainDistributionPipeline.yml` |
-| **Full toolkit** (render + `anofox_serve*`) | `duckext/scripts/build-native.sh` (this crate, C-API) | **self-hosted**, unsigned — `.github/workflows/extension.yml` |
+| **Full toolkit** (render + `anofox_serve*`) | `duckext/scripts/build-native.sh` (this crate, C-API) | **GitHub release assets + extension repository on Pages**, unsigned — `.github/workflows/extension.yml` |
 
 ## Prerequisites (both)
 
 - The repository is public: `github.com/DataZooDE/anofox-visualization`.
-- Self-contained build: `ggplot-rs` comes from crates.io (`ggplot-rs = "0.16"`
+- Self-contained build: `ggplot-rs` comes from crates.io (`ggplot-rs = "0.17"`
   in the root `Cargo.toml`) — no sibling checkout needed. `Cargo.lock` is
   committed and every build uses `--locked`.
 - One version: `[workspace.package] version` in the root `Cargo.toml`
@@ -33,25 +33,45 @@ extension-ci-tools pipeline as `MainDistributionPipeline.yml` (`build: cmake`,
 `requires_toolchains: rust`) and signs the result. The C++ ABI pins one DuckDB
 version per build (currently v1.5.6).
 
-## Route 2 — self-hosted repository (full toolkit, unsigned)
+## Route 2 — GitHub releases + Pages repository (full toolkit, unsigned)
 
-`.github/workflows/extension.yml` (on `v*` tags or manually) builds the web UI
-(`wasm-pack`), the C-API extension, packages it with
-`append_extension_metadata.py` (`--abi-type C_STRUCT`, C-API `v1.2.0`) for
-linux/macOS/Windows, smoke-tests it with a pinned Python `duckdb`, and uploads
-`anofox_visualization.duckdb_extension` per platform. Serve the files in the
-DuckDB repository layout:
+Publishing a GitHub release pushes its tag `v<version>`, which runs
+`.github/workflows/extension.yml` ("Release full toolkit"). Per platform
+(linux_amd64, linux_arm64, osx_arm64, osx_amd64, windows_amd64) it builds
+web/pkg (`wasm-pack`) and the C-API extension, packages it with
+`append_extension_metadata.py` (`--abi-type C_STRUCT`, C-API `v1.2.0`), builds
+the `dashboard` / `serve` CLIs, smoke-tests both against the DuckDB CLI pinned
+in `.duckdb-version` (v1.5.6) on that runner, and uploads to the release:
 
 ```
-<repo>/v1.2.0/<platform>/anofox_visualization.duckdb_extension[.gz]
+anofox_visualization.<tag>.duckdb-v1.5.6.<platform>.duckdb_extension
+anofox-visualization-cli-<tag>-<rust target>.tar.gz   (.zip on Windows)
+SHA256SUMS
+```
+
+The logic is in `scripts/release/` (see the root `BUILD.md`, "Release
+assets"); `workflow_dispatch` produces the same files as workflow artifacts
+only. Before publishing a release: bump the CalVer version (`Cargo.toml`,
+`duckext/description.yml`), merge, then publish the release with tag
+`v<version>` — the build job fails if the tag and `Cargo.toml` disagree.
+
+After a successful tag run, `pages.yml` downloads the latest release's
+extensions and publishes them in DuckDB's repository layout
+(`scripts/release/extension-repo.sh`):
+
+```
+https://datazoode.github.io/anofox-visualization/extensions/v1.5.6/<platform>/anofox_visualization.duckdb_extension.gz
 ```
 
 ```sql
-SET custom_extension_repository = 'https://you.example.com/duckdb';
-INSTALL anofox_visualization;      -- needs allow_unsigned_extensions / duckdb -unsigned
+-- duckdb -unsigned  (or SET allow_unsigned_extensions = true)
+INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
 LOAD anofox_visualization;
 ```
 
-C-API (`C_STRUCT`) extensions are portable across DuckDB releases that provide
-that API version (v1.2.0+), so one build per platform covers many DuckDB
-versions — unlike the C++ ABI build, which pins an exact version.
+DuckDB requests `<repository>/<its own version>/<platform>/…`, so only DuckDB
+v1.5.6 finds the files there. C-API (`C_STRUCT`) extensions are portable across
+DuckDB releases that provide that API version (v1.2.0+), so for another DuckDB
+version download the release asset and `LOAD` it directly (or mirror the same
+`.gz` under another version directory) — unlike the C++ ABI build, which pins
+an exact version.

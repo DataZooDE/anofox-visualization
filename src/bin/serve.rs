@@ -49,10 +49,10 @@ struct Opts {
     threads: usize,
 }
 
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open]                (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N]\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+
 fn usage(msg: &str) -> ! {
-    eprintln!(
-        "error: {msg}\n\nusage: serve [--db] <db> [--port N] [--no-open]                (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N]"
-    );
+    eprintln!("error: {msg}\n\n{USAGE}");
     std::process::exit(2)
 }
 
@@ -76,6 +76,14 @@ fn parse_args() -> Opts {
     };
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0)
+            }
+            "--version" | "-V" => {
+                println!("serve {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0)
+            }
             "--port" | "-p" => {
                 let p = num(args.next(), "--port");
                 o.port = u16::try_from(p)

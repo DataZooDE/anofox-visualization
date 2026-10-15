@@ -16,7 +16,7 @@ One Cargo workspace (root `Cargo.toml`):
 | Shell | C++ (`csrc/`), DuckDB C++ extension ABI, built by extension-ci-tools + CMake + corrosion | Rust only, DuckDB **C extension API** (`duckext/src`), no libduckdb linking |
 | DuckDB compatibility | exactly the pinned version (`duckdb` submodule, v1.5.6) | any DuckDB providing C-API v1.2.0 (v1.2+) |
 | Macros | registered as internal catalog entries (with descriptions) | created with SQL (see caveat below) |
-| Ships as | the DuckDB community extension (signed) | self-hosted artifact (`.github/workflows/extension.yml`, unsigned) |
+| Ships as | the DuckDB community extension (signed) | GitHub release assets + a DuckDB extension repository on Pages (`.github/workflows/extension.yml`, unsigned) |
 | Tests | `make test` → `test/sql/*.test` | `cargo test -p anofox-visualization-duckdb`, smoke test in `build-native.sh` |
 
 ```sh
@@ -73,6 +73,40 @@ ours (its body calls `anofox_render`/`anofox_xy`), and a read-only database
 simply gets no macros. The C++ build registers them as internal, documented
 catalog entries and has neither issue.
 
+## Release assets (full toolkit)
+
+Publishing a GitHub release pushes its `v<version>` tag, which runs
+`.github/workflows/extension.yml` ("Release full toolkit"). One job per
+platform (linux_amd64 / linux_arm64 on Ubuntu 22.04, osx_arm64, osx_amd64,
+windows_amd64) builds and smoke-tests on its own runner, then one job writes
+`SHA256SUMS` and uploads everything to the release (`gh release upload
+--clobber`, so re-runs replace assets; if only the tag exists the release is
+created). `workflow_dispatch` builds the same files as workflow artifacts
+without touching any release. After a successful tag run, `pages.yml`
+republishes the latest release's extensions as a DuckDB extension repository
+under `https://datazoode.github.io/anofox-visualization/extensions`.
+
+The steps are scripts in `scripts/release/`, runnable locally (Linux, macOS,
+Git Bash on Windows; output in `dist/`, the DuckDB CLI cached in `.cache/`):
+
+```sh
+scripts/release/build-extension.sh   # web/pkg + extension + smoke test
+#   → dist/anofox_visualization.v<version>.duckdb-v1.5.6.<platform>.duckdb_extension
+scripts/release/package-cli.sh       # dashboard + serve, smoke test, archive
+#   → dist/anofox-visualization-cli-v<version>-<rust target>.tar.gz (.zip on Windows)
+DRY_RUN=1 scripts/release/upload-release.sh v<version> dist   # SHA256SUMS only
+scripts/release/extension-repo.sh dist /tmp/repo   # → /tmp/repo/v1.5.6/<platform>/anofox_visualization.duckdb_extension.gz
+```
+
+The extension smoke test (`smoke-extension.sh`) loads the file in the pinned
+DuckDB CLI with `-unsigned` and checks: an SVG from `anofox_render`, NULL → NULL,
+a bad spec raises an error, `anofox_contract_version()`, the `anofox_serve*`
+functions, the stamped extension version, and that web/pkg is embedded. The
+CLI smoke test runs `--version`/`--help` and `dashboard --check
+dashboards/sessions.sql`. The extension file name must start with
+`anofox_visualization.` — DuckDB derives the extension name (and its
+`<name>_init_c_api` entry point) from the file name up to the first dot.
+
 ## Versions — one source of truth
 
 - `[workspace.package] version` in the root `Cargo.toml` (CalVer
@@ -83,7 +117,11 @@ catalog entries and has neither issue.
   artifact. `duckext/description.yml` must carry the same value.
 - DuckDB: the C++ build is pinned to the `duckdb` submodule (v1.5.6) and
   `MainDistributionPipeline.yml`'s `duckdb_version`; bump both together. The
-  C-API build requests C-API v1.2.0.
+  C-API build requests C-API v1.2.0 (so its metadata footer says `v1.2.0`, not
+  a DuckDB release); the DuckDB release the full toolkit is tested against —
+  and published for in the release asset names and the Pages extension
+  repository — is `.duckdb-version` (read by `scripts/release/` and
+  `pages.yml`). Bump it together with the two above.
 
 ## Lockfile policy
 
