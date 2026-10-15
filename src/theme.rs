@@ -1580,7 +1580,7 @@ pub fn header_html(t: &ResolvedTheme) -> String {
         (Variant::Dark, Some(d), _) => Some(d),
         (_, _, l) => l.as_ref(),
     };
-    let mut s = String::from("<header class=\"dp-head\">");
+    let mut s = String::from("<div class=\"dp-head\">");
     if let Some(l) = logo {
         s.push_str(&format!(
             "<img class=\"dp-logo\" src=\"{}\" alt=\"\">",
@@ -1594,7 +1594,7 @@ pub fn header_html(t: &ResolvedTheme) -> String {
     if let Some(ti) = &b.title {
         s.push_str(&format!("<h1 class=\"dp-title\">{}</h1>", esc(ti)));
     }
-    s.push_str("</div></header>");
+    s.push_str("</div></div>");
     s
 }
 

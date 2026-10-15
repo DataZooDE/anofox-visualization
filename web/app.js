@@ -1918,7 +1918,7 @@ function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
   if (!b.title && !b.name && !b.logo) return null;
-  const h = document.createElement("header");
+  const h = document.createElement("div"); // not <header>: the builder styles that
   h.className = "dp-head";
   const logo = b.logo && safeUrl(b.logo, { image: true });
   if (logo) {

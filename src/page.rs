@@ -49,7 +49,7 @@ pub fn render(p: &StaticPage) -> String {
     // Without an author title the page still names itself.
     let header = if header.is_empty() {
         format!(
-            "<header class=\"dp-head\"><div class=\"dp-head-text\"><h1 class=\"dp-title\">{}</h1></div></header>",
+            "<div class=\"dp-head\"><div class=\"dp-head-text\"><h1 class=\"dp-title\">{}</h1></div></div>",
             esc(p.fallback_title)
         )
     } else {
