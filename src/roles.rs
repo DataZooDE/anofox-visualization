@@ -237,6 +237,18 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("RELOAD", &["REFRESH"], R::Reload, "chrome", false, "auto-refresh interval (seconds)"),
     e("HEADER_IMAGE", &["HEADERIMAGE"], R::HeaderImage, "chrome", false, "banner image URL"),
     e("FOOTER_LINK", &["FOOTERLINK"], R::FooterLink, "chrome", false, "link at the bottom"),
+    e("SECTION", &["SECTION_HEADING"], R::Section, "layout", false,
+      "a section heading that always starts a new row"),
+    e("THEME", &[], R::Theme, "chrome", false,
+      "dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON"),
+    e("LOCALE", &[], R::Locale, "chrome", false,
+      "number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR'"),
+    e("DASHBOARD_TITLE", &["DASHBOARDTITLE", "PAGE_TITLE"], R::DashboardTitle, "chrome", false,
+      "dashboard title: page header, browser tab and export title"),
+    e("BRAND", &["BRAND_NAME"], R::Brand, "chrome", false,
+      "brand / organisation name shown above the dashboard title"),
+    e("LOGO", &[], R::Logo, "chrome", false, "header logo image URL (relative, https: or data:image/)"),
+    e("FAVICON", &[], R::Favicon, "chrome", false, "browser-tab icon URL"),
 ];
 
 /// Role tokens that are **also DuckDB type names** (`x::DATE` is a real cast).
@@ -373,12 +385,28 @@ pub fn roles_json() -> String {
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::Tab | Role::SubTab | Role::Placeholder
         )),
+        // Dashboard-level chrome directives (theme, locale, title, branding).
+        "chrome": tokens(&|r| is_chrome_directive(r)),
         "table_formats": tokens(&|r| is_table_format(r)),
         "text_sizes": tokens(&|r| matches!(r, Role::Text(_))),
         // Chart kinds whose panel honours a zoom window (scroll/drag zoom).
         "zoomable": tokens(&|r| matches!(r, Role::Value(k) if k.zoomable())),
     });
     serde_json::json!({ "roles": roles, "sets": sets }).to_string()
+}
+
+/// Dashboard-level chrome directives collected before the panels render
+/// (see [`crate::theme::DashboardChrome`]).
+pub fn is_chrome_directive(r: Role) -> bool {
+    matches!(
+        r,
+        Role::Theme
+            | Role::Locale
+            | Role::DashboardTitle
+            | Role::Brand
+            | Role::Logo
+            | Role::Favicon
+    )
 }
 
 /// Per-column formatting roles honoured inside a `::TABLE`/`::PAGED` panel.
@@ -603,6 +631,13 @@ mod tests {
             Role::Censor,
             Role::CooksContour,
             Role::SmoothMethod,
+            Role::Theme,
+            Role::Locale,
+            Role::DashboardTitle,
+            Role::Brand,
+            Role::Logo,
+            Role::Favicon,
+            Role::Section,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -671,7 +706,14 @@ mod tests {
                 | Role::Rank
                 | Role::Censor
                 | Role::CooksContour
-                | Role::SmoothMethod => {}
+                | Role::SmoothMethod
+                | Role::Theme
+                | Role::Locale
+                | Role::DashboardTitle
+                | Role::Brand
+                | Role::Logo
+                | Role::Favicon
+                | Role::Section => {}
             }
         }
         v

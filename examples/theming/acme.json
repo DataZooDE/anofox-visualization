@@ -1,0 +1,18 @@
+{
+  "name": "acme",
+  "extends": "light",
+  "palette": ["#0b5fff", "#e11d48", "#16a34a", "#f59e0b", "#7c3aed", "#0891b2"],
+  "colors": {
+    "bg": "#f4f6f9", "bg2": "#f4f6f9", "card": "#ffffff", "ink": "#1f2937", "muted": "#6b7280",
+    "line": "#e5e7eb", "heading": "#111827", "accent": "#0b5fff", "accent2": "#3b82f6",
+    "positive": "#16a34a", "negative": "#dc2626", "warning": "#d97706", "link": "#0b5fff"
+  },
+  "font": {"family": "Inter, system-ui, -apple-system, Segoe UI, sans-serif",
+           "display": "Inter, system-ui, sans-serif"},
+  "radius": 10,
+  "chrome": {"gradient": false, "background": "plain", "kpi_value": "accent", "table_zebra": true, "shadow": "sm"},
+  "brand": {"title_suffix": " · ACME"},
+  "dark": {"colors": {"bg": "#0f1729", "bg2": "#0f1729", "card": "#162033", "ink": "#e5e7eb",
+                      "muted": "#9ca3af", "line": "#26324a", "heading": "#f9fafb",
+                      "accent": "#5b8cff", "accent2": "#7aa2ff"}}
+}

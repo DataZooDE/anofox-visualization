@@ -351,6 +351,9 @@ pub struct LockedOptions {
     pub attach: bool,
     /// Extra extensions to LOAD into the snapshot (before it is locked).
     pub load: Vec<String>,
+    /// Default theme (a name, `a+b`, or a JSON object) for dashboards without
+    /// their own `::THEME` — validated and frozen when the server starts.
+    pub theme: Option<String>,
 }
 
 impl Default for LockedOptions {
@@ -362,6 +365,7 @@ impl Default for LockedOptions {
             threads: 4,
             attach: true,
             load: Vec::new(),
+            theme: None,
         }
     }
 }
@@ -394,7 +398,16 @@ impl LockedOptions {
                         o.load.push(e.to_string());
                     }
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load)")),
+                "theme" => {
+                    let spec = match val {
+                        serde_json::Value::String(t) => t.clone(),
+                        serde_json::Value::Object(_) => val.to_string(),
+                        _ => return Err("options.theme must be a theme name or a JSON object".into()),
+                    };
+                    anofox_visualization::theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
+                    o.theme = Some(spec);
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load, theme)")),
             }
         }
         Ok(o)
@@ -844,7 +857,8 @@ fn served_index(st: &Locked, dash: &Dash) -> Vec<u8> {
         .map(|d| serde_json::json!({ "id": d.id, "title": d.title }))
         .collect();
     let cfg = json_for_script(&serde_json::json!({
-        "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav, "locked": true
+        "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav, "locked": true,
+        "theme": st.opts.theme,
     }));
     html.replacen("<head>", "<head><base href=\"/\">", 1)
         .replacen(
@@ -889,6 +903,13 @@ mod tests {
         assert!(LockedOptions::parse(Some(r#"{"nope":1}"#)).is_err());
         assert!(LockedOptions::parse(Some(r#"{"load":["x; DROP"]}"#)).is_err());
         assert!(LockedOptions::parse(None).is_ok());
+        let t = LockedOptions::parse(Some(r#"{"theme":"dark"}"#)).unwrap();
+        assert_eq!(t.theme.as_deref(), Some("dark"));
+        assert!(LockedOptions::parse(Some(r#"{"theme":"nope"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(
+            r##"{"theme":{"extends":"light","palette":["#123456"]}}"##
+        ))
+        .is_ok());
     }
 
     #[test]

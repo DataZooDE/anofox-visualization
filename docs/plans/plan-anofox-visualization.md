@@ -95,6 +95,13 @@ golden-structure SVG comparison, evals, report templates.
   "Classifier report" (ROC, PR, calibration, confusion table), "Forecast
   report" (prediction fan + residual ACF + accuracy summary).
 
+## Phase 4 — Theming, layout & customization
+
+Whole-dashboard theme model (charts + page chrome + exports), `::THEME`,
+`::LOCALE` (de-DE), `::OPTS` options registry, header/sections/print layout,
+stable series colours, accessibility lint. Detailed plan:
+[plan-theming-layout.md](plan-theming-layout.md).
+
 ## Dependencies on other repos
 
 anofox-statistics issue numbers refer to DataZooDE/anofox-statistics; tracking issue #161.

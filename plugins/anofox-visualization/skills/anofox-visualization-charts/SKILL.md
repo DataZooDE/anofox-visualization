@@ -62,6 +62,7 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 {"rows":  [{"c0": "W1", "c1": 30, "c2": 4.5}, …],
  "roles": [[0, "XAXIS"], [1, "BARCHART", "sessions"], [2, "LINECHART", "revenue"]],
  "width": 640, "height": 400, "primary": "0b7285",
+ "theme": "dark", "locale": "de-DE",
  "max_categories": 30, "max_line_points": 5000}
 ```
 
@@ -71,11 +72,25 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 | `roles` | `[column_index, "ROLE"(, "legend name")]` — any `::ROLE` of the registry (case-insensitive, aliases allowed) |
 | `width`, `height` | integers in 16–8192 (default 640 × 400) |
 | `primary` | brand colour `rrggbb` for single-series marks |
+| `theme` | `light` (default) · `dark` · `print` · `colorblind` · `high-contrast` · `'a+b'` · a theme JSON object/string; `variant` `light`/`dark` picks the side of an auto theme |
+| `locale` | `en-US` (default) · `en-GB` · `de-DE` · `fr-FR`: axis/legend numbers, currency and month names |
 | `max_categories` | discrete axis / colour cap (default 30: the largest 29 + "Other"; `0` = off) |
 | `max_line_points` | LTTB downsampling threshold per line series (default 5,000) |
 | `plot` + `options` | a contract plot instead of `roles` (`terms`, `prediction`, `curve`, `summary`, `obs`, `diagnostics`, `tests`, `compare`, `partial`, `auto`) — what the `anofox_plot_*` macros send |
 
 Limits: 200,000 rows and 64 MiB per spec. Build the spec with `json_object` / `to_json(list({c0: …, c1: …}))` so values are quoted correctly.
+
+## Themes and locale
+
+Every chart macro takes `theme :=` and `locale :=`; unset, they read the session variables `anofox_theme` / `anofox_locale`:
+
+```sql
+SET VARIABLE anofox_theme = 'dark';
+SET VARIABLE anofox_locale = 'de-DE';
+SELECT anofox_bar(x, y) FROM (VALUES ('Q1', 1200.5), ('Q2', 3400.25)) t(x, y);
+SELECT anofox_xy(x, y, kind := 'LINECHART', theme := 'colorblind', locale := 'en-US')
+FROM (VALUES (1, 10.5), (2, 12.0), (3, 9.75)) t(x, y);
+```
 
 ## Worked examples
 

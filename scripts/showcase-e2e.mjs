@@ -5,9 +5,15 @@
 //                                            # + scripts/fetch-wasm-extensions.sh)
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/showcase-e2e.mjs \
 //       [--url http://127.0.0.1:8791/] [--dashboard "Statistics showcase: property market (live anofox-statistics)"] \
-//       [--out ~/.cache/stats-showcase]
+//       [--out ~/.cache/stats-showcase] [--theme dark|light] [--sql file.sql] [--query "&k=v"]
+//
+// --theme dark   view with the viewer's dark preference (?theme=dark) and fail
+//                if a panel (card or chart SVG) still has a white background
+// --sql f.sql    load a dashboard from a file instead of a built-in example
+//                (passed in the #sql hash, like a Share link)
+// Every run also fails when the "Powered by DataZoo GmbH" credit is missing.
 import { createRequire } from "module";
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
 import path from "path";
 import os from "os";
 
@@ -20,6 +26,9 @@ const arg = (k, d) => {
 const base = arg("--url", "http://127.0.0.1:8791/");
 const dash = arg("--dashboard", "Statistics showcase: property market (live anofox-statistics)");
 const out = arg("--out", path.join(os.homedir(), ".cache/stats-showcase"));
+const theme = arg("--theme", "");
+const sqlFile = arg("--sql", "");
+const extra = arg("--query", "");
 mkdirSync(out, { recursive: true });
 
 const browser = await chromium.launch();
@@ -28,7 +37,13 @@ const logs = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 const t0 = Date.now();
-await page.goto(`${base}?dashboard=${encodeURIComponent(dash)}`);
+const q = [theme ? `theme=${theme}` : "", extra.replace(/^&/, "")].filter(Boolean).join("&");
+if (sqlFile) {
+  const b64 = Buffer.from(readFileSync(sqlFile, "utf8"), "utf8").toString("base64");
+  await page.goto(`${base}${q ? "?" + q : ""}#sql=${b64}`);
+} else {
+  await page.goto(`${base}?dashboard=${encodeURIComponent(dash)}${q ? "&" + q : ""}`);
+}
 // Done when the status shows the panel count and the page is no longer loading.
 try {
   await page.waitForFunction(
@@ -63,10 +78,32 @@ const shoot = async (name) => {
       .filter((e) => vis(e.closest(".panel")) && /next anofox-visualization release/.test(e.textContent))
       .map((e) => e.textContent);
     const panels = [...document.querySelectorAll(".dash .panel")].filter(vis).length;
-    return { errs, svgErr, notes, panels };
+    // dark: no visible card or chart may keep a white background
+    const white = (c) => /^(rgb\(255, 255, 255\)|#fff(fff)?|white)$/i.test(String(c).trim());
+    const whiteCards = [...document.querySelectorAll(".dash .panel, .dash .group")]
+      .filter(vis)
+      .filter((e) => white(getComputedStyle(e).backgroundColor)).length;
+    const whiteSvg = [...document.querySelectorAll(".dash .panel svg")]
+      .filter((e) => vis(e.closest(".panel")))
+      .filter((svg) => {
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        return [...svg.querySelectorAll("rect")].some((r) => {
+          const f = r.getAttribute("fill") || "";
+          const w = parseFloat(r.getAttribute("width")) || 0;
+          const h = parseFloat(r.getAttribute("height")) || 0;
+          return white(f) && vb && w >= vb.width * 0.9 && h >= vb.height * 0.9;
+        });
+      }).length;
+    const credit = document.querySelector(".dash .dp-credit");
+    const creditOk = !!credit && /Powered by\s*DataZoo GmbH/.test(credit.textContent) &&
+      !!credit.querySelector('a[href^="https://data-zoo.de"]');
+    return { errs, svgErr, notes, panels, whiteCards, whiteSvg, creditOk };
   });
   for (const e of [...found.errs, ...found.svgErr]) problems.push(`${name}: ${e}`);
   for (const n of found.notes) console.log(`  note (${name}): ${n}`);
+  if (theme === "dark" && found.whiteCards) problems.push(`${name}: ${found.whiteCards} white card(s) in dark mode`);
+  if (theme === "dark" && found.whiteSvg) problems.push(`${name}: ${found.whiteSvg} chart(s) with a white background in dark mode`);
+  if (!found.creditOk) problems.push(`${name}: the "Powered by DataZoo GmbH" credit is missing`);
   const file = path.join(out, `${slug(name)}.png`);
   await page.screenshot({ path: file, fullPage: true });
   console.log(`${name}: ${found.panels} panels → ${file}`);

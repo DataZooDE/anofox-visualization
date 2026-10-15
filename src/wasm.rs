@@ -57,7 +57,9 @@ fn plan_json(script: &str) -> String {
 
 /// Render one panel to SVG. `rows_json` = `[{ "c0": …, "c1": … }, …]` (a panel
 /// query's `-json` result; bare `NaN`/`Infinity` tolerated); `roles_json` = the
-/// panel's `roles` from [`plan`]; `primary` = brand colour `rrggbb` (or "");
+/// panel's `roles` from [`plan`]; `primary` = brand colour `rrggbb` (or ""),
+/// or a JSON render context `{"primary","theme","variant","locale"}` (see
+/// [`RenderOptions::from_primary_arg`]);
 /// `zoom_json` = `[x0, x1, y0, y1]` (or "" for auto-fit). Errors come back as a
 /// small error SVG.
 #[wasm_bindgen]
@@ -88,11 +90,8 @@ pub fn render_panel_checked(
             .map_err(|e| RenderError::BadSpec(format!("roles JSON: {e}")))?;
         let entries = parse_role_entries(&roles_v).map_err(RenderError::BadSpec)?;
         let cols = columns_from_entries(&rows, &entries);
-        let opts = RenderOptions {
-            brand: crate::parse_rgb(primary),
-            zoom: parse_zoom(zoom_json),
-            ..RenderOptions::default()
-        };
+        let mut opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        opts.zoom = parse_zoom(zoom_json);
         render_with(&cols, width, height, &opts)
     })
 }
@@ -238,6 +237,62 @@ pub fn roles_json() -> String {
 #[wasm_bindgen]
 pub fn format_number(value: f64, fmt: &str) -> String {
     crate::format::format_number(value, crate::format::metric_fmt_of(fmt))
+}
+
+/// [`format_number`] in a dashboard locale (`de-DE`, …; "" = en-US).
+#[wasm_bindgen]
+pub fn format_number_locale(value: f64, fmt: &str, locale: &str) -> String {
+    let l = crate::format::Locale::from_tag(locale).unwrap_or_default();
+    crate::format::format_number_l(value, crate::format::metric_fmt_of(fmt), &l)
+}
+
+/// Format an ISO date (`2026-10-15[ 12:00:00]`) in a dashboard locale;
+/// other text is returned unchanged.
+#[wasm_bindgen]
+pub fn format_date_locale(iso: &str, locale: &str) -> String {
+    crate::format::Locale::from_tag(locale)
+        .unwrap_or_default()
+        .format_date(iso)
+}
+
+/// Resolve a theme spec (a name, `a+b`, or JSON) to
+/// `{"ok":true,"name","mode","light":{css,card,bg,brand,locale},"dark":{…}}`,
+/// or `{"ok":false,"error":"…"}`.
+#[wasm_bindgen]
+pub fn resolve_theme(spec: &str) -> String {
+    theme_json(spec, "")
+}
+
+/// [`resolve_theme`] plus the dashboard's chrome directives as a JSON object
+/// `{"title","brand","logo","favicon","locale"}` merged over it.
+#[wasm_bindgen]
+pub fn resolve_dashboard_theme(spec: &str, chrome_json: &str) -> String {
+    theme_json(spec, chrome_json)
+}
+
+fn theme_json(spec: &str, chrome_json: &str) -> String {
+    let out = guard(|| {
+        let c: serde_json::Value = serde_json::from_str(chrome_json).unwrap_or_default();
+        let s = |k: &str| c.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let chrome = crate::theme::DashboardChrome {
+            theme: Some(spec.to_string()).filter(|t| !t.trim().is_empty()),
+            locale: s("locale"),
+            title: s("title"),
+            brand: s("brand"),
+            logo: s("logo").filter(|u| crate::theme::safe_url(u)),
+            favicon: s("favicon").filter(|u| crate::theme::safe_url(u)),
+        };
+        Ok(chrome.resolve(None))
+    });
+    match out {
+        Ok(Ok(set)) => {
+            let mut v = set.to_json();
+            v["ok"] = serde_json::Value::Bool(true);
+            v.to_string()
+        }
+        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}).to_string(),
+        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+    }
 }
 
 /// Parse a `[x0, x1, y0, y1]` zoom window (empty / invalid → `None`).

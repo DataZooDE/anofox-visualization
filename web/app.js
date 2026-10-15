@@ -8,6 +8,9 @@ import init, {
   map_bounds,
   roles_json,
   format_number,
+  format_number_locale,
+  format_date_locale,
+  resolve_dashboard_theme,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -1102,14 +1105,17 @@ async function boot() {
   // URL params — for embedding / theming:
   //   ?embed=1        hide the header + sidebar + toolbar (dashboard only)
   //   ?primary=RRGGBB brand accent colour (UI + chart primary)
+  //   ?theme=dark|light the viewer's light/dark choice (a dashboard whose
+  //                   ::THEME follows the viewer switches; JSON is never read
+  //                   from the URL)
   //   ?dashboard=Name load a saved/example dashboard by name
   //   #sql=<base64>   inline SQL (from Share)
   const params = new URLSearchParams(location.search);
   const primary = params.get("primary");
   if (primary && /^#?[0-9a-fA-F]{6}$/.test(primary)) {
     const hex = primary.replace(/^#/, "");
-    document.documentElement.style.setProperty("--accent", "#" + hex);
-    document.documentElement.style.setProperty("--accent2", "#" + hex);
+    for (const v of ["--ui-accent", "--ui-accent2", "--ax-accent", "--ax-accent2"])
+      document.documentElement.style.setProperty(v, "#" + hex);
     dpPrimary = hex; // chart primary colour (passed to the wasm renderer)
   }
   // Served mode: `anofox-visualization serve --dashboards` injects window.__served
@@ -1154,7 +1160,32 @@ async function boot() {
   }
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
-  $("dark").onclick = () => document.body.classList.toggle("dark");
+  // 🌙: the viewer's light/dark choice — the builder chrome follows it, and so
+  // does the dashboard when its theme follows the viewer (mode "auto"). The
+  // panels re-render through wasm with the dark theme.
+  document.body.classList.toggle("dark", viewerPrefersDark());
+  $("dark").onclick = () => {
+    const dark = !document.body.classList.contains("dark");
+    try {
+      localStorage.setItem("anofox-viz-dark", dark ? "1" : "0");
+    } catch (_) {}
+    if (new URLSearchParams(location.search).has("theme")) {
+      const u = new URL(location.href);
+      u.searchParams.delete("theme");
+      history.replaceState(null, "", u);
+    }
+    document.body.classList.toggle("dark", dark);
+    run(false);
+  };
+  if (typeof matchMedia === "function") {
+    matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => {
+      let stored = null;
+      try {
+        stored = localStorage.getItem("anofox-viz-dark");
+      } catch (_) {}
+      if (stored == null && !new URLSearchParams(location.search).has("theme")) run(false);
+    });
+  }
   $("refresh").onchange = () => {
     clearInterval(dpTimer);
     const s = parseInt($("refresh").value);
@@ -1778,6 +1809,7 @@ function loadRoleSets() {
     TFMT = sets.table_formats;
     TEXT_SIZES = sets.text_sizes;
     if (sets.zoomable) ZOOMABLE = sets.zoomable;
+    if (sets.chrome) CHROME = sets.chrome;
   } catch (_) {}
 }
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
@@ -1785,6 +1817,134 @@ const isInput = (s) => !!inputKind(s);
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => DIRECTIVES.find((d) => role(s, d));
+// Dashboard chrome directives (::THEME, ::LOCALE, ::DASHBOARD_TITLE, ::BRAND,
+// ::LOGO, ::FAVICON) — collected in the pre-pass, before any panel renders.
+let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON"];
+const chromeRole = (s) => CHROME.find((d) => role(s, d));
+
+// ---- theme (src/theme.rs is the source of truth; plan T1/T4/T12) ----
+// dpTheme.spec: the dashboard's ::THEME (or ""), dpTheme.chrome: the other
+// chrome directives, dpTheme.set: the resolved theme JSON from wasm, and
+// dpTheme.variant: the variant on screen ("light" | "dark").
+let dpTheme = { spec: "", chrome: {}, set: null, variant: "light", key: "" };
+// The viewer's light/dark preference: ?theme=dark|light, else the 🌙 toggle
+// (remembered in this browser), else the OS setting.
+function viewerPrefersDark() {
+  const q = new URLSearchParams(location.search).get("theme");
+  if (q === "dark" || q === "light") return q === "dark";
+  try {
+    const v = localStorage.getItem("anofox-viz-dark");
+    if (v === "1" || v === "0") return v === "1";
+  } catch (_) {}
+  return typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+}
+// Resolve the dashboard theme (cached by spec+chrome) and apply its tokens to
+// the page. Returns an error message, or "".
+function applyDashboardTheme() {
+  const key = dpTheme.spec + "\u0000" + JSON.stringify(dpTheme.chrome);
+  let err = "";
+  if (key !== dpTheme.key || !dpTheme.set) {
+    let set = null;
+    try {
+      set = JSON.parse(resolve_dashboard_theme(dpTheme.spec, JSON.stringify(dpTheme.chrome)));
+    } catch (e) {
+      set = { ok: false, error: String(e) };
+    }
+    if (!set.ok) {
+      err = `::THEME / chrome directive: ${set.error}`;
+      set = JSON.parse(resolve_dashboard_theme("", "{}"));
+    }
+    dpTheme.set = set;
+    dpTheme.key = key;
+  }
+  const set = dpTheme.set;
+  const dark = viewerPrefersDark();
+  dpTheme.variant = set.mode === "auto" ? (dark ? "dark" : "light") : set.mode;
+  document.body.classList.toggle("dark", dark);
+  const v = set[dpTheme.variant];
+  const el = document.getElementById("ax-theme");
+  if (el && el.textContent !== v.css) el.textContent = v.css;
+  document.documentElement.dataset.axVariant = dpTheme.variant;
+  // Author branding: <title>, favicon (the builder keeps its product header).
+  const b = v.brand || {};
+  if (b.title) document.title = b.title + (b.title_suffix || "");
+  let icon = document.querySelector("link[rel=icon]");
+  if (b.favicon) {
+    const href = safeUrl(b.favicon, { image: true });
+    if (href) {
+      if (!icon) {
+        icon = document.createElement("link");
+        icon.rel = "icon";
+        document.head.appendChild(icon);
+      }
+      icon.href = href;
+    }
+  } else if (icon) icon.remove();
+  return err;
+}
+function defaultThemeSpec() {
+  const sv = window.__served;
+  const t = (sv && sv.theme) || window.__anofoxTheme || "";
+  return typeof t === "string" ? t : JSON.stringify(t);
+}
+// The wasm render context: "" / "rrggbb" for the default look (byte-identical
+// to earlier releases), else {"primary","theme","variant","locale"}.
+function renderCtx() {
+  const set = dpTheme.set;
+  const loc = dashLocale();
+  const plain = !dpTheme.spec && dpTheme.variant === "light" && !loc;
+  if (plain) return dpPrimary || "";
+  const ctx = { theme: dpTheme.spec || "", variant: dpTheme.variant };
+  if (loc) ctx.locale = loc;
+  if (dpPrimary) ctx.primary = dpPrimary;
+  return JSON.stringify(ctx);
+}
+// The dashboard locale (::LOCALE or the theme's locale token), "" = en-US.
+function dashLocale() {
+  // ?locale=de-DE: a viewer override (not in served/locked mode).
+  const q = !servedMode && new URLSearchParams(location.search).get("locale");
+  if (q && /^[A-Za-z]{2}([-_][A-Za-z]{2})?$/.test(q)) return q;
+  const set = dpTheme.set;
+  const v = set && set[dpTheme.variant];
+  return (v && v.locale) || "";
+}
+// A theme token's current value (e.g. "scale-lo"), read from the page.
+function axToken(name, fallback = "") {
+  const v = getComputedStyle(document.documentElement).getPropertyValue("--ax-" + name).trim();
+  return v || fallback;
+}
+// The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
+function dashHeader() {
+  const v = dpTheme.set && dpTheme.set[dpTheme.variant];
+  const b = (v && v.brand) || {};
+  if (!b.title && !b.name && !b.logo) return null;
+  const h = document.createElement("div"); // not <header>: the builder styles that
+  h.className = "dp-head";
+  const logo = b.logo && safeUrl(b.logo, { image: true });
+  if (logo) {
+    const img = document.createElement("img");
+    img.className = "dp-logo";
+    img.alt = "";
+    img.src = logo;
+    h.appendChild(img);
+  }
+  const txt = document.createElement("div");
+  txt.className = "dp-head-text";
+  if (b.name) {
+    const n = document.createElement("div");
+    n.className = "dp-brand";
+    n.textContent = b.name;
+    txt.appendChild(n);
+  }
+  if (b.title) {
+    const t = document.createElement("h1");
+    t.className = "dp-title";
+    t.textContent = b.title;
+    txt.appendChild(t);
+  }
+  h.appendChild(txt);
+  return h;
+}
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -1840,29 +2000,8 @@ function setTabParam(name) {
 // toggled by run(), including a series-change re-run). Injected once.
 function installSpinner() {
   if (document.getElementById("dp-spinner")) return;
-  const s = document.createElement("style");
-  s.textContent =
-    "#dp-spinner{position:fixed;inset:0;display:none;align-items:center;justify-content:center;" +
-    "background:rgba(248,250,252,.5);z-index:9999;pointer-events:none}" +
-    "body.loading #dp-spinner{display:flex}" +
-    ".dp-spin{width:44px;height:44px;border:4px solid #cbd5e1;border-top-color:#0f766e;" +
-    "border-radius:50%;animation:dpspin .8s linear infinite}" +
-    "@keyframes dpspin{to{transform:rotate(360deg)}}" +
-    // ::HEIGHT caps a chart's SVG (keeps aspect, centres) so a full-width chart
-    // can be made shorter; tables have no <svg> so they are unaffected.
-    ".dp-colf{width:100%;box-sizing:border-box;font:400 12px system-ui;padding:3px 6px;" +
-    "border:1px solid #d1d5db;border-radius:5px;margin-top:2px}" +
-    ".dp-range{position:relative;height:24px;margin-top:6px}" +
-    ".dp-range .trk{position:absolute;top:7px;left:0;width:100%;height:4px;background:#e2e8f0;border-radius:3px}" +
-    ".dp-range .fil{position:absolute;top:7px;height:4px;background:#5eead4;border-radius:3px}" +
-    ".dp-range .out{position:absolute;top:12px;right:0;font:400 10px system-ui;color:#64748b}" +
-    ".dp-range input{position:absolute;top:2px;left:0;width:100%;height:14px;margin:0;pointer-events:none;" +
-    "-webkit-appearance:none;appearance:none;background:transparent}" +
-    ".dp-range input::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:13px;height:13px;" +
-    "border-radius:50%;background:#0f766e;border:2px solid #fff;box-shadow:0 0 0 1px #94a3b8;cursor:pointer}" +
-    ".dp-range input::-moz-range-thumb{pointer-events:auto;width:13px;height:13px;border:2px solid #fff;" +
-    "border-radius:50%;background:#0f766e;cursor:pointer}";
-  document.head.appendChild(s);
+  // (its CSS — and the range-slider / column-filter styles — live in
+  // web/theme-base.css on theme tokens)
   const o = document.createElement("div");
   o.id = "dp-spinner";
   o.innerHTML = '<div class="dp-spin"></div>';
@@ -1876,17 +2015,12 @@ function renderServedNav(served) {
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
   nav.className = "served-nav";
-  nav.style.cssText =
-    "position:sticky;top:0;z-index:50;display:flex;gap:.25rem;padding:.5rem 1rem;background:#fff;" +
-    "border-bottom:1px solid #e5e9f0;flex-wrap:wrap;align-items:center;box-shadow:0 1px 3px rgba(16,24,40,.06)";
   for (const d of served.nav) {
     const a = document.createElement("a");
     a.href = "/d/" + encodeURIComponent(d.id);
     a.textContent = d.title || d.id;
     const active = d.id === served.id;
-    a.style.cssText =
-      "padding:.35rem .8rem;border-radius:6px;text-decoration:none;font:600 14px system-ui;" +
-      (active ? "background:#0f766e;color:#fff" : "color:#334");
+    if (active) a.className = "active"; // styled by web/theme-base.css (.served-nav)
     nav.appendChild(a);
   }
   const dash = document.querySelector(".dash");
@@ -1933,11 +2067,29 @@ async function run(fresh = true) {
   }
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
-  // caching options for the render pass by statement index.
+  // caching options for the render pass by statement index. Chrome directives
+  // (::THEME, ::LOCALE, ::DASHBOARD_TITLE, …) are collected here so the theme
+  // applies to every panel wherever the directive sits in the script.
   const dd = {};
+  // Default theme: the server's (`serve --theme`, anofox_serve_dashboards
+  // options.theme), else the built-in light look; a ::THEME overrides it.
+  dpTheme.spec = defaultThemeSpec();
+  dpTheme.chrome = {};
+  const CHROME_KEY = { LOCALE: "locale", DASHBOARD_TITLE: "title", BRAND: "brand", LOGO: "logo", FAVICON: "favicon" };
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     try {
+      if (!s.setup && chromeRole(s)) {
+        const cr = chromeRole(s);
+        const rows = JSON.parse(await runSql(s.sql));
+        const idx = s.roles.find((r) => r[1] === cr)[0];
+        let v = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+        if (v != null && typeof v === "object") v = JSON.stringify(v);
+        v = v == null ? "" : String(v);
+        if (cr === "THEME") dpTheme.spec = v;
+        else dpTheme.chrome[CHROME_KEY[cr]] = v;
+        continue;
+      }
       if (s.setup) {
         // On a cross-filter re-run, skip selection-independent setup (it already
         // ran on the last full run) so clicks don't recompute forecasts etc.
@@ -1987,6 +2139,13 @@ async function run(fresh = true) {
       showError(newGrid, `${s.sql}\n\n${e}`);
     }
   }
+
+  // The theme (and its light/dark variant) for this run: CSS tokens on the
+  // page, the wasm render context for every panel.
+  const themeErr = applyDashboardTheme();
+  if (themeErr) showError(newGrid, themeErr);
+  const head = dashHeader();
+  if (head) newGrid.appendChild(head);
 
   // Render pass: place controls / headings / charts in document order into the
   // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
@@ -2043,7 +2202,9 @@ async function run(fresh = true) {
       autoGroup = body;
     }
     try {
-      if (d === "COLUMNS") {
+      if (chromeRole(s)) {
+        // collected in the pre-pass
+      } else if (d === "COLUMNS") {
         const n = parseInt(await firstValue(s));
         if (n > 0) {
           dpCols = n;
@@ -2189,7 +2350,7 @@ async function run(fresh = true) {
             contractCell(r, s.contract.args, "{}"),
             rw,
             ph,
-            dpPrimary || ""
+            renderCtx()
           );
           const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
           if (warn) console.warn(`${s.contract.macro}: ${warn}`);
@@ -2332,11 +2493,14 @@ async function run(fresh = true) {
           const r = JSON.parse(rowsJson)[0];
           return r ? String(Object.values(r)[0] ?? "").replace(/^"|"$/g, "") : "";
         };
-        if (isHeading(s)) {
+        if (isHeading(s) || role(s, "SECTION")) {
+          // A lone ::LABEL or a ::SECTION: a full-width heading (own row).
           const rows = JSON.parse(rowsJson);
+          const sr = s.roles.find((r) => r[1] === "SECTION");
           const h = document.createElement("h2");
           h.className = "section";
-          h.textContent = rows[0] ? Object.values(rows[0])[0] : "";
+          const r0 = rows[0];
+          h.textContent = r0 ? String((sr ? r0["c" + sr[0]] : Object.values(r0)[0]) ?? "") : "";
           container.appendChild(h);
         } else if (role(s, "RELOAD")) {
           // Auto-refresh every N seconds, driven from SQL.
@@ -2448,7 +2612,7 @@ async function run(fresh = true) {
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
-            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, dpPrimary || "", "");
+            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, renderCtx(), "");
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
             const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
@@ -2994,13 +3158,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           if (n != null) {
             td.innerHTML =
               `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
-              `${Math.abs(n).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 })}</span>`;
+              `${dashLocale() ? format_number_locale(Math.round(Math.abs(n) * 10) / 10, "METRIC", dashLocale()) : Math.abs(n).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 })}</span>`;
           }
           continue;
         }
         if (f === "PLAIN") {
           // a numeric column with NO in-cell bar (::PLAIN / ::NOBAR)
-          td.textContent = v == null ? "" : v;
+          td.textContent = fmtCell(v);
           td.style.textAlign = "right";
           td.style.fontVariantNumeric = "tabular-nums";
           continue;
@@ -3017,14 +3181,14 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
           }
           continue;
         }
-        td.textContent = v == null ? "" : v;
+        td.textContent = fmtCell(v);
         if (numeric[c]) {
           const n = cleanNum(v);
           td.style.textAlign = "right";
           td.style.fontVariantNumeric = "tabular-nums";
           if (n != null) {
             const pct = (Math.abs(n) / maxAbs[c]) * 100;
-            td.style.background = `linear-gradient(90deg, rgba(42,157,143,.16) 0, rgba(31,140,166,.14) ${pct}%, transparent ${pct}%)`;
+            td.style.background = `linear-gradient(90deg, var(--ax-databar-a) 0, var(--ax-databar-b) ${pct}%, transparent ${pct}%)`;
           }
         }
       }
@@ -3242,11 +3406,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
 // text readable.
 function heatColor(t) {
   t = Math.max(0, Math.min(1, t));
-  const stops = [
-    [0x63, 0xc9, 0x7f], // green
-    [0xff, 0xe0, 0x8a], // amber
-    [0xff, 0x8a, 0x8a], // red
-  ];
+  // Theme tokens --ax-scale-lo/-mid/-hi (green / amber / red in the default look).
+  const rgb = (name) => {
+    const h = axToken(name).replace("#", "");
+    return h.length === 6 ? [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) : [128, 128, 128];
+  };
+  const stops = [rgb("scale-lo"), rgb("scale-mid"), rgb("scale-hi")];
   const seg = t < 0.5 ? 0 : 1;
   const u = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5;
   const a = stops[seg];
@@ -3288,8 +3453,8 @@ function cellSpark(v) {
   const ly = ys(nums[nums.length - 1]).toFixed(1);
   return (
     `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
-    `<polyline points="${pts}" fill="none" stroke="#456481" stroke-width="0.9" stroke-linejoin="round" stroke-linecap="round"/>` +
-    `<circle cx="${lx}" cy="${ly}" r="1.8" fill="#E8335D"/></svg>`
+    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="0.9" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${lx}" cy="${ly}" r="1.8" fill="var(--ax-spark-dot)"/></svg>`
   );
 }
 
@@ -3307,10 +3472,23 @@ function fmtNum(v, fmt) {
   const n = typeof v === "number" ? v : parseFloat(v);
   if (Number.isNaN(n)) return String(v);
   try {
-    return format_number(n, fmt || "METRIC");
+    const loc = dashLocale();
+    return loc ? format_number_locale(n, fmt || "METRIC", loc) : format_number(n, fmt || "METRIC");
   } catch (_) {
     return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
   }
+}
+
+// A plain table cell in the dashboard locale: numbers grouped with its marks,
+// ISO dates in its date order. Without a ::LOCALE the raw value is shown
+// (unchanged from earlier releases).
+function fmtCell(v) {
+  const loc = dashLocale();
+  if (!loc || v == null) return v == null ? "" : v;
+  if (typeof v === "number") return format_number_locale(v, "METRIC", loc);
+  const s = String(v);
+  if (/^-?\d+(\.\d+)?$/.test(s)) return format_number_locale(parseFloat(s), "METRIC", loc);
+  return format_date_locale(s, loc);
 }
 
 // Escape for HTML text AND attribute contexts (& < > " ').
@@ -3499,7 +3677,7 @@ function svgToPng(svg, name) {
     c.height = h * 2;
     const ctx = c.getContext("2d");
     ctx.scale(2, 2);
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = axToken("export-bg", "white"); // the theme's card colour
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(img, 0, 0, w, h);
     c.toBlob((b) => download(b, name + ".png"));
@@ -3603,12 +3781,35 @@ function shareLink(e) {
 }
 
 // Download the current dashboard as a standalone, self-contained HTML file.
-function downloadHtml() {
-  const style = document.querySelector("style").textContent;
+// It carries the dashboard stylesheet (web/theme-base.css) and the CURRENT
+// theme variant's tokens, so a dark dashboard stays dark when opened alone.
+async function downloadHtml() {
+  const sheetText = (sheet) => {
+    try {
+      return [...sheet.cssRules].map((r) => r.cssText).join("\n");
+    } catch (_) {
+      return "";
+    }
+  };
+  // The stylesheet's source text (re-serialised CSSOM can reorder shorthand /
+  // longhand pairs such as the KPI's clipped-text background).
+  const sheet = [...document.styleSheets].find((sh) => sh.href && /theme-base\.css/.test(sh.href));
+  let base = "";
+  try {
+    base = await (await fetch(sheet.href)).text();
+  } catch (_) {
+    base = sheet ? sheetText(sheet) : "";
+  }
+  const tokens = document.getElementById("ax-theme")?.textContent || "";
   const content = document.querySelector(".dash").innerHTML;
+  const v = dpTheme.set && dpTheme.set[dpTheme.variant];
+  const b = (v && v.brand) || {};
+  const title = b.title ? b.title + (b.title_suffix || "") : "anofox-visualization dashboard";
+  const fav = b.favicon && safeUrl(b.favicon, { image: true });
   const html =
-    `<!doctype html><html><head><meta charset="utf-8"><title>anofox-visualization dashboard</title>` +
-    `<style>${style}</style></head><body style="background:#f4f6f9;padding:1.5rem">` +
+    `<!doctype html><html data-ax-variant="${dpTheme.variant}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+    (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
+    `<style>${tokens}\n${base}\nbody{margin:0}</style></head><body class="embed">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
     `<script>${SNAPSHOT_JS}<\/script></body></html>`;
   download(new Blob([html], { type: "text/html" }), "dashboard.html");
@@ -3680,7 +3881,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, dpPrimary || "", zoom);
+      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
       attachHover(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
@@ -3950,7 +4151,7 @@ function toggleMagicType(panel) {
     const vi = dp.roles.findIndex((r) => magicSwap([r])); // first line/bar value role
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
-  holder.innerHTML = render_panel(dp.rows, JSON.stringify(use), 460, dp.ph, dpPrimary || "", "");
+  holder.innerHTML = render_panel(dp.rows, JSON.stringify(use), 460, dp.ph, renderCtx(), "");
   attachHover();
 }
 
@@ -4188,7 +4389,7 @@ function savePanelPng(panel) {
     c.width = vb.width * scale;
     c.height = vb.height * scale;
     const ctx = c.getContext("2d");
-    ctx.fillStyle = document.body.classList.contains("dark") ? "#0f1729" : "#ffffff";
+    ctx.fillStyle = axToken("export-bg", "white"); // the theme's card colour
     ctx.fillRect(0, 0, c.width, c.height);
     ctx.drawImage(img, 0, 0, c.width, c.height);
     c.toBlob((blob) => {
@@ -4251,7 +4452,7 @@ function attachLegendToggle() {
       entries.forEach((e) => {
         const off = hidden.has(e.s);
         e.text.style.opacity = off ? "0.35" : "";
-        if (e.swatch && e.fill) e.swatch.setAttribute("fill", off ? "#c4c9d2" : e.fill); // grey when off
+        if (e.swatch && e.fill) e.swatch.setAttribute("fill", off ? axToken("legend-off", "grey") : e.fill); // grey when off
       });
     };
     // ECharts-style focus: hovering a legend entry emphasises that series and
@@ -4397,7 +4598,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, dpPrimary || "", zoom);
+      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
       attachHover();
       syncSlider();
     });

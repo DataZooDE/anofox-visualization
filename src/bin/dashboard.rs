@@ -7,16 +7,26 @@
 //! The SQL parsing (`::ROLE` casts, comments, statement splitting) lives in
 //! `anofox_visualization::sql`, shared with the wasm browser build.
 
-use anofox_visualization::format::escape_xml;
+use anofox_visualization::format::{escape_xml, Locale};
 use anofox_visualization::lint::{self, Severity};
-use anofox_visualization::{error_pre, render, sql, Role};
+use anofox_visualization::theme::{self, DashboardChrome, Variant};
+use anofox_visualization::{
+    dashboard, error_pre, page, render_with, roles, sql, RenderOptions, Role,
+};
 use std::process::Command;
+use std::sync::Arc;
 
 const USAGE: &str = "usage:\n  \
-     dashboard <file.sql> [out.html]         render to interactive HTML\n  \
+     dashboard <file.sql> [out.html] [--theme T] [--dark]\n  \
+                                             render to interactive HTML (T: a built-in theme,\n  \
+                                             'acme+dark', or a theme .json file)\n  \
+     dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]\n  \
+                                             render the whole dashboard headless to one SVG\n  \
      dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
+     dashboard --themes                      list the built-in themes\n  \
+     dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
      dashboard --version                     print the version\n\n\
      Queries run through the `duckdb` CLI on PATH.";
 
@@ -26,6 +36,9 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
+        Some("--themes") => cmd_themes(),
+        Some("--svg") => cmd_svg(&args[1..]),
+        Some("--theme-css") => cmd_theme_css(&args[1..]),
         // The DOCS.md role table (generated from the registry).
         Some("--roles-md") => print!("{}", anofox_visualization::roles::markdown_table()),
         Some("--version") | Some("-V") => println!("dashboard {}", env!("CARGO_PKG_VERSION")),
@@ -41,9 +54,27 @@ fn main() {
 }
 
 /// Render an annotated `.sql` file to an interactive HTML dashboard.
+///
+/// `dashboard <file.sql> [out.html] [--theme NAME|file.json] [--dark]`: the
+/// script's own `::THEME` wins over `--theme`; `--dark` picks the dark
+/// variant of a theme that follows the viewer.
 fn cmd_render(args: &[String]) {
-    let path = args[0].clone();
-    let out = args
+    let mut pos: Vec<String> = Vec::new();
+    let mut theme_arg: Option<String> = None;
+    let mut variant = Variant::Light;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--theme" => theme_arg = it.next().map(|v| theme_spec_arg(v)),
+            "--dark" => variant = Variant::Dark,
+            _ => pos.push(a.clone()),
+        }
+    }
+    let Some(path) = pos.first().cloned() else {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    };
+    let out = pos
         .get(1)
         .cloned()
         .unwrap_or_else(|| "dashboard.html".to_string());
@@ -53,20 +84,66 @@ fn cmd_render(args: &[String]) {
     let _ = std::fs::remove_file(&db);
     let db = db.to_string_lossy().to_string();
 
-    let mut panels = String::new();
-    let mut n = 0;
+    // Phase 1: run the script in order; collect chrome directives and the
+    // panels' rows (a ::THEME anywhere applies to every panel).
+    let mut chrome = DashboardChrome::default();
+    type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
+    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
     for p in sql::plan(&script) {
         if p.setup {
             run(&db, &p.sql, false); // DDL/insert — run for effect
             continue;
         }
+        if let Some(r) = p
+            .roles
+            .iter()
+            .map(|(_, r)| *r)
+            .find(|r| roles::is_chrome_directive(*r))
+        {
+            let json = run(&db, &p.sql, true);
+            let v = sql::parse_rows_json(&json)
+                .ok()
+                .and_then(|rows| rows.first().and_then(|r| r.values().next().cloned()))
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Null => None,
+                    v => Some(v.to_string()),
+                });
+            chrome.apply(r, v);
+            continue;
+        }
+        let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
         // Inputs + layout directives are interactive — the browser builder /
         // `serve` handle them; the static CLI output skips them (role registry).
-        if anofox_visualization::roles::is_directive_panel(&p.roles) {
+        if roles::is_directive_panel(&p.roles) && !section {
             continue;
         }
         let json = run(&db, &p.sql, true);
-        let rows = match sql::parse_rows_json(&json) {
+        let rows = sql::parse_rows_json(&json);
+        queried.push((p, rows));
+    }
+    let _ = std::fs::remove_file(&db);
+
+    let set = chrome.resolve(theme_arg.as_deref()).unwrap_or_else(|e| {
+        eprintln!("theme: {e}");
+        std::process::exit(2);
+    });
+    let t = set.pick(variant).clone();
+    let opts = RenderOptions {
+        locale: t
+            .locale
+            .as_deref()
+            .and_then(Locale::from_tag)
+            .unwrap_or_default(),
+        theme: Arc::new(t.clone()),
+        ..RenderOptions::default()
+    };
+
+    // Phase 2: render.
+    let mut panels = String::new();
+    let mut n = 0;
+    for (p, rows) in queried {
+        let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 panels.push_str(&format!(
@@ -79,15 +156,16 @@ fn cmd_render(args: &[String]) {
         };
         // A contract plot call: one figure per result row (GROUP BY key).
         if let Some(cp) = &p.contract {
-            for (_, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
                 let svg = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
                 n += 1;
             }
             continue;
         }
-        // A label-only panel is a spanning section heading, not a card.
-        if p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label) {
+        // A label-only panel / ::SECTION is a spanning section heading, not a card.
+        let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
+        if section || (p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label)) {
             let text = rows
                 .first()
                 .and_then(|r| r.values().next())
@@ -97,14 +175,137 @@ fn cmd_render(args: &[String]) {
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &p.roles);
-        let svg = render(&cols, 460, 300).unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+        let svg = render_with(&cols, 460, 300, &opts)
+            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }
-    let _ = std::fs::remove_file(&db);
 
-    std::fs::write(&out, page(&path, n, &panels)).unwrap_or_else(|e| panic!("write {out}: {e}"));
+    let html = page::render(&page::StaticPage {
+        theme: &t,
+        fallback_title: "anofox-visualization dashboard",
+        subtitle_html: format!(
+            "rendered from <code>{}</code> · {n} panels",
+            escape_xml(&path)
+        ),
+        head_extra: String::new(),
+        controls_html: String::new(),
+        panels_html: panels,
+    });
+    std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");
+}
+
+/// The DuckDB CLI as a headless data provider (one temp database file, so
+/// setup statements persist between calls).
+struct CliProvider {
+    db: String,
+}
+
+impl dashboard::DataProvider for CliProvider {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        run(&self.db, sql, false);
+        Ok(())
+    }
+    fn query(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
+        let json = run(&self.db, sql, true);
+        let rows = sql::parse_rows_json(json.trim())?;
+        Ok(sql::result_columns(&rows))
+    }
+}
+
+/// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]`:
+/// the whole dashboard (KPIs, tables, charts, header, credit) as one SVG.
+fn cmd_svg(args: &[String]) {
+    let mut pos: Vec<String> = Vec::new();
+    let mut o = dashboard::DashboardOptions::default();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--theme" => o.theme = it.next().map(|v| theme_spec_arg(v)),
+            "--dark" => o.variant = Variant::Dark,
+            "--width" => o.width = it.next().and_then(|v| v.parse().ok()).unwrap_or(o.width),
+            _ => pos.push(a.clone()),
+        }
+    }
+    let Some(path) = pos.first().cloned() else {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    };
+    let out = pos
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "dashboard.svg".into());
+    let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let db = std::env::temp_dir().join(format!("anofox_svg_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let mut p = CliProvider {
+        db: db.to_string_lossy().to_string(),
+    };
+    let svg = dashboard::render_dashboard_svg(&script, &mut p, &o);
+    let _ = std::fs::remove_file(&db);
+    match svg {
+        Ok(svg) => {
+            std::fs::write(&out, svg).unwrap_or_else(|e| panic!("write {out}: {e}"));
+            println!("wrote {out}");
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `--theme` value: a `.json` path is read (a theme definition file),
+/// anything else is a theme spec (`dark`, `acme+dark`, inline JSON).
+fn theme_spec_arg(v: &str) -> String {
+    if v.ends_with(".json") && std::path::Path::new(v).exists() {
+        std::fs::read_to_string(v).unwrap_or_else(|e| {
+            eprintln!("read {v}: {e}");
+            std::process::exit(2);
+        })
+    } else {
+        v.to_string()
+    }
+}
+
+/// `dashboard --theme-css <spec> [--dark]`: print the theme's CSS token block.
+fn cmd_theme_css(args: &[String]) {
+    let spec = args.first().map(|v| theme_spec_arg(v)).unwrap_or_default();
+    let dark = args.iter().any(|a| a == "--dark");
+    match theme::resolve(&spec) {
+        Ok(set) => println!(
+            "{}",
+            set.pick(if dark { Variant::Dark } else { Variant::Light })
+                .css_vars()
+        ),
+        Err(e) => {
+            eprintln!("theme: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `dashboard --themes`: the built-in themes.
+fn cmd_themes() {
+    for (name, about) in theme::BUILTINS {
+        let set = theme::resolve(name).expect("built-in");
+        let sw: Vec<String> = set
+            .default_variant()
+            .palette
+            .iter()
+            .take(6)
+            .map(|c| theme::hex(*c))
+            .collect();
+        println!(
+            "{name:<14} {about}\n               palette {}  mode {}",
+            sw.join(" "),
+            set.mode.as_str()
+        );
+    }
 }
 
 /// Lint a dashboard: report panels that error, render wrong, are silently
@@ -280,46 +481,3 @@ fn run(db: &str, sql: &str, json: bool) -> String {
     }
     String::from_utf8_lossy(&out.stdout).to_string()
 }
-
-/// The dashboard HTML shell + interactive hover layer (shared visual language
-/// with the browser builder).
-fn page(path: &str, n: usize, panels: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
-<title>anofox-visualization dashboard</title><style>{STYLE}</style></head>\
-<body><h1>anofox-visualization dashboard</h1><div class=\"src\">rendered from <code>{}</code> · {n} panels</div>\
-<div class=\"grid\">{panels}</div><div id=\"dp-tip\" class=\"dp-tip\"></div>\
-<script>{SCRIPT}</script></body></html>",
-        escape_xml(path)
-    )
-}
-
-const STYLE: &str = r#":root{--bg:#f4f6f9;--card:#fff;--ink:#1f2937;--muted:#6b7280;--line:#e5e7eb}
-body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:2rem}
-h1{font-size:1.35rem;font-weight:650;letter-spacing:-.01em;margin:0 0 .25rem}
-.src{color:var(--muted);font-size:.85rem;margin-bottom:1.5rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem;align-content:start}
-.section{grid-column:1/-1;margin:.6rem 0 -.4rem;font-size:1.1rem;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
-.panel{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
-.panel svg{width:100%;height:auto;display:block}
-.dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s,transform .09s;z-index:20;white-space:nowrap}
-.dp-tip.show{opacity:1;transform:translateY(0)}
-.dp-hit{transition:filter .1s}.dp-hit:hover{filter:brightness(1.09) saturate(1.05)}"#;
-
-const SCRIPT: &str = r#"(function(){
-  var tip=document.getElementById('dp-tip'), selected=null;
-  var marks=[].slice.call(document.querySelectorAll('.panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline'))
-    .filter(function(el){var t=el.querySelector('title');return t&&t.textContent.trim();});
-  function apply(){marks.forEach(function(el){
-    var s=el.getAttribute('data-series'); el.style.opacity=(!selected||s===selected)?'':'0.15';});}
-  marks.forEach(function(el){
-    var t=el.querySelector('title'), txt=t.textContent;
-    var series=txt.indexOf(': ')>=0?txt.slice(0,txt.lastIndexOf(': ')):txt;
-    el.removeChild(t); el.setAttribute('data-series',series); el.classList.add('dp-hit'); el.style.cursor='pointer';
-    el.addEventListener('mouseenter',function(){tip.textContent=txt;tip.classList.add('show');});
-    el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
-    el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
-    el.addEventListener('click',function(e){e.stopPropagation();selected=(selected===series)?null:series;apply();});
-  });
-  document.addEventListener('click',function(){if(selected!==null){selected=null;apply();}});
-})();"#;

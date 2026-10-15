@@ -128,6 +128,13 @@ terminal.
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
 | `::HEADER_IMAGE` | `::HEADERIMAGE` | chrome | banner image URL |
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
+| `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
+| `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
+| `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
+| `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
+| `::FAVICON` |  | chrome | browser-tab icon URL |
 <!-- roles-table:end -->
 
 **Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
@@ -229,8 +236,10 @@ Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
 and `anofox_xyc(x, y, series, kind := …)` chart two or three columns.
 
-All take `width := 640, height := 400` (diagnostics 820×640) and
-`title := NULL, x_label := NULL, y_label := NULL`.
+All take `width := 640, height := 400` (diagnostics 820×640),
+`title := NULL, x_label := NULL, y_label := NULL`, and `theme := NULL,
+locale := NULL` (defaulting to `getvariable('anofox_theme')` /
+`getvariable('anofox_locale')`; see *Themes* below).
 
 **Titles and labels.** A contract plot draws no inner title by default — in a
 dashboard the panel caption (`'…'::TITLE`) is the title, and the standalone
@@ -423,11 +432,117 @@ that are not in the rows are not drawn and reported as a render warning
 `scripts/statistics_conformance.py` renders the output of every producer
 (see the README).
 
-### Combo charts, auto-refresh, dark mode
+### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
 `SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. The toolbar also has
-an **auto-refresh** interval and a **dark-mode** toggle.
+an **auto-refresh** interval.
+
+### Themes, dark mode, branding and locale
+
+One theme definition (`src/theme.rs`) styles the **whole dashboard**: the charts
+(palette, sequential fills, dark ink), the page chrome (background, header,
+cards, tabs, KPI tiles, Markdown callouts, tables, inputs, tooltips, buttons,
+footer) and every output — the browser, embed / served / locked pages, the CLI's
+static HTML, `dashboard --svg`, and the ⤓ HTML / PNG exports. The page reads
+it as CSS custom properties (`--ax-*`, see `web/theme-base.css`); colour
+literals live only in the theme.
+
+```sql
+SELECT 'dark'::THEME;                                    -- a built-in
+SELECT 'acme+dark'::THEME;                               -- stacked: acme, with a dark variant
+SELECT content::THEME FROM read_text('themes/acme.json');-- a corporate theme from a file
+SELECT to_json(t)::THEME FROM themes t WHERE name = 'acme'; -- …or from a table
+SELECT 'de-DE'::LOCALE;                                  -- numbers and dates
+SELECT 'Sales cockpit'::DASHBOARD_TITLE;                 -- header, browser tab, export title
+SELECT 'ACME Analytics'::BRAND;                          -- small brand line above the title
+SELECT 'assets/acme.svg'::LOGO;                          -- header logo (relative, https: or data:image/)
+SELECT 'assets/favicon.svg'::FAVICON;
+SELECT 'Revenue'::SECTION;                               -- a section heading (always a new row)
+```
+
+**Built-in themes** (`dashboard --themes`):
+
+| Theme | Look |
+|-------|------|
+| `light` (= `datazoo`, `default`) | the default DataZoo look; follows the viewer's light/dark preference |
+| `dark` | always dark: dark cards, light ink, lifted palette |
+| `print` | white page, black ink, no shadows or gradients |
+| `colorblind` | the light look with the Okabe-Ito palette |
+| `high-contrast` | maximum text contrast, solid accents |
+
+**Which variant a viewer sees.** With no `::THEME` (or `'x+dark'`) the dashboard
+*follows the viewer*: the OS `prefers-color-scheme`, the 🌙 toggle (remembered in
+the browser) or `?theme=dark` / `?theme=light` in the URL. `'light'`, `'dark'`,
+`'print'` alone pin the variant. Charts are re-rendered with the dark theme (not
+just recoloured cards), and a PNG / HTML export keeps the variant on screen. The
+builder chrome (sidebar, editor, toolbar) stays neutral and product-branded; only
+the dashboard follows the dashboard theme.
+
+**A theme file** is JSON; every key is optional and merges over `extends`
+(default `light`):
+
+```json
+{"name": "acme", "extends": "light",
+ "palette": ["#0b5fff", "#e11d48", "#16a34a", "#f59e0b"],
+ "sequential": ["#eef3ff", "#0b5fff"],
+ "colors": {"bg": "#f4f6f9", "bg2": "#f4f6f9", "card": "#ffffff", "ink": "#1f2937",
+            "muted": "#6b7280", "line": "#e5e7eb", "heading": "#111827",
+            "accent": "#0b5fff", "accent2": "#3b82f6",
+            "positive": "#16a34a", "negative": "#dc2626", "warning": "#d97706"},
+ "font": {"family": "Inter, system-ui, sans-serif", "display": "Inter, sans-serif"},
+ "radius": 10,
+ "chrome": {"gradient": false, "background": "plain", "kpi_value": "accent",
+            "table_zebra": true, "shadow": "sm"},
+ "brand": {"name": "ACME Analytics", "logo": "logo.svg", "logo_dark": "logo-dark.svg",
+           "favicon": "favicon.svg", "title_suffix": " · ACME"},
+ "locale": "de-DE",
+ "dark": {"colors": {"bg": "#0f1729", "card": "#162033", "ink": "#e5e7eb"}}}
+```
+
+Theme JSON is data: colours must be `#rgb`/`#rrggbb`, fonts plain font-family
+lists, logos relative paths, `https:` or `data:image/` URIs; anything else (and
+unknown keys) is an error. `?theme=` only switches light/dark — a URL never
+injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
+`de-locale.sql`).
+
+**The credit.** "Powered by DataZoo GmbH" is shown on every dashboard, in every
+output and under every theme (it takes the theme's colours so it stays
+readable). Author branding is shown *in addition*; there is no role to hide or
+replace the credit.
+
+**Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
+`en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
+formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
+legends / month names identically in the browser and the CLI:
+
+| | en-US | de-DE | fr-FR |
+|---|---|---|---|
+| `::METRIC` 1234567.5 | 1,234,567.5 | 1.234.567,5 | 1 234 567,5 |
+| `::MONEY` 12400 | $12,400 | 12.400 € | 12 400 € |
+| `::PERCENT` 12.5 | 12.5% | 12,5 % | 12,5 % |
+| `::COMPACT` 1234567 | 1.2M | 1,2 Mio. | 1,2 M |
+| date 2026-10-15 (tables) | 2026-10-15 (unchanged) | 15.10.2026 | 15/10/2026 |
+| axis | `1,000` · `Oct 2026` | `1.000` · `Okt. 2026` | `1 000` · `oct. 2026` |
+
+`?locale=de-DE` overrides it for one viewer (not in served/locked mode).
+
+**Everywhere else:** `dashboard file.sql out.html --theme dark` /
+`dashboard --svg file.sql out.svg [--theme T] [--dark]`,
+`serve [db] --theme T`, `serve --dashboards dir --theme T`,
+`anofox_serve_dashboards(dir, port, '{"theme":"dark"}')` (resolved and frozen
+when the server starts). A theme argument is a built-in, a stack or a `.json`
+file; the dashboard's own `::THEME` wins. The SQL macros take
+`theme := …` and `locale := …`, defaulting to the session variables:
+
+```sql
+SET VARIABLE anofox_theme = 'dark';      -- every anofox_plot_* / anofox_xy … call
+SET VARIABLE anofox_locale = 'de-DE';
+SELECT anofox_plot_terms(t, theme := 'colorblind') FROM coefs t;
+```
+
+`dashboard --theme-css <T> [--dark]` prints a theme's CSS tokens (to style your
+own page around exported SVGs).
 
 ### Export & share
 
@@ -715,7 +830,9 @@ wasm exports (`src/wasm.rs`):
 | Export | Purpose |
 |--------|---------|
 | `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
-| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
+| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale"}`; `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
+| `resolve_dashboard_theme(spec, chrome_json)` | a theme spec (+ `{title,brand,logo,favicon,locale}`) → `{ok, name, mode, light:{css,…}, dark:{css,…}}` |
+| `format_number_locale(value, fmt, locale)` / `format_date_locale(iso, locale)` | KPI / table formatting in a dashboard locale |
 | `map_bounds(rows_json, roles_json)` | a map's lon/lat extent for the zoom UI |
 | `panel_bounds(…)` | *deprecated* raw data extent of a cartesian panel; the UI now reads the rendered SVG's `data-domain` / `data-flip` attributes (ggplot-rs) and the `zoomable` role set instead |
 | `roles_json()` | the role registry + derived role sets (inputs, metrics, directives, table formats, text sizes, zoomable chart kinds — the browser's single source) |

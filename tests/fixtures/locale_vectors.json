@@ -1,0 +1,35 @@
+{
+  "_doc": "Locale formatting vectors shared by the Rust formatter (tests/theme.rs) and the browser (tests/web/locale_test.mjs, through the wasm exports app.js calls). The same value must read the same in the browser and the CLI.",
+  "numbers": [
+    [1234567.5, "METRIC", "en-US", "1,234,567.5"],
+    [1234567.5, "METRIC", "de-DE", "1.234.567,5"],
+    [1234567.5, "METRIC", "fr-FR", "1 234 567,5"],
+    [1234567.5, "METRIC", "en-GB", "1,234,567.5"],
+    [12400, "MONEY", "en-US", "$12,400"],
+    [12400, "MONEY", "de-DE", "12.400 €"],
+    [12400, "MONEY", "fr-FR", "12 400 €"],
+    [12400, "MONEY", "en-GB", "£12,400"],
+    [-1200.4, "MONEY", "de-DE", "-1.200 €"],
+    [53800000, "MONEY", "de-DE", "53,8 Mio. €"],
+    [53800000, "MONEY", "en-US", "$53.8M"],
+    [12.5, "PERCENT", "en-US", "12.5%"],
+    [12.5, "PERCENT", "de-DE", "12,5 %"],
+    [12.5, "PERCENT", "fr-FR", "12,5 %"],
+    [1234567, "COMPACT", "de-DE", "1,2 Mio."],
+    [2500000000, "COMPACT", "de-DE", "2,5 Mrd."],
+    [12000, "COMPACT", "de-DE", "12.000"],
+    [1234567, "COMPACT", "fr-FR", "1,2 M"],
+    [1234, "COMPACT", "fr-FR", "1,2 k"],
+    [1234567, "COMPACT", "en-US", "1.2M"],
+    [0.125, "METRIC", "de-DE", "0,13"]
+  ],
+  "dates": [
+    ["2026-10-15", "de-DE", "15.10.2026"],
+    ["2026-10-15", "en-US", "10/15/2026"],
+    ["2026-10-15", "en-GB", "15/10/2026"],
+    ["2026-10-15", "fr-FR", "15/10/2026"],
+    ["2026-10-15 00:00:00", "de-DE", "15.10.2026"],
+    ["2026-10-15 13:45:00", "de-DE", "15.10.2026 13:45:00"],
+    ["not a date", "de-DE", "not a date"]
+  ]
+}
