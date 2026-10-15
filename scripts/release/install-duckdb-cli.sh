@@ -9,7 +9,7 @@ set -euo pipefail
 
 DIR="${1:-$ROOT/.cache/duckdb-$DUCKDB_VERSION-$PLATFORM}"
 BIN="$DIR/duckdb$EXE"
-if [ -x "$BIN" ] && "$BIN" --version 2>/dev/null | grep -q "^$DUCKDB_VERSION "; then
+if [ -x "$BIN" ] && case "$("$BIN" --version 2>/dev/null)" in "$DUCKDB_VERSION "*) true ;; *) false ;; esac; then
   echo "$BIN"; exit 0
 fi
 mkdir -p "$DIR"

@@ -31,10 +31,15 @@ else
 fi
 PATH="$DUCKDB_DIR:$PATH"; export PATH
 command -v duckdb >/dev/null || { echo "FAIL: duckdb not on PATH ($DUCKDB_DIR)"; exit 1; }
-"$BIN/dashboard$EXE" --version | tr -d '\r' | grep -qx "dashboard $VERSION" || { echo "FAIL: dashboard --version"; exit 1; }
-"$BIN/serve$EXE" --version | tr -d '\r' | grep -qx "serve $VERSION" || { echo "FAIL: serve --version"; exit 1; }
-"$BIN/dashboard$EXE" --help | grep -q -- "--check" || { echo "FAIL: dashboard --help"; exit 1; }
-"$BIN/serve$EXE" --help | grep -q -- "--dashboards" || { echo "FAIL: serve --help"; exit 1; }
+# Capture output before matching: `cmd | grep -q` lets grep exit on the first
+# match, the CLI then dies writing the rest (EPIPE) and pipefail fails the step.
+out() { "$@" 2>&1 | tr -d '\r'; }
+DV="$(out "$BIN/dashboard$EXE" --version)"; SV="$(out "$BIN/serve$EXE" --version)"
+DH="$(out "$BIN/dashboard$EXE" --help)";    SH="$(out "$BIN/serve$EXE" --help)"
+[ "$DV" = "dashboard $VERSION" ] || { echo "FAIL: dashboard --version: $DV"; exit 1; }
+[ "$SV" = "serve $VERSION" ]     || { echo "FAIL: serve --version: $SV"; exit 1; }
+case "$DH" in *--check*) ;; *) echo "FAIL: dashboard --help"; exit 1 ;; esac
+case "$SH" in *--dashboards*) ;; *) echo "FAIL: serve --help"; exit 1 ;; esac
 echo "OK: --version / --help ($VERSION)"
 "$BIN/dashboard$EXE" --check "$ROOT/dashboards/sessions.sql"
 echo "OK: dashboard --check dashboards/sessions.sql"
