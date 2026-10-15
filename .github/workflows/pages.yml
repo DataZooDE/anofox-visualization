@@ -2,9 +2,16 @@ name: Deploy web app to Pages
 
 # Build the wasm module and publish the web/ dashboard app to GitHub Pages.
 # web/pkg is gitignored, so it's built here rather than committed.
+# Also publishes the latest release's full-toolkit extensions as a DuckDB
+# custom extension repository under /extensions (scripts/release/extension-repo.sh):
+#   INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
+# so it also redeploys after "Release full toolkit" (extension.yml) uploaded them.
 on:
   push:
     branches: [master]
+  workflow_run:
+    workflows: ["Release full toolkit"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +26,11 @@ concurrency:
 
 jobs:
   build:
+    # After a release run: only when it succeeded on a v* tag (a manual run
+    # uploads no release assets).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
@@ -37,7 +49,16 @@ jobs:
       # The anofox DuckDB-Wasm extensions, served same-origin from
       # web/localext/ (get.erpl.io has no CORS + needs a signature fix, #192).
       - name: Fetch wasm extensions (→ web/localext)
-        run: scripts/fetch-wasm-extensions.sh v1.5.6
+        run: scripts/fetch-wasm-extensions.sh "$(cat .duckdb-version)"
+
+      # The latest release's native extensions → web/extensions/<duckdb>/<platform>/
+      # anofox_visualization.duckdb_extension.gz (a warning, not a failure, when
+      # no release has them yet).
+      - name: DuckDB extension repository (latest release → web/extensions)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/release/extension-repo.sh --release latest web/extensions
 
       - uses: actions/configure-pages@v5
 
