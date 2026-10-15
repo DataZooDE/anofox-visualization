@@ -99,20 +99,3 @@ query I
 SELECT anofox_render('{"rows":[{"c0":"a","c1":2500},{"c0":"b","c1":1000}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"locale":"de-DE"}') LIKE '%>2.000<%';
 ----
 true
-
-# SET VARIABLE anofox_theme reaches the macros
-statement ok
-SET VARIABLE anofox_theme = 'dark';
-
-query I
-SELECT anofox_xy(x, y) NOT LIKE '%fill="#000000"%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
-----
-true
-
-statement ok
-RESET VARIABLE anofox_theme;
-
-query I
-SELECT anofox_xy(x, y, theme := 'colorblind') ILIKE '%#0072b2%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
-----
-true

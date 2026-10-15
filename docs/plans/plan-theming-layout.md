@@ -523,6 +523,8 @@ SELECT region, margin::PERCENT, '<0:negative; 0..0.05:warning; >0.05:positive'::
 | **M2 — Customization & structure** (≈3 wk) | C1, C2 first wave, L1, L2, T2 rest, T6, T7 lint, T12, T5, L3, L5, L4, C6, upstream U2 | `--options` table generated; every option key has a render test; contrast lint on all examples; showcase uses header + sections + colormap |
 | **M3 — Reports & advanced layout** (≈3–4 wk) | T11 + L6 print/PDF, C4, C5, T10, L7–L12, tooltip templates, U4 CSS-var SVG | Print screenshots A4; `report` and `wall` templates as examples; embed demo; single exported HTML works in light and dark |
 
+**M1 status (branch `feat/theme-m1`):** implemented — T1, T8 (`web/theme-base.css`, token-only CSS test), T3, T4, T9 (author branding; the DataZoo credit is mandatory), T12 (neutral builder chrome), C3 (format::Locale + ggplot-rs 0.18 `GGPlot::locale`), built-ins `light`/`dark`/`print`/`colorblind`/`high-contrast`, `dashboard`/`serve --theme`, `dashboard --svg`, `anofox_serve_dashboards` `options.theme`, lint `theme/*`, `locale/unknown`, `chrome/bad-url`. Not in M1: the toolbar theme-preview dropdown (T12), `print` re-render on `beforeprint` (T11), font self-hosting (T6), headless groups/tabs (L4).
+
 ## 9. Open questions for the owner
 
 1. **Default look:** keep the DataZoo palette as `datazoo` default, or switch the default to `colorblind` (Okabe-Ito) for new dashboards (an opt-in flag for old ones)?

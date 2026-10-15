@@ -57,3 +57,22 @@ statement error
 SELECT anofox_xy(ch, n, width := 1000000) FROM sales;
 ----
 outside [16, 8192]
+
+# ---- theme := / locale := and the anofox_theme variable (plan M1) ----
+
+# SET VARIABLE anofox_theme reaches the macros
+statement ok
+SET VARIABLE anofox_theme = 'dark';
+
+query I
+SELECT anofox_xy(x, y) NOT LIKE '%fill="#000000"%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
+----
+true
+
+statement ok
+RESET VARIABLE anofox_theme;
+
+query I
+SELECT anofox_xy(x, y, theme := 'colorblind') ILIKE '%#0072b2%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
+----
+true
