@@ -195,7 +195,9 @@ SELECT 6::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#
 SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
 
 SELECT 'Heatmap, calendar & candlestick'::TAB;
-SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- Heatmap (::HEATMAP): x × y tiles; rows keep the SQL order (first on top),
+-- ::DATALABELS writes each value into its cell, a click cross-filters by the row.
+SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, ''::DATALABELS, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
 -- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
 SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
 SELECT 12::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
@@ -5032,6 +5034,9 @@ const SNAPSHOT_JS = `(function(){
   var tip=document.getElementById('dp-tip');
   document.querySelectorAll('.dp-hit').forEach(function(el){
     var t=el.getAttribute('data-tip'); if(!t)return;
+    // the formatted value (::YFORMAT, ::LOCALE) in place of the raw one
+    var fv=el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
+    if(fv)t=(x&&x!==s?x+(s?' · '+s:''):(s||x||''))+': '+fv;
     el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
     el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
     el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
@@ -5165,21 +5170,30 @@ function fmtTipValue(v) {
 
 // Hover / selection metadata of a mark. ggplot-rs (>= 0.16) writes
 // `data-series` (colour/fill/group level), `data-value` (the raw measured value)
-// and `data-x`; marks without them (maps, older SVGs) fall back to parsing the
-// "series: value" `<title>` text `tip`. `attr` reads an attribute (null if
-// absent). `detail` is the full tooltip when it says more than "series: value"
-// (box-plot stats, OHLC, bin ranges, …), else "".
+// and `data-x`; the renderer adds `data-fvalue` / `data-fx` — the value and x
+// as the panel formats them (`::YFORMAT` currency/percent/unit, `::XFORMAT`,
+// the dashboard locale). Marks without them (maps, older SVGs) fall back to
+// parsing the "series: value" `<title>` text `tip`. `attr` reads an attribute
+// (null if absent). `detail` is the full tooltip when it says more than
+// "series: value" (box-plot stats, OHLC, bin ranges, …), else "". `fx` is set
+// when x carries its own formatted label; `own` when the series is the x
+// itself (a single-series bar).
 function markInfo(attr, tip) {
   const i = tip.lastIndexOf(": ");
   const tSeries = i >= 0 ? tip.slice(0, i) : tip;
   const tValue = i >= 0 ? tip.slice(i + 2) : "";
   const ds = attr("data-series");
   const dv = attr("data-value");
+  const fv = attr("data-fvalue");
   const series = ds !== null && ds !== "" ? ds : tSeries;
-  const value = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
-  const plain =
-    tip === value || tip === series || tip === `${series}: ${value}` || tip === `${tSeries}: ${value}`;
-  return { series, value, x: attr("data-x") || "", detail: plain ? "" : tip };
+  const raw = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
+  const value = fv !== null && fv !== "" ? fv : raw;
+  const plain = [raw, value].some(
+    (v) => tip === v || tip === series || tip === `${series}: ${v}` || tip === `${tSeries}: ${v}`
+  );
+  const fx = attr("data-fx") || "";
+  const x = attr("data-x") || "";
+  return { series, value, x: fx || x, fx: !!fx, own: series === x, detail: plain ? "" : tip };
 }
 
 // A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
@@ -5235,7 +5249,7 @@ function attachHover() {
     const t = el.querySelector("title");
     const txt = t.textContent;
     const info = markInfo((k) => el.getAttribute(k), txt);
-    info.x = xTickLabel(el, info.x);
+    if (!info.fx) info.x = xTickLabel(el, info.x);
     const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);
@@ -5273,10 +5287,12 @@ function attachHover() {
 }
 
 // One tooltip row: colour swatch + series + value (+ the full tooltip text
-// when it carries more, e.g. box-plot stats or OHLC).
+// when it carries more, e.g. box-plot stats or OHLC). A single-series bar's
+// series is its x, already the tooltip's header: the row then shows the value.
 function tipRow(info, fill) {
+  const name = info.own || (info.x && info.series === info.x) ? "" : info.series;
   return (
-    `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(info.series)}</span><b>${escapeHtml(info.value)}</b></div>` +
+    `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(name)}</span><b>${escapeHtml(info.value)}</b></div>` +
     (info.detail ? `<div class="tip-row"><span>${escapeHtml(info.detail)}</span></div>` : "")
   );
 }
@@ -5628,6 +5644,8 @@ function attachLegendToggle() {
   document.querySelectorAll(".panel").forEach((panel) => {
     const svg = panel.querySelector("svg");
     if (!svg || svg.dataset.legendWired || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    // A heatmap's series are its rows (the y axis), not a legend.
+    if (svg.getAttribute("data-kind") === "heatmap") return;
     const series = new Set([...svg.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series")));
     if (series.size < 2) return; // need a real multi-series legend
     const vbH = svg.viewBox.baseVal.height;

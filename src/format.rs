@@ -342,9 +342,136 @@ pub fn metric_fmt_of(token: &str) -> MetricFmt {
     }
 }
 
+/// How a chart value reads: the panel's `::YFORMAT` spec (the same keywords
+/// and prefix/suffix rule as the axis labels), plus the share kinds whose
+/// values are fractions.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ValueFmt {
+    /// Grouped number.
+    Plain,
+    /// A currency symbol (placed per locale: `$1,200.50`, `1.200,50 €`).
+    Currency(String),
+    /// Already in percent units (`12.5` → `12.5%`).
+    Percent,
+    /// A fraction shown as percent (`0.125` → `12.5%`).
+    Share,
+    /// A literal prefix (`CHF 1,200`).
+    Prefix(String),
+    /// A literal suffix (`12 kg`).
+    Suffix(String),
+}
+
+impl ValueFmt {
+    /// Parse a `::YFORMAT` spec (`'$'`, `'€'`, `'percent'`, `'comma'`,
+    /// `' kg'`, `'CHF '`, …); empty → plain.
+    pub fn parse(spec: &str) -> ValueFmt {
+        let s = spec.trim_end_matches(';');
+        let low = s.trim().to_ascii_lowercase();
+        match low.as_str() {
+            "" | "," | "comma" | "thousands" | "number" => ValueFmt::Plain,
+            "$" | "usd" | "dollar" | "dollars" => ValueFmt::Currency("$".into()),
+            "€" | "eur" | "euro" | "euros" => ValueFmt::Currency("€".into()),
+            "£" | "gbp" | "pound" | "pounds" => ValueFmt::Currency("£".into()),
+            "¥" | "jpy" | "yen" | "cny" | "yuan" => ValueFmt::Currency("¥".into()),
+            "%" | "percent" | "pct" => ValueFmt::Percent,
+            _ => match s.strip_prefix(' ') {
+                Some(suffix) => ValueFmt::Suffix(suffix.trim().to_string()),
+                None => ValueFmt::Prefix(s.to_string()),
+            },
+        }
+    }
+
+    /// The full value, as a tooltip shows it: grouped, ≤ 2 decimals (a
+    /// currency amount with cents keeps both digits: `$1,234.50`).
+    pub fn full(&self, n: f64, l: &Locale) -> String {
+        self.write(n, l, false)
+    }
+
+    /// The short value, as a label on a mark shows it: compact from 10 000
+    /// on (`12K`, `1.2 Mio.`), fewer decimals as the number grows.
+    pub fn short(&self, n: f64, l: &Locale) -> String {
+        self.write(n, l, true)
+    }
+
+    fn write(&self, n: f64, l: &Locale, short: bool) -> String {
+        if !n.is_finite() {
+            return "–".into();
+        }
+        let v = if *self == ValueFmt::Share {
+            n * 100.0
+        } else {
+            n
+        };
+        let a = v.abs();
+        let body = if short && a >= 1e4 {
+            compact_l(a, l)
+        } else if short {
+            grouped(
+                a,
+                if a >= 100.0 {
+                    0
+                } else if a >= 10.0 {
+                    1
+                } else {
+                    2
+                },
+            )
+        } else if matches!(self, ValueFmt::Currency(_)) {
+            // An amount with cents keeps both digits: $12.50, not $12.5.
+            let g = grouped(a, 2);
+            match g.find('.') {
+                Some(i) if g.len() - i == 2 => format!("{g}0"),
+                _ => g,
+            }
+        } else {
+            grouped(a, 2)
+        };
+        let neg = v < 0.0 && body.chars().any(|c| c.is_ascii_digit() && c != '0');
+        let sign = if neg { "-" } else { "" };
+        let body = l.localize(&body);
+        let pct = if l.percent_space { " %" } else { "%" };
+        match self {
+            ValueFmt::Plain => format!("{sign}{body}"),
+            ValueFmt::Percent | ValueFmt::Share => format!("{sign}{body}{pct}"),
+            ValueFmt::Currency(sym) if l.currency_suffix => {
+                format!("{sign}{body}{UNIT_SPACE}{sym}")
+            }
+            ValueFmt::Currency(sym) | ValueFmt::Prefix(sym) => format!("{sign}{sym}{body}"),
+            ValueFmt::Suffix(unit) => format!("{sign}{body} {unit}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_formats() {
+        let us = Locale::EN_US;
+        let de = Locale::DE_DE;
+        let f = |spec: &str, n: f64| ValueFmt::parse(spec).full(n, &us);
+        assert_eq!(f("$", 1234.5), "$1,234.50");
+        assert_eq!(f("$", 12.5), "$12.50");
+        assert_eq!(f("usd", -12.0), "-$12");
+        assert_eq!(f("€", 1_200_000.0), "€1,200,000");
+        assert_eq!(f("percent", 12.345), "12.35%");
+        assert_eq!(f(" kg", 1200.0), "1,200 kg");
+        assert_eq!(f("CHF ", 3.0), "CHF 3");
+        assert_eq!(f("", 121.94), "121.94");
+        assert_eq!(ValueFmt::Share.full(0.125, &us), "12.5%");
+        assert_eq!(ValueFmt::parse("€").full(1234.5, &de), "1.234,50 €");
+        assert_eq!(ValueFmt::parse("€").full(12.5, &de), "12,50 €");
+        assert_eq!(ValueFmt::Percent.full(12.5, &de), "12,5 %");
+        let s = |spec: &str, n: f64| ValueFmt::parse(spec).short(n, &us);
+        assert_eq!(s("$", 1_234_567.0), "$1.2M");
+        assert_eq!(s("", 121.94), "122");
+        assert_eq!(s("", 12.34), "12.3");
+        assert_eq!(s("", 0.1234), "0.12");
+        assert_eq!(s("", 9999.0), "9,999");
+        assert_eq!(ValueFmt::Plain.short(15_000.0, &de), "15.000");
+        assert_eq!(f("$", f64::NAN), "–");
+    }
 
     /// Shared test vectors — `web/app.js` delegates `fmtNum` to the wasm
     /// export of [`format_number`], so these pin the browser output too.

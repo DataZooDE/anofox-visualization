@@ -223,7 +223,7 @@ SELECT '**What to look for:** `vat_id` is 71 % empty — expected, only business
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
-SELECT field ::XAXIS, country ::YAXIS, round(100 * valid_rate, 1) ::HEATMAP,
+SELECT field ::XAXIS, country ::YAXIS, round(100 * valid_rate, 1) ::HEATMAP, 'percent'::YFORMAT, ''::DATALABELS,
        'Valid values by country (%), legacy CRM — VAT IDs are the weak spot'::TITLE
 FROM tq_validity WHERE tq_cty(country) ORDER BY field, country;
 

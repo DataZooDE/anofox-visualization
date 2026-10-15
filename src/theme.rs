@@ -12,8 +12,9 @@
 //! `?theme=dark`).
 //!
 //! **Colour literals live here.** Every other module reads colours from a
-//! [`ResolvedTheme`]; the built-in `light` theme reproduces the look of earlier
-//! releases exactly (byte-identical chart SVGs, pixel-equivalent pages).
+//! [`ResolvedTheme`]; the built-in `light` theme is the default look. Chart
+//! chrome (text, grid, gaps between marks) is painted from the same tokens
+//! (`chart_text`, `chart_grid`, … below; see `crate::chart_theme`).
 //!
 //! ```text
 //! {"name":"acme","extends":"light","mode":"auto",
@@ -832,7 +833,8 @@ fn rgba(c: Rgb, a: f64) -> String {
     )
 }
 
-fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+/// `a` → `b` by `t` (0..1), per channel in sRGB.
+pub fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     let l = |x: u8, y: u8| {
         (x as f64 + (y as f64 - x as f64) * t)
             .round()
@@ -883,7 +885,7 @@ impl Default for ResolvedTheme {
 // ───────────────────────── chart side ─────────────────────────────────────
 
 impl ResolvedTheme {
-    /// Is this the default light look (charts render exactly as before)?
+    /// Is this the default light look?
     pub fn is_default_light(&self) -> bool {
         *self == default_set().light
     }
@@ -893,9 +895,18 @@ impl ResolvedTheme {
         self.palette[i % self.palette.len()]
     }
 
+    /// The explicit sequential pair for this variant. A light-on-light pair
+    /// (pale low end) inherited by a dark variant is dropped: the dark
+    /// variant then ramps from its own dark low end to its brand.
+    pub fn seq_pair(&self) -> Option<[Rgb; 2]> {
+        self.sequential.filter(|[lo, _]| {
+            self.variant == Variant::Light || luminance(*lo) <= luminance(self.colors.card) + 0.2
+        })
+    }
+
     /// Low end of the heatmap fill.
     pub fn seq_low(&self) -> Rgb {
-        self.sequential
+        self.seq_pair()
             .map(|s| s[0])
             .or(self.chart.seq_low)
             .unwrap_or((0xed, 0xf1, 0xf7))
@@ -903,7 +914,7 @@ impl ResolvedTheme {
 
     /// Low end of the calendar fill (a hair lighter in the default look).
     pub fn calendar_low(&self) -> Rgb {
-        self.sequential
+        self.seq_pair()
             .map(|s| s[0])
             .or(self.chart.seq_low)
             .unwrap_or((0xeb, 0xf1, 0xf7))
@@ -911,7 +922,77 @@ impl ResolvedTheme {
 
     /// High end of a sequential fill (`brand` unless the theme sets one).
     pub fn seq_high(&self, brand: Rgb) -> Rgb {
-        self.sequential.map(|s| s[1]).unwrap_or(brand)
+        self.seq_pair().map(|s| s[1]).unwrap_or(brand)
+    }
+
+    /// The diverging ramp `[low, mid, high]` for this variant: the theme's
+    /// colours, with the midpoint of a light ramp moved onto the card colour
+    /// family in the dark variant (a pale grey midpoint would glow).
+    pub fn diverging_ramp(&self) -> [Rgb; 3] {
+        let [lo, mid, hi] = self.diverging;
+        match self.variant {
+            Variant::Light => [lo, mid, hi],
+            Variant::Dark if luminance(mid) > 0.5 => {
+                [lo, mix(self.colors.card, self.colors.ink, 0.17), hi]
+            }
+            Variant::Dark => [lo, mid, hi],
+        }
+    }
+
+    /// Chart text: tick labels, axis titles, legend titles (the muted ink).
+    pub fn chart_text(&self) -> Rgb {
+        self.colors.muted
+    }
+
+    /// Chart text that names data: legend entries, data labels.
+    pub fn chart_label(&self) -> Rgb {
+        mix(self.colors.ink, self.colors.muted, 0.35)
+    }
+
+    /// The chart grid: a hairline a step quieter than the card border.
+    pub fn chart_grid(&self) -> Rgb {
+        mix(self.colors.line, self.colors.card, 0.25)
+    }
+
+    /// Text on a filled cell (heatmap / calendar labels): ink or card,
+    /// whichever reads better on `fill`.
+    pub fn text_on(&self, fill: Rgb) -> Rgb {
+        let (dark, light) = if luminance(self.colors.ink) < luminance(self.colors.card) {
+            (self.colors.ink, self.colors.card)
+        } else {
+            (self.colors.card, self.colors.ink)
+        };
+        // Prefer the dark text unless the light one is clearly better: a
+        // mid-tone cell reads best with dark text.
+        if contrast(light, fill) > contrast(dark, fill) * 1.15 {
+            light
+        } else {
+            dark
+        }
+    }
+
+    /// The font-family list as an SVG attribute value (double quotes become
+    /// single quotes; the value is escaped by the writer).
+    pub fn svg_font(&self) -> String {
+        self.font.family.replace('"', "'")
+    }
+
+    /// Colours the chart theme paints directly in this variant — already
+    /// right for it, never remapped by [`ResolvedTheme::finish_svg`].
+    fn owns(&self, c: Rgb) -> bool {
+        let k = &self.colors;
+        [
+            k.ink,
+            k.muted,
+            k.line,
+            k.card,
+            k.heading,
+            self.chart_text(),
+            self.chart_label(),
+            self.chart_grid(),
+            self.diverging_ramp()[1],
+        ]
+        .contains(&c)
     }
 
     /// Post-process a rendered chart SVG for this variant. The light variant
@@ -924,12 +1005,20 @@ impl ResolvedTheme {
     /// directly (contract plots: model colours, accents) are swapped for the
     /// same *slot* of this theme's palette, so "ols = slot 0" holds in every
     /// theme.
+    ///
+    /// Text the plotting engine writes in its generic `sans-serif` (geom
+    /// labels, legends) or the extension's own `system-ui,sans-serif` takes
+    /// the theme's font family.
     pub fn finish_svg(&self, svg: String) -> String {
+        let svg = self.with_font(svg);
         let dz = self.palette.as_slice() == DZ_PALETTE.as_slice();
         if self.variant == Variant::Light && dz {
             return svg;
         }
         remap_neutrals(&svg, &|c| {
+            if self.owns(c) {
+                return None;
+            }
             if !dz {
                 if let Some(i) = DZ_PALETTE.iter().position(|&p| p == c) {
                     return Some(self.color(i));
@@ -943,6 +1032,24 @@ impl ResolvedTheme {
         })
     }
 
+    /// Swap the generic font families for the theme's.
+    fn with_font(&self, svg: String) -> String {
+        let font = format!(
+            "font-family=\"{}\"",
+            crate::format::escape_xml(&self.svg_font())
+        );
+        let mut svg = svg;
+        for generic in [
+            "font-family=\"sans-serif\"",
+            "font-family=\"system-ui,sans-serif\"",
+        ] {
+            if svg.contains(generic) {
+                svg = svg.replace(generic, &font);
+            }
+        }
+        svg
+    }
+
     /// The dark-ramp image of a neutral colour (`None` = keep).
     fn neutral(&self, c: Rgb) -> Option<Rgb> {
         let (mx, mn) = (c.0.max(c.1).max(c.2), c.0.min(c.1).min(c.2));
@@ -951,7 +1058,8 @@ impl ResolvedTheme {
         let own = self.palette.contains(&c)
             || c == self.seq_low()
             || c == self.calendar_low()
-            || self.sequential.is_some_and(|s| s.contains(&c));
+            || self.sequential.is_some_and(|s| s.contains(&c))
+            || self.owns(c);
         if mx - mn > 32 || own {
             return None;
         }
@@ -1659,6 +1767,49 @@ mod tests {
         let low = hex(t.seq_low());
         let svg = format!(r#"<svg><rect fill="{low}"/></svg>"#);
         assert!(t.finish_svg(svg).contains(&low));
+    }
+
+    #[test]
+    fn chart_tokens_survive_the_dark_pass() {
+        // Colours the chart theme paints directly must not collide with the
+        // renderer's neutrals or the DataZoo slot colours (the dark pass
+        // would remap them).
+        let engine: [Rgb; 6] = [
+            (0x32, 0x32, 0x32),
+            (0x4d, 0x4d, 0x4d),
+            (0xeb, 0xeb, 0xeb),
+            (0xff, 0xff, 0xff),
+            (0, 0, 0),
+            (0x78, 0x80, 0x8c),
+        ];
+        for (n, _) in BUILTINS {
+            let t = resolve(n).unwrap().dark;
+            for c in [
+                t.chart_text(),
+                t.chart_label(),
+                t.chart_grid(),
+                t.diverging_ramp()[1],
+            ] {
+                assert!(
+                    !engine.contains(&c) && !DZ_PALETTE.contains(&c),
+                    "{n}: {}",
+                    hex(c)
+                );
+                let svg = format!(r#"<svg><text fill="{}">a</text></svg>"#, hex(c));
+                assert!(t.finish_svg(svg).contains(&hex(c)), "{n}: {} kept", hex(c));
+            }
+            // Label text on cells: whichever of ink/card reads better.
+            assert_eq!(t.text_on(t.colors.ink), t.colors.card);
+            assert_eq!(t.text_on(t.colors.card), t.colors.ink);
+        }
+        // A light sequential pair inherited by a dark variant is not used.
+        let s = resolve(r##"{"name":"x","sequential":["#e0e7ff","#3730a3"]}"##).unwrap();
+        assert_eq!(s.light.seq_low(), (0xe0, 0xe7, 0xff));
+        assert!(
+            luminance(s.dark.seq_low()) < 0.1,
+            "{}",
+            hex(s.dark.seq_low())
+        );
     }
 
     #[test]

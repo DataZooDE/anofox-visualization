@@ -37,11 +37,14 @@ fn bars(svg: &str, s: &str) -> Vec<(f64, f64)> {
     }
     out
 }
-/// Point lists of non-grid `<polyline>`s.
+/// Point lists of non-grid `<polyline>`s (the grid is drawn in the theme's
+/// grid colour).
 fn polylines(svg: &str) -> Vec<String> {
+    let (r, g, b) = anofox_visualization::theme::default_light().chart_grid();
+    let grid = format!("#{r:02X}{g:02X}{b:02X}");
     svg.split("<polyline ")
         .skip(1)
-        .filter(|t| !t.contains("#EBEBEB"))
+        .filter(|t| !t.contains(&grid))
         .map(|t| t[..t.find('>').unwrap()].to_string())
         .collect()
 }
@@ -955,4 +958,167 @@ fn plain_bars_with_intervals_are_one_colour() {
         !s.contains("#E86433") && !s.contains("#e86433"),
         "no per-bar palette"
     );
+}
+
+// ── Chart chrome follows the dashboard theme ─────────────────────────────
+fn hexu((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+fn render_in(cols: &[Column], spec: &str, dark: bool) -> String {
+    use anofox_visualization::{render_with, RenderOptions};
+    let set = anofox_visualization::theme::resolve(spec).unwrap();
+    let t = if dark { set.dark } else { set.light };
+    let o = RenderOptions {
+        theme: std::sync::Arc::new(t),
+        ..RenderOptions::default()
+    };
+    render_with(cols, 480, 320, &o).unwrap()
+}
+
+#[test]
+fn chart_text_and_grid_use_theme_tokens() {
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W3"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 22.0, 41.0])),
+    ];
+    for dark in [false, true] {
+        let set = anofox_visualization::theme::resolve("light").unwrap();
+        let t = if dark { &set.dark } else { &set.light };
+        let s = render_in(&cols, "light", dark);
+        // No ggplot defaults: grey30 tick text, grey92 grid, dark bar outlines,
+        // the generic font.
+        for gone in [
+            "#4D4D4D",
+            "#EBEBEB",
+            "#323232",
+            "font-family=\"sans-serif\"",
+        ] {
+            assert!(!s.contains(gone), "dark={dark}: {gone} left in {s}");
+        }
+        assert!(
+            s.contains(&format!("fill=\"{}\">W1<", hexu(t.chart_text()))),
+            "{s}"
+        );
+        assert!(
+            s.contains(&hexu(t.chart_grid())),
+            "grid in the theme colour"
+        );
+        assert!(s.contains("Hanken Grotesk"), "theme font family");
+        // Bars part with a card-coloured hairline.
+        assert!(
+            s.contains(&format!("stroke=\"{}\"", hexu(t.colors.card))),
+            "{s}"
+        );
+    }
+    // A custom theme's muted ink paints the ticks.
+    let acme =
+        r##"{"name":"acme","colors":{"muted":"#5b6478"},"font":{"family":"Inter, sans-serif"}}"##;
+    let s = render_in(&cols, acme, false);
+    assert!(
+        s.contains("fill=\"#5B6478\">W1<") && s.contains("font-family=\"Inter, sans-serif\""),
+        "{s}"
+    );
+}
+
+fn heatmap_cols(labels: bool) -> Vec<Column> {
+    let mut cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W1", "W2"])),
+        Column::new("c", Role::Y, strs(&["web", "web", "api", "api"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&[1.5, 40.25, 20.0, 1234.5]),
+        ),
+        Column::new("f", Role::YFormat, strs(&["$"])),
+    ];
+    if labels {
+        cols.push(Column::new("l", Role::DataLabels, strs(&[""])));
+    }
+    cols
+}
+
+#[test]
+fn heatmap_labels_contrast_and_order() {
+    let t = anofox_visualization::theme::default_light();
+    let s = svg(heatmap_cols(true));
+    // Values in the panel format, written into the cells.
+    assert!(s.contains(">$1.5<") && s.contains(">$1,235<"), "{s}");
+    // Dark text on the pale low cell, light (card) text on the deep high cell.
+    assert!(
+        s.contains(&format!("fill=\"{}\">$1.5<", hexu(t.colors.ink))),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!("fill=\"{}\">$1,235<", hexu(t.colors.card))),
+        "{s}"
+    );
+    // Rows keep the SQL order, first on top: "web" is drawn above "api".
+    let y_of = |label: &str| -> f64 {
+        let i = s.find(&format!(">{label}</text>")).unwrap();
+        let tag = &s[s[..i].rfind("<text").unwrap()..i];
+        let k = tag.find(" y=\"").unwrap() + 4;
+        tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap()
+    };
+    assert!(y_of("web") < y_of("api"));
+    // Thin card-coloured gaps between cells, no dark borders.
+    assert!(s.contains(&format!(
+        "stroke=\"{}\" stroke-width=\"2.00\"",
+        hexu(t.colors.card)
+    )));
+    assert!(!s.contains("#323232"));
+    // Formatted tooltip values beside the raw ones; the colourbar in dollars.
+    assert!(
+        s.contains("data-value=\"1234.5\"") && s.contains("data-fvalue=\"$1,234.50\""),
+        "{s}"
+    );
+    assert!(
+        s.contains(">W1, api: $20<") || s.contains("W1, api: $20"),
+        "{s}"
+    );
+    // Without ::DATALABELS no cell text.
+    assert!(!svg(heatmap_cols(false)).contains(">$1.5<"));
+}
+
+#[test]
+fn heatmap_diverges_around_zero() {
+    let t = anofox_visualization::theme::default_light();
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["a", "b", "c"])),
+        Column::new("c", Role::Y, strs(&["r", "r", "r"])),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&[-10.0, 0.0, 10.0])),
+    ]);
+    let [lo, mid, hi] = t.diverging_ramp();
+    for c in [lo, mid, hi] {
+        assert!(s.contains(&hexu(c)), "{} in {s}", hexu(c));
+    }
+}
+
+#[test]
+fn tooltip_values_follow_yformat_and_locale() {
+    use anofox_visualization::{format::Locale, render_with, RenderOptions};
+    let cols = vec![
+        Column::new("d", Role::X, strs(&["2024-03-01", "2024-03-02"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[1234.5, 12.0])),
+        Column::new("f", Role::YFormat, strs(&["€"])),
+    ];
+    let s = svg(cols.clone());
+    assert!(s.contains("data-fvalue=\"€1,234.50\""), "{s}");
+    assert!(!s.contains("data-fx="), "en-US keeps ISO dates");
+    let o = RenderOptions {
+        locale: Locale::DE_DE,
+        ..RenderOptions::default()
+    };
+    let s = render_with(&cols, 480, 320, &o).unwrap();
+    assert!(
+        s.contains("data-fvalue=\"1.234,50 €\"") && s.contains("data-fx=\"01.03.2024\""),
+        "{s}"
+    );
+    // A percent kind's fractions read as percent.
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W1"])),
+        Column::new("c", Role::Category, strs(&["a", "b"])),
+        Column::new("n", Role::Value(Kind::BarPercent), nums(&[30.0, 10.0])),
+    ]);
+    assert!(s.contains("data-fvalue=\"75%\""), "{s}");
 }

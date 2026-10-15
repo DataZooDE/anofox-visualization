@@ -99,7 +99,7 @@ SELECT 4::COL;
 SELECT 340::HEIGHT;
 SELECT CASE WHEN p_refund >= dc_t() THEN 'escalated' ELSE 'not escalated' END ::XAXIS,
        CASE WHEN refund THEN 'asked for a refund' ELSE 'no refund asked' END ::YAXIS,
-       count(*) ::HEATMAP, 'Confusion at your threshold (tickets)'::TITLE
+       count(*) ::HEATMAP, ''::DATALABELS, 'Confusion at your threshold (tickets)'::TITLE
 FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 1, 2;
 
 SELECT 12::COL;
@@ -179,7 +179,7 @@ FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 2 DESC;
 
 SELECT 4::COL;
 SELECT 320::HEIGHT;
-SELECT team_pred ::XAXIS, team ::YAXIS, count(*) ::HEATMAP,
+SELECT team_pred ::XAXIS, team ::YAXIS, count(*) ::HEATMAP, ''::DATALABELS,
        'Labelled team (rows) vs the model''s choice'::TITLE
 FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 1, 2;
 

@@ -154,7 +154,7 @@ pub(crate) fn render(
         .collect();
     match crate::panel_plot(&cols, w, h, o).map_err(fail)? {
         Some(plot) => {
-            let plot = tweak(plot, &refs, &labels, &xl, &yl, false);
+            let plot = tweak(plot, o, &refs, &labels, &xl, &yl, false);
             crate::guard(|| stats::finish(plot, w, h, place).map_err(fail))
         }
         None => crate::render_placed(&cols, place, width, height, o),
@@ -293,6 +293,7 @@ fn axis_labels(cols: &[Column]) -> (String, String) {
 /// The house look over a role-rendered plot.
 fn tweak(
     plot: ggplot_rs::prelude::GGPlot,
+    o: &RenderOptions,
     refs: &Refs,
     labels: &look::Labels,
     xl: &str,
@@ -300,7 +301,7 @@ fn tweak(
     small: bool,
 ) -> ggplot_rs::prelude::GGPlot {
     use ggplot_rs::prelude::*;
-    let mut plot = plot.theme_update(look::theme_update(small));
+    let mut plot = plot.theme_update(look::theme_update(o, small));
     for (i, y) in refs.h.iter().enumerate() {
         plot = look::hline(plot, *y);
         if i == 0 {
@@ -794,9 +795,8 @@ fn diagnostics(
             (xl, yl)
         };
         grid = match crate::panel_plot(&cols, w, h, o)? {
-            Some(plot) => {
-                grid.add(tweak(plot, &refs, &look::Labels::default(), &xl, &yl, true).title(title))
-            }
+            Some(plot) => grid
+                .add(tweak(plot, o, &refs, &look::Labels::default(), &xl, &yl, true).title(title)),
             None => grid.add_spacer(),
         };
     }
@@ -1012,6 +1012,65 @@ mod tests {
             {"curve_type":"lambda_cv","x":10.0,"y":3.0,"y_low":2.7,"y_high":3.3,"is_min":false,"is_1se":false}]"#;
         let svg = go("curve", cv, "{}").unwrap();
         assert!(svg.contains("λ.min") && svg.contains("λ.1se"));
+    }
+
+    #[test]
+    fn terms_fade_intervals_that_cross_the_null() {
+        // x1 is significant, x2's interval crosses 0, x3 has no interval.
+        let rows = r#"[{"term":"x1","estimate":0.5,"conf_low":0.2,"conf_high":0.8},
+            {"term":"x2","estimate":-0.3,"conf_low":-0.7,"conf_high":0.1},
+            {"term":"x3","estimate":0.4}]"#;
+        let svg = go("terms", rows, "{}").unwrap();
+        // The start tag of the mark whose tooltip names `term`.
+        let marks = |svg: &str, term: &str| -> Vec<String> {
+            svg.match_indices(&format!("<title>{term}:"))
+                .map(|(i, _)| {
+                    let start = svg[..i].rfind('<').unwrap();
+                    svg[start..i].to_string()
+                })
+                .collect()
+        };
+        let x1 = marks(&svg, "x1");
+        let x2 = marks(&svg, "x2");
+        let x3 = marks(&svg, "x3");
+        assert!(!x1.is_empty() && !x2.is_empty() && !x3.is_empty(), "{svg}");
+        assert!(
+            x1.iter().all(|m| m.contains("fill-opacity=\"1.000\"")),
+            "{x1:?}"
+        );
+        assert!(
+            x3.iter().all(|m| m.contains("fill-opacity=\"1.000\"")),
+            "{x3:?}"
+        );
+        assert!(
+            x2.iter().all(|m| m.contains("fill-opacity=\"0.500\"")),
+            "{x2:?}"
+        );
+        assert!(
+            svg.contains("x2: -0.3 [-0.7, 0.1] · n.s."),
+            "tooltip says n.s."
+        );
+        // Exactly one interval line is faded (x2's).
+        assert_eq!(svg.matches("stroke-opacity=\"0.500\"").count(), 1, "{svg}");
+        assert!(svg.contains("faded = interval crosses 0"));
+        // A numeric `reference :=` moves the null value: against 0.5, x1
+        // (0.2..0.8) is not significant and x2 (-0.7..0.1) is.
+        let svg = go("terms", rows, r#"{"reference":0.5}"#).unwrap();
+        assert!(marks(&svg, "x1")
+            .iter()
+            .all(|m| m.contains("fill-opacity=\"0.500\"")));
+        assert!(marks(&svg, "x2")
+            .iter()
+            .all(|m| m.contains("fill-opacity=\"1.000\"")));
+        assert!(svg.contains("faded = interval crosses 0.5"));
+        // All significant: no caption about fading.
+        let svg = go(
+            "terms",
+            r#"[{"term":"a","estimate":1,"conf_low":0.5,"conf_high":1.5}]"#,
+            "{}",
+        )
+        .unwrap();
+        assert!(!svg.contains("faded"));
     }
 
     #[test]

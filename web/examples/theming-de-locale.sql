@@ -85,7 +85,7 @@ FROM nl_umsatz WHERE nl_in(region, warengruppe) AND nl_akt(tag) GROUP BY ALL ORD
 
 SELECT 12::COL;
 SELECT 300::HEIGHT;
-SELECT monat ::XAXIS, wochentag ::YAXIS, round(avg(ums) / 1000) ::HEATMAP,
+SELECT monat ::XAXIS, wochentag ::YAXIS, round(avg(ums) / 1000) ::HEATMAP, ''::DATALABELS,
        'Ø Tagesumsatz in Tsd. € nach Wochentag und Monat — samstags der stärkste Tag, sonntags geschlossen'::TITLE
 FROM (SELECT tag, sum(umsatz) AS ums,
              ['Jan.','Feb.','März','Apr.','Mai','Juni','Juli','Aug.','Sep.'][month(tag)] AS monat,

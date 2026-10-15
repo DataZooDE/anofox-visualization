@@ -132,7 +132,7 @@ SELECT 'Regions'::TAB;
 SELECT 7::COL;
 SELECT 360::HEIGHT;
 SELECT strftime(date_trunc('month', day), '%Y-%m') ::XAXIS, region ::YAXIS,
-       round(100 * (sum(revenue) / any_value(ly) - 1)) ::HEATMAP,
+       round(100 * (sum(revenue) / any_value(ly) - 1)) ::HEATMAP, 'percent'::YFORMAT,
        'Growth vs. the same month last year (%) — East jumps when its new office opens in March'::TITLE
 FROM acme_orders o
 JOIN (SELECT region AS r2, date_trunc('month', day + INTERVAL 1 YEAR) AS m2, sum(revenue) AS ly

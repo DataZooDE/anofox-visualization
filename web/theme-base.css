@@ -312,6 +312,8 @@ body.loading #dp-spinner{display:flex}
 .dp-tip .tip-row b{font-variant-numeric:tabular-nums;color:var(--ax-tip-head);font-weight:700}
 .dp-cross{position:fixed;width:0;border-left:1px dashed var(--ax-cross);pointer-events:none;z-index:49;display:none}
 .dp-hit{transition:filter .12s}.dp-hit:hover{filter:brightness(1.1) saturate(1.06)}
+/* heatmap cell labels: hover and click reach the cell underneath */
+svg[data-kind="heatmap"] text{pointer-events:none}
 
 /* ---- per-panel toolbox, zoom bar, brush, value-map ---- */
 .dp-toolbox{position:absolute;top:9px;right:11px;display:flex;gap:4px;opacity:0;transition:opacity .15s;z-index:6}

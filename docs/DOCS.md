@@ -65,7 +65,7 @@ terminal.
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
 | `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
-| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure |
+| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0) |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
@@ -77,12 +77,12 @@ terminal.
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
-| `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark (value = font size) |
+| `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark or heatmap cell (value = font size) |
 | `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
-| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | y-axis tick format: '€', '$', 'percent', 'comma', ' kg'… |
+| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent', 'comma', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
@@ -235,7 +235,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 
 | Macro | Schema (required **bold**) | Draws |
 |---|---|---|
-| `anofox_plot_terms(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL, facet := NULL, reference := NULL)` | **term, estimate**, conf_low, conf_high, conf_level, model_id, id, index_name, index_value, window_end | coefficient forest (x "estimate (95% CI)"; models — or groups, `id` — dodged + coloured with the legend in stacking order; rows without an interval as hollow rings, noted under the plot; models × groups: one panel per group). With `index_value`: a **λ path** (ridge / elastic net) is one panel with every coefficient overlaid on a log-λ axis and labelled at its line end (`highlight := ['tv', …]` greys the others; λ.min / λ.1se as dashed lines from `lambda_min :=` / `lambda_1se :=` or the table's `lambda_min`/`is_min` columns; `facet := true` keeps one panel per term); a **LARS path** on x = \|β\|₁ / max \|β\|₁; the **quantile process** (x "τ (quantile)") and **rolling coefficients** (x = `window_end`, a date axis) one panel per term, with a dashed full-sample reference (± CI shaded) from the input's index-less rows (e.g. an `ols` tidy table `UNION ALL BY NAME`) or `reference := (SELECT list(t) FROM ols_tidy_by(…) t)` |
+| `anofox_plot_terms(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL, facet := NULL, reference := NULL)` | **term, estimate**, conf_low, conf_high, conf_level, model_id, id, index_name, index_value, window_end | coefficient forest (x "estimate (95% CI)"; models — or groups, `id` — dodged + coloured with the legend in stacking order; rows without an interval as hollow rings, noted under the plot; a coefficient whose interval contains 0 — not significant — is drawn at half opacity (point and interval, "n.s." in its tooltip, "faded = interval crosses 0" under the plot); a numeric `reference := 1` moves that no-effect line, e.g. for odds ratios; models × groups: one panel per group). With `index_value`: a **λ path** (ridge / elastic net) is one panel with every coefficient overlaid on a log-λ axis and labelled at its line end (`highlight := ['tv', …]` greys the others; λ.min / λ.1se as dashed lines from `lambda_min :=` / `lambda_1se :=` or the table's `lambda_min`/`is_min` columns; `facet := true` keeps one panel per term); a **LARS path** on x = \|β\|₁ / max \|β\|₁; the **quantile process** (x "τ (quantile)") and **rolling coefficients** (x = `window_end`, a date axis) one panel per term, with a dashed full-sample reference (± CI shaded) from the input's index-less rows (e.g. an `ols` tidy table `UNION ALL BY NAME`) or `reference := (SELECT list(t) FROM ols_tidy_by(…) t)` |
 | `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL, band := NULL, kind := NULL)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id, focal, focal_name | observed y as neutral grey points, the fit as a coloured line with a light band; split changes along x as labelled dashed vertical lines ("hold-out", "forecast", else the split name; when splits interleave along x the non-train points are marked instead). Several models in a panel: one band only (`band := 'model'`, default `ols` or the first model) and a line per model in its stable colour; `kind := 'difference'` plots each model minus the reference. Effects tables (`focal`): y "P(y = 1)" for logistic / binomial, "expected count" for poisson / negbinom, else "predicted y"; x from `focal_name` when present. Several `id`s become panels |
 | `anofox_plot_curve(tbl, base_rate := NULL)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, auc, n_censor \| censored, n_risk, n_event (km), is_min, is_1se (lambda_cv) | roc: square, diagonal, the AUC (trapezoid, or an `auc` column) in each legend label; pr: the recall-0 points trimmed, a dashed base-rate line (`base_rate :=`, else the precision at the lowest threshold with full recall); calibration: square, diagonal, point size by the bin count (`weight`); km: step curves from S(0) = 1, step-ribbon band, small `+` censor marks, a dashed 50 % line with drops at each stratum's median and a number-at-risk table under the curves; acf/pacf: lollipops without lag 0 (ACF), significance bounds (one panel per series); lambda_cv: CV error ± SE on a log-λ axis with λ.min / λ.1se; qq / pdp / lift / null_dist: line or points (+ band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl, metrics := NULL, baseline := 'range')` | **metric, value**, model_id \| model_name, id, conf_low, conf_high | a grid of small panels, one per metric with its own scale; one model order in every panel (best first by the first metric), the value beside each dot, "n/a" for a missing metric, the best model highlighted for metrics with a direction; `baseline := 'range'` zooms to the values and prints the range ("Δ = …") in the panel title, `'zero'` starts the axis at 0; n_observations / n_features / iterations only when `metrics := [...]` asks |
@@ -446,6 +446,47 @@ that are not in the rows are not drawn and reported as a render warning
 `scripts/statistics_conformance.py` renders the output of every producer
 (see the README).
 
+### Heatmaps
+
+```sql
+SELECT week::XAXIS, channel::YAXIS, sum(revenue)::HEATMAP,
+       '$'::YFORMAT,      -- cell labels, legend and tooltip in dollars
+       ''::DATALABELS,    -- write each value into its cell (a number = font size)
+       'Revenue by week × channel'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+```
+
+- **Order**: text axes keep the SQL row order — the first `::YAXIS` level is the
+  top row (a matrix reads like a table), the first `::XAXIS` level the left
+  column. Numeric axes stay continuous.
+- **Colour**: the theme's sequential ramp, one hue light → dark (pale → brand →
+  a deeper brand; in dark mode the low end recedes into the card and the high
+  end is the brightest). When the values **span zero** the theme's diverging
+  ramp is used instead: two hues around a neutral midpoint at 0, both arms
+  scaled to the larger |end|, so −2…+10 reads as a little red and a lot of blue.
+  A theme's explicit `sequential` pair is used as given.
+- **Labels** (`::DATALABELS`): the short value (`$1,235`, `12K`, `1,2 Mio.` in
+  `de-DE`), dark text on light cells and light text on dark ones; the font size
+  fits the cell unless the role's value sets it.
+- **Hover / click**: the tooltip shows the column (header), the row and the
+  formatted value; a click cross-filters like any chart — it sets
+  `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
+- `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
+  tooltips.
+
+### Formatted tooltips
+
+Hover tooltips show values the way the panel formats them: its `::YFORMAT`
+(`'$'`, `'€'`, `'percent'`, `'comma'`, `' kg'`, `'CHF '` — the same keywords as
+the axis) in the dashboard `::LOCALE`, with cents kept for currency
+(`$1,234.50`, `1.234,50 €`). Share charts (`::BARCHART_PERCENT`,
+`::BAR_STACKED_PERCENT`, a fractional `::LINECHART_PERCENT`) read as percent.
+The x value follows `::XFORMAT`, and ISO dates take the locale's date order
+(`01.03.2024`) when a `::LOCALE` is set. Data labels (`::DATALABELS`) use the
+same format in short form. The renderer writes these as `data-fvalue` /
+`data-fx` next to the raw `data-value` / `data-x` on each mark, so any host can
+show them; selection and filtering keep using the raw values.
+
 ### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
@@ -461,6 +502,17 @@ footer) and every output — the browser, embed / served / locked pages, the CLI
 static HTML, `dashboard --svg`, and the ⤓ HTML / PNG exports. The page reads
 it as CSS custom properties (`--ax-*`, see `web/theme-base.css`); colour
 literals live only in the theme.
+
+**Charts wear the theme too.** Every chart — the role charts and the
+contract plots (`anofox_plot_*`: calibration, ROC, terms, …) — draws its text
+in the theme's font family, tick labels and axis titles in the muted ink,
+legend entries a step stronger, titles in the heading colour, a hairline grid a
+step quieter than the card border (no minor grid), and leaves the background
+transparent so the card shows through. Bars, slices and heatmap cells part with
+a thin card-coloured gap instead of a dark outline; reference lines
+(`::REFLINE`/`::XLINE`) are quiet dashed rules; box/violin bodies and gauge
+tracks are a tint of the brand on the card. Series colours follow the palette.
+All of it follows the light/dark variant and a custom theme's `colors`.
 
 ```sql
 SELECT 'dark'::THEME;                                    -- a built-in

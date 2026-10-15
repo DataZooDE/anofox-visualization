@@ -407,6 +407,83 @@ pub(crate) fn dz_palette(o: &RenderOptions) -> Vec<ggplot_rs::scale::color::RGBA
     (0..o.theme.palette.len()).map(|i| dz_color(o, i)).collect()
 }
 
+/// The house chart theme — ggplot's minimal look painted with the
+/// dashboard's tokens: tick labels and axis titles in the muted ink, legend
+/// entries a step stronger, titles in the heading colour, a hairline major
+/// grid a step quieter than the card border, no minor grid, no ticks and
+/// transparent backgrounds (the card shows through). `base` is the base font
+/// size (ggplot's 11 pt for role charts).
+pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
+    let mut th = ggplot_rs::theme::presets::theme_minimal_base(base);
+    paint_theme(&mut th, o);
+    th.panel_grid_major = ggplot_rs::theme::ElementLine {
+        color: o.theme.chart_grid(),
+        width: 0.6,
+        ..Default::default()
+    };
+    th.panel_grid_minor = ggplot_rs::theme::ElementLine::blank();
+    th
+}
+
+/// [`chart_theme`] without axes or grid (pie, gauge, map, sparkline).
+pub(crate) fn void_theme(o: &RenderOptions) -> Theme {
+    let mut th = ggplot_rs::theme::presets::theme_void();
+    paint_theme(&mut th, o);
+    th
+}
+
+/// Paint a theme's text with the dashboard's tokens.
+pub(crate) fn paint_theme(th: &mut Theme, o: &RenderOptions) {
+    let t = &o.theme;
+    let font = t.svg_font();
+    let paint = |e: &mut ggplot_rs::theme::ElementText, c: (u8, u8, u8)| {
+        e.color = c;
+        e.family = font.clone();
+    };
+    paint(&mut th.text, t.chart_label());
+    paint(&mut th.title, t.colors.heading);
+    paint(&mut th.subtitle, t.chart_text());
+    paint(&mut th.caption, t.chart_text());
+    paint(&mut th.axis_text_x, t.chart_text());
+    paint(&mut th.axis_text_y, t.chart_text());
+    paint(&mut th.axis_title_x, t.chart_text());
+    paint(&mut th.axis_title_y, t.chart_text());
+    paint(&mut th.legend_title, t.chart_text());
+    paint(&mut th.legend_text, t.chart_label());
+    paint(&mut th.strip_text, t.colors.heading);
+}
+
+/// `.theme(chart_theme(..))` / `.theme(void_theme(..))` as plot builders.
+pub(crate) trait HouseTheme {
+    fn house_theme(self, o: &RenderOptions) -> Self;
+    fn house_void(self, o: &RenderOptions) -> Self;
+}
+
+impl HouseTheme for GGPlot {
+    fn house_theme(self, o: &RenderOptions) -> Self {
+        self.theme(chart_theme(o, 11.0))
+    }
+    fn house_void(self, o: &RenderOptions) -> Self {
+        self.theme(void_theme(o))
+    }
+}
+
+/// A light wash of `c` on the card (`t` = how far towards the card): a
+/// pale tint on a light card, a deep one on a dark card.
+pub(crate) fn wash(o: &RenderOptions, c: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    theme::mix(c, o.theme.colors.card, t)
+}
+
+/// Bars and pie slices are outlined in the card colour, so adjoining marks
+/// (stacked segments, slices) part with a hairline gap instead of a dark rule.
+pub(crate) fn card_col(o: &RenderOptions) -> GeomCol {
+    GeomCol {
+        fill: o.brand(),
+        color: o.theme.colors.card,
+        ..Default::default()
+    }
+}
+
 /// A map zoom window: `((x0, x1), (y0, y1))` in geometry (lon/lat) coordinates.
 pub type ZoomWindow = ((f64, f64), (f64, f64));
 
@@ -1044,8 +1121,72 @@ fn render_placed(
             .map(|p| p.localized(o, &cols))
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
-        Ok((o.theme.finish_svg(strip_nonfinite_marks(svg)), warnings))
+        let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
+        Ok((with_formatted_values(svg, &cols, o), warnings))
     })
+}
+
+/// Give every hoverable mark its value as the panel formats it: the
+/// plotting engine writes the raw measure (`data-value="1234.5"`); this adds
+/// `data-fvalue="$1,234.50"` per the panel's `::YFORMAT` (or a percent kind)
+/// and the dashboard locale, and — when the axis formats x (`::XFORMAT`, a
+/// `::LOCALE` date order) — `data-fx` beside `data-x`. Hosts show these in
+/// tooltips; the raw attributes stay for selection and filtering.
+fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> String {
+    let Some(value) = cols.iter().find(|c| matches!(c.role, Role::Value(_))) else {
+        return svg;
+    };
+    let Role::Value(kind) = value.role else {
+        return svg;
+    };
+    if !svg.contains(" data-value=\"") {
+        return svg;
+    }
+    let fmt = value_fmt(cols, kind, &value.values);
+    let xfmt = role_str(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(tag[k..k + tag[k..].find('"')?].to_string())
+    };
+    let mut out = String::with_capacity(svg.len() + svg.len() / 8);
+    let mut rest = svg.as_str();
+    while let Some(i) = rest.find(" data-value=\"") {
+        // The whole start tag around this attribute.
+        let start = rest[..i].rfind('<').unwrap_or(0);
+        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
+            break;
+        };
+        let tag = &rest[start..end];
+        out.push_str(&rest[..end]);
+        let mut extra = String::new();
+        if let Some(v) = attr(tag, "data-value").and_then(|v| v.parse::<f64>().ok()) {
+            extra.push_str(&format!(
+                " data-fvalue=\"{}\"",
+                format::escape_xml(&fmt.full(v, &o.locale))
+            ));
+        }
+        if let Some(x) = attr(tag, "data-x") {
+            let fx = match (&xfmt, x.parse::<f64>()) {
+                (Some(f), Ok(n)) => Some(f.full(n, &o.locale)),
+                _ if !o.locale.is_default() => Some(o.locale.format_date(&x)).filter(|d| *d != x),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                extra.push_str(&format!(" data-fx=\"{}\"", format::escape_xml(&fx)));
+            }
+        }
+        // Before a self-closing `/`.
+        if out.ends_with('/') {
+            out.pop();
+            out.push_str(&extra);
+            out.push('/');
+        } else {
+            out.push_str(&extra);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The ggplot of one panel, for composing into a [`PlotGrid`] (`None` when
@@ -1241,7 +1382,7 @@ fn render_inner(
         Kind::Heatmap => return render_heatmap(o, value, cols, title.as_deref(), width, height),
         Kind::Calendar => return render_calendar(o, value, cols, title.as_deref(), width, height),
         Kind::Candlestick => {
-            return render_candlestick(value, cols, title.as_deref(), width, height)
+            return render_candlestick(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, width, height),
@@ -1707,7 +1848,16 @@ fn cartesian(
         .filter(|s| *s >= 5.0 && *s <= 40.0)
         .unwrap_or(11.0);
     if show_labels {
-        let dl: Vec<Value> = data[1].1.iter().map(|v| Value::Str(fmt_label(v))).collect();
+        // In the panel's value format (`$1,235`, `12%`), short form.
+        let fmt = value_fmt(cols, kind, &data[1].1);
+        let dl: Vec<Value> = data[1]
+            .1
+            .iter()
+            .map(|v| match v.as_f64() {
+                Some(f) => Value::Str(fmt.short(f, &o.locale)),
+                None => Value::Str(fmt_label(v)),
+            })
+            .collect();
         data.push(("dlab".to_string(), dl));
     }
 
@@ -1870,15 +2020,15 @@ fn cartesian(
         ..Default::default()
     };
     // A light brand wash for box/violin bodies (unless a CATEGORY fills them).
-    let body_fill = lighten(brand, 0.72);
+    let body_fill = wash(o, brand, 0.72);
     plot = match kind {
-        Kind::Bar | Kind::BarPercent if dodge => {
-            plot.geom_col().position(position_dodge(dodge_width))
-        }
+        Kind::Bar | Kind::BarPercent if dodge => plot
+            .geom_col_with(card_col(o))
+            .position(position_dodge(dodge_width)),
         // (A slotted x is already dodged, see `dodge_discrete`.)
-        Kind::Bar | Kind::BarPercent => plot.geom_col(),
-        Kind::BarStacked => plot.geom_col().position(PositionStack),
-        Kind::BarStackedPercent => plot.geom_col().position(PositionFill),
+        Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
+        Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
+        Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
         Kind::Line | Kind::LinePercent => plot
@@ -1988,13 +2138,13 @@ fn cartesian(
         // CATEGORY fill still wins).
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
             fill: body_fill,
-            color: (60, 60, 60),
+            color: o.theme.chart_label(),
             width: 0.6,
             alpha: 1.0,
         }),
         Kind::Violin => plot.geom_violin_with(GeomViolin {
             fill: body_fill,
-            color: darken(brand, 0.35),
+            color: theme::mix(brand, o.theme.colors.ink, 0.35),
             alpha: 1.0,
             line_width: 1.0,
         }),
@@ -2055,7 +2205,7 @@ fn cartesian(
         plot = plot
             .geom_text_with(GeomText {
                 size: dlabel_size,
-                color: (70, 78, 92),
+                color: o.theme.chart_label(),
                 // Lift the label clear of the mark (a small gap above the top).
                 vjust: -0.35,
                 ..Default::default()
@@ -2080,7 +2230,7 @@ fn cartesian(
                     size: 3.4,
                     ..Default::default()
                 }),
-                _ => plot.geom_col(),
+                _ => plot.geom_col_with(card_col(o)),
             }
             .layer_aes(lay);
         }
@@ -2120,7 +2270,7 @@ fn cartesian(
             plot = plot
                 .geom_text_repel_with(GeomTextRepel {
                     size: 10.0,
-                    color: (55, 62, 75),
+                    color: o.theme.chart_label(),
                     repel: RepelParams {
                         segment_color: Some((150, 156, 168)),
                         ..Default::default()
@@ -2152,10 +2302,30 @@ fn cartesian(
             col.to_string(),
             vals.into_iter().map(Value::Float).collect(),
         )];
+        // A quiet dashed rule in the chart text colour (not ggplot's black).
+        let ink = o.theme.chart_text();
         plot = if vertical {
-            plot.geom_vline_aes(Aes::new().xintercept(col))
+            plot.geom_vline_aes_with(
+                GeomVline {
+                    xintercept: 0.0,
+                    color: ink,
+                    width: 0.8,
+                    linetype: Linetype::Dashed,
+                    alpha: 1.0,
+                },
+                Aes::new().xintercept(col),
+            )
         } else {
-            plot.geom_hline_aes(Aes::new().yintercept(col))
+            plot.geom_hline_aes_with(
+                GeomHline {
+                    yintercept: 0.0,
+                    color: ink,
+                    width: 0.8,
+                    linetype: Linetype::Dashed,
+                    alpha: 1.0,
+                },
+                Aes::new().yintercept(col),
+            )
         }
         .layer_data(frame);
     }
@@ -2323,7 +2493,7 @@ fn cartesian(
             plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
         }
     }
-    plot = plot.theme_minimal();
+    plot = plot.house_theme(o);
     plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = &title {
         plot = plot.title(t);
@@ -2354,8 +2524,12 @@ fn render_histogram(
     let data = vec![("x".to_string(), value.values.clone())];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x"))
-        .geom_histogram()
-        .theme_minimal()
+        .geom_histogram_with(GeomHistogram {
+            fill: o.brand(),
+            color: o.theme.colors.card,
+            ..Default::default()
+        })
+        .house_theme(o)
         .primary_color(o.brand());
     if let Some(t) = title {
         plot = plot.title(t);
@@ -2388,13 +2562,13 @@ fn render_density(
             })
             .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
             .scale_color(dz_scale(o, Aesthetic::Color, cat))
-            .theme_minimal()
+            .house_theme(o)
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     } else {
         plot = GGPlot::new(data)
             .aes(aes)
             .geom_density()
-            .theme_minimal()
+            .house_theme(o)
             .primary_color(o.brand());
     }
     if let Some(t) = title {
@@ -2532,7 +2706,7 @@ fn render_qq(
         .geom_qq_line()
         .xlab("Theoretical")
         .ylab("Sample")
-        .theme_minimal()
+        .house_theme(o)
         .primary_color(o.brand());
     if let Some(t) = title {
         plot = plot.title(t);
@@ -2540,7 +2714,14 @@ fn render_qq(
     Ok(Panel::plot(plot, width, height))
 }
 
-/// A heatmap: `x` × `y` tiles coloured by the measure (light → steel blue).
+/// A heatmap: `x` × `y` tiles coloured by the measure.
+///
+/// Cells part with a thin card-coloured gap; the fill is the theme's
+/// sequential ramp (pale → brand → deep brand; dark-mode aware), or its
+/// diverging ramp around zero when the values span it. Discrete axes keep
+/// the SQL row order (first level at the top, like a table). `::DATALABELS`
+/// writes each value into its cell (dark text on light cells, light text on
+/// dark ones); `::YFORMAT` formats the values (labels, legend, tooltip).
 fn render_heatmap(
     o: &RenderOptions,
     value: &Column,
@@ -2557,21 +2738,298 @@ fn render_heatmap(
         .iter()
         .find(|c| c.role == Role::Y)
         .ok_or("heatmap needs a YAXIS column")?;
+    let fmt = value_fmt(cols, Kind::Heatmap, &value.values);
+    let nums: Vec<f64> = value
+        .values
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .filter(|f| f.is_finite())
+        .collect();
+    let (min, max) = nums
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    let ramp = Ramp::new(o, o.theme.seq_low(), min, max);
+    let tips: Vec<Value> = value
+        .values
+        .iter()
+        .map(|v| match v.as_f64() {
+            Some(f) => Value::Str(fmt.full(f, &o.locale)),
+            None => Value::Na,
+        })
+        .collect();
     let data = vec![
         ("x".to_string(), x.values.clone()),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
-        ("label".to_string(), value.values.clone()),
+        ("label".to_string(), tips),
     ];
-    let mut plot = GGPlot::new(data)
+    let mut th = chart_theme(o, 11.0);
+    // Tiles fill the panel: no grid behind them; a slim, borderless colourbar.
+    th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
+    th.legend_key.color = Some(o.theme.colors.card);
+    th.legend_key_width = 9.0;
+    let mut plot = GGPlot::new(data.clone())
         .aes(Aes::new().x("x").y("y").fill("fill").label("label"))
-        .geom_tile()
-        .scale_fill_gradient(rgba(o.theme.seq_low()), rgba(o.theme.seq_high(o.brand())))
-        .theme_minimal();
+        .geom_tile_with(GeomTile {
+            color: o.theme.colors.card,
+            line_width: 2.0,
+            ..Default::default()
+        })
+        .scale_fill(FmtGradient::new(&ramp, fmt.clone(), o.locale))
+        .theme(th);
+    if let Some(levels) = str_levels(&x.values) {
+        plot = plot.scale_x_discrete(
+            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
+        );
+    }
+    if let Some(mut levels) = str_levels(&y.values) {
+        levels.reverse();
+        plot = plot.scale_y_discrete(
+            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
+        );
+    }
+    if let Some(dl) = find_role(cols, Role::DataLabels) {
+        let short: Vec<String> = value
+            .values
+            .iter()
+            .map(|v| {
+                v.as_f64()
+                    .map(|f| fmt.short(f, &o.locale))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let size = dl
+            .values
+            .iter()
+            .find_map(|v| v.as_f64())
+            .filter(|s| (5.0..=40.0).contains(s))
+            .unwrap_or_else(|| {
+                let nx = distinct_labels_of(&x.values).max(1) as f64;
+                let ny = distinct_labels_of(&y.values).max(1) as f64;
+                let chars = short.iter().map(|s| s.chars().count()).max().unwrap_or(1) as f64;
+                let cw = width as f64 * 0.8 / nx;
+                let ch = height as f64 * 0.85 / ny;
+                (cw / (chars * 0.62 + 1.2)).min(ch * 0.4).clamp(7.0, 12.0)
+            });
+        // One text layer per label colour (ggplot text has one colour).
+        let mut by_ink: Vec<((u8, u8, u8), Vec<usize>)> = Vec::new();
+        for (i, v) in value.values.iter().enumerate() {
+            let Some(f) = v.as_f64().filter(|f| f.is_finite()) else {
+                continue;
+            };
+            let ink = o.theme.text_on(ramp.color_of(f));
+            match by_ink.iter_mut().find(|(c, _)| *c == ink) {
+                Some((_, rows)) => rows.push(i),
+                None => by_ink.push((ink, vec![i])),
+            }
+        }
+        for (ink, rows) in by_ink {
+            let pick =
+                |vals: &[Value]| -> Vec<Value> { rows.iter().map(|&i| vals[i].clone()).collect() };
+            plot = plot
+                .geom_text_with(GeomText {
+                    size,
+                    color: ink,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".to_string(), pick(&x.values)),
+                    ("y".to_string(), pick(&y.values)),
+                    (
+                        "cell".to_string(),
+                        rows.iter().map(|&i| Value::Str(short[i].clone())).collect(),
+                    ),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("cell"))
+                .show_legend(false);
+        }
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    let mut panel = Panel::plot(plot, width, height);
+    // Hosts: cell labels let hover/click through to the cell; no legend toggle.
+    if let Panel::Plot { attrs, .. } = &mut panel {
+        attrs.push(("data-kind", "heatmap".to_string()));
+    }
+    Ok(panel)
+}
+
+/// The value format of a panel: its `::YFORMAT`, or a share for the
+/// percent kinds (whose values are fractions).
+pub(crate) fn value_fmt(cols: &[Column], kind: Kind, values: &[Value]) -> format::ValueFmt {
+    let fractions = || {
+        values
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .all(|f| f.abs() <= 1.0)
+    };
+    match kind {
+        Kind::BarPercent | Kind::BarStackedPercent => return format::ValueFmt::Share,
+        Kind::LinePercent if fractions() => return format::ValueFmt::Share,
+        Kind::LinePercent => return format::ValueFmt::Percent,
+        _ => {}
+    }
+    role_str(cols, Role::YFormat)
+        .map(|s| format::ValueFmt::parse(&s))
+        .unwrap_or(format::ValueFmt::Plain)
+}
+
+/// The first-seen order of a text column's levels (`None` when the column
+/// holds numbers, which keep a continuous axis).
+fn str_levels(values: &[Value]) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for v in values {
+        match v {
+            Value::Str(s) => {
+                if !out.contains(s) {
+                    out.push(s.clone());
+                }
+            }
+            Value::Na => {}
+            _ => return None,
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The number of distinct (non-missing) values.
+fn distinct_labels_of(values: &[Value]) -> usize {
+    let mut seen: Vec<String> = Vec::new();
+    for v in values {
+        if matches!(v, Value::Na) {
+            continue;
+        }
+        let k = value_str(v);
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    seen.len()
+}
+
+/// The fill ramp of a heatmap / calendar over the values `[min, max]`:
+/// gradient stops at 0..1. Sequential: `low` → brand → a deeper brand (one
+/// hue, light → dark; in the dark variant the deep end is lighter). Values
+/// spanning zero: the theme's diverging ramp with a neutral midpoint at 0,
+/// both arms scaled to the larger |end| (−2…+10 reads as a little red, a lot
+/// of blue). An explicit theme `sequential` pair is used as given.
+pub(crate) struct Ramp {
+    min: f64,
+    max: f64,
+    stops: Vec<(f64, (u8, u8, u8))>,
+}
+
+impl Ramp {
+    pub(crate) fn new(o: &RenderOptions, low: (u8, u8, u8), min: f64, max: f64) -> Ramp {
+        let t = &o.theme;
+        let stops = if min < 0.0 && max > 0.0 {
+            let [lo, mid, hi] = t.diverging_ramp();
+            let m = (-min).max(max);
+            vec![
+                (0.0, theme::mix(mid, lo, -min / m)),
+                (-min / (max - min), mid),
+                (1.0, theme::mix(mid, hi, max / m)),
+            ]
+        } else if let Some([_, high]) = t.seq_pair() {
+            vec![(0.0, low), (1.0, high)]
+        } else {
+            let brand = o.brand();
+            vec![
+                (0.0, low),
+                (0.72, brand),
+                (1.0, theme::mix(brand, t.colors.ink, 0.32)),
+            ]
+        };
+        Ramp { min, max, stops }
+    }
+
+    /// The colour a value gets (as the gradient scale maps it).
+    fn color_of(&self, v: f64) -> (u8, u8, u8) {
+        let span = self.max - self.min;
+        let p = if span > 0.0 {
+            ((v - self.min) / span).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let i = self
+            .stops
+            .windows(2)
+            .position(|w| p <= w[1].0)
+            .unwrap_or(self.stops.len().saturating_sub(2));
+        let ((a, ca), (b, cb)) = (self.stops[i], self.stops[(i + 1).min(self.stops.len() - 1)]);
+        let f = if b > a { (p - a) / (b - a) } else { 0.0 };
+        theme::mix(ca, cb, f)
+    }
+}
+
+/// A continuous fill scale over a [`Ramp`] whose colourbar labels use the
+/// panel's value format (`$1.2M`, `12 %`).
+#[derive(Clone)]
+pub(crate) struct FmtGradient {
+    inner: ggplot_rs::scale::gradient_n::ScaleColorGradientN,
+    fmt: format::ValueFmt,
+    locale: format::Locale,
+}
+
+impl FmtGradient {
+    pub(crate) fn new(ramp: &Ramp, fmt: format::ValueFmt, locale: format::Locale) -> FmtGradient {
+        FmtGradient {
+            inner: ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
+                Aesthetic::Fill,
+                ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
+            ),
+            fmt,
+            locale,
+        }
+    }
+}
+
+impl ggplot_rs::scale::Scale for FmtGradient {
+    fn aesthetic(&self) -> Aesthetic {
+        self.inner.aesthetic()
+    }
+    fn train(&mut self, values: &[Value]) {
+        self.inner.train(values)
+    }
+    fn map(&self, value: &Value) -> f64 {
+        self.inner.map(value)
+    }
+    fn breaks(&self) -> Vec<(f64, String)> {
+        let (lo, hi) = self.inner.domain().unwrap_or((0.0, 1.0));
+        self.inner
+            .breaks()
+            .into_iter()
+            .map(|(p, l)| {
+                let v = lo + p * (hi - lo);
+                if hi > lo {
+                    (p, self.fmt.short(v, &self.locale))
+                } else {
+                    (p, l)
+                }
+            })
+            .collect()
+    }
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name)
+    }
+    fn map_to_color(&self, value: &Value) -> Option<(u8, u8, u8)> {
+        self.inner.map_to_color(value)
+    }
+    fn domain(&self) -> Option<(f64, f64)> {
+        self.inner.domain()
+    }
+    fn clone_box(&self) -> Box<dyn ggplot_rs::scale::Scale> {
+        Box::new(self.clone())
+    }
+    fn reset_training(&mut self) {
+        self.inner.reset_training()
+    }
 }
 
 /// Max span a calendar heatmap draws (one column per week; beyond this the
@@ -2624,22 +3082,47 @@ fn render_calendar(
             "calendar spans {span_years} years — at most {MAX_CALENDAR_YEARS} are drawn; filter the date range"
         ));
     }
-    let labels: Vec<Value> = vals.iter().map(|v| Value::Str(fmt_label(v))).collect();
+    let fmt = value_fmt(cols, Kind::Calendar, &vals);
+    let labels: Vec<Value> = vals
+        .iter()
+        .map(|v| {
+            Value::Str(
+                v.as_f64()
+                    .map(|f| fmt.full(f, &o.locale))
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    let (min, max) = vals
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+            (a.min(v), b.max(v))
+        });
+    let ramp = Ramp::new(o, o.theme.calendar_low(), min, max);
     let data = vec![
         ("x".to_string(), dates),
         ("fill".to_string(), vals),
         ("label".to_string(), labels),
     ];
+    let mut th = chart_theme(o, 11.0);
+    th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
+    th.legend_key.color = Some(o.theme.colors.card);
+    th.legend_key_width = 9.0;
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").fill("fill").label("label"))
-        .geom_calendar()
-        .scale_fill_gradient(
-            rgba(o.theme.calendar_low()),
-            rgba(o.theme.seq_high(o.brand())),
+        .geom_calendar_with(
+            GeomTile {
+                color: o.theme.colors.card,
+                line_width: 1.5,
+                ..Default::default()
+            },
+            false,
         )
+        .scale_fill(FmtGradient::new(&ramp, fmt, o.locale))
         .xlab("")
         .ylab("")
-        .theme_minimal();
+        .theme(th);
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -2651,6 +3134,7 @@ fn render_calendar(
 /// (`::CANDLESTICK`). Up candles green, down red; each candle's hover reads
 /// "period — O … H … L … C …".
 fn render_candlestick(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
@@ -2694,7 +3178,7 @@ fn render_candlestick(
         .geom_candlestick()
         .xlab("")
         .ylab("")
-        .theme_minimal();
+        .house_theme(o);
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -2770,7 +3254,7 @@ fn render_radar(
         .coord_radar_with(ggplot_rs::coord::radar::CoordRadar::new().radius_frac(0.86))
         .xlab("")
         .ylab("")
-        .theme_minimal()
+        .house_theme(o)
         .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(cat) = category {
         plot = plot
@@ -2803,7 +3287,7 @@ fn render_sparkline(
     ];
 
     let steel = o.brand();
-    let fill = lighten(steel, 0.62); // wash under the line
+    let fill = wash(o, steel, 0.62); // wash under the line
     let last = n.saturating_sub(1);
     // A single-point layer marking the most recent value (the eye-catching dot).
     let end = vec![
@@ -2836,7 +3320,7 @@ fn render_sparkline(
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0),
         )
-        .theme_void();
+        .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
     Ok(Panel::plot(plot, width.min(240), height))
@@ -2966,7 +3450,7 @@ fn render_gauge(
         x0.extend([min, min]);
         x1.extend([max, shown]);
         fill.extend(["track".to_string(), "value".to_string()]);
-        pairs.push(("track".to_string(), lighten(o.brand(), 0.87)));
+        pairs.push(("track".to_string(), wash(o, o.brand(), 0.87)));
         pairs.push(("value".to_string(), o.brand()));
     } else {
         for (i, c) in zone_cols.iter().enumerate() {
@@ -3007,7 +3491,7 @@ fn render_gauge(
         let k = xs.len();
         plot = plot
             .geom_segment_with(GeomSegment {
-                color: (255, 255, 255),
+                color: o.theme.colors.card,
                 width: 2.0,
                 alpha: 1.0,
             })
@@ -3021,7 +3505,7 @@ fn render_gauge(
     // The needle: a dark bar across the band at the (clamped) value.
     plot = plot
         .geom_segment_with(GeomSegment {
-            color: (31, 41, 55),
+            color: o.theme.colors.ink,
             width: 3.5,
             alpha: 1.0,
         })
@@ -3069,7 +3553,7 @@ fn render_gauge(
     }
     let ends = GeomText {
         size: 11.0,
-        color: (0x8a, 0x93, 0xa6),
+        color: o.theme.chart_text(),
         // Shift below the arc ends (text is centred on its anchor).
         vjust: 0.5 + 16.0 / 11.0,
         ..Default::default()
@@ -3087,11 +3571,11 @@ fn render_gauge(
         x: at(0.5),
         y: 0.0,
         size: big,
-        color: (0x1f, 0x29, 0x37),
+        color: o.theme.colors.ink,
     });
     let caption = GeomText {
         size: 11.0,
-        color: (0x8a, 0x93, 0xa6),
+        color: o.theme.chart_text(),
         vjust: 0.5 + (big * 0.8) / 11.0,
         ..Default::default()
     };
@@ -3121,7 +3605,7 @@ fn render_gauge(
         .coord_polar_with(
             ggplot_rs::coord::polar::CoordPolar::new().with_span(-3.0 * quarter, 3.0 * quarter),
         )
-        .theme_void()
+        .house_void(o)
         .legend_position(ggplot_rs::theme::LegendPosition::None);
     if let Some(t) = title {
         plot = plot.title(t);
@@ -3261,7 +3745,7 @@ fn render_map(
     // An unfilled map takes a light brand tint (not ggplot's default blue).
     let plot = plot.geom_sf_with(ggplot_rs::geom::sf::GeomSf {
         alpha,
-        fill: lighten(o.brand(), 0.55),
+        fill: wash(o, o.brand(), 0.55),
         color: (90, 98, 112),
         ..Default::default()
     });
@@ -3271,7 +3755,7 @@ fn render_map(
         Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
         None => plot.coord_sf(),
     };
-    plot = plot.theme_void();
+    plot = plot.house_void(o);
     if measure.is_some() {
         // Viridis gives points/regions strong contrast over the grey basemap;
         // a plain choropleth keeps the on-brand light→primary gradient.
@@ -3312,7 +3796,7 @@ fn render_pie(
     ];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
-        .geom_col()
+        .geom_col_with(card_col(o))
         .position(PositionStack)
         .scale_fill(dz_scale(o, Aesthetic::Fill, category))
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
@@ -3324,7 +3808,7 @@ fn render_pie(
                 .theta("y")
                 .inner_radius(inner),
         )
-        .theme_void()
+        .house_void(o)
         .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(t) = title {
         plot = plot.title(t);

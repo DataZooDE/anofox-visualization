@@ -19,9 +19,6 @@ pub(super) const BASE_SIZE: f64 = 13.2;
 /// Reference lines (zero, 4/n, diagonals, 50 %): light grey, thin, dashed.
 pub(super) const REF: (u8, u8, u8) = (178, 184, 194);
 pub(super) const REF_WIDTH: f64 = 0.8;
-/// Facet strip / sub-panel title text.
-const STRIP: (u8, u8, u8) = (40, 44, 52);
-
 /// `title :=`, `x_label :=`, `y_label :=` of a contract macro.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Labels {
@@ -62,30 +59,33 @@ pub(super) fn humanize(name: &str) -> String {
     s.join(" ")
 }
 
-/// The house theme. `small` (a grid cell) shrinks titles a little but keeps
-/// tick labels at ≥ 10 px.
-pub(super) fn theme(small: bool) -> Theme {
+/// The house theme (the dashboard's chart tokens, see [`crate::chart_theme`])
+/// at the contract plots' base size. `small` (a grid cell) shrinks titles a
+/// little but keeps tick labels at ≥ 10 px. Axis titles are quiet labels,
+/// not headings: a little larger than the tick labels, in the muted ink.
+pub(super) fn theme(o: &RenderOptions, small: bool) -> Theme {
     let base = if small { BASE_SIZE * 0.9 } else { BASE_SIZE };
-    let mut th = ggplot_rs::theme::presets::theme_minimal_base(base);
+    let mut th = crate::chart_theme(o, base);
     let floor = |e: &mut ElementText, min: f64| e.size = e.size.max(min);
     floor(&mut th.axis_text_x, 10.0);
     floor(&mut th.axis_text_y, 10.0);
     floor(&mut th.legend_text, 10.5);
+    th.axis_title_x.size = (base * 0.85).max(10.5);
+    th.axis_title_y.size = (base * 0.85).max(10.5);
+    th.legend_title.size = th.legend_text.size;
     th.strip_text.face = ggplot_rs::render::backend::FontFace::Bold;
-    th.strip_text.color = STRIP;
     th.strip_text.size = th.strip_text.size.max(11.0);
     if small {
         th.title.size = (base * 1.0).max(11.0);
         th.title.face = ggplot_rs::render::backend::FontFace::Bold;
-        th.title.color = STRIP;
     }
     th
 }
 
 /// The house theme as an update over a role-rendered plot (whose own theme
-/// is ggplot2's minimal at 11 pt).
-pub(super) fn theme_update(small: bool) -> ThemeUpdate {
-    let th = theme(small);
+/// is the role charts' house theme at 11 pt).
+pub(super) fn theme_update(o: &RenderOptions, small: bool) -> ThemeUpdate {
+    let th = theme(o, small);
     ThemeUpdate {
         text: Some(th.text),
         title: Some(th.title),
@@ -113,7 +113,7 @@ pub(super) fn styled_aspect(
     small: bool,
     aspect: Option<f64>,
 ) -> GGPlot {
-    let mut th = theme(small);
+    let mut th = theme(o, small);
     th.aspect_ratio = aspect;
     plot.theme(th)
         .primary_color(o.brand())

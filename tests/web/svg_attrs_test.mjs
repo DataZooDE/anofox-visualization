@@ -33,12 +33,14 @@ assert.deepEqual(info({ "data-series": "a: b", "data-value": "22", "data-x": "W1
   series: "a: b",
   value: "22",
   x: "W1",
+  fx: false,
+  own: false,
   detail: "",
 });
 // A stacked segment: the raw segment value, rounded.
 assert.equal(info({ "data-series": "web", "data-value": "21.99999" }, "web: 22").value, "22");
 // No attributes (a map feature) → the "series: value" title.
-assert.deepEqual(info({}, "Germany: 42"), { series: "Germany", value: "42", x: "", detail: "" });
+assert.deepEqual(info({}, "Germany: 42"), { series: "Germany", value: "42", x: "", fx: false, own: false, detail: "" });
 // Line/polygon titles are just the series.
 assert.equal(info({ "data-series": "Model A" }, "Model A").detail, "");
 // A richer tooltip is kept as detail (box-plot stats, OHLC).
@@ -50,4 +52,25 @@ assert.equal(ohlc.series, "up");
 assert.ok(ohlc.detail.includes("O 100.7"));
 // Heatmap tile "x, y: v" with data-series = y.
 assert.deepEqual(info({ "data-series": "pm", "data-value": "7", "data-x": "Mon" }, "Mon, pm: 7").detail, "");
+// The renderer's formatted value / x win for display (::YFORMAT, ::LOCALE);
+// the raw value still decides whether the title says more.
+const money = info(
+  { "data-series": "api", "data-value": "1234.5", "data-fvalue": "$1,234.50", "data-x": "W1" },
+  "api: 1234.5"
+);
+assert.equal(money.value, "$1,234.50");
+assert.equal(money.detail, "");
+const de = info(
+  { "data-series": "web", "data-value": "12.5", "data-fvalue": "12,50 €", "data-x": "2024-03-01", "data-fx": "01.03.2024" },
+  "web: 12.5"
+);
+assert.deepEqual([de.value, de.x, de.fx, de.detail], ["12,50 €", "01.03.2024", true, ""]);
+// A single-series bar (series = x): the tooltip row drops the repeated name.
+const one = info({ "data-series": "2024-03-01", "data-value": "3", "data-x": "2024-03-01", "data-fx": "01.03.2024" }, "2024-03-01: 3");
+assert.equal(one.own, true);
+// A heatmap tile whose title carries the formatted value.
+assert.equal(
+  info({ "data-series": "pm", "data-value": "7.5", "data-fvalue": "$7.50", "data-x": "Mon" }, "Mon, pm: $7.50").detail,
+  ""
+);
 console.log("web svg attribute tests: ok");
