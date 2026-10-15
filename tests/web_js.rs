@@ -42,3 +42,8 @@ fn web_contract_plot_glue() {
 fn web_wasm_extensions_load() {
     run_node("wasm_extensions_test.mjs");
 }
+
+#[test]
+fn web_locale_formatting_matches_the_cli() {
+    run_node("locale_test.mjs");
+}
