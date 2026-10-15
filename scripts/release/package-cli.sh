@@ -22,7 +22,15 @@ BIN="$TARGET_DIR/release"
 
 echo "== smoke =="
 # dashboard/serve run queries through `duckdb` on PATH.
-PATH="$(dirname "$DUCKDB"):$PATH"; export PATH
+# On Windows (Git Bash) $DUCKDB is a C:\… path: bash's dirname can't split it,
+# so convert to a POSIX path first or PATH would gain a bogus entry.
+if command -v cygpath >/dev/null 2>&1; then
+  DUCKDB_DIR="$(dirname "$(cygpath -u "$DUCKDB")")"
+else
+  DUCKDB_DIR="$(dirname "$DUCKDB")"
+fi
+PATH="$DUCKDB_DIR:$PATH"; export PATH
+command -v duckdb >/dev/null || { echo "FAIL: duckdb not on PATH ($DUCKDB_DIR)"; exit 1; }
 "$BIN/dashboard$EXE" --version | tr -d '\r' | grep -qx "dashboard $VERSION" || { echo "FAIL: dashboard --version"; exit 1; }
 "$BIN/serve$EXE" --version | tr -d '\r' | grep -qx "serve $VERSION" || { echo "FAIL: serve --version"; exit 1; }
 "$BIN/dashboard$EXE" --help | grep -q -- "--check" || { echo "FAIL: dashboard --help"; exit 1; }
