@@ -690,7 +690,7 @@ SELECT 'Tables — rich per-column formatting & scalable paging'::LABEL;
 -- Rich formatting: each column picks its own presentation role.
 SELECT 'Formatted'::TAB;
 SELECT 12::COL;
-SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL**.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
@@ -715,6 +715,20 @@ FROM (VALUES ('North', 4.2e6, 4.61e6, 18.2, 0.94, 2.1), ('South', 3.8e6, 3.42e6,
              ('East', 5.1e6, 5.35e6, 21.0, 0.97, 0.4), ('West', 2.9e6, 2.71e6, 9.8, 0.81, -3.2),
              ('Central', 3.3e6, 3.55e6, 15.1, 0.91, 1.6)) v(region, plan, revenue, margin, accuracy, bias)
 ORDER BY revenue DESC;
+
+-- Subtotals (::SUBTOTAL): the rows grouped by a column, a subtotal row after
+-- each group; sorting by another column sorts within the groups.
+SELECT 12::COL;
+SELECT 'region'::SUBTOTAL;
+SELECT 'Margin %: mean'::TOTALS;
+SELECT region::TABLE, store, revenue::MONEY, orders, margin AS "Margin %",
+       'Stores by region — a subtotal per region (sort any column: it sorts within the regions)'::TITLE
+FROM (VALUES ('North', 'Hamburg', 1.92e6, 18400, 19.1), ('North', 'Bremen', 1.21e6, 11900, 17.4),
+             ('North', 'Kiel', 0.68e6, 7100, 16.0), ('South', 'Munich', 2.05e6, 19800, 13.9),
+             ('South', 'Stuttgart', 1.37e6, 13300, 11.2), ('East', 'Berlin', 3.10e6, 29400, 22.3),
+             ('East', 'Leipzig', 1.08e6, 10200, 18.7), ('East', 'Dresden', 1.17e6, 11600, 20.5))
+     v(region, store, revenue, orders, margin)
+ORDER BY region, revenue DESC;
 
 -- Paging: a plain ::TABLE returns everything and the browser paginates it.
 SELECT '1,000 rows (client)'::TAB;
@@ -1881,7 +1895,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -2302,7 +2316,7 @@ async function runOnce(fresh = true) {
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
-  let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT → the next table's options
+  let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -2378,7 +2392,7 @@ async function runOnce(fresh = true) {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
           .toLowerCase();
-      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT"].includes(d)) {
+      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
@@ -3346,7 +3360,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const cols = allKeys.filter((_, i) => i !== skip);
   const loc = dashLocale() || NUM_LOCALE;
   const selMode = ["single", "multi"].includes(opts.select) ? opts.select : "none";
-  // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT name columns by the raw name or
+  // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL name columns by the raw name or
   // the header people read (case-insensitive)
   const colNamed = (name) => {
     const n = String(name).trim().toLowerCase();
@@ -3394,6 +3408,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     const m = part.match(/^\s*(?:(.+?)\s*:\s*)?(top|bottom)\s+(\d+)\s*$/i);
     if (m && (!m[1] || colNamed(m[1]))) hlSpec[m[1] ? colNamed(m[1]) : ""] = { top: m[2].toLowerCase() === "top", n: +m[3] };
   }
+  // ::SUBTOTAL 'region': the rows grouped by that column, a subtotal row after
+  // each group (client tables; a ::PAGED table has only the rows of one page)
+  const subCol = (!server && opts.subtotal && colNamed(opts.subtotal)) || null;
+  const SUB = Symbol("subtotal"); // a subtotal row in the Scroll view's row list
+  const groupKey = (r) => unquote(r[subCol] ?? "");
+  let subGroups = new Map(); // group key -> its matching rows
 
   // ── per-column profile: kind, range, decimals, whether it gets data bars ──
   // A ::PAGED table profiles the whole filtered result from its SQL statistics
@@ -3574,8 +3594,20 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           : unquote(x).localeCompare(unquote(y), undefined, { numeric: true }) * dir;
       });
     }
-    return data;
+    if (!subCol) return data;
+    // ::SUBTOTAL: each group together, the groups in order of their first row
+    // (sorting by the group column orders the groups, any other sorts within them)
+    const groups = new Map();
+    for (const r of data) {
+      const k = groupKey(r);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    }
+    return [...groups.values()].flat();
   };
+  // after row j of the (grouped) rows: the key of the group it closes, else undefined
+  const closesGroup = (data, j) =>
+    subCol && (j === data.length - 1 || groupKey(data[j + 1]) !== groupKey(data[j])) ? groupKey(data[j]) : undefined;
   // A filter changed: a client table re-filters; a ::PAGED table asks its caller
   // to re-query (text input is debounced so each keystroke isn't a query).
   let colTimer = null;
@@ -3863,6 +3895,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       if (c === cols[0] && !i.numeric) w *= 1.08; // the key column is bold
       if (flags[c]) w += 2.5;
       if (hlSpec[c]) w += 3;
+      if (subCol && c === cols[0])
+        for (const r of sample) w = Math.max(w, chars("Subtotal ") * 0.9 + chars(groupKey(r)) * 1.05);
       natW[c] = w;
     }
   };
@@ -4152,7 +4186,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // and getvariable('<first column>') (click again / the background clears);
   // with 'multi' each click toggles the row in the list getvariable('<first column>').
   const k0 = cols[0];
-  function renderRow(tr, r) {
+  function renderRow(tr, r, repeat = false) {
     const vc = visCols();
     const selectable = selMode !== "none" && k0 != null && !info[k0].numeric;
     if (selectable) {
@@ -4191,6 +4225,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       const td = tr.insertCell();
       fillCell(td, r[c], c);
       decorate(td, r[c], c);
+      if (repeat && c === subCol) td.classList.add("grp-rep"); // ::SUBTOTAL: the group's value once
       if (ix === 0 && selectable && selMode === "multi") {
         const cb = document.createElement("span");
         cb.className = "row-cb" + (tr.classList.contains("row-sel") ? " on" : "");
@@ -4232,7 +4267,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   };
   let lastWindow = "";
   function renderWindow(force = false) {
-    const total = nTotal();
+    const total = server ? nTotal() : sortedCache.length; // (with ::SUBTOTAL rows)
     const viewH = scroller.clientHeight || 560;
     const first = Math.max(0, Math.floor(scroller.scrollTop / ROW_H) - 8);
     const last = Math.min(total, first + Math.ceil(viewH / ROW_H) + 16);
@@ -4245,7 +4280,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     for (let i = first; i < last; i++) {
       const r = rowAt(i);
       const tr = document.createElement("tr");
-      if (r) renderRow(tr, r);
+      const prev = i > first ? rowAt(i - 1) : null;
+      if (r && r[SUB] !== undefined) renderSubRow(tr, r[SUB]);
+      else if (r) renderRow(tr, r, !!subCol && !!prev && prev[SUB] === undefined && groupKey(prev) === groupKey(r));
       else {
         tr.className = "tbl-loading";
         const td = tr.insertCell();
@@ -4255,7 +4292,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       tb.appendChild(tr);
     }
     tb.appendChild(spacer((total - last) * ROW_H));
-    updateFoot(total, 1);
+    updateFoot(nTotal(), 1);
   }
   const emptyRow = () => {
     const tr = tb.insertRow();
@@ -4282,8 +4319,17 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const body = () => {
     tb.innerHTML = "";
     rankHighlights();
+    if (subCol) {
+      subGroups = new Map();
+      for (const r of filtered) {
+        const k = groupKey(r);
+        if (!subGroups.has(k)) subGroups.set(k, []);
+        subGroups.get(k).push(r);
+      }
+    }
     if (view === "scroll" && !(printing && !server)) {
       sortedCache = server ? null : sortedRows();
+      if (subCol) sortedCache = sortedCache.flatMap((r, j, all) => (closesGroup(all, j) === undefined ? [r] : [r, { [SUB]: groupKey(r) }]));
       renderWindow(true);
       renderTotals();
       return;
@@ -4296,11 +4342,16 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       page = Math.min(page, pages - 1);
       updateFoot(data.length, pages);
     }
-    const pageRows = server || printing ? data : data.slice(page * pageSize, (page + 1) * pageSize);
+    const from = server || printing ? 0 : page * pageSize;
+    const pageRows = server || printing ? data : data.slice(from, from + pageSize);
     // a long page scrolls inside the table, so the header and the totals stay in view
     scroller.classList.toggle("long", view !== "scroll" && !printing && pageRows.length > 20);
     if (!pageRows.length) emptyRow();
-    for (const r of pageRows) renderRow(tb.insertRow(), r);
+    pageRows.forEach((r, j) => {
+      renderRow(tb.insertRow(), r, !!subCol && j > 0 && groupKey(pageRows[j - 1]) === groupKey(r));
+      const k = closesGroup(data, from + j);
+      if (k !== undefined) renderSubRow(tb.insertRow(), k);
+    });
     renderTotals();
   };
 
@@ -4308,12 +4359,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // cell, else ::TOTALS, else Σ for amounts and counts / mean for rates; counts
   // for badges. A ::PAGED table's come from the SQL statistics (n, s, m, md, lo, hi).
   const aggOf = (c) => aggPick[c] ?? totSpec.col[c] ?? totSpec.all ?? (additive(c) ? "sum" : "mean");
-  const aggValue = (c, a) => {
-    if (server) {
+  const aggValue = (c, a, of = null) => {
+    if (server && !of) {
       const st = sstat(c);
       return st ? { sum: st.s, mean: st.m, median: st.md, min: st.lo, max: st.hi, count: st.n }[a] : null;
     }
-    const nums = filtered.map((r) => cleanNum(r[c])).filter((v) => v != null);
+    const nums = (of || filtered).map((r) => cleanNum(r[c])).filter((v) => v != null);
     if (a === "count") return nums.length;
     if (!nums.length) return null;
     if (a === "min" || a === "max") return nums.reduce((x, y) => (a === "min" ? Math.min(x, y) : Math.max(x, y)));
@@ -4335,6 +4386,28 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       return minus(new Intl.NumberFormat(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(v));
     return cellText(v, c);
   };
+  // ::SUBTOTAL: the group's row, each numeric column with its total's aggregation
+  function renderSubRow(tr, k) {
+    const grp = subGroups.get(k) || [];
+    tr.className = "sub-row";
+    visCols().forEach((c, ix) => {
+      const td = tr.insertCell();
+      const i = info[c];
+      if (ix === 0) {
+        td.innerHTML = `<span class="tot-l">Subtotal</span> ${k === "" ? nil() : escapeHtml(k)}`;
+        td.title = `${head(subCol)}: ${k || "(empty)"} — ${grp.length.toLocaleString(loc)} matching rows`;
+        return;
+      }
+      if (!i.numeric || i.label || ["SPARKLINE", "BADGE"].includes(i.f)) return;
+      const a = aggOf(c);
+      if (a === "none") return;
+      const v = aggValue(c, a, grp);
+      td.classList.add("num");
+      if (v != null && v < 0 && negStyle === "red") td.classList.add("neg");
+      td.textContent = v == null ? "–" : aggText(v, c, a);
+      td.title = `${head(c)}: ${AGG_WORD[a]} over the ${grp.length.toLocaleString(loc)} rows of ${k || "(empty)"}`;
+    });
+  }
   let tfoot = null;
   function renderTotals() {
     if (tfoot) tfoot.remove();
@@ -4406,7 +4479,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
             aggPick[c] = x;
             persist();
             renderCols();
-            renderTotals();
+            if (subCol) body(); // the subtotals follow the pick
+            else renderTotals();
           };
           menu.appendChild(it);
         }

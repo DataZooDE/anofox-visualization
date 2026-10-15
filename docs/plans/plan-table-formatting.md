@@ -8,8 +8,8 @@ numeric widths, key-column emphasis, no zebra with in-cell bars; minus sign,
 muted zeros, `chrome.negatives` / `chrome.zero`, per-column units, signed trends.
 T2b: `::TOTALS` + a per-cell aggregation picker (SQL stats gained `median`).
 T5: `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`, `::FLAG`, `::HIGHLIGHT`.
-T7: caption / scope / aria-sort / aria-selected, print CSS. **Open**: T6, T8,
-T9, `::SUBTOTAL` (T2b).
+T7: caption / scope / aria-sort / aria-selected, print CSS. `::SUBTOTAL` (T2b,
+client tables). **Open**: T6, T8, T9.
 Originally a proposal Follows the table rebuild (toolbar, totals, Scroll
 view, `::ROWSELECT`, SQL-side filters/totals for `::PAGED`). Goal: tables that
 read like a well-set report — clear headers, an unmistakable totals row, quiet
@@ -104,7 +104,9 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   it, the heuristic stays (amounts / counts → sum, rate-like → mean).
 - `::PAGED`: the statistics request returns `md{i}` = `median(x)` too, so every
   aggregation comes from the one SQL statistics row (n, s, m, md, lo, hi).
-- Still open: `::SUBTOTAL`.
+- `::SUBTOTAL 'region'` (done, `::TABLE` only): rows grouped by the column, its
+  value once per group, a subtotal row (single rule, lighter background) after
+  each group with each column's total aggregation.
 
 ## T6 · Header statistics, visible on demand
 

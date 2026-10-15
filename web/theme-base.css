@@ -213,6 +213,12 @@ body.loading #dp-spinner{display:flex}
 .dp-table .bool.no{color:var(--ax-muted);opacity:.7}
 /* totals: the accounting double rule above, bold, apart from the body */
 .dp-table tfoot td{border-top:3px double var(--ax-ink);border-bottom:0;font-weight:700;background:var(--ax-th-bg);padding:.6rem .75rem;white-space:nowrap}
+.dp-table tbody tr.sub-row td,.dp-table tbody tr.sub-row:hover td{border-top:1px solid color-mix(in srgb,var(--ax-ink) 45%,transparent);font-weight:600;background-color:color-mix(in srgb,var(--ax-th-bg) 55%,transparent);white-space:nowrap}
+.dp-table tbody tr.sub-row td.num{text-align:right;font-variant-numeric:tabular-nums}
+.dp-table tbody tr.sub-row td.neg{color:var(--ax-negative)}
+.dp-table tbody tr.sub-row .tot-l{margin-right:.35rem}
+.dp-table tbody td.grp-rep{color:transparent}
+.dp-table tbody tr:hover td.grp-rep{color:var(--ax-muted)}
 .tot-legend{font-size:.72rem;color:var(--ax-muted);padding:0 .1rem;margin-top:-.2rem}
 .dp-table caption.tbl-cap{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 /* the total's aggregation: small caps, quiet until hovered; opens .tot-menu */

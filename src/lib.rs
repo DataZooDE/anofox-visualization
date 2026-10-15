@@ -176,6 +176,8 @@ pub enum TableOpt {
     Flag,
     /// `::HIGHLIGHT`: emphasise the top / bottom n of a column (`'Revenue: top 3'`).
     Highlight,
+    /// `::SUBTOTAL`: a subtotal row after each group of a column (`'region'`).
+    Subtotal,
 }
 
 /// The role a result column plays in the visualization.
