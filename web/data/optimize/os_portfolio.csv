@@ -1,0 +1,51 @@
+max_holdings,cap,algorithm,return_pct,volatility_pct,sharpe
+1,1.00,best of,4.5,13.0,0.346
+1,1.00,top return (naive),6.5,23.0,0.283
+2,1.00,best of,4.16,10.03,0.415
+2,1.00,top return (naive),6.25,19.65,0.318
+3,0.40,best of,4.09,8.61,0.475
+3,0.40,top return (naive),6.0,17.64,0.34
+3,1.00,best of,4.09,8.61,0.475
+3,1.00,top return (naive),6.0,17.64,0.34
+4,0.25,best of,3.3,6.68,0.494
+4,0.25,top return (naive),5.62,14.88,0.378
+4,0.40,best of,2.68,5.36,0.5
+4,0.40,top return (naive),5.62,14.88,0.378
+4,1.00,best of,2.68,5.36,0.5
+4,1.00,top return (naive),5.62,14.88,0.378
+5,0.25,best of,2.63,5.05,0.521
+5,0.25,top return (naive),5.3,13.76,0.385
+5,0.40,best of,2.54,4.86,0.523
+5,0.40,top return (naive),5.3,13.76,0.385
+5,1.00,best of,2.54,4.86,0.523
+5,1.00,top return (naive),5.3,13.76,0.385
+6,0.25,best of,2.69,5.07,0.53
+6,0.25,top return (naive),5.05,12.71,0.397
+6,0.40,best of,2.62,4.93,0.531
+6,0.40,top return (naive),5.05,12.71,0.397
+6,1.00,best of,2.62,4.93,0.531
+6,1.00,top return (naive),5.05,12.71,0.397
+7,0.25,best of,2.7,5.05,0.534
+7,0.25,top return (naive),4.83,12.11,0.399
+7,0.40,best of,2.65,4.96,0.534
+7,0.40,top return (naive),4.83,12.11,0.399
+7,1.00,best of,2.65,4.96,0.534
+7,1.00,top return (naive),4.83,12.11,0.399
+8,0.25,best of,2.75,5.14,0.535
+8,0.25,top return (naive),4.5,11.15,0.404
+8,0.40,best of,2.7,5.05,0.535
+8,0.40,top return (naive),4.5,11.15,0.404
+8,1.00,best of,2.7,5.05,0.535
+8,1.00,top return (naive),4.5,11.15,0.404
+9,0.25,best of,2.75,5.14,0.535
+9,0.25,top return (naive),4.22,9.58,0.441
+9,0.40,best of,2.7,5.06,0.535
+9,0.40,top return (naive),4.22,9.58,0.441
+9,1.00,best of,2.7,5.06,0.535
+9,1.00,top return (naive),4.22,9.58,0.441
+10,0.25,best of,2.75,5.14,0.535
+10,0.25,top return (naive),3.92,8.77,0.447
+10,0.40,best of,2.71,5.06,0.535
+10,0.40,top return (naive),3.92,8.77,0.447
+10,1.00,best of,2.71,5.06,0.535
+10,1.00,top return (naive),3.92,8.77,0.447

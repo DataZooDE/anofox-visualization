@@ -1,0 +1,5 @@
+algorithm,ord,changeover_min,sequence
+2-opt,3,63.0,white → ivory → sand → yellow → grey → green → red → brown → navy → black
+best of,4,63.0,white → ivory → sand → yellow → grey → green → red → brown → navy → black
+nearest neighbour,2,63.0,white → ivory → sand → yellow → grey → green → red → brown → navy → black
+order book (today),1,303.0,white → navy → ivory → red → sand → black → yellow → green → grey → brown

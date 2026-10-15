@@ -1,0 +1,8 @@
+algorithm,ord,bins_used,lower_bound,avg_fill_pct
+best fit decreasing,3,39,39,97.5
+best of,7,39,39,97.5
+bin completion,5,39,39,97.5
+first fit decreasing,2,39,39,97.5
+local search,6,39,39,97.5
+next fit (today),1,46,39,82.7
+worst fit decreasing,4,39,39,97.5

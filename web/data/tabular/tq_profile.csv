@@ -1,0 +1,9 @@
+column_name,column_type,row_count,null_count,null_rate,distinct_count,distinct_rate,is_unique,pattern_summary,min_val,max_val
+country,VARCHAR,600,0,0.0,4,0.0067,false,mixed,DE,NL
+customer_id,BIGINT,600,0,0.0,600,1.0,true,,1,600
+email,VARCHAR,600,0,0.0,600,1.0,true,email,customer 121@example.com,customer9@example.com
+name,VARCHAR,600,0,0.0,36,0.06,false,mixed,Anna Becker,Marco Martin
+phone,VARCHAR,600,21,0.035,560,0.9333,false,phone,+31 12345,+49 30 89795908
+segment,VARCHAR,600,0,0.0,2,0.0033,false,mixed,business,consumer
+signup_date,DATE,600,0,0.0,523,0.8717,false,,2019-01-05,2024-06-20
+vat_id,VARCHAR,600,424,0.7067,176,0.2933,true,mixed,DE000382208,NL098452174B04

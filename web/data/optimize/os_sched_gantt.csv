@@ -1,0 +1,25 @@
+algorithm,pos,job_name,family,weight,due_min,start_min,end_min,late_min
+earliest due date (today),1,J01,D,3.0,109.0,5.0,51.0,0.0
+earliest due date (today),2,J05,D,3.0,148.0,53.0,73.0,0.0
+earliest due date (today),3,J12,A,3.0,155.0,88.0,149.0,0.0
+earliest due date (today),4,J08,A,1.0,159.0,151.0,195.0,36.0
+earliest due date (today),5,J11,B,1.0,239.0,210.0,246.0,7.0
+earliest due date (today),6,J07,B,1.0,249.0,248.0,313.0,64.0
+earliest due date (today),7,J09,D,1.0,261.0,328.0,393.0,132.0
+earliest due date (today),8,J04,A,1.0,363.0,408.0,466.0,103.0
+earliest due date (today),9,J03,B,1.0,379.0,481.0,502.0,123.0
+earliest due date (today),10,J06,C,1.0,431.0,517.0,562.0,131.0
+earliest due date (today),11,J02,C,1.0,434.0,564.0,610.0,176.0
+earliest due date (today),12,J10,C,1.0,436.0,612.0,662.0,226.0
+exact (proven optimum),1,J05,D,3.0,148.0,5.0,25.0,0.0
+exact (proven optimum),2,J01,D,3.0,109.0,27.0,73.0,0.0
+exact (proven optimum),3,J12,A,3.0,155.0,88.0,149.0,0.0
+exact (proven optimum),4,J08,A,1.0,159.0,151.0,195.0,36.0
+exact (proven optimum),5,J11,B,1.0,239.0,210.0,246.0,7.0
+exact (proven optimum),6,J07,B,1.0,249.0,248.0,313.0,64.0
+exact (proven optimum),7,J03,B,1.0,379.0,315.0,336.0,0.0
+exact (proven optimum),8,J06,C,1.0,431.0,351.0,396.0,0.0
+exact (proven optimum),9,J02,C,1.0,434.0,398.0,444.0,10.0
+exact (proven optimum),10,J10,C,1.0,436.0,446.0,496.0,60.0
+exact (proven optimum),11,J04,A,1.0,363.0,511.0,569.0,206.0
+exact (proven optimum),12,J09,D,1.0,261.0,584.0,649.0,388.0

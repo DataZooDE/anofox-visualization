@@ -1,0 +1,2 @@
+row_count,column_count,numeric_columns,string_columns,temporal_columns,boolean_columns,complex_columns,total_nulls,total_null_rate,duplicate_row_count,estimated_memory_bytes
+4509,7,4,2,1,0,0,0,0.0,0,252504

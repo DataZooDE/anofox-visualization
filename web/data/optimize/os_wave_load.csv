@@ -1,0 +1,46 @@
+algorithm,wave,class,lines
+arrival order (today),1,express,89
+arrival order (today),1,priority,12
+arrival order (today),1,standard,16
+arrival order (today),2,priority,10
+arrival order (today),2,standard,109
+arrival order (today),3,priority,29
+arrival order (today),3,standard,91
+arrival order (today),4,priority,43
+arrival order (today),4,standard,72
+arrival order (today),5,express,32
+arrival order (today),5,priority,36
+arrival order (today),5,standard,50
+arrival order (today),6,express,29
+arrival order (today),6,standard,89
+arrival order (today),7,priority,38
+arrival order (today),7,standard,71
+arrival order (today),8,express,31
+arrival order (today),8,priority,17
+arrival order (today),8,standard,65
+arrival order (today),9,express,45
+arrival order (today),9,standard,69
+arrival order (today),10,standard,114
+arrival order (today),11,priority,67
+arrival order (today),11,standard,43
+arrival order (today),12,express,34
+arrival order (today),12,priority,44
+best of,1,express,51
+best of,1,priority,55
+best of,1,standard,10
+best of,2,express,92
+best of,2,priority,21
+best of,3,express,117
+best of,4,priority,93
+best of,4,standard,23
+best of,5,priority,81
+best of,5,standard,25
+best of,6,priority,46
+best of,6,standard,74
+best of,7,standard,118
+best of,8,standard,119
+best of,9,standard,111
+best of,10,standard,83
+best of,11,standard,87
+best of,12,standard,91
+best of,13,standard,48

@@ -1,0 +1,93 @@
+ticket_id,lang,text,refund,team,frustration,p_refund,team_pred,p_team,frustration_score
+1,en,Do you offer training sessions for new Ledgerly users?,false,other,0,0.0016831927336207332,billing,0.762116049208881,0.6023721553286572
+2,de,Haben Sie ein Büro in München? Wir würden Ledgerly gern vor Ort besprechen.,false,other,0,0.04751518496253194,billing,0.9934007113164759,0.8933376936133618
+3,en,How do I change the credit card used for Ledgerly?,false,billing,0,0.13400315305722899,billing,0.5820911994110568,0.8196893075979559
+4,en,I have asked about Ledgerly pricing for teams twice and nobody answers. Is anyone reading this?,false,other,1,0.04296249362296408,billing,0.9646891226734811,1.0803426281167174
+5,en,I was charged twice for my Ledgerly subscription this month. Please refund the duplicate payment.,true,billing,1,0.9359304788539864,billing,0.994403186147574,1.1382470078090867
+6,de,"Ich habe Ledgerly vor Wochen gekündigt und zahle immer noch! Ich will mein Geld zurück, sofort.",true,billing,2,0.9981751556303298,billing,0.7950415686255798,1.0179606105558026
+7,de,"In Ledgerly wird der Bericht seit gestern nicht mehr exportiert, Fehler 500.",false,defect,1,0.06664195538420709,defect,0.9927138941894403,1.0657264749319144
+8,fr,"Je veux être remboursé : Ledgerly ne fonctionne pas comme annoncé, c'est inadmissible !",true,billing,2,0.9997699316468528,defect,0.9996399008962908,1.0242500207433254
+9,fr,Le bouton d'export de Ledgerly ne réagit plus depuis la mise à jour.,false,defect,1,0.04285229374612573,defect,0.971570150199771,0.983178717202179
+10,fr,"Merci pour la démonstration de Ledgerly, très claire !",false,other,0,0.05763445954964643,billing,0.7540984642242472,0.5841828147034336
+11,en,Our invoice for Ledgerly shows the wrong VAT number. Could you issue a corrected invoice?,false,billing,0,0.05033605727629307,billing,0.8541861030963668,1.1714950023021067
+12,en,Please cancel my Ledgerly plan and reimburse the unused months.,true,billing,0,0.9688112258635675,billing,0.752012266569641,1.0566482939839439
+13,fr,Pouvez-vous m'envoyer la facture de Ledgerly pour le mois dernier ?,false,billing,0,0.015529108889715957,billing,0.9982901669616535,0.8033584188314006
+14,de,Sie haben mir Ledgerly doppelt abgebucht. Bitte erstatten Sie den zweiten Betrag.,true,billing,1,0.9426737794251958,billing,0.9464897198604078,1.1748770930321928
+15,en,Small thing: the date picker in Ledgerly starts weeks on Sunday even with a German locale.,false,defect,0,0.0005844929679018336,billing,0.521932306213226,1.019379239497131
+16,en,"Thanks for the quick help with Ledgerly yesterday, everything works now!",false,other,0,0.002580030948437472,other,0.8829955556181396,0.4290416130598017
+17,en,This is the third time Ledgerly has billed me after I cancelled. I want ALL my money back now.,true,billing,2,0.9853610550973865,billing,0.9997445585140787,1.4164451210413889
+18,en,Ledgerly crashes every time I open the export dialog. This is blocking our month-end close!,false,defect,2,0.0018258767342481436,defect,0.971282455010564,1.1611154339257843
+19,en,Ledgerly does not do what your website promised. I would like a refund.,true,billing,1,0.9759318909462233,defect,0.8170977243227184,1.019198948602791
+20,de,Ledgerly funktioniert seit einer Woche nicht. Ich verlange eine Gutschrift für diesen Monat.,true,defect,2,0.8091000201897854,defect,0.5507461612279317,0.8598461136318046
+21,en,"Ledgerly has been down for three days. Refund this month, it is unacceptable.",true,defect,2,0.9320044901344473,defect,0.8635980816209688,1.1111888218355022
+22,de,"Ledgerly stürzt beim Speichern ab, wir verlieren ständig Daten. Das ist eine Katastrophe!",false,defect,2,0.18189900224306907,defect,0.8338306448369194,0.9467111554408874
+23,de,Bitte schicken Sie die Rechnung für Shiftboard an unsere Buchhaltung statt an mich.,false,billing,0,0.1763763988092889,billing,0.9978565116469423,0.9348036777013147
+24,en,Do you offer training sessions for new Shiftboard users?,false,other,0,0.00143299709159193,other,0.9033932290749136,0.6981575019092415
+25,de,Haben Sie ein Büro in München? Wir würden Shiftboard gern vor Ort besprechen.,false,other,0,0.011074356549300448,other,0.4854239812443424,0.9396044846657349
+26,en,How do I change the credit card used for Shiftboard?,false,billing,0,0.05701284543913689,other,0.4331899633996472,0.7812479962337437
+27,en,I was charged twice for my Shiftboard subscription this month. Please refund the duplicate payment.,true,billing,1,0.8802022804825426,billing,0.9815556335715095,1.2044558038480235
+28,de,"Ich habe Shiftboard vor Wochen gekündigt und zahle immer noch! Ich will mein Geld zurück, sofort.",true,billing,2,0.995196342755324,billing,0.5341733923235984,1.0678545865276396
+29,de,"In Shiftboard wird der Bericht seit gestern nicht mehr exportiert, Fehler 500.",false,defect,1,0.0010069442280270962,defect,0.9980995781826003,1.1143423900088025
+30,fr,J'ai été débité deux fois pour Shiftboard. Merci de me rembourser le second paiement.,true,billing,1,0.9786919298410585,billing,0.9783416463214766,1.0631435594351168
+31,fr,"Je veux être remboursé : Shiftboard ne fonctionne pas comme annoncé, c'est inadmissible !",true,billing,2,0.9615927390486416,defect,0.9965670719070124,1.0426659863379866
+32,fr,"Merci pour la démonstration de Shiftboard, très claire !",false,other,0,0.00037108189468926093,other,0.8823771365954178,0.5736584080881398
+33,en,Our invoice for Shiftboard shows the wrong VAT number. Could you issue a corrected invoice?,false,billing,0,0.006520587036539723,billing,0.7827558168289535,1.0011474710380173
+34,en,Please cancel my Shiftboard plan and reimburse the unused months.,true,billing,0,0.9384480749993698,defect,0.8089500048950128,1.0242273063407652
+35,fr,Pouvez-vous m'envoyer la facture de Shiftboard pour le mois dernier ?,false,billing,0,0.01199223084171695,billing,0.9992723614707434,0.8851743387088822
+36,de,Sie haben mir Shiftboard doppelt abgebucht. Bitte erstatten Sie den zweiten Betrag.,true,billing,1,0.9762244623432041,billing,0.9622226387247248,1.1771278869172397
+37,en,Since the last update Shiftboard shows a blank screen on login. Please fix this.,false,defect,1,0.028659065054911028,defect,0.9990175027889825,1.0279081198059865
+38,en,Small thing: the date picker in Shiftboard starts weeks on Sunday even with a German locale.,false,defect,0,9.334950115770116e-06,defect,0.6377647401829871,0.9393566095652619
+39,en,"Thanks for the quick help with Shiftboard yesterday, everything works now!",false,other,0,0.0013111586847477663,other,0.9510688349923132,0.589076561807038
+40,en,This is the third time Shiftboard has billed me after I cancelled. I want ALL my money back now.,true,billing,2,0.9806464147540231,billing,0.9955365782267002,1.4529439919387457
+41,en,Shiftboard crashes every time I open the export dialog. This is blocking our month-end close!,false,defect,2,3.6924097903630446e-07,defect,0.9011009042990954,1.121293615899385
+42,en,Shiftboard does not do what your website promised. I would like a refund.,true,billing,1,0.9114728031718191,defect,0.935497877653321,1.0007908452903895
+43,en,"Shiftboard has been down for three days. Refund this month, it is unacceptable.",true,defect,2,0.6005691410781409,defect,0.8888521371680637,1.192750760718488
+44,fr,Shiftboard plante à chaque ouverture du tableau de bord. Nous ne pouvons plus travailler !,false,defect,2,0.387951912629124,defect,0.9347746044216666,1.0496398268585174
+45,de,Bitte schicken Sie die Rechnung für PayRoll Pro an unsere Buchhaltung statt an mich.,false,billing,0,0.6120745528480486,billing,0.9998296208050513,0.9979297232486003
+46,en,Do you offer training sessions for new PayRoll Pro users?,false,other,0,0.005966674263430927,billing,0.9887681967722358,0.6705218337202716
+47,de,Haben Sie ein Büro in München? Wir würden PayRoll Pro gern vor Ort besprechen.,false,other,0,0.3425537873567123,billing,0.9990549664967531,0.8199674125161284
+48,en,How do I change the credit card used for PayRoll Pro?,false,billing,0,0.13707028064586782,billing,0.6507964206186041,0.8763994634508222
+49,en,I have asked about PayRoll Pro pricing for teams twice and nobody answers. Is anyone reading this?,false,other,1,0.0655441262282501,billing,0.9956511022123181,1.0537288445748816
+50,en,I was charged twice for my PayRoll Pro subscription this month. Please refund the duplicate payment.,true,billing,1,0.8566368596647225,billing,0.9955257981288343,1.163736664866934
+51,de,"Ich habe PayRoll Pro vor Wochen gekündigt und zahle immer noch! Ich will mein Geld zurück, sofort.",true,billing,2,0.9965146941203513,billing,0.9744943359232844,1.0701340829911181
+52,de,"In PayRoll Pro wird der Bericht seit gestern nicht mehr exportiert, Fehler 500.",false,defect,1,0.09501083282570812,defect,0.9303089970744101,1.0808272458177188
+53,fr,J'ai été débité deux fois pour PayRoll Pro. Merci de me rembourser le second paiement.,true,billing,1,0.9748112139196211,billing,0.9961269083741369,0.8399753436061494
+54,fr,"Je veux être remboursé : PayRoll Pro ne fonctionne pas comme annoncé, c'est inadmissible !",true,billing,2,0.9762377535697739,billing,0.9586564070100396,1.0823736254678948
+55,fr,Le bouton d'export de PayRoll Pro ne réagit plus depuis la mise à jour.,false,defect,1,0.19615912594311005,billing,0.9998782015316287,1.0002529551171646
+56,fr,"Merci pour la démonstration de PayRoll Pro, très claire !",false,other,0,0.0966318002639367,billing,0.9475924604575436,0.6178618508536398
+57,en,Our invoice for PayRoll Pro shows the wrong VAT number. Could you issue a corrected invoice?,false,billing,0,0.004849407741966553,billing,0.9823102373411688,1.044866865105432
+58,en,Please cancel my PayRoll Pro plan and reimburse the unused months.,true,billing,0,0.9242115799434802,billing,0.8559338996083296,0.9848701462167544
+59,fr,Pouvez-vous m'envoyer la facture de PayRoll Pro pour le mois dernier ?,false,billing,0,0.18232695638321855,billing,0.9999988415704416,0.953679821800566
+60,de,Sie haben mir PayRoll Pro doppelt abgebucht. Bitte erstatten Sie den zweiten Betrag.,true,billing,1,0.977088718990742,billing,0.9842442241609899,1.1733383999230915
+61,en,Since the last update PayRoll Pro shows a blank screen on login. Please fix this.,false,defect,1,0.46044881478904043,billing,0.5404131058165478,0.9622619699269179
+62,en,"Thanks for the quick help with PayRoll Pro yesterday, everything works now!",false,other,0,0.050355566762467684,billing,0.9939489453691821,0.5759803886735269
+63,en,This is the third time PayRoll Pro has billed me after I cancelled. I want ALL my money back now.,true,billing,2,0.9873375252726169,billing,0.9973348573286945,1.4863383899036242
+64,en,PayRoll Pro crashes every time I open the export dialog. This is blocking our month-end close!,false,defect,2,0.021576172710858425,defect,0.9505590901998705,1.1733425082672269
+65,en,PayRoll Pro does not do what your website promised. I would like a refund.,true,billing,1,0.9343407362567476,defect,0.7450957607310277,1.0460169940397286
+66,de,PayRoll Pro funktioniert seit einer Woche nicht. Ich verlange eine Gutschrift für diesen Monat.,true,defect,2,0.47740421525916715,defect,0.852491250118382,1.1767819989064146
+67,en,"PayRoll Pro has been down for three days. Refund this month, it is unacceptable.",true,defect,2,0.4934009569318077,defect,0.5586052361185521,1.2364721150502334
+68,fr,PayRoll Pro plante à chaque ouverture du tableau de bord. Nous ne pouvons plus travailler !,false,defect,2,0.8936728274743947,defect,0.8297260530750815,1.035245201200425
+69,de,"PayRoll Pro stürzt beim Speichern ab, wir verlieren ständig Daten. Das ist eine Katastrophe!",false,defect,2,0.09847735381974808,defect,0.5787314579950281,1.0761763686276125
+70,de,Bitte schicken Sie die Rechnung für DocuVault an unsere Buchhaltung statt an mich.,false,billing,0,0.3650890042731333,billing,0.9976767024478153,0.9587365282120761
+71,en,Do you offer training sessions for new DocuVault users?,false,other,0,0.0009317426625460711,other,0.819021906684631,0.699999692164234
+72,de,Haben Sie ein Büro in München? Wir würden DocuVault gern vor Ort besprechen.,false,other,0,0.034847056387218155,billing,0.4812574943664664,0.8783060348910545
+73,en,How do I change the credit card used for DocuVault?,false,billing,0,0.024409870283087463,defect,0.8333701629623098,0.8418566605130642
+74,en,I have asked about DocuVault pricing for teams twice and nobody answers. Is anyone reading this?,false,other,1,0.014161486046284864,billing,0.959985766814519,1.0856184223213865
+75,en,I was charged twice for my DocuVault subscription this month. Please refund the duplicate payment.,true,billing,1,0.8963835718157352,billing,0.9495915190098989,1.1622666583751655
+76,de,"Ich habe DocuVault vor Wochen gekündigt und zahle immer noch! Ich will mein Geld zurück, sofort.",true,billing,2,0.9949513773016567,billing,0.8234963021270699,0.9684083549480328
+77,de,"In DocuVault wird der Bericht seit gestern nicht mehr exportiert, Fehler 500.",false,defect,1,0.011432868065207932,defect,0.996615838803784,1.0544643354111507
+78,fr,J'ai été débité deux fois pour DocuVault. Merci de me rembourser le second paiement.,true,billing,1,0.9631715544087717,billing,0.9941100922826639,0.980121241450496
+79,fr,"Je veux être remboursé : DocuVault ne fonctionne pas comme annoncé, c'est inadmissible !",true,billing,2,0.8971805947073102,defect,0.9660865334982568,1.0942962136188732
+80,fr,"Merci pour la démonstration de DocuVault, très claire !",false,other,0,0.012804007113309215,other,0.6236956503551968,0.5787576191416854
+81,en,Our invoice for DocuVault shows the wrong VAT number. Could you issue a corrected invoice?,false,billing,0,0.023650014747996488,billing,0.9291123357566109,1.02530636001946
+82,en,Please cancel my DocuVault plan and reimburse the unused months.,true,billing,0,0.9087690671483987,defect,0.592441500182766,0.9231244436232829
+83,fr,Pouvez-vous m'envoyer la facture de DocuVault pour le mois dernier ?,false,billing,0,0.059551476634652975,billing,0.9997716870388045,0.9544344359744208
+84,de,Sie haben mir DocuVault doppelt abgebucht. Bitte erstatten Sie den zweiten Betrag.,true,billing,1,0.9494288606924202,billing,0.7110245268539561,1.21374055023304
+85,en,Since the last update DocuVault shows a blank screen on login. Please fix this.,false,defect,1,0.06279336866577921,defect,0.9982630832549735,0.936081494433177
+86,en,"Thanks for the quick help with DocuVault yesterday, everything works now!",false,other,0,0.01001829461903563,other,0.6953480979488988,0.46004918065777795
+87,en,This is the third time DocuVault has billed me after I cancelled. I want ALL my money back now.,true,billing,2,0.9906032483943038,billing,0.7742288098175593,1.3068751446123361
+88,en,DocuVault does not do what your website promised. I would like a refund.,true,billing,1,0.8731280923008263,defect,0.8945565075519737,1.0186409654512076
+89,de,DocuVault funktioniert seit einer Woche nicht. Ich verlange eine Gutschrift für diesen Monat.,true,defect,2,0.44815173244688566,defect,0.5734090039229693,1.0365107820523407
+90,en,"DocuVault has been down for three days. Refund this month, it is unacceptable.",true,defect,2,0.32608920824300663,defect,0.9009294197910637,1.147171249772697
+91,fr,DocuVault plante à chaque ouverture du tableau de bord. Nous ne pouvons plus travailler !,false,defect,2,0.30575867638277066,defect,0.9669399245036259,1.02673637132097
+92,de,"DocuVault stürzt beim Speichern ab, wir verlieren ständig Daten. Das ist eine Katastrophe!",false,defect,2,0.012503182070662082,defect,0.9257061552382482,1.1174823002197645
