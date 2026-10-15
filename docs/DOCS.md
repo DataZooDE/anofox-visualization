@@ -128,6 +128,13 @@ terminal.
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
 | `::HEADER_IMAGE` | `::HEADERIMAGE` | chrome | banner image URL |
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
+| `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
+| `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
+| `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
+| `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
+| `::FAVICON` |  | chrome | browser-tab icon URL |
 <!-- roles-table:end -->
 
 **Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
