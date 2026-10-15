@@ -9,6 +9,7 @@ charting library, no bespoke config — the SQL *is* the dashboard.
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.5.x-brightgreen.svg)](https://duckdb.org)
 [![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f.svg)](https://datazoode.github.io/anofox-visualization/)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-plugin-8A2BE2)](#claude-code-plugin)
 
 > [!IMPORTANT]
 > This extension is in early development, so bugs and breaking changes are expected.
@@ -187,7 +188,7 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 - **[Dashboard design principles](docs/dashboard-design.md)** — what makes a dashboard good (enforced by `dashboard --check`).
 - **[Visual review rubric](docs/dashboard-visual-review.md)** — the appearance gate.
 - **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving.
-- **[`build-dashboard` skill](.claude/skills/build-dashboard/SKILL.md)** — an agent that authors dashboards from a prompt.
+- **[Claude Code plugin](#claude-code-plugin)** — four skills that document the SQL API for Claude Code, including the dashboard-authoring workflow (also available in this checkout as the project skill [`build-dashboard`](.claude/skills/build-dashboard/SKILL.md)).
 
 ### Conformance with anofox-statistics
 
@@ -207,6 +208,26 @@ python3 scripts/statistics_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_
 
 CI runs it on every push (`.github/workflows/ci.yml`, job *anofox-statistics
 conformance*).
+
+## Claude Code plugin
+
+The repository ships a [Claude Code](https://claude.com/claude-code) plugin with four skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
+
+Install it in a Claude Code session:
+
+```
+/plugin marketplace add DataZooDE/anofox-visualization
+/plugin install anofox-visualization@anofox-visualization
+```
+
+| Skill | Covers |
+|-------|--------|
+| `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs from-source build |
+| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs and tables, inputs and `getvariable()`, cross-filter, contract plots as panels, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
+| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial` and `anofox_plot` with all options, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11 and anofox-forecast, use in dashboards and the browser builder |
+| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: the trust model, options and limits, header comments, which mode to use |
+
+The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualization/). To use a local checkout instead of the marketplace, start Claude Code with `claude --plugin-dir ./plugins/anofox-visualization`. Every `sql` block in the skills is executed in CI against the built extension (`scripts/validate_skills_sql.py`; dashboard scripts are linted with `dashboard --check --strict`).
 
 ## Dependencies
 

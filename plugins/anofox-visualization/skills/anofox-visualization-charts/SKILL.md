@@ -1,0 +1,143 @@
+---
+name: anofox-visualization-charts
+description: >
+  SQL to SVG with the anofox_visualization DuckDB extension: the
+  anofox_render(spec) scalar (rows + ::ROLE annotations as JSON, width /
+  height, brand colour, category cap, line downsampling), the column macros
+  anofox_bar, anofox_line, anofox_scatter, anofox_area, anofox_xy(x, y,
+  kind :=) and anofox_xyc(x, y, series, kind :=), which chart kinds `kind :=`
+  accepts (bar, stacked / percent bars, line, area, step, scatter, bubble,
+  jitter, histogram, density, boxplot, violin, QQ, pie, donut, radar,
+  sparkline, heatmap, calendar), one SVG per GROUP BY group, saving the SVG
+  to a file, the error messages, and the community (render-only) build versus
+  the from-source C-API build (render + serving). Use when the user wants "a
+  chart from this query", "render an SVG in DuckDB", "plot these columns",
+  "a bar / line / scatter chart in SQL", asks what anofox_render expects,
+  how to install or load anofox_visualization, or why a chart call fails.
+  For model output tables (coefficients, residuals, ROC, forecasts) see the
+  statistics-plots skill; for ::ROLE dashboards the dashboards skill.
+version: 2026.9.26
+user-invocable: false
+---
+
+# Anofox Visualization — Charts in SQL Cheat Sheet
+
+**Extension:** `anofox_visualization` (CalVer 2026.9.26) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
+
+## Install and builds
+
+| | Community build | From-source C-API build |
+|---|---|---|
+| Get it | `INSTALL anofox_visualization FROM community; LOAD anofox_visualization;` (once it is accepted; until then `make` gives the same binary) | `duckext/scripts/build-native.sh --release` → `/tmp/anofox_visualization.duckdb_extension` (`OUT=…` to change) |
+| Rendering: `anofox_render`, column macros, `anofox_plot_*`, `anofox_contract_version` | yes | yes |
+| Serving: `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` | **no** | yes (embeds the web builder) |
+| Macro descriptions / `tags` in `duckdb_functions()` | yes | no (the C API cannot attach them) |
+| DuckDB | exactly the pinned version | any DuckDB with C-API v1.2.0+ |
+
+Both local builds are unsigned: start `duckdb -unsigned` and `LOAD '/path/anofox_visualization.duckdb_extension';`.
+
+## Functions
+
+| Function | Signature | Returns |
+|---|---|---|
+| `anofox_render` | `anofox_render(spec VARCHAR)` | SVG `VARCHAR`; `NULL` spec → `NULL`; a bad spec raises `Invalid Input Error: anofox_render: …` |
+| `anofox_xy` | `anofox_xy(x, y, kind := 'BARCHART', width := 640, height := 400)` | aggregate macro: one SVG over the rows (per group) |
+| `anofox_xyc` | `anofox_xyc(x, y, series, kind := 'BARCHART_STACKED', width := 640, height := 400)` | as above, `series` = colour (`::CATEGORY`) |
+| `anofox_bar` / `anofox_line` / `anofox_scatter` / `anofox_area` | `(x, y)` — **no named options** | shorthand for `anofox_xy(x, y, kind := 'BARCHART' / 'LINECHART' / 'SCATTER' / 'AREACHART')` |
+| `anofox_contract_version` | `()` | `'1'` (see the statistics-plots skill) |
+
+The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deterministic, so `GROUP BY` gives one SVG per group.
+
+### `kind :=` values
+
+`kind` is a chart role token (`dashboard --roles` lists all of them, with aliases such as `'BAR'`, `'LINE'`):
+
+| Works with `anofox_xy` | `BARCHART`, `BARCHART_PERCENT`, `LINECHART`, `LINECHART_PERCENT`, `AREACHART`, `STEP`, `SCATTER`, `BUBBLE`, `JITTER`, `SMOOTH` (needs a numeric x), `HISTOGRAM`, `DENSITY`, `BOXPLOT`, `VIOLIN`, `QQ`, `SPARKLINE`, `RADAR`, `GAUGE`, `CALENDAR` (date x) |
+| Also with `anofox_xyc` (needs the series) | `BARCHART_STACKED`, `BARCHART_STACKED_PERCENT`, `AREACHART_STACKED`, `PIE`, `DONUTCHART` (slices = `series`) |
+| Needs `anofox_render` | `HEATMAP` (`::YAXIS`), `CANDLESTICK` (`::OPEN/HIGH/LOW`), `MAP` (WKT), combo charts (several measures), intervals (`::YMIN/YMAX`), facets, scales, reference lines |
+
+## `anofox_render` spec
+
+```json
+{"rows":  [{"c0": "W1", "c1": 30, "c2": 4.5}, …],
+ "roles": [[0, "XAXIS"], [1, "BARCHART", "sessions"], [2, "LINECHART", "revenue"]],
+ "width": 640, "height": 400, "primary": "0b7285",
+ "max_categories": 30, "max_line_points": 5000}
+```
+
+| Key | Meaning |
+|---|---|
+| `rows` | array of objects; role `[i, …]` reads key `c{i}` |
+| `roles` | `[column_index, "ROLE"(, "legend name")]` — any `::ROLE` of the registry (case-insensitive, aliases allowed) |
+| `width`, `height` | integers in 16–8192 (default 640 × 400) |
+| `primary` | brand colour `rrggbb` for single-series marks |
+| `max_categories` | discrete axis / colour cap (default 30: the largest 29 + "Other"; `0` = off) |
+| `max_line_points` | LTTB downsampling threshold per line series (default 5,000) |
+| `plot` + `options` | a contract plot instead of `roles` (`terms`, `prediction`, `curve`, `summary`, `obs`, `diagnostics`, `tests`, `compare`, `partial`, `auto`) — what the `anofox_plot_*` macros send |
+
+Limits: 200,000 rows and 64 MiB per spec. Build the spec with `json_object` / `to_json(list({c0: …, c1: …}))` so values are quoted correctly.
+
+## Worked examples
+
+```sql
+CREATE TABLE sales AS SELECT * FROM (VALUES
+  ('2024-01', 'app', 30), ('2024-01', 'web', 22), ('2024-02', 'app', 41),
+  ('2024-02', 'web', 28), ('2024-03', 'app', 38), ('2024-03', 'web', 35)) t(month, channel, n);
+
+-- One chart over the table
+SELECT anofox_bar(channel, n) FROM sales;
+
+-- Size and kind via anofox_xy (anofox_bar/_line/... take no options)
+SELECT anofox_xy(month, n, kind := 'LINECHART', width := 480, height := 300) FROM sales;
+
+-- Coloured by a third column; one SVG per channel with GROUP BY
+SELECT anofox_xyc(month, n, channel, kind := 'BARCHART_STACKED') FROM sales;
+SELECT channel, anofox_line(month, n) AS svg FROM sales GROUP BY channel ORDER BY channel;
+
+-- Distribution kinds take raw rows
+SELECT anofox_xy(channel, n, kind := 'BOXPLOT') FROM sales;
+SELECT anofox_xyc(channel, n, channel, kind := 'DONUTCHART') FROM sales;
+```
+
+```sql
+-- anofox_render: a combo chart (bars + line) and a heatmap
+SELECT anofox_render(json_object(
+         'rows', to_json(list({c0: week, c1: sessions, c2: revenue} ORDER BY week)),
+         'roles', json('[[0,"XAXIS"],[1,"BARCHART","sessions"],[2,"LINECHART","revenue"]]'),
+         'width', 640, 'height', 360))
+FROM (VALUES ('W1', 30, 12.5), ('W2', 41, 18.0), ('W3', 35, 15.2)) t(week, sessions, revenue);
+
+SELECT anofox_render(json_object(
+         'rows', to_json(list({c0: d, c1: h, c2: n})),
+         'roles', json('[[0,"XAXIS"],[1,"YAXIS"],[2,"HEATMAP"]]')))
+FROM (SELECT d, h, (d * 7 + h * 3) % 11 AS n FROM range(7) a(d), range(24) b(h));
+```
+
+```sql
+-- Save an SVG to a file from SQL (no quoting, no header)
+COPY (SELECT anofox_bar(ch, n) FROM (VALUES ('app', 30), ('web', 22)) t(ch, n))
+TO 'chart.svg' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+```
+
+From the shell: `duckdb -unsigned -noheader -list -c "LOAD …; SELECT anofox_bar(ch, n) FROM t" > chart.svg`. Convert with `rsvg-convert -o chart.png chart.svg`.
+
+## Errors
+
+| Message (`Invalid Input Error: anofox_render: …`) | Cause / fix |
+|---|---|
+| `unknown role 'BARCHAT'` | typo in `kind :=` or a role name |
+| `pie needs a CATEGORY column` | `PIE` / `DONUTCHART` with `anofox_xy`: use `anofox_xyc(x, y, series, kind := 'PIE')` |
+| `heatmap needs a YAXIS column` | `HEATMAP` needs `anofox_render` with `[i, "YAXIS"]` |
+| `spec needs a 'roles' array, …` | spec without `roles` (and without `plot`) |
+| `'width' = 10 is outside [16, 8192]` | width / height out of range |
+| `N rows exceed the limit of 200000` | aggregate first (or sample) |
+| `ORDER BY non-integer literal has no effect` (Binder) | column macros over constants (`anofox_xy('a', 1)`): pass columns of a table or `VALUES` |
+
+## Gotchas
+
+1. **The column macros take columns, not constants.** They aggregate with `list(… ORDER BY x, y)`; call them over a `FROM`.
+2. **Measures are cast to DOUBLE**; `BIGINT`, `HUGEINT` and `DECIMAL` render numerically. `NaN` / `±Inf` are treated as missing and reported on the SVG root as `data-warnings="[…]"` (escaped JSON).
+3. **Empty input renders a "No data" SVG**, not an error; a `NULL` spec returns `NULL`.
+4. **More than 30 levels** on a discrete axis or colour fold into "Other"; set `max_categories` in an `anofox_render` spec to change that.
+5. **`SMOOTH` on a discrete x** draws the points but no trend (render warning): use a numeric x.
+6. **Charts are SVG strings.** In a ::ROLE dashboard you do not call these macros: tag the columns instead (dashboards skill).

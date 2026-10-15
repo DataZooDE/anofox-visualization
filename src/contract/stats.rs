@@ -1895,13 +1895,23 @@ pub(super) fn prediction(
         ylab = format!("difference vs {rf}");
     } else {
         ycol = yhat.iter().map(nan).collect();
+        // The fit line: rows without a yhat (the history unioned in before a
+        // forecast) are part of the schema, not lost data — leave them out of
+        // the line layer instead of letting it report them as non-finite.
+        let fitted: Vec<usize> = (0..n).filter(|&i| fin(&yhat[i]).is_some()).collect();
+        let fitted: Vec<usize> = if fitted.is_empty() {
+            (0..n).collect()
+        } else {
+            fitted
+        };
+        let pick = |v: &[Value]| fitted.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
         let mut data: Frame = vec![
-            ("x".into(), xs.clone()),
-            ("yhat".into(), ycol.clone()),
-            ("model".into(), models.clone()),
+            ("x".into(), pick(&xs)),
+            ("yhat".into(), pick(&ycol)),
+            ("model".into(), pick(&models)),
         ];
         if let Some(f) = &fac {
-            data.push(("facet".into(), f.clone()));
+            data.push(("facet".into(), pick(f)));
         }
         let mut aes = Aes::new().x("x").y("yhat");
         if several {
