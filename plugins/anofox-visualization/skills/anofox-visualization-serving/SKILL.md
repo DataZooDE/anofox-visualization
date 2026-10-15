@@ -73,6 +73,7 @@ SELECT anofox_serve_stop(8095);      -- stop + delete the snapshot; re-run to re
 | `threads` | 4 | worker pool |
 | `attach` | `true` | snapshot every attached DuckDB database; `false` = only the current one |
 | `load` | `[]` | extensions to load in the snapshot instance (`["spatial"]`) |
+| `theme` | — | default theme for dashboards without their own `::THEME`: a name (`"dark"`, `"acme+dark"`) or a theme JSON object; validated and frozen at start |
 
 Unknown keys are an error naming the valid ones.
 
@@ -99,11 +100,12 @@ Unknown keys are an error naming the valid ones.
 
 ```sh
 cargo build --release --features serve --bin serve      # needs web/pkg (wasm-pack) for the UI
-serve mydata.duckdb [--port 8080] [--no-open]           # authoring on a database file
+serve mydata.duckdb [--port 8080] [--no-open] [--theme dark]   # authoring on a database file
 serve --dashboards dash/ --init init.sql \
       [--db data.duckdb] [--bind 127.0.0.1] [--port 8080] \
-      [--max-rows 100000] [--timeout 30] [--threads 4] [--cache 60]   # static render (B)
-cargo run --bin dashboard -- file.sql [out.html]         # one static HTML file, no server
+      [--max-rows 100000] [--timeout 30] [--threads 4] [--cache 60] [--theme T]   # static render (B)
+cargo run --bin dashboard -- file.sql [out.html] [--theme T] [--dark]   # one static HTML file, no server
+cargo run --bin dashboard -- --svg file.sql [out.svg] [--theme T] [--dark]   # the whole dashboard as one SVG
 ```
 
 - `--init setup.sql` runs once, read-write, before serving (attach sources, create views).
@@ -129,4 +131,5 @@ FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY month;
 2. **The locked snapshot is taken at start.** Stop and start again to show new data; heavy setup belongs in tables before serving (setup statements re-run per request).
 3. **Attach DuckDB, not foreign catalogs**, for locked serving: copy Postgres / SQLite / MotherDuck data into local DuckDB tables first.
 4. **Inputs, tabs, cross-filter and downloads** need the browser UI (authoring or A); the static `dashboard` HTML and mode B render panels only.
-5. **Lint before serving**: `dashboard --check dir/file.sql` (dashboards skill) catches panels that would be blank or fail for every viewer.
+5. **Themes in served pages.** `--theme T` / `options.theme` is only a default — a dashboard's own `::THEME` wins. Viewers can switch light/dark (`?theme=dark`, the 🌙 toggle) only when the theme follows the viewer; a URL never injects a theme, and `?locale=` is ignored in served/locked mode. A `read_text` theme file must be readable when the locked snapshot is taken (or pass the JSON in `options.theme`). The DataZoo credit is shown on every page.
+6. **Lint before serving**: `dashboard --check dir/file.sql` (dashboards skill) catches panels that would be blank or fail for every viewer.

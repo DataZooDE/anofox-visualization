@@ -19,6 +19,6 @@ SELECT 1::ENDGROUP;
 SELECT 6::COL;
 SELECT monat::XAXIS, betrag::LINECHART, '€'::YFORMAT, 'Umsatz je Monat'::TITLE FROM umsatz ORDER BY monat;
 SELECT 6::COL;
-SELECT strftime(monat, '%m')::XAXIS, betrag / 1000::BARCHART, 'Umsatz (Tsd.)'::TITLE FROM umsatz ORDER BY monat;
+SELECT monat::XAXIS, betrag / 1000::AREACHART, 'Umsatz (Tsd.)'::TITLE FROM umsatz ORDER BY monat;
 
 SELECT 'Tabelle'::TITLE, monat::TABLE, betrag, betrag AS "in Euro" ::MONEY FROM umsatz ORDER BY monat LIMIT 6;

@@ -60,6 +60,8 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
 | `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id → tests. Only the common options |
 
+Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
+
 Errors are SQL errors naming the problem (missing column, unknown `kind`, mixed `curve_type`, the contract version); no rows give a "No data" SVG. Tests naming groups that are not in the rows of `anofox_plot_compare` are skipped and reported on the SVG root (`data-warnings`).
 
 ## Without anofox_statistics: contract-shaped tables

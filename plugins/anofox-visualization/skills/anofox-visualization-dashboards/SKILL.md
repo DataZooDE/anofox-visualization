@@ -65,7 +65,8 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
 | Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::HINT` |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name, for an input it is the variable name, in a table the header.
 
@@ -74,6 +75,34 @@ A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue
 - The **output column name of an input is a DuckDB variable**: `SELECT region AS region ::DROPDOWN FROM t GROUP BY 1 ORDER BY 1;` → `getvariable('region')`. A `::MULTISELECT` is a list: `list_contains(getvariable('channel'), channel)`; "nothing selected = all": `(len(getvariable('channel')) = 0 OR list_contains(getvariable('channel'), channel))`.
 - **Cross-filter**: a click on a mark or a table row sets `getvariable('selected')` (the clicked value) and `getvariable('<first column of the clicked table>')`. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
 - Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render skips them.
+
+## Themes, branding and locale
+
+One theme styles the whole dashboard — charts, cards, tabs, KPI tiles, tables, inputs, tooltips — in every output (browser, `serve`, locked pages, `dashboard` HTML / `--svg`, exports). Directives are dashboard-level: put them at the top; the last one of each kind wins.
+
+```sql dashboard
+SELECT 'Sales cockpit'::DASHBOARD_TITLE;
+SELECT 'ACME Analytics'::BRAND;
+SELECT 'colorblind+dark'::THEME;   -- Okabe-Ito palette; dark when the viewer prefers dark
+SELECT 'de-DE'::LOCALE;            -- 1.234,5 · 12.400 € · 12,5 % · Okt. 2026
+
+CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
+  ('North', 1200.5), ('South', 950.25), ('West', 610.0)) t(region, revenue);
+
+SELECT 'Revenue'::SECTION;
+SELECT 'Totals'::GROUP;
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL FROM sales;
+SELECT count(*)::METRIC, 'Regions'::LABEL FROM sales;
+SELECT 1::ENDGROUP;
+SELECT region::XAXIS, sum(revenue)::BARCHART, 'Revenue by region'::TITLE
+FROM sales GROUP BY ALL ORDER BY 2 DESC;
+```
+
+- **Variant.** No `::THEME`, or `'x+dark'`, follows the viewer (OS setting, the 🌙 toggle, `?theme=dark`); `'light'` / `'dark'` / `'print'` alone pin it. Charts are re-rendered dark, not just the cards.
+- **A corporate theme** is a JSON object (`{"extends":"light","palette":[…],"colors":{"accent":"#0b5fff",…},"brand":{…},"dark":{…}}`) — from a file (`SELECT content::THEME FROM read_text('acme.json')`), a table (`SELECT to_json(t)::THEME FROM themes t WHERE name = 'acme'`) or inline. Colours must be `#rrggbb`; unknown keys are an error. Full key list: `docs/DOCS.md` → *Themes*.
+- **The "Powered by DataZoo GmbH" credit is always shown** (every theme, every output); branding is added next to it, there is no way to hide it.
+- `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
+- `dashboard --themes` lists the built-ins; `dashboard file.sql --theme dark` / `serve … --theme T` set a default the script's `::THEME` overrides.
 
 ## Contract plots as panels
 

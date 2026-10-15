@@ -47,7 +47,7 @@ WHERE function_name LIKE 'anofox_plot%'
 query I
 SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_plot_prediction';
 ----
-[tbl, x, y, facet, band, kind, title, x_label, y_label, width, height]
+[tbl, x, y, facet, band, kind, title, x_label, y_label, theme, locale, width, height]
 
 # ============================================================================
 # The macros are documented, which is the part that needed the rewrite
@@ -94,7 +94,7 @@ SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_bar';
 query I
 SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_xy';
 ----
-[x, y, kind, width, height]
+[x, y, kind, theme, locale, width, height]
 
 query I
 SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_render';

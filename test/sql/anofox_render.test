@@ -73,3 +73,46 @@ statement error
 SELECT anofox_render('{"rows":"x","roles":[]}');
 ----
 'rows' must be a JSON array
+
+# ---- themes & locale (plan M1) ----
+
+# a built-in theme in the spec: dark charts have no black text
+query I
+SELECT anofox_render('{"rows":[{"c0":"a","c1":1}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"theme":"dark"}') NOT LIKE '%fill="#000000"%';
+----
+true
+
+# an unknown theme is a SQL error
+statement error
+SELECT anofox_render('{"rows":[{"c0":"a","c1":1}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"theme":"nope"}');
+----
+unknown theme
+
+# a JSON theme recolours the palette
+query I
+SELECT anofox_render('{"rows":[{"c0":"a","c1":1}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"theme":"{\"palette\":[\"#0b5fff\"]}"}') ILIKE '%#0b5fff%';
+----
+true
+
+# de-DE axis labels
+query I
+SELECT anofox_render('{"rows":[{"c0":"a","c1":2500},{"c0":"b","c1":1000}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"locale":"de-DE"}') LIKE '%>2.000<%';
+----
+true
+
+# SET VARIABLE anofox_theme reaches the macros
+statement ok
+SET VARIABLE anofox_theme = 'dark';
+
+query I
+SELECT anofox_xy(x, y) NOT LIKE '%fill="#000000"%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
+----
+true
+
+statement ok
+RESET VARIABLE anofox_theme;
+
+query I
+SELECT anofox_xy(x, y, theme := 'colorblind') ILIKE '%#0072b2%' FROM (VALUES ('a', 1), ('b', 2)) t(x, y);
+----
+true

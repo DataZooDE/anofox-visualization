@@ -37,7 +37,8 @@ pub struct Diagnostic {
     /// Stable machine code. Correctness: `sql-error` | `silent-setup` |
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
-    /// `unknown-cast`. Design advisories
+    /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
+    /// | `chrome/bad-url`. Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -81,7 +82,8 @@ where
 {
     let mut diags = Vec::new();
     let mut prelude = String::new();
-    // Cross-panel design counters (only used when opts.design).
+    let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
+                             // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
     let mut group_depth = 0i32;
@@ -184,6 +186,63 @@ where
                 continue;
             }
         };
+
+        // Chrome directives: a bad theme / locale / logo URL is reported here
+        // (the browser would fall back to the default look).
+        if let Some(r) = p
+            .roles
+            .iter()
+            .map(|(_, r)| *r)
+            .find(|r| roles::is_chrome_directive(*r))
+        {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().next())
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                })
+                .unwrap_or_default();
+            let mut bad = |code: &'static str, message: String, severity| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            match r {
+                Role::Theme => {
+                    themes += 1;
+                    if themes == 2 {
+                        bad(
+                            "theme/multiple",
+                            "more than one ::THEME — the last one wins".into(),
+                            Severity::Warning,
+                        );
+                    }
+                    if let Err(e) = crate::theme::resolve(&v) {
+                        bad("theme/unknown", e, Severity::Error);
+                    }
+                }
+                Role::Locale if crate::format::Locale::from_tag(&v).is_none() => bad(
+                    "locale/unknown",
+                    format!(
+                        "unknown locale `{v}` (known: {})",
+                        crate::format::Locale::TAGS.join(", ")
+                    ),
+                    Severity::Error,
+                ),
+                Role::Logo | Role::Favicon if !crate::theme::safe_url(&v) => bad(
+                    "chrome/bad-url",
+                    format!("`{v}` is not an allowed image URL (relative, https: or data:image/)"),
+                    Severity::Warning,
+                ),
+                _ => {}
+            }
+            continue;
+        }
 
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
