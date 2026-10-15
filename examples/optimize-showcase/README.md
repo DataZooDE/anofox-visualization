@@ -24,7 +24,7 @@ So the computation runs natively and the dashboard reads its results:
 
 | File | Role |
 |---|---|
-| `compute.sql` | Builds the synthetic inputs (hash-based noise, no files) and calls the solvers; one result table per panel (`os_*`). |
+| `compute.sql` | Builds the synthetic inputs (hash-based noise, no files) and calls the solvers over **parameter sweeps** — four container sizes, 20 carrier bookings (250–5,000 kg), four wave sizes, every schedule rule, every (holdings, cap) portfolio setting — so the dashboard's planning inputs have stored results to pick from. One result table per panel (`os_*`). |
 | `../../scripts/gen-showcase-data.sh optimize` | Runs `compute.sql` with a native DuckDB and writes the tables to `web/data/optimize/*.csv`, plus `provenance.csv` (extension and DuckDB version). |
 | `showcase.sql` | A link to `web/examples/optimize-showcase.sql`, the single source of the dashboard. It only reads the CSVs, and says on the page that the results are stored. |
 
@@ -41,17 +41,28 @@ Lint the dashboard natively (the CSV paths are relative to `web/`):
 cd web && ../target/release/dashboard --check ../examples/optimize-showcase/showcase.sql
 ```
 
+## Planning inputs
+
+The header holds six inputs: container size, carrier booking (snapped to the
+nearest stored 250 kg step), wave size, the packing-line rule to compare with
+today's, and the portfolio's holdings limit and cap per asset. They only
+select among the stored sweeps — nothing is re-solved in the browser. A KPI
+strip compares the optimiser with today's rule at the chosen inputs.
+
 ## Tabs
 
-1. **Overview** — today's rule vs the optimiser for every decision.
-2. **Containers** — 150 cartons: next fit needs 46 containers, every decreasing
-   packer 39 = the volume lower bound (provably optimal here).
-3. **Carrier** — saving vs booked capacity: the exact knapsack beats "biggest
-   savers first" by about a third at 2 t.
-4. **Pick waves** — priority-weighted mean wave 5.73 → 3.85; express orders
-   move to the first waves.
-5. **Lines** — a Gantt-like plan of the packing line (exact schedule: weighted
-   lateness 998 → 771) and the paint-line changeovers (303 → 63 minutes).
-6. **Reserve fund** — return vs risk per (holdings, cap) setting; the
-   optimiser's portfolios earn more per unit of risk than the naive top-return
-   rule.
+1. **Overview** — the gain over today's rule per decision, and which solver
+   family (with which guarantee) handles it.
+2. **Containers** — fill gauges, containers used vs the volume lower bound,
+   the fill profile and containers needed per container size (next fit needs
+   46 containers at 1,000 units, every decreasing packer 39 = the bound).
+3. **Carrier** — saving vs booked capacity for three rules, the shipments each
+   plan loads at the chosen booking, and where the plans disagree.
+4. **Pick waves** — priority-weighted mean wave (5.73 → 3.85 at 120 lines),
+   the wave loads of both plans, and a rule × wave-size heatmap.
+5. **Lines** — *Packing line*: run plans of today's rule and the selected rule,
+   lateness by rule, job by job (exact schedule: 998 → 771 job-minutes).
+   *Paint line*: cumulative changeovers (303 → 63 minutes), the changeover
+   matrix and the four sequences.
+6. **Reserve fund** — return vs risk per (holdings, cap) setting, the weights at
+   the selected setting, a Sharpe heatmap and the best settings.

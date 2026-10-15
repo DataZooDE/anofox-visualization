@@ -1,86 +1,315 @@
-algorithm,container,fill_pct
-best of,1,97.8
-best of,2,100.0
-best of,3,99.7
-best of,4,99.9
-best of,5,98.9
-best of,6,99.4
-best of,7,99.8
-best of,8,99.9
-best of,9,96.6
-best of,10,99.5
-best of,11,99.8
-best of,12,99.8
-best of,13,100.0
-best of,14,99.8
-best of,15,99.6
-best of,16,99.9
-best of,17,99.5
-best of,18,100.0
-best of,19,99.9
-best of,20,99.7
-best of,21,99.9
-best of,22,98.7
-best of,23,97.5
-best of,24,95.1
-best of,25,99.0
-best of,26,99.8
-best of,27,99.4
-best of,28,96.0
-best of,29,99.9
-best of,30,100.0
-best of,31,98.7
-best of,32,94.0
-best of,33,99.8
-best of,34,94.9
-best of,35,100.0
-best of,36,96.7
-best of,37,93.9
-best of,38,94.3
-best of,39,54.8
-next fit (today),1,85.9
-next fit (today),2,86.5
-next fit (today),3,62.5
-next fit (today),4,74.5
-next fit (today),5,95.2
-next fit (today),6,96.1
-next fit (today),7,91.2
-next fit (today),8,84.4
-next fit (today),9,50.4
-next fit (today),10,94.7
-next fit (today),11,76.7
-next fit (today),12,97.5
-next fit (today),13,73.4
-next fit (today),14,84.9
-next fit (today),15,92.0
-next fit (today),16,93.8
-next fit (today),17,86.1
-next fit (today),18,80.0
-next fit (today),19,77.7
-next fit (today),20,94.3
-next fit (today),21,95.3
-next fit (today),22,67.9
-next fit (today),23,90.1
-next fit (today),24,75.0
-next fit (today),25,53.4
-next fit (today),26,82.4
-next fit (today),27,69.1
-next fit (today),28,74.7
-next fit (today),29,88.8
-next fit (today),30,99.2
-next fit (today),31,93.8
-next fit (today),32,64.3
-next fit (today),33,63.5
-next fit (today),34,85.8
-next fit (today),35,88.2
-next fit (today),36,73.9
-next fit (today),37,94.4
-next fit (today),38,96.7
-next fit (today),39,95.3
-next fit (today),40,91.5
-next fit (today),41,96.9
-next fit (today),42,83.6
-next fit (today),43,83.4
-next fit (today),44,88.0
-next fit (today),45,92.1
-next fit (today),46,36.8
+capacity,algorithm,container,fill_pct
+800,best of,1,100.0
+800,best of,2,99.9
+800,best of,3,99.5
+800,best of,4,99.3
+800,best of,5,99.8
+800,best of,6,100.0
+800,best of,7,100.0
+800,best of,8,99.5
+800,best of,9,99.6
+800,best of,10,98.9
+800,best of,11,99.9
+800,best of,12,100.0
+800,best of,13,100.0
+800,best of,14,100.0
+800,best of,15,99.9
+800,best of,16,99.1
+800,best of,17,99.8
+800,best of,18,99.0
+800,best of,19,100.0
+800,best of,20,100.0
+800,best of,21,99.3
+800,best of,22,99.1
+800,best of,23,98.9
+800,best of,24,97.5
+800,best of,25,96.3
+800,best of,26,93.5
+800,best of,27,100.0
+800,best of,28,100.0
+800,best of,29,99.9
+800,best of,30,99.9
+800,best of,31,99.6
+800,best of,32,99.6
+800,best of,33,99.6
+800,best of,34,99.6
+800,best of,35,96.1
+800,best of,36,99.9
+800,best of,37,99.5
+800,best of,38,100.0
+800,best of,39,99.0
+800,best of,40,96.1
+800,best of,41,99.9
+800,best of,42,100.0
+800,best of,43,96.5
+800,best of,44,100.0
+800,best of,45,99.5
+800,best of,46,100.0
+800,best of,47,99.9
+800,best of,48,89.3
+800,next fit (today),1,61.0
+800,next fit (today),2,46.4
+800,next fit (today),3,72.5
+800,next fit (today),4,81.8
+800,next fit (today),5,93.4
+800,next fit (today),6,71.3
+800,next fit (today),7,79.5
+800,next fit (today),8,80.6
+800,next fit (today),9,84.4
+800,next fit (today),10,99.1
+800,next fit (today),11,75.5
+800,next fit (today),12,63.0
+800,next fit (today),13,64.4
+800,next fit (today),14,91.8
+800,next fit (today),15,90.5
+800,next fit (today),16,89.5
+800,next fit (today),17,91.8
+800,next fit (today),18,91.8
+800,next fit (today),19,80.5
+800,next fit (today),20,73.4
+800,next fit (today),21,92.8
+800,next fit (today),22,83.3
+800,next fit (today),23,64.4
+800,next fit (today),24,60.0
+800,next fit (today),25,97.1
+800,next fit (today),26,48.8
+800,next fit (today),27,69.1
+800,next fit (today),28,93.1
+800,next fit (today),29,93.0
+800,next fit (today),30,85.1
+800,next fit (today),31,60.8
+800,next fit (today),32,78.4
+800,next fit (today),33,66.8
+800,next fit (today),34,86.8
+800,next fit (today),35,76.6
+800,next fit (today),36,96.5
+800,next fit (today),37,70.4
+800,next fit (today),38,87.6
+800,next fit (today),39,99.9
+800,next fit (today),40,93.9
+800,next fit (today),41,90.0
+800,next fit (today),42,93.1
+800,next fit (today),43,97.6
+800,next fit (today),44,47.9
+800,next fit (today),45,92.3
+800,next fit (today),46,72.1
+800,next fit (today),47,46.3
+800,next fit (today),48,98.1
+800,next fit (today),49,94.5
+800,next fit (today),50,68.0
+800,next fit (today),51,75.3
+800,next fit (today),52,90.3
+800,next fit (today),53,83.5
+800,next fit (today),54,85.0
+800,next fit (today),55,98.5
+800,next fit (today),56,62.9
+800,next fit (today),57,96.9
+800,next fit (today),58,83.9
+800,next fit (today),59,90.4
+1000,best of,1,97.8
+1000,best of,2,100.0
+1000,best of,3,99.7
+1000,best of,4,99.9
+1000,best of,5,98.9
+1000,best of,6,99.4
+1000,best of,7,99.8
+1000,best of,8,99.9
+1000,best of,9,96.6
+1000,best of,10,99.5
+1000,best of,11,99.8
+1000,best of,12,99.8
+1000,best of,13,100.0
+1000,best of,14,99.8
+1000,best of,15,99.6
+1000,best of,16,99.9
+1000,best of,17,99.5
+1000,best of,18,100.0
+1000,best of,19,99.9
+1000,best of,20,99.7
+1000,best of,21,99.9
+1000,best of,22,98.7
+1000,best of,23,97.5
+1000,best of,24,95.1
+1000,best of,25,99.0
+1000,best of,26,99.8
+1000,best of,27,99.4
+1000,best of,28,96.0
+1000,best of,29,99.9
+1000,best of,30,100.0
+1000,best of,31,98.7
+1000,best of,32,94.0
+1000,best of,33,99.8
+1000,best of,34,94.9
+1000,best of,35,100.0
+1000,best of,36,96.7
+1000,best of,37,93.9
+1000,best of,38,94.3
+1000,best of,39,54.8
+1000,next fit (today),1,85.9
+1000,next fit (today),2,86.5
+1000,next fit (today),3,62.5
+1000,next fit (today),4,74.5
+1000,next fit (today),5,95.2
+1000,next fit (today),6,96.1
+1000,next fit (today),7,91.2
+1000,next fit (today),8,84.4
+1000,next fit (today),9,50.4
+1000,next fit (today),10,94.7
+1000,next fit (today),11,76.7
+1000,next fit (today),12,97.5
+1000,next fit (today),13,73.4
+1000,next fit (today),14,84.9
+1000,next fit (today),15,92.0
+1000,next fit (today),16,93.8
+1000,next fit (today),17,86.1
+1000,next fit (today),18,80.0
+1000,next fit (today),19,77.7
+1000,next fit (today),20,94.3
+1000,next fit (today),21,95.3
+1000,next fit (today),22,67.9
+1000,next fit (today),23,90.1
+1000,next fit (today),24,75.0
+1000,next fit (today),25,53.4
+1000,next fit (today),26,82.4
+1000,next fit (today),27,69.1
+1000,next fit (today),28,74.7
+1000,next fit (today),29,88.8
+1000,next fit (today),30,99.2
+1000,next fit (today),31,93.8
+1000,next fit (today),32,64.3
+1000,next fit (today),33,63.5
+1000,next fit (today),34,85.8
+1000,next fit (today),35,88.2
+1000,next fit (today),36,73.9
+1000,next fit (today),37,94.4
+1000,next fit (today),38,96.7
+1000,next fit (today),39,95.3
+1000,next fit (today),40,91.5
+1000,next fit (today),41,96.9
+1000,next fit (today),42,83.6
+1000,next fit (today),43,83.4
+1000,next fit (today),44,88.0
+1000,next fit (today),45,92.1
+1000,next fit (today),46,36.8
+1250,best of,1,100.0
+1250,best of,2,100.0
+1250,best of,3,99.8
+1250,best of,4,99.6
+1250,best of,5,99.0
+1250,best of,6,99.9
+1250,best of,7,100.0
+1250,best of,8,100.0
+1250,best of,9,99.9
+1250,best of,10,99.9
+1250,best of,11,99.5
+1250,best of,12,100.0
+1250,best of,13,99.8
+1250,best of,14,99.8
+1250,best of,15,99.5
+1250,best of,16,100.0
+1250,best of,17,99.6
+1250,best of,18,99.4
+1250,best of,19,100.0
+1250,best of,20,99.7
+1250,best of,21,99.8
+1250,best of,22,99.8
+1250,best of,23,99.8
+1250,best of,24,100.0
+1250,best of,25,96.2
+1250,best of,26,100.0
+1250,best of,27,99.8
+1250,best of,28,96.7
+1250,best of,29,96.2
+1250,best of,30,95.3
+1250,best of,31,62.3
+1250,next fit (today),1,68.7
+1250,next fit (today),2,98.7
+1250,next fit (today),3,80.1
+1250,next fit (today),4,93.9
+1250,next fit (today),5,87.8
+1250,next fit (today),6,86.5
+1250,next fit (today),7,65.6
+1250,next fit (today),8,99.9
+1250,next fit (today),9,73.7
+1250,next fit (today),10,87.6
+1250,next fit (today),11,98.2
+1250,next fit (today),12,96.9
+1250,next fit (today),13,87.4
+1250,next fit (today),14,79.6
+1250,next fit (today),15,93.4
+1250,next fit (today),16,65.0
+1250,next fit (today),17,98.4
+1250,next fit (today),18,93.4
+1250,next fit (today),19,92.9
+1250,next fit (today),20,65.9
+1250,next fit (today),21,93.1
+1250,next fit (today),22,93.0
+1250,next fit (today),23,90.6
+1250,next fit (today),24,90.5
+1250,next fit (today),25,75.5
+1250,next fit (today),26,93.1
+1250,next fit (today),27,59.0
+1250,next fit (today),28,75.8
+1250,next fit (today),29,78.8
+1250,next fit (today),30,88.0
+1250,next fit (today),31,72.1
+1250,next fit (today),32,87.3
+1250,next fit (today),33,91.0
+1250,next fit (today),34,94.1
+1250,next fit (today),35,88.3
+1250,next fit (today),36,57.8
+1500,best of,1,99.9
+1500,best of,2,99.9
+1500,best of,3,99.8
+1500,best of,4,99.7
+1500,best of,5,97.3
+1500,best of,6,99.9
+1500,best of,7,99.9
+1500,best of,8,100.0
+1500,best of,9,100.0
+1500,best of,10,99.3
+1500,best of,11,99.3
+1500,best of,12,97.1
+1500,best of,13,99.9
+1500,best of,14,99.9
+1500,best of,15,99.7
+1500,best of,16,99.0
+1500,best of,17,99.8
+1500,best of,18,100.0
+1500,best of,19,100.0
+1500,best of,20,97.7
+1500,best of,21,99.9
+1500,best of,22,99.8
+1500,best of,23,99.9
+1500,best of,24,99.8
+1500,best of,25,99.8
+1500,best of,26,47.0
+1500,next fit (today),1,95.9
+1500,next fit (today),2,93.4
+1500,next fit (today),3,95.2
+1500,next fit (today),4,86.6
+1500,next fit (today),5,79.7
+1500,next fit (today),6,96.7
+1500,next fit (today),7,81.5
+1500,next fit (today),8,83.5
+1500,next fit (today),9,91.9
+1500,next fit (today),10,88.6
+1500,next fit (today),11,78.7
+1500,next fit (today),12,83.8
+1500,next fit (today),13,80.1
+1500,next fit (today),14,91.5
+1500,next fit (today),15,94.0
+1500,next fit (today),16,97.9
+1500,next fit (today),17,92.3
+1500,next fit (today),18,84.3
+1500,next fit (today),19,74.3
+1500,next fit (today),20,84.4
+1500,next fit (today),21,99.5
+1500,next fit (today),22,69.6
+1500,next fit (today),23,63.1
+1500,next fit (today),24,92.2
+1500,next fit (today),25,86.9
+1500,next fit (today),26,92.7
+1500,next fit (today),27,97.9
+1500,next fit (today),28,92.2
+1500,next fit (today),29,85.9

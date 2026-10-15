@@ -833,8 +833,8 @@ fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
         }
         match &r.page {
             Some(p) => {
-                let (q, filter) = sv::page_sql(panel_sql, p);
-                let params: Vec<&str> = filter.as_deref().into_iter().collect();
+                let (q, params) = sv::page_sql(panel_sql, p);
+                let params: Vec<&str> = params.iter().map(String::as_str).collect();
                 json_rows(c, &q, &params, st.opts.max_rows)
             }
             None => json_rows(c, panel_sql, &[], st.opts.max_rows),

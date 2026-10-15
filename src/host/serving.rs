@@ -299,6 +299,10 @@ pub fn sql_literal(v: &serde_json::Value) -> Result<String, String> {
             if items.len() > MAX_LIST_LEN {
                 return Err(format!("list has more than {MAX_LIST_LEN} items"));
             }
+            if items.is_empty() {
+                // typed: a bare `[]` is an INTEGER list, which list_contains(…, 'x') rejects
+                return Ok("[]::VARCHAR[]".into());
+            }
             let parts: Result<Vec<String>, String> = items.iter().map(scalar_literal).collect();
             Ok(format!("[{}]", parts?.join(", ")))
         }
@@ -338,7 +342,11 @@ fn scalar_literal(v: &serde_json::Value) -> Result<String, String> {
 /// Max number of variables one locked panel request may set.
 pub const MAX_VARS: usize = 64;
 
-/// A server-side paging request for a `::PAGED` table panel.
+/// A server-side request for a `::PAGED` table panel: one page of rows, or the
+/// row count, the column statistics or one column's distinct values — all over
+/// the same filtered result. Every client-supplied value is a bound parameter
+/// (or, for [`page_sql_inline`], an escaped string literal) and every column
+/// name a quoted identifier.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PageRequest {
     /// Return `[{"n": count}]` instead of a page of rows.
@@ -348,9 +356,45 @@ pub struct PageRequest {
     /// Column to sort by (any name; it is quoted, never interpolated raw).
     pub sort: Option<String>,
     pub desc: bool,
-    /// Full-text filter (bound as a prepared-statement parameter).
+    /// Full-text filter over the whole row.
     pub filter: Option<String>,
+    /// Per-column filters, ANDed.
+    pub filters: Vec<ColFilter>,
+    /// Return one row of statistics for these columns instead of a page: per
+    /// column `i`: `n{i}` non-null count, `d{i}` approximate distinct count and,
+    /// for values that read as numbers, `s{i}` sum, `m{i}` mean, `lo{i}` min,
+    /// `hi{i}` max; plus `n` = the row count.
+    pub stats: Vec<String>,
+    /// Return up to [`MAX_DISTINCT`] distinct values `v` of this column (for a
+    /// filter dropdown), under every filter except those on the column itself.
+    pub distinct: Option<String>,
 }
+
+/// One per-column filter of a [`PageRequest`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColFilter {
+    pub col: String,
+    pub op: FilterOp,
+    pub value: String,
+}
+
+/// How a [`ColFilter`] compares: text equality / containment, or a numeric
+/// comparison (values that don't read as numbers never match).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Eq,
+    Contains,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+/// Limits of a [`PageRequest`].
+pub const MAX_FILTERS: usize = 32;
+pub const MAX_STATS_COLS: usize = 64;
+pub const MAX_DISTINCT: usize = 50;
+const MAX_COL_LEN: usize = 256;
 
 /// A locked-mode data request: `POST /api/panel` with
 /// `{"dashboard": id, "panel": n, "vars": {name: value}, "page": {...}}`.
@@ -399,37 +443,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     }
     let page = match o.get("page") {
         None | Some(serde_json::Value::Null) => None,
-        Some(p) => {
-            let p = p.as_object().ok_or("'page' must be an object")?;
-            let num = |k: &str, dflt: u64| p.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
-            let limit = num("limit", 10);
-            if limit == 0 || limit > 10_000 {
-                return Err("'page.limit' must be in 1..=10000".into());
-            }
-            let sort = p.get("sort").and_then(|s| s.as_str()).map(str::to_string);
-            if sort.as_ref().is_some_and(|s| s.len() > 256) {
-                return Err("'page.sort' too long".into());
-            }
-            let filter = p
-                .get("filter")
-                .and_then(|s| s.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.trim().is_empty());
-            if filter
-                .as_ref()
-                .is_some_and(|s| s.len() > MAX_VALUE_LEN || s.contains('\0'))
-            {
-                return Err("'page.filter' too long or contains NUL".into());
-            }
-            Some(PageRequest {
-                count: p.get("count").and_then(|v| v.as_bool()).unwrap_or(false),
-                limit,
-                offset: num("offset", 0),
-                sort,
-                desc: p.get("desc").and_then(|v| v.as_bool()).unwrap_or(false),
-                filter,
-            })
-        }
+        Some(p) => Some(parse_page(p)?),
     };
     Ok(PanelRequest {
         dashboard,
@@ -439,36 +453,214 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     })
 }
 
-/// Wrap a server-owned panel query for paging. Returns the SQL (with at most one
-/// `?` placeholder) and the parameter to bind to it (the filter text).
-pub fn page_sql(base: &str, p: &PageRequest) -> (String, Option<String>) {
-    let base = base.trim().trim_end_matches(';');
-    let filter = p.filter.as_ref().map(|f| f.trim().to_string());
-    let where_ = if filter.is_some() {
-        " WHERE CAST(_dp AS VARCHAR) ILIKE '%' || ? || '%'"
-    } else {
-        ""
+/// Parse + validate the `page` object of a panel request (also used by the
+/// browser, through wasm, to build the same SQL in its own DuckDB).
+pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
+    let p = p.as_object().ok_or("'page' must be an object")?;
+    for k in p.keys() {
+        if !matches!(
+            k.as_str(),
+            "count"
+                | "limit"
+                | "offset"
+                | "sort"
+                | "desc"
+                | "filter"
+                | "filters"
+                | "stats"
+                | "distinct"
+        ) {
+            return Err(format!("unknown page field '{k}'"));
+        }
+    }
+    let num = |k: &str, dflt: u64| p.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
+    let limit = num("limit", 10);
+    if limit == 0 || limit > 10_000 {
+        return Err("'page.limit' must be in 1..=10000".into());
+    }
+    let col = |v: &serde_json::Value, what: &str| -> Result<String, String> {
+        let c = v.as_str().ok_or(format!("{what} must be a column name"))?;
+        if c.is_empty() || c.len() > MAX_COL_LEN || c.contains('\0') {
+            return Err(format!("{what}: invalid column name"));
+        }
+        Ok(c.to_string())
     };
+    let text = |v: &str, what: &str| -> Result<String, String> {
+        if v.len() > MAX_VALUE_LEN || v.contains('\0') {
+            return Err(format!("{what} too long or contains NUL"));
+        }
+        Ok(v.to_string())
+    };
+    let sort = match p.get("sort") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(col(v, "'page.sort'")?),
+    };
+    let filter = match p.get("filter").and_then(|s| s.as_str()) {
+        Some(f) if !f.trim().is_empty() => Some(text(f, "'page.filter'")?),
+        _ => None,
+    };
+    let mut filters = Vec::new();
+    if let Some(fs) = p.get("filters") {
+        let fs = fs.as_array().ok_or("'page.filters' must be an array")?;
+        if fs.len() > MAX_FILTERS {
+            return Err(format!("more than {MAX_FILTERS} column filters"));
+        }
+        for f in fs {
+            let f = f.as_object().ok_or("a column filter must be an object")?;
+            let op = match f.get("op").and_then(|o| o.as_str()).unwrap_or("") {
+                "eq" => FilterOp::Eq,
+                "contains" => FilterOp::Contains,
+                "gt" => FilterOp::Gt,
+                "ge" => FilterOp::Ge,
+                "lt" => FilterOp::Lt,
+                "le" => FilterOp::Le,
+                o => {
+                    return Err(format!(
+                        "unknown filter op '{o}' (eq, contains, gt, ge, lt, le)"
+                    ))
+                }
+            };
+            let value = match f.get("value") {
+                Some(serde_json::Value::String(v)) => text(v, "a filter value")?,
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                _ => return Err("a filter value must be a string or a number".into()),
+            };
+            filters.push(ColFilter {
+                col: col(
+                    f.get("col").unwrap_or(&serde_json::Value::Null),
+                    "a filter's 'col'",
+                )?,
+                op,
+                value,
+            });
+        }
+    }
+    let mut stats = Vec::new();
+    if let Some(cs) = p.get("stats") {
+        let cs = cs
+            .as_array()
+            .ok_or("'page.stats' must be an array of column names")?;
+        if cs.len() > MAX_STATS_COLS {
+            return Err(format!("more than {MAX_STATS_COLS} statistics columns"));
+        }
+        for c in cs {
+            stats.push(col(c, "'page.stats'")?);
+        }
+    }
+    let distinct = match p.get("distinct") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(col(v, "'page.distinct'")?),
+    };
+    let count = p.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
+    if [count, !stats.is_empty(), distinct.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count()
+        > 1
+    {
+        return Err("a page request asks for one of: rows, count, stats, distinct".into());
+    }
+    Ok(PageRequest {
+        count,
+        limit,
+        offset: num("offset", 0),
+        sort,
+        desc: p.get("desc").and_then(|v| v.as_bool()).unwrap_or(false),
+        filter,
+        filters,
+        stats,
+        distinct,
+    })
+}
+
+/// Wrap a server-owned panel query for paging: returns the SQL (with `?`
+/// placeholders) and the parameters to bind to them, in order.
+pub fn page_sql(base: &str, p: &PageRequest) -> (String, Vec<String>) {
+    let mut params = Vec::new();
+    let sql = build_page_sql(base, p, &mut |v| {
+        params.push(v.to_string());
+        "?".to_string()
+    });
+    (sql, params)
+}
+
+/// [`page_sql`] with every parameter inlined as an escaped string literal, for
+/// a client that runs its own SQL (the browser's DuckDB-Wasm, the authoring
+/// server's `/query`): the same query, one builder.
+pub fn page_sql_inline(base: &str, p: &PageRequest) -> String {
+    build_page_sql(base, p, &mut |v| format!("'{}'", v.replace('\'', "''")))
+}
+
+fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> String) -> String {
+    let base = base.trim().trim_end_matches(';');
+    // A value read as a number — through text, so any column type is fine.
+    let num = |c: &str| format!("TRY_CAST(CAST({c} AS VARCHAR) AS DOUBLE)");
+    let mut conds = Vec::new();
+    if let Some(f) = p.filter.as_ref().map(|f| f.trim()) {
+        conds.push(format!(
+            "CAST(_dp AS VARCHAR) ILIKE '%' || {} || '%'",
+            param(f)
+        ));
+    }
+    for f in &p.filters {
+        if p.distinct.as_deref() == Some(f.col.as_str()) {
+            continue; // a dropdown lists the values its own filter would hide
+        }
+        let c = quote_ident(&f.col);
+        let v = param(&f.value);
+        conds.push(match f.op {
+            FilterOp::Eq => format!("CAST({c} AS VARCHAR) = {v}"),
+            FilterOp::Contains => format!("CAST({c} AS VARCHAR) ILIKE '%' || {v} || '%'"),
+            op => {
+                let o = match op {
+                    FilterOp::Gt => ">",
+                    FilterOp::Ge => ">=",
+                    FilterOp::Lt => "<",
+                    _ => "<=",
+                };
+                format!("{} {o} TRY_CAST({v} AS DOUBLE)", num(&c))
+            }
+        });
+    }
+    let where_ = if conds.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conds.join(" AND "))
+    };
+    let from = format!("FROM ({base}) _dp{where_}");
     if p.count {
-        return (
-            format!("SELECT count(*) AS n FROM ({base}) _dp{where_}"),
-            filter,
+        return format!("SELECT count(*) AS n {from}");
+    }
+    if let Some(d) = &p.distinct {
+        let c = quote_ident(d);
+        return format!(
+            "SELECT DISTINCT CAST({c} AS VARCHAR) AS v {from} ORDER BY v NULLS LAST LIMIT {}",
+            MAX_DISTINCT + 1
         );
+    }
+    if !p.stats.is_empty() {
+        let mut sel = vec!["count(*) AS n".to_string()];
+        for (i, col) in p.stats.iter().enumerate() {
+            let c = quote_ident(col);
+            let x = num(&c);
+            sel.push(format!(
+                "count({c}) AS n{i}, approx_count_distinct({c}) AS d{i}, sum({x}) AS s{i}, \
+                 avg({x}) AS m{i}, min({x}) AS lo{i}, max({x}) AS hi{i}"
+            ));
+        }
+        return format!("SELECT {} {from}", sel.join(", "));
     }
     let order = match &p.sort {
         Some(c) => format!(
-            " ORDER BY {} {}",
+            " ORDER BY {} {} NULLS LAST",
             quote_ident(c),
             if p.desc { "DESC" } else { "ASC" }
         ),
         None => String::new(),
     };
-    (
-        format!(
-            "SELECT * FROM ({base}) _dp{where_}{order} LIMIT {} OFFSET {}",
-            p.limit, p.offset
-        ),
-        filter,
+    format!(
+        "SELECT * {from}{order} LIMIT {} OFFSET {}",
+        p.limit, p.offset
     )
 }
 
@@ -647,12 +839,12 @@ mod tests {
         assert_eq!(r.dashboard, "sales");
         assert_eq!(r.panel, 3);
         assert!(r.vars.contains(&("region".into(), "'EU'".into())));
-        let (sql, param) = page_sql("SELECT 1 AS c0;", r.page.as_ref().unwrap());
+        let (sql, params) = page_sql("SELECT 1 AS c0;", r.page.as_ref().unwrap());
         assert_eq!(
             sql,
-            "SELECT * FROM (SELECT 1 AS c0) _dp WHERE CAST(_dp AS VARCHAR) ILIKE '%' || ? || '%' ORDER BY \"c\"\"1\" DESC LIMIT 5 OFFSET 10"
+            "SELECT * FROM (SELECT 1 AS c0) _dp WHERE CAST(_dp AS VARCHAR) ILIKE '%' || ? || '%' ORDER BY \"c\"\"1\" DESC NULLS LAST LIMIT 5 OFFSET 10"
         );
-        assert_eq!(param.as_deref(), Some("x"));
+        assert_eq!(params, vec!["x".to_string()]);
         assert!(parse_panel_request(r#"{"dashboard":"../x","panel":0}"#).is_err());
         assert!(parse_panel_request(r#"{"dashboard":"a","panel":0,"sql":"SELECT 1"}"#).is_err());
         assert!(
@@ -661,6 +853,58 @@ mod tests {
         assert!(
             parse_panel_request(r#"{"dashboard":"a","panel":0,"vars":{"x":{"a":1}}}"#).is_err()
         );
+    }
+
+    #[test]
+    fn page_column_filters_stats_distinct() {
+        let page = |j: &str| parse_page(&serde_json::from_str(j).unwrap());
+        // column filters: every value is a parameter, every name a quoted identifier
+        let p = page(
+            r#"{"filters":[{"col":"re\"gion","op":"eq","value":"EU"},{"col":"amt","op":"ge","value":10},
+                {"col":"note","op":"contains","value":"it's"}],"sort":"amt","limit":20}"#,
+        )
+        .unwrap();
+        let (sql, params) = page_sql("SELECT * FROM t", &p);
+        assert_eq!(
+            sql,
+            "SELECT * FROM (SELECT * FROM t) _dp WHERE CAST(\"re\"\"gion\" AS VARCHAR) = ? \
+             AND TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE) >= TRY_CAST(? AS DOUBLE) \
+             AND CAST(\"note\" AS VARCHAR) ILIKE '%' || ? || '%' ORDER BY \"amt\" ASC NULLS LAST LIMIT 20 OFFSET 0"
+        );
+        assert_eq!(params, vec!["EU", "10", "it's"]);
+        // the inline form escapes quotes in the literal
+        assert!(page_sql_inline("SELECT * FROM t", &p).contains("ILIKE '%' || 'it''s' || '%'"));
+        // stats: one row of aggregates over the filtered result
+        let p =
+            page(r#"{"stats":["amt","region"],"filters":[{"col":"amt","op":"lt","value":"5"}]}"#)
+                .unwrap();
+        let (sql, params) = page_sql("SELECT * FROM t", &p);
+        assert!(sql.starts_with(
+            "SELECT count(*) AS n, count(\"amt\") AS n0, approx_count_distinct(\"amt\") AS d0"
+        ));
+        assert!(sql.contains("sum(TRY_CAST(CAST(\"region\" AS VARCHAR) AS DOUBLE)) AS s1"));
+        assert_eq!(params, vec!["5"]);
+        // distinct ignores the column's own filter, keeps the others
+        let p = page(
+            r#"{"distinct":"region","filters":[{"col":"region","op":"eq","value":"EU"},{"col":"amt","op":"gt","value":1}]}"#,
+        )
+        .unwrap();
+        let (sql, params) = page_sql("SELECT * FROM t", &p);
+        assert!(sql.starts_with("SELECT DISTINCT CAST(\"region\" AS VARCHAR) AS v FROM"));
+        assert!(sql.ends_with("ORDER BY v NULLS LAST LIMIT 51"));
+        assert_eq!(params, vec!["1"]);
+        // rejected
+        for bad in [
+            r#"{"filters":[{"col":"a","op":"like","value":"x"}]}"#,
+            r#"{"filters":[{"col":"a","op":"eq","value":{"x":1}}]}"#,
+            r#"{"filters":[{"col":"","op":"eq","value":"x"}]}"#,
+            r#"{"stats":["a"],"count":true}"#,
+            r#"{"distinct":"a","stats":["a"]}"#,
+            r#"{"limit":0}"#,
+            r#"{"sql":"SELECT 1"}"#,
+        ] {
+            assert!(page(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

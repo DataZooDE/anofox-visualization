@@ -1,0 +1,103 @@
+check_name,week,check_type,value,lower_threshold,upper_threshold,status
+Orders: amount is positive,2026-06-01,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-06-08,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-06-15,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-06-22,compliance,0.9963,1.0,,fail
+Orders: amount is positive,2026-06-29,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-07-06,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-07-13,compliance,0.9962,1.0,,fail
+Orders: amount is positive,2026-07-20,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-07-27,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-08-03,compliance,0.9963,1.0,,fail
+Orders: amount is positive,2026-08-10,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-08-17,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-08-24,compliance,0.9963,1.0,,fail
+Orders: amount is positive,2026-08-31,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-09-07,compliance,1.0,1.0,,pass
+Orders: amount is positive,2026-09-14,compliance,0.9963,1.0,,fail
+Orders: amount is positive,2026-09-21,compliance,1.0,1.0,,pass
+Orders: customer exists,2026-06-01,match_rate,0.9805,0.99,,fail
+Orders: customer exists,2026-06-08,match_rate,0.9651,0.99,,fail
+Orders: customer exists,2026-06-15,match_rate,0.9668,0.99,,fail
+Orders: customer exists,2026-06-22,match_rate,0.9556,0.99,,fail
+Orders: customer exists,2026-06-29,match_rate,0.9853,0.99,,fail
+Orders: customer exists,2026-07-06,match_rate,0.9887,0.99,,fail
+Orders: customer exists,2026-07-13,match_rate,0.977,0.99,,fail
+Orders: customer exists,2026-07-20,match_rate,0.9962,0.99,,pass
+Orders: customer exists,2026-07-27,match_rate,0.9963,0.99,,pass
+Orders: customer exists,2026-08-03,match_rate,0.9738,0.99,,fail
+Orders: customer exists,2026-08-10,match_rate,0.9585,0.99,,fail
+Orders: customer exists,2026-08-17,match_rate,0.9887,0.99,,fail
+Orders: customer exists,2026-08-24,match_rate,0.9813,0.99,,fail
+Orders: customer exists,2026-08-31,match_rate,0.9891,0.99,,fail
+Orders: customer exists,2026-09-07,match_rate,0.9606,0.99,,fail
+Orders: customer exists,2026-09-14,match_rate,0.9738,0.99,,fail
+Orders: customer exists,2026-09-21,match_rate,0.989,0.99,,fail
+Orders: mean amount 50–150 €,2026-06-01,agg,82.1522,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-06-08,agg,74.1702,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-06-15,agg,71.7311,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-06-22,agg,84.1703,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-06-29,agg,81.5158,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-07-06,agg,79.7049,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-07-13,agg,78.2214,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-07-20,agg,86.1061,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-07-27,agg,75.8093,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-08-03,agg,78.4669,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-08-10,agg,84.0441,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-08-17,agg,80.1014,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-08-24,agg,77.9145,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-08-31,agg,354.8171,50.0,150.0,fail
+Orders: mean amount 50–150 €,2026-09-07,agg,71.52,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-09-14,agg,78.7138,50.0,150.0,pass
+Orders: mean amount 50–150 €,2026-09-21,agg,79.6674,50.0,150.0,pass
+Orders: order_id is unique,2026-06-01,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-06-08,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-06-15,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-06-22,duplicate_count,1.0,,0.0,fail
+Orders: order_id is unique,2026-06-29,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-07-06,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-07-13,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-07-20,duplicate_count,1.0,,0.0,fail
+Orders: order_id is unique,2026-07-27,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-08-03,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-08-10,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-08-17,duplicate_count,1.0,,0.0,fail
+Orders: order_id is unique,2026-08-24,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-08-31,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-09-07,duplicate_count,0.0,,0.0,pass
+Orders: order_id is unique,2026-09-14,duplicate_count,1.0,,0.0,fail
+Orders: order_id is unique,2026-09-21,duplicate_count,0.0,,0.0,pass
+Orders: status is a known value,2026-06-01,values_in_set,0.9961,1.0,,fail
+Orders: status is a known value,2026-06-08,values_in_set,0.9884,1.0,,fail
+Orders: status is a known value,2026-06-15,values_in_set,1.0,1.0,,pass
+Orders: status is a known value,2026-06-22,values_in_set,0.9926,1.0,,fail
+Orders: status is a known value,2026-06-29,values_in_set,0.9926,1.0,,fail
+Orders: status is a known value,2026-07-06,values_in_set,0.9962,1.0,,fail
+Orders: status is a known value,2026-07-13,values_in_set,0.9885,1.0,,fail
+Orders: status is a known value,2026-07-20,values_in_set,1.0,1.0,,pass
+Orders: status is a known value,2026-07-27,values_in_set,0.9888,1.0,,fail
+Orders: status is a known value,2026-08-03,values_in_set,0.9888,1.0,,fail
+Orders: status is a known value,2026-08-10,values_in_set,0.9862,1.0,,fail
+Orders: status is a known value,2026-08-17,values_in_set,0.9962,1.0,,fail
+Orders: status is a known value,2026-08-24,values_in_set,0.9963,1.0,,fail
+Orders: status is a known value,2026-08-31,values_in_set,0.9964,1.0,,fail
+Orders: status is a known value,2026-09-07,values_in_set,0.9961,1.0,,fail
+Orders: status is a known value,2026-09-14,values_in_set,0.9775,1.0,,fail
+Orders: status is a known value,2026-09-21,values_in_set,0.9963,1.0,,fail
+Orders: ≥ 250 per week,2026-06-01,volume,257.0,250.0,,pass
+Orders: ≥ 250 per week,2026-06-08,volume,258.0,250.0,,pass
+Orders: ≥ 250 per week,2026-06-15,volume,271.0,250.0,,pass
+Orders: ≥ 250 per week,2026-06-22,volume,270.0,250.0,,pass
+Orders: ≥ 250 per week,2026-06-29,volume,272.0,250.0,,pass
+Orders: ≥ 250 per week,2026-07-06,volume,266.0,250.0,,pass
+Orders: ≥ 250 per week,2026-07-13,volume,261.0,250.0,,pass
+Orders: ≥ 250 per week,2026-07-20,volume,266.0,250.0,,pass
+Orders: ≥ 250 per week,2026-07-27,volume,267.0,250.0,,pass
+Orders: ≥ 250 per week,2026-08-03,volume,267.0,250.0,,pass
+Orders: ≥ 250 per week,2026-08-10,volume,217.0,250.0,,fail
+Orders: ≥ 250 per week,2026-08-17,volume,266.0,250.0,,pass
+Orders: ≥ 250 per week,2026-08-24,volume,267.0,250.0,,pass
+Orders: ≥ 250 per week,2026-08-31,volume,276.0,250.0,,pass
+Orders: ≥ 250 per week,2026-09-07,volume,254.0,250.0,,pass
+Orders: ≥ 250 per week,2026-09-14,volume,267.0,250.0,,pass
+Orders: ≥ 250 per week,2026-09-21,volume,273.0,250.0,,pass

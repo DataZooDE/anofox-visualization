@@ -2,6 +2,7 @@
 //! scales, reference lines, top-k labels, smoothing methods) and for the
 //! rendering bugs fixed alongside them.
 
+use anofox_visualization::theme::DEFAULT_PALETTE;
 use anofox_visualization::{render, Column, Kind, Role};
 use ggplot_rs::prelude::Value;
 
@@ -10,6 +11,11 @@ fn strs(v: &[&str]) -> Vec<Value> {
 }
 fn nums(v: &[f64]) -> Vec<Value> {
     v.iter().map(|&f| Value::Float(f)).collect()
+}
+/// Default palette slot `i` as it appears in an SVG (`#rrggbb`, upper case).
+fn slot(i: usize) -> String {
+    let (r, g, b) = DEFAULT_PALETTE[i];
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 fn svg(cols: Vec<Column>) -> String {
     render(&cols, 480, 320).expect("renders")
@@ -126,7 +132,8 @@ fn step_per_category() {
     ]);
     let lines = polylines(&s);
     assert_eq!(lines.len(), 2, "two step lines: {lines:?}");
-    assert!(lines[0].contains("#456481") && lines[1].contains("#E86433"));
+    let (l0, l1) = (lines[0].to_uppercase(), lines[1].to_uppercase());
+    assert!(l0.contains(&slot(0)) && l1.contains(&slot(1)), "{lines:?}");
 }
 
 // ── A4: maps keep their fill (measure, numeric ::CHOROPLETH, category) ───
@@ -155,7 +162,8 @@ fn map_fill_by_value_and_category() {
         Column::new("g", Role::Geometry, wkt.clone()),
         Column::new("c", Role::Category, strs(&["a", "b"])),
     ]);
-    assert_eq!(fills(&s), vec!["#456481", "#E86433"]);
+    let f: Vec<String> = fills(&s).iter().map(|c| c.to_uppercase()).collect();
+    assert_eq!(f, vec![slot(0), slot(1)]);
     // Unfilled: a brand tint, not ggplot's default blue.
     let s = svg(vec![Column::new("g", Role::Geometry, wkt)]);
     assert!(!s.contains("#619CFF"));
@@ -179,7 +187,10 @@ fn violin_and_box_are_filled() {
             !s.contains("fill=\"#FFFFFF\" fill-opacity=\"1.000\" stroke"),
             "{kind:?}"
         );
-        assert!(s.contains("#CBD4DC"), "{kind:?} brand tint");
+        assert!(
+            s.contains("#C2D3F9"),
+            "{kind:?} brand tint (slot 0, lightened)"
+        );
     }
 }
 
@@ -604,7 +615,11 @@ fn contract_km_band_and_censor_marks() {
         .filter(|t| t.contains("fill-opacity=\"0.180\""))
         .collect();
     assert_eq!(ribbons.len(), 2, "{s}");
-    assert!(ribbons[0].contains("#456481") && ribbons[1].contains("#E86433"));
+    let (r0, r1) = (ribbons[0].to_uppercase(), ribbons[1].to_uppercase());
+    assert!(
+        r0.contains(&slot(0)) && r1.contains(&slot(1)),
+        "{ribbons:?}"
+    );
     // A `+` censoring mark per group (stroked paths).
     assert_eq!(s.matches("<path ").count(), 2, "{s}");
 }
@@ -801,12 +816,12 @@ fn contract_model_colours_are_stable_across_charts() {
                   {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
     let two = r#"[{"model_id":"huber","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
                   {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
-    let ridge = "#3FA66F";
+    let ridge = slot(5); // ridge = DataZoo slot 5, mapped to the default palette's slot 5
     for rows in [one, two] {
         let s = spec("terms", rows, "{}").unwrap();
         assert!(
-            s.to_uppercase().contains(ridge),
-            "ridge is green in every chart"
+            s.to_uppercase().contains(&ridge),
+            "ridge keeps its colour in every chart"
         );
     }
 }

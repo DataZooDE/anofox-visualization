@@ -4,148 +4,237 @@
 -- with the anofox_decide extension and its local laya-multilingual decision
 -- model (examples/decide-showcase/compute.sql, written to web/data/decide/*.csv
 -- by scripts/gen-showcase-data.sh). The model runs on ONNX Runtime and can't
--- run in the browser, so this dashboard only reads and plots the stored
--- answers; every quality metric is computed in SQL from them.
+-- run in the browser, so this dashboard only reads the stored answers; every
+-- metric (precision, recall, cost, Brier score, calibration, routing accuracy)
+-- is computed in SQL from them, live, for the threshold and filters you pick.
 --
 -- A made-up software shop's support inbox: 92 synthetic tickets in English,
 -- German and French, each labelled by a support lead (refund requested?
--- owning team? how upset?). The model answers the same three questions; how
--- far can its answers be trusted to route tickets automatically?
+-- owning team? how upset?). The model answers the same three questions in one
+-- decide_answers() call per ticket. Can its answers route tickets
+-- automatically, and where should the thresholds sit?
 --
--- Tabs: 1 Overview · 2 Refund probability · 3 Routing · 4 Frustration ·
--- 5 Tickets. Natively, run from web/:  dashboard --check ../examples/decide-showcase/showcase.sql
+-- Tabs: Refund queue · Calibration · Routing · Frustration · All tickets.
+-- Natively, run from web/:  dashboard --check ../examples/decide-showcase/showcase.sql
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Data: the stored anofox_decide answers
--- ─────────────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE TABLE dc_scored AS FROM read_csv('data/decide/dc_scored.csv');
-CREATE OR REPLACE TABLE dc_metrics AS FROM read_csv('data/decide/dc_metrics.csv');
+-- ── Header ─────────────────────────────────────────────────────────────────────
+SELECT 'anofox_decide · stored results'::BRAND;
+SELECT 'Can a decision model triage the support inbox?'::DASHBOARD_TITLE;
+
+-- ── Data: the stored anofox_decide answers ───────────────────────────────────
+CREATE OR REPLACE TABLE dc_scored AS
+SELECT *, CASE lang WHEN 'en' THEN 'English' WHEN 'de' THEN 'German' ELSE 'French' END AS language
+FROM read_csv('data/decide/dc_scored.csv');
 CREATE OR REPLACE TABLE dc_provenance AS FROM read_csv('data/decide/provenance.csv');
 
--- Calibration (5 equal-width bins) and ROC of the refund probability, in the
--- `curve` schema of the anofox_plot_curve contract plot.
-CREATE OR REPLACE TABLE dc_calibration AS
-SELECT 'calibration' AS curve_type, 'laya-multilingual' AS model_id,
-       avg(p_refund) AS x, avg(refund::INTEGER) AS y, count(*) AS weight
-FROM dc_scored GROUP BY least(floor(p_refund * 5), 4);
-CREATE OR REPLACE TABLE dc_roc AS
-WITH th AS (SELECT DISTINCT p_refund AS t FROM dc_scored UNION ALL SELECT 1.01),
-     pos AS (SELECT count(*) FILTER (WHERE refund) AS p, count(*) FILTER (WHERE NOT refund) AS n FROM dc_scored)
-SELECT 'roc' AS curve_type, 'laya-multilingual' AS model_id, th.t AS threshold,
-       count(*) FILTER (WHERE s.p_refund >= th.t AND NOT s.refund) / any_value(pos.n) AS x,
-       count(*) FILTER (WHERE s.p_refund >= th.t AND s.refund) / any_value(pos.p) AS y
-FROM th, dc_scored s, pos GROUP BY th.t;
--- Precision / recall / share escalated for every threshold.
-CREATE OR REPLACE TABLE dc_thresholds AS
-SELECT t / 20.0 AS threshold,
-       count(*) FILTER (WHERE p_refund >= t / 20.0 AND refund) / nullif(count(*) FILTER (WHERE p_refund >= t / 20.0), 0) AS precision,
-       count(*) FILTER (WHERE p_refund >= t / 20.0 AND refund) / count(*) FILTER (WHERE refund) AS recall
-FROM range(1, 20) r(t), dc_scored GROUP BY t;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- Dashboard
--- ─────────────────────────────────────────────────────────────────────────────
-SELECT 'Can a decision model triage the support inbox? 92 tickets, three questions, anofox_decide (stored results)'::LABEL;
+-- The controls: refund threshold, the cost (agent minutes) of each kind of
+-- mistake, the confidence a routing answer needs to be applied automatically,
+-- and the ticket filters.
+CREATE OR REPLACE MACRO dc_t() AS getvariable('refund_at_pct')::DOUBLE / 100;
+CREATE OR REPLACE MACRO dc_gate() AS getvariable('autoroute_at_pct')::DOUBLE / 100;
+CREATE OR REPLACE MACRO dc_miss() AS getvariable('missed_refund_min')::DOUBLE;
+CREATE OR REPLACE MACRO dc_false() AS getvariable('false_alarm_min')::DOUBLE;
+CREATE OR REPLACE MACRO dc_in(lg, tm) AS
+    list_contains(getvariable('language'), lg) AND getvariable('team') IN ('All teams', tm);
+-- A click on a team bar narrows the routing table; clicks on anything else don't.
+CREATE OR REPLACE MACRO dc_team_click(tm) AS
+    coalesce(getvariable('selected'), '') NOT IN ('billing', 'defect', 'other') OR getvariable('selected') = tm;
+CREATE OR REPLACE MACRO dc_verdict(p, y, t) AS
+    CASE WHEN p >= t AND y THEN 'ok: caught' WHEN p < t AND NOT y THEN 'ok: no refund'
+         WHEN y THEN 'failed: missed refund' ELSE 'review: false alarm' END;
 
 SELECT 12::COL;
-SELECT ('**Stored results, computed natively.** The answers on this page were computed with the **anofox_decide** DuckDB extension (version `' || (SELECT extension_version FROM dc_provenance) || '`) and its local **' || (SELECT model FROM dc_metrics) || '** decision model on a native DuckDB ' || (SELECT duckdb_version FROM dc_provenance) || ', by `examples/decide-showcase/compute.sql`; the demo reads them from `web/data/decide/`. They are **not** recomputed in your browser: the model runs on ONNX Runtime, outside DuckDB-Wasm''s reach. The tickets and their labels are synthetic. One call asks all three questions per ticket: `unnest(decide_answers(text, ''[{"id": "refund", "kind": "binary", …}, {"id": "team", "kind": "choice", "options": […]}, {"id": "mood", "kind": "score", "levels": […]}]''), recursive := true)`.')::MARKDOWN, 'About this dashboard'::TITLE;
+SELECT ('Stored results: the answers were computed natively with **anofox_decide** `' || (SELECT extension_version FROM dc_provenance)
+        || '` and its local **laya-multilingual** model (ONNX Runtime, not available in the browser); only the metrics on this page are computed live, in SQL, from those stored answers.')::MARKDOWN;
 
--- ── 1 · Overview ─────────────────────────────────────────────────────────────
-SELECT '1 Overview'::TAB;
-
-SELECT 12::COL;
-SELECT ('**Question:** can the model''s answers route support tickets without a human reading each one? Three questions, written in the query: a **binary** one (*the customer asks for money back*), a **choice** (*which team: billing, defect, other*) and a **score** on an ordered rubric (*calm, annoyed, angry*). **What to look for:** the refund probability is accurate (**' || round(100 * (SELECT accuracy FROM dc_metrics))::INTEGER || ' %** at a 0.5 threshold) and well calibrated (Brier **' || (SELECT brier FROM dc_metrics) || '**, ECE **' || (SELECT ece FROM dc_metrics) || '**), in all three languages; its few misses are mostly tickets that mix a **defect with a refund demand**. Routing is weaker (**' || round(100 * (SELECT team_accuracy FROM dc_metrics))::INTEGER || ' %**): "other" tickets are pulled to billing. The frustration score tells calm from upset writers but not annoyed from angry. Verdict: automate the refund queue, keep a human on routing and tone.')::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 'How good are the answers?'::GROUP;
-SELECT (100 * (SELECT accuracy FROM dc_metrics))::PERCENT, 'refund: accuracy (decide_accuracy)'::LABEL;
-SELECT (SELECT brier FROM dc_metrics)::METRIC, 'refund: Brier score (0 = perfect, 0.25 = coin)'::LABEL;
-SELECT (SELECT ece FROM dc_metrics)::METRIC, 'refund: calibration error (decide_ece)'::LABEL;
-SELECT (100 * (SELECT team_accuracy FROM dc_metrics))::PERCENT, 'team routing: accuracy'::LABEL;
-SELECT (SELECT tickets FROM dc_metrics)::METRIC, 'labelled tickets (en / de / fr)'::LABEL;
+SELECT 'Decision rules'::GROUP;
+SELECT 50 AS refund_at_pct ::NUMBER, 'Escalate as refund at P ≥ (%)'::LABEL;
+SELECT 30 AS missed_refund_min ::NUMBER, 'Cost of a missed refund (min)'::LABEL;
+SELECT 5 AS false_alarm_min ::NUMBER, 'Cost of a false alarm (min)'::LABEL;
+SELECT 90 AS autoroute_at_pct ::NUMBER, 'Auto-route at confidence ≥ (%)'::LABEL;
+SELECT DISTINCT language ::MULTISELECT, 'Languages'::LABEL FROM dc_scored ORDER BY language;
+SELECT team ::DROPDOWN, 'Labelled team'::LABEL FROM (SELECT 0 AS k, 'All teams' AS team UNION ALL SELECT DISTINCT 1, team FROM dc_scored) ORDER BY k, team;
 SELECT 1::ENDGROUP;
 
-SELECT 12::COL;
-SELECT 380::HEIGHT;
-SELECT CASE lang WHEN 'en' THEN 'English' WHEN 'de' THEN 'German' ELSE 'French' END ::XAXIS, question ::CATEGORY,
-       acc ::BARCHART, 'percent'::YFORMAT,
-       'Accuracy by language — refunds are recognised in every language; routing varies'::TITLE
-FROM (SELECT lang, 'refund (p ≥ 0.5)' AS question, round(100 * avg(((p_refund >= 0.5) = refund)::INTEGER), 1) AS acc FROM dc_scored GROUP BY ALL
-      UNION ALL SELECT lang, 'team routing', round(100 * avg((team_pred = team)::INTEGER), 1) FROM dc_scored GROUP BY ALL)
-ORDER BY 1, 2;
+SELECT 'At these rules'::GROUP;
+SELECT count(*) FILTER (WHERE p_refund >= dc_t())::METRIC, ('of ' || count(*) || ' tickets escalated as refunds')::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT (100 * count(*) FILTER (WHERE p_refund >= dc_t() AND refund) / nullif(count(*) FILTER (WHERE p_refund >= dc_t()), 0))::PERCENT,
+       'precision: escalations that are refunds'::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT (100 * count(*) FILTER (WHERE p_refund >= dc_t() AND refund) / nullif(count(*) FILTER (WHERE refund), 0))::PERCENT,
+       'recall: refunds caught'::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT round(100 * (dc_miss() * count(*) FILTER (WHERE p_refund < dc_t() AND refund)
+                  + dc_false() * count(*) FILTER (WHERE p_refund >= dc_t() AND NOT refund)) / count(*))::METRIC,
+       'agent minutes lost per 100 tickets'::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT (100 * count(*) FILTER (WHERE p_team >= dc_gate()) / count(*))::PERCENT, 'tickets routed automatically'::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT (100 * avg((team_pred = team)::INTEGER) FILTER (WHERE p_team >= dc_gate()))::PERCENT, 'of those to the right team'::LABEL
+FROM dc_scored WHERE dc_in(language, team);
+SELECT 1::ENDGROUP;
 
--- ── 2 · Refund probability ───────────────────────────────────────────────────
-SELECT '2 Refund probability'::TAB;
+-- ── 1 · Refund queue ─────────────────────────────────────────────────────────
+SELECT 'Refund queue'::TAB;
 
 SELECT 12::COL;
-SELECT ('**How:** the model returns a **probability**, not a label, so the threshold is yours. **What to look for:** in the calibration plot, each dot is a bin of tickets — mean predicted probability vs the share that really asked for a refund; dots on the diagonal mean *"0.9" really means 9 in 10*. The model is decisive (most tickets score below 0.1 or above 0.9) and right when it is. The ROC curve hugs the top-left corner. The threshold chart shows the trade-off: at **0.5**, **' || round(100 * (SELECT precision FROM dc_thresholds WHERE threshold = 0.5))::INTEGER || ' %** of the escalated tickets are refund requests (precision) and **' || round(100 * (SELECT recall FROM dc_thresholds WHERE threshold = 0.5))::INTEGER || ' %** of all refund requests are caught (recall); at **0.7** precision rises to **' || round(100 * (SELECT precision FROM dc_thresholds WHERE threshold = 0.7))::INTEGER || ' %** for a recall of **' || round(100 * (SELECT recall FROM dc_thresholds WHERE threshold = 0.7))::INTEGER || ' %**. Most misses are the mixed defect-and-refund tickets listed below.')::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'The model returns a **probability**, so the threshold is a business decision: a missed refund costs a callback, a false alarm a few minutes of checking. Change the two costs above and the cheapest threshold moves.'::MARKDOWN, 'What to look for'::TITLE;
+
+SELECT 8::COL;
+SELECT 340::HEIGHT;
+WITH s AS (SELECT * FROM dc_scored WHERE dc_in(language, team)),
+g AS (SELECT t / 100.0 AS th FROM range(5, 100, 5) r(t)),
+c AS (SELECT g.th, 100 * (dc_miss() * count(*) FILTER (WHERE s.p_refund < g.th AND s.refund)
+                        + dc_false() * count(*) FILTER (WHERE s.p_refund >= g.th AND NOT s.refund)) / count(*) AS cost
+      FROM g, s GROUP BY g.th),
+o AS (SELECT arg_min(th, cost) AS best, min(cost) AS best_cost FROM c)
+SELECT c.th ::XAXIS, round(c.cost, 1) ::LINECHART,
+       CASE WHEN c.th < 0.5 THEN o.best ELSE dc_t() END ::XLINE,
+       ('Agent minutes lost per 100 tickets by threshold — cheapest at ' || o.best || ' (' || round(o.best_cost)::INTEGER
+        || ' min), yours at ' || dc_t() || ' (dashed lines)') ::TITLE
+FROM c, o ORDER BY c.th;
 
 SELECT 4::COL;
-SELECT 380::HEIGHT;
-SELECT anofox_plot_curve(c), 'Calibration — predicted vs observed refund rate (dot size = tickets)'::TITLE
-FROM dc_calibration c;
+SELECT 340::HEIGHT;
+SELECT CASE WHEN p_refund >= dc_t() THEN 'escalated' ELSE 'not escalated' END ::XAXIS,
+       CASE WHEN refund THEN 'asked for a refund' ELSE 'no refund asked' END ::YAXIS,
+       count(*) ::HEATMAP, 'Confusion at your threshold (tickets)'::TITLE
+FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 1, 2;
+
+SELECT 12::COL;
+SELECT 'Every mistake at your threshold — the misses are tickets that report a defect and demand money back in the same breath'::TITLE,
+       dc_verdict(p_refund, refund, dc_t()) AS "Verdict" ::BADGE, '#' || ticket_id AS "Ticket" ::TABLE, language AS "Language",
+       round(100 * p_refund, 1) AS "P(refund)" ::PERCENT, team AS "Team", text AS "Ticket text"
+FROM dc_scored WHERE dc_in(language, team) AND (p_refund >= dc_t()) <> refund
+ORDER BY refund DESC, p_refund DESC;
+
+-- ── 2 · Calibration ──────────────────────────────────────────────────────────
+SELECT 'Calibration'::TAB;
+
+SELECT 12::COL;
+SELECT 'A calibrated model''s "0.9" means 9 in 10. The model is decisive (most tickets score below 0.1 or above 0.9) and right when it is, in all three languages; the few uncertain tickets mix a defect with a refund demand.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 4::COL;
-SELECT 380::HEIGHT;
+SELECT 340::HEIGHT;
+SELECT anofox_plot_curve(c), 'Calibration — predicted vs observed refund rate'::TITLE
+FROM (SELECT 'calibration' AS curve_type, 'laya-multilingual' AS model_id,
+             avg(p_refund) AS x, avg(refund::INTEGER) AS y, count(*) AS weight
+      FROM dc_scored WHERE dc_in(language, team) GROUP BY least(floor(p_refund * 5), 4)) c;
+
+SELECT 4::COL;
+SELECT 340::HEIGHT;
 SELECT anofox_plot_curve(c), 'ROC of the refund probability'::TITLE
-FROM dc_roc c;
+FROM (WITH s AS (SELECT * FROM dc_scored WHERE dc_in(language, team)),
+           th AS (SELECT DISTINCT p_refund AS t FROM s UNION ALL SELECT 1.01),
+           pos AS (SELECT count(*) FILTER (WHERE refund) AS p, count(*) FILTER (WHERE NOT refund) AS n FROM s)
+      SELECT 'roc' AS curve_type, 'laya-multilingual' AS model_id, th.t AS threshold,
+             count(*) FILTER (WHERE s.p_refund >= th.t AND NOT s.refund) / nullif(any_value(pos.n), 0) AS x,
+             count(*) FILTER (WHERE s.p_refund >= th.t AND s.refund) / nullif(any_value(pos.p), 0) AS y
+      FROM th, s, pos GROUP BY th.t) c;
 
 SELECT 4::COL;
-SELECT 380::HEIGHT;
-SELECT threshold ::XAXIS, metric ::CATEGORY, value ::LINECHART, 'percent'::YFORMAT, 0.5 ::XLINE,
-       'Precision and recall by threshold'::TITLE
-FROM (SELECT threshold, 'precision' AS metric, round(100 * precision, 1) AS value FROM dc_thresholds
-      UNION ALL SELECT threshold, 'recall', round(100 * recall, 1) FROM dc_thresholds)
-ORDER BY threshold, metric;
-
-SELECT 12::COL;
-SELECT 'The misses at a 0.5 threshold — four mixed defect-and-refund tickets, a crash report and an invoice request'::TITLE,
-       ticket_id AS "Ticket" ::TABLE, lang AS "Lang", refund AS "Refund (label)", round(p_refund, 3) AS "P(refund)" ::PLAIN, text AS "Ticket text"
-FROM dc_scored WHERE (p_refund >= 0.5) <> refund ORDER BY p_refund DESC;
-
--- ── 3 · Routing ──────────────────────────────────────────────────────────────
-SELECT '3 Routing'::TAB;
-
-SELECT 12::COL;
-SELECT '**How:** `decide_choice` (or a `choice` question in `decide_answers`) picks one of the options written in the query and reports its probability. **What to look for:** the diagonal of the confusion matrix is the correct routing. **Defect** tickets are routed well; **billing** tickets go to defect when they mention something broken; and most **"other"** tickets — thank-you notes, office visits, training questions — land in **billing**, so a catch-all option needs a better description. A threshold on the choice probability would help only a little: wrong routings have the same median confidence (≈ 0.94) as right ones, just a longer tail of hesitant answers.'::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 6::COL;
-SELECT 400::HEIGHT;
-SELECT team_pred ::XAXIS, team ::YAXIS, count(*) ::HEATMAP, 12 ::DATALABELS,
-       'Confusion matrix — labelled team (rows) vs model''s choice (columns)'::TITLE
-FROM dc_scored GROUP BY ALL ORDER BY 1, 2;
-
-SELECT 6::COL;
-SELECT 400::HEIGHT;
-SELECT CASE WHEN team_pred = team THEN 'right team' ELSE 'wrong team' END ::XAXIS, p_team ::BOXPLOT,
-       'Choice probability — wrong routings are nearly as confident as right ones'::TITLE
-FROM dc_scored;
-
--- ── 4 · Frustration ──────────────────────────────────────────────────────────
-SELECT '4 Frustration'::TAB;
-
-SELECT 12::COL;
-SELECT '**How:** a `score` question takes an ordered rubric (here *calm, annoyed, angry*, levels 0–2) and returns the **expected level** — 1.4 means "between annoyed and angry". **What to look for:** if the score worked, the three boxes would climb from 0 to 2. They climb only a little: **calm** tickets score clearly lower than upset ones (median ≈ 0.9 vs ≈ 1.1), but **annoyed and angry** tickets are indistinguishable and every score sits near the middle level. Usable to separate calm from upset writers, not to grade how upset they are.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 340::HEIGHT;
+SELECT th ::XAXIS, metric ::CATEGORY, value ::LINECHART, 'percent'::YFORMAT, dc_t() ::XLINE,
+       'Precision and recall by threshold — yours dashed'::TITLE
+FROM (SELECT t / 20.0 AS th, m.metric,
+             round(100 * CASE m.metric
+                 WHEN 'precision' THEN count(*) FILTER (WHERE p_refund >= t / 20.0 AND refund) / nullif(count(*) FILTER (WHERE p_refund >= t / 20.0), 0)
+                 ELSE count(*) FILTER (WHERE p_refund >= t / 20.0 AND refund) / nullif(count(*) FILTER (WHERE refund), 0) END, 1) AS value
+      FROM range(1, 20) r(t), (VALUES ('precision'), ('recall')) m(metric), dc_scored
+      WHERE dc_in(language, team) GROUP BY t, m.metric)
+ORDER BY th, metric;
 
 SELECT 7::COL;
-SELECT 400::HEIGHT;
-SELECT CASE frustration WHEN 0 THEN '0 calm' WHEN 1 THEN '1 annoyed' ELSE '2 angry' END ::XAXIS, frustration_score ::BOXPLOT,
-       'Model score by labelled frustration — calm is lower; annoyed and angry look alike'::TITLE
-FROM dc_scored ORDER BY 1;
+SELECT 320::HEIGHT;
+SELECT language ::XAXIS, round(p_refund, 3) ::JITTER, CASE WHEN refund THEN 'asked for a refund' ELSE 'no refund asked' END ::CATEGORY,
+       dc_t() ::REFLINE, 'P(refund) per ticket — decisive in every language; the misses sit near your threshold (dashed)'::TITLE
+FROM dc_scored WHERE dc_in(language, team) ORDER BY refund, language;
 
 SELECT 5::COL;
-SELECT 'Mean score per labelled level'::TITLE,
-       CASE frustration WHEN 0 THEN '0 calm' WHEN 1 THEN '1 annoyed' ELSE '2 angry' END AS "Label" ::TABLE,
-       round(avg(frustration_score), 2) AS "Mean score (0–2)" ::PLAIN, count(*) AS "Tickets" ::PLAIN
-FROM dc_scored GROUP BY frustration ORDER BY frustration;
+SELECT 'Quality per language (lower Brier and calibration error are better)'::TITLE,
+       language AS "Language" ::TABLE, count(*) AS "Tickets" ::PLAIN,
+       round(100 * avg(((p_refund >= dc_t()) = refund)::INTEGER), 1) AS "Accuracy" ::PERCENT,
+       round(avg(power(p_refund - refund::INTEGER, 2)), 3) AS "Brier" ::COLORSCALE,
+       round(any_value(ece), 3) AS "Calibration error" ::COLORSCALE
+FROM dc_scored
+JOIN (SELECT language AS l2, sum(abs(sp - sy)) / sum(n) AS ece
+      FROM (SELECT language, sum(p_refund) AS sp, sum(refund::INTEGER) AS sy, count(*) AS n
+            FROM dc_scored WHERE dc_in(language, team) GROUP BY language, least(floor(p_refund * 5), 4))
+      GROUP BY language) e ON e.l2 = language
+WHERE dc_in(language, team)
+GROUP BY language ORDER BY language;
 
--- ── 5 · Tickets ──────────────────────────────────────────────────────────────
-SELECT '5 Tickets'::TAB;
+-- ── 3 · Routing ──────────────────────────────────────────────────────────────
+SELECT 'Routing'::TAB;
 
 SELECT 12::COL;
-SELECT 'Every ticket with the labels and the model''s answers. Sort by **P(refund)** to see the decisive answers at both ends; filter mentally by language to see that the multilingual model treats German and French like English.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A `choice` question picks one of the teams written in the query. Defect tickets route well; "other" tickets are pulled to billing, and raising the confidence gate doesn''t help — better option descriptions would. Click a team bar to list its routing mistakes.'::MARKDOWN, 'What to look for'::TITLE;
+
+SELECT 4::COL;
+SELECT 320::HEIGHT;
+SELECT team ::XAXIS, round(100 * avg((team_pred = team)::INTEGER), 1) ::BARCHART, 'percent'::YFORMAT,
+       'Right team, by labelled team — "other" is the weak spot'::TITLE
+FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 2 DESC;
+
+SELECT 4::COL;
+SELECT 320::HEIGHT;
+SELECT team_pred ::XAXIS, team ::YAXIS, count(*) ::HEATMAP,
+       'Labelled team (rows) vs the model''s choice'::TITLE
+FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 1, 2;
+
+SELECT 4::COL;
+SELECT 320::HEIGHT;
+SELECT gate ::XAXIS, metric ::CATEGORY, value ::LINECHART, 'percent'::YFORMAT, dc_gate() ::XLINE,
+       'A confidence gate cuts coverage but buys no accuracy — wrong routings are as confident as right ones'::TITLE
+FROM (SELECT g / 100.0 AS gate, m.metric,
+             round(CASE m.metric WHEN 'accuracy of auto-routed' THEN 100 * avg((team_pred = team)::INTEGER) FILTER (WHERE p_team >= g / 100.0)
+                                 ELSE 100 * count(*) FILTER (WHERE p_team >= g / 100.0) / count(*) END, 1) AS value
+      FROM range(50, 100, 2) r(g), (VALUES ('accuracy of auto-routed'), ('share auto-routed')) m(metric), dc_scored
+      WHERE dc_in(language, team) GROUP BY g, m.metric)
+WHERE value IS NOT NULL ORDER BY gate, metric;
 
 SELECT 12::COL;
-SELECT ticket_id AS "Ticket" ::PAGED, lang AS "Lang", text AS "Ticket text",
-       refund AS "Refund (label)", round(p_refund, 3) AS "P(refund)",
-       team AS "Team (label)", team_pred AS "Team (model)", round(frustration_score, 2) AS "Frustration (0–2)"
-FROM dc_scored ORDER BY ticket_id;
+SELECT 'Routing mistakes'::TITLE,
+       CASE WHEN p_team >= dc_gate() THEN 'failed: auto-routed wrong' ELSE 'review: held for a human' END AS "Outcome" ::BADGE,
+       '#' || ticket_id AS "Ticket" ::TABLE, language AS "Language", team AS "Labelled team", team_pred AS "Model's team",
+       round(100 * p_team, 1) AS "Confidence" ::PERCENT, text AS "Ticket text"
+FROM dc_scored WHERE dc_in(language, team) AND team_pred <> team AND dc_team_click(team)
+ORDER BY p_team DESC;
+
+-- ── 4 · Frustration ──────────────────────────────────────────────────────────
+SELECT 'Frustration'::TAB;
+
+SELECT 12::COL;
+SELECT 'A `score` question returns the expected level on a rubric (calm 0, annoyed 1, angry 2). It separates calm writers from upset ones but cannot grade how upset — good enough to order a callback queue, not to label tone.'::MARKDOWN, 'What to look for'::TITLE;
+
+SELECT 6::COL;
+SELECT 320::HEIGHT;
+SELECT CASE frustration WHEN 0 THEN '0 calm' WHEN 1 THEN '1 annoyed' ELSE '2 angry' END ::XAXIS, frustration_score ::BOXPLOT,
+       'Score by labelled level — calm is lower; annoyed and angry overlap'::TITLE
+FROM dc_scored WHERE dc_in(language, team) ORDER BY 1;
+
+SELECT 6::COL;
+SELECT 320::HEIGHT;
+SELECT CASE frustration WHEN 0 THEN '0 calm' WHEN 1 THEN '1 annoyed' ELSE '2 angry' END ::CATEGORY, frustration_score ::DENSITY,
+       'Distribution of the score per labelled level'::TITLE
+FROM dc_scored WHERE dc_in(language, team) ORDER BY 1;
+
+SELECT 12::COL;
+SELECT 'Call back first — the 10 highest scores among open refund escalations'::TITLE,
+       CASE frustration WHEN 0 THEN 'calm (low)' WHEN 1 THEN 'annoyed (medium)' ELSE 'angry (high)' END AS "Labelled tone" ::BADGE,
+       '#' || ticket_id AS "Ticket" ::TABLE, language AS "Language", round(frustration_score, 2) AS "Score (0–2)" ::PLAIN,
+       round(100 * p_refund, 1) AS "P(refund)" ::PERCENT, text AS "Ticket text"
+FROM dc_scored WHERE dc_in(language, team) AND p_refund >= dc_t()
+ORDER BY frustration_score DESC LIMIT 10;
+
+-- ── 5 · All tickets ──────────────────────────────────────────────────────────
+SELECT 'All tickets'::TAB;
+
+SELECT 12::COL;
+SELECT 'Every ticket with its labels, the model''s answers and the verdict at your rules'::TITLE,
+       '#' || ticket_id AS "Ticket" ::TABLE, language AS "Language", text AS "Ticket text",
+       dc_verdict(p_refund, refund, dc_t()) AS "Refund verdict" ::BADGE, round(100 * p_refund, 1) AS "P(refund)" ::PERCENT,
+       CASE WHEN team_pred = team THEN 'ok' ELSE 'failed: ' || team_pred END AS "Routing" ::BADGE, team AS "Labelled team",
+       round(frustration_score, 2) AS "Frustration (0–2)" ::PLAIN
+FROM dc_scored WHERE dc_in(language, team) ORDER BY ticket_id;

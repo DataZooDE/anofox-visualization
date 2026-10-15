@@ -183,6 +183,9 @@ pub enum Role {
     Span,
     /// Layout: `::HEIGHT` sets the *next* panel's height in pixels (the value).
     Height,
+    /// Layout: `::ROWSELECT` sets how the *next* table's rows can be selected:
+    /// `'none'` (default), `'single'` or `'multi'` (the value).
+    RowSelect,
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
     /// A SQL-paginated table (`::PAGED`) — the browser pages it with
@@ -359,12 +362,11 @@ fn value_str(v: &Value) -> String {
     }
 }
 
-/// The DataZoo palette — anofox-visualization's default categorical + single-series
-/// colours. The first five are the brand set (index 0 = the default primary);
-/// seven more distinct hues follow so a chart with up to ~12 categories keeps
-/// every series visually separable (11 GICS sectors used to collide at 5).
-/// (Defined in [`theme`]; the active theme's palette is
-/// [`theme::ResolvedTheme::palette`] — this constant is the default.)
+/// The DataZoo palette — the slot colours chart code writes directly
+/// (contract plots). Twelve distinct hues so a chart with up to ~12
+/// categories keeps every series separable. The rendered colours come from
+/// the active theme ([`theme::ResolvedTheme::palette`], by default
+/// [`theme::DEFAULT_PALETTE`]); its SVG pass maps these slot by slot.
 pub const DZ_COLORS: [(u8, u8, u8); 12] = theme::DZ_PALETTE;
 
 /// Palette colour `i` of the render's theme.
@@ -2180,7 +2182,7 @@ fn cartesian(
         }
     }
     if let Some(col) = color_col {
-        // DataZoo palette, levels sorted so a series keeps its colour across
+        // The theme palette, levels sorted so a series keeps its colour across
         // charts; `#rrggbb` levels are drawn in that colour.
         plot = if by_colour {
             plot.scale_color(dz_scale(o, Aesthetic::Color, col))
@@ -3160,7 +3162,7 @@ fn cell_num(v: &Value) -> Option<f64> {
 
 /// A choropleth map from a WKT `::MAP` geometry column, filled by a numeric
 /// measure (light → brand gradient, viridis over a basemap), else by a
-/// `::CATEGORY` (DataZoo palette), else in a light brand tint.
+/// `::CATEGORY` (theme palette), else in a light brand tint.
 fn render_map(
     o: &RenderOptions,
     cols: &[Column],

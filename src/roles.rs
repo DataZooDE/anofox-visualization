@@ -228,6 +228,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
     e("HEIGHT", &["TALL"], R::Height, "layout", false, "next panel's height in px"),
+    e("ROWSELECT", &["ROW_SELECT", "SELECTABLE"], R::RowSelect, "layout", false,
+      "next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>')"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
@@ -383,7 +385,7 @@ pub fn roles_json() -> String {
         "directives": tokens(&|r| matches!(
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
-                | Role::Tab | Role::SubTab | Role::Placeholder
+                | Role::RowSelect | Role::Tab | Role::SubTab | Role::Placeholder
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -488,6 +490,7 @@ mod tests {
             "ENDGROUP",
             "SPAN",
             "HEIGHT",
+            "ROWSELECT",
             "TAB",
             "SUBTAB",
             "PLACEHOLDER",
@@ -581,6 +584,7 @@ mod tests {
             Role::GroupEnd,
             Role::Span,
             Role::Height,
+            Role::RowSelect,
             Role::Table,
             Role::PagedTable,
             Role::Delta,
@@ -654,6 +658,7 @@ mod tests {
                 | Role::GroupEnd
                 | Role::Span
                 | Role::Height
+                | Role::RowSelect
                 | Role::Table
                 | Role::PagedTable
                 | Role::Metric(_)

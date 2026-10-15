@@ -5,7 +5,9 @@
 -- written to web/data/optimize/*.csv by scripts/gen-showcase-data.sh). The
 -- browser demo can't compute them live yet: the extension's DuckDB-Wasm build
 -- doesn't load (see examples/optimize-showcase/README.md), so this dashboard
--- only reads and plots the stored tables.
+-- only reads and plots the stored tables. The planning inputs pick among
+-- stored parameter sweeps (container sizes, bookings, wave sizes, schedule
+-- rules, portfolio limits); nothing is re-solved in the browser.
 --
 -- A made-up regional distribution centre plans one Friday: which containers
 -- to book, which shipments to give the cheap carrier, how to cut pick waves,
@@ -14,8 +16,12 @@
 -- anofox_optimize family; every panel puts "what we do today" (the family's
 -- weak baseline) next to the optimiser.
 --
--- Tabs: 1 Overview · 2 Containers · 3 Carrier · 4 Pick waves · 5 Lines ·
--- 6 Reserve fund. Natively, run from web/:  dashboard --check ../examples/optimize-showcase/showcase.sql
+-- Tabs: Overview · Containers · Carrier · Pick waves · Lines (packing, paint) ·
+-- Reserve fund. Natively, run from web/:  dashboard --check ../examples/optimize-showcase/showcase.sql
+
+-- ── Look ─────────────────────────────────────────────────────────────────────
+SELECT 'anofox_optimize · stored results'::BRAND;
+SELECT 'One Friday at a distribution centre: six decisions, optimised in SQL'::DASHBOARD_TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Data: the stored anofox_optimize results (CSV, a few KB each)
@@ -29,162 +35,313 @@ CREATE OR REPLACE TABLE os_wave_load AS FROM read_csv('data/optimize/os_wave_loa
 CREATE OR REPLACE TABLE os_sched_algos AS FROM read_csv('data/optimize/os_sched_algos.csv');
 CREATE OR REPLACE TABLE os_sched_gantt AS FROM read_csv('data/optimize/os_sched_gantt.csv');
 CREATE OR REPLACE TABLE os_seq_algos AS FROM read_csv('data/optimize/os_seq_algos.csv');
+CREATE OR REPLACE TABLE os_seq_matrix AS FROM read_csv('data/optimize/os_seq_matrix.csv');
+CREATE OR REPLACE TABLE os_seq_steps AS FROM read_csv('data/optimize/os_seq_steps.csv');
 CREATE OR REPLACE TABLE os_portfolio AS FROM read_csv('data/optimize/os_portfolio.csv');
-CREATE OR REPLACE TABLE os_portfolio_weights AS FROM read_csv('data/optimize/os_portfolio_weights.csv');
+CREATE OR REPLACE TABLE os_portfolio_alloc AS FROM read_csv('data/optimize/os_portfolio_alloc.csv');
 CREATE OR REPLACE TABLE os_provenance AS FROM read_csv('data/optimize/provenance.csv');
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Dashboard
--- ─────────────────────────────────────────────────────────────────────────────
-SELECT 'One Friday at a distribution centre: six decisions, optimised in SQL with anofox_optimize (stored results)'::LABEL;
+-- The planning inputs (strings from the controls → typed values; each snaps to
+-- a stored sweep point).
+CREATE OR REPLACE MACRO os_cap() AS coalesce(TRY_CAST(getvariable('container_size') AS INTEGER), 1000);
+CREATE OR REPLACE MACRO os_book() AS
+    least(5000, greatest(250, round(coalesce(TRY_CAST(getvariable('booking_kg') AS DOUBLE), 2000) / 250) * 250))::INTEGER;
+CREATE OR REPLACE MACRO os_wave() AS coalesce(TRY_CAST(getvariable('wave_size') AS INTEGER), 120);
+CREATE OR REPLACE MACRO os_rule() AS coalesce(getvariable('schedule_rule'), 'exact (proven optimum)');
+CREATE OR REPLACE MACRO os_pcap() AS
+    CASE coalesce(getvariable('position_cap'), '25 %') WHEN '40 %' THEN 0.4 WHEN 'no cap' THEN 1.0 ELSE 0.25 END;
+CREATE OR REPLACE MACRO os_hold() AS
+    greatest(coalesce(TRY_CAST(getvariable('holdings') AS INTEGER), 10), ceil(1 / os_pcap())::INTEGER);
+CREATE OR REPLACE MACRO os_shift() AS 480;  -- paint-line minutes in an 8-hour shift
 
+-- ── Header: provenance, planning inputs, KPIs ────────────────────────────────
 SELECT 12::COL;
-SELECT ('**Stored results, computed natively.** Every number on this page was computed with the **anofox_optimize** DuckDB extension (version `' || (SELECT extension_version FROM os_provenance) || '`) on a native DuckDB ' || (SELECT duckdb_version FROM os_provenance) || ' by `examples/optimize-showcase/compute.sql`; the demo reads the stored tables from `web/data/optimize/`. They are **not** recomputed in your browser: the extension''s DuckDB-Wasm build does not load in DuckDB-Wasm yet. The inputs are synthetic and deterministic. Each solver is one SQL call over a column aggregated with `list()`, e.g. `SELECT opt_pack_best_of(list(size ORDER BY carton), 1000.0) FROM cartons`.')::MARKDOWN, 'About this dashboard'::TITLE;
+SELECT ('**Stored results.** Computed natively with anofox_optimize `' || (SELECT extension_version FROM os_provenance) || '` on DuckDB ' || (SELECT duckdb_version FROM os_provenance) || ' by `examples/optimize-showcase/compute.sql`; its DuckDB-Wasm build does not load yet, so nothing is re-solved in your browser — the inputs below pick among stored parameter sweeps.')::MARKDOWN;
 
--- ── 1 · Overview ─────────────────────────────────────────────────────────────
-SELECT '1 Overview'::TAB;
-
-SELECT 12::COL;
-SELECT '**Question:** how much does a DC leave on the table when it plans with today''s rules of thumb? Six decisions, six anofox_optimize families: **pack** cartons into containers, **knapsack** shipments onto a cheap carrier, batch orders into pick **waves**, **schedule** the packing line against due dates, **sequence** the paint line to cut changeovers and pick a **portfolio** for the reserve fund. **What to look for:** every bar pair compares the baseline (the family''s deliberately weak member — "what we do today") with the optimiser; lower is better except for the carrier saving. Two functions return a **proven optimum** (`knapsack_exact`, `schedule_exact`); the rest are heuristics, which is why the `opt_…_best_of` members run every algorithm of the family and keep the winner.'::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 'Today''s rule vs the optimiser'::GROUP;
-SELECT ((SELECT bins_used FROM os_pack_algos WHERE algorithm = 'next fit (today)') - (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'best of'))::METRIC,
-       ('containers saved (of ' || (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'next fit (today)') || ')')::LABEL;
-SELECT ((SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE 'exact%')
-     - (SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE '%(today)'))::METRIC,
-       '€ more carrier savings at a 2 t booking'::LABEL;
-SELECT round(100 * (1 - (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm = 'best of')
-                      / (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm LIKE '%(today)')))::PERCENT,
-       'earlier pick of priority orders'::LABEL;
-SELECT round(100 * (1 - (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE 'exact%')
-                      / (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE '%(today)')))::PERCENT,
-       'less weighted lateness on the packing line'::LABEL;
-SELECT ((SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)')
-     - (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of'))::METRIC,
-       'paint-line changeover minutes saved'::LABEL;
+SELECT 'Planning inputs'::GROUP;
+SELECT container_size ::DROPDOWN, 'Container size (units)'::LABEL FROM (VALUES (1, '1000'), (2, '800'), (3, '1250'), (4, '1500')) t(k, container_size) ORDER BY k;
+SELECT 2000 AS booking_kg ::NUMBER, 'Carrier booking (kg, 250–5,000)'::LABEL;
+SELECT wave_size ::DROPDOWN, 'Wave size (order lines)'::LABEL FROM (VALUES (1, '120'), (2, '80'), (3, '160'), (4, '200')) t(k, wave_size) ORDER BY k;
+SELECT algorithm AS schedule_rule ::DROPDOWN, 'Packing-line rule'::LABEL FROM os_sched_algos WHERE algorithm NOT LIKE '%(today)' ORDER BY ord DESC;
+SELECT holdings ::DROPDOWN, 'Max. holdings'::LABEL FROM (SELECT DISTINCT max_holdings::VARCHAR AS holdings, max_holdings FROM os_portfolio) ORDER BY max_holdings DESC;
+SELECT position_cap ::DROPDOWN, 'Cap per asset'::LABEL FROM (VALUES (1, '25 %'), (2, '40 %'), (3, 'no cap')) t(k, position_cap) ORDER BY k;
 SELECT 1::ENDGROUP;
 
-SELECT 12::COL;
+SELECT 'Optimiser vs. today''s rule (arrow = change from today)'::GROUP;
+SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'best of')::PERCENT,
+       (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')::DELTA,
+       'Container fill'::LABEL;
+SELECT (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE 'exact%')::METRIC,
+       (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE '%(today)')::DELTA,
+       'Carrier saving (€)'::LABEL;
+SELECT round(100 * sum(lines) FILTER (WHERE algorithm = 'best of' AND wave <= 3) / sum(lines) FILTER (WHERE algorithm = 'best of'), 1)::PERCENT,
+       round(100 * sum(lines) FILTER (WHERE algorithm LIKE '%(today)' AND wave <= 3) / sum(lines) FILTER (WHERE algorithm LIKE '%(today)'), 1)::DELTA,
+       'Express lines in waves 1–3'::LABEL
+FROM os_wave_load WHERE capacity = os_wave() AND class = 'express';
+SELECT count(*) FILTER (WHERE algorithm = os_rule() AND late_min = 0)::METRIC,
+       count(*) FILTER (WHERE algorithm LIKE '%(today)' AND late_min = 0)::DELTA,
+       'Packing jobs on time (of 12)'::LABEL
+FROM os_sched_gantt;
+SELECT (os_shift() - (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of'))::METRIC,
+       (os_shift() - (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)'))::DELTA,
+       'Paint minutes left per shift'::LABEL;
+SELECT (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm = 'best of')::METRIC,
+       (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm LIKE 'top return%')::DELTA,
+       'Reserve-fund Sharpe ratio'::LABEL;
+SELECT 1::ENDGROUP;
+
+-- ── 1 · Overview ─────────────────────────────────────────────────────────────
+SELECT 'Overview'::TAB;
+
+SELECT 7::COL;
 SELECT 380::HEIGHT;
-SELECT decision ::XAXIS, rule ::CATEGORY, value ::BARCHART, 'percent'::YFORMAT,
-       'Optimiser vs today''s rule, today = 100 % — every family beats its baseline; paint changeovers drop by four fifths'::TITLE
-FROM (
-    SELECT 'containers' AS decision, 'today' AS rule, 100.0 AS value
-    UNION ALL SELECT 'containers', 'optimised', round(100.0 * (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'best of') / (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'next fit (today)'), 1)
-    UNION ALL SELECT 'carrier saving', 'today', 100.0
-    UNION ALL SELECT 'carrier saving', 'optimised', round(100.0 * (SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE 'exact%') / (SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE '%(today)'), 1)
-    UNION ALL SELECT 'mean pick wave', 'today', 100.0
-    UNION ALL SELECT 'mean pick wave', 'optimised', round(100.0 * (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm = 'best of') / (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm LIKE '%(today)'), 1)
-    UNION ALL SELECT 'weighted lateness', 'today', 100.0
-    UNION ALL SELECT 'weighted lateness', 'optimised', round(100.0 * (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE 'exact%') / (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE '%(today)'), 1)
-    UNION ALL SELECT 'paint changeovers', 'today', 100.0
-    UNION ALL SELECT 'paint changeovers', 'optimised', round(100.0 * (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of') / (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)'), 1)
-) ORDER BY decision, rule DESC;
+WITH g AS (
+    SELECT 'fewer containers' AS gain,
+           100 * (1 - (SELECT bins_used FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'best of')
+                    / (SELECT bins_used FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')) AS pct
+    UNION ALL SELECT 'more carrier saving',
+           100 * ((SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE 'exact%')
+                / (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE '%(today)') - 1)
+    UNION ALL SELECT 'earlier priority picking',
+           100 * (1 - (SELECT avg_weighted_wave FROM os_wave_algos WHERE capacity = os_wave() AND algorithm = 'best of')
+                    / (SELECT avg_weighted_wave FROM os_wave_algos WHERE capacity = os_wave() AND algorithm LIKE '%(today)'))
+    UNION ALL SELECT 'less weighted lateness',
+           100 * (1 - (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm = os_rule())
+                    / (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE '%(today)'))
+    UNION ALL SELECT 'less paint changeover',
+           100 * (1 - (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of')
+                    / (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)'))
+    UNION ALL SELECT 'higher Sharpe ratio',
+           100 * ((SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm = 'best of')
+                / (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm LIKE 'top return%') - 1))
+SELECT gain ::XAXIS, round(pct, 1) ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT,
+       'Gain over today''s rule at the chosen inputs — paint changeovers and the carrier gain most'::TITLE
+FROM g ORDER BY pct;
+
+SELECT 5::COL;
+SELECT 'Six decisions, six solver families'::TITLE,
+       decision AS "Decision" ::TABLE, fn AS "Functions", today AS "Today's rule", guarantee AS "Optimiser" ::BADGE
+FROM (VALUES
+    (1, 'Containers', 'opt_pack_…', 'next fit', 'ok: meets the lower bound'),
+    (2, 'Carrier', 'opt_knapsack_…', 'biggest saving first', 'ok: proven optimum'),
+    (3, 'Pick waves', 'opt_wave_…', 'arrival order', 'heuristic (best of 4)'),
+    (4, 'Packing line', 'opt_schedule_…', 'earliest due date', 'ok: proven optimum'),
+    (5, 'Paint line', 'opt_sequence_…', 'order book', 'heuristic (best of 3)'),
+    (6, 'Reserve fund', 'opt_portfolio_…', 'top expected return', 'heuristic')
+) t(k, decision, fn, today, guarantee) ORDER BY k;
+
+SELECT 12::COL;
+SELECT '**What to look for:** change the planning inputs above — every KPI, chart and table re-reads the stored sweep for that setting. Each solver is one SQL call over a `list()` column, for example `opt_pack_best_of(list(size ORDER BY carton), 1000.0)`.'::MARKDOWN;
 
 -- ── 2 · Containers (pack_*) ──────────────────────────────────────────────────
-SELECT '2 Containers'::TAB;
+SELECT 'Containers'::TAB;
 
 SELECT 12::COL;
-SELECT ('**Decision:** 150 cartons (60–580 volume units) go out in 1,000-unit containers — how few containers will do? `opt_pack_…(sizes, capacity)` returns the number of bins and each carton''s bin. **What to look for:** **next fit** — close the container as soon as a carton doesn''t fit, today''s practice at the dock — needs **' || (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'next fit (today)') || '** containers. Every *decreasing* packer needs **' || (SELECT bins_used FROM os_pack_algos WHERE algorithm = 'best of') || '**, which equals the volume lower bound ⌈total volume / 1,000⌉ — so here the heuristics are **provably optimal**. The fill chart shows why: next fit leaves a ragged tail of half-empty containers, the optimised plan fills 34 of its 39 containers to 95 % or more.')::MARKDOWN, 'What to look for'::TITLE;
+SELECT ('**What to look for:** 150 cartons into **' || os_cap() || '-unit** containers. Today''s next-fit rule closes a container as soon as a carton doesn''t fit; every *decreasing* packer reaches the volume lower bound — so here the heuristics are provably optimal.')::MARKDOWN;
 
-SELECT 5::COL;
-SELECT 380::HEIGHT;
+SELECT 4::COL;
+SELECT 300::HEIGHT;
+SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'best of')::GAUGE, '50,100'::RANGE,
+       '#c93636,#b45309,#13803b'::COLORS, 'Average fill, optimised'::TITLE;
+
+SELECT 4::COL;
+SELECT 300::HEIGHT;
+SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')::GAUGE, '50,100'::RANGE,
+       '#c93636,#b45309,#13803b'::COLORS, 'Average fill, today (next fit)'::TITLE;
+
+SELECT 4::COL;
+SELECT 300::HEIGHT;
 SELECT algorithm ::XAXIS, bins_used ::BARCHART, lower_bound ::REFLINE, 1 ::FLIP,
-       'Containers used — next fit needs 7 more than the bound (dashed); every decreasing packer hits it'::TITLE
-FROM os_pack_algos ORDER BY 2 DESC;
+       'Containers used — dashed: the volume lower bound'::TITLE
+FROM os_pack_algos WHERE capacity = os_cap() ORDER BY 2 DESC, 1 DESC;
 
-SELECT 7::COL;
-SELECT 380::HEIGHT;
-SELECT container ::XAXIS, fill_pct ::BARCHART, algorithm ::FACET, 1 ::FACET_NCOL, 'percent'::YFORMAT,
-       'Fill per container — the optimised plan is nearly full; next fit leaves gaps everywhere'::TITLE
-FROM os_pack_bins ORDER BY algorithm, container;
-
--- ── 3 · Carrier (knapsack_*) ─────────────────────────────────────────────────
-SELECT '3 Carrier'::TAB;
-
-SELECT 12::COL;
-SELECT ('**Decision:** a cheaper carrier takes a limited weight; each of 60 shipments saves a different amount if it rides with them. Which shipments to hand over? That is a 0/1 knapsack: `opt_knapsack_…(values, weights, capacity)`. **What to look for:** today''s rule ("give them the biggest savers first") falls far short of the **proven optimum** (`opt_knapsack_exact`) at every booking size — at the **2,000 kg** booking it captures **' || (SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE '%(today)')::INTEGER || ' €** of **' || (SELECT saving_eur FROM os_knap_curve WHERE capacity = 2000 AND algorithm LIKE 'exact%')::INTEGER || ' €** possible, because the big savers are also the heaviest. Ranking by **saving per kg** gets within a few euros of the optimum here, but carries no guarantee. The scatter shows the 2,000 kg plan: the optimum takes many light, mid-value shipments.')::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 7::COL;
-SELECT 400::HEIGHT;
-SELECT capacity ::XAXIS, algorithm ::CATEGORY, saving_eur ::LINECHART, '€'::YFORMAT, 2000 ::XLINE,
-       'Saving vs booked capacity — the exact optimum dominates; today''s rule loses 35 % at 2 t'::TITLE
-FROM os_knap_curve ORDER BY capacity, algorithm;
-
-SELECT 5::COL;
-SELECT 400::HEIGHT;
-SELECT weight_kg ::XAXIS, saving_eur ::SCATTER,
-       CASE WHEN exact_loads AND greedy_loads THEN 'both'
-            WHEN exact_loads THEN 'optimum only'
-            WHEN greedy_loads THEN 'today only'
-            ELSE 'neither' END ::CATEGORY, '€'::YFORMAT,
-       'The 2 t plan — the optimum swaps heavy savers for many light ones'::TITLE
-FROM os_knap_pick ORDER BY shipment;
-
--- ── 4 · Pick waves (wave_*) ──────────────────────────────────────────────────
-SELECT '4 Pick waves'::TAB;
-
-SELECT 12::COL;
-SELECT ('**Decision:** 48 orders (8–48 order lines each; **express**, **priority** or **standard**) are picked in waves of at most 120 lines. Which order goes into which wave? `opt_wave_…(lines, priorities, capacity)` returns a 1-based wave per order and the **priority-weighted mean wave** (lower = urgent orders leave earlier). **What to look for:** in **arrival order** express orders are scattered from the first to the last of twelve waves (weighted mean wave **' || (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm LIKE '%(today)') || '**). The optimiser front-loads them into the first waves (**' || (SELECT avg_weighted_wave FROM os_wave_algos WHERE algorithm = 'best of') || '**) at the price of one extra wave at the end — and "fewest waves" alone is the *worst* rule for urgency.')::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 4::COL;
-SELECT 400::HEIGHT;
-SELECT algorithm ::XAXIS, avg_weighted_wave ::BARCHART, 1 ::FLIP,
-       'Priority-weighted mean wave — lower is better'::TITLE
-FROM os_wave_algos ORDER BY 2 DESC;
-
-SELECT 4::COL;
-SELECT 400::HEIGHT;
-SELECT wave ::XAXIS, class ::CATEGORY, lines ::BARCHART_STACKED,
-       'Arrival order (today) — express orders spread from wave 1 to 12'::TITLE
-FROM os_wave_load WHERE algorithm = 'arrival order (today)' ORDER BY wave, class;
-
-SELECT 4::COL;
-SELECT 400::HEIGHT;
-SELECT wave ::XAXIS, class ::CATEGORY, lines ::BARCHART_STACKED,
-       'Optimised (best of) — express and priority orders in waves 1–6'::TITLE
-FROM os_wave_load WHERE algorithm = 'best of' ORDER BY wave, class;
-
--- ── 5 · Lines (schedule_* and sequence_*) ────────────────────────────────────
-SELECT '5 Lines'::TAB;
-
-SELECT 12::COL;
-SELECT ('**Decisions:** (1) the packing line runs 12 jobs from four product families; switching family costs a 15-minute changeover, and every job has a due time and a weight (3 = key account). `opt_schedule_…(processing, due, weights, setup, n)` orders the jobs. (2) The paint line runs ten colours; going light → dark is a quick rinse, dark → light a full clean. `opt_sequence_…(setup, n)` orders them. **What to look for:** **earliest due date** — today''s rule — ignores changeovers and weights; the **proven optimum** (`opt_schedule_exact`, ≤ 14 jobs) cuts weighted lateness from **' || (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE '%(today)')::INTEGER || '** to **' || (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE 'exact%')::INTEGER || '** job-minutes and finishes 13 minutes earlier with one 15-minute family changeover fewer. On the paint line the order book needs **' || (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)')::INTEGER || '** minutes of changeovers, the light-to-dark sequence **' || (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of')::INTEGER || '**.')::MARKDOWN, 'What to look for'::TITLE;
-
-SELECT 12::COL;
-SELECT 460::HEIGHT;
-SELECT ((start_min + end_min) / 2) ::XAXIS, pos ::SCATTER, start_min ::XMIN, end_min ::XMAX,
-       CASE WHEN late_min > 0 THEN 'late job' ELSE 'job on time' END ::CATEGORY,
-       algorithm ::FACET, 1 ::FACET_NCOL, 'reverse'::YSCALE,
-       'Packing-line plan (bar = job run, minutes after 06:00; row = position) — 7 late jobs instead of 9 under the optimum'::TITLE
-FROM os_sched_gantt ORDER BY algorithm, pos;
+SELECT 8::COL;
+SELECT 340::HEIGHT;
+SELECT rank ::XAXIS, rule ::CATEGORY, fill_pct ::LINECHART, 'percent'::YFORMAT,
+       'Fill profile, fullest container first — next fit leaves a long tail of half-empty containers'::TITLE
+FROM (SELECT row_number() OVER (PARTITION BY algorithm ORDER BY fill_pct DESC) AS rank,
+             CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'today (next fit)' END AS rule, fill_pct
+      FROM os_pack_bins WHERE capacity = os_cap())
+ORDER BY rule, rank;
 
 SELECT 4::COL;
 SELECT 340::HEIGHT;
-SELECT algorithm ::XAXIS, weighted_tardiness ::BARCHART, 1 ::FLIP,
-       'Weighted lateness by rule (job-minutes) — exact = proven optimum'::TITLE
-FROM os_sched_algos ORDER BY 2 DESC;
+SELECT capacity ::XAXIS, rule ::CATEGORY, n ::LINECHART, os_cap() ::XLINE,
+       'Containers needed by size — optimised = the lower bound at every size'::TITLE
+FROM (SELECT capacity, CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'today (next fit)' END AS rule, bins_used AS n
+      FROM os_pack_algos WHERE algorithm IN ('best of', 'next fit (today)'))
+ORDER BY rule, capacity;
+
+-- ── 3 · Carrier (knapsack_*) ─────────────────────────────────────────────────
+SELECT 'Carrier'::TAB;
+
+SELECT 12::COL;
+SELECT ('**What to look for:** at a **' || os_book() || ' kg** booking, today''s "biggest saver first" rule captures **' ||
+        (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE '%(today)')::INTEGER || ' €** of the **' ||
+        (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE 'exact%')::INTEGER ||
+        ' €** possible (`opt_knapsack_exact`) — the big savers are also the heaviest. Ranking by saving per kg comes close, without a guarantee.')::MARKDOWN;
 
 SELECT 8::COL;
-SELECT 'Paint line — changeover minutes per sequence'::TITLE,
+SELECT 360::HEIGHT;
+SELECT capacity ::XAXIS, algorithm ::CATEGORY, saving_eur ::LINECHART, os_book() ::XLINE,
+       'Saving (€) by booked capacity (kg) — the gap to the optimum never closes'::TITLE
+FROM os_knap_curve ORDER BY algorithm, capacity;
+
+SELECT 4::COL;
+SELECT 360::HEIGHT;
+SELECT algorithm ::XAXIS, saving_eur ::BARCHART, 1 ::FLIP,
+       ('Saving (€) at ' || os_book() || ' kg')::TITLE
+FROM os_knap_curve WHERE capacity = os_book() ORDER BY 2;
+
+SELECT 7::COL;
+SELECT 380::HEIGHT;
+SELECT weight_kg ::XAXIS, saving_eur ::SCATTER,
+       CASE WHEN exact_loads AND greedy_loads THEN 'both rules'
+            WHEN exact_loads THEN 'optimum only'
+            WHEN greedy_loads THEN 'today only'
+            ELSE 'stays with the regular carrier' END ::CATEGORY,
+       ('Which shipments ride at ' || os_book() || ' kg (x: weight in kg, y: saving in €) — the optimum swaps heavy savers for light ones')::TITLE
+FROM os_knap_pick WHERE capacity = os_book() ORDER BY 3, shipment;
+
+SELECT 5::COL;
+SELECT 'Where the two plans disagree'::TITLE,
+       'S' || lpad(shipment::VARCHAR, 2, '0') AS "Shipment" ::TABLE, weight_kg AS "kg" ::PLAIN, saving_eur AS "Saving €" ::PLAIN, eur_per_kg AS "€ / kg" ::PLAIN,
+       CASE WHEN exact_loads THEN 'ok: loads' ELSE 'leaves' END AS "Optimum" ::BADGE,
+       CASE WHEN greedy_loads THEN 'ok: loads' ELSE 'leaves' END AS "Today" ::BADGE
+FROM os_knap_pick WHERE capacity = os_book() AND exact_loads <> greedy_loads
+ORDER BY exact_loads DESC, eur_per_kg DESC;
+
+-- ── 4 · Pick waves (wave_*) ──────────────────────────────────────────────────
+SELECT 'Pick waves'::TAB;
+
+SELECT 12::COL;
+SELECT ('**What to look for:** 48 orders in waves of **' || os_wave() || '** order lines. Lower priority-weighted mean wave = urgent orders leave earlier. The optimiser front-loads express orders at the price of one extra wave at the end; "fewest waves" alone is the worst rule for urgency.')::MARKDOWN;
+
+SELECT 4::COL;
+SELECT 340::HEIGHT;
+SELECT algorithm ::XAXIS, avg_weighted_wave ::BARCHART, 1 ::FLIP,
+       'Priority-weighted mean wave — lower is better'::TITLE
+FROM os_wave_algos WHERE capacity = os_wave() ORDER BY 2 DESC;
+
+SELECT 4::COL;
+SELECT 340::HEIGHT;
+SELECT 'W' || lpad(wave::VARCHAR, 2, '0') ::XAXIS, class ::CATEGORY, lines ::BARCHART_STACKED,
+       'Today (arrival order) — express lines in every wave'::TITLE
+FROM os_wave_load WHERE capacity = os_wave() AND algorithm = 'arrival order (today)' ORDER BY wave, class;
+
+SELECT 4::COL;
+SELECT 340::HEIGHT;
+SELECT 'W' || lpad(wave::VARCHAR, 2, '0') ::XAXIS, class ::CATEGORY, lines ::BARCHART_STACKED,
+       'Optimised (best of) — express first, standard last'::TITLE
+FROM os_wave_load WHERE capacity = os_wave() AND algorithm = 'best of' ORDER BY wave, class;
+
+SELECT 7::COL;
+SELECT 320::HEIGHT;
+SELECT (capacity || ' lines') ::XAXIS, algorithm ::YAXIS, avg_weighted_wave ::HEATMAP,
+       'Mean wave by rule and wave size (darker = later, worse) — the optimiser wins at every size'::TITLE
+FROM os_wave_algos ORDER BY capacity, ord DESC;
+
+SELECT 5::COL;
+SELECT 320::HEIGHT;
+SELECT capacity ::XAXIS, CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'today (arrival order)' END ::CATEGORY,
+       waves ::LINECHART, os_wave() ::XLINE, 'Waves needed by wave size — the price is one extra wave'::TITLE
+FROM os_wave_algos WHERE algorithm IN ('best of', 'arrival order (today)') ORDER BY 2, 1;
+
+-- ── 5 · Lines (schedule_* and sequence_*) ────────────────────────────────────
+SELECT 'Lines'::TAB;
+
+SELECT 'Packing line'::SUBTAB;
+
+SELECT 12::COL;
+SELECT ('**What to look for:** 12 jobs, four product families, a 15-minute changeover between families and a weight of 3 for key accounts. Today''s earliest-due-date rule ignores both; **' || os_rule() || '** cuts weighted lateness from **' ||
+        (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm LIKE '%(today)')::INTEGER || '** to **' ||
+        (SELECT weighted_tardiness FROM os_sched_algos WHERE algorithm = os_rule())::INTEGER || '** job-minutes. Pick another rule in the inputs.')::MARKDOWN;
+
+SELECT 12::COL;
+SELECT 440::HEIGHT;
+SELECT ((start_min + end_min) / 2) ::XAXIS, pos ::SCATTER, start_min ::XMIN, end_min ::XMAX,
+       CASE WHEN late_min > 0 THEN 'late job' ELSE 'job on time' END ::CATEGORY,
+       algorithm ::FACET, 1 ::FACET_NCOL, 'reverse'::YSCALE,
+       'Run plan (bar = job, minutes after 06:00; row = position in the sequence)'::TITLE
+FROM os_sched_gantt WHERE algorithm LIKE '%(today)' OR algorithm = os_rule() ORDER BY algorithm, pos;
+
+SELECT 5::COL;
+SELECT 360::HEIGHT;
+SELECT algorithm ::XAXIS, weighted_tardiness ::BARCHART, 1 ::FLIP,
+       'Weighted lateness by rule (job-minutes) — exact = proven optimum'::TITLE
+FROM os_sched_algos ORDER BY 2 DESC, 1;
+
+SELECT 7::COL;
+SELECT 'Job by job: today vs the selected rule'::TITLE,
+       t.job_name AS "Job" ::TABLE, t.family AS "Family",
+       CASE WHEN t.weight > 1 THEN 'key account' ELSE 'standard' END AS "Customer",
+       strftime(TIMESTAMP '2026-10-16 06:00' + INTERVAL (t.due_min::INTEGER) MINUTE, '%H:%M') AS "Due" ::PLAIN,
+       t.late_min AS "Late today (min)" ::COLORSCALE,
+       s.late_min AS "Late, selected (min)" ::COLORSCALE,
+       CASE WHEN s.late_min = 0 THEN 'ok: on time' WHEN s.late_min < t.late_min THEN 'late, but earlier' ELSE 'late' END AS "Selected rule" ::BADGE
+FROM os_sched_gantt t JOIN os_sched_gantt s ON s.job_name = t.job_name AND s.algorithm = os_rule()
+WHERE t.algorithm LIKE '%(today)'
+ORDER BY t.weight DESC, t.due_min;
+
+SELECT 'Paint line'::SUBTAB;
+
+SELECT 12::COL;
+SELECT ('**What to look for:** ten colours; light → dark is a quick rinse, dark → light a full clean. The order book needs **' ||
+        (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)')::INTEGER || '** minutes of changeovers, `opt_sequence_best_of` **' ||
+        (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of')::INTEGER || '** — it simply paints light to dark.')::MARKDOWN;
+
+SELECT 7::COL;
+SELECT 360::HEIGHT;
+SELECT pos ::XAXIS, CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'today (order book)' END ::CATEGORY,
+       cum_min ::STEP, 'Changeover minutes, cumulative over the ten colours — every dark → light step costs half an hour'::TITLE
+FROM os_seq_steps WHERE algorithm IN ('best of', 'order book (today)') ORDER BY 2, 1;
+
+SELECT 5::COL;
+SELECT 360::HEIGHT;
+SELECT to_colour ::XAXIS, from_colour ::YAXIS, minutes ::HEATMAP,
+       'Changeover matrix (minutes, from row to column) — colours from light to dark'::TITLE
+FROM os_seq_matrix ORDER BY to_dark, from_dark DESC;
+
+SELECT 12::COL;
+SELECT 'The four sequences'::TITLE,
        algorithm AS "Rule" ::TABLE, changeover_min AS "Changeover (min)" ::COLORSCALE, sequence AS "Colour order" ::PLAIN
 FROM os_seq_algos ORDER BY ord;
 
 -- ── 6 · Reserve fund (portfolio_*) ───────────────────────────────────────────
-SELECT '6 Reserve fund'::TAB;
+SELECT 'Reserve fund'::TAB;
 
 SELECT 12::COL;
-SELECT ('**Decision:** the back office parks a reserve fund in at most *k* of ten asset classes, with at most *cap* of the fund in any one. `opt_portfolio_…(expected_returns, covariance, max_holdings, cap)` returns the weights, expected (excess) return, volatility and Sharpe ratio. Each dot is one *(k, cap)* setting. **What to look for:** the naive rule — fill the cap with the highest-return assets — is riskier than the optimiser''s portfolio for every setting (dots further **right**). The optimiser''s portfolios sit **up and to the left**: per unit of risk they earn more (best Sharpe **' || (SELECT max(sharpe) FROM os_portfolio WHERE algorithm = 'best of') || '** vs **' || (SELECT max(sharpe) FROM os_portfolio WHERE algorithm LIKE 'top return%') || '**), because they mix bonds, gold and private credit whose risks don''t move together. These are heuristics: no optimum is guaranteed.')::MARKDOWN, 'What to look for'::TITLE;
+SELECT ('**What to look for:** at most **' || os_hold() || '** of ten asset classes, at most **' || CASE WHEN os_pcap() = 1 THEN 'no cap' ELSE (100 * os_pcap())::INTEGER || ' %' END ||
+        '** in any one. The naive rule fills the cap with the highest-return assets; the optimiser mixes bonds, gold and private credit whose risks don''t move together, and earns more per unit of risk. Heuristics: no optimum is guaranteed.')::MARKDOWN;
 
-SELECT 8::COL;
-SELECT 420::HEIGHT;
-SELECT volatility_pct ::XAXIS, return_pct ::SCATTER, algorithm ::CATEGORY,
+SELECT 7::COL;
+SELECT 400::HEIGHT;
+SELECT volatility_pct ::XAXIS, return_pct ::SCATTER,
+       CASE WHEN max_holdings = os_hold() AND cap = os_pcap() THEN '▶ selected setting'
+            WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'top return (naive)' END ::CATEGORY,
        'percent'::XFORMAT, 'percent'::YFORMAT,
-       'Return vs risk per (holdings, cap) setting — the optimiser earns more per unit of risk'::TITLE
-FROM os_portfolio ORDER BY algorithm, max_holdings, cap;
+       'Return vs risk for every (holdings, cap) setting — optimised portfolios sit up and to the left'::TITLE
+FROM os_portfolio ORDER BY 3, max_holdings, cap;
 
-SELECT 4::COL;
-SELECT 420::HEIGHT;
-SELECT asset ::XAXIS, weight_pct ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT,
-       'The best-Sharpe portfolio — eight asset classes, none above 25 %'::TITLE
-FROM os_portfolio_weights ORDER BY 2 DESC;
+SELECT 5::COL;
+SELECT 400::HEIGHT;
+SELECT asset ::XAXIS, CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'top return (naive)' END ::CATEGORY,
+       weight_pct ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT,
+       'Weights at the selected setting'::TITLE
+FROM os_portfolio_alloc WHERE max_holdings = os_hold() AND cap = os_pcap() ORDER BY 2, asset DESC;
+
+SELECT 6::COL;
+SELECT 300::HEIGHT;
+SELECT max_holdings ::XAXIS, CASE cap WHEN 1 THEN 'no cap' ELSE (100 * cap)::INTEGER || ' % cap' END ::YAXIS, sharpe ::HEATMAP,
+       'Sharpe ratio of the optimised portfolio by holdings limit and cap'::TITLE
+FROM os_portfolio WHERE algorithm = 'best of' ORDER BY max_holdings, cap;
+
+SELECT 6::COL;
+SELECT 'Settings ranked by Sharpe ratio'::TITLE,
+       max_holdings || ' holdings' AS "Setting" ::TABLE, CASE cap WHEN 1 THEN 'no cap' ELSE (100 * cap)::INTEGER || ' %' END AS "Cap" ::PLAIN,
+       return_pct AS "Return %" ::PLAIN, volatility_pct AS "Volatility %" ::PLAIN, sharpe AS "Sharpe" ::PLAIN,
+       round(100 * (sharpe / naive - 1), 1) AS "vs naive %" ::TREND
+FROM (SELECT b.*, n.sharpe AS naive FROM os_portfolio b
+      JOIN os_portfolio n ON n.max_holdings = b.max_holdings AND n.cap = b.cap AND n.algorithm LIKE 'top return%'
+      WHERE b.algorithm = 'best of')
+ORDER BY sharpe DESC, max_holdings LIMIT 10;

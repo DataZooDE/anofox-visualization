@@ -237,8 +237,9 @@ impl ThemeSet {
 
 // ───────────────────────── built-ins ──────────────────────────────────────
 
-/// The DataZoo palette (the `light` default). Index 0 = brand steel blue,
-/// 4 = near-black, 11 = slate ("Other").
+/// The DataZoo palette — the colours chart code writes directly (contract
+/// plots); every theme maps them to its own palette slot by slot. Index 0 =
+/// steel blue, 4 = near-black, 11 = slate ("Other").
 pub const DZ_PALETTE: [Rgb; 12] = [
     (0x45, 0x64, 0x81), // steel blue (brand primary)
     (0xe8, 0x64, 0x33), // orange
@@ -254,21 +255,40 @@ pub const DZ_PALETTE: [Rgb; 12] = [
     (0x7a, 0x8b, 0x99), // slate grey
 ];
 
-/// The DataZoo palette tuned for dark cards (same hue order, lifted
-/// lightness; the near-black slot becomes a light grey).
-pub const DZ_PALETTE_DARK: [Rgb; 12] = [
-    (0x7f, 0xa7, 0xcf),
-    (0xf0, 0x86, 0x5c),
-    (0xf2, 0x5f, 0x83),
-    (0xf2, 0xd2, 0x6b),
-    (0xd5, 0xdb, 0xe5),
-    (0x5c, 0xc4, 0x8b),
-    (0xa8, 0x82, 0xc8),
-    (0x74, 0xc9, 0xe6),
-    (0xc8, 0x95, 0x66),
-    (0xbd, 0xdc, 0x74),
-    (0xe3, 0x9c, 0xcc),
-    (0x9a, 0xa8, 0xb6),
+/// The default palette (the `light` theme): electric blue first, then hues
+/// checked for colour-vision-deficiency separation between neighbours. The
+/// slots keep the DataZoo palette's roles — 4 = near-black, 11 = grey
+/// ("Other") — because chart code that writes [`DZ_PALETTE`] colours is
+/// remapped slot by slot (see [`ResolvedTheme::finish_svg`]).
+pub const DEFAULT_PALETTE: [Rgb; 12] = [
+    (0x25, 0x63, 0xeb), // electric blue
+    (0xeb, 0x68, 0x34), // orange
+    (0x1b, 0xaf, 0x7a), // aqua
+    (0xed, 0xa1, 0x00), // amber
+    (0x1f, 0x29, 0x37), // near-black
+    (0xe8, 0x7b, 0xa4), // pink
+    (0x4a, 0x3a, 0xa7), // violet
+    (0xe3, 0x49, 0x48), // red
+    (0x00, 0x83, 0x00), // green
+    (0x08, 0x91, 0xb2), // cyan
+    (0xdb, 0x27, 0x77), // magenta
+    (0x8b, 0x92, 0x9e), // grey ("Other")
+];
+
+/// [`DEFAULT_PALETTE`] stepped for dark cards (same hues and slots).
+pub const DEFAULT_PALETTE_DARK: [Rgb; 12] = [
+    (0x3b, 0x82, 0xf6),
+    (0xd9, 0x59, 0x26),
+    (0x19, 0x9e, 0x70),
+    (0xc9, 0x85, 0x00),
+    (0xd1, 0xd5, 0xdb),
+    (0xd5, 0x51, 0x81),
+    (0x90, 0x85, 0xe9),
+    (0xe6, 0x67, 0x67),
+    (0x22, 0xa3, 0x2a),
+    (0x08, 0x91, 0xb2),
+    (0xdb, 0x27, 0x77),
+    (0x9c, 0xa3, 0xaf),
 ];
 
 /// Okabe-Ito — the colour-blind-safe palette (`colorblind` theme).
@@ -285,7 +305,7 @@ pub const OKABE_ITO: [Rgb; 8] = [
 
 /// Names of the built-in themes (for `--themes`, lint and docs).
 pub const BUILTINS: &[(&str, &str)] = &[
-    ("light", "the default DataZoo look (alias: datazoo, default); follows the viewer's light/dark preference"),
+    ("light", "the default graphite look (alias: default, datazoo); follows the viewer's light/dark preference"),
     ("dark", "always dark: dark cards, light ink, lifted palette"),
     ("print", "white page, black ink, no shadows or gradients — for printing/PDF"),
     ("colorblind", "the light look with the Okabe-Ito palette (safe under colour-vision deficiency)"),
@@ -301,27 +321,27 @@ fn light_json() -> J {
     json!({
         "name": "light",
         "mode": "auto",
-        "palette": hexs(&DZ_PALETTE),
+        "palette": hexs(&DEFAULT_PALETTE),
         "sequential": null,
-        "diverging": ["#c0392b", "#f5f5f5", "#1e8449"],
+        "diverging": ["#dc2626", "#f3f4f6", "#2563eb"],
         "colors": {
-            "bg": "#e8f5f3", "bg2": "#f1fbf9", "card": "#ffffff", "ink": "#0f2a28",
-            "muted": "#5c7a76", "line": "#dcece9", "heading": "#0f2a28",
-            "accent": "#0fb5a5", "accent2": "#0aa2c4",
-            "positive": "#0ca678", "negative": "#e03131", "warning": "#b5730b",
-            "info": "#2563a8", "link": "#2563a8", "other": "#7a8b99"
+            "bg": "#f4f5f7", "bg2": "#f4f5f7", "card": "#ffffff", "ink": "#0a0a0a",
+            "muted": "#6b7280", "line": "#e5e7eb", "heading": "#0a0a0a",
+            "accent": "#2563eb", "accent2": "#2563eb",
+            "positive": "#15803d", "negative": "#dc2626", "warning": "#b45309",
+            "info": "#2563eb", "link": "#1d4ed8", "other": "#8b929e"
         },
         "chart": {
-            "heading": "#1f2430", "note": "#8a93a6", "ink": "#1f2937", "muted": "#667085",
-            "line": "#e6e9f1", "error": "#b42318", "seq_low": null
+            "heading": "#0a0a0a", "note": "#9ca3af", "ink": "#111827", "muted": "#6b7280",
+            "line": "#eceef1", "error": "#b42318", "seq_low": null
         },
         "font": {
             "family": "'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif",
-            "display": "'Bricolage Grotesque','Hanken Grotesk',system-ui,sans-serif"
+            "display": "'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif"
         },
-        "radius": 18,
-        "chrome": {"gradient": true, "background": "gradient", "kpi_value": "gradient",
-                   "table_zebra": false, "shadow": "md"},
+        "radius": 8,
+        "chrome": {"gradient": false, "background": "plain", "kpi_value": "ink",
+                   "table_zebra": false, "shadow": "none"},
         "brand": {},
         "locale": null,
         "dark": dark_overlay()
@@ -333,15 +353,15 @@ fn light_json() -> J {
 fn dark_overlay() -> J {
     json!({
         "colors": {
-            "bg": "#0b1226", "bg2": "#0d142b", "card": "#141d33", "ink": "#e6ecf5",
-            "muted": "#9fb0c9", "line": "#26324c", "heading": "#f1f5fb",
-            "accent": "#2dd4bf", "accent2": "#38bdf8",
-            "positive": "#34d399", "negative": "#f87171", "warning": "#fbbf24",
-            "info": "#7db3f0", "link": "#7db3f0", "other": "#9aa8b6"
+            "bg": "#0a0a0a", "bg2": "#0a0a0a", "card": "#141414", "ink": "#ededed",
+            "muted": "#a1a1aa", "line": "#262626", "heading": "#fafafa",
+            "accent": "#3b82f6", "accent2": "#3b82f6",
+            "positive": "#4ade80", "negative": "#f87171", "warning": "#fbbf24",
+            "info": "#60a5fa", "link": "#60a5fa", "other": "#8b8b93"
         },
         "chart": {
-            "heading": "#f1f5fb", "note": "#9fb0c9", "ink": "#e6ecf5", "muted": "#9fb0c9",
-            "line": "#26324c", "error": "#f87171", "seq_low": "#1c2740"
+            "heading": "#fafafa", "note": "#8b8b93", "ink": "#ededed", "muted": "#a1a1aa",
+            "line": "#262626", "error": "#f87171", "seq_low": "#16294d"
         },
         "chrome": {"background": "plain"}
     })
@@ -538,11 +558,11 @@ pub fn resolve_json(def: &J) -> Result<ThemeSet, String> {
     if let Some(d) = full.get("dark") {
         check_keys(d, "dark.")?;
         // The dark palette: the theme's own `dark.palette`, else the lifted
-        // DataZoo palette when the theme kept the default palette.
-        let custom_palette = full.get("palette") != Some(&json!(hexs(&DZ_PALETTE)));
+        // default palette when the theme kept the default palette.
+        let custom_palette = full.get("palette") != Some(&json!(hexs(&DEFAULT_PALETTE)));
         let mut d = d.clone();
         if d.get("palette").is_none() && !custom_palette {
-            d["palette"] = json!(hexs(&DZ_PALETTE_DARK));
+            d["palette"] = json!(hexs(&DEFAULT_PALETTE_DARK));
         }
         merge(&mut dark_def, &d);
     }
@@ -894,7 +914,7 @@ impl ResolvedTheme {
     /// white → card, black → ink — leaving data colours (the palette, any
     /// colour with real chroma) untouched.
     ///
-    /// Colours of the default DataZoo palette that chart code still writes
+    /// Colours of the DataZoo slot palette that chart code still writes
     /// directly (contract plots: model colours, accents) are swapped for the
     /// same *slot* of this theme's palette, so "ols = slot 0" holds in every
     /// theme.
@@ -920,7 +940,13 @@ impl ResolvedTheme {
     /// The dark-ramp image of a neutral colour (`None` = keep).
     fn neutral(&self, c: Rgb) -> Option<Rgb> {
         let (mx, mn) = (c.0.max(c.1).max(c.2), c.0.min(c.1).min(c.2));
-        if mx - mn > 32 || self.palette.contains(&c) {
+        // The theme's own colours (series, the ends of a sequential fill) are
+        // already dark-mode colours, however grey they look.
+        let own = self.palette.contains(&c)
+            || c == self.seq_low()
+            || c == self.calendar_low()
+            || self.sequential.is_some_and(|s| s.contains(&c));
+        if mx - mn > 32 || own {
             return None;
         }
         // Lightness 0..1 → ink..card (inverted).
@@ -948,22 +974,32 @@ impl ResolvedTheme {
 /// Rewrite every `fill="#rrggbb"` / `stroke="#rrggbb"` (also `#RRGGBB` and
 /// `rgb(r,g,b)`) whose colour `f` maps.
 fn remap_neutrals(svg: &str, f: &dyn Fn(Rgb) -> Option<Rgb>) -> String {
+    const KEYS: [&str; 3] = ["fill=\"", "stroke=\"", "color=\""];
     let mut out = String::with_capacity(svg.len());
-    let mut rest = svg;
+    // Next occurrence of each key at or after `pos` (cached, so a key that is
+    // rare or absent is not rescanned from every match: linear, not quadratic).
+    let find_from = |k: &str, from: usize| svg[from..].find(k).map(|i| from + i);
+    let mut next: Vec<Option<usize>> = KEYS.iter().map(|k| find_from(k, 0)).collect();
+    let mut pos = 0;
     loop {
-        let next = ["fill=\"", "stroke=\"", "color=\""]
+        for (n, k) in next.iter_mut().zip(KEYS) {
+            if matches!(*n, Some(i) if i < pos) {
+                *n = find_from(k, pos);
+            }
+        }
+        let Some((i, klen)) = next
             .iter()
-            .filter_map(|k| rest.find(k).map(|i| (i, k.len())))
-            .min();
-        let Some((i, klen)) = next else {
-            out.push_str(rest);
+            .zip(KEYS)
+            .filter_map(|(n, k)| n.map(|i| (i, k.len())))
+            .min()
+        else {
+            out.push_str(&svg[pos..]);
             return out;
         };
         let start = i + klen;
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let end = tail.find('"').unwrap_or(tail.len());
-        let val = &tail[..end];
+        out.push_str(&svg[pos..start]);
+        let end = svg[start..].find('"').map_or(svg.len(), |e| start + e);
+        let val = &svg[start..end];
         let parsed = if val.starts_with('#') && val.len() == 7 {
             parse_color(val)
         } else if let Some(inner) = val.strip_prefix("rgb(").and_then(|v| v.strip_suffix(')')) {
@@ -979,160 +1015,16 @@ fn remap_neutrals(svg: &str, f: &dyn Fn(Rgb) -> Option<Rgb>) -> String {
             Some(c) => out.push_str(&hex(c)),
             None => out.push_str(val),
         }
-        rest = &tail[end..];
+        pos = end;
     }
 }
 
 // ───────────────────────── CSS tokens ─────────────────────────────────────
 
-/// The `--ax-*` design tokens of the default light look, verbatim from the
-/// pre-theme stylesheet (pixel-equivalence of the default dashboard).
-const LIGHT_TOKENS: &[(&str, &str)] = &[
-    ("bg", "#e8f5f3"),
-    ("bg-image", "radial-gradient(900px 520px at 92% -12%,rgba(15,181,165,.16),transparent 58%),radial-gradient(760px 520px at 3% 108%,rgba(10,162,196,.13),transparent 60%),linear-gradient(180deg,#f1fbf9 0%,#e6f4f2 100%)"),
-    ("bg-pattern", "radial-gradient(rgba(12,110,100,.05) 1px,transparent 1px)"),
-    ("canvas", "transparent"),
-    ("card", "#fff"),
-    ("ink", "#0f2a28"),
-    ("muted", "#5c7a76"),
-    ("line", "#dcece9"),
-    ("heading", "#0f2a28"),
-    ("header-ink", "#0f2a28"),
-    ("accent", "#0fb5a5"),
-    ("accent2", "#0aa2c4"),
-    ("accent-ink", "#fff"),
-    ("accent-bar", "linear-gradient(135deg,var(--ax-accent),var(--ax-accent2))"),
-    ("accent-glow", "0 2px 7px rgba(15,181,165,.45)"),
-    ("shadow", "0 1px 2px rgba(6,60,55,.05),0 18px 40px -22px rgba(6,72,66,.26)"),
-    ("shadow-hover", "0 2px 8px rgba(6,60,55,.08),0 30px 60px -24px rgba(6,72,66,.4)"),
-    ("card-border-hover", "rgba(15,181,165,.42)"),
-    ("kpi-bg", "linear-gradient(135deg,var(--ax-accent),var(--ax-accent2))"),
-    ("kpi-ink", "transparent"),
-    ("positive", "#0ca678"),
-    ("negative", "#e03131"),
-    ("warning", "#b5730b"),
-    ("info", "#2563a8"),
-    ("btn-bg", "linear-gradient(135deg,var(--ax-accent),var(--ax-accent2))"),
-    ("btn-ink", "#fff"),
-    ("btn-shadow", "0 6px 16px -6px rgba(31,140,166,.5)"),
-    ("btn-shadow-hover", "0 10px 22px -8px rgba(31,140,166,.6)"),
-    ("btn2-bg", "#fff"),
-    ("btn2-hover", "#f6f8fc"),
-    ("btn2-shadow", "0 1px 2px rgba(16,24,40,.05)"),
-    ("input-bg", "#fff"),
-    ("input-border-hover", "#c7cede"),
-    ("input-border-hover2", "#cfd6e4"),
-    ("input-shadow", "0 1px 2px rgba(16,24,40,.04)"),
-    ("focus-ring", "0 0 0 3px rgba(42,157,143,.16)"),
-    ("chevron", "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\")"),
-    ("pop-shadow", "0 10px 30px rgba(16,24,40,.16)"),
-    ("colf-border", "#d1d5db"),
-    ("slider-track", "#e2e8f0"),
-    ("slider-fill", "#5eead4"),
-    ("slider-label", "#64748b"),
-    ("slider-thumb", "#0f766e"),
-    ("slider-thumb-edge", "#fff"),
-    ("slider-thumb-ring", "0 0 0 1px #94a3b8"),
-    ("veil", "rgba(248,250,252,.5)"),
-    ("spinner-track", "#cbd5e1"),
-    ("spinner-head", "#0f766e"),
-    ("callout-bg", "linear-gradient(135deg,rgba(15,181,165,.13),rgba(10,162,196,.13))"),
-    ("callout-border", "rgba(15,181,165,.22)"),
-    ("callout-bar", "linear-gradient(135deg,var(--ax-accent),var(--ax-accent2))"),
-    ("md-ink", "#39424f"),
-    ("md-heading", "#0b1220"),
-    ("link", "#2563a8"),
-    ("code-bg", "rgba(15,23,42,.06)"),
-    ("pre-bg", "#f4f6fa"),
-    ("quote-bar", "#c4cddd"),
-    ("quote-ink", "#5a6472"),
-    ("th-ink", "#5c7a76"),
-    ("th-bg", "#fff"),
-    ("zebra", "transparent"),
-    ("row-hover", "#f5f8fd"),
-    ("row-hover-tint", "rgba(42,157,143,.05)"),
-    ("row-focus", "rgba(42,157,143,.14)"),
-    ("row-focus-kbd", "rgba(42,157,143,.22)"),
-    ("databar-a", "rgba(42,157,143,.16)"),
-    ("databar-b", "rgba(31,140,166,.14)"),
-    ("badge-good-bg", "#e6f7f0"),
-    ("badge-good-ink", "#0a7a54"),
-    ("badge-warn-bg", "#fdf3e2"),
-    ("badge-warn-ink", "#b5730b"),
-    ("badge-bad-bg", "#fdeaea"),
-    ("badge-bad-ink", "#c92a2a"),
-    ("badge-neutral-bg", "#eef1f6"),
-    ("badge-neutral-ink", "#556"),
-    ("scale-lo", "#63c97f"),
-    ("scale-mid", "#ffe08a"),
-    ("scale-hi", "#ff8a8a"),
-    ("spark", "#456481"),
-    ("spark-dot", "#E8335D"),
-    ("err-ink", "#b42318"),
-    ("err-bg", "#fef3f2"),
-    ("err-border", "#fecdca"),
-    ("tab-ink", "#5c7a76"),
-    ("tab-active", "var(--ax-accent)"),
-    ("tab-hover-bg", "linear-gradient(135deg,rgba(15,181,165,.13),rgba(10,162,196,.13))"),
-    ("subtab-bg", "#e8f5f3"),
-    ("pill-hover", "rgba(42,157,143,.08)"),
-    ("nav-bg", "#fff"),
-    ("nav-border", "#e5e9f0"),
-    ("nav-shadow", "0 1px 3px rgba(16,24,40,.06)"),
-    ("nav-ink", "#334"),
-    ("nav-active-bg", "#0f766e"),
-    ("nav-active-ink", "#fff"),
-    ("tip-bg", "rgba(255,255,255,.97)"),
-    ("tip-ink", "#39424f"),
-    ("tip-head", "#0b1220"),
-    ("tip-border", "rgba(15,23,42,.09)"),
-    ("tip-shadow", "0 6px 26px rgba(15,23,42,.16)"),
-    ("cross", "rgba(15,23,42,.4)"),
-    ("legend-off", "#c4c9d2"),
-    ("tool-bg", "rgba(255,255,255,.92)"),
-    ("tool-bg-soft", "rgba(255,255,255,.85)"),
-    ("tool-ink", "#5a6472"),
-    ("tool-border", "rgba(15,23,42,.12)"),
-    ("tool-hover-ink", "#0b1220"),
-    ("tool-hover-border", "rgba(15,23,42,.28)"),
-    ("tool-hover-bg", "#fff"),
-    ("tool-on", "#456481"),
-    ("tool-on-ink", "#fff"),
-    ("zoom-track", "#eef1f6"),
-    ("zoom-track-border", "rgba(15,23,42,.08)"),
-    ("zoom-fill", "rgba(69,100,129,.13)"),
-    ("zoom-fill-border", "rgba(69,100,129,.45)"),
-    ("zoom-fill-on", "rgba(69,100,129,.2)"),
-    ("zoom-handle", "#fff"),
-    ("zoom-handle-border", "rgba(69,100,129,.75)"),
-    ("zoom-handle-shadow", "0 1px 2px rgba(15,23,42,.16)"),
-    ("zoom-grip", "rgba(69,100,129,.55)"),
-    ("brush-border", "rgba(69,100,129,.9)"),
-    ("brush-fill", "rgba(69,100,129,.12)"),
-    ("vmap-border", "rgba(15,23,42,.1)"),
-    ("vmap-track", "linear-gradient(90deg,#dbe3f0,#456481)"),
-    ("vmap-fill", "rgba(255,255,255,.12)"),
-    ("vmap-fill-border", "rgba(255,255,255,.7)"),
-    ("vmap-handle-border", "rgba(69,100,129,.8)"),
-    ("vmap-handle-shadow", "0 1px 2px rgba(15,23,42,.18)"),
-    ("modal-backdrop", "rgba(15,23,42,.42)"),
-    ("modal-shadow", "0 20px 60px rgba(15,23,42,.35)"),
-    ("modal-x", "#7a8496"),
-    ("modal-x-hover", "#0b1220"),
-    ("export-bg", "#ffffff"),
-];
-
 impl ResolvedTheme {
     /// The `--ax-*` tokens (name without the prefix, CSS value).
     pub fn css_tokens(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = if self.is_default_light() {
-            LIGHT_TOKENS
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        } else {
-            self.derived_tokens()
-        };
+        let mut out = self.derived_tokens();
         // Structure tokens every theme emits (fonts, radii, brand sizes).
         out.extend([
             ("font-body".to_string(), self.font.family.clone()),
@@ -1375,7 +1267,7 @@ impl ResolvedTheme {
                 hex(mix(c.card, c.negative, if dark { 0.45 } else { 0.55 })),
             ),
             t("spark", hex(brand)),
-            t("spark-dot", hex(self.color(2))),
+            t("spark-dot", hex(brand)),
             t("err-ink", hex(c.negative)),
             t("err-bg", hex(mix(c.card, c.negative, 0.08))),
             t("err-border", hex(mix(c.card, c.negative, 0.3))),
@@ -1652,9 +1544,9 @@ mod tests {
     #[test]
     fn default_is_the_dz_palette() {
         let d = default_set();
-        assert_eq!(d.light.palette, DZ_PALETTE.to_vec());
+        assert_eq!(d.light.palette, DEFAULT_PALETTE.to_vec());
         assert!(d.light.is_default_light());
-        assert_eq!(d.dark.palette, DZ_PALETTE_DARK.to_vec());
+        assert_eq!(d.dark.palette, DEFAULT_PALETTE_DARK.to_vec());
     }
 
     #[test]
@@ -1710,7 +1602,7 @@ mod tests {
     #[test]
     fn light_css_has_no_unknown_tokens() {
         let css = default_set().light.css_vars();
-        assert!(css.starts_with(":root{--ax-bg:#e8f5f3;"));
+        assert!(css.starts_with(":root{--ax-bg:#f4f5f7;"));
         let dark = default_set().dark.css_vars();
         // same token names in both
         let names = |s: &str| -> Vec<String> {
@@ -1738,8 +1630,26 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("#EBEBEB"));
-        // light: untouched
-        assert_eq!(default_set().light.finish_svg(svg.to_string()), svg);
+        // light: neutrals untouched, DataZoo slot colours mapped to the default palette
+        let l = &default_set().light;
+        let out = l.finish_svg(svg.to_string());
+        assert!(
+            out.contains("fill=\"#000000\"") && out.contains("#EBEBEB"),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("fill=\"{}\"", hex(l.color(2)))),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn dark_keeps_its_own_sequential_colours() {
+        // A greyish dark heatmap low end must not be flipped like a light-theme neutral.
+        let t = &default_set().dark;
+        let low = hex(t.seq_low());
+        let svg = format!(r#"<svg><rect fill="{low}"/></svg>"#);
+        assert!(t.finish_svg(svg).contains(&low));
     }
 
     #[test]

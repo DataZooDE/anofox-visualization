@@ -1,0 +1,13 @@
+country,field,valid_rate,n
+DE,VAT ID,0.86,50
+DE,email,0.9231,182
+DE,phone,0.9286,182
+FR,VAT ID,0.8108,37
+FR,email,0.9179,134
+FR,phone,0.9254,134
+IT,VAT ID,0.7955,44
+IT,email,0.9481,135
+IT,phone,0.9333,135
+NL,VAT ID,0.9767,43
+NL,email,0.9536,151
+NL,phone,0.9272,151

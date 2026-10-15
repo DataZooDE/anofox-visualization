@@ -17,9 +17,10 @@ cd "$ROOT"
 for ext in "$@"; do
   case "$ext" in
     optimize) tables="os_pack_algos os_pack_bins os_knap_curve os_knap_pick os_wave_algos os_wave_load
-                      os_sched_algos os_sched_gantt os_seq_algos os_portfolio os_portfolio_weights" ;;
+                      os_sched_algos os_sched_gantt os_seq_algos os_seq_matrix os_seq_steps os_portfolio
+                      os_portfolio_weights os_portfolio_alloc" ;;
     tabular)  tables="tq_check_results tq_daily tq_profile tq_profile_summary tq_validity tq_anomaly
-                      tq_outlier_tree tq_diff" ;;
+                      tq_outlier_tree tq_diff tq_check_history tq_validity_new" ;;
     decide)   tables="dc_scored dc_metrics" ;;
     *) echo "unknown showcase: $ext" >&2; exit 2 ;;
   esac

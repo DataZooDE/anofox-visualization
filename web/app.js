@@ -11,6 +11,7 @@ import init, {
   format_number_locale,
   format_date_locale,
   resolve_dashboard_theme,
+  page_sql,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -59,7 +60,7 @@ FROM sessions GROUP BY ALL ORDER BY week, channel;
 SELECT 6::COL;
 SELECT channel::CATEGORY, sum(n)::PIE, 'Share'::TITLE FROM sessions GROUP BY ALL;
 
-SELECT 6::COL;
+SELECT 6::COL; SELECT 'single'::ROWSELECT; -- clicking a row sets getvariable('selected')
 SELECT 'Detail'::TITLE, channel, week, sum(n) AS n ::TABLE
 FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
@@ -397,6 +398,7 @@ SELECT 'Summary'::TAB;
 SELECT 12::COL;
 SELECT 'Per-series **summary** of every forecast item — last actual, next-month and 12-month forecast totals, and growth vs the prior 12 months. **Click a row** to drill the chart above to that item.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
+SELECT 'single'::ROWSELECT; -- click a row to drill the chart above
 SELECT item        AS "Item × store"     ::PAGED,
        last_actual AS "Last actual"      ::COMPACT,
        next_fc     AS "Next month"       ::COMPACT,
@@ -417,6 +419,7 @@ SELECT 6::COL;
 SELECT winner ::XAXIS, count(*) AS wins ::BARCHART, 'Series won per method (by MAE)'::TITLE
 FROM lx_scores WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
 SELECT 12::COL;
+SELECT 'single'::ROWSELECT; -- click a row to drill the chart above
 SELECT item    AS "Item × store" ::PAGED,
        winner  AS "Winner"       ::BADGE,
        es_mae  AS "ES · MAE"     ::COMPACT,
@@ -644,19 +647,21 @@ GROUP BY ALL ORDER BY day, channel;
 
 SELECT 'Cross-filter'::TAB;
 SELECT 12::COL;
-SELECT 'Two **independent named cross-filters**. Each table emits its own variable (named after its first column — sku / market); **click a SKU and a market** and the KPI + chart below filter by *both* at once. This is finer-grained than the single generic click-to-filter — you compose several selections. Click a selected row again to clear it.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Two **independent named cross-filters**, opted in per table with **::ROWSELECT**. Each table emits its own variable, named after its first column: the SKU table is \`''multi''\` — **tick several SKUs** and getvariable(''sku'') is a list — the market table is \`''single''\` (getvariable(''market'') is one value). The KPI and chart below filter by *both* at once. Click a row again to clear it; tables without ::ROWSELECT are not clickable.'::MARKDOWN, 'What this shows'::TITLE;
 
-SELECT 4::COL; SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
-SELECT 4::COL; SELECT region AS market, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
+SELECT 4::COL; SELECT 'multi'::ROWSELECT;
+SELECT sku, sum(amount) AS total ::TABLE FROM sales2 GROUP BY sku ORDER BY total DESC;
+SELECT 4::COL; SELECT 'single'::ROWSELECT;
+SELECT region AS market, sum(amount) AS total ::TABLE FROM sales2 GROUP BY region ORDER BY total DESC;
 
 SELECT 4::COL;
 SELECT sum(amount)::METRIC, 'Total (filtered)'::LABEL FROM sales2
-WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+WHERE (len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku))
   AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'));
 
 SELECT 12::COL;
 SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & market)'::TITLE FROM sales2
-WHERE (COALESCE(getvariable('sku'),'') = '' OR sku = getvariable('sku'))
+WHERE (len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku))
   AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'))
 GROUP BY month ORDER BY month;`,
     },
@@ -874,8 +879,9 @@ function sqlLiteralToJson(lit) {
   if (/^true$/i.test(t)) return true;
   if (/^false$/i.test(t)) return false;
   if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
-  if (t.startsWith("[") && t.endsWith("]")) {
-    const inner = t.slice(1, -1).trim();
+  const list = t.replace(/::VARCHAR\[\]$/i, "");
+  if (list.startsWith("[") && list.endsWith("]")) {
+    const inner = list.slice(1, -1).trim();
     if (!inner) return [];
     const strs = [...inner.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
     if (strs.length) return strs;
@@ -1566,6 +1572,8 @@ function loadDash(name, sql) {
   dpXf = {};
   dpPage = {};
   dpSort = {};
+  dpPaged = {};
+  dpFilterText = {};
   $("sql").value = sql;
   $("dash-name").value = name || "";
   syncHL();
@@ -1854,7 +1862,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -2030,6 +2038,7 @@ let dpKbdActive = false; // one-shot: keep row highlight after a server page-cha
 let dpNav = null; // arrow-key controller for the table the pointer is over
 let dpPageSize = {}; // ::PAGED tables: statement idx -> rows per page
 let dpFilterText = {}; // ::PAGED tables: statement idx -> full-text filter term
+let dpPaged = {}; // ::PAGED tables: statement idx -> {colEq, colQ, colRange, view, …} (column filters, Scroll view)
 let dpTableUI = {}; // client ::TABLE: statement idx -> {sortCol,dir,page,pageSize,colQ} — survives a cross-filter re-run so sort/filter/page persist
 
 // Arrow-key table navigation acts on whichever table the pointer is over
@@ -2109,7 +2118,33 @@ let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 // so we SKIP setup that doesn't depend on the selection — e.g. an expensive
 // CREATE OR REPLACE TABLE fc AS ts_forecast_by(...) is computed once, not on
 // every row click. Setup that references getvariable() still re-runs.
-async function run(fresh = true) {
+//
+// Runs never overlap: a run requested while one is in progress (two quick
+// clicks, an input changed mid-run) is queued and coalesced into ONE follow-up
+// run with the latest state (a full run wins over a cross-filter re-run), so two
+// half-built dashboards can never race to replace each other.
+let runActive = null; // the run in progress (a promise)
+let runQueued = null; // null, or the `fresh` flag of the queued follow-up run
+function run(fresh = true) {
+  if (runActive) {
+    runQueued = (runQueued ?? false) || fresh;
+    return runActive;
+  }
+  runActive = (async () => {
+    try {
+      await runOnce(fresh);
+    } finally {
+      runActive = null;
+      if (runQueued !== null) {
+        const f = runQueued;
+        runQueued = null;
+        run(f);
+      }
+    }
+  })();
+  return runActive;
+}
+async function runOnce(fresh = true) {
   const grid = $("grid");
   document.body.classList.add("loading");
   status("running…");
@@ -2132,9 +2167,12 @@ async function run(fresh = true) {
   // so targets guard with COALESCE(getvariable('name'),'').
   try {
     await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
+    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
     for (const [k, v] of Object.entries(dpXf)) {
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-        await runSql(`SET VARIABLE ${k} = '${String(v).replace(/'/g, "''")}'`);
+        // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
+        const lit = Array.isArray(v) ? (v.length ? `[${v.map(q).join(", ")}]` : "[]::VARCHAR[]") : q(v);
+        await runSql(`SET VARIABLE ${k} = ${lit}`);
       }
     }
   } catch (e) {
@@ -2174,13 +2212,22 @@ async function run(fresh = true) {
         const kind = inputKind(s);
         const rows = JSON.parse(await runSql(s.sql));
         if (!rows.length) continue;
+        // Optional ::LABEL column → the control's caption (default: the variable
+        // name). A ::DATERANGE keeps its columns as they are (from, to, label).
+        const lr = s.roles.find((r) => r[1] === "LABEL");
+        const caption =
+          kind === "DATERANGE"
+            ? String(Object.values(rows[0])[2] ?? "")
+            : lr
+              ? String(rows[0]["c" + lr[0]] ?? "")
+              : "";
         if (kind === "DATERANGE") {
           const keys = Object.keys(rows[0]);
           const fk = keys[0];
           const tk = keys[1] || keys[0];
           if (dpVars[fk] === undefined) dpVars[fk] = String(rows[0][fk] ?? "");
           if (dpVars[tk] === undefined) dpVars[tk] = String(rows[0][tk] ?? "");
-          dd[i] = { kind, varnames: [fk, tk] };
+          dd[i] = { kind, varnames: [fk, tk], caption };
           await runSql(`SET VARIABLE ${fk} = '${String(dpVars[fk]).replace(/'/g, "''")}'`);
           await runSql(`SET VARIABLE ${tk} = '${String(dpVars[tk]).replace(/'/g, "''")}'`);
           continue;
@@ -2193,18 +2240,18 @@ async function run(fresh = true) {
           // Optional ::HINT column → a hint shown next to each option.
           const hr = s.roles.find((r) => r[1] === "HINT");
           const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
-          dd[i] = { kind, varname, options, hints };
+          dd[i] = { kind, varname, options, hints, caption };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "MULTISELECT") {
           const options = rows.map((r) => String(r[varname]));
           if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
           dpVars[varname] = dpVars[varname].filter((v) => options.includes(v));
-          dd[i] = { kind, varname, options };
+          dd[i] = { kind, varname, options, caption };
           lit = "[" + dpVars[varname].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(",") + "]";
         } else {
           // number / date / text: the query's value is the default
           if (dpVars[varname] === undefined) dpVars[varname] = String(rows[0][varname] ?? "");
-          dd[i] = { kind, varname };
+          dd[i] = { kind, varname, caption };
           const v = String(dpVars[varname]);
           lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`; // number unquoted
         }
@@ -2235,6 +2282,7 @@ async function run(fresh = true) {
   let subWrap = null;
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
+  let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -2306,6 +2354,10 @@ async function run(fresh = true) {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {
         nextHeight = parseInt(await firstValue(s)) || 0;
+      } else if (d === "ROWSELECT") {
+        nextRowSelect = String((await firstValue(s)) ?? "")
+          .replace(/^"|"$/g, "")
+          .toLowerCase();
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
         if (!tabBar) {
@@ -2389,6 +2441,7 @@ async function run(fresh = true) {
         container.appendChild(ph);
         nextSpan = 0;
         nextHeight = 0;
+        nextRowSelect = "";
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else if (s.contract) {
@@ -2437,10 +2490,15 @@ async function run(fresh = true) {
         }
         nextSpan = 0;
         nextHeight = 0;
+        nextRowSelect = "";
       } else if (role(s, "PAGED")) {
-        // SQL-driven pagination: only ONE page (+ a COUNT) is fetched, so the
-        // browser never holds the whole table. LIMIT/OFFSET + ORDER BY run in
-        // DuckDB — the same over a huge parquet in S3 or MotherDuck.
+        // A SQL-driven table: only one page of rows (Scroll view: one block at
+        // a time) is fetched, plus one statistics row (count, sums, means, ranges)
+        // — sorting, the search and the per-column filters all run in DuckDB, so
+        // it works the same over a huge Parquet in S3 or MotherDuck. Every query
+        // is the same `page` request everywhere: a locked server builds its SQL
+        // with bound parameters; the browser and the authoring server run the
+        // identical query from wasm page_sql().
         const span = Math.min(12, nextSpan || defaultSpan);
         const fig = document.createElement("figure");
         fig.className = "panel";
@@ -2451,56 +2509,75 @@ async function run(fresh = true) {
         const titleIdx = titleRole ? titleRole[0] : -1;
         const base = s.sql;
         const idx = i;
+        const rowSelect = nextRowSelect;
         const titleHolder = document.createElement("div");
-        // Server-side full-text filter: one WHERE across all columns, re-queried
-        // (with a fresh COUNT) as you type, so it scales like the paging itself.
-        const filterInput = document.createElement("input");
-        filterInput.className = "dp-table-filter";
-        filterInput.type = "search";
-        filterInput.placeholder = "Filter all rows…";
-        filterInput.value = dpFilterText[idx] || "";
         const holder = document.createElement("div");
-        fig.append(titleHolder, filterInput, holder);
-        const qident = (c) => `"${String(c).replace(/"/g, '""')}"`;
-        let cachedTotal = null;
-        const whereClause = () => {
-          const q = (dpFilterText[idx] || "").trim();
-          // Cast the whole row (the subquery alias is a STRUCT of all columns) to
-          // text and match — a generic full-text filter over every column.
-          return q ? ` WHERE CAST(_dp AS VARCHAR) ILIKE '%${q.replace(/'/g, "''")}%'` : "";
+        fig.append(titleHolder, holder);
+        const filterInput = document.createElement("input");
+        filterInput.className = "tbl-search";
+        filterInput.type = "search";
+        filterInput.placeholder = "Search all rows…";
+        filterInput.value = dpFilterText[idx] || "";
+        // Every reload rebuilds the table and its toolbar, where the search box
+        // lives; detaching it drops the focus. Typing in it marks it as in use,
+        // so a rebuild hands the focus back (unless the user moved elsewhere).
+        let lastTyped = 0;
+        filterInput.addEventListener("input", () => (lastTyped = Date.now()));
+        filterInput.addEventListener("focus", () => (lastTyped = Date.now())); // clicked in while a reload runs
+        const st = (dpPaged[idx] ||= { colEq: {}, colQ: {}, colRange: {}, view: "pages" });
+        // The column filters as request filters (op + value; values bound / escaped).
+        const colFilters = () => {
+          const out = [];
+          for (const [col, v] of Object.entries(st.colEq)) out.push({ col, op: "eq", value: String(v) });
+          for (const [col, v] of Object.entries(st.colQ)) {
+            const m = String(v).match(/^([<>]=?)\s*(-?\d+(?:\.\d+)?)$/);
+            if (m) out.push({ col, op: { ">": "gt", ">=": "ge", "<": "lt", "<=": "le" }[m[1]], value: m[2] });
+            else out.push({ col, op: "contains", value: String(v) });
+          }
+          for (const [col, [lo, hi]] of Object.entries(st.colRange)) {
+            if (lo != null) out.push({ col, op: "ge", value: String(lo) });
+            if (hi != null) out.push({ col, op: "le", value: String(hi) });
+          }
+          return out;
+        };
+        const pageReq = async (extra, withFilters = true) => {
+          const page = { ...extra };
+          if (withFilters) {
+            const q = (dpFilterText[idx] || "").trim();
+            if (q) page.filter = q;
+            const fl = colFilters();
+            if (fl.length) page.filters = fl;
+          }
+          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }));
+          const sql = page_sql(base, JSON.stringify(page));
+          if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
+          return JSON.parse(await runSql(sql));
+        };
+        let stats = null; // the statistics row of the current filters (n = row count)
+        let unfiltered = null; // the row count without search / column filters
+        const sortPart = () => {
+          const so = dpSort[idx];
+          return so && so.col ? { sort: so.col, desc: so.dir < 0 } : {};
         };
         const load = async () => {
           const pageSize = dpPageSize[idx] || 10;
           const page = dpPage[idx] || 0;
-          const sort = dpSort[idx];
-          const where = whereClause();
-          if (cachedTotal == null) {
-            try {
-              const c = JSON.parse(
-                await runSql(`SELECT count(*) AS n FROM (${base}) _dp${where}`, {
-                  base,
-                  count: true,
-                  filter: (dpFilterText[idx] || "").trim(),
-                })
-              );
-              cachedTotal = Number(c[0] && c[0].n) || 0;
-            } catch (_) {
-              cachedTotal = 0;
-            }
-          }
-          const order = sort && sort.col ? ` ORDER BY ${qident(sort.col)} ${sort.dir > 0 ? "ASC" : "DESC"}` : "";
+          const so = dpSort[idx];
+          const scroll = st.view === "scroll";
           let rows = [];
           try {
-            rows = JSON.parse(
-              await runSql(`SELECT * FROM (${base}) _dp${where}${order} LIMIT ${pageSize} OFFSET ${page * pageSize}`, {
-                base,
-                limit: pageSize,
-                offset: page * pageSize,
-                sort: sort && sort.col ? sort.col : null,
-                desc: !!(sort && sort.col && sort.dir < 0),
-                filter: (dpFilterText[idx] || "").trim(),
-              })
-            );
+            rows = await pageReq({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() });
+            if (!stats) {
+              // the column names come from a page; a search with no hits still
+              // keeps the last known columns
+              const cols = rows.length ? Object.keys(rows[0]).filter((_, k) => k !== titleIdx) : st.cols || [];
+              st.cols = cols;
+              stats = cols.length ? (await pageReq({ stats: cols.slice(0, 64) }))[0] || { n: 0 } : (await pageReq({ count: true }))[0];
+              stats._cols = cols.slice(0, 64);
+            }
+            const filtering = (dpFilterText[idx] || "").trim() || colFilters().length;
+            if (unfiltered == null || !filtering)
+              unfiltered = filtering ? Number((await pageReq({ count: true }, false))[0].n) : Number(stats.n);
           } catch (e) {
             holder.innerHTML = "";
             showError(holder, String(e));
@@ -2514,12 +2591,23 @@ async function run(fresh = true) {
             if (tv != null) titleHolder.appendChild(mkTitle(String(tv).replace(/^"|"$/g, "")));
             sk = titleIdx;
           }
+          const reload = () => {
+            stats = null;
+            dpPage[idx] = 0;
+            load();
+          };
           const server = {
-            total: cachedTotal,
+            search: filterInput,
+            total: Number(stats.n) || 0,
+            unfiltered,
+            stats,
+            statCols: stats._cols,
+            colState: st,
+            view: st.view,
             page,
             pageSize,
-            sortCol: sort ? sort.col : null,
-            sortDir: sort ? sort.dir : 1,
+            sortCol: so ? so.col : null,
+            sortDir: so ? so.dir : 1,
             onPage: (p) => {
               dpPage[idx] = Math.max(0, p);
               load();
@@ -2535,15 +2623,29 @@ async function run(fresh = true) {
               dpPage[idx] = 0;
               load();
             },
+            onView: (v) => {
+              st.view = v;
+              dpPage[idx] = 0;
+              load();
+            },
+            onColFilters: reload,
+            distinct: (col) => pageReq({ distinct: col }).then((rs) => rs.map((r) => r.v)),
+            fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }),
           };
-          holder.appendChild(renderTable(rows, sk, fmtByIdx, server));
+          holder.appendChild(renderTable(rows, sk, fmtByIdx, server, null, { select: rowSelect }));
+          const lost = !document.activeElement || document.activeElement === document.body;
+          if (Date.now() - lastTyped < 4000 && lost) {
+            filterInput.focus();
+            const n = filterInput.value.length;
+            filterInput.setSelectionRange(n, n);
+          }
         };
         let filterTimer = null;
         filterInput.oninput = () => {
           clearTimeout(filterTimer);
           filterTimer = setTimeout(() => {
             dpFilterText[idx] = filterInput.value;
-            cachedTotal = null; // filter changes the row count
+            stats = null; // the search changes the count and the statistics
             dpPage[idx] = 0;
             load();
           }, 180);
@@ -2553,6 +2655,7 @@ async function run(fresh = true) {
         panels++;
         nextSpan = 0;
         nextHeight = 0;
+        nextRowSelect = "";
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
@@ -2642,7 +2745,7 @@ async function run(fresh = true) {
           // ::SPARKLINE mini charts), keyed by output column index.
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
-          fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i));
+          fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect }));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -2708,6 +2811,7 @@ async function run(fresh = true) {
         }
         nextSpan = 0;
         nextHeight = 0;
+        nextRowSelect = "";
       }
     } catch (e) {
       showError(container, `${s.sql}\n\n${e}`);
@@ -2806,7 +2910,7 @@ function installMsAutoClose() {
 function makeControl(meta, bar) {
   const wrap = document.createElement("label");
   wrap.className = "control";
-  wrap.textContent = (meta.varname || "date") + ":";
+  wrap.textContent = (meta.caption || meta.varname || "date") + ":";
   if (meta.kind === "DATERANGE") {
     const mk = (k) => {
       const inp = document.createElement("input");
@@ -2851,7 +2955,7 @@ function makeControl(meta, bar) {
     const cont = document.createElement("div");
     cont.className = "control";
     const cap = document.createElement("span");
-    cap.textContent = (meta.varname || "") + ":";
+    cap.textContent = (meta.caption || meta.varname || "") + ":";
     cont.appendChild(cap);
 
     const det = document.createElement("details");
@@ -2864,8 +2968,18 @@ function makeControl(meta, bar) {
     det.appendChild(pop);
 
     const summarize = () => {
+      // name the picks while they fit; otherwise count them
+      const picked = options.filter((o) => sel.has(o));
+      const names = picked.join(", ");
       sum.textContent =
-        sel.size === 0 ? "None" : sel.size === options.length ? "All" : `${sel.size} selected`;
+        sel.size === 0
+          ? "None"
+          : sel.size === options.length
+            ? "All"
+            : picked.length <= 3 && names.length <= 32
+              ? names
+              : `${sel.size} of ${options.length}`;
+      sum.title = sel.size && sel.size < options.length ? names : "";
     };
     // Re-running rebuilds the controls (closing this popover), so we batch:
     // toggles just update `sel` + the summary, and we commit once on close.
@@ -3035,7 +3149,7 @@ function matchCell(v, q, isNum) {
 
 // A dual-handle range slider. Calls onChange(lo, hi) with nulls for an
 // unbounded end (so a full-range slider = no filter). `init` = [lo, hi] or null.
-function dualRange(min, max, init, onChange) {
+function dualRange(min, max, init, onChange, fmt = null) {
   const wrap = document.createElement("div");
   wrap.className = "dp-range";
   wrap.onclick = (e) => e.stopPropagation();
@@ -3056,7 +3170,7 @@ function dualRange(min, max, init, onChange) {
   });
   lo.value = init && init[0] != null ? init[0] : min;
   hi.value = init && init[1] != null ? init[1] : max;
-  const fmtv = (v) => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : String(Math.round(v * 100) / 100));
+  const fmtv = fmt || ((v) => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : String(Math.round(v * 100) / 100)));
   const paint = () => {
     const a = +lo.value,
       b = +hi.value;
@@ -3086,101 +3200,836 @@ function dualRange(min, max, init, onChange) {
 // formatting (fmtByIdx maps an output column index to a format role). Pass
 // `server` = {total, page, pageSize, onPage, onSort, sortCol, sortDir} for
 // SQL-driven pagination/sorting (::PAGED); otherwise it paginates client-side.
-function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) {
+// A strict "is this a number" test for auto-detecting numeric columns (cleanNum
+// alone would read an ISO date "2026-06-01" as 2026).
+const NUM_RE = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+const isNumLike = (v) => (typeof v === "number" ? isFinite(v) : NUM_RE.test(String(v ?? "").replace(/^"|"$/g, "")));
+const isBoolLike = (v) => v === true || v === false || v === "true" || v === "false";
+
+// Decimals a column needs so its numbers line up: the most any value uses
+// (after rounding away float noise), at most 3 — or 4 when every value is
+// below 1 in magnitude (rates like 0.0405).
+function colDecimals(nums) {
+  let d = 0;
+  for (const n of nums) {
+    const s = String(Math.round(Math.abs(n) * 1e4) / 1e4);
+    const i = s.indexOf(".");
+    if (i >= 0) d = Math.max(d, s.length - i - 1);
+  }
+  const small = nums.length && nums.every((n) => Math.abs(n) < 1);
+  return Math.min(d, small ? 4 : 3);
+}
+
+// Rich, readable data table: per-column number formats, slim data bars, soft
+// colour scales, a toolbar (row count, search, filter chips, Filters / Totals /
+// Columns / Pages|Scroll / CSV), a totals row, column statistics on the header,
+// opt-in row selection and a virtualised Scroll view.
+//
+// `server` = a ::PAGED table: rows are one page (or, in Scroll view, the first
+// block) and sorting, the search, the per-column filters, the totals and the
+// column statistics are all computed in SQL by the caller (server.stats,
+// server.onColFilters, server.distinct, server.fetchRows, …). `opts.select` =
+// the ::ROWSELECT mode: "single" | "multi" (anything else: rows aren't clickable).
+// Readable header for a raw column name (snake_case / camelCase, as SQL emits
+// it); a name that already looks written for people (capitals, spaces, symbols
+// — an `AS "Header"` alias) is kept as it is.
+const HDR_WORDS = {
+  pct: "%", percent: "%", perc: "%", avg: "Avg", qty: "Qty", num: "No.", nr: "No.", amt: "Amount",
+  id: "ID", sku: "SKU", kpi: "KPI", url: "URL", vat: "VAT", eu: "EU", us: "US", uk: "UK",
+  mae: "MAE", rmse: "RMSE", mape: "MAPE", smape: "sMAPE", mse: "MSE", r2: "R²", ci: "CI", sd: "SD", se: "SE",
+  yoy: "YoY", mom: "MoM", ytd: "YTD", eur: "EUR", usd: "USD", api: "API", ui: "UI",
+};
+function humanHeader(c) {
+  const raw = String(c);
+  if (!/^[a-z0-9_]+$/.test(raw) && !/^[a-z]+(?:[A-Z][a-z0-9]*)+$/.test(raw)) return raw;
+  const words = raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+  if (!words.length) return raw;
+  const out = words.map((w) => HDR_WORDS[w] ?? w);
+  if (!HDR_WORDS[words[0]]) out[0] = out[0].charAt(0).toUpperCase() + out[0].slice(1);
+  return out.join(" ").replace(/ %/g, " %");
+}
+// Per-column units for ::MONEY / ::COMPACT columns: one unit for the whole
+// column (never "$4M" next to "$5.9M" next to "$812K"), chosen by its largest value.
+const UNIT_WORDS = {
+  de: { K: "\u00a0Tsd.", M: "\u00a0Mio.", B: "\u00a0Mrd." },
+  fr: { K: "\u00a0k", M: "\u00a0M", B: "\u00a0Md" },
+};
+const ROW_H_COMFY = 37; // row height of the virtualised Scroll view (px), comfortable density
+const ROW_H_COMPACT = 29; // … compact density
+const SCROLL_BLOCK = 100; // rows per fetch of a ::PAGED table in Scroll view
+function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, opts = {}) {
+  const unquote = unq;
+  if (!rows.length && !server) {
+    const empty = document.createElement("div");
+    empty.className = "tbl-empty";
+    empty.textContent = "No rows";
+    return empty;
+  }
   const t = document.createElement("table");
   t.className = "dp-table";
-  if (!rows.length) {
-    t.textContent = "(no rows)";
-    return t;
-  }
-  // Restore sort/filter/page from a previous render of this same panel so a
-  // cross-filter re-run (clicking a row) doesn't reset the table the user set up.
-  const saved = key != null && !server ? dpTableUI[key] || {} : {};
+  // UI state: a client table keeps it per panel across cross-filter re-runs
+  // (dpTableUI); a ::PAGED table's lives with its caller (server.colState), which
+  // also turns the column filters into SQL.
+  const saved = server ? server.colState : key != null ? dpTableUI[key] || {} : {};
   const persist = () => {
-    if (key != null && !server) dpTableUI[key] = { sortCol, dir, page, pageSize, colQ, colRange, colEq };
+    const st = { sortCol, dir, page, pageSize, colQ, colRange, colEq, q, hidden: [...hidden], showFilters, showTotals, view, compact };
+    if (server) Object.assign(server.colState, st);
+    else if (key != null) dpTableUI[key] = st;
   };
-  const colQ = saved.colQ ? { ...saved.colQ } : {}; // text/comparison per column
-  const colRange = saved.colRange ? { ...saved.colRange } : {}; // [lo,hi] slider per numeric column
-  const colEq = saved.colEq ? { ...saved.colEq } : {}; // exact value from a categorical dropdown
-  const allKeys = Object.keys(rows[0]);
+  // (a ::PAGED table shares these objects with its caller)
+  const colQ = server ? (saved.colQ ||= {}) : { ...(saved.colQ || {}) }; // text / >n per column
+  const colRange = server ? (saved.colRange ||= {}) : { ...(saved.colRange || {}) }; // [lo,hi] per numeric column
+  const colEq = server ? (saved.colEq ||= {}) : { ...(saved.colEq || {}) }; // exact value per categorical column
+  let q = server ? "" : saved.q || ""; // client search (a ::PAGED table's is server.search)
+  const hidden = new Set(saved.hidden || []);
+  const allKeys = rows.length ? Object.keys(rows[0]) : server.statCols || [];
   const colFmt = {}; // column key -> format role
   for (const [idx, f] of Object.entries(fmtByIdx)) colFmt[allKeys[idx]] = f;
   const cols = allKeys.filter((_, i) => i !== skip);
-  const numeric = {};
-  const maxAbs = {};
-  const colMin = {};
-  const colMax = {};
+  const loc = dashLocale() || NUM_LOCALE;
+  const selMode = ["single", "multi"].includes(opts.select) ? opts.select : "none";
+
+  // ── per-column profile: kind, range, decimals, whether it gets data bars ──
+  // A ::PAGED table profiles the whole filtered result from its SQL statistics
+  // (n{i}, d{i}, s{i}, m{i}, lo{i}, hi{i}); a client table from its rows.
+  const sstat = (c) => {
+    if (!server || !server.stats || !server.statCols) return null;
+    const j = server.statCols.indexOf(c);
+    if (j < 0) return null;
+    const g = (k) => (server.stats[k + j] == null ? null : Number(server.stats[k + j]));
+    return { n: g("n"), d: g("d"), s: g("s"), m: g("m"), lo: g("lo"), hi: g("hi") };
+  };
+  const info = {};
   for (const c of cols) {
-    const nums = rows.map((r) => cleanNum(r[c]));
-    const numFmt = [...METRICS, "COLORSCALE", "TREND", "PLAIN"].includes(colFmt[c]);
-    numeric[c] = numFmt || (nums.some((v) => v != null) && nums.every((v) => v == null || !isNaN(v)));
-    maxAbs[c] = Math.max(1, ...nums.map((v) => Math.abs(v) || 0));
-    const fin = nums.filter((v) => v != null);
-    colMin[c] = fin.length ? Math.min(...fin) : 0;
-    colMax[c] = fin.length ? Math.max(...fin) : 1;
+    const f = colFmt[c];
+    const vals = rows.map((r) => r[c]);
+    const present = vals.filter((v) => v != null && unquote(v) !== "");
+    const nums = present.map(cleanNum).filter((v) => v != null);
+    const st = sstat(c);
+    const numFmt = [...METRICS, "COLORSCALE", "TREND", "PLAIN"].includes(f);
+    const numeric = numFmt || (present.length > 0 ? present.every(isNumLike) : !!(st && st.lo != null));
+    const bool = !f && present.length > 0 && present.every(isBoolLike);
+    const ints = nums.every((n) => Number.isInteger(n));
+    // identifiers and years read as labels: no grouping, no bars, no totals
+    const idLike = /(^|[_\s-])(id|no|nr|nummer|number|code|key)$|^#|^id[_\s]/i.test(c);
+    const yearLike = ints && nums.length > 0 && nums.every((n) => n >= 1800 && n <= 2200) && /year|jahr|^yr$/i.test(c);
+    const label = numeric && ints && (idLike || yearLike);
+    const mn = st && st.lo != null ? st.lo : nums.length ? Math.min(...nums) : 0;
+    const mx = st && st.hi != null ? st.hi : nums.length ? Math.max(...nums) : 0;
+    info[c] = {
+      f,
+      numeric,
+      bool,
+      label,
+      ints,
+      dec: numeric && (!f || f === "PLAIN") ? colDecimals(nums) : 0,
+      min: mn,
+      max: mx,
+      maxAbs: Math.max(Math.abs(mn), Math.abs(mx)) || 1,
+      empty: st ? (server.total || 0) - (st.n || 0) : vals.length - present.length,
+      distinct: st && st.d != null ? st.d : new Set(present.map((v) => unquote(v))).size,
+      mean: st ? st.m : nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null,
+      sum: st ? st.s : null,
+      // slim in-cell bars: plain numeric columns that vary, not the row key
+      bars: numeric && !f && !label && mx !== mn && c !== cols[0] && (rows.length > 1 || !!server),
+      longText: !numeric && present.some((v) => String(v).length > 48),
+    };
   }
+  const nf = {}; // cached Intl formatters
+  const minus = (t) => t.replace(/^-/, "\u2212"); // a true minus sign
+  // ::MONEY / ::COMPACT: one unit per column (K / M / B) and fixed decimals
+  const lang = String(loc).slice(0, 2);
+  const unitOf = {};
+  for (const c of cols) {
+    const i = info[c];
+    if (!["MONEY", "COMPACT"].includes(i.f)) continue;
+    const mx = i.maxAbs;
+    const [div, u] = mx >= 1e9 ? [1e9, "B"] : mx >= 1e6 ? [1e6, "M"] : i.f === "COMPACT" && mx >= 1e4 ? [1e3, "K"] : [1, ""];
+    const scaled = mx / div;
+    const dec = div === 1 ? (i.f === "MONEY" && mx < 100 && !i.ints ? 2 : 0) : scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    // the currency's place and symbol, from the locale-aware formatter
+    const sample = i.f === "MONEY" ? fmtNum(1234, "MONEY") : "1234";
+    const pre = sample.slice(0, sample.search(/\d/));
+    const post = sample.slice(sample.search(/\d[^\d]*$/) + 1); // e.g. " €" (keeps its space)
+    const word = u ? (UNIT_WORDS[lang] || { K: "K", M: "M", B: "B" })[u] : "";
+    unitOf[c] = { div, dec, pre, post, word };
+  }
+  const fmtUnit = (n, c) => {
+    const u = unitOf[c];
+    const k = `u${u.dec}`;
+    nf[k] ||= new Intl.NumberFormat(loc, { minimumFractionDigits: u.dec, maximumFractionDigits: u.dec });
+    return minus(`${n < 0 ? "-" : ""}${u.pre}${nf[k].format(Math.abs(n) / u.div)}${u.word}${u.post}`);
+  };
+  const fmtPlain = (n, c) => {
+    const i = info[c];
+    const k = `${i.dec}|${i.label}`;
+    nf[k] ||= new Intl.NumberFormat(loc, {
+      minimumFractionDigits: i.dec,
+      maximumFractionDigits: i.dec,
+      useGrouping: !i.label,
+    });
+    return nf[k].format(n);
+  };
+  // text of one cell (display, search, totals, slider labels)
+  const cellText = (v, c) => {
+    if (v == null) return "";
+    const i = info[c];
+    if (i.numeric) {
+      const n = cleanNum(v);
+      if (n == null) return unquote(v);
+      if (unitOf[c]) return fmtUnit(n, c);
+      if (METRICS.includes(i.f)) return minus(fmtNum(n, i.f));
+      return minus(fmtPlain(n, c));
+    }
+    return String(fmtCell(unquote(v)));
+  };
+  const head = (c) => humanHeader(c); // the header people read (raw name in the tooltip)
+
   let sortCol = server ? server.sortCol : saved.sortCol ?? null;
   let dir = server ? server.sortDir || 1 : saved.dir ?? 1;
-  const hr = t.createTHead().insertRow();
-  cols.forEach((c) => {
-    const th = document.createElement("th");
-    th.style.cursor = "pointer";
-    // Numeric cells are right-aligned (below); align their header the same way
-    // so the label sits over the numbers rather than over the gap before them.
-    if (numeric[c] && !["BADGE", "SPARKLINE"].includes(colFmt[c])) th.style.textAlign = "right";
-    th.onclick = (e) => {
-      if (server) {
-        e.stopPropagation();
-        server.onSort(c); // server re-queries with ORDER BY + reloads this panel
-        return;
-      }
-      dir = sortCol === c ? -dir : 1;
-      sortCol = c;
-      persist();
-      head();
-      body();
-    };
-    hr.appendChild(th);
-  });
-  const tb = t.createTBody();
-  let page = saved.page || 0;
+  let page = server ? server.page : saved.page || 0;
   let pageSize = server ? server.pageSize : saved.pageSize || 10;
-  let filtered = rows; // narrowed by the per-column filters (colQ)
-  const unquote = (v) => String(v ?? "").replace(/^"|"$/g, "");
-  const applyColFilters = () => {
+  let view = server ? server.view || "pages" : saved.view || "pages";
+  // density: compact rows by default for long tables
+  let compact = saved.compact ?? (server ? server.unfiltered ?? server.total : rows.length) > 50;
+  let ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
+  let showFilters =
+    !!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0;
+  // Σ for amounts and counts; a column named like a rate / share / score is averaged
+  const rateLike = (c) => /pct|percent|%|rate|ratio|share|avg|mean|median|score|index|quote|anteil/i.test(c);
+  const additive = (c) =>
+    info[c].numeric &&
+    !info[c].label &&
+    (["MONEY", "COMPACT"].includes(info[c].f) || ((!info[c].f || info[c].f === "PLAIN") && info[c].ints && !rateLike(c)));
+  const hasAdditive = cols.some((c) => ["MONEY", "COMPACT"].includes(info[c].f));
+  const nTotal = () => (server ? server.total : filtered.length);
+  let showTotals = saved.showTotals ?? ((server ? server.total : rows.length) >= 3 && hasAdditive);
+  const visCols = () => cols.filter((c) => !hidden.has(c));
+
+  // ── filtering + sorting (client tables; a ::PAGED table's happen in SQL) ──
+  let filtered = rows;
+  const applyFilters = () => {
+    if (server) return;
     const qs = Object.entries(colQ);
     const rs = Object.entries(colRange);
     const es = Object.entries(colEq);
+    const needle = q.trim().toLowerCase();
     filtered =
-      qs.length || rs.length || es.length
+      qs.length || rs.length || es.length || needle
         ? rows.filter(
             (r) =>
-              qs.every(([cc, qq]) => matchCell(r[cc], qq, numeric[cc])) &&
+              qs.every(([cc, qq]) => matchCell(r[cc], qq, info[cc].numeric)) &&
               es.every(([cc, val]) => unquote(r[cc]) === val) &&
               rs.every(([cc, [lo, hi]]) => {
                 const n = cleanNum(r[cc]);
                 return n != null && (lo == null || n >= lo) && (hi == null || n <= hi);
-              })
+              }) &&
+              (!needle ||
+                visCols().some((cc) => {
+                  const v = r[cc];
+                  return v != null && (unquote(v).toLowerCase().includes(needle) || cellText(v, cc).toLowerCase().includes(needle));
+                }))
           )
         : rows;
   };
-  applyColFilters(); // re-apply any restored filters
+  applyFilters();
+  let sortedCache = null; // the client table's filtered + sorted rows (Scroll view reads it)
   const sortedRows = () => {
-    if (server) return rows; // already sorted + paged server-side
+    if (server) return rows;
     const data = filtered.slice();
-    if (sortCol) {
-      const num = numeric[sortCol];
-      data.sort((a, b) =>
-        num
-          ? ((cleanNum(a[sortCol]) || 0) - (cleanNum(b[sortCol]) || 0)) * dir
-          : String(a[sortCol]).localeCompare(String(b[sortCol])) * dir
-      );
+    if (sortCol && info[sortCol]) {
+      const num = info[sortCol].numeric;
+      data.sort((a, b) => {
+        const x = a[sortCol];
+        const y = b[sortCol];
+        if (x == null || y == null) return x == null ? (y == null ? 0 : 1) : -1; // empties last
+        return num
+          ? ((cleanNum(x) ?? 0) - (cleanNum(y) ?? 0)) * dir
+          : unquote(x).localeCompare(unquote(y), undefined, { numeric: true }) * dir;
+      });
     }
     return data;
   };
-  const head = () => cols.forEach((c, i) => (hr.cells[i].textContent = c + (c === sortCol ? (dir > 0 ? " ▲" : " ▼") : "")));
+  // A filter changed: a client table re-filters; a ::PAGED table asks its caller
+  // to re-query (text input is debounced so each keystroke isn't a query).
+  let colTimer = null;
+  const filtersChanged = (debounce = false) => {
+    persist();
+    if (server) {
+      clearTimeout(colTimer);
+      colTimer = setTimeout(() => server.onColFilters(), debounce ? 300 : 0);
+      return;
+    }
+    page = 0;
+    applyFilters();
+    persist();
+    body();
+    renderBar();
+  };
+
+  // ── toolbar ──
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  const bar = document.createElement("div");
+  bar.className = "tbl-bar";
+  const barLeft = document.createElement("div");
+  barLeft.className = "tbl-bar-l";
+  const barRight = document.createElement("div");
+  barRight.className = "tbl-bar-r";
+  bar.append(barLeft, barRight);
+  const mkBtn = (label, title, on, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tbl-btn" + (on ? " on" : "");
+    b.textContent = label;
+    b.title = title;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      fn(b);
+    };
+    return b;
+  };
+  const search = server ? server.search : document.createElement("input");
+  if (!server) {
+    search.type = "search";
+    search.className = "tbl-search";
+    search.placeholder = "Search…";
+    search.value = q;
+    search.onclick = (e) => e.stopPropagation();
+    search.oninput = () => {
+      q = search.value;
+      filtersChanged();
+    };
+  }
+  const chip = (text, clear, cls = "") => {
+    const s = document.createElement("span");
+    s.className = "tbl-chip" + cls;
+    s.textContent = text;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "×";
+    x.title = "remove";
+    x.onclick = (e) => {
+      e.stopPropagation();
+      clear();
+    };
+    s.appendChild(x);
+    return s;
+  };
+  const numTxt = (n, c) => (n == null ? "…" : cellText(n, c));
+  const filterChip = (text, clear) =>
+    chip(text, () => {
+      clear();
+      renderFilterRow();
+      filtersChanged();
+    });
+  function renderBar() {
+    barLeft.innerHTML = "";
+    const count = document.createElement("span");
+    count.className = "tbl-count";
+    const total = server ? server.unfiltered ?? server.total : rows.length;
+    const shown = nTotal();
+    const noun = total === 1 ? "row" : "rows";
+    count.textContent =
+      shown === total ? `${total.toLocaleString(loc)} ${noun}` : `${shown.toLocaleString(loc)} of ${total.toLocaleString(loc)} ${noun}`;
+    barLeft.appendChild(count);
+    for (const [c, v] of Object.entries(colEq)) barLeft.appendChild(filterChip(`${head(c)}: ${v}`, () => delete colEq[c]));
+    for (const [c, v] of Object.entries(colQ))
+      barLeft.appendChild(filterChip(`${head(c)} ${/^[<>]/.test(v) ? v : "∋ " + v}`, () => delete colQ[c]));
+    for (const [c, [lo, hi]] of Object.entries(colRange))
+      barLeft.appendChild(filterChip(`${head(c)}: ${numTxt(lo, c)} – ${numTxt(hi, c)}`, () => delete colRange[c]));
+    if (!server && q.trim())
+      barLeft.appendChild(
+        filterChip(`“${q.trim()}”`, () => {
+          q = "";
+          search.value = "";
+        })
+      );
+    // the multi-select selection, clearable in one click
+    const k0 = cols[0];
+    if (selMode === "multi" && Array.isArray(dpXf[k0]) && dpXf[k0].length)
+      barLeft.appendChild(
+        chip(
+          `${dpXf[k0].length} selected`,
+          () => {
+            dpXf[k0] = [];
+            run(false);
+          },
+          " sel"
+        )
+      );
+    // rebuilding the toolbar detaches the search box: keep its focus and caret
+    const typing = document.activeElement === search;
+    const caret = typing ? search.selectionStart : null;
+    barRight.innerHTML = "";
+    const many = (server ? server.unfiltered ?? server.total : rows.length) > 10;
+    if (server ? !!search : rows.length > 8) barRight.appendChild(search);
+    if (typing && search.isConnected) {
+      search.focus();
+      if (caret != null) search.setSelectionRange(caret, caret);
+    }
+    if (many) {
+      const nAct = Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length;
+      barRight.appendChild(
+        mkBtn(nAct ? `Filters · ${nAct}` : "Filters", "per-column filters", showFilters, () => {
+          showFilters = !showFilters;
+          persist();
+          renderFilterRow();
+          renderBar();
+        })
+      );
+    }
+    if (cols.some((c) => info[c].numeric && !info[c].label) && nTotal() > 1)
+      barRight.appendChild(
+        mkBtn(
+          "Σ Totals",
+          `a totals row over all ${server ? "matching rows (computed in SQL)" : "matching rows"}: sums of amounts and counts, means (⌀) of rates`,
+          showTotals,
+          () => {
+            showTotals = !showTotals;
+            persist();
+            renderTotals();
+            renderBar();
+          }
+        )
+      );
+    if (cols.length > 4) barRight.appendChild(columnsMenu());
+    if (many) {
+      const seg = document.createElement("span");
+      seg.className = "tbl-seg";
+      for (const [v, label, tip] of [
+        ["pages", "Pages", "page through the rows"],
+        ["scroll", "Scroll", "scroll through every row (only the visible ones are drawn" + (server ? ", fetched in blocks)" : ")")],
+      ])
+        seg.appendChild(
+          mkBtn(label, tip, view === v, () => {
+            if (view === v) return;
+            if (server) {
+              server.onView(v);
+              return;
+            }
+            view = v;
+            page = 0;
+            persist();
+            setView();
+            body();
+            renderBar();
+          })
+        );
+      barRight.appendChild(seg);
+    }
+    barRight.appendChild(
+      mkBtn(compact ? "Compact" : "Comfortable", "row density: compact ↔ comfortable", false, () => {
+        compact = !compact;
+        ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
+        t.classList.toggle("compact", compact);
+        persist();
+        if (view === "scroll") body();
+        renderBar();
+      })
+    );
+    barRight.appendChild(csvBtn());
+  }
+  function columnsMenu() {
+    const d = document.createElement("details");
+    d.className = "tbl-cols";
+    d.onclick = (e) => e.stopPropagation();
+    const s = document.createElement("summary");
+    s.className = "tbl-btn" + (hidden.size ? " on" : "");
+    const lab = () => (hidden.size ? `Columns · ${cols.length - hidden.size}/${cols.length}` : "Columns");
+    s.textContent = lab();
+    s.title = "show / hide columns";
+    const pop = document.createElement("div");
+    pop.className = "tbl-cols-pop";
+    cols.forEach((c, ix) => {
+      const l = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !hidden.has(c);
+      cb.disabled = ix === 0; // the row key stays
+      cb.onchange = () => {
+        if (cb.checked) hidden.delete(c);
+        else hidden.add(c);
+        persist();
+        renderHead();
+        renderFilterRow();
+        body();
+        s.textContent = lab();
+        s.classList.toggle("on", hidden.size > 0);
+      };
+      l.append(cb, document.createTextNode(head(c)));
+      pop.appendChild(l);
+    });
+    d.append(s, pop);
+    return d;
+  }
+  // CSV of what the table shows: the matching rows (a ::PAGED table: the rows
+  // loaded so far) and the visible columns, in table order.
+  function csvBtn() {
+    return mkBtn(
+      "⤓ CSV",
+      server ? "download the loaded rows as CSV" : "download the matching rows as CSV",
+      false,
+      () => {
+        const data = server ? (view === "scroll" ? loadedRows() : rows) : sortedRows();
+        download(new Blob([csvOfRows(data, visCols())], { type: "text/csv" }), "data.csv");
+      }
+    );
+  }
+  wrap.appendChild(bar);
+
+  // ── head: label, sort icon, column statistics on hover ──
+  const scroller = document.createElement("div");
+  scroller.className = "tbl-scroll";
+  scroller.appendChild(t);
+  wrap.appendChild(scroller);
+  const thead = t.createTHead();
+  const hr = thead.insertRow();
+  const statsTitle = (c) => {
+    const i = info[c];
+    const parts = [];
+    if (i.numeric && !i.label && i.mean != null && !["SPARKLINE", "BADGE"].includes(i.f)) {
+      parts.push(`min ${cellText(i.min, c)}`, `max ${cellText(i.max, c)}`, `mean ${cellText(i.mean, c)}`);
+    } else if (i.f !== "SPARKLINE") parts.push(`${i.distinct.toLocaleString(loc)} distinct`);
+    if (i.empty) parts.push(`${i.empty.toLocaleString(loc)} empty`);
+    const scope = server ? " (all matching rows)" : "";
+    const name = head(c) === c ? c : `${head(c)}  (${c})`;
+    return `${name}\n${parts.join(" · ")}${scope}\nclick to sort`;
+  };
+  const alignRight = (c) => info[c].numeric && !["BADGE", "SPARKLINE"].includes(info[c].f);
+  function renderHead() {
+    hr.innerHTML = "";
+    for (const c of visCols()) {
+      const th = document.createElement("th");
+      th.title = statsTitle(c);
+      if (alignRight(c)) th.classList.add("num");
+      const active = c === sortCol;
+      th.classList.toggle("sorted", active);
+      th.innerHTML =
+        `<span class="th-in"><span class="th-l">${escapeHtml(head(c))}</span>` +
+        `<span class="th-sort">${active ? (dir > 0 ? "↑" : "↓") : "↕"}</span></span>`;
+      th.onclick = (e) => {
+        if (server) {
+          e.stopPropagation();
+          server.onSort(c);
+          return;
+        }
+        dir = sortCol === c ? -dir : 1;
+        sortCol = c;
+        persist();
+        renderHead();
+        body();
+      };
+      hr.appendChild(th);
+    }
+  }
+
+  // ── the per-column filter row (behind the Filters button) ──
+  let fRow = null;
+  function renderFilterRow() {
+    if (fRow) fRow.remove();
+    fRow = null;
+    const total = server ? server.unfiltered ?? server.total : rows.length;
+    if (!showFilters || total <= 10) return;
+    fRow = thead.insertRow();
+    fRow.className = "tbl-frow";
+    for (const c of visCols()) {
+      const th = document.createElement("th");
+      const i = info[c];
+      // a categorical column with few values → a dropdown (a ::PAGED table loads
+      // its values from SQL: every distinct value under the other filters)
+      const few = !i.numeric && i.f !== "SPARKLINE" && (colEq[c] != null || (i.distinct > 1 && i.distinct <= 30));
+      if (few) {
+        const sel = document.createElement("select");
+        sel.className = "dp-colf";
+        sel.onclick = (e) => e.stopPropagation();
+        const fill = (vals) => {
+          sel.innerHTML = `<option value="">All</option>`;
+          for (const v of vals) {
+            const o = document.createElement("option");
+            o.value = v;
+            o.textContent = v;
+            sel.appendChild(o);
+          }
+          sel.value = colEq[c] || "";
+        };
+        if (server) {
+          fill(colEq[c] ? [colEq[c]] : []);
+          server
+            .distinct(c)
+            .then((vals) => fill(vals.filter((v) => v != null && v !== "")))
+            .catch(() => {});
+        } else fill([...new Set(rows.map((r) => unquote(r[c])))].filter((x) => x !== "").sort());
+        sel.onchange = () => {
+          if (sel.value) colEq[c] = sel.value;
+          else delete colEq[c];
+          filtersChanged();
+        };
+        th.appendChild(sel);
+      } else if (i.f !== "SPARKLINE") {
+        const inp = document.createElement("input");
+        inp.className = "dp-colf";
+        inp.placeholder = i.numeric ? "> n  < n" : "contains…";
+        inp.value = colQ[c] || "";
+        inp.onclick = (e) => e.stopPropagation();
+        // a ::PAGED table is rebuilt after the query: give the focus back
+        if (server && saved.focus === c) {
+          requestAnimationFrame(() => {
+            inp.focus();
+            inp.setSelectionRange(inp.value.length, inp.value.length);
+          });
+          saved.focus = null;
+        }
+        inp.oninput = () => {
+          const v = inp.value.trim();
+          if (v) colQ[c] = v;
+          else delete colQ[c];
+          if (server) saved.focus = c;
+          if (server) filtersChanged(true);
+          else {
+            applyFilters();
+            page = 0;
+            persist();
+            body();
+            renderBar();
+          }
+        };
+        th.appendChild(inp);
+        if (i.numeric && i.max > i.min) {
+          const init = colRange[c] ? [colRange[c][0] ?? i.min, colRange[c][1] ?? i.max] : null;
+          th.appendChild(
+            dualRange(
+              i.min,
+              i.max,
+              init,
+              (lo, hi) => {
+                if (lo == null && hi == null) delete colRange[c];
+                else colRange[c] = [lo, hi];
+                if (server) filtersChanged(true);
+                else {
+                  applyFilters();
+                  page = 0;
+                  persist();
+                  body();
+                  renderBar();
+                }
+              },
+              (v) => cellText(v, c)
+            )
+          );
+        }
+      }
+      fRow.appendChild(th);
+    }
+  }
+
+  // ── cells ──
+  const tb = t.createTBody();
+  const nil = () => `<span class="nil">—</span>`;
+  function fillCell(td, v, c) {
+    const i = info[c];
+    const f = i.f;
+    if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
+    if (f === "SPARKLINE") {
+      td.className = "spark-cell";
+      td.innerHTML = cellSpark(v, c);
+      return;
+    }
+    if (v == null || unquote(v) === "") {
+      td.innerHTML = nil();
+      if (alignRight(c)) td.classList.add("num");
+      return;
+    }
+    if (f === "BADGE") {
+      td.innerHTML = badgeHtml(unq(v));
+      return;
+    }
+    if (i.bool) {
+      const yes = v === true || v === "true";
+      td.innerHTML = yes ? `<span class="bool yes" title="true">✓</span>` : `<span class="bool no" title="false">✗</span>`;
+      td.classList.add("ctr");
+      return;
+    }
+    if (!i.numeric) {
+      td.textContent = cellText(v, c);
+      if (i.longText) {
+        td.classList.add("long");
+        td.title = unquote(v);
+      }
+      return;
+    }
+    const n = cleanNum(v);
+    td.classList.add("num");
+    if (n == null) {
+      td.textContent = unquote(v);
+      return;
+    }
+    if (f === "TREND") {
+      const flat = Math.abs(n) < 0.05; // rounds to 0.0: neither up nor down
+      const up = n > 0;
+      const txt = new Intl.NumberFormat(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(Math.abs(n));
+      td.innerHTML = flat
+        ? `<span class="trend flat">– ${escapeHtml(txt)}</span>`
+        : `<span class="trend ${up ? "up" : "down"}">${up ? "▲ +" : "▼ \u2212"}${escapeHtml(txt)}</span>`;
+      return;
+    }
+    if (f === "COLORSCALE") {
+      const tt = (n - i.min) / (i.max - i.min || 1);
+      td.innerHTML = `<span class="cscale" style="--cs:${heatColor(tt)}">${escapeHtml(
+        new Intl.NumberFormat(loc, { maximumFractionDigits: 2 }).format(n)
+      )}</span>`;
+      return;
+    }
+    td.textContent = cellText(n, c);
+    if (n === 0) td.classList.add("zero");
+    if (i.bars) {
+      const frac = Math.max(0.02, Math.min(1, Math.abs(n) / i.maxAbs));
+      const b = document.createElement("span");
+      b.className = "cbar" + (n < 0 ? " neg" : "");
+      b.style.width = `calc((100% - 1.5rem) * ${frac.toFixed(3)})`;
+      td.appendChild(b);
+    }
+  }
+  // One body row. With ::ROWSELECT 'single' a click sets getvariable('selected')
+  // and getvariable('<first column>') (click again / the background clears);
+  // with 'multi' each click toggles the row in the list getvariable('<first column>').
+  const k0 = cols[0];
+  function renderRow(tr, r) {
+    const vc = visCols();
+    const selectable = selMode !== "none" && k0 != null && !info[k0].numeric;
+    if (selectable) {
+      const keyVal = unquote(r[k0]);
+      tr.classList.add("clickable");
+      if (selMode === "single") {
+        const own = dpXf[k0] !== undefined && !Array.isArray(dpXf[k0]) ? dpXf[k0] : dpSelected;
+        if (own && keyVal === own) tr.classList.add("row-sel");
+        tr.onclick = (e) => {
+          if (document.body.classList.contains("mode-explore")) return; // preview tables aren't cross-filters
+          e.stopPropagation();
+          const on = (dpXf[k0] ?? "") !== keyVal;
+          dpXf[k0] = on ? keyVal : "";
+          dpFilter = on ? keyVal : "";
+          dpSelected = dpFilter || null;
+          run(false);
+        };
+      } else {
+        const cur = Array.isArray(dpXf[k0]) ? dpXf[k0] : [];
+        const on = cur.includes(keyVal);
+        tr.classList.toggle("row-sel", on);
+        tr.onclick = (e) => {
+          if (document.body.classList.contains("mode-explore")) return;
+          e.stopPropagation();
+          // the selection as it is now (clicks can come faster than re-renders)
+          const set = new Set(Array.isArray(dpXf[k0]) ? dpXf[k0] : []);
+          if (set.has(keyVal)) set.delete(keyVal);
+          else set.add(keyVal);
+          dpXf[k0] = [...set];
+          run(false);
+        };
+      }
+    }
+    vc.forEach((c, ix) => {
+      const td = tr.insertCell();
+      fillCell(td, r[c], c);
+      if (ix === 0 && selectable && selMode === "multi") {
+        const cb = document.createElement("span");
+        cb.className = "row-cb" + (tr.classList.contains("row-sel") ? " on" : "");
+        td.prepend(cb);
+      }
+    });
+  }
+
+  // ── body: one page, or (Scroll view) the rows around the viewport ──
+  const blocks = new Map(); // ::PAGED Scroll view: block index -> rows | Promise
+  if (server && view === "scroll") blocks.set(0, rows);
+  const loadedRows = () => [...blocks.keys()].sort((a, b) => a - b).flatMap((k) => (Array.isArray(blocks.get(k)) ? blocks.get(k) : []));
+  const rowAt = (i) => {
+    if (!server) return sortedCache[i];
+    const b = Math.floor(i / SCROLL_BLOCK);
+    const got = blocks.get(b);
+    if (Array.isArray(got)) return got[i - b * SCROLL_BLOCK] ?? null;
+    if (!got)
+      blocks.set(
+        b,
+        server
+          .fetchRows(b * SCROLL_BLOCK, SCROLL_BLOCK)
+          .then((rs) => {
+            blocks.set(b, rs);
+            renderWindow(true); // the block arrived: redraw the rows it fills
+          })
+          .catch(() => blocks.delete(b))
+      );
+    return null; // still loading
+  };
+  const spacer = (h) => {
+    const tr = document.createElement("tr");
+    tr.className = "tbl-spacer";
+    const td = document.createElement("td");
+    td.colSpan = visCols().length;
+    td.style.height = `${h}px`;
+    tr.appendChild(td);
+    return tr;
+  };
+  let lastWindow = "";
+  function renderWindow(force = false) {
+    const total = nTotal();
+    const viewH = scroller.clientHeight || 560;
+    const first = Math.max(0, Math.floor(scroller.scrollTop / ROW_H) - 8);
+    const last = Math.min(total, first + Math.ceil(viewH / ROW_H) + 16);
+    const sig = `${first}:${last}:${blocks.size}`;
+    if (!force && sig === lastWindow) return;
+    lastWindow = sig;
+    tb.innerHTML = "";
+    if (!total) return emptyRow();
+    tb.appendChild(spacer(first * ROW_H));
+    for (let i = first; i < last; i++) {
+      const r = rowAt(i);
+      const tr = document.createElement("tr");
+      if (r) renderRow(tr, r);
+      else {
+        tr.className = "tbl-loading";
+        const td = tr.insertCell();
+        td.colSpan = visCols().length;
+        td.textContent = "…";
+      }
+      tb.appendChild(tr);
+    }
+    tb.appendChild(spacer((total - last) * ROW_H));
+    updateFoot(total, 1);
+  }
+  const emptyRow = () => {
+    const tr = tb.insertRow();
+    const td = tr.insertCell();
+    td.colSpan = visCols().length || 1;
+    td.className = "tbl-none";
+    td.textContent = server ? "No rows match." : "No rows match the filters.";
+  };
+  let rafPending = false;
+  scroller.addEventListener("scroll", () => {
+    if (view !== "scroll" || rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      renderWindow();
+    });
+  });
+  function setView() {
+    scroller.classList.toggle("virtual", view === "scroll");
+    t.classList.toggle("virtual", view === "scroll");
+    if (view === "scroll") scroller.scrollTop = 0;
+  }
   const body = () => {
     tb.innerHTML = "";
+    if (view === "scroll") {
+      sortedCache = server ? null : sortedRows();
+      renderWindow(true);
+      renderTotals();
+      return;
+    }
     const data = sortedRows();
     if (server) {
       updateFoot(server.total, Math.max(1, Math.ceil(server.total / pageSize)));
@@ -3190,170 +4039,90 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
       updateFoot(data.length, pages);
     }
     const pageRows = server ? data : data.slice(page * pageSize, (page + 1) * pageSize);
-    for (const r of pageRows) {
-      const tr = tb.insertRow();
-      // A categorical first column makes the row a cross-filter source. Clicking
-      // sets BOTH the generic getvariable('selected') AND a NAMED cross-filter
-      // getvariable('<first column name>') — so two tables with different first
-      // columns drive two independent live selections. Click again / the
-      // background to clear. Each table highlights its OWN named selection.
-      const key = cols[0];
-      if (!numeric[key]) {
-        const keyVal = String(r[key] ?? "").replace(/^"|"$/g, "");
-        tr.style.cursor = "pointer";
-        const own = dpXf[key] !== undefined ? dpXf[key] : dpSelected;
-        if (own && keyVal === own) tr.classList.add("row-sel");
-        tr.onclick = (e) => {
-          if (document.body.classList.contains("mode-explore")) return; // preview tables aren't cross-filters
-          e.stopPropagation();
-          const on = (dpXf[key] ?? "") !== keyVal;
-          dpXf[key] = on ? keyVal : "";
-          dpFilter = on ? keyVal : "";
-          dpSelected = dpFilter || null;
-          run(false);
-        };
-      }
-      for (const c of cols) {
-        const td = tr.insertCell();
-        let v = r[c];
-        if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
-        const f = colFmt[c];
-        if (f === "SPARKLINE") {
-          td.className = "spark-cell";
-          td.innerHTML = cellSpark(v);
-          continue;
-        }
-        if (f === "BADGE") {
-          td.innerHTML = v == null ? "" : badgeHtml(unq(v));
-          continue;
-        }
-        if (f === "TREND") {
-          const n = cleanNum(v);
-          td.style.textAlign = "right";
-          if (n != null) {
-            td.innerHTML =
-              `<span class="trend ${n >= 0 ? "up" : "down"}">${n >= 0 ? "▲" : "▼"} ` +
-              `${dashLocale() ? format_number_locale(Math.round(Math.abs(n) * 10) / 10, "METRIC", dashLocale()) : Math.abs(n).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 1 })}</span>`;
-          }
-          continue;
-        }
-        if (f === "PLAIN") {
-          // a numeric column with NO in-cell bar (::PLAIN / ::NOBAR)
-          td.textContent = fmtCell(v);
-          td.style.textAlign = "right";
-          td.style.fontVariantNumeric = "tabular-nums";
-          continue;
-        }
-        if ([...METRICS, "COLORSCALE"].includes(f)) {
-          const n = cleanNum(v);
-          td.style.textAlign = "right";
-          td.style.fontVariantNumeric = "tabular-nums";
-          td.textContent =
-            n == null ? (v == null ? "" : v) : f === "COLORSCALE" ? fmtNum(n, "METRIC") : fmtNum(n, f);
-          if (f === "COLORSCALE" && n != null) {
-            td.style.background = heatColor((n - colMin[c]) / (colMax[c] - colMin[c] || 1));
-            td.style.fontWeight = "600";
-          }
-          continue;
-        }
-        td.textContent = fmtCell(v);
-        if (numeric[c]) {
-          const n = cleanNum(v);
-          td.style.textAlign = "right";
-          td.style.fontVariantNumeric = "tabular-nums";
-          if (n != null) {
-            const pct = (Math.abs(n) / maxAbs[c]) * 100;
-            td.style.background = `linear-gradient(90deg, var(--ax-databar-a) 0, var(--ax-databar-b) ${pct}%, transparent ${pct}%)`;
-          }
-        }
-      }
-    }
+    if (!pageRows.length) emptyRow();
+    for (const r of pageRows) renderRow(tb.insertRow(), r);
+    renderTotals();
   };
-  // Client-side pagination (50/page) so thousands of rows stay responsive; the
-  // full result is kept for sorting and CSV export.
-  const wrap = document.createElement("div");
-  wrap.className = "table-wrap";
-  // A per-table text filter across all columns. Client tables filter the held
-  // rows here; ::PAGED tables filter server-side (handled by the caller), so we
-  // only add the box for client tables big enough to warrant it.
-  // Per-column filters: an input under each header, ANDed together. Numeric
-  // columns also accept >n / <n / >=n / <=n. (Client tables only; ::PAGED
-  // tables filter server-side, handled by the caller.)
-  if (!server && rows.length > 10) {
-    const fRow = t.tHead.insertRow();
-    cols.forEach((c) => {
-      const th = document.createElement("th");
-      // A low-cardinality categorical column → a dropdown of its values.
-      const distinct = numeric[c]
-        ? null
-        : [...new Set(rows.map((r) => unquote(r[c])))].filter((x) => x !== "");
-      if (distinct && distinct.length > 1 && distinct.length <= 30) {
-        const sel = document.createElement("select");
-        sel.className = "dp-colf";
-        sel.onclick = (e) => e.stopPropagation();
-        const all = document.createElement("option");
-        all.value = "";
-        all.textContent = "All";
-        sel.appendChild(all);
-        distinct.sort().forEach((v) => {
-          const o = document.createElement("option");
-          o.value = v;
-          o.textContent = v;
-          sel.appendChild(o);
-        });
-        sel.value = colEq[c] || "";
-        sel.onchange = () => {
-          if (sel.value) colEq[c] = sel.value;
-          else delete colEq[c];
-          applyColFilters();
-          page = 0;
-          persist();
-          body();
-        };
-        th.appendChild(sel);
-      } else {
-        const inp = document.createElement("input");
-        inp.className = "dp-colf";
-        inp.placeholder = numeric[c] ? ">n / <n" : "filter";
-        inp.value = colQ[c] || "";
-        inp.onclick = (e) => e.stopPropagation();
-        inp.oninput = () => {
-          const q = inp.value.trim();
-          if (q) colQ[c] = q;
-          else delete colQ[c];
-          applyColFilters();
-          page = 0;
-          persist();
-          body();
-        };
-        th.appendChild(inp);
-        // Numeric columns also get a dual-handle range slider (an extra option).
-        if (numeric[c] && colMax[c] > colMin[c]) {
-          const init = colRange[c] ? [colRange[c][0] ?? colMin[c], colRange[c][1] ?? colMax[c]] : null;
-          th.appendChild(
-            dualRange(colMin[c], colMax[c], init, (lo, hi) => {
-              if (lo == null && hi == null) delete colRange[c];
-              else colRange[c] = [lo, hi];
-              applyColFilters();
-              page = 0;
-              persist();
-              body();
-            })
-          );
-        }
+
+  // ── totals row: Σ for amounts and counts, ⌀ for rates, counts for badges ──
+  let tfoot = null;
+  function renderTotals() {
+    if (tfoot) tfoot.remove();
+    tfoot = null;
+    t.querySelector("caption.tot-legend")?.remove();
+    if (!showTotals) return;
+    const data = server ? [] : filtered;
+    tfoot = t.createTFoot();
+    const tr = tfoot.insertRow();
+    const meanCols = [];
+    visCols().forEach((c, ix) => {
+      const td = tr.insertCell();
+      const i = info[c];
+      if (ix === 0) {
+        td.innerHTML = `<span class="tot-l">Total</span>`;
+        td.title = `Σ = sum, ⌀ = mean, over all ${nTotal().toLocaleString(loc)} matching rows${server ? " (computed in SQL)" : ""}`;
+        return;
       }
-      fRow.appendChild(th);
+      if (i.f === "BADGE" && !server) {
+        const cnt = {};
+        for (const r of data) if (r[c] != null) cnt[unq(r[c])] = (cnt[unq(r[c])] || 0) + 1;
+        td.innerHTML = Object.entries(cnt)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([k, n]) => `<span class="tot-badge">${n}× ${escapeHtml(k)}</span>`)
+          .join(" ");
+        return;
+      }
+      if (!i.numeric || i.label || i.f === "SPARKLINE") return;
+      let sum;
+      let mean;
+      if (server) {
+        sum = i.sum;
+        mean = i.mean;
+      } else {
+        const nums = data.map((r) => cleanNum(r[c])).filter((v) => v != null);
+        if (!nums.length) return;
+        sum = nums.reduce((a, b) => a + b, 0);
+        mean = sum / nums.length;
+      }
+      if (sum == null && mean == null) return;
+      td.classList.add("num");
+      const n = nTotal().toLocaleString(loc);
+      if (additive(c) && sum != null) {
+        td.textContent = cellText(sum, c);
+        td.title = `${head(c)}: sum of ${n} rows`;
+      } else if (mean != null) {
+        td.textContent =
+          i.f === "TREND" || i.f === "COLORSCALE" ? minus(new Intl.NumberFormat(loc, { maximumFractionDigits: 2 }).format(mean)) : cellText(mean, c);
+        td.classList.add("tot-mean");
+        td.title = `${head(c)}: mean of ${n} rows`;
+        meanCols.push(head(c));
+      }
     });
+    // what the totals are, in words (means are set in italics in the row)
+    const leg = document.createElement("caption");
+    leg.className = "tot-legend";
+    leg.textContent =
+      `Totals over all ${nTotal().toLocaleString(loc)} matching rows${server ? " (computed in SQL)" : ""}: sums` +
+      (meanCols.length ? `; means (italic) for ${meanCols.join(", ")}` : "");
+    t.appendChild(leg);
   }
-  wrap.appendChild(t);
+
+  // ── pager (Pages view) / position (Scroll view) ──
   t._rows = rows;
   t._cols = cols;
   const foot = document.createElement("div");
   foot.className = "table-foot";
   wrap.appendChild(foot);
   function updateFoot(total, pages) {
-    // Hide the pager only for genuinely small tables (≤ the smallest page size),
-    // so the rows-per-page control stays available for paged tables.
+    if (view === "scroll") {
+      const first = Math.min(total, Math.floor(scroller.scrollTop / ROW_H) + 1);
+      const last = Math.min(total, first - 1 + Math.floor((scroller.clientHeight || 560) / ROW_H));
+      foot.style.display = total ? "" : "none";
+      foot.innerHTML = `<span class="table-info">${first.toLocaleString(loc)}–${last.toLocaleString(loc)} of ${total.toLocaleString(loc)}</span>`;
+      return;
+    }
+    // Hide the pager only for genuinely small tables (≤ the smallest page size).
     if (total <= 10) {
       foot.style.display = "none";
       return;
@@ -3363,27 +4132,26 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
     const cur = server ? server.page : page;
     const from = cur * pageSize + 1;
     const to = Math.min(total, (cur + 1) * pageSize);
-    const mk = (label, disabled, fn) => {
+    const mk = (label, title, disabled, fn) => {
       const btn = document.createElement("button");
       btn.className = "page-btn";
       btn.textContent = label;
+      btn.title = title;
       btn.disabled = disabled;
       btn.onclick = (e) => {
         e.stopPropagation();
-        if (server) {
-          fn(); // server.onPage handles the re-query + re-render
-        } else {
-          fn();
+        fn();
+        if (!server) {
           persist();
           body();
         }
       };
       return btn;
     };
-    const info = document.createElement("span");
-    info.className = "table-info";
-    info.textContent = `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`;
-    // Rows-per-page selector.
+    const go = (p) => (server ? server.onPage(p) : (page = p));
+    const infoEl = document.createElement("span");
+    infoEl.className = "table-info";
+    infoEl.textContent = `${from.toLocaleString(loc)}–${to.toLocaleString(loc)} of ${total.toLocaleString(loc)}`;
     const sizeSel = document.createElement("select");
     sizeSel.className = "page-size";
     for (const nn of [10, 20, 50, 100]) {
@@ -3393,6 +4161,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
       if (nn === pageSize) o.selected = true;
       sizeSel.appendChild(o);
     }
+    sizeSel.onclick = (e) => e.stopPropagation();
     sizeSel.onchange = (e) => {
       e.stopPropagation();
       const nn = Number(sizeSel.value);
@@ -3405,25 +4174,31 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
       }
     };
     foot.append(
-      mk("◀", cur === 0, () => (server ? server.onPage(cur - 1) : (page = Math.max(0, page - 1)))),
-      info,
-      mk("▶", cur >= pages - 1, () => (server ? server.onPage(cur + 1) : (page = Math.min(pages - 1, page + 1)))),
-      sizeSel
+      sizeSel,
+      mk("«", "first page", cur === 0, () => go(0)),
+      mk("‹", "previous page", cur === 0, () => go(Math.max(0, cur - 1))),
+      infoEl,
+      mk("›", "next page", cur >= pages - 1, () => go(Math.min(pages - 1, cur + 1))),
+      mk("»", "last page", cur >= pages - 1, () => go(pages - 1))
     );
   }
-  // Arrow-key navigation while the pointer is over the table (no click/focus
-  // needed, so browsing rows never triggers a re-run): ↑/↓ move the highlighted
-  // row, ←/→ (PageUp/Down) page, Enter drills into the row (cross-filter),
-  // Home/End jump. Registered on the shared dpNav handler on hover.
+
+  // Arrow-key navigation while the pointer is over the table: ↑/↓ move the
+  // highlighted row, ←/→ (PageUp/Down) page (Scroll view: scroll a screen),
+  // Enter selects (with ::ROWSELECT), Home/End jump.
   t.classList.add("dp-kbd");
   let focusIdx = -1;
+  const bodyRows = () => [...tb.rows].filter((r) => !r.classList.contains("tbl-spacer"));
   const applyFocus = () => {
-    [...tb.rows].forEach((r, i) => r.classList.toggle("row-focus", i === focusIdx));
-    if (focusIdx >= 0) tb.rows[focusIdx]?.scrollIntoView({ block: "nearest" });
+    bodyRows().forEach((r, i) => r.classList.toggle("row-focus", i === focusIdx));
+    if (focusIdx >= 0) bodyRows()[focusIdx]?.scrollIntoView({ block: "nearest" });
   };
-  const totalPages = () =>
-    server ? Math.max(1, Math.ceil((server.total || 0) / pageSize)) : Math.max(1, Math.ceil(rows.length / pageSize));
+  const totalPages = () => Math.max(1, Math.ceil(nTotal() / pageSize));
   const gotoPage = (p) => {
+    if (view === "scroll") {
+      scroller.scrollTop += Math.sign(p - page) * (scroller.clientHeight - ROW_H);
+      return;
+    }
     p = Math.max(0, Math.min(totalPages() - 1, p));
     const cur = server ? server.page : page;
     if (p === cur) return;
@@ -3437,16 +4212,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
       applyFocus();
     }
   };
-  const startFocus = () => {
-    if (focusIdx < 0) {
-      const sel = [...tb.rows].findIndex((r) => r.classList.contains("row-sel"));
-      focusIdx = sel >= 0 ? sel : 0;
-      applyFocus();
-    }
-  };
   const controller = {
     move: (d) => {
-      const n = tb.rows.length;
+      const n = bodyRows().length;
       if (!n) return;
       if (d === "home") focusIdx = 0;
       else if (d === "end") focusIdx = n - 1;
@@ -3454,16 +4222,21 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
       applyFocus();
     },
     page: (d) => gotoPage((server ? server.page : page) + d),
-    drill: () => tb.rows[focusIdx]?.click(),
+    drill: () => bodyRows()[focusIdx]?.click(),
   };
   t.addEventListener("mouseenter", () => {
     dpNav = controller;
-    startFocus();
+    if (focusIdx < 0) {
+      const sel = bodyRows().findIndex((r) => r.classList.contains("row-sel"));
+      if (sel >= 0) {
+        focusIdx = sel;
+        applyFocus();
+      }
+    }
   });
   t.addEventListener("mouseleave", () => {
     if (dpNav === controller) dpNav = null;
   });
-  // After a server page-change the panel is rebuilt; keep this table navigable.
   if (server && dpKbdActive) {
     dpKbdActive = false;
     dpNav = controller;
@@ -3471,14 +4244,17 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null) 
     requestAnimationFrame(applyFocus);
   }
 
-  head();
+  t.classList.toggle("compact", compact);
+  setView();
+  renderHead();
+  renderFilterRow();
   body();
+  renderBar();
   return wrap;
 }
 
-// ::COLORSCALE cell background — a diverging green→amber→red scale by the
-// normalized value t∈[0,1] (low = green, high = red). Soft tones keep the cell
-// text readable.
+// ::COLORSCALE cell colour — green→amber→red by the normalised value t∈[0,1]
+// (low = green, high = red); the cell shows it as a soft tint (CSS --cs).
 function heatColor(t) {
   t = Math.max(0, Math.min(1, t));
   // Theme tokens --ax-scale-lo/-mid/-hi (green / amber / red in the default look).
@@ -3499,13 +4275,19 @@ function heatColor(t) {
 function badgeHtml(text) {
   const t = text.toLowerCase();
   let cls = "badge-neutral";
-  if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low)\b/.test(t)) cls = "badge-good";
-  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch)\b/.test(t)) cls = "badge-warn";
-  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach)\b/.test(t)) cls = "badge-bad";
+  // English and German status words (a dashboard may be localised)
+  if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low|grow(ing|th)?|ris(e|ing)|improv(ed|ing)|correct|right|met|achieved|erreicht|gut|aktiv|erledigt)\b/.test(t))
+    cls = "badge-good";
+  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|knapp|prüfen|offen)\b/.test(t))
+    cls = "badge-warn";
+  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
+    cls = "badge-bad";
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
 
-// ::SPARKLINE cell — a tiny inline trend line from a numeric array (DuckDB list()).
+// ::SPARKLINE cell — a word-sized trend from a numeric array (DuckDB list()):
+// a soft area under the line, the last point marked, and first → last / min /
+// max on hover.
 function cellSpark(v) {
   let arr = Array.isArray(v) ? v : null;
   if (!arr && typeof v === "string") {
@@ -3515,21 +4297,27 @@ function cellSpark(v) {
     } catch (_) {}
   }
   const nums = (arr || []).map(Number).filter((x) => isFinite(x));
-  if (nums.length < 2) return "";
-  const w = 84;
-  const h = 22;
-  const pad = 2;
+  if (nums.length < 2) return `<span class="nil">—</span>`;
+  const w = 104;
+  const h = 26;
+  const pad = 2.5;
   const mn = Math.min(...nums);
-  const rng = Math.max(...nums) - mn || 1;
+  const mx = Math.max(...nums);
+  const rng = mx - mn || 1;
   const xs = (i) => pad + (i * (w - 2 * pad)) / (nums.length - 1);
   const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
   const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
-  const lx = xs(nums.length - 1).toFixed(1);
-  const ly = ys(nums[nums.length - 1]).toFixed(1);
+  const area = `${xs(0).toFixed(1)},${h} ${pts} ${xs(nums.length - 1).toFixed(1)},${h}`;
+  const first = nums[0];
+  const last = nums[nums.length - 1];
+  const f = (n) => fmtNum(n, "COMPACT");
+  const chg = first ? ` (${last >= first ? "+" : "−"}${Math.abs(((last - first) / Math.abs(first)) * 100).toFixed(0)}%)` : "";
+  const tip = `${f(first)} → ${f(last)}${chg} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
   return (
-    `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
-    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="0.9" stroke-linejoin="round" stroke-linecap="round"/>` +
-    `<circle cx="${lx}" cy="${ly}" r="1.8" fill="var(--ax-spark-dot)"/></svg>`
+    `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><title>${escapeHtml(tip)}</title>` +
+    `<polygon points="${area}" fill="var(--ax-spark)" fill-opacity="0.1"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
   );
 }
 
@@ -3768,7 +4556,7 @@ function addExportButtons() {
     if (fig.querySelector(".dl")) return;
     const svg = fig.querySelector("svg");
     const table = fig.querySelector(".dp-table");
-    if (svg || !table) return;
+    if (svg || !table || fig.querySelector(".tbl-bar")) return; // tables export from their toolbar
     fig.style.position = "relative";
     const btn = document.createElement("button");
     btn.className = "dl";
@@ -3876,7 +4664,10 @@ async function downloadHtml() {
     base = sheet ? sheetText(sheet) : "";
   }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
-  const content = document.querySelector(".dash").innerHTML;
+  // A snapshot has no live tables: drop their search / filter / pager controls.
+  const snap = document.querySelector(".dash").cloneNode(true);
+  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
   const title = b.title ? b.title + (b.title_suffix || "") : "anofox-visualization dashboard";
@@ -4151,6 +4942,7 @@ function attachToolbox() {
     if (panel.dataset.toolboxWired) return;
     const svg = panel.querySelector("svg");
     if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
+    if (panel.querySelector(".dp-table")) return; // a table's sparklines are not a chart
     panel.dataset.toolboxWired = "1";
     const bar = document.createElement("div");
     bar.className = "dp-toolbox";
@@ -4832,11 +5624,11 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
 
 // Click empty dashboard space to clear all cross-filters / selections.
 document.querySelector(".dash").addEventListener("click", () => {
-  const anyNamed = Object.values(dpXf).some((v) => v);
+  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
   if (dpFilter || dpSelected !== null || anyNamed) {
     dpFilter = "";
     dpSelected = null;
-    for (const k in dpXf) dpXf[k] = "";
+    for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
     run(false);
   }
 });

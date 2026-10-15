@@ -226,6 +226,22 @@ fn panel_bounds_inner(rows_json: &str, roles_json: &str) -> String {
 /// The role registry as JSON (see [`crate::roles::roles_json`]) — the browser
 /// derives its role sets (inputs, metrics, layout directives, table formats)
 /// from this instead of hard-coding them.
+/// The SQL of a `::PAGED` table request (`page_json` = the same `page` object a
+/// locked server receives) over the panel query `base`, with its values inlined
+/// as escaped literals — so the browser's DuckDB runs exactly the query a
+/// locked server would. Errors come back as `{"error": "…"}`.
+#[wasm_bindgen]
+pub fn page_sql(base: &str, page_json: &str) -> String {
+    let built = serde_json::from_str(page_json)
+        .map_err(|e| format!("bad page JSON: {e}"))
+        .and_then(|v| crate::host::serving::parse_page(&v))
+        .map(|p| crate::host::serving::page_sql_inline(base, &p));
+    match built {
+        Ok(sql) => sql,
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

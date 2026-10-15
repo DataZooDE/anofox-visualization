@@ -31,6 +31,29 @@ SELECT check_name, check_type, table_name, coalesce(identifier, '') AS identifie
        lower_threshold, upper_threshold, status, message
 FROM run_checks('tq_checks');
 
+-- The order checks once per week (filter_expr restricts each run to that
+-- week's orders), to see when a rule started to fail. Full weeks only.
+CREATE OR REPLACE TABLE tq_weeks AS
+SELECT DISTINCT date_trunc('week', order_date)::DATE AS wk FROM tq_orders
+WHERE date_trunc('week', order_date)::DATE >= DATE '2026-06-01' AND date_trunc('week', order_date)::DATE + 6 <= DATE '2026-09-28';
+CREATE OR REPLACE TABLE tq_weekly_checks AS SELECT * FROM tq_checks LIMIT 0;
+INSERT INTO tq_weekly_checks
+SELECT c.check_name || ' @' || w.wk::VARCHAR, c.check_type, c.table_name, c.column_name, c.params,
+       c.lower_threshold, c.upper_threshold, false, NULL,
+       format('order_date >= DATE ''{}'' AND order_date < DATE ''{}''', w.wk, w.wk + 7)
+FROM tq_checks c, tq_weeks w
+WHERE c.check_name IN ('Orders: amount is positive', 'Orders: status is a known value', 'Orders: customer exists',
+                       'Orders: order_id is unique', 'Orders: mean amount 50–150 €')
+UNION ALL  -- a weekly volume floor: about 280 orders arrive in a normal week
+SELECT 'Orders: ≥ 250 per week @' || w.wk::VARCHAR, 'volume', 'tq_orders', NULL, NULL, 250, NULL, false, NULL,
+       format('order_date >= DATE ''{}'' AND order_date < DATE ''{}''', w.wk, w.wk + 7)
+FROM tq_weeks w;
+
+CREATE OR REPLACE TABLE tq_check_history AS
+SELECT split_part(check_name, ' @', 1) AS check_name, split_part(check_name, ' @', 2)::DATE AS week,
+       check_type, round(value, 4) AS value, lower_threshold, upper_threshold, status
+FROM run_checks('tq_weekly_checks');
+
 -- ── 2. Time-aware checks for every day: count drift and metric anomalies ───
 -- rel_count_change / metric_anomaly_iqr judge one reference date; a check
 -- row per day (params.reference_date) runs them over the whole history.
@@ -77,6 +100,17 @@ UNION ALL
 SELECT country, 'VAT ID', round(avg(vat_is_valid(vat_id)::INTEGER), 4), count(*)
 FROM tq_customers_legacy WHERE vat_id IS NOT NULL GROUP BY ALL;
 
+-- The same field checks on the new CRM, to compare before and after.
+CREATE OR REPLACE TABLE tq_validity_new AS
+SELECT country, 'email' AS field, round(avg(email_is_valid(email)::INTEGER), 4) AS valid_rate, count(*) AS n
+FROM tq_customers_new GROUP BY ALL
+UNION ALL
+SELECT country, 'phone', round(avg(coalesce(phonenumber_is_valid(phone, country), false)::INTEGER), 4), count(*)
+FROM tq_customers_new GROUP BY ALL
+UNION ALL
+SELECT country, 'VAT ID', round(avg(vat_is_valid(vat_id)::INTEGER), 4), count(*)
+FROM tq_customers_new WHERE vat_id IS NOT NULL GROUP BY ALL;
+
 -- ── 4. Anomalous orders: isolation forest + explainable outlier tree ───────
 CREATE OR REPLACE TABLE tq_anomaly AS
 SELECT o.order_id, o.order_date, o.quantity, o.amount, round(o.amount / o.quantity, 2) AS unit_price, o.channel,
@@ -93,7 +127,7 @@ JOIN (SELECT *, row_number() OVER () AS row_id FROM tq_orders) o USING (row_id);
 
 -- ── 5. The migration diff: legacy CRM vs new CRM ───────────────────────────
 CREATE OR REPLACE TABLE tq_diff AS
-SELECT d.diff_type, d.customer_id,
+SELECT d.diff_type, d.customer_id, coalesce(l.country, d.country) AS country,
        CASE WHEN d.diff_type <> 'changed' THEN NULL
             ELSE concat_ws(', ',
                 CASE WHEN l.email IS DISTINCT FROM d.email THEN 'email' END,

@@ -23,29 +23,32 @@ SELECT i AS carton,
                   ELSE 420 + 160 * os_unif('c', i, 's') END) AS size
 FROM range(1, 151) t(i);
 
+-- Swept over four container sizes (the dashboard's "container size" input).
 CREATE OR REPLACE TABLE os_pack_raw AS
-WITH l AS (SELECT list(size ORDER BY carton) AS s FROM os_cartons)
-SELECT a.algorithm, a.ord, r.bins_used, r.assignment
-FROM l, LATERAL (VALUES
-    ('next fit (today)', 1, opt_pack_next_fit(l.s, 1000.0)),
-    ('first fit decreasing', 2, opt_pack_first_fit_decreasing(l.s, 1000.0)),
-    ('best fit decreasing', 3, opt_pack_best_fit_decreasing(l.s, 1000.0)),
-    ('worst fit decreasing', 4, opt_pack_worst_fit_decreasing(l.s, 1000.0)),
-    ('bin completion', 5, opt_pack_bin_completion(l.s, 1000.0)),
-    ('local search', 6, opt_pack_local_search(l.s, 1000.0)),
-    ('best of', 7, opt_pack_best_of(l.s, 1000.0))
+WITH l AS (SELECT list(size ORDER BY carton) AS s FROM os_cartons),
+     caps(capacity) AS (VALUES (800.0), (1000.0), (1250.0), (1500.0))
+SELECT caps.capacity, a.algorithm, a.ord, r.bins_used, r.assignment
+FROM l, caps, LATERAL (VALUES
+    ('next fit (today)', 1, opt_pack_next_fit(l.s, caps.capacity)),
+    ('first fit decreasing', 2, opt_pack_first_fit_decreasing(l.s, caps.capacity)),
+    ('best fit decreasing', 3, opt_pack_best_fit_decreasing(l.s, caps.capacity)),
+    ('worst fit decreasing', 4, opt_pack_worst_fit_decreasing(l.s, caps.capacity)),
+    ('bin completion', 5, opt_pack_bin_completion(l.s, caps.capacity)),
+    ('local search', 6, opt_pack_local_search(l.s, caps.capacity)),
+    ('best of', 7, opt_pack_best_of(l.s, caps.capacity))
 ) a(algorithm, ord, res), LATERAL (SELECT a.res.bins_used::INTEGER AS bins_used, a.res.assignment AS assignment) r;
 
--- One row per algorithm: containers used vs the volume lower bound.
+-- One row per (container size, algorithm): containers used vs the volume lower bound.
 CREATE OR REPLACE TABLE os_pack_algos AS
-SELECT algorithm, ord, bins_used,
-       (SELECT ceil(sum(size) / 1000.0)::INTEGER FROM os_cartons) AS lower_bound,
-       round(100.0 * (SELECT sum(size) FROM os_cartons) / (bins_used * 1000.0), 1) AS avg_fill_pct
+SELECT capacity::INTEGER AS capacity, algorithm, ord, bins_used,
+       ceil((SELECT sum(size) FROM os_cartons) / capacity)::INTEGER AS lower_bound,
+       round(100.0 * (SELECT sum(size) FROM os_cartons) / (bins_used * capacity), 1) AS avg_fill_pct
 FROM os_pack_raw;
 
 -- One row per container: its fill, for today's rule and the best packer.
 CREATE OR REPLACE TABLE os_pack_bins AS
-SELECT p.algorithm, (u.bin + 1)::INTEGER AS container, round(sum(c.size) / 10.0, 1) AS fill_pct
+SELECT p.capacity::INTEGER AS capacity, p.algorithm, (u.bin + 1)::INTEGER AS container,
+       round(100.0 * sum(c.size) / any_value(p.capacity), 1) AS fill_pct
 FROM os_pack_raw p, LATERAL unnest(p.assignment) WITH ORDINALITY u(bin, k)
 JOIN os_cartons c ON c.carton = u.k
 WHERE p.algorithm IN ('next fit (today)', 'best of')
@@ -70,14 +73,17 @@ FROM l, caps, LATERAL (VALUES
     ('greedy by saving (today)', opt_knapsack_greedy_value(l.v, l.w, capacity))
 ) a(algorithm, res);
 
--- The selection at today's 2,000 kg booking: which shipments each rule loads.
+-- The selection at every booking size (the dashboard's "booking" input):
+-- which shipments each rule loads.
 CREATE OR REPLACE TABLE os_knap_pick AS
 WITH l AS (SELECT list(saving_eur ORDER BY shipment) AS v, list(weight_kg ORDER BY shipment) AS w FROM os_shipments),
-     r AS (SELECT opt_knapsack_exact(v, w, 2000.0).selected AS ex,
-                  opt_knapsack_greedy_value(v, w, 2000.0).selected AS gv FROM l)
-SELECT s.shipment, s.weight_kg, s.saving_eur,
+     caps AS (SELECT (c * 250)::DOUBLE AS capacity FROM range(1, 21) t(c)),
+     r AS (SELECT capacity, opt_knapsack_exact(v, w, capacity).selected AS ex,
+                  opt_knapsack_greedy_value(v, w, capacity).selected AS gv,
+                  opt_knapsack_greedy_ratio(v, w, capacity).selected AS gr FROM l, caps)
+SELECT r.capacity::INTEGER AS capacity, s.shipment, s.weight_kg, s.saving_eur,
        round(s.saving_eur / s.weight_kg, 2) AS eur_per_kg,
-       r.ex[s.shipment] AS exact_loads, r.gv[s.shipment] AS greedy_loads
+       r.ex[s.shipment] AS exact_loads, r.gv[s.shipment] AS greedy_loads, r.gr[s.shipment] AS ratio_loads
 FROM os_shipments s, r;
 
 -- ── C. Pick waves: 48 orders into waves of 120 order lines (wave_*) ─────────
@@ -89,24 +95,26 @@ SELECT i AS order_no,
        CASE WHEN os_unif('o', i, 'p') < 0.12 THEN 5 WHEN os_unif('o', i, 'p') < 0.30 THEN 3 ELSE 1 END AS priority
 FROM range(1, 49) t(i);
 
+-- Swept over four wave sizes (the dashboard's "wave size" input).
 CREATE OR REPLACE TABLE os_wave_raw AS
-WITH l AS (SELECT list(lines ORDER BY order_no) AS s, list(priority::DOUBLE ORDER BY order_no) AS p FROM os_orders)
-SELECT a.algorithm, a.ord, a.res.wave AS wave, a.res.avg_weighted_wave AS avg_weighted_wave
-FROM l, LATERAL (VALUES
-    ('arrival order (today)', 1, opt_wave_as_given(l.s, l.p, 120.0)),
-    ('fewest waves', 2, opt_wave_fewest_waves(l.s, l.p, 120.0)),
-    ('priority first', 3, opt_wave_priority_first(l.s, l.p, 120.0)),
-    ('priority density', 4, opt_wave_priority_density(l.s, l.p, 120.0)),
-    ('best of', 5, opt_wave_best_of(l.s, l.p, 120.0))
+WITH l AS (SELECT list(lines ORDER BY order_no) AS s, list(priority::DOUBLE ORDER BY order_no) AS p FROM os_orders),
+     caps(capacity) AS (VALUES (80.0), (120.0), (160.0), (200.0))
+SELECT caps.capacity, a.algorithm, a.ord, a.res.wave AS wave, a.res.avg_weighted_wave AS avg_weighted_wave
+FROM l, caps, LATERAL (VALUES
+    ('arrival order (today)', 1, opt_wave_as_given(l.s, l.p, caps.capacity)),
+    ('fewest waves', 2, opt_wave_fewest_waves(l.s, l.p, caps.capacity)),
+    ('priority first', 3, opt_wave_priority_first(l.s, l.p, caps.capacity)),
+    ('priority density', 4, opt_wave_priority_density(l.s, l.p, caps.capacity)),
+    ('best of', 5, opt_wave_best_of(l.s, l.p, caps.capacity))
 ) a(algorithm, ord, res);
 
 CREATE OR REPLACE TABLE os_wave_algos AS
-SELECT algorithm, ord, round(avg_weighted_wave, 3) AS avg_weighted_wave, list_max(wave)::INTEGER AS waves
+SELECT capacity::INTEGER AS capacity, algorithm, ord, round(avg_weighted_wave, 3) AS avg_weighted_wave, list_max(wave)::INTEGER AS waves
 FROM os_wave_raw;
 
 -- Order lines per wave, split by priority class.
 CREATE OR REPLACE TABLE os_wave_load AS
-SELECT w.algorithm, u.wave::INTEGER AS wave,
+SELECT w.capacity::INTEGER AS capacity, w.algorithm, u.wave::INTEGER AS wave,
        CASE o.priority WHEN 5 THEN 'express' WHEN 3 THEN 'priority' ELSE 'standard' END AS class,
        sum(o.lines)::INTEGER AS lines
 FROM os_wave_raw w, LATERAL unnest(w.wave) WITH ORDINALITY u(wave, k)
@@ -154,7 +162,6 @@ WITH seq AS (
     SELECT s.algorithm, u.pos::INTEGER AS pos, (u.j + 1)::INTEGER AS job,
            lag((u.j + 1)::INTEGER) OVER (PARTITION BY s.algorithm ORDER BY u.pos) AS prev_job
     FROM os_sched_raw s, LATERAL unnest(s.job_order) WITH ORDINALITY u(j, pos)
-    WHERE s.algorithm IN ('earliest due date (today)', 'exact (proven optimum)')
 ), t AS (
     SELECT q.*, j.job_name, j.family, j.proc_min, j.due_min, j.weight,
            CASE WHEN q.prev_job IS NULL THEN 5.0
@@ -171,11 +178,18 @@ FROM t WINDOW w AS (PARTITION BY algorithm ORDER BY pos ROWS UNBOUNDED PRECEDING
 CREATE OR REPLACE TABLE os_colours AS
 SELECT * FROM (VALUES (0,'white',0),(1,'navy',8),(2,'ivory',1),(3,'red',6),(4,'sand',2),
                       (5,'black',9),(6,'yellow',3),(7,'green',5),(8,'grey',4),(9,'brown',7)) t(k, colour, darkness);
-CREATE OR REPLACE TABLE os_seq_algos AS
+-- The changeover matrix (minutes from one colour to the next).
+CREATE OR REPLACE TABLE os_seq_matrix AS
+SELECT a.colour AS from_colour, a.darkness AS from_dark, b.colour AS to_colour, b.darkness AS to_dark,
+       CASE WHEN a.k = b.k THEN 0.0 WHEN b.darkness >= a.darkness THEN 5.0 + 2 * (b.darkness - a.darkness)
+            ELSE 30.0 + 6 * (a.darkness - b.darkness) END AS minutes
+FROM os_colours a, os_colours b;
+
+CREATE OR REPLACE TABLE os_seq_raw AS
 WITH m AS (SELECT list(CASE WHEN a.k = b.k THEN 0.0 WHEN b.darkness >= a.darkness THEN 5.0 + 2 * (b.darkness - a.darkness)
                             ELSE 30.0 + 6 * (a.darkness - b.darkness) END ORDER BY a.k, b.k) AS m
            FROM os_colours a, os_colours b)
-SELECT a.algorithm, a.ord, a.res.total_setup AS changeover_min,
+SELECT a.algorithm, a.ord, a.res.total_setup AS changeover_min, a.res."order" AS colour_order,
        (SELECT string_agg(c.colour, ' → ' ORDER BY u.pos) FROM unnest(a.res."order") WITH ORDINALITY u(k, pos)
           JOIN os_colours c ON c.k = u.k) AS sequence
 FROM m, LATERAL (VALUES
@@ -184,6 +198,21 @@ FROM m, LATERAL (VALUES
     ('2-opt', 3, opt_sequence_two_opt(m.m, 10)),
     ('best of', 4, opt_sequence_best_of(m.m, 10))
 ) a(algorithm, ord, res);
+
+CREATE OR REPLACE TABLE os_seq_algos AS
+SELECT algorithm, ord, changeover_min, sequence FROM os_seq_raw;
+
+-- Each changeover of each sequence, with the running total.
+CREATE OR REPLACE TABLE os_seq_steps AS
+WITH st AS (
+    SELECT s.algorithm, u.pos::INTEGER AS pos, c.colour, c.darkness,
+           lag(c.colour) OVER (PARTITION BY s.algorithm ORDER BY u.pos) AS prev_colour
+    FROM os_seq_raw s, LATERAL unnest(s.colour_order) WITH ORDINALITY u(k, pos)
+    JOIN os_colours c ON c.k = u.k
+)
+SELECT st.algorithm, st.pos, st.colour, st.darkness, coalesce(m.minutes, 0) AS step_min,
+       sum(coalesce(m.minutes, 0)) OVER (PARTITION BY st.algorithm ORDER BY st.pos) AS cum_min
+FROM st LEFT JOIN os_seq_matrix m ON m.from_colour = st.prev_colour AND m.to_colour = st.colour;
 
 -- ── F. Treasury: where to park the DC's reserve fund (portfolio_*) ───────────
 -- 10 risky assets (excess return over cash / volatility) and a one-factor
@@ -216,3 +245,8 @@ CREATE OR REPLACE TABLE os_portfolio_weights AS
 WITH best AS (SELECT weights FROM os_portfolio WHERE algorithm = 'best of' ORDER BY sharpe DESC, max_holdings LIMIT 1)
 SELECT a.name AS asset, round(100 * best.weights[a.k + 1], 1) AS weight_pct
 FROM os_assets a, best WHERE best.weights[a.k + 1] > 0.0005;
+
+-- Weights of every (holdings, cap, rule) portfolio — the dashboard's inputs pick one.
+CREATE OR REPLACE TABLE os_portfolio_alloc AS
+SELECT p.max_holdings, p.cap, p.algorithm, a.name AS asset, round(100 * p.weights[a.k + 1], 1) AS weight_pct
+FROM os_portfolio p, os_assets a WHERE p.weights[a.k + 1] > 0.0005;

@@ -120,6 +120,7 @@ terminal.
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
+| `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
@@ -158,6 +159,13 @@ SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;  -- variable `
 
 SELECT week::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
+```
+
+A `::LABEL` column sets the control's caption (default: the variable name), so
+the variable can stay a short identifier:
+
+```sql
+SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
 ```
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
@@ -465,7 +473,7 @@ SELECT 'Revenue'::SECTION;                               -- a section heading (a
 
 | Theme | Look |
 |-------|------|
-| `light` (= `datazoo`, `default`) | the default DataZoo look; follows the viewer's light/dark preference |
+| `light` (= `default`, `datazoo`) | the default graphite look: cool grey page, white cards, electric-blue accent, flat; follows the viewer's light/dark preference |
 | `dark` | always dark: dark cards, light ink, lifted palette |
 | `print` | white page, black ink, no shadows or gradients |
 | `colorblind` | the light look with the Okabe-Ito palette |
@@ -607,6 +615,62 @@ GROUP BY ALL ORDER BY week;
 
 Clicking a channel narrows those panels to that channel; clicking empty space
 clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
+
+**Selecting table rows** is opt-in per table, with a `::ROWSELECT` directive
+before it (tables without one are not clickable):
+
+| `SELECT … ::ROWSELECT;` | A click on a row… |
+|---|---|
+| `'none'` (default) | does nothing |
+| `'single'` | sets `getvariable('selected')` and `getvariable('<first column>')` to the row's first value; click it again (or empty space) to clear |
+| `'multi'` | toggles a check mark; `getvariable('<first column>')` is the list of checked values (`[]::VARCHAR[]` when none) |
+
+```sql
+SELECT 'multi'::ROWSELECT;
+SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku;
+SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
+WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
+```
+
+### Tables
+
+A `::TABLE` / `::PAGED` panel comes with a toolbar: the row count ("8 of 24
+rows") with a chip per active filter, a **search** box, **Filters** (a filter
+under each header: a dropdown for a column with few values, `> n` / `< n` and a
+range slider for numbers, "contains" for text), **Σ Totals** (a totals row:
+sums of amounts and counts, means ⌀ of rates, shares and scores, counts of badge
+values — over every matching row, not just the page), **Columns** (show / hide),
+**Pages | Scroll**, **Compact | Comfortable** row density (compact by default
+above 50 rows) and **⤓ CSV** (the matching rows, visible columns). Hovering a
+header shows the column's min / max / mean, empty and distinct counts.
+
+Formatting: raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
+"Avg MAE"; an `AS "Header"` alias is kept as written) and wrap onto two lines;
+numbers are formatted per column — aligned decimals, grouping (ids and years stay
+ungrouped), a true minus sign, muted zeros, and one unit per `::MONEY` /
+`::COMPACT` column ("$5.87M … $1.71M", never "$4M" next to "$5.9M"); `::TREND`
+shows a signed change (▲ +2.7, ▼ −3.1, – 0.0). The totals row sits under a double
+rule; sums are upright, means italic, and a line under the table says which is
+which. Plain numeric columns get a slim in-cell bar, empty cells show "—" and
+booleans ✓ / ✗.
+
+**Scroll** is a virtualised view: only the rows around the viewport are drawn,
+so it stays smooth over any number of rows.
+
+| | `::TABLE` | `::PAGED` |
+|---|---|---|
+| data in the browser | the whole result | one page (Scroll: 100-row blocks, fetched as you scroll) |
+| sort, search, column filters | in the browser | in DuckDB (`ORDER BY`, `WHERE`) |
+| totals and column statistics | in the browser | one aggregate query in DuckDB |
+| filter dropdown values | from the rows | `SELECT DISTINCT` in DuckDB (under the other filters) |
+| good for | up to ~10k rows | any size: Parquet on S3, MotherDuck, a served database |
+
+A `::PAGED` request is the same everywhere: in the browser and the authoring
+`serve` the query is built by the wasm `page_sql()`; a **locked** server
+(`anofox_serve_dashboards`) receives only the structured request — page, sort,
+search, column filters (`eq`, `contains`, `gt`, `ge`, `lt`, `le`), a statistics
+or distinct-values request — and builds the identical SQL itself, with every
+value a bound parameter and every column name a quoted identifier.
 
 ### Example
 

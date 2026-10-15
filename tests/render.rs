@@ -82,11 +82,11 @@ fn brand_and_palette_colours() {
             "{kind:?}: no black marks"
         );
     }
-    // Sorted levels: "a" → palette 0 (steel), "b" → palette 1 (orange),
+    // Sorted levels: "a" → palette 0, "b" → palette 1,
     // whatever the data order; a hex level is its own colour.
     let cols = vec![
         Column::new("x", Role::X, strs(&["W1", "W1", "W1"])),
-        Column::new("c", Role::Category, strs(&["b", "a", "#3fa66f"])),
+        Column::new("c", Role::Category, strs(&["b", "a", "#3a7d5c"])),
         Column::new("n", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0])),
     ];
     let svg = render(&cols, 400, 260).unwrap();
@@ -95,10 +95,15 @@ fn brand_and_palette_colours() {
         let tag = &svg[svg[..i].rfind('<').unwrap()..i];
         tag[tag.find("fill=\"").unwrap() + 6..][..7].to_string()
     };
-    assert_eq!(fill_of("#3fa66f").to_lowercase(), "#3fa66f");
-    // Sorted: "#3fa66f" < "a" < "b" → a = palette 1, b = palette 2.
-    assert_eq!(fill_of("a"), "#E86433");
-    assert_eq!(fill_of("b"), "#E8335D");
+    // (a hex level outside the palette: palette colours are remapped by slot)
+    assert_eq!(fill_of("#3a7d5c").to_lowercase(), "#3a7d5c");
+    // Sorted: "#3a7d5c" < "a" < "b" → a = palette 1, b = palette 2.
+    let slot = |i: usize| {
+        let (r, g, b) = anofox_visualization::theme::DEFAULT_PALETTE[i];
+        format!("#{r:02x}{g:02x}{b:02x}")
+    };
+    assert_eq!(fill_of("a").to_lowercase(), slot(1));
+    assert_eq!(fill_of("b").to_lowercase(), slot(2));
 }
 
 /// The browser offers zoom only for kinds that honour a zoom window; the set
