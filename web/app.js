@@ -3395,7 +3395,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     const present = vals.filter((v) => v != null && unquote(v) !== "");
     const nums = present.map(cleanNum).filter((v) => v != null);
     const st = sstat(c);
-    const numFmt = [...METRICS, "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "TREND", "PLAIN"].includes(f);
+    // (::PLAIN only drops the bar: whether the column is numeric comes from its values,
+    // so a text column of dates / strings with a few number-like cells stays text)
+    const numFmt = [...METRICS, "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "TREND"].includes(f);
     const numeric = numFmt || (present.length > 0 ? present.every(isNumLike) : !!(st && st.lo != null));
     const bool = !f && present.length > 0 && present.every(isBoolLike);
     const ints = nums.every((n) => Number.isInteger(n));
@@ -3484,6 +3486,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       if (METRICS.includes(i.f)) return minus(fmtNum(n, i.f));
       return minus(fmtPlain(n, c));
     }
+    // a year among text (dates, names) reads as a label: never "2,019"
+    if (/^\d{4}$/.test(unquote(v)) && +unquote(v) >= 1800 && +unquote(v) <= 2200) return unquote(v);
     return String(fmtCell(unquote(v)));
   };
   // the header people read (raw name in the tooltip), with the column's unit when the cells drop it
