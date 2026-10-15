@@ -299,7 +299,8 @@ SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
   },
 
   {
-    group: "Forecasting",
+    group: "Forecast (anofox-forecast)",
+    ext: true,
     items: {
       "M5 forecast (live extension)": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
 -- anofox-forecast extension entirely client-side — no server. On boot the app
@@ -751,10 +752,19 @@ SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP B
 ];
 
 // Present the examples as a learning path: start → the visual vocabulary →
-// making it interactive → tables → page layout → the advanced live-forecasting
-// extension last (so a missing extension never blocks the core demos).
+// making it interactive → tables → page layout → theming. The showcases of
+// the anofox DuckDB extensions live in their own sidebar area ("anofox
+// extensions", groups with `ext: true`), one group per extension, so they
+// never mix with the core feature tour (and a missing extension never blocks
+// the core demos).
 const STATS_GROUP = "Statistics (anofox-statistics)";
-const GROUP_ORDER = ["Start here", STATS_GROUP, "Charts", "Interactivity", "Tables", "Layout", "Forecasting"];
+const FORECAST_GROUP = "Forecast (anofox-forecast)";
+const TABULAR_GROUP = "Tabular (anofox-tabular)";
+const OPTIMIZE_GROUP = "Optimize (anofox-optimize)";
+const DECIDE_GROUP = "Decide (anofox-decide)";
+const THEMING_GROUP = "Theming";
+const EXT_GROUPS = [STATS_GROUP, FORECAST_GROUP, TABULAR_GROUP, OPTIMIZE_GROUP, DECIDE_GROUP];
+const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", THEMING_GROUP, ...EXT_GROUPS];
 const sortGroups = () =>
   SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
 sortGroups();
@@ -762,32 +772,55 @@ sortGroups();
 const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g.items)));
 
 // Examples kept in their own files under web/examples/ — the single source of
-// a dashboard that is also run natively (examples/statistics-showcase/
-// showcase.sql links to it). Fetched once at boot; a missing file just leaves
-// the example out.
+// a dashboard that is also run natively (examples/<name>/showcase.sql links to
+// it). Fetched once at boot; a missing file just leaves the example out.
+// "stored results" showcases read tables computed natively (web/data/<ext>/,
+// scripts/gen-showcase-data.sh) because their extension can't run in
+// DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
+  { group: THEMING_GROUP, name: "Theming: your branding (ACME)", url: "examples/theming-branded.sql" },
+  { group: THEMING_GROUP, name: "Locale: de-DE", url: "examples/theming-de-locale.sql" },
   {
     group: STATS_GROUP,
     name: "Statistics showcase: property market (live anofox-statistics)",
     url: "examples/statistics-showcase.sql",
   },
+  {
+    group: TABULAR_GROUP,
+    name: "Stored results: CRM data quality",
+    url: "examples/tabular-showcase.sql",
+  },
+  {
+    group: OPTIMIZE_GROUP,
+    name: "Stored results: distribution centre",
+    url: "examples/optimize-showcase.sql",
+  },
+  {
+    group: DECIDE_GROUP,
+    name: "Stored results: support inbox triage",
+    url: "examples/decide-showcase.sql",
+  },
 ];
 async function loadFileSamples() {
-  await Promise.all(
+  // Fetch in parallel, register in FILE_SAMPLES order (stable sidebar order).
+  const texts = await Promise.all(
     FILE_SAMPLES.map(async (f) => {
       try {
         const r = await fetch(f.url);
-        if (!r.ok) return;
-        const sql = await r.text();
-        let g = SAMPLE_GROUPS.find((x) => x.group === f.group);
-        if (!g) SAMPLE_GROUPS.push((g = { group: f.group, items: {} }));
-        g.items[f.name] = sql;
-        SAMPLES[f.name] = sql;
+        return r.ok ? await r.text() : null;
       } catch (_) {
-        /* offline / file:// — skip the example */
+        return null; /* offline / file:// — skip the example */
       }
     })
   );
+  FILE_SAMPLES.forEach((f, i) => {
+    const sql = texts[i];
+    if (sql == null) return;
+    let g = SAMPLE_GROUPS.find((x) => x.group === f.group);
+    if (!g) SAMPLE_GROUPS.push((g = { group: f.group, ext: EXT_GROUPS.includes(f.group), items: {} }));
+    g.items[f.name] = sql;
+    SAMPLES[f.name] = sql;
+  });
   sortGroups();
 }
 
@@ -1356,19 +1389,34 @@ function renderSidebar() {
   master.append(mc, ml);
   master.onclick = () => toggleEx("__all__");
   nav.appendChild(master);
-  if (!exc.__all__) {
-    // Group headers are static labels — only the master "Examples" collapses.
-    for (const g of SAMPLE_GROUPS) {
-      const hdr = document.createElement("div");
-      hdr.className = "side-section side-sub";
-      hdr.textContent = g.group;
-      nav.appendChild(hdr);
-      for (const [n, sql] of Object.entries(g.items)) {
-        const it = sideItem(n, sql, false);
-        it.classList.add("side-ex-item"); // indent examples under their group header
-        nav.appendChild(it);
-      }
+  // Group headers are static labels — only the two masters collapse.
+  const groupItems = (g) => {
+    const hdr = document.createElement("div");
+    hdr.className = "side-section side-sub";
+    hdr.textContent = g.group;
+    nav.appendChild(hdr);
+    for (const [n, sql] of Object.entries(g.items)) {
+      const it = sideItem(n, sql, false);
+      it.classList.add("side-ex-item"); // indent examples under their group header
+      nav.appendChild(it);
     }
+  };
+  if (!exc.__all__) for (const g of SAMPLE_GROUPS) if (!g.ext) groupItems(g);
+  // The anofox extension showcases — a separate area below the core tour.
+  const extGroups = SAMPLE_GROUPS.filter((g) => g.ext);
+  if (extGroups.length) {
+    const xm = document.createElement("div");
+    xm.className = "side-section side-section-toggle side-master";
+    const xc = document.createElement("span");
+    xc.className = "ex-caret";
+    xc.textContent = exc.__ext__ ? "▸" : "▾";
+    const xl = document.createElement("span");
+    xl.textContent = "anofox extensions";
+    xm.title = "Showcases of the anofox DuckDB extensions (live in the browser, or stored results computed natively)";
+    xm.append(xc, xl);
+    xm.onclick = () => toggleEx("__ext__");
+    nav.appendChild(xm);
+    if (!exc.__ext__) for (const g of extGroups) groupItems(g);
   }
   markActive();
 }
@@ -1451,6 +1499,7 @@ function sideItem(name, sql, deletable) {
   const s = document.createElement("span");
   s.className = "s-name";
   s.textContent = name;
+  b.title = name; // long names are ellipsised in the sidebar
   b.appendChild(s);
   if (deletable) {
     const del = document.createElement("span");
