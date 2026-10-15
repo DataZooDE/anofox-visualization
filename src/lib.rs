@@ -2223,13 +2223,28 @@ fn cartesian(
             if !combo_names.is_empty() {
                 lay = lay.color(&format!("__s{}", k + 1));
             }
-            plot = match ekind {
-                Kind::Line => plot.geom_line(),
-                Kind::Area => plot.geom_area(),
+            // A bar-based combo keeps its bars in the brand colour (no combo
+            // legend): each overlay takes the next palette colour, so a line
+            // never disappears into bars of the same colour.
+            let own = (bar && combo_names.is_empty()).then(|| o.theme.color(k + 1));
+            plot = match (ekind, own) {
+                (Kind::Line, Some(color)) => plot.geom_line_with(GeomLine {
+                    color,
+                    width: 2.0,
+                    ..Default::default()
+                }),
+                (Kind::Area, Some(color)) => plot.geom_area_with(GeomArea {
+                    fill: color,
+                    color,
+                    alpha: 0.35,
+                    ..Default::default()
+                }),
+                (Kind::Line, None) => plot.geom_line(),
+                (Kind::Area, None) => plot.geom_area(),
                 // A point overlay (e.g. detected changepoints/peaks) reads as a
                 // marker on the base line, so make it a touch larger.
-                Kind::Point => plot.geom_point_with(GeomPoint {
-                    color: brand,
+                (Kind::Point, own) => plot.geom_point_with(GeomPoint {
+                    color: own.unwrap_or(brand),
                     size: 3.4,
                     ..Default::default()
                 }),

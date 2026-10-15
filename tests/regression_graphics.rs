@@ -1122,3 +1122,31 @@ fn tooltip_values_follow_yformat_and_locale() {
     ]);
     assert!(s.contains("data-fvalue=\"75%\""), "{s}");
 }
+
+// ── a bar + line combo: the line takes the next palette colour, drawn above
+// the bars (it used to share the bars' brand colour and vanish into them) ──
+#[test]
+fn bar_line_combo_line_is_visible() {
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W3"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 41.0, 26.0])),
+        Column::new("r", Role::Value(Kind::Line), nums(&[24.0, 32.0, 20.0])),
+    ]);
+    let lines = polylines(&s);
+    assert_eq!(lines.len(), 1, "{s}");
+    assert!(
+        lines[0].contains(&slot(1)),
+        "line in palette slot 1: {}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains(&slot(0)),
+        "not the bars' colour: {}",
+        lines[0]
+    );
+    let last_bar = s.rfind("<rect ").unwrap();
+    assert!(
+        s.rfind("<polyline ").unwrap() > last_bar,
+        "line drawn above the bars"
+    );
+}
