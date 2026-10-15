@@ -154,6 +154,8 @@ body.loading #dp-spinner{display:flex}
 .tbl-cols-pop label{display:flex;align-items:center;gap:.45rem;padding:.3rem .45rem;border-radius:5px;font-size:.8rem;cursor:pointer;white-space:nowrap;color:var(--ax-ink)}
 .tbl-cols-pop label:hover{background:var(--ax-row-hover)}
 .tbl-cols-pop input{accent-color:var(--ax-accent);margin:0}
+.tbl-cols-pop .tbl-mi{display:block;width:100%;text-align:left;font:inherit;font-size:.8rem;color:var(--ax-ink);background:transparent;border:0;border-radius:5px;padding:.35rem .5rem;cursor:pointer;white-space:nowrap;box-shadow:none;transform:none}
+.tbl-cols-pop .tbl-mi:hover,.tbl-cols-pop .tbl-mi:focus-visible{background:var(--ax-row-hover);outline:none;filter:none;transform:none}
 .tbl-scroll{overflow-x:auto}
 .tbl-seg{display:inline-flex}
 .tbl-seg .tbl-btn{border-radius:0;margin-left:-1px}

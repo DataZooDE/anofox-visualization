@@ -471,6 +471,15 @@ fn render_panel_svg(
     let title_h = if title.is_some() { 26.0 } else { 0.0 };
     let pad = 14.0;
 
+    // A table (before the KPI check: a table's ::MONEY / ::PERCENT columns are
+    // column formats, not a KPI).
+    if roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+    {
+        return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
+    }
+
     // A KPI / text card.
     if let Some((i, fmt)) = roles.iter().find_map(|(i, r)| match r {
         Role::Metric(f) => Some((*i, Some(*f))),
@@ -509,14 +518,6 @@ fn render_panel_svg(
         );
     }
 
-    // A table.
-    if roles
-        .iter()
-        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
-    {
-        return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
-    }
-
     // Otherwise a chart — render at the content area, then wrap with a title.
     let body_h = (h - title_h - pad).max(30.0);
     // The chart is nested below the title as a positioned fragment.
@@ -546,7 +547,12 @@ fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> S
     )
 }
 
-/// A minimal table: header row + up to ~14 body rows. Skips a ::TITLE column.
+/// The headless table: the browser table's formatting decisions (shared
+/// [`crate::table`] module — humanised headers, one unit per money / compact
+/// column moved into the header, aligned decimals, a true minus sign, ids and
+/// years ungrouped), numbers right-aligned, natural column widths, and the
+/// default totals row under a double rule (≥ 3 rows with an amount column).
+/// As many rows as fit, then "… n more rows". Skips a ::TITLE column.
 fn table_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
@@ -556,7 +562,12 @@ fn table_svg(
     title: Option<&str>,
     ropts: &RenderOptions,
 ) -> String {
+    use crate::table::{
+        default_total, display_text, profile_column, short_number, Cell, ColumnSpec, Negatives,
+    };
     let th = &ropts.theme;
+    let l = &ropts.locale;
+    let neg = Negatives::parse(&th.chrome.negatives);
     let (ink, muted, line) = (
         hex(th.colors.ink),
         hex(th.colors.muted),
@@ -567,28 +578,133 @@ fn table_svg(
         .filter(|(_, r)| matches!(r, Role::Title))
         .map(|(i, _)| *i)
         .collect();
-    // Per-column number formats (::MONEY/::PERCENT/::COMPACT/::METRIC), the
-    // same formatter the browser uses (wasm `format_number`).
-    let fmt_of: std::collections::HashMap<usize, crate::MetricFmt> = roles
+    // Per-column format roles (::MONEY, ::PERCENT, ::TREND, ::COLORSCALE, …),
+    // the tokens the browser table reads.
+    let fmt_of: std::collections::HashMap<usize, &'static str> = roles
         .iter()
-        .filter_map(|(i, r)| match r {
-            Role::Metric(f) => Some((*i, *f)),
-            _ => None,
-        })
+        .filter(|(_, r)| crate::roles::is_table_format(*r))
+        .map(|(i, r)| (*i, r.token()))
         .collect();
-    type FmtCol<'a> = (Option<crate::MetricFmt>, &'a (String, Vec<Value>));
-    let cols: Vec<FmtCol> = rows
+    let cell = |v: &Value| match v {
+        Value::Na => Cell::Null,
+        Value::Str(s) => Cell::Text(s.clone()),
+        Value::Bool(b) => Cell::Bool(*b),
+        Value::DateTime(_) => Cell::Text(value_str(v)),
+        v => v.as_f64().map_or(Cell::Null, Cell::Num),
+    };
+    struct Col {
+        fmt: Option<&'static str>,
+        cells: Vec<Cell>,
+        p: crate::table::ColumnProfile,
+    }
+    let nrow = rows.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let vis: Vec<(usize, &(String, Vec<Value>))> = rows
         .iter()
         .enumerate()
         .filter(|(i, _)| !skip.contains(i))
-        .map(|(i, c)| (fmt_of.get(&i).copied(), c))
+        .filter(|(i, _)| fmt_of.get(i) != Some(&"SPARKLINE"))
         .collect();
-    let ncol = cols.len().max(1);
-    let nrow = cols.iter().map(|(_, (_, v))| v.len()).max().unwrap_or(0);
+    let cols: Vec<Col> = vis
+        .iter()
+        .enumerate()
+        .map(|(k, (i, (name, vals)))| {
+            let cells: Vec<Cell> = vals.iter().map(cell).collect();
+            let fmt = fmt_of.get(i).copied();
+            let spec = ColumnSpec {
+                name,
+                fmt,
+                first: k == 0,
+                range: None,
+                many: nrow > 1,
+            };
+            let p = profile_column(&spec, &cells, l);
+            Col { fmt, cells, p }
+        })
+        .collect();
+    let text = |c: &Col, r: usize| {
+        c.cells
+            .get(r)
+            .map(|v| display_text(v, &c.p, c.fmt, l, neg))
+            .unwrap_or_default()
+    };
+    // totals: the browser's default (≥ 3 rows and an amount column)
+    let totals: Vec<Option<String>> = cols
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let agg = default_total(&c.p, c.fmt).filter(|_| k > 0)?;
+            let nums: Vec<f64> = c.cells.iter().filter_map(Cell::num).collect();
+            if nums.is_empty() {
+                return None;
+            }
+            let sum: f64 = nums.iter().sum();
+            let v = if agg == "sum" {
+                sum
+            } else {
+                sum / nums.len() as f64
+            };
+            // a mean of whole numbers keeps one decimal
+            let mut p = c.p.clone();
+            if agg == "mean" && p.unit.is_none() && p.dec == 0 && v.fract() != 0.0 {
+                p.dec = 1;
+            }
+            // trends and colour scales: ≤ 2 decimals, like the browser's totals
+            if c.fmt
+                .is_some_and(|f| f == "TREND" || f.starts_with("COLORSCALE"))
+            {
+                return Some(short_number(v, l, neg));
+            }
+            Some(crate::table::number_text(v, &p, c.fmt, l, neg))
+        })
+        .collect();
+    let show_totals = nrow >= 3
+        && cols
+            .iter()
+            .any(|c| matches!(c.fmt, Some("MONEY" | "COMPACT")));
+
+    // natural widths (in characters): the header (wrapping onto ≤ 2 lines) and
+    // the formatted cells, shared out over the card
+    let sample = nrow.min(200);
+    let chars = |s: &str| s.chars().count() as f64;
+    let nat: Vec<f64> = cols
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let head = chars(&c.p.head).min(14.0);
+            let cells = (0..sample).map(|r| chars(&text(c, r))).fold(0.0, f64::max);
+            let tot = totals[k].as_deref().map_or(0.0, chars);
+            head.max(cells).max(tot).clamp(3.0, 32.0) + 2.5
+        })
+        .collect();
+    let total_ch: f64 = nat.iter().sum::<f64>().max(1.0);
+    let inner = w - 24.0;
+    let widths: Vec<f64> = nat.iter().map(|n| inner * n / total_ch).collect();
+    let xs: Vec<f64> = widths
+        .iter()
+        .scan(12.0, |x, wd| {
+            let x0 = *x;
+            *x += wd;
+            Some(x0)
+        })
+        .collect();
+    let right = |k: usize| cols[k].p.numeric && !matches!(cols[k].fmt, Some("BADGE"));
+    let anchor = |k: usize| {
+        if right(k) {
+            (xs[k] + widths[k] - 8.0, "end")
+        } else {
+            (xs[k], "start")
+        }
+    };
+
     let top = if title.is_some() { 30.0 } else { 10.0 };
-    let col_w = (w - 20.0) / ncol as f64;
     let row_h = 22.0;
-    let max_rows = (((h - top - 24.0) / row_h).floor().max(0.0) as usize).min(nrow);
+    let foot_h = if show_totals { row_h + 6.0 } else { 0.0 };
+    let max_rows = (((h - top - 30.0 - foot_h) / row_h).floor().max(0.0) as usize).min(nrow);
+    let max_rows = if max_rows < nrow {
+        max_rows.saturating_sub(1) // room for "… n more rows"
+    } else {
+        max_rows
+    };
 
     let mut s = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     s.push_str(&format!(
@@ -603,50 +719,82 @@ fn table_svg(
         ));
     }
     // header
-    for (c, (_, (name, _))) in cols.iter().enumerate() {
-        let cx = 12.0 + c as f64 * col_w;
+    for (k, c) in cols.iter().enumerate() {
+        let (x, a) = anchor(k);
         s.push_str(&format!(
-            "<text x=\"{cx:.0}\" y=\"{y:.0}\" font-weight=\"700\" fill=\"{muted}\">{}</text>",
-            esc(name),
+            "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}</text>",
+            esc(&c.p.head),
             y = top + 16.0
         ));
     }
     s.push_str(&format!(
-        "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{line}\"/>",
-        ly = top + 22.0,
-        x2 = w - 8.0
+        "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{muted}\" stroke-width=\"1.5\"/>",
+        ly = top + 23.0,
+        x2 = w - 12.0
     ));
     // rows
     for r in 0..max_rows {
-        let y = top + 22.0 + (r as f64 + 1.0) * row_h;
-        for (c, (fmt, (_, vals))) in cols.iter().enumerate() {
-            let cx = 12.0 + c as f64 * col_w;
-            let cell = match (fmt, vals.get(r)) {
-                (Some(f), Some(v)) if v.as_f64().is_some() => {
-                    format_number_l(v.as_f64().unwrap_or(f64::NAN), *f, &ropts.locale)
-                }
-                // A dashboard locale also formats plain numbers and ISO dates.
-                (None, Some(v)) if !ropts.locale.is_default() => match v {
-                    Value::Str(s) => ropts.locale.format_date(s),
-                    v => match v.as_f64() {
-                        Some(n) => format_number_l(n, crate::MetricFmt::Plain, &ropts.locale),
-                        None => value_str(v),
-                    },
-                },
-                (_, v) => v.map(value_str).unwrap_or_default(),
+        let y = top + 23.0 + (r as f64 + 1.0) * row_h - 6.0;
+        for (k, c) in cols.iter().enumerate() {
+            let (x, a) = anchor(k);
+            let t = text(c, r);
+            let neg_num = right(k) && c.cells.get(r).and_then(Cell::num).is_some_and(|n| n < 0.0);
+            let trend = c.fmt == Some("TREND");
+            let fill = match c.cells.get(r).and_then(Cell::num) {
+                Some(n) if trend && n >= 0.05 => hex(th.colors.positive),
+                Some(n) if trend && n <= -0.05 => hex(th.colors.negative),
+                _ if neg_num && neg == Negatives::Red => hex(th.colors.negative),
+                _ => ink.clone(),
+            };
+            let weight = if k == 0 && !c.p.numeric {
+                " font-weight=\"600\""
+            } else {
+                ""
             };
             s.push_str(&format!(
-                "<text x=\"{cx:.0}\" y=\"{y:.0}\" fill=\"{ink}\">{}</text>",
-                esc(&cell)
+                "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{fill}\"{weight}>{}</text>",
+                esc(&t)
+            ));
+        }
+        if r + 1 < max_rows {
+            s.push_str(&format!(
+                "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{line}\" stroke-width=\"0.6\"/>",
+                ly = y + 7.0,
+                x2 = w - 12.0
             ));
         }
     }
+    let mut y = top + 23.0 + max_rows as f64 * row_h;
     if nrow > max_rows {
+        y += row_h;
         s.push_str(&format!(
             "<text x=\"12\" y=\"{y:.0}\" fill=\"{muted}\">… {} more rows</text>",
             nrow - max_rows,
-            y = top + 22.0 + (max_rows as f64 + 1.0) * row_h
+            y = y - 6.0
         ));
+    }
+    if show_totals {
+        // the double rule, then the totals
+        let ly = y + 4.0;
+        s.push_str(&format!(
+            "<line x1=\"12\" y1=\"{ly:.1}\" x2=\"{x2:.0}\" y2=\"{ly:.1}\" stroke=\"{ink}\" stroke-width=\"0.8\"/>\
+             <line x1=\"12\" y1=\"{ly2:.1}\" x2=\"{x2:.0}\" y2=\"{ly2:.1}\" stroke=\"{ink}\" stroke-width=\"0.8\"/>",
+            ly2 = ly + 2.5,
+            x2 = w - 12.0
+        ));
+        let ty = ly + row_h - 2.0;
+        s.push_str(&format!(
+            "<text x=\"12\" y=\"{ty:.0}\" font-size=\"10\" font-weight=\"700\" letter-spacing=\"0.6\" fill=\"{muted}\">TOTAL</text>"
+        ));
+        for (k, t) in totals.iter().enumerate() {
+            if let Some(t) = t {
+                let (x, a) = anchor(k);
+                s.push_str(&format!(
+                    "<text x=\"{x:.1}\" y=\"{ty:.0}\" text-anchor=\"{a}\" font-weight=\"700\" fill=\"{ink}\">{}</text>",
+                    esc(t)
+                ));
+            }
+        }
     }
     s.push_str("</g></svg>");
     s

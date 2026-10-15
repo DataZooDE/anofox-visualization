@@ -10,7 +10,9 @@ T2b: `::TOTALS` + a per-cell aggregation picker (SQL stats gained `median`).
 T5: `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`, `::FLAG`, `::HIGHLIGHT`.
 T7: caption / scope / aria-sort / aria-selected, print CSS. `::SUBTOTAL` (T2b,
 client tables). T6: the Stats strip (client, and `page.profile` in SQL for
-`::PAGED`). T8: Excel export (dependency-free `.xlsx` writer). **Open**: T9.
+`::PAGED`). T8: Excel export (dependency-free `.xlsx` writer). T9: `src/table.rs` decides
+for every output (browser through wasm `table_profile`, headless SVG table);
+shared vectors `tests/fixtures/table_vectors.json`. All steps done.
 Originally a proposal Follows the table rebuild (toolbar, totals, Scroll
 view, `::ROWSELECT`, SQL-side filters/totals for `::PAGED`). Goal: tables that
 read like a well-set report — clear headers, an unmistakable totals row, quiet
@@ -133,7 +135,7 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   totals row with its double rule, frozen header — so the sheet looks like the
   table.
 
-## T9 · One table renderer for every output
+## T9 · One table renderer for every output (done)
 
 The CLI's static HTML and `dashboard --svg` draw tables in Rust (`src/page.rs`,
 headless SVG). Move the formatting decisions (column profile, decimals, units,

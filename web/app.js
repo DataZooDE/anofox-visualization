@@ -12,6 +12,8 @@ import init, {
   format_date_locale,
   resolve_dashboard_theme,
   page_sql,
+  table_profile,
+  human_header,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -3251,20 +3253,6 @@ const NUM_RE = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
 const isNumLike = (v) => (typeof v === "number" ? isFinite(v) : NUM_RE.test(String(v ?? "").replace(/^"|"$/g, "")));
 const isBoolLike = (v) => v === true || v === false || v === "true" || v === "false";
 
-// Decimals a column needs so its numbers line up: the most any value uses
-// (after rounding away float noise), at most 3 — or 4 when every value is
-// below 1 in magnitude (rates like 0.0405).
-function colDecimals(nums) {
-  let d = 0;
-  for (const n of nums) {
-    const s = String(Math.round(Math.abs(n) * 1e4) / 1e4);
-    const i = s.indexOf(".");
-    if (i >= 0) d = Math.max(d, s.length - i - 1);
-  }
-  const small = nums.length && nums.every((n) => Math.abs(n) < 1);
-  return Math.min(d, small ? 4 : 3);
-}
-
 // Rich, readable data table: per-column number formats, slim data bars, soft
 // colour scales, a toolbar (row count, search, filter chips, Filters / Totals /
 // Columns / Pages|Scroll / CSV), a totals row, column statistics on the header,
@@ -3276,33 +3264,33 @@ function colDecimals(nums) {
 // server.onColFilters, server.distinct, server.fetchRows, …). `opts.select` =
 // the ::ROWSELECT mode: "single" | "multi" (anything else: rows aren't clickable).
 // Readable header for a raw column name (snake_case / camelCase, as SQL emits
-// it); a name that already looks written for people (capitals, spaces, symbols
-// — an `AS "Header"` alias) is kept as it is.
-const HDR_WORDS = {
-  pct: "%", percent: "%", perc: "%", avg: "Avg", qty: "Qty", num: "No.", nr: "No.", amt: "Amount",
-  id: "ID", sku: "SKU", kpi: "KPI", url: "URL", vat: "VAT", eu: "EU", us: "US", uk: "UK",
-  mae: "MAE", rmse: "RMSE", mape: "MAPE", smape: "sMAPE", mse: "MSE", r2: "R²", ci: "CI", sd: "SD", se: "SE",
-  yoy: "YoY", mom: "MoM", ytd: "YTD", eur: "EUR", usd: "USD", api: "API", ui: "UI",
-};
+// it: `load_pct` → "Load %"); an `AS "Header"` alias is kept as it is. The
+// shared Rust rule (wasm human_header), like every table formatting decision.
 function humanHeader(c) {
-  const raw = String(c);
-  if (!/^[a-z0-9_]+$/.test(raw) && !/^[a-z]+(?:[A-Z][a-z0-9]*)+$/.test(raw)) return raw;
-  const words = raw
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w.toLowerCase());
-  if (!words.length) return raw;
-  const out = words.map((w) => HDR_WORDS[w] ?? w);
-  if (!HDR_WORDS[words[0]]) out[0] = out[0].charAt(0).toUpperCase() + out[0].slice(1);
-  return out.join(" ").replace(/ %/g, " %");
+  return human_header(String(c));
 }
-// Per-column units for ::MONEY / ::COMPACT columns: one unit for the whole
-// column (never "$4M" next to "$5.9M" next to "$812K"), chosen by its largest value.
-const UNIT_WORDS = {
-  de: { K: "\u00a0Tsd.", M: "\u00a0Mio.", B: "\u00a0Mrd." },
-  fr: { K: "\u00a0k", M: "\u00a0M", B: "\u00a0Md" },
-};
+// A number in a table cell as its column profile (wasm table_profile) formats
+// it: the column's unit (scaled; in the header or the cell), a KPI format, or
+// fixed decimals; a true minus sign or accounting parentheses. The browser twin
+// of the Rust table::number_text — shared vectors in tests/fixtures/table_vectors.json.
+function tableNumText(n, p, f, loc, neg) {
+  if (!isFinite(n)) return "–";
+  const nf = (dec, group) =>
+    ((tableNumText.nf ||= {})[`${loc}|${dec}|${group}`] ||= new Intl.NumberFormat(loc, {
+      minimumFractionDigits: dec,
+      maximumFractionDigits: dec,
+      useGrouping: group,
+      signDisplay: "negative",
+    }));
+  const minus = (t) => (neg === "parens" && /^-/.test(t) ? `(${t.slice(1)})` : t.replace(/^-/, "−"));
+  const u = p.unit;
+  if (u) {
+    const num = nf(u.dec, true).format(Math.abs(n) / u.div);
+    return minus(`${n < 0 ? "-" : ""}${u.inHead ? num : `${u.pre}${num}${u.word}${u.post}`}`);
+  }
+  if (METRICS.includes(f)) return minus(fmtNum(n, f));
+  return minus(nf(p.dec, !p.label).format(n));
+}
 const ROW_H_COMFY = 37; // row height of the virtualised Scroll view (px), comfortable density
 const ROW_H_COMPACT = 29; // … compact density
 const SCROLL_BLOCK = 100; // rows per fetch of a ::PAGED table in Scroll view
@@ -3417,9 +3405,11 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const groupKey = (r) => unquote(r[subCol] ?? "");
   let subGroups = new Map(); // group key -> its matching rows
 
-  // ── per-column profile: kind, range, decimals, whether it gets data bars ──
-  // A ::PAGED table profiles the whole filtered result from its SQL statistics
-  // (n{i}, d{i}, s{i}, m{i}, lo{i}, hi{i}); a client table from its rows.
+  // ── per-column profile: kind, range, decimals, unit, whether it gets data
+  // bars — decided by the shared Rust table module (wasm table_profile), the
+  // same rules the headless SVG table uses. A ::PAGED table profiles the whole
+  // filtered result from its SQL statistics (n{i}, d{i}, s{i}, m{i}, lo{i},
+  // hi{i}); a client table from its rows.
   const sstat = (c) => {
     if (!server || !server.stats || !server.statCols) return null;
     const j = server.statCols.indexOf(c);
@@ -3427,93 +3417,47 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     const g = (k) => (server.stats[k + j] == null ? null : Number(server.stats[k + j]));
     return { n: g("n"), d: g("d"), s: g("s"), m: g("m"), md: g("md"), lo: g("lo"), hi: g("hi") };
   };
+  const profiles = JSON.parse(
+    table_profile(
+      JSON.stringify({
+        locale: loc,
+        many: rows.length > 1 || !!server,
+        cols: cols.map((c, k) => {
+          const st = sstat(c);
+          return { name: c, fmt: colFmt[c] || "", first: k === 0, lo: st?.lo ?? null, hi: st?.hi ?? null, values: rows.map((r) => r[c] ?? null) };
+        }),
+      })
+    )
+  );
   const info = {};
-  for (const c of cols) {
-    const f = colFmt[c];
+  const unitOf = {};
+  cols.forEach((c, k) => {
+    const p = profiles[k];
     const vals = rows.map((r) => r[c]);
     const present = vals.filter((v) => v != null && unquote(v) !== "");
     const nums = present.map(cleanNum).filter((v) => v != null);
     const st = sstat(c);
-    // (::PLAIN only drops the bar: whether the column is numeric comes from its values,
-    // so a text column of dates / strings with a few number-like cells stays text)
-    const numFmt = [...METRICS, "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "TREND"].includes(f);
-    const numeric = numFmt || (present.length > 0 ? present.every(isNumLike) : !!(st && st.lo != null));
-    const bool = !f && present.length > 0 && present.every(isBoolLike);
-    const ints = nums.every((n) => Number.isInteger(n));
-    // identifiers and years read as labels: no grouping, no bars, no totals
-    const idLike = /(^|[_\s-])(id|no|nr|nummer|number|code|key)$|^#|^id[_\s]/i.test(c);
-    const yearLike = ints && nums.length > 0 && nums.every((n) => n >= 1800 && n <= 2200) && /year|jahr|^yr$/i.test(c);
-    const label = numeric && ints && (idLike || yearLike);
-    const mn = st && st.lo != null ? st.lo : nums.length ? Math.min(...nums) : 0;
-    const mx = st && st.hi != null ? st.hi : nums.length ? Math.max(...nums) : 0;
     info[c] = {
-      f,
-      numeric,
-      bool,
-      label,
-      ints,
-      dec: numeric && (!f || f === "PLAIN") ? colDecimals(nums) : 0,
-      min: mn,
-      max: mx,
-      maxAbs: Math.max(Math.abs(mn), Math.abs(mx)) || 1,
+      ...p,
+      f: colFmt[c],
       empty: st ? (server.total || 0) - (st.n || 0) : vals.length - present.length,
       distinct: st && st.d != null ? st.d : new Set(present.map((v) => unquote(v))).size,
       mean: st ? st.m : nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null,
       sum: st ? st.s : null,
-      // slim in-cell bars: plain numeric columns that vary, not the row key
-      bars: numeric && !f && !label && mx !== mn && c !== cols[0] && (rows.length > 1 || !!server),
-      longText: !numeric && present.some((v) => String(v).length > 32),
+      longText: !p.numeric && present.some((v) => String(v).length > 32),
     };
-  }
+    if (p.unit) unitOf[c] = p.unit;
+  });
   if (hlSpec[""]) {
     const c = cols.find((cc) => info[cc].numeric && !info[cc].label && cc !== cols[0]);
     if (c && !hlSpec[c]) hlSpec[c] = hlSpec[""];
     delete hlSpec[""];
   }
-  const nf = {}; // cached Intl formatters
   // theme chrome.negatives ("minus" | "red" | "parens") and chrome.zero ("muted" | "dash")
   const negStyle = axToken("table-negatives", "minus");
   const zeroStyle = axToken("table-zero", "muted");
   // a true minus sign, or accounting parentheses
-  const minus = (t) => (negStyle === "parens" && /^-/.test(t) ? `(${t.slice(1)})` : t.replace(/^-/, "\u2212"));
-  // ::MONEY / ::COMPACT: one unit per column (K / M / B) and fixed decimals
-  const lang = String(loc).slice(0, 2);
-  const unitOf = {};
-  for (const c of cols) {
-    const i = info[c];
-    if (!["MONEY", "COMPACT"].includes(i.f)) continue;
-    const mx = i.maxAbs;
-    const [div, u] = mx >= 1e9 ? [1e9, "B"] : mx >= 1e6 ? [1e6, "M"] : i.f === "COMPACT" && mx >= 1e4 ? [1e3, "K"] : [1, ""];
-    const scaled = mx / div;
-    const dec = div === 1 ? (i.f === "MONEY" && mx < 100 && !i.ints ? 2 : 0) : scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-    // the currency's place and symbol, from the locale-aware formatter
-    const sample = i.f === "MONEY" ? fmtNum(1234, "MONEY") : "1234";
-    const pre = sample.slice(0, sample.search(/\d/));
-    const post = sample.slice(sample.search(/\d[^\d]*$/) + 1); // e.g. " €" (keeps its space)
-    const word = u ? (UNIT_WORDS[lang] || { K: "K", M: "M", B: "B" })[u] : "";
-    // the unit once in the header ("Revenue ($M)") instead of in every cell: a
-    // currency column, or one scaled to K / M / B, with more than one row
-    const label = `${pre}${word}${post}`.replace(/\u00a0/g, " ").trim();
-    const inHead = !!label && (rows.length > 1 || !!server) && !humanHeader(c).includes(label);
-    unitOf[c] = { div, dec, pre, post, word, label, inHead };
-  }
-  const fmtUnit = (n, c) => {
-    const u = unitOf[c];
-    const k = `u${u.dec}`;
-    nf[k] ||= new Intl.NumberFormat(loc, { minimumFractionDigits: u.dec, maximumFractionDigits: u.dec });
-    const num = nf[k].format(Math.abs(n) / u.div);
-    return minus(`${n < 0 ? "-" : ""}${u.inHead ? num : `${u.pre}${num}${u.word}${u.post}`}`);
-  };
-  const fmtPlain = (n, c) => {
-    const i = info[c];
-    const k = `${i.dec}|${i.label}`;
-    nf[k] ||= new Intl.NumberFormat(loc, {
-      minimumFractionDigits: i.dec,
-      maximumFractionDigits: i.dec,
-      useGrouping: !i.label,
-    });
-    return nf[k].format(n);
-  };
+  const minus = (t) => (negStyle === "parens" && /^-/.test(t) ? `(${t.slice(1)})` : t.replace(/^-/, "−"));
   // text of one cell (display, search, totals, slider labels)
   const cellText = (v, c) => {
     if (v == null) return "";
@@ -3521,16 +3465,14 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     if (i.numeric) {
       const n = cleanNum(v);
       if (n == null) return unquote(v);
-      if (unitOf[c]) return fmtUnit(n, c);
-      if (METRICS.includes(i.f)) return minus(fmtNum(n, i.f));
-      return minus(fmtPlain(n, c));
+      return tableNumText(n, i, i.f, loc, negStyle);
     }
     // a year among text (dates, names) reads as a label: never "2,019"
     if (/^\d{4}$/.test(unquote(v)) && +unquote(v) >= 1800 && +unquote(v) <= 2200) return unquote(v);
     return String(fmtCell(unquote(v)));
   };
   // the header people read (raw name in the tooltip), with the column's unit when the cells drop it
-  const head = (c) => (unitOf[c]?.inHead ? `${humanHeader(c)} (${unitOf[c].label.replace(/ /g, "\u00a0")})` : humanHeader(c));
+  const head = (c) => info[c].head;
 
   let sortCol = server ? server.sortCol : saved.sortCol ?? null;
   let dir = server ? server.sortDir || 1 : saved.dir ?? 1;
@@ -3543,12 +3485,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   let showStats = !!saved.showStats; // the column-stats strip under the header
   let showFilters =
     !!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0;
-  // Σ for amounts and counts; a column named like a rate / share / score is averaged
-  const rateLike = (c) => /pct|percent|%|rate|ratio|share|avg|mean|median|score|index|quote|anteil/i.test(c);
-  const additive = (c) =>
-    info[c].numeric &&
-    !info[c].label &&
-    (["MONEY", "COMPACT"].includes(info[c].f) || ((!info[c].f || info[c].f === "PLAIN") && info[c].ints && !rateLike(c)));
+  // Σ for amounts and counts; a column named like a rate / share / score is averaged (table_profile)
+  const additive = (c) => info[c].additive;
   const hasAdditive = cols.some((c) => ["MONEY", "COMPACT"].includes(info[c].f));
   const nTotal = () => (server ? server.total : filtered.length);
   let showTotals =
@@ -3800,10 +3738,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         renderBar();
       })
     );
-    const dl = document.createElement("span");
-    dl.className = "tbl-seg";
-    dl.append(csvBtn(), xlsxBtn());
-    barRight.appendChild(dl);
+    barRight.appendChild(exportMenu());
   }
   function columnsMenu() {
     const d = document.createElement("details");
@@ -3836,6 +3771,33 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       l.append(cb, document.createTextNode(head(c)));
       pop.appendChild(l);
     });
+    d.append(s, pop);
+    return d;
+  }
+  // ⤓ Export: CSV (raw values) or Excel (formatted like the table)
+  function exportMenu() {
+    const d = document.createElement("details");
+    d.className = "tbl-cols tbl-export";
+    d.onclick = (e) => e.stopPropagation();
+    const s = document.createElement("summary");
+    s.className = "tbl-btn";
+    s.textContent = "⤓ Export";
+    s.title = `download the ${server ? "loaded" : "matching"} rows`;
+    const pop = document.createElement("div");
+    pop.className = "tbl-cols-pop";
+    for (const [b, label] of [
+      [csvBtn(), "CSV — raw values"],
+      [xlsxBtn(), "Excel — formatted like the table"],
+    ]) {
+      b.className = "tbl-mi";
+      b.textContent = label;
+      const go = b.onclick;
+      b.onclick = (e) => {
+        d.open = false;
+        go(e);
+      };
+      pop.appendChild(b);
+    }
     d.append(s, pop);
     return d;
   }

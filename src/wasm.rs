@@ -242,6 +242,58 @@ pub fn page_sql(base: &str, page_json: &str) -> String {
     }
 }
 
+/// The column profiles of a table (see [`crate::table::profile_column`]):
+/// `spec_json` = `{"locale": "de-DE", "many": true, "cols": [{"name", "fmt",
+/// "first", "lo", "hi", "values": [...]}]}` → a JSON array of profiles
+/// (`head`, `numeric`, `label`, `dec`, `unit`, …) — the browser table and the
+/// headless table read a column the same way. Errors: `{"error": "…"}`.
+#[wasm_bindgen]
+pub fn table_profile(spec_json: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(spec_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({ "error": format!("bad table spec: {e}") }).to_string()
+        }
+    };
+    let locale = v
+        .get("locale")
+        .and_then(|l| l.as_str())
+        .and_then(crate::format::Locale::from_tag)
+        .unwrap_or_default();
+    let many = v.get("many").and_then(|m| m.as_bool()).unwrap_or(true);
+    let empty = Vec::new();
+    let cols = v.get("cols").and_then(|c| c.as_array()).unwrap_or(&empty);
+    let out: Vec<serde_json::Value> = cols
+        .iter()
+        .map(|c| {
+            let num = |k: &str| c.get(k).and_then(|x| x.as_f64());
+            let spec = crate::table::ColumnSpec {
+                name: c.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                fmt: c
+                    .get("fmt")
+                    .and_then(|f| f.as_str())
+                    .filter(|f| !f.is_empty()),
+                first: c.get("first").and_then(|f| f.as_bool()).unwrap_or(false),
+                range: num("lo").zip(num("hi")),
+                many,
+            };
+            let values: Vec<crate::table::Cell> = c
+                .get("values")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().map(crate::table::Cell::from_json).collect())
+                .unwrap_or_default();
+            crate::table::profile_column(&spec, &values, &locale).to_json()
+        })
+        .collect();
+    serde_json::Value::Array(out).to_string()
+}
+
+/// A readable header for a raw column name ([`crate::table::human_header`]).
+#[wasm_bindgen]
+pub fn human_header(raw: &str) -> String {
+    crate::table::human_header(raw)
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

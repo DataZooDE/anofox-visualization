@@ -710,8 +710,8 @@ histogram with min and max for each number column, the top 3 values with their
 share for the others, "all N values distinct" for ids and names, empty counts —
 over the matching rows), **Columns** (show / hide),
 **Pages | Scroll**, **Compact | Comfortable** row density (compact by default
-above 50 rows), **⤓ CSV** (the matching rows, visible columns, raw values) and
-**Excel** (the same rows as an `.xlsx` that reads like the table: the headers
+above 50 rows) and **⤓ Export**: CSV (the matching rows, visible columns, raw
+values) or Excel (the same rows as an `.xlsx` that reads like the table: the headers
 with their units, the grouped header, each column's number format — scaled units
 keep the raw value, e.g. `#,##0.00,,` shows 5,350,000 as 5.35 — dates as dates,
 subtotal and totals rows as live `SUBTOTAL()` formulas, a frozen header with a
@@ -720,7 +720,9 @@ filter; a `::PAGED` table exports the loaded rows and its SQL totals as values).
 booleans typed). Hovering a
 header shows the column's min / max / mean, empty and distinct counts.
 
-Formatting: raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
+Formatting (one set of rules, `src/table.rs`, for the browser table and the
+headless `dashboard --svg` / static HTML table — which also right-aligns
+numbers, moves units into the header and adds the default totals row): raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
 "Avg MAE"; an `AS "Header"` alias is kept as written) and wrap onto two lines;
 numbers are formatted per column — aligned decimals, grouping (ids and years stay
 ungrouped), a true minus sign, muted zeros, and one unit per `::MONEY` /

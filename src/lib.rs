@@ -33,6 +33,7 @@ pub mod page;
 pub mod roles;
 mod smooth;
 pub mod sql;
+pub mod table;
 pub mod theme;
 #[cfg(feature = "wasm")]
 pub mod wasm;
