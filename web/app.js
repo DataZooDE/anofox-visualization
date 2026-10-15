@@ -3783,7 +3783,7 @@ function shareLink(e) {
 // Download the current dashboard as a standalone, self-contained HTML file.
 // It carries the dashboard stylesheet (web/theme-base.css) and the CURRENT
 // theme variant's tokens, so a dark dashboard stays dark when opened alone.
-function downloadHtml() {
+async function downloadHtml() {
   const sheetText = (sheet) => {
     try {
       return [...sheet.cssRules].map((r) => r.cssText).join("\n");
@@ -3791,8 +3791,15 @@ function downloadHtml() {
       return "";
     }
   };
-  const sheets = [...document.styleSheets];
-  const base = sheets.filter((sh) => sh.href && /theme-base\.css/.test(sh.href)).map(sheetText).join("\n");
+  // The stylesheet's source text (re-serialised CSSOM can reorder shorthand /
+  // longhand pairs such as the KPI's clipped-text background).
+  const sheet = [...document.styleSheets].find((sh) => sh.href && /theme-base\.css/.test(sh.href));
+  let base = "";
+  try {
+    base = await (await fetch(sheet.href)).text();
+  } catch (_) {
+    base = sheet ? sheetText(sheet) : "";
+  }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
   const content = document.querySelector(".dash").innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
