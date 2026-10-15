@@ -336,9 +336,30 @@ fn render_values(
     height: u32,
     primary: &str,
 ) -> Result<String, RenderError> {
-    let rows = match rows {
-        J::Null => J::Array(Vec::new()),
-        J::Array(a) => J::Array(a),
+    let mut opts = crate::RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+    render_values_opts(macro_name, rows, args, width, height, &mut opts)
+}
+
+/// [`render_values`] with explicit render options (theme, locale, brand).
+fn render_values_opts(
+    macro_name: &str,
+    rows: J,
+    args: J,
+    width: u32,
+    height: u32,
+    opts: &mut crate::RenderOptions,
+) -> Result<String, RenderError> {
+    let rows: Vec<Map<String, J>> = match rows {
+        J::Null => Vec::new(),
+        J::Array(a) => a
+            .into_iter()
+            .map(|r| match r {
+                J::Object(m) => Ok(m),
+                _ => Err(RenderError::BadSpec(
+                    "`rows` must be an array of objects".into(),
+                )),
+            })
+            .collect::<Result<_, _>>()?,
         _ => return Err(RenderError::BadSpec("rows must be a JSON array".into())),
     };
     let args: Map<String, J> = match args {
@@ -351,7 +372,7 @@ fn render_values(
         let note = format!("{macro_name}() ships with the next anofox-visualization release");
         return crate::note_svg(None, &note, width, height)
             .finish(crate::Place::Doc)
-            .map(|(svg, _)| svg)
+            .map(|(svg, _)| opts.theme.finish_svg(svg))
             .map_err(RenderError::Render);
     }
     let mut options = Map::new();
@@ -374,16 +395,63 @@ fn render_values(
         };
         options.insert(key, v);
     }
-    let mut spec = Map::new();
-    spec.insert("plot".into(), J::String(plot));
-    spec.insert("rows".into(), rows);
-    spec.insert("options".into(), J::Object(options));
-    spec.insert("width".into(), J::from(width));
-    spec.insert("height".into(), J::from(height));
-    if !primary.is_empty() {
-        spec.insert("primary".into(), J::String(primary.to_string()));
+    // A `theme :=` / `locale :=` macro argument (or the anofox_theme /
+    // anofox_locale variables) overrides the dashboard's render context.
+    let mut ctx = Map::new();
+    for k in ["theme", "variant", "locale", "primary"] {
+        if let Some(v) = options.remove(k) {
+            ctx.insert(k.to_string(), v);
+        }
     }
-    crate::render_spec_checked(&J::Object(spec).to_string())
+    if !ctx.is_empty() {
+        opts.apply_context(&J::Object(ctx))
+            .map_err(RenderError::BadSpec)?;
+    }
+    let (w, h) = (
+        crate::clamp_dim(width as u64),
+        crate::clamp_dim(height as u64),
+    );
+    crate::guard(|| {
+        crate::contract::render(&plot, &rows, &options, w, h, opts, crate::Place::Doc)
+            .map(|(svg, warn)| crate::finish_contract_svg(svg, &warn, opts))
+    })
+}
+
+/// [`render_rows`] with explicit render options (the headless dashboard
+/// passes its resolved theme, so custom JSON themes reach contract plots).
+pub fn render_rows_opts(
+    cp: &ContractPanel,
+    rows: &[Map<String, J>],
+    width: u32,
+    height: u32,
+    opts: &crate::RenderOptions,
+) -> Vec<(String, Result<String, RenderError>)> {
+    rows.iter()
+        .map(|r| {
+            let label = row_label(cp, r);
+            let get = |i: usize| r.get(&format!("c{i}")).cloned().unwrap_or(J::Null);
+            let out = payload(&get(cp.rows))
+                .and_then(|rows| payload(&get(cp.args)).map(|a| (rows, a)))
+                .map_err(RenderError::BadSpec)
+                .and_then(|(rows, args)| {
+                    render_values_opts(&cp.macro_name, rows, args, width, height, &mut opts.clone())
+                });
+            (label, out)
+        })
+        .collect()
+}
+
+fn row_label(cp: &ContractPanel, r: &Map<String, J>) -> String {
+    cp.groups
+        .iter()
+        .filter_map(|(i, _)| r.get(&format!("c{i}")))
+        .map(|v| match v {
+            J::String(s) => s.clone(),
+            J::Null => "NULL".into(),
+            v => v.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Render every result row of a planned contract panel (one SVG per row, the
@@ -396,29 +464,13 @@ pub fn render_rows(
     height: u32,
     primary: &str,
 ) -> Vec<(String, Result<String, RenderError>)> {
-    rows.iter()
-        .map(|r| {
-            let label = cp
-                .groups
-                .iter()
-                .filter_map(|(i, _)| r.get(&format!("c{i}")))
-                .map(|v| match v {
-                    J::String(s) => s.clone(),
-                    J::Null => "NULL".into(),
-                    v => v.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let get = |i: usize| r.get(&format!("c{i}")).cloned().unwrap_or(J::Null);
-            let out = payload(&get(cp.rows))
-                .and_then(|rows| payload(&get(cp.args)).map(|a| (rows, a)))
-                .map_err(RenderError::BadSpec)
-                .and_then(|(rows, args)| {
-                    render_values(&cp.macro_name, rows, args, width, height, primary)
-                });
-            (label, out)
-        })
-        .collect()
+    match crate::RenderOptions::from_primary_arg(primary) {
+        Ok(o) => render_rows_opts(cp, rows, width, height, &o),
+        Err(e) => rows
+            .iter()
+            .map(|r| (row_label(cp, r), Err(RenderError::BadSpec(e.clone()))))
+            .collect(),
+    }
 }
 
 #[cfg(test)]

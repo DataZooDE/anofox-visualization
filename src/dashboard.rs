@@ -19,13 +19,16 @@
 //! assert!(svg.starts_with("<svg"));
 //! ```
 
-use crate::format::{escape_xml as esc, format_number};
+use crate::format::escape_xml as esc;
+use crate::format::{format_number_l, Locale};
 use crate::sql::contract_call;
+use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant, CREDIT_TEXT, CREDIT_URL};
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
     Role,
 };
 use ggplot_rs::prelude::Value;
+use std::sync::Arc;
 
 /// A data source for headless rendering. Implement this over your engine
 /// (DuckDB, Arrow, …); the column order returned by [`query`](DataProvider::query)
@@ -47,10 +50,14 @@ pub struct DashboardOptions {
     pub panel_height: u32,
     /// Gap between panels in px.
     pub gap: u32,
-    /// Brand/primary colour for single-series marks + accents.
+    /// Brand/primary colour for single-series marks (`None` = the theme's
+    /// first palette colour).
     pub brand: Option<(u8, u8, u8)>,
-    /// Page background colour.
-    pub background: (u8, u8, u8),
+    /// Theme spec used when the script sets no `::THEME` (a built-in name,
+    /// `a+b`, or JSON — e.g. from `dashboard --theme`). `None` = `light`.
+    pub theme: Option<String>,
+    /// Which variant to draw when the theme follows the viewer (`auto`).
+    pub variant: Variant,
 }
 
 impl Default for DashboardOptions {
@@ -61,7 +68,8 @@ impl Default for DashboardOptions {
             panel_height: 320,
             gap: 16,
             brand: None,
-            background: (0xf4, 0xf7, 0xfc),
+            theme: None,
+            variant: Variant::Light,
         }
     }
 }
@@ -82,7 +90,16 @@ fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)])
     roles
         .iter()
         .filter_map(|(i, role)| {
-            column_at(result, *i).map(|(name, vals)| Column::new(name.clone(), *role, vals.clone()))
+            column_at(result, *i).map(|(name, vals)| {
+                // An ISO-date x axis becomes a datetime scale, as in the
+                // browser (`sql::columns_from_rows`).
+                let vals = if *role == Role::X {
+                    sql::maybe_decimal(sql::maybe_datetime(vals.clone()))
+                } else {
+                    vals.clone()
+                };
+                Column::new(name.clone(), *role, vals)
+            })
         })
         .collect()
 }
@@ -96,11 +113,74 @@ pub fn render_dashboard_svg(
     render_inner(script, provider, opts)
 }
 
+/// One executed statement of the script (phase 1).
+struct Step {
+    panel: sql::Panel,
+    rows: Result<Vec<(String, Vec<Value>)>, String>,
+}
+
+/// The first cell of a result as text.
+fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
+    rows.first().and_then(|(_, v)| v.first()).map(value_str)
+}
+
+/// Run the script in order (setup for effect, panels queried) and collect
+/// the dashboard chrome directives — so a `::THEME` anywhere applies to every
+/// panel.
+fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, DashboardChrome) {
+    let mut chrome = DashboardChrome::default();
+    let mut steps = Vec::new();
+    for panel in sql::plan(script) {
+        if panel.setup {
+            provider.execute(&panel.sql).ok();
+            continue;
+        }
+        let chrome_role = panel
+            .roles
+            .iter()
+            .map(|(_, r)| *r)
+            .find(|r| roles::is_chrome_directive(*r));
+        if let Some(r) = chrome_role {
+            let v = provider
+                .query(&panel.sql)
+                .ok()
+                .and_then(|rows| first_text(&rows));
+            chrome.apply(r, v);
+            continue;
+        }
+        let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
+        let layout =
+            has(&|r| matches!(r, Role::Columns | Role::Span | Role::Height | Role::Section));
+        if roles::is_directive_panel(&panel.roles) && !layout {
+            continue; // inputs, downloads, tabs, groups, reload, …
+        }
+        let rows = provider.query(&panel.sql);
+        steps.push(Step { panel, rows });
+    }
+    (steps, chrome)
+}
+
 fn render_inner(
     script: &str,
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
 ) -> Result<String, String> {
+    let (steps, chrome) = execute(script, provider);
+    let set = chrome.resolve(opts.theme.as_deref())?;
+    let theme = set.pick(opts.variant).clone();
+    let locale = theme
+        .locale
+        .as_deref()
+        .and_then(Locale::from_tag)
+        .unwrap_or_default();
+    let t = &theme;
+    let ropts = RenderOptions {
+        brand: opts.brand,
+        theme: Arc::new(theme.clone()),
+        locale,
+        ..RenderOptions::default()
+    };
+
     let pad = opts.gap as f64;
     let gap = opts.gap as f64;
     let content_w = opts.width as f64 - 2.0 * pad;
@@ -109,12 +189,20 @@ fn render_inner(
 
     // A placed panel: (x, y, w, h, nested svg fragment positioned at x, y).
     let mut placed: Vec<(f64, f64, f64, f64, String)> = Vec::new();
+    // Full-width headings (no card): nested svg fragments.
+    let mut headings: Vec<String> = Vec::new();
     let mut x = pad;
     let mut row_y = pad;
     let mut row_h = 0.0f64;
     let mut row_units = 0u32;
     let mut next_span = 0u32;
     let mut next_height = 0u32;
+
+    // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO).
+    if let Some((svg, h)) = header_svg(t, pad, row_y, content_w) {
+        headings.push(svg);
+        row_y += h + gap;
+    }
 
     let unit_w = content_w / 12.0;
     let new_row = |row_y: &mut f64, row_h: &mut f64, x: &mut f64, row_units: &mut u32| {
@@ -124,57 +212,37 @@ fn render_inner(
         *row_units = 0;
     };
 
-    for panel in sql::plan(script) {
-        if panel.setup {
-            provider.execute(&panel.sql).ok();
-            continue;
-        }
+    for step in &steps {
+        let panel = &step.panel;
         let roles = &panel.roles;
         let has = |r: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, role)| r(role));
+        let num = || {
+            step.rows.as_ref().ok().and_then(|rows| {
+                rows.first()
+                    .and_then(|(_, v)| v.first())
+                    .and_then(|v| v.as_f64())
+            })
+        };
 
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {
-            if let Ok(rows) = provider.query(&panel.sql) {
-                if let Some(n) = rows
-                    .first()
-                    .and_then(|(_, v)| v.first())
-                    .and_then(|v| v.as_f64())
-                {
-                    if n >= 1.0 {
-                        columns = n as u32;
-                        default_span = (12 / columns).max(1);
-                    }
+            if let Some(n) = num() {
+                if n >= 1.0 {
+                    columns = n as u32;
+                    default_span = (12 / columns).max(1);
                 }
             }
             continue;
         }
         if has(&|r| matches!(r, Role::Span)) {
-            if let Ok(rows) = provider.query(&panel.sql) {
-                next_span = rows
-                    .first()
-                    .and_then(|(_, v)| v.first())
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0) as u32;
-            }
+            next_span = num().unwrap_or(0.0) as u32;
             continue;
         }
         if has(&|r| matches!(r, Role::Height)) {
-            if let Ok(rows) = provider.query(&panel.sql) {
-                next_height = rows
-                    .first()
-                    .and_then(|(_, v)| v.first())
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0) as u32;
-            }
+            next_height = num().unwrap_or(0.0) as u32;
             continue;
         }
-        // Non-rendering directives (inputs, downloads, tabs, chrome, reload,
-        // group markers, placeholders) — from the role registry.
-        if roles::is_directive_panel(roles) {
-            continue;
-        }
-
-        let rows = match provider.query(&panel.sql) {
+        let rows = match &step.rows {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -197,29 +265,33 @@ fn render_inner(
             let title = roles
                 .iter()
                 .find(|(_, r)| matches!(r, Role::Title))
-                .and_then(|(i, _)| column_at(&rows, *i))
+                .and_then(|(i, _)| column_at(rows, *i))
                 .and_then(|(_, v)| v.first())
                 .map(value_str)
                 .unwrap_or_default();
-            let maps = json_rows(&rows);
+            let maps = json_rows(rows);
             let title_h = 26.0;
             let body_h = (ch - title_h).max(30.0);
-            for (label, r) in contract_call::render_rows(cp, &maps, cw as u32, body_h as u32, "") {
+            for (label, r) in
+                contract_call::render_rows_opts(cp, &maps, cw as u32, body_h as u32, &ropts)
+            {
                 if row_units + span > 12 {
                     new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
                 }
                 let svg = r.unwrap_or_else(|e| error_svg_at(Place::Doc, &e.to_string(), cw as u32));
-                let t = match (title.is_empty(), label.is_empty()) {
+                let tt = match (title.is_empty(), label.is_empty()) {
                     (false, false) => format!("{title} — {label}"),
                     (false, true) => title.clone(),
                     (true, _) => label,
                 };
                 let inner = format!(
-                    "{open}<text x=\"14\" y=\"20\" font-family=\"system-ui,sans-serif\" \
-                     font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{t}</text>\
+                    "{open}<text x=\"14\" y=\"20\" font-family=\"{font}\" \
+                     font-size=\"14\" font-weight=\"700\" fill=\"{ink}\">{tt}</text>\
                      <g transform=\"translate(0,{title_h})\">{svg}</g></svg>",
                     open = svg_open(Place::At(x, row_y), format!("{cw:.0}"), format!("{ch:.0}")),
-                    t = esc(&t),
+                    font = esc(&t.font.family),
+                    ink = hex(t.colors.heading),
+                    tt = esc(&tt),
                 );
                 placed.push((x, row_y, cw, ch, inner));
                 x += unit_w * span as f64;
@@ -229,24 +301,16 @@ fn render_inner(
             continue;
         }
 
-        // Heading (::LABEL alone) → full-width section title, own row.
-        if roles.len() == 1 && matches!(roles[0].1, Role::Label) {
-            let text = rows
-                .first()
-                .and_then(|(_, v)| v.first())
-                .map(value_str)
-                .unwrap_or_default();
+        // Heading (::LABEL alone, ::SECTION) → full-width section title, own row.
+        if has(&|r| matches!(r, Role::Section))
+            || (roles.len() == 1 && matches!(roles[0].1, Role::Label))
+        {
+            let text = first_text(rows).unwrap_or_default();
             if row_units > 0 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
             let h = 34.0;
-            placed.push((
-                pad,
-                row_y,
-                content_w,
-                h,
-                heading_svg(Place::At(pad, row_y), &text, content_w, h),
-            ));
+            headings.push(heading_svg(t, Place::At(pad, row_y), &text, content_w, h));
             row_y += h + gap;
             continue;
         }
@@ -271,38 +335,95 @@ fn render_inner(
         }
 
         // Render the panel body to an inner SVG sized (cw, ch).
-        let ropts = RenderOptions {
-            brand: opts.brand,
-            ..RenderOptions::default()
-        };
-        let inner = render_panel_svg(&rows, roles, Place::At(x, row_y), cw, ch, &ropts);
+        let inner = render_panel_svg(rows, roles, Place::At(x, row_y), cw, ch, &ropts);
         placed.push((x, row_y, cw, ch, inner));
 
         x += unit_w * span as f64;
         row_units += span;
         row_h = row_h.max(ch);
     }
-    let total_h = row_y + row_h + pad;
+    // The mandatory credit line, below the last row.
+    let credit_y = row_y + row_h + gap + 14.0;
+    let total_h = credit_y + 12.0 + pad;
 
     // Compose.
-    let (br, bg, bb) = opts.background;
     let mut out = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h:.0}\" viewBox=\"0 0 {w} {h:.0}\">\
-         <rect width=\"{w}\" height=\"{h:.0}\" fill=\"rgb({br},{bg},{bb})\"/>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h:.0}\" viewBox=\"0 0 {w} {h:.0}\" data-theme=\"{name}\" data-variant=\"{var}\">\
+         <rect width=\"{w}\" height=\"{h:.0}\" fill=\"{bg}\"/>",
         w = opts.width,
-        h = total_h
+        h = total_h,
+        name = esc(&t.name),
+        var = t.variant.as_str(),
+        bg = hex(t.colors.bg),
     );
     for (px, py, pw, ph, inner) in &placed {
-        // card background (skip for headings, which have transparent inner)
         out.push_str(&format!(
-            "<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"14\" \
-             fill=\"#ffffff\" stroke=\"#e6e9f1\" stroke-width=\"1\"/>"
+            "<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"{r}\" \
+             fill=\"{card}\" stroke=\"{line}\" stroke-width=\"1\"/>",
+            r = (t.radius * 0.78).round(),
+            card = hex(t.colors.card),
+            line = hex(t.colors.line),
         ));
         // the panel itself: a nested <svg> already positioned at (px, py)
         out.push_str(inner);
     }
+    for h in &headings {
+        out.push_str(h);
+    }
+    out.push_str(&credit_svg(t, opts.width as f64 / 2.0, credit_y));
     out.push_str("</svg>");
     Ok(out)
+}
+
+/// The header strip (logo, brand, title), or `None` when the dashboard sets
+/// no branding. Returns the fragment and its height.
+fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)> {
+    let b = &t.brand;
+    if b.title.is_none() && b.name.is_none() && b.logo.is_none() {
+        return None;
+    }
+    let h = 52.0;
+    let mut s = svg_open(Place::At(x, y), format!("{w:.0}"), format!("{h:.0}"));
+    let mut tx = 2.0;
+    let logo = match (t.variant, &b.logo_dark, &b.logo) {
+        (Variant::Dark, Some(d), _) => Some(d),
+        (_, _, l) => l.as_ref(),
+    };
+    if let Some(l) = logo {
+        s.push_str(&format!(
+            "<image class=\"dp-logo\" href=\"{}\" x=\"0\" y=\"6\" width=\"40\" height=\"40\" preserveAspectRatio=\"xMinYMid meet\"/>",
+            esc(l)
+        ));
+        tx = 52.0;
+    }
+    let font = esc(&t.font.display);
+    match (&b.name, &b.title) {
+        (Some(n), Some(ti)) => s.push_str(&format!(
+            "<text x=\"{tx}\" y=\"18\" font-family=\"{font}\" font-size=\"11\" font-weight=\"700\" letter-spacing=\".05em\" fill=\"{m}\">{n}</text>\
+             <text x=\"{tx}\" y=\"42\" font-family=\"{font}\" font-size=\"24\" font-weight=\"800\" fill=\"{hd}\">{ti}</text>",
+            m = hex(t.colors.muted),
+            hd = hex(t.colors.heading),
+            n = esc(&n.to_uppercase()),
+            ti = esc(ti),
+        )),
+        (None, Some(ti)) | (Some(ti), None) => s.push_str(&format!(
+            "<text x=\"{tx}\" y=\"34\" font-family=\"{font}\" font-size=\"24\" font-weight=\"800\" fill=\"{hd}\">{}</text>",
+            esc(ti),
+            hd = hex(t.colors.heading),
+        )),
+        (None, None) => {}
+    }
+    s.push_str("</svg>");
+    Some((s, h))
+}
+
+/// The mandatory "Powered by DataZoo GmbH" credit, centred at (cx, y).
+fn credit_svg(t: &ResolvedTheme, cx: f64, y: f64) -> String {
+    format!(
+        "<a href=\"{CREDIT_URL}\" class=\"dp-credit\"><text x=\"{cx:.0}\" y=\"{y:.0}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"12\" fill=\"{m}\">{CREDIT_TEXT}</text></a>",
+        font = esc(&t.font.family),
+        m = hex(t.colors.muted),
+    )
 }
 
 /// A column result as JSON row maps keyed by output column name (`c{i}`).
@@ -360,7 +481,7 @@ fn render_panel_svg(
         let val = match fmt {
             Some(f) => raw
                 .and_then(|v| v.as_f64())
-                .map(|n| format_number(n, f))
+                .map(|n| format_number_l(n, f, &ropts.locale))
                 .unwrap_or_else(|| "–".into()),
             None => raw.map(value_str).unwrap_or_default(),
         };
@@ -372,10 +493,15 @@ fn render_panel_svg(
             .map(value_str)
             .unwrap_or_default();
         let cy = h / 2.0;
+        let t = &ropts.theme;
         return format!(
-            "{open}<text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"system-ui,sans-serif\" font-size=\"34\" font-weight=\"800\" fill=\"#1f2937\">{v}</text>\
-             <text x=\"{pad}\" y=\"{cy2:.0}\" font-family=\"system-ui,sans-serif\" font-size=\"13\" font-weight=\"600\" fill=\"#667085\">{c}</text></svg>",
+            "{open}<text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"{fd}\" font-size=\"34\" font-weight=\"800\" fill=\"{ink}\">{v}</text>\
+             <text x=\"{pad}\" y=\"{cy2:.0}\" font-family=\"{fb}\" font-size=\"13\" font-weight=\"600\" fill=\"{muted}\">{c}</text></svg>",
             open = svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
+            fd = esc(&t.font.display),
+            fb = esc(&t.font.family),
+            ink = hex(t.colors.ink),
+            muted = hex(t.colors.muted),
             ty = cy,
             cy2 = cy + 24.0,
             v = esc(&val),
@@ -388,7 +514,7 @@ fn render_panel_svg(
         .iter()
         .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
     {
-        return table_svg(rows, roles, place, w, h, title.as_deref());
+        return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
     }
 
     // Otherwise a chart — render at the content area, then wrap with a title.
@@ -397,10 +523,12 @@ fn render_panel_svg(
     let chart = render_with_at(&cols, 0.0, title_h, w as u32, body_h as u32, ropts)
         .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
-    if let Some(t) = &title {
+    if let Some(tt) = &title {
         svg.push_str(&format!(
-            "<text x=\"{pad}\" y=\"20\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
-            esc(t)
+            "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}</text>",
+            esc(tt),
+            f = esc(&ropts.theme.font.display),
+            hd = hex(ropts.theme.colors.heading),
         ));
     }
     svg.push_str(&chart);
@@ -408,10 +536,12 @@ fn render_panel_svg(
     svg
 }
 
-fn heading_svg(place: Place, text: &str, w: f64, h: f64) -> String {
+fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> String {
     format!(
-        "{}<text x=\"2\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"19\" font-weight=\"700\" fill=\"#1f2430\">{}</text></svg>",
+        "{}<text x=\"2\" y=\"24\" font-family=\"{}\" font-size=\"19\" font-weight=\"700\" fill=\"{}\">{}</text></svg>",
         svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
+        esc(&t.font.display),
+        hex(t.colors.heading),
         esc(text)
     )
 }
@@ -424,7 +554,14 @@ fn table_svg(
     w: f64,
     h: f64,
     title: Option<&str>,
+    ropts: &RenderOptions,
 ) -> String {
+    let th = &ropts.theme;
+    let (ink, muted, line) = (
+        hex(th.colors.ink),
+        hex(th.colors.muted),
+        hex(th.colors.line),
+    );
     let skip: std::collections::HashSet<usize> = roles
         .iter()
         .filter(|(_, r)| matches!(r, Role::Title))
@@ -454,10 +591,14 @@ fn table_svg(
     let max_rows = (((h - top - 24.0) / row_h).floor().max(0.0) as usize).min(nrow);
 
     let mut s = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
-    s.push_str("<g font-family=\"system-ui,sans-serif\" font-size=\"12\">");
+    s.push_str(&format!(
+        "<g font-family=\"{}\" font-size=\"12\">",
+        esc(&th.font.family)
+    ));
     if let Some(t) = title {
         s.push_str(&format!(
-            "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
+            "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
+            hex(th.colors.heading),
             esc(t)
         ));
     }
@@ -465,13 +606,13 @@ fn table_svg(
     for (c, (_, (name, _))) in cols.iter().enumerate() {
         let cx = 12.0 + c as f64 * col_w;
         s.push_str(&format!(
-            "<text x=\"{cx:.0}\" y=\"{y:.0}\" font-weight=\"700\" fill=\"#667085\">{}</text>",
+            "<text x=\"{cx:.0}\" y=\"{y:.0}\" font-weight=\"700\" fill=\"{muted}\">{}</text>",
             esc(name),
             y = top + 16.0
         ));
     }
     s.push_str(&format!(
-        "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"#e6e9f1\"/>",
+        "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{line}\"/>",
         ly = top + 22.0,
         x2 = w - 8.0
     ));
@@ -482,19 +623,27 @@ fn table_svg(
             let cx = 12.0 + c as f64 * col_w;
             let cell = match (fmt, vals.get(r)) {
                 (Some(f), Some(v)) if v.as_f64().is_some() => {
-                    format_number(v.as_f64().unwrap_or(f64::NAN), *f)
+                    format_number_l(v.as_f64().unwrap_or(f64::NAN), *f, &ropts.locale)
                 }
+                // A dashboard locale also formats plain numbers and ISO dates.
+                (None, Some(v)) if !ropts.locale.is_default() => match v {
+                    Value::Str(s) => ropts.locale.format_date(s),
+                    v => match v.as_f64() {
+                        Some(n) => format_number_l(n, crate::MetricFmt::Plain, &ropts.locale),
+                        None => value_str(v),
+                    },
+                },
                 (_, v) => v.map(value_str).unwrap_or_default(),
             };
             s.push_str(&format!(
-                "<text x=\"{cx:.0}\" y=\"{y:.0}\" fill=\"#1f2937\">{}</text>",
+                "<text x=\"{cx:.0}\" y=\"{y:.0}\" fill=\"{ink}\">{}</text>",
                 esc(&cell)
             ));
         }
     }
     if nrow > max_rows {
         s.push_str(&format!(
-            "<text x=\"12\" y=\"{y:.0}\" fill=\"#8a93a6\">… {} more rows</text>",
+            "<text x=\"12\" y=\"{y:.0}\" fill=\"{muted}\">… {} more rows</text>",
             nrow - max_rows,
             y = top + 22.0 + (max_rows as f64 + 1.0) * row_h
         ));

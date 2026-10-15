@@ -16,10 +16,12 @@
 //! locked after the server-declared `-- @load`s, under a row cap and a timeout.
 //! See `docs/secure-serving.md`.
 
+use anofox_visualization::format::Locale;
 use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
-use anofox_visualization::{render, sql, Role};
+use anofox_visualization::theme::DashboardChrome;
+use anofox_visualization::{page, render_with, sql, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -47,9 +49,18 @@ struct Opts {
     max_rows: usize,
     timeout: Duration,
     threads: usize,
+    /// `--theme`: default theme (name, `a+b`, or a `.json` file) when a
+    /// dashboard sets no `::THEME`.
+    theme: Option<String>,
 }
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open]                (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N]\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+/// The `--theme` default (set once in `main`).
+static THEME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+fn theme_default() -> Option<&'static str> {
+    THEME.get().and_then(|t| t.as_deref())
+}
+
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -68,6 +79,7 @@ fn parse_args() -> Opts {
         max_rows: 100_000,
         timeout: Duration::from_secs(30),
         threads: 4,
+        theme: None,
     };
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
@@ -104,6 +116,21 @@ fn parse_args() -> Opts {
             "--timeout" => o.timeout = Duration::from_secs(num(args.next(), "--timeout").max(1)),
             "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
             "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
+            "--theme" => {
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| usage("--theme needs a theme"));
+                let spec = if v.ends_with(".json") {
+                    std::fs::read_to_string(&v)
+                        .unwrap_or_else(|e| usage(&format!("--theme {v}: {e}")))
+                } else {
+                    v
+                };
+                if let Err(e) = anofox_visualization::theme::resolve(&spec) {
+                    usage(&format!("--theme: {e}"));
+                }
+                o.theme = Some(spec);
+            }
             s if s.starts_with('-') => usage(&format!("unknown option {s}")),
             _ => o.db = a,
         }
@@ -113,6 +140,7 @@ fn parse_args() -> Opts {
 
 fn main() {
     let o = parse_args();
+    let _ = THEME.set(o.theme.clone());
     match o.dashboards_dir.clone() {
         Some(dir) => serve_dashboards(&dir, &o),
         None => authoring_mode(&o),
@@ -297,6 +325,19 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         asset
     };
     match WEB.get_file(asset) {
+        // index.html carries the --theme default for the builder.
+        Some(f) if asset == "index.html" && theme_default().is_some() => {
+            let html = String::from_utf8_lossy(f.contents()).into_owned();
+            let spec = serde_json::to_string(theme_default().unwrap_or(""))
+                .unwrap_or_default()
+                .replace('<', "\\u003c");
+            let html = html.replacen(
+                "</head>",
+                &format!("<script>window.__anofoxTheme={spec};</script></head>"),
+                1,
+            );
+            respond(req, 200, sv::content_type(asset), html.into_bytes())
+        }
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
     }
@@ -536,13 +577,26 @@ fn render_dashboard_page(
         )
     };
 
-    let mut panels = String::new();
+    // Phase 1: query every panel (read-only) and collect the chrome
+    // directives, so a ::THEME anywhere styles the whole page.
+    type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
+    let mut chrome = DashboardChrome::default();
+    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
     for panel in sql::plan(&dash.script) {
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
         }
+        let chrome_role = panel
+            .roles
+            .iter()
+            .map(|(_, r)| *r)
+            .find(|r| anofox_visualization::roles::is_chrome_directive(*r));
+        let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
         // Skip interactive/layout-only directives (params drive re-render instead).
-        if anofox_visualization::roles::is_directive_panel(&panel.roles) {
+        if chrome_role.is_none()
+            && !section
+            && anofox_visualization::roles::is_directive_panel(&panel.roles)
+        {
             continue;
         }
         let q = format!(
@@ -551,23 +605,52 @@ fn render_dashboard_page(
             st.max_rows + 1
         );
         let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
-        let rows: Vec<serde_json::Map<String, serde_json::Value>> =
-            sql::parse_rows_json(json.trim())?;
+        let rows: Rows = sql::parse_rows_json(json.trim())?;
         if rows.len() > st.max_rows {
             return Err(format!(
                 "a panel of '{}' returned more than {} rows",
                 dash.id, st.max_rows
             ));
         }
+        if let Some(r) = chrome_role {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().next())
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Null => None,
+                    v => Some(v.to_string()),
+                });
+            chrome.apply(r, v);
+            continue;
+        }
+        queried.push((panel, rows));
+    }
+    let set = chrome.resolve(theme_default())?;
+    let t = set.default_variant().clone();
+    let opts = RenderOptions {
+        locale: t
+            .locale
+            .as_deref()
+            .and_then(Locale::from_tag)
+            .unwrap_or_default(),
+        theme: Arc::new(t.clone()),
+        ..RenderOptions::default()
+    };
+
+    // Phase 2: render.
+    let mut panels = String::new();
+    for (panel, rows) in queried {
         if let Some(cp) = &panel.contract {
-            for (_, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
                 let svg =
                     r.unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e.to_string())));
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
             }
             continue;
         }
-        if panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label) {
+        let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
+        if section || (panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label)) {
             let text = rows
                 .first()
                 .and_then(|r| r.values().next())
@@ -577,8 +660,10 @@ fn render_dashboard_page(
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &panel.roles);
-        let svg = anofox_visualization::host::catch_panic(|| render(&cols, 460, 300))
-            .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
+        let svg = anofox_visualization::host::catch_panic(|| {
+            render_with(&cols, 460, 300, &opts).map_err(|e| e.to_string())
+        })
+        .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
@@ -590,31 +675,26 @@ fn render_dashboard_page(
     } else {
         String::new()
     };
-    Ok(format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">{meta}<title>{title}</title><style>{STYLE}</style></head>\
-<body><h1>{title}</h1>{controls}<div class=\"grid\">{panels}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{SCRIPT}</script></body></html>",
-        title = esc(&dash.meta.title)
-    ))
+    Ok(page::render(&page::StaticPage {
+        theme: &t,
+        fallback_title: &dash.meta.title,
+        subtitle_html: String::new(),
+        head_extra: meta,
+        controls_html: controls,
+        panels_html: panels,
+    }))
 }
 
 fn list_page(dashboards: &[Dashboard]) -> String {
-    let items: String = dashboards
+    let t = anofox_visualization::theme::resolve(theme_default().unwrap_or(""))
+        .map(|s| s.default_variant().clone())
+        .unwrap_or_default();
+    let items: Vec<(String, String)> = dashboards
         .iter()
-        .map(|d| {
-            format!(
-                "<li><a href=\"/d/{}\">{}</a></li>",
-                esc(&d.id),
-                esc(&d.meta.title)
-            )
-        })
+        .map(|d| (format!("/d/{}", d.id), d.meta.title.clone()))
         .collect();
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Dashboards</title><style>{STYLE}</style></head>\
-<body><h1>Dashboards</h1><ul class=\"dash-list\">{items}</ul></body></html>"
-    )
+    page::list(&t, "Dashboards", &items)
 }
-
 /// Run the `duckdb` CLI with flags + a SQL string; stdout on success, stderr on
 /// error. The SQL is passed as one argv element after `-c` (no shell), and
 /// callers refuse dot-command lines first. `timeout` > 0 kills a slow run.
@@ -658,35 +738,3 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
         Err(String::from_utf8_lossy(&stderr).to_string())
     }
 }
-
-const STYLE: &str = r#"body{font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f4f6f9;color:#1f2937;margin:0;padding:2rem}
-h1{font-size:1.35rem;font-weight:650;margin:0 0 1rem}
-.controls{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:.7rem 1rem;margin-bottom:1.2rem;font-size:.85rem;font-weight:600;color:#6b7280}
-.controls select{font:inherit;font-weight:600;color:#1f2937;border:1px solid #e5e7eb;border-radius:8px;padding:.35rem .6rem;margin-left:.3rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:1.1rem;align-content:start}
-.section{grid-column:1/-1;margin:.6rem 0 -.4rem;font-size:1.1rem;font-weight:650}
-.panel{margin:0;background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 2px rgba(16,24,40,.05)}
-.panel svg{width:100%;height:auto;display:block}
-.dash-list a{color:#1f8ca6;font-weight:600;text-decoration:none}.dash-list a:hover{text-decoration:underline}
-.dp-tip{position:fixed;pointer-events:none;background:#111827;color:#fff;padding:.35rem .55rem;border-radius:7px;font-size:.8rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;transform:translateY(2px);transition:opacity .09s;z-index:20;white-space:nowrap}
-.dp-tip.show{opacity:1;transform:translateY(0)}
-.dp-hit{transition:filter .1s}.dp-hit:hover{filter:brightness(1.09) saturate(1.05)}"#;
-
-// Hover tooltips + click-to-focus a series, wired from the `<title>` each SVG mark
-// carries. Static (no wasm) — enough interactivity for a served dashboard.
-const SCRIPT: &str = r#"(function(){
-  var tip=document.getElementById('dp-tip'), selected=null;
-  var marks=[].slice.call(document.querySelectorAll('.panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline'))
-    .filter(function(el){var t=el.querySelector('title');return t&&t.textContent.trim();});
-  function apply(){marks.forEach(function(el){var s=el.getAttribute('data-series');el.style.opacity=(!selected||s===selected)?'':'0.15';});}
-  marks.forEach(function(el){
-    var t=el.querySelector('title'), txt=t.textContent;
-    var series=txt.indexOf(': ')>=0?txt.slice(0,txt.lastIndexOf(': ')):txt;
-    el.removeChild(t); el.setAttribute('data-series',series); el.classList.add('dp-hit'); el.style.cursor='pointer';
-    el.addEventListener('mouseenter',function(){tip.textContent=txt;tip.classList.add('show');});
-    el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
-    el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
-    el.addEventListener('click',function(e){e.stopPropagation();selected=(selected===series)?null:series;apply();});
-  });
-  document.addEventListener('click',function(){if(selected!==null){selected=null;apply();}});
-})();"#;

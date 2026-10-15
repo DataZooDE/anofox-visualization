@@ -138,9 +138,12 @@ pub(super) fn grid_cols(n: usize, max: usize) -> usize {
 
 /// The DataZoo discrete scale (sorted levels).
 fn dz(aesthetic: Aesthetic) -> ScaleColorDiscrete {
-    ScaleColorDiscrete::new(aesthetic)
-        .sorted()
-        .with_palette((0..DZ_COLORS.len()).map(crate::dz_color).collect())
+    ScaleColorDiscrete::new(aesthetic).sorted().with_palette(
+        DZ_COLORS
+            .iter()
+            .map(|&(r, g, b)| RGBAColor::new(r, g, b))
+            .collect(),
+    )
 }
 
 /// Distinct non-null text values of `k`, first-seen order.

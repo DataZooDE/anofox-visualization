@@ -114,6 +114,36 @@ pub fn columns_from_rows(
         .collect()
 }
 
+/// JSON rows (as the DuckDB CLI's `-json` prints them) → columns in SELECT
+/// order, for a headless [`crate::dashboard::DataProvider`].
+pub fn result_columns(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+) -> Vec<(String, Vec<Value>)> {
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    first
+        .keys()
+        .map(|k| {
+            let vals = rows.iter().map(|r| jval(r.get(k), false)).collect();
+            (k.clone(), vals)
+        })
+        .map(|(k, vals): (String, Vec<Value>)| {
+            // A column whose strings are all numbers is numeric.
+            let numeric = vals.iter().all(|v| match v {
+                Value::Str(s) => s.trim().parse::<f64>().is_ok(),
+                _ => true,
+            });
+            let vals = if numeric {
+                rows.iter().map(|r| jval(r.get(&k), true)).collect()
+            } else {
+                vals
+            };
+            (k, vals)
+        })
+        .collect()
+}
+
 fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
     match v {
         Some(serde_json::Value::Number(n)) => n
@@ -212,7 +242,7 @@ pub fn parse_rows_json(s: &str) -> Result<Vec<serde_json::Map<String, serde_json
 /// DuckDB's JSON writes DECIMAL values as strings (`"5.2"`): an x column whose
 /// values are all such decimal strings is numeric (a continuous axis), not a
 /// list of category labels. Integer-looking strings (`"2019"`) stay discrete.
-fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
+pub(crate) fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
     let mut saw_point = false;
     for v in &vals {
         match v {

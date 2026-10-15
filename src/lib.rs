@@ -29,9 +29,11 @@ pub mod format;
 pub mod host;
 pub mod lint;
 pub mod macros;
+pub mod page;
 pub mod roles;
 mod smooth;
 pub mod sql;
+pub mod theme;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -304,6 +306,21 @@ pub enum Role {
     /// Trend-line method for `::SMOOTH` (`::SMOOTH_METHOD`): `'loess'`
     /// (default), `'lm'`, `'gam'`; `'glm'` draws the Gaussian GLM (= lm).
     SmoothMethod,
+    /// Dashboard theme (`::THEME`): a built-in name, a stack `'acme+dark'` or
+    /// a JSON definition (see [`theme`]).
+    Theme,
+    /// Dashboard locale for numbers and dates (`::LOCALE 'de-DE'`).
+    Locale,
+    /// Dashboard title (`::DASHBOARD_TITLE`): page header, `<title>`, exports.
+    DashboardTitle,
+    /// Brand / organisation name shown above the dashboard title (`::BRAND`).
+    Brand,
+    /// Header logo image URL (`::LOGO`).
+    Logo,
+    /// Page favicon URL (`::FAVICON`).
+    Favicon,
+    /// A section heading that always starts a new row (`::SECTION`).
+    Section,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -346,24 +363,19 @@ fn value_str(v: &Value) -> String {
 /// colours. The first five are the brand set (index 0 = the default primary);
 /// seven more distinct hues follow so a chart with up to ~12 categories keeps
 /// every series visually separable (11 GICS sectors used to collide at 5).
-pub const DZ_COLORS: [(u8, u8, u8); 12] = [
-    (0x45, 0x64, 0x81), // steel blue (brand primary)
-    (0xe8, 0x64, 0x33), // orange
-    (0xE8, 0x33, 0x5D), // pink
-    (0xef, 0xc9, 0x4c), // yellow
-    (0x21, 0x21, 0x21), // near-black
-    (0x3f, 0xa6, 0x6f), // green
-    (0x81, 0x56, 0xa0), // purple
-    (0x57, 0xb7, 0xd6), // sky blue
-    (0x9c, 0x6b, 0x3f), // brown
-    (0xa7, 0xc9, 0x57), // lime
-    (0xd0, 0x81, 0xb8), // mauve
-    (0x7a, 0x8b, 0x99), // slate grey
-];
+/// (Defined in [`theme`]; the active theme's palette is
+/// [`theme::ResolvedTheme::palette`] — this constant is the default.)
+pub const DZ_COLORS: [(u8, u8, u8); 12] = theme::DZ_PALETTE;
 
-pub(crate) fn dz_color(i: usize) -> ggplot_rs::scale::color::RGBAColor {
-    let (r, g, b) = DZ_COLORS[i % DZ_COLORS.len()];
+/// Palette colour `i` of the render's theme.
+pub(crate) fn dz_color(o: &RenderOptions, i: usize) -> ggplot_rs::scale::color::RGBAColor {
+    let (r, g, b) = o.theme.color(i);
     ggplot_rs::scale::color::RGBAColor::new(r, g, b)
+}
+
+/// The whole palette of the render's theme as scale colours.
+pub(crate) fn dz_palette(o: &RenderOptions) -> Vec<ggplot_rs::scale::color::RGBAColor> {
+    (0..o.theme.palette.len()).map(|i| dz_color(o, i)).collect()
 }
 
 /// A map zoom window: `((x0, x1), (y0, y1))` in geometry (lon/lat) coordinates.
@@ -393,6 +405,11 @@ pub struct RenderOptions {
     /// Max points per series for line/area/step charts before LTTB
     /// downsampling. `0` disables it.
     pub max_line_points: usize,
+    /// The theme variant to paint with (palette, sequential fills, dark
+    /// chart ink). Default: the built-in light look.
+    pub theme: std::sync::Arc<theme::ResolvedTheme>,
+    /// Number/date locale of axis and legend labels (default en-US).
+    pub locale: format::Locale,
 }
 
 impl Default for RenderOptions {
@@ -402,14 +419,82 @@ impl Default for RenderOptions {
             zoom: None,
             max_categories: DEFAULT_MAX_CATEGORIES,
             max_line_points: DEFAULT_MAX_LINE_POINTS,
+            theme: theme::default_light(),
+            locale: format::Locale::EN_US,
         }
     }
 }
 
 impl RenderOptions {
-    /// The effective brand colour.
+    /// The effective brand colour: the explicit `brand`, else the theme's
+    /// first palette colour.
     pub fn brand(&self) -> (u8, u8, u8) {
-        self.brand.unwrap_or(DZ_COLORS[0])
+        self.brand.unwrap_or(self.theme.palette[0])
+    }
+
+    /// Apply a render context from a spec / wasm call: `"theme"` (a spec
+    /// string or a JSON object), `"variant"` (`light`/`dark`), `"locale"` and
+    /// `"primary"`. Unknown themes are an error; an absent key keeps the
+    /// current value.
+    pub fn apply_context(&mut self, ctx: &serde_json::Value) -> Result<(), String> {
+        let theme = match ctx.get("theme") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(t)) => Some(theme::resolve(t)?),
+            Some(v @ serde_json::Value::Object(_)) => Some(theme::resolve_json(v)?),
+            Some(_) => return Err("`theme` must be a string or an object".into()),
+        };
+        let variant = ctx
+            .get("variant")
+            .and_then(|v| v.as_str())
+            .map(theme::Variant::parse);
+        if theme.is_some() || variant.is_some() {
+            let set = match theme {
+                Some(s) => s,
+                None => theme::default_set().clone(),
+            };
+            let t = set.pick(variant.unwrap_or(theme::Variant::Light)).clone();
+            if self.locale.is_default() {
+                if let Some(l) = t.locale.as_deref().and_then(format::Locale::from_tag) {
+                    self.locale = l;
+                }
+            }
+            self.theme = std::sync::Arc::new(t);
+        }
+        if let Some(l) = ctx
+            .get("locale")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            self.locale = format::Locale::from_tag(l).ok_or_else(|| {
+                format!(
+                    "unknown locale `{l}` (known: {})",
+                    format::Locale::TAGS.join(", ")
+                )
+            })?;
+        }
+        if let Some(p) = ctx
+            .get("primary")
+            .and_then(|v| v.as_str())
+            .and_then(parse_rgb)
+        {
+            self.brand = Some(p);
+        }
+        Ok(())
+    }
+
+    /// Options from a wasm/host "primary" argument: a brand colour `rrggbb`
+    /// (or ""), or a JSON render context `{"primary","theme","variant","locale"}`.
+    pub fn from_primary_arg(primary: &str) -> Result<RenderOptions, String> {
+        let mut o = RenderOptions::default();
+        let p = primary.trim();
+        if p.starts_with('{') {
+            let v: serde_json::Value =
+                serde_json::from_str(p).map_err(|e| format!("render context JSON: {e}"))?;
+            o.apply_context(&v)?;
+        } else {
+            o.brand = parse_rgb(p);
+        }
+        Ok(o)
     }
 }
 
@@ -471,32 +556,37 @@ fn distinct_labels(col: &Column) -> Vec<String> {
 /// contains it. A level that is itself a hex colour (`#rrggbb`) is drawn in
 /// that colour (an extension convention ggplot-rs doesn't have), so such
 /// columns pin their levels with a per-level palette.
-fn dz_scale(aesthetic: Aesthetic, col: &Column) -> ScaleColorDiscrete {
+fn dz_scale(o: &RenderOptions, aesthetic: Aesthetic, col: &Column) -> ScaleColorDiscrete {
     let scale = ScaleColorDiscrete::new(aesthetic).sorted();
     let hex_level = |v: &Value| matches!(v, Value::Str(s) if parse_hex(s).is_some());
     if !col.values.iter().any(hex_level) {
-        return scale.with_palette((0..DZ_COLORS.len()).map(dz_color).collect());
+        return scale.with_palette(dz_palette(o));
     }
     let levels = distinct_labels(col);
     let palette = levels
         .iter()
         .enumerate()
-        .map(|(i, s)| parse_hex(s).unwrap_or_else(|| dz_color(i)))
+        .map(|(i, s)| parse_hex(s).unwrap_or_else(|| dz_color(o, i)))
         .collect();
     scale.with_levels(levels).with_palette(palette)
 }
 
 /// The colour [`dz_scale`] gives the last (sorted) level of `col`.
-fn last_level_color(col: &Column) -> Option<(u8, u8, u8)> {
+fn last_level_color(o: &RenderOptions, col: &Column) -> Option<(u8, u8, u8)> {
     let levels = distinct_labels(col);
     let i = levels.len().checked_sub(1)?;
-    let c = parse_hex(&levels[i]).unwrap_or_else(|| dz_color(i));
+    let c = parse_hex(&levels[i]).unwrap_or_else(|| dz_color(o, i));
     Some((c.r, c.g, c.b))
 }
 
 /// The [`dz_scale`] colour of the series (`col`'s level) of the row with the
 /// largest x among rows that carry a band value.
-fn band_series_color(col: &Column, x: &[Value], band: Option<&Column>) -> Option<(u8, u8, u8)> {
+fn band_series_color(
+    o: &RenderOptions,
+    col: &Column,
+    x: &[Value],
+    band: Option<&Column>,
+) -> Option<(u8, u8, u8)> {
     let band = band?;
     let row = (0..col.values.len())
         .filter(|&i| band.values.get(i).and_then(|v| v.as_f64()).is_some())
@@ -506,7 +596,7 @@ fn band_series_color(col: &Column, x: &[Value], band: Option<&Column>) -> Option
     let level = value_str(&col.values[row]);
     let levels = distinct_labels(col);
     let i = levels.iter().position(|l| *l == level)?;
-    let c = parse_hex(&level).unwrap_or_else(|| dz_color(i));
+    let c = parse_hex(&level).unwrap_or_else(|| dz_color(o, i));
     Some((c.r, c.g, c.b))
 }
 
@@ -618,15 +708,12 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
                 .map(|n| n.min(1_000_000) as usize)
                 .unwrap_or(default)
         };
-        let opts = RenderOptions {
-            brand: spec
-                .get("primary")
-                .and_then(|v| v.as_str())
-                .and_then(parse_rgb),
-            zoom: None,
+        let mut opts = RenderOptions {
             max_categories: count("max_categories", DEFAULT_MAX_CATEGORIES),
             max_line_points: count("max_line_points", DEFAULT_MAX_LINE_POINTS),
+            ..RenderOptions::default()
         };
+        opts.apply_context(&spec).map_err(RenderError::BadSpec)?;
         if let Some(plot) = plot {
             // A contract plot (`terms`, `prediction`, …) over named columns.
             let options = match spec.get("options") {
@@ -636,12 +723,18 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             };
             return guard(|| {
                 contract::render(&plot, &rows, &options, width, height, &opts, Place::Doc)
-                    .map(|(svg, w)| with_warnings_attr(strip_nonfinite_marks(svg), &w))
+                    .map(|(svg, w)| finish_contract_svg(svg, &w, &opts))
             });
         }
         let cols = columns_from_entries(&rows, &entries);
         render_with(&cols, width, height, &opts)
     })
+}
+
+/// The last step of every contract render: drop non-finite marks, apply the
+/// theme variant, record the build warnings.
+pub(crate) fn finish_contract_svg(svg: String, warnings: &[String], o: &RenderOptions) -> String {
+    with_warnings_attr(o.theme.finish_svg(strip_nonfinite_marks(svg)), warnings)
 }
 
 /// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
@@ -665,8 +758,9 @@ pub fn error_svg(msg: &str, width: u32) -> String {
 /// [`error_svg`] at `place` (a dashboard nests it as a fragment).
 pub(crate) fn error_svg_at(place: Place, msg: &str, width: u32) -> String {
     format!(
-        "{}<text x=\"4\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"#b42318\">{}</text></svg>",
+        "{}<text x=\"4\" y=\"24\" font-family=\"system-ui,sans-serif\" font-size=\"12\" fill=\"{}\">{}</text></svg>",
         svg_open(place, clamp_dim(width as u64), 40),
+        theme::SVG_ERROR,
         format::escape_xml(msg)
     )
 }
@@ -714,6 +808,44 @@ pub(crate) enum Panel {
 }
 
 impl Panel {
+    /// Label axes and legends in the render's locale (no-op for en-US, so the
+    /// default output is unchanged). A year-like x axis (integers
+    /// 1000..=2999) is not thousands-grouped.
+    pub(crate) fn localized(self, o: &RenderOptions, cols: &[Column]) -> Panel {
+        match self {
+            Panel::Plot {
+                plot,
+                width,
+                height,
+                attrs,
+            } if !o.locale.is_default() => {
+                let yearish = cols.iter().filter(|c| c.role == Role::X).any(|c| {
+                    let mut any = false;
+                    c.values.iter().all(|v| match v {
+                        Value::Na => true,
+                        v => {
+                            v.as_f64().is_some_and(|f| {
+                                any = true;
+                                f.fract() == 0.0 && (1000.0..3000.0).contains(&f)
+                            }) && !matches!(v, Value::Str(_))
+                        }
+                    }) && any
+                });
+                let mut l = o.locale.gg();
+                if yearish {
+                    l = l.with_min_grouping_digits(2);
+                }
+                Panel::Plot {
+                    plot: Box::new(plot.locale(l)),
+                    width,
+                    height,
+                    attrs,
+                }
+            }
+            p => p,
+        }
+    }
+
     pub(crate) fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
         Panel::Plot {
             plot: Box::new(plot),
@@ -880,9 +1012,10 @@ fn render_placed(
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
         let cols = downsample::prepare(cols, o);
         let (svg, warnings) = render_inner(&cols, w, h, o)
+            .map(|p| p.localized(o, &cols))
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
-        Ok((strip_nonfinite_marks(svg), warnings))
+        Ok((o.theme.finish_svg(strip_nonfinite_marks(svg)), warnings))
     })
 }
 
@@ -896,7 +1029,7 @@ pub(crate) fn panel_plot(
 ) -> Result<Option<GGPlot>, String> {
     let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
     let cols = downsample::prepare(cols, o);
-    Ok(match render_inner(&cols, w, h, o)? {
+    Ok(match render_inner(&cols, w, h, o)?.localized(o, &cols) {
         Panel::Plot { plot, .. } => Some(*plot),
         Panel::Own { .. } => None,
     })
@@ -1070,8 +1203,8 @@ fn render_inner(
         ));
     }
     match kind {
-        Kind::Pie => return render_pie(value, cols, title.as_deref(), 0.0, width, height),
-        Kind::Donut => return render_pie(value, cols, title.as_deref(), 0.55, width, height),
+        Kind::Pie => return render_pie(o, value, cols, title.as_deref(), 0.0, width, height),
+        Kind::Donut => return render_pie(o, value, cols, title.as_deref(), 0.55, width, height),
         Kind::Gauge => return render_gauge(o, value, cols, title.as_deref(), width, height),
         Kind::Histogram => return render_histogram(o, value, title.as_deref(), width, height),
         Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
@@ -1649,8 +1782,8 @@ fn cartesian(
     // reads as that series' uncertainty: the series of the right-most row that
     // carries a band (else the last coloured series).
     let band_color: (u8, u8, u8) = color_col
-        .and_then(|c| band_series_color(c, &x.values, band_lo))
-        .or_else(|| color_col.and_then(last_level_color))
+        .and_then(|c| band_series_color(o, c, &x.values, band_lo))
+        .or_else(|| color_col.and_then(|c| last_level_color(o, c)))
         .unwrap_or(brand);
     // The band is drawn first so the line sits on top of it; one band per
     // series. A step chart (Kaplan–Meier) gets a step ribbon in each series'
@@ -2050,12 +2183,12 @@ fn cartesian(
         // DataZoo palette, levels sorted so a series keeps its colour across
         // charts; `#rrggbb` levels are drawn in that colour.
         plot = if by_colour {
-            plot.scale_color(dz_scale(Aesthetic::Color, col))
+            plot.scale_color(dz_scale(o, Aesthetic::Color, col))
         } else {
-            plot.scale_fill(dz_scale(Aesthetic::Fill, col))
+            plot.scale_fill(dz_scale(o, Aesthetic::Fill, col))
         };
         if (step_band && category.is_some()) || multi_band {
-            plot = plot.scale_fill(dz_scale(Aesthetic::Fill, col));
+            plot = plot.scale_fill(dz_scale(o, Aesthetic::Fill, col));
         }
     }
     if !combo_names.is_empty() {
@@ -2064,7 +2197,7 @@ fn cartesian(
         plot = plot.scale_color(
             ScaleColorDiscrete::new(Aesthetic::Color)
                 .with_levels(combo_names.clone())
-                .with_palette((0..DZ_COLORS.len()).map(dz_color).collect()),
+                .with_palette(dz_palette(o)),
         );
     }
     if bar && category.is_none() && combo_names.is_empty() {
@@ -2075,7 +2208,7 @@ fn cartesian(
     // percent kinds), transform (`::YSCALE`) and — for a dodged discrete x —
     // the level breaks/labels.
     use ggplot_rs::scale::continuous::ScaleContinuous;
-    let y_fmt = role_str(cols, Role::YFormat).and_then(|s| axis_formatter(&s));
+    let y_fmt = role_str(cols, Role::YFormat).and_then(|s| axis_formatter(&s, &o.locale));
     let y_fmt = if percent {
         let f: Box<dyn Fn(f64) -> String + Send + Sync> = if kind == Kind::LinePercent {
             percent_axis(&value.values)
@@ -2114,7 +2247,7 @@ fn cartesian(
                 .with_labels(d.labels.clone()),
         );
     } else if !x_discrete {
-        let x_fmt = role_str(cols, Role::XFormat).and_then(|s| axis_formatter(&s));
+        let x_fmt = role_str(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
@@ -2224,8 +2357,8 @@ fn render_density(
                 alpha: 0.4,
                 ..Default::default()
             })
-            .scale_fill(dz_scale(Aesthetic::Fill, cat))
-            .scale_color(dz_scale(Aesthetic::Color, cat))
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
+            .scale_color(dz_scale(o, Aesthetic::Color, cat))
             .theme_minimal()
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     } else {
@@ -2245,7 +2378,16 @@ fn render_density(
 /// symbol — mirroring ggplot2's `scales::` label helpers. Numbers are always
 /// thousands-grouped. A leading space marks a suffix ("` kg`" → "12 kg");
 /// otherwise the spec is a prefix ("€" → "€1,200", "CHF " → "CHF 1,200").
-fn axis_formatter(spec: &str) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
+///
+/// With a dashboard locale (`::LOCALE 'de-DE'`) the numbers take its marks
+/// and a currency keyword its placement (`1.200 €`); en-US is unchanged.
+fn axis_formatter(
+    spec: &str,
+    locale: &format::Locale,
+) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
+    if !locale.is_default() {
+        return axis_formatter_locale(spec, locale);
+    }
     use ggplot_rs::scale::format::{label_comma, label_dollar};
     let s = spec.trim_end_matches(';');
     let low = s.trim().to_ascii_lowercase();
@@ -2280,6 +2422,54 @@ fn axis_formatter(spec: &str) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>
                         format!("-{}{}", prefix, label_comma(-v))
                     } else {
                         format!("{}{}", prefix, label_comma(v))
+                    }
+                })
+            }
+        }
+    };
+    Some(f)
+}
+
+/// [`axis_formatter`] in a non-default locale (ggplot-rs `label_*_locale`).
+fn axis_formatter_locale(
+    spec: &str,
+    locale: &format::Locale,
+) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
+    use ggplot_rs::scale::format::{label_comma_locale, label_currency_locale};
+    let s = spec.trim_end_matches(';');
+    let low = s.trim().to_ascii_lowercase();
+    if low.is_empty() {
+        return None;
+    }
+    let gg = locale.gg();
+    let currency = |sym: &str| -> Box<dyn Fn(f64) -> String + Send + Sync> {
+        Box::new(label_currency_locale(
+            &gg.clone().with_currency(sym),
+            Some(1.0),
+        ))
+    };
+    let comma = label_comma_locale(&gg);
+    let f: Box<dyn Fn(f64) -> String + Send + Sync> = match low.as_str() {
+        "$" | "usd" | "dollar" | "dollars" => currency("$"),
+        "€" | "eur" | "euro" | "euros" => currency("€"),
+        "£" | "gbp" | "pound" | "pounds" => currency("£"),
+        "¥" | "jpy" | "yen" | "cny" | "yuan" => currency("¥"),
+        "%" | "percent" | "pct" => {
+            let suffix = gg.percent_suffix.clone();
+            Box::new(move |v: f64| format!("{}{suffix}", comma(v)))
+        }
+        "," | "comma" | "thousands" | "number" => Box::new(comma),
+        _ => {
+            if let Some(suffix) = s.strip_prefix(' ') {
+                let suffix = suffix.to_string();
+                Box::new(move |v: f64| format!("{} {}", comma(v), suffix))
+            } else {
+                let prefix = s.to_string();
+                Box::new(move |v: f64| {
+                    if v < 0.0 {
+                        format!("-{}{}", prefix, comma(-v))
+                    } else {
+                        format!("{}{}", prefix, comma(v))
                     }
                 })
             }
@@ -2347,10 +2537,7 @@ fn render_heatmap(
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("fill").label("label"))
         .geom_tile()
-        .scale_fill_gradient(
-            ggplot_rs::scale::color::RGBAColor::new(0xed, 0xf1, 0xf7),
-            ggplot_rs::scale::color::RGBAColor::new(o.brand().0, o.brand().1, o.brand().2),
-        )
+        .scale_fill_gradient(rgba(o.theme.seq_low()), rgba(o.theme.seq_high(o.brand())))
         .theme_minimal();
     if let Some(t) = title {
         plot = plot.title(t);
@@ -2417,7 +2604,10 @@ fn render_calendar(
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").fill("fill").label("label"))
         .geom_calendar()
-        .scale_fill_gradient(rgba((0xeb, 0xf1, 0xf7)), rgba(o.brand()))
+        .scale_fill_gradient(
+            rgba(o.theme.calendar_low()),
+            rgba(o.theme.seq_high(o.brand())),
+        )
         .xlab("")
         .ylab("")
         .theme_minimal();
@@ -2555,8 +2745,8 @@ fn render_radar(
         .legend_position(ggplot_rs::theme::LegendPosition::Top);
     if let Some(cat) = category {
         plot = plot
-            .scale_color(dz_scale(Aesthetic::Color, cat))
-            .scale_fill(dz_scale(Aesthetic::Fill, cat));
+            .scale_color(dz_scale(o, Aesthetic::Color, cat))
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat));
     }
     if let Some(t) = title {
         plot = plot.title(t);
@@ -2610,7 +2800,7 @@ fn render_sparkline(
         })
         .geom_point_with(GeomPoint {
             size: 4.2,
-            color: DZ_COLORS[2],
+            color: o.theme.color(2),
             alpha: 1.0,
         })
         .layer_data(end) // restrict the point layer to just the endpoint
@@ -3059,11 +3249,11 @@ fn render_map(
         plot = if base.is_some() {
             plot.scale_fill_viridis_c()
         } else {
-            plot.scale_fill_gradient(rgba((0xed, 0xf1, 0xf7)), rgba(o.brand()))
+            plot.scale_fill_gradient(rgba(o.theme.seq_low()), rgba(o.theme.seq_high(o.brand())))
         };
     } else if let Some(cat) = category {
         plot = plot
-            .scale_fill(dz_scale(Aesthetic::Fill, cat))
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     }
     Ok(Panel::plot(plot, width, height))
@@ -3072,6 +3262,7 @@ fn render_map(
 /// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
 /// and coloured by `CATEGORY`.
 fn render_pie(
+    o: &RenderOptions,
     value: &Column,
     cols: &[Column],
     title: Option<&str>,
@@ -3094,7 +3285,7 @@ fn render_pie(
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
         .geom_col()
         .position(PositionStack)
-        .scale_fill(dz_scale(Aesthetic::Fill, category))
+        .scale_fill(dz_scale(o, Aesthetic::Fill, category))
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
         .scale_y_continuous(
             ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0),
@@ -3118,7 +3309,8 @@ fn heading_svg(text: &str, width: u32) -> Panel {
         width,
         height: 40,
         body: format!(
-            "<text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"#1f2430\">{}</text>",
+            "<text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"{}\">{}</text>",
+            theme::SVG_HEADING,
             format::escape_xml(text)
         ),
     }
@@ -3132,10 +3324,11 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
         width,
         height,
         body: format!(
-            "{}<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"#8a93a6\">{}</text>",
+            "{}<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"{}\">{}</text>",
             title_text(title, w),
             w / 2.0,
             h / 2.0,
+            theme::SVG_NOTE,
             format::escape_xml(note)
         ),
     }
@@ -3146,8 +3339,9 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
 fn title_text(title: Option<&str>, w: f64) -> String {
     match title.filter(|t| !t.is_empty()) {
         Some(t) => format!(
-            "<text x=\"{:.1}\" y=\"18\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#1f2430\">{}</text>",
+            "<text x=\"{:.1}\" y=\"18\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
             w / 2.0,
+            theme::SVG_HEADING,
             format::escape_xml(t)
         ),
         None => String::new(),
