@@ -16,13 +16,13 @@ description: >
   with its lint codes (sql-error, silent-setup, render-error,
   render-warning, empty-panel, unknown-cast, design/*), the design contract,
   templates and the authoring gotchas that silently break a panel.
-version: 2026.9.26
+version: 2026.10.15
 user-invocable: false
 ---
 
 # Anofox Visualization — ::ROLE Dashboards (build-dashboard)
 
-**Extension:** `anofox_visualization` (CalVer 2026.9.26) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
+**Extension:** `anofox_visualization` (CalVer 2026.10.15) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
 
 A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel (chart, KPI, table, input). Statements without a role (`CREATE TABLE`, `SET`, `LOAD`, …) run as setup, in order, on one session. Your output is one SQL script.
 

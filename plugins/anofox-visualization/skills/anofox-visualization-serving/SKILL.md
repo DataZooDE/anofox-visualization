@@ -19,7 +19,7 @@ description: >
   is safe, or gets "nothing is serving on port" / "already serving" errors.
   Serving needs the from-source C-API build (the community build is
   render-only).
-version: 2026.9.26
+version: 2026.10.15
 user-invocable: false
 ---
 

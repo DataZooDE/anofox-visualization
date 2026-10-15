@@ -22,13 +22,13 @@ description: >
   to plot a regression, coefficients, residual diagnostics, a forecast, a
   ROC curve, survival curves or test results, asks "how do I plot
   ols_tidy_by / ts_forecast_by output", or a contract plot call errors.
-version: 2026.9.26
+version: 2026.10.15
 user-invocable: false
 ---
 
 # Anofox Visualization — Statistics Plots (contract macros) Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.9.26) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast` | **DuckDB:** v1.5.6
+**Extension:** `anofox_visualization` (CalVer 2026.10.15) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast` | **DuckDB:** v1.5.6
 
 anofox-statistics and anofox-forecast return plot-ready **long tables** with fixed columns (the anofox integration contract: `terms`, `summary`, `obs`, `prediction`, `curve`, `test`). One macro per schema renders such a table to SVG. The schemas and their producers are documented in the **anofox-statistics-plotting** skill of the anofox-statistics plugin; this skill is the consumer side.
 
