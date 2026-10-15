@@ -9,3 +9,5 @@
 /build
 /web/localext/v1.5.6
 /tests/web/node_modules
+/dist
+/.cache

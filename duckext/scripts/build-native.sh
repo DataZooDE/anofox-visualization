@@ -39,7 +39,7 @@ done
 echo "   $LIB"
 
 echo "== package (C_STRUCT metadata footer, C-API v1.2.0, platform $PLATFORM) =="
-python3 "$HERE/scripts/append_extension_metadata.py" -l "$LIB" -n anofox_visualization \
+"${PYTHON:-python3}" "$HERE/scripts/append_extension_metadata.py" -l "$LIB" -n anofox_visualization \
   -p "$PLATFORM" -dv v1.2.0 -ev "v$VERSION" --abi-type C_STRUCT -o "$OUT" | grep -i "output file"
 
 echo "== smoke test =="
