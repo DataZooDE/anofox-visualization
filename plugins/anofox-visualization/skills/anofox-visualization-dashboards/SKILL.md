@@ -9,9 +9,12 @@ description: >
   is a panel, unannotated statements are setup), every role token of the
   registry (chart kinds, axes, intervals, facets, scales, reference lines,
   KPIs and number formats, tables, inputs), layout (::COLUMNS, ::COL /
-  ::SPAN, ::HEIGHT, ::GROUP / ::ENDGROUP, ::TAB / ::SUBTAB), inputs bound to
-  DuckDB variables with getvariable(), click cross-filter
-  (getvariable('selected')), anofox_plot_* contract plots as panels, the
+  ::SPAN, ::HEIGHT, ::GROUP / ::ENDGROUP, ::TAB / ::SUBTAB), tables (toolbar,
+  ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT, colour scales, ::PAGED),
+  heatmaps, inputs bound to DuckDB variables with getvariable(), click
+  cross-filter (getvariable('selected')) and opt-in row selection
+  (::ROWSELECT), themes / branding / locale, anofox_plot_* contract plots
+  as panels, the
   `dashboard --describe` / `dashboard --check` generate-validate-repair loop
   with its lint codes (sql-error, silent-setup, render-error,
   render-warning, empty-panel, unknown-cast, design/*), the design contract,
@@ -63,7 +66,8 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` · `::BAND_LOWER` + `::BAND_UPPER` · `::MARKAREA` · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
 | Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
 | KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
-| Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
+| Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` (low = good) `::COLORSCALE_HIGH_GOOD` `::COLORSCALE_DIVERGING` (around 0) `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
+| Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) — see *Tables* |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::HINT` |
 | Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` |
@@ -74,8 +78,50 @@ A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue
 
 - The **output column name of an input is a DuckDB variable**: `SELECT region AS region ::DROPDOWN FROM t GROUP BY 1 ORDER BY 1;` → `getvariable('region')`. A `::MULTISELECT` is a list: `list_contains(getvariable('channel'), channel)`; "nothing selected = all": `(len(getvariable('channel')) = 0 OR list_contains(getvariable('channel'), channel))`.
 - An input's caption is its variable name unless a `::LABEL` column gives one: `SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;`.
-- **Cross-filter**: a click on a chart mark sets `getvariable('selected')`. **Table rows are clickable only when the table opts in** with a `::ROWSELECT` directive before it: `SELECT 'single'::ROWSELECT;` (a click sets `getvariable('selected')` and `getvariable('<first column>')`) or `SELECT 'multi'::ROWSELECT;` (rows get check marks; `getvariable('<first column>')` is a list — guard with `len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku)`). Without it rows are not selectable. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
+- **Cross-filter**: a click on a chart mark sets `getvariable('selected')`. **Table rows are clickable only when the table opts in** (`'none'` is the default) with a `::ROWSELECT` directive before it: `SELECT 'single'::ROWSELECT;` (a click sets `getvariable('selected')` and `getvariable('<first column>')`) or `SELECT 'multi'::ROWSELECT;` (rows get check marks; `getvariable('<first column>')` is a list — guard with `len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku)`). Without it rows are not selectable. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
 - Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render skips them.
+
+## Tables
+
+A `::TABLE` / `::PAGED` panel has a toolbar the viewer drives: row count with filter chips, **search**, **Filters** (a dropdown / `> n` `< n` range / "contains" under each header), **Σ Totals** (over every matching row; each total has a "sum ▾" menu: sum, mean, median, min, max, count), **Columns** (show / hide), **Pages | Scroll** (virtualised), **Compact | Comfortable** density and **⤓ CSV** (matching rows, visible columns). Hovering a header shows min / max / mean, empty and distinct counts.
+
+Formatting is automatic, so do not pre-format numbers as text: raw names become headers (`load_pct` → "Load %", `avg_mae` → "Avg MAE"; an `AS "Header"` alias is kept), each numeric column gets its own decimals and grouping (ids and years ungrouped), a true minus, muted zeros, "—" for NULL, ✓ / ✗ for booleans, and one unit per `::MONEY` / `::COMPACT` column moved into the header ("Revenue ($M)"). Plain numeric columns get a slim in-cell bar (`::PLAIN` turns it off).
+
+Directives for the **next** table (columns named by raw name or header, case-insensitive):
+
+| Directive | Value | Effect |
+|---|---|---|
+| `::ROWSELECT` | `'none'` (default) \| `'single'` \| `'multi'` | row click → `getvariable('<first column>')` (+ `'selected'` for single); multi = a list |
+| `::TOTALS` | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'revenue: sum, margin: mean'` | totals aggregation (default: sums of amounts / counts, means of rates and scores); `'none'` hides the row |
+| `::COLGROUP` | `'Money: plan, revenue \| Quality: accuracy, bias'` | a grouped header over adjacent columns |
+| `::FLAG` | `'margin < 12, status = breach'` (`>` `>=` `<` `<=` `=` `!=`) | ⚠ + warning tint on matching cells |
+| `::HIGHLIGHT` | `'revenue: top 2, margin: bottom 1'` (`'top 3'` = first numeric column) | bold + rank on the top / bottom n (a `::PAGED` table: within the page) |
+
+```sql dashboard
+CREATE TABLE regions AS SELECT * FROM (VALUES
+  ('North', 1200, 1350.5, 18.2, 0.91, 2.5), ('South', 1100, 980.0, 9.5, 0.84, -4.1),
+  ('West', 800, 860.25, 14.0, 0.88, 0.0), ('East', 950, 1010.0, 11.3, 0.79, -1.2)) t(region, plan, revenue, margin, accuracy, bias);
+
+SELECT 'single'::ROWSELECT;
+SELECT 'revenue: sum, margin: mean, accuracy: median'::TOTALS;
+SELECT 'Money: plan, revenue | Quality: accuracy, bias'::COLGROUP;
+SELECT 'margin < 12'::FLAG;
+SELECT 'revenue: top 2'::HIGHLIGHT;
+SELECT region::TABLE, plan::MONEY, revenue::MONEY, margin,
+       accuracy::COLORSCALE_HIGH_GOOD, bias::COLORSCALE_DIVERGING,
+       'Revenue against plan by region'::TITLE
+FROM regions ORDER BY revenue DESC;
+SELECT sum(revenue)::MONEY, 'Revenue of the clicked region'::LABEL FROM regions
+WHERE COALESCE(getvariable('region'), '') IN ('', region);
+```
+
+`::PAGED` runs everything in DuckDB — page, sort, search, column filters, totals, column statistics and filter values — so it suits Parquet on S3, MotherDuck or a served database; `::TABLE` loads the whole result (up to ~10k rows). A theme's `chrome.negatives` (`"minus"` default, `"red"`, `"parens"`) and `chrome.zero` (`"muted"` default, `"dash"`) set how tables show negatives and zeros.
+
+## Heatmaps
+
+`x::XAXIS, y::YAXIS, value::HEATMAP` (+ `'$'::YFORMAT`, `''::DATALABELS` to print values in the cells). Text axes keep the **SQL row order** — the first `::YAXIS` level is the top row, so `ORDER BY` the rows you want first. Colour is the theme's sequential ramp; values spanning zero switch to its diverging ramp around 0. Cells part with card-coloured gaps; labels flip dark / light for contrast. Tooltip, labels and legend use `::YFORMAT` and the locale. A click cross-filters: `getvariable('selected')` = the cell's **row** (`::YAXIS`) value.
+
+Chart tooltips and `::DATALABELS` everywhere follow `::YFORMAT` / `::XFORMAT` and the `::LOCALE` (`$1,234.50`, `1.234,50 €`); percent charts read as percent.
 
 ## Themes, branding and locale
 
@@ -99,9 +145,10 @@ SELECT region::XAXIS, sum(revenue)::BARCHART, 'Revenue by region'::TITLE
 FROM sales GROUP BY ALL ORDER BY 2 DESC;
 ```
 
+- **Default look**: graphite + electric blue (cool grey page, flat white cards) — the built-in `light` (aliases `default`, `datazoo`). `colorblind` (Okabe-Ito palette) is a built-in theme too, never implied.
 - **Variant.** No `::THEME`, or `'x+dark'`, follows the viewer (OS setting, the 🌙 toggle, `?theme=dark`); `'light'` / `'dark'` / `'print'` alone pin it. Charts are re-rendered dark, not just the cards.
-- **A corporate theme** is a JSON object (`{"extends":"light","palette":[…],"colors":{"accent":"#0b5fff",…},"brand":{…},"dark":{…}}`) — from a file (`SELECT content::THEME FROM read_text('acme.json')`), a table (`SELECT to_json(t)::THEME FROM themes t WHERE name = 'acme'`) or inline. Colours must be `#rrggbb`; unknown keys are an error. Full key list: `docs/DOCS.md` → *Themes*.
-- **The "Powered by DataZoo GmbH" credit is always shown** (every theme, every output); branding is added next to it, there is no way to hide it.
+- **A corporate theme** is a JSON object (`{"extends":"light","palette":[…],"colors":{"accent":"#0b5fff",…},"chrome":{"negatives":"parens","zero":"dash",…},"brand":{…},"dark":{…}}`) — from a file (`SELECT content::THEME FROM read_text('acme.json')`), a table (`SELECT to_json(t)::THEME FROM themes t WHERE name = 'acme'`) or inline. Colours must be `#rrggbb`; unknown keys are an error. Full key list: `docs/DOCS.md` → *Themes*.
+- **The "Powered by DataZoo GmbH" credit is mandatory**: shown under every theme and in every output; author branding is added next to it, and no role, theme key or option hides or replaces it.
 - `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
 - `dashboard --themes` lists the built-ins; `dashboard file.sql --theme dark` / `serve … --theme T` set a default the script's `::THEME` overrides.
 
@@ -168,6 +215,7 @@ SELECT 'SKU-' || s AS sku, DATE '2024-01-01' + to_months(m::INTEGER) AS month,
 FROM range(1, 6) a(s), range(12) b(m);
 
 SELECT 5::COL;
+SELECT 'single'::ROWSELECT;
 SELECT sku AS "SKU" ::TABLE, sum(sales) AS "Total" FROM ts GROUP BY sku ORDER BY "Total" DESC;
 SELECT 7::COL;
 SELECT month::XAXIS, sales::LINECHART, 'Monthly sales of the selected SKU'::TITLE FROM ts
@@ -223,7 +271,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | two categories + a measure | `::HEATMAP` |
 | progress toward a goal | `::GAUGE` + `::RANGE` |
 | geography (WKT) | `::MAP` |
-| row-level detail | `::TABLE` (`::PAGED` if large / remote) |
+| row-level detail | `::TABLE` (`::PAGED` if large / remote); flag / rank with `::FLAG` / `::HIGHLIGHT`, not colour alone |
 
 - **Inverted pyramid**: KPI strip of 2–6 tiles inside `::GROUP … ::ENDGROUP` **[lint: ungrouped-kpis]** → the primary full-width chart → 2-up breakdowns → a detail table.
 - **Title every chart with the takeaway** (`'Revenue up 12% YoY'`, not `'Revenue'`) **[lint: untitled-chart]**; format money / percent axes (`'€'::YFORMAT`).
@@ -276,7 +324,8 @@ These silently break a panel (it renders wrong or vanishes):
 6. **Don't pre-alias a chart column** (`x AS a ::BARCHART` names the legend entry) unless you mean it; for inputs the alias is the variable name.
 7. **Aggregating charts need `GROUP BY ALL`**; a `::ROLE` must be in the SELECT list, not after `FROM`.
 8. **Large or remote sources** (parquet, MotherDuck): `::PAGED` instead of `::TABLE`.
-9. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
+9. **Clickable table rows need `'single'::ROWSELECT` / `'multi'::ROWSELECT`** before the table; without it a click does nothing and `getvariable('<first column>')` stays unset. The first column is the key and must be non-numeric (a text id / name). Table directives (`::ROWSELECT`, `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`) apply to the next table only.
+10. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
 
 ## Running it
 
