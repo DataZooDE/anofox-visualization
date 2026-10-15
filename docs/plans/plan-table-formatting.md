@@ -10,7 +10,7 @@ T2b: `::TOTALS` + a per-cell aggregation picker (SQL stats gained `median`).
 T5: `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`, `::FLAG`, `::HIGHLIGHT`.
 T7: caption / scope / aria-sort / aria-selected, print CSS. `::SUBTOTAL` (T2b,
 client tables). T6: the Stats strip (client, and `page.profile` in SQL for
-`::PAGED`). **Open**: T8, T9.
+`::PAGED`). T8: Excel export (dependency-free `.xlsx` writer). **Open**: T9.
 Originally a proposal Follows the table rebuild (toolbar, totals, Scroll
 view, `::ROWSELECT`, SQL-side filters/totals for `::PAGED`). Goal: tables that
 read like a well-set report — clear headers, an unmistakable totals row, quiet
@@ -126,7 +126,7 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   rows of a client table printed (not just the page); totals repeated at the end;
   header repeated on every printed page (`thead { display: table-header-group }`).
 
-## T8 · Export follows the formatting choice
+## T8 · Export follows the formatting choice (done)
 
 - CSV keeps raw values (machine-readable) — unchanged.
 - **Excel** (`::DOWNLOAD_XLSX` and a toolbar entry): number formats, the bold

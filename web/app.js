@@ -3800,7 +3800,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         renderBar();
       })
     );
-    barRight.appendChild(csvBtn());
+    const dl = document.createElement("span");
+    dl.className = "tbl-seg";
+    dl.append(csvBtn(), xlsxBtn());
+    barRight.appendChild(dl);
   }
   function columnsMenu() {
     const d = document.createElement("details");
@@ -3846,6 +3849,127 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       () => {
         const data = server ? (view === "scroll" ? loadedRows() : rows) : sortedRows();
         download(new Blob([csvOfRows(data, visCols())], { type: "text/csv" }), "data.csv");
+      }
+    );
+  }
+  // Excel: the same rows as the CSV, but as the table reads — headers with their
+  // units, the grouped header, each column's number format (units by scaling,
+  // the raw value kept), dates as dates, subtotal and totals rows as live
+  // SUBTOTAL() formulas (a ::PAGED table's totals: the SQL values), a frozen
+  // header with a filter.
+  const xlFmt = (c) => {
+    const i = info[c];
+    if (!i.numeric) return null;
+    if (i.label) return "0";
+    const neg = (pos) => (negStyle === "parens" ? `${pos};(${pos})` : negStyle === "red" ? `${pos};[Red]-${pos}` : pos);
+    const dec = (n) => (n > 0 ? "." + "0".repeat(n) : "");
+    const lit = (t) => (t ? `"${t.replace(/"/g, "")}"` : "");
+    const u = unitOf[c];
+    if (u) {
+      const scale = { 1: "", 1e3: ",", 1e6: ",,", 1e9: ",,," }[u.div] ?? "";
+      return neg(u.inHead ? `#,##0${dec(u.dec)}${scale}` : `${lit(u.pre)}#,##0${dec(u.dec)}${scale}${lit(u.word + u.post)}`);
+    }
+    if (i.f === "PERCENT") return neg('#,##0.0"%"');
+    if (i.f === "TREND") return "+0.0;-0.0;0.0";
+    if (i.f === "METRIC") return neg("#,##0.00");
+    if (String(i.f).startsWith("COLORSCALE")) return neg("#,##0.0#");
+    return neg(`#,##0${dec(i.dec)}`);
+  };
+  const xlDate = (t) => {
+    const l = String(dashLocale() || "");
+    const d = /^de|^ru|^pl/.test(l) ? "dd.mm.yyyy" : /^en-US/.test(l) ? "mm/dd/yyyy" : /^(en|fr|es|it|pt)/.test(l) ? "dd/mm/yyyy" : "yyyy-mm-dd";
+    return /[ T]\d/.test(t) ? `${d} hh:mm` : d;
+  };
+  function xlsxBtn() {
+    return mkBtn(
+      "Excel",
+      `download the ${server ? "loaded" : "matching"} rows as an Excel workbook, formatted like the table`,
+      false,
+      () => {
+        const vc = visCols().filter((c) => info[c].f !== "SPARKLINE");
+        const data = server ? (view === "scroll" ? loadedRows() : rows) : sortedRows();
+        const fmts = Object.fromEntries(vc.map((c) => [c, xlFmt(c)]));
+        const present = (c) => data.map((r) => r[c]).filter((v) => v != null && unquote(v) !== "");
+        const isDate = Object.fromEntries(
+          vc.map((c) => [c, !info[c].numeric && !info[c].bool && present(c).length > 0 && present(c).every((v) => excelDate(unquote(v)) != null)])
+        );
+        const out = [];
+        const merges = [];
+        if (Object.keys(groupOf).length) {
+          const g = vc.map((c) => groupOf[c] ?? "");
+          const row = g.map(() => null);
+          for (let k = 0; k < g.length; ) {
+            let e = k;
+            while (e + 1 < g.length && g[e + 1] === g[k]) e++;
+            if (g[k]) {
+              row[k] = { v: g[k], style: "group" };
+              if (e > k) merges.push(`${xlsxCol(k)}1:${xlsxCol(e)}1`);
+            }
+            k = e + 1;
+          }
+          out.push(row);
+        }
+        out.push(vc.map((c) => ({ v: head(c), style: "head" })));
+        const hdr = out.length;
+        const cellOf = (v, c) => {
+          if (v == null || unquote(v) === "") return null;
+          const i = info[c];
+          if (i.bool) return v === true || v === "true";
+          if (i.numeric) {
+            const n = cleanNum(v);
+            return n == null ? unquote(v) : { v: n, fmt: fmts[c] };
+          }
+          if (isDate[c]) return { v: excelDate(unquote(v)), fmt: xlDate(unquote(v)) };
+          return unquote(v);
+        };
+        const FN = { sum: 109, mean: 101, count: 102, max: 104, min: 105 };
+        const aggable = (c) => info[c].numeric && !info[c].label && info[c].f !== "BADGE" && aggOf(c) !== "none";
+        // a subtotal / total cell: the value, and (client tables) the live formula
+        const aggCell = (c, from, to, v, style, nested) => {
+          const a = aggOf(c);
+          const col = xlsxCol(vc.indexOf(c));
+          const f = server ? null : a === "median" ? (nested ? null : `MEDIAN(${col}${from}:${col}${to})`) : `SUBTOTAL(${FN[a]},${col}${from}:${col}${to})`;
+          // (a mean / median of whole numbers keeps one decimal, as in the table)
+          const whole = (!info[c].f || info[c].f === "PLAIN") && info[c].dec === 0 && !info[c].label;
+          const fmt = a === "count" ? "#,##0" : (a === "mean" || a === "median") && whole ? "#,##0.0" : fmts[c];
+          return { v: v ?? "", f, fmt, style };
+        };
+        let gStart = out.length + 1;
+        data.forEach((r, j) => {
+          out.push(vc.map((c) => cellOf(r[c], c)));
+          const k = closesGroup(data, j);
+          if (k === undefined) return;
+          const grp = subGroups.get(k) || [];
+          const to = out.length;
+          out.push(
+            vc.map((c, ix) =>
+              ix === 0 ? { v: `Subtotal ${k}`, style: "sub" } : aggable(c) ? aggCell(c, gStart, to, aggValue(c, aggOf(c), grp), "sub", false) : { v: "", style: "sub" }
+            )
+          );
+          gStart = out.length + 1;
+        });
+        const last = Math.max(out.length, hdr + 1);
+        if (showTotals && !totalsOff && data.length)
+          out.push(
+            vc.map((c, ix) =>
+              ix === 0
+                ? { v: server ? `Total (all ${nTotal().toLocaleString(loc)} rows)` : "Total", style: "tot" }
+                : aggable(c)
+                  ? aggCell(c, hdr + 1, last, aggValue(c, aggOf(c)), "tot", !!subCol)
+                  : { v: "", style: "tot" }
+            )
+          );
+        const name = (opts.caption && opts.caption !== "Data table" ? opts.caption : "Data").split(/\s+[—–-]\s+/)[0];
+        const file = name.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 60) || "data";
+        const bytes = xlsxOf({
+          name,
+          cols: vc.map((c) => ({ width: Math.min(60, Math.max(8, (natW?.[c] ?? 10) + 3, Math.ceil(chars(head(c)) / 2) + 3)) })),
+          rows: out,
+          freeze: hdr,
+          filter: data.length ? `A${hdr}:${xlsxCol(vc.length - 1)}${last}` : null,
+          merges,
+        });
+        download(new Blob([bytes], { type: XLSX_TYPE }), `${file}.xlsx`);
       }
     );
   }
@@ -5029,11 +5153,191 @@ function csvOfRows(rows, cols) {
   const esc = (v) => `"${unq(v).replace(/"/g, '""')}"`;
   return [cols.map(esc).join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
 }
-function xlsOfRows(rows, cols) {
-  const cell = (v) => escapeHtml(unq(v));
-  const head = "<tr>" + cols.map((c) => `<th>${cell(c)}</th>`).join("") + "</tr>";
-  const body = rows.map((r) => "<tr>" + cols.map((c) => `<td>${cell(r[c])}</td>`).join("") + "</tr>").join("");
-  return `<html><head><meta charset="utf-8"></head><body><table>${head}${body}</table></body></html>`;
+// The raw query rows as a workbook (::DOWNLOAD_XLSX): numbers stay numbers,
+// ISO dates become dates, a bold frozen header with a filter.
+function xlsxOfRows(rows, cols) {
+  const cell = (v) => {
+    if (v == null) return null;
+    if (typeof v === "number" || typeof v === "boolean") return v;
+    const t = unq(v);
+    const d = excelDate(t);
+    if (d != null) return { v: d, fmt: /[ T]\d/.test(t) ? "yyyy-mm-dd hh:mm" : "yyyy-mm-dd" };
+    return NUM_RE.test(t) && t.trim() !== "" ? Number(t) : t;
+  };
+  const out = [cols.map((c) => ({ v: String(c), style: "head" })), ...rows.map((r) => cols.map((c) => cell(r[c])))];
+  return xlsxOf({
+    cols: cols.map((c) => ({ width: Math.min(50, Math.max(8, String(c).length + 2, ...rows.slice(0, 200).map((r) => String(unq(r[c] ?? "")).length + 2))) })),
+    rows: out,
+    freeze: 1,
+    filter: cols.length ? `A1:${xlsxCol(cols.length - 1)}${rows.length + 1}` : null,
+  });
+}
+
+// ── a minimal .xlsx writer (no dependency): SpreadsheetML parts in a stored
+// (uncompressed) zip. `xlsxOf(sheet)` takes
+//   { name, cols: [{ width }], rows: [[cell]], freeze: rows above the pane,
+//     filter: "A2:F9" | null, merges: ["B1:C1"] }
+// where a cell is null, a number, a string, a boolean or
+// { v, f: formula without "=", fmt: Excel number format, style: "head" | "group" |
+//   "body" | "sub" | "tot" }. Returns the file's bytes.
+function crc32(bytes) {
+  let c,
+    crc = -1;
+  crc32.t ||= Array.from({ length: 256 }, (_, n) => {
+    c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  for (const b of bytes) crc = crc32.t[(crc ^ b) & 0xff] ^ (crc >>> 8);
+  return (crc ^ -1) >>> 0;
+}
+function zipStored(files) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let off = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const data = typeof f.data === "string" ? enc.encode(f.data) : f.data;
+    const crc = crc32(data);
+    const loc = new DataView(new ArrayBuffer(30));
+    // signature, version, flags (UTF-8 names), method 0 = stored, time, date (1980-01-01)
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x800, 2], [8, 0, 2], [10, 0, 2], [12, 33, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]].forEach(([o, v, n]) => (n === 4 ? loc.setUint32(o, v, true) : loc.setUint16(o, v, true)));
+    const cen = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x800, 2], [10, 0, 2], [12, 0, 2], [14, 33, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, off, 4]].forEach(([o, v, n]) => (n === 4 ? cen.setUint32(o, v, true) : cen.setUint16(o, v, true)));
+    parts.push(new Uint8Array(loc.buffer), name, data);
+    central.push(new Uint8Array(cen.buffer), name);
+    off += 30 + name.length + data.length;
+  }
+  const cenLen = central.reduce((a, b) => a + b.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, files.length, 2], [10, files.length, 2], [12, cenLen, 4], [16, off, 4], [20, 0, 2]].forEach(([o, v, n]) => (n === 4 ? end.setUint32(o, v, true) : end.setUint16(o, v, true)));
+  const all = [...parts, ...central, new Uint8Array(end.buffer)];
+  const out = new Uint8Array(all.reduce((a, b) => a + b.length, 0));
+  let p = 0;
+  for (const b of all) {
+    out.set(b, p);
+    p += b.length;
+  }
+  return out;
+}
+// a 0-based column index as Excel's letters (0 → A, 26 → AA)
+function xlsxCol(i) {
+  return (i >= 26 ? xlsxCol(Math.floor(i / 26) - 1) : "") + String.fromCharCode(65 + (i % 26));
+}
+function xlsxOf(sheet) {
+  const x = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
+  const colName = xlsxCol;
+  // styles: one cell format per (number format, style) pair
+  const fmts = []; // custom number formats (ids from 164)
+  const xfs = [{ fmt: 0, style: "body" }];
+  const xfOf = (fmt, style = "body") => {
+    let id = 0;
+    if (fmt) {
+      let k = fmts.indexOf(fmt);
+      if (k < 0) k = fmts.push(fmt) - 1;
+      id = 164 + k;
+    }
+    let i = xfs.findIndex((s) => s.fmt === id && s.style === style);
+    if (i < 0) i = xfs.push({ fmt: id, style }) - 1;
+    return i;
+  };
+  const rowsXml = sheet.rows
+    .map((row, r) => {
+      const cells = row
+        .map((cell, ci) => {
+          if (cell == null) return "";
+          const c = typeof cell === "object" ? cell : { v: cell };
+          const ref = `${colName(ci)}${r + 1}`;
+          const s = xfOf(c.fmt, c.style);
+          const f = c.f ? `<f>${x(c.f)}</f>` : "";
+          if (typeof c.v === "number" && isFinite(c.v)) return `<c r="${ref}" s="${s}">${f}<v>${c.v}</v></c>`;
+          if (typeof c.v === "boolean") return `<c r="${ref}" s="${s}" t="b">${f}<v>${c.v ? 1 : 0}</v></c>`;
+          if (c.v == null || c.v === "") return f ? `<c r="${ref}" s="${s}">${f}</c>` : `<c r="${ref}" s="${s}"/>`;
+          return `<c r="${ref}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${x(c.v)}</t></is></c>`;
+        })
+        .join("");
+      return `<row r="${r + 1}">${cells}</row>`;
+    })
+    .join("");
+  const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const pane = sheet.freeze
+    ? `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${sheet.freeze}" topLeftCell="A${sheet.freeze + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`
+    : "";
+  const cols = (sheet.cols || []).length
+    ? `<cols>${sheet.cols.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${(c.width || 10).toFixed(1)}" customWidth="1"/>`).join("")}</cols>`
+    : "";
+  const filter = sheet.filter ? `<autoFilter ref="${sheet.filter}"/>` : "";
+  const merges = (sheet.merges || []).length ? `<mergeCells count="${sheet.merges.length}">${sheet.merges.map((m) => `<mergeCell ref="${m}"/>`).join("")}</mergeCells>` : "";
+  const ws = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet ${ns}>${pane}${cols}<sheetData>${rowsXml}</sheetData>${filter}${merges}</worksheet>`;
+  // fonts: 0 regular, 1 bold · fills: 0 none, 1 gray125 (required), 2 header / subtotal tint
+  // borders: 0 none, 1 thin bottom (header), 2 thin top (subtotal), 3 double top (total)
+  const look = {
+    body: [0, 0, 0],
+    head: [1, 2, 1],
+    group: [1, 0, 0],
+    sub: [1, 2, 2],
+    tot: [1, 0, 3],
+  };
+  const xfXml = xfs
+    .map(({ fmt, style }) => {
+      const [font, fill, border] = look[style] || look.body;
+      const align = style === "head" ? '<alignment wrapText="1" vertical="bottom"/>' : style === "group" ? '<alignment horizontal="center"/>' : "";
+      return `<xf numFmtId="${fmt}" fontId="${font}" fillId="${fill}" borderId="${border}" xfId="0"${fmt ? ' applyNumberFormat="1"' : ""}${font ? ' applyFont="1"' : ""}${fill ? ' applyFill="1"' : ""}${border ? ' applyBorder="1"' : ""}${align ? ' applyAlignment="1">' + align + "</xf>" : "/>"}`;
+    })
+    .join("");
+  const styles =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+    (fmts.length ? `<numFmts count="${fmts.length}">${fmts.map((f, i) => `<numFmt numFmtId="${164 + i}" formatCode="${x(f)}"/>`).join("")}</numFmts>` : "") +
+    `<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>` +
+    `<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF2F3F5"/><bgColor indexed="64"/></patternFill></fill></fills>` +
+    `<borders count="4"><border><left/><right/><top/><bottom/><diagonal/></border>` +
+    `<border><left/><right/><top/><bottom style="thin"><color rgb="FF5B6170"/></bottom><diagonal/></border>` +
+    `<border><left/><right/><top style="thin"><color rgb="FF9AA0AC"/></top><bottom/><diagonal/></border>` +
+    `<border><left/><right/><top style="double"><color rgb="FF2B2F38"/></top><bottom/><diagonal/></border></borders>` +
+    `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
+    `<cellXfs count="${xfs.length}">${xfXml}</cellXfs>` +
+    `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  const name = String(sheet.name || "Data").replace(/[\[\]:*?/\\]/g, " ").trim().slice(0, 31) || "Data";
+  const defined = sheet.filter
+    ? `<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'${x(name.replace(/'/g, "''"))}'!${sheet.filter.replace(/([A-Z]+)(\d+)/g, "$$$1$$$2")}</definedName></definedNames>`
+    : "";
+  return zipStored([
+    {
+      name: "[Content_Types].xml",
+      data:
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+        `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>` +
+        `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
+        `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+        `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    },
+    {
+      name: "xl/workbook.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook ${ns}><sheets><sheet name="${x(name)}" sheetId="1" r:id="rId1"/></sheets>${defined}</workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data:
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>` +
+        `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    },
+    { name: "xl/worksheets/sheet1.xml", data: ws },
+    { name: "xl/styles.xml", data: styles },
+  ]);
+}
+const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+// ISO date text → Excel's serial day number (1900 date system), else null
+function excelDate(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?$/.exec(String(v));
+  if (!m) return null;
+  const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), 0) + 1000 * +(m[6] || 0);
+  return isFinite(ms) ? (ms - Date.UTC(1899, 11, 30)) / 864e5 : null;
 }
 
 // A ::DOWNLOAD_CSV/_XLSX/_PDF button. CSV/XLSX export the query rows; PDF prints.
@@ -5048,7 +5352,7 @@ function mkDownload(s, rows) {
   btn.onclick = () => {
     if (fmt === "pdf") return window.print();
     const cols = rows.length ? Object.keys(rows[0]) : [];
-    if (fmt === "xlsx") download(new Blob([xlsOfRows(rows, cols)], { type: "application/vnd.ms-excel" }), "data.xls");
+    if (fmt === "xlsx") download(new Blob([xlsxOfRows(rows, cols)], { type: XLSX_TYPE }), "data.xlsx");
     else download(new Blob([csvOfRows(rows, cols)], { type: "text/csv" }), "data.csv");
   };
   wrap.appendChild(btn);

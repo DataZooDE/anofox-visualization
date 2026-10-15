@@ -710,7 +710,14 @@ histogram with min and max for each number column, the top 3 values with their
 share for the others, "all N values distinct" for ids and names, empty counts —
 over the matching rows), **Columns** (show / hide),
 **Pages | Scroll**, **Compact | Comfortable** row density (compact by default
-above 50 rows) and **⤓ CSV** (the matching rows, visible columns). Hovering a
+above 50 rows), **⤓ CSV** (the matching rows, visible columns, raw values) and
+**Excel** (the same rows as an `.xlsx` that reads like the table: the headers
+with their units, the grouped header, each column's number format — scaled units
+keep the raw value, e.g. `#,##0.00,,` shows 5,350,000 as 5.35 — dates as dates,
+subtotal and totals rows as live `SUBTOTAL()` formulas, a frozen header with a
+filter; a `::PAGED` table exports the loaded rows and its SQL totals as values).
+`::DOWNLOAD_XLSX` writes the raw query rows as a real `.xlsx` (numbers, dates and
+booleans typed). Hovering a
 header shows the column's min / max / mean, empty and distinct counts.
 
 Formatting: raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
