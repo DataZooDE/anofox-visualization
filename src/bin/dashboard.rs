@@ -12,6 +12,14 @@ use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::{error_pre, render, sql, Role};
 use std::process::Command;
 
+const USAGE: &str = "usage:\n  \
+     dashboard <file.sql> [out.html]         render to interactive HTML\n  \
+     dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
+     dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
+     dashboard --roles                       list every valid ::ROLE token\n  \
+     dashboard --version                     print the version\n\n\
+     Queries run through the `duckdb` CLI on PATH.";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -20,14 +28,12 @@ fn main() {
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         // The DOCS.md role table (generated from the registry).
         Some("--roles-md") => print!("{}", anofox_visualization::roles::markdown_table()),
-        None | Some("--help") | Some("-h") => {
-            eprintln!(
-                "usage:\n  \
-                 dashboard <file.sql> [out.html]         render to interactive HTML\n  \
-                 dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
-                 dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
-                 dashboard --roles                       list every valid ::ROLE token"
-            );
+        Some("--version") | Some("-V") => println!("dashboard {}", env!("CARGO_PKG_VERSION")),
+        // An explicit --help is a successful request (exit 0, stdout); no
+        // arguments at all is a usage error (exit 2, stderr).
+        Some("--help") | Some("-h") => println!("{USAGE}"),
+        None => {
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
         Some(_) => cmd_render(&args),
