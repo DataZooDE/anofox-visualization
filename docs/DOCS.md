@@ -721,6 +721,28 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 Edit the SQL, press **Run**, hover the marks. Load your own data with DuckDB’s
 readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
 
+**Examples in the sidebar** (open one directly with `?dashboard=<name>`):
+
+- **Examples** — the core feature tour: *Start here*, *Charts*,
+  *Interactivity*, *Tables*, *Layout* and *Theming* ("Theming: your branding
+  (ACME)", "Locale: de-DE"; sources in `examples/theming/`).
+- **anofox extensions** — one group per anofox DuckDB extension:
+  - *Statistics* — "Statistics showcase: property market (live
+    anofox-statistics)", computed live by the anofox_statistics wasm extension;
+  - *Forecast* — "M5 forecast (live extension)" and "M5 analytics", live
+    anofox_forecast;
+  - *Tabular*, *Optimize*, *Decide* — "Stored results: CRM data quality",
+    "Stored results: distribution centre", "Stored results: support inbox
+    triage". These extensions can't run in DuckDB-Wasm (no loadable wasm
+    build, or a native model runtime), so the results were computed natively
+    (`examples/<ext>-showcase/compute.sql` → `scripts/gen-showcase-data.sh` →
+    `web/data/<ext>/*.csv`) and the dashboards only read them — each page says so.
+
+The live extensions are fetched by `scripts/fetch-wasm-extensions.sh` into
+`web/localext/` and loaded on first use; a statement that reads
+`'data/<ext>/<file>.csv'` gets that file fetched and registered with
+DuckDB-Wasm first.
+
 ### b2) Serve the UI on a live DuckDB — explore existing data
 
 `anofox-visualization serve` starts a tiny local HTTP server that serves the same builder UI
