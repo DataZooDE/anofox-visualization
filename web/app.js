@@ -976,6 +976,31 @@ async function ensureForecast(sql) {
   if (/\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureExtension("anofox_forecast");
 }
 
+// Stored showcase results: an example that reads 'data/<ext>/<table>.csv'
+// (web/data/, written natively by scripts/gen-showcase-data.sh for extensions
+// that can't run in the browser) gets each file fetched and registered with
+// DuckDB-Wasm on first use (memoised per file; a failure is retried later).
+const dataFiles = {};
+async function ensureDataFiles(sql) {
+  if (backend === "live") return; // the native backend reads them from disk
+  if (!db) throw new Error("in-browser DuckDB not ready");
+  const names = new Set([...sql.matchAll(/'(data\/[\w-]+\/[\w.-]+\.(?:csv|parquet))'/g)].map((m) => m[1]));
+  await Promise.all(
+    [...names].map((n) => {
+      if (!dataFiles[n])
+        dataFiles[n] = (async () => {
+          const r = await fetch(n);
+          if (!r.ok) throw new Error(`couldn't fetch ${n} (HTTP ${r.status})`);
+          await db.registerFileBuffer(n, new Uint8Array(await r.arrayBuffer()));
+        })().catch((e) => {
+          delete dataFiles[n];
+          throw e;
+        });
+      return dataFiles[n];
+    })
+  );
+}
+
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
 // `page` (served mode only) describes a ::PAGED request structurally —
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
@@ -984,6 +1009,7 @@ async function runSql(sql, page) {
   if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
   if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
   if (STATS_RE.test(sql)) await ensureExtension("anofox_statistics");
+  if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
   if (servedMode) {
     // Capture a SET VARIABLE (never sent as SQL) …
     const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
