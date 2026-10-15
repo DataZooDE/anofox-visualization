@@ -705,7 +705,10 @@ range slider for numbers, "contains" for text), **Σ Totals** (a totals row
 over every matching row, not just the page: sums of amounts and counts, means of
 rates, shares and scores, counts of badge values — each numeric total carries a
 small tag, e.g. "sum ▾", to switch it to mean, median, min, max or count; the
-choice is kept per table), **Columns** (show / hide),
+choice is kept per table), **Stats** (a strip under the header: a 10-bin
+histogram with min and max for each number column, the top 3 values with their
+share for the others, "all N values distinct" for ids and names, empty counts —
+over the matching rows), **Columns** (show / hide),
 **Pages | Scroll**, **Compact | Comfortable** row density (compact by default
 above 50 rows) and **⤓ CSV** (the matching rows, visible columns). Hovering a
 header shows the column's min / max / mean, empty and distinct counts.
@@ -764,13 +767,14 @@ so it stays smooth over any number of rows.
 | sort, search, column filters | in the browser | in DuckDB (`ORDER BY`, `WHERE`) |
 | totals and column statistics | in the browser | one aggregate query in DuckDB (count, distinct, sum, mean, median, min, max) |
 | filter dropdown values | from the rows | `SELECT DISTINCT` in DuckDB (under the other filters) |
+| Stats strip | in the browser | one query in DuckDB: a 10-bin histogram and the top 3 values per column |
 | good for | up to ~10k rows | any size: Parquet on S3, MotherDuck, a served database |
 
 A `::PAGED` request is the same everywhere: in the browser and the authoring
 `serve` the query is built by the wasm `page_sql()`; a **locked** server
 (`anofox_serve_dashboards`) receives only the structured request — page, sort,
-search, column filters (`eq`, `contains`, `gt`, `ge`, `lt`, `le`), a statistics
-or distinct-values request — and builds the identical SQL itself, with every
+search, column filters (`eq`, `contains`, `gt`, `ge`, `lt`, `le`), a statistics,
+column-profile or distinct-values request — and builds the identical SQL itself, with every
 value a bound parameter and every column name a quoted identifier.
 
 ### Example

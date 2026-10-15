@@ -9,7 +9,8 @@ muted zeros, `chrome.negatives` / `chrome.zero`, per-column units, signed trends
 T2b: `::TOTALS` + a per-cell aggregation picker (SQL stats gained `median`).
 T5: `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`, `::FLAG`, `::HIGHLIGHT`.
 T7: caption / scope / aria-sort / aria-selected, print CSS. `::SUBTOTAL` (T2b,
-client tables). **Open**: T6, T8, T9.
+client tables). T6: the Stats strip (client, and `page.profile` in SQL for
+`::PAGED`). **Open**: T8, T9.
 Originally a proposal Follows the table rebuild (toolbar, totals, Scroll
 view, `::ROWSELECT`, SQL-side filters/totals for `::PAGED`). Goal: tables that
 read like a well-set report — clear headers, an unmistakable totals row, quiet
@@ -108,7 +109,7 @@ Today the header is the raw column name (`load_pct`, `n0`, `avg_mae`).
   value once per group, a subtotal row (single rule, lighter background) after
   each group with each column's total aggregation.
 
-## T6 · Header statistics, visible on demand
+## T6 · Header statistics, visible on demand (done)
 
 - The tooltip stats (min / max / mean / empty / distinct) become an optional
   **summary strip** under the header (toolbar → "Column stats"): a mini

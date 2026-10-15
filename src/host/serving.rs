@@ -365,6 +365,12 @@ pub struct PageRequest {
     /// for values that read as numbers, `s{i}` sum, `m{i}` mean, `md{i}` median,
     /// `lo{i}` min, `hi{i}` max; plus `n` = the row count.
     pub stats: Vec<String>,
+    /// Return the column-stats strip's distributions for these columns: rows
+    /// `(c, t, k, v, n)` — per column index `c`, `t = 'h'` rows of a 10-bin
+    /// histogram of the values that read as numbers (`k` = bin 0..=9 between
+    /// their min and max, `n` = count) and `t = 't'` rows of the 3 most
+    /// frequent values (`v` as text, `n` = count).
+    pub profile: Vec<String>,
     /// Return up to [`MAX_DISTINCT`] distinct values `v` of this column (for a
     /// filter dropdown), under every filter except those on the column itself.
     pub distinct: Option<String>,
@@ -468,6 +474,7 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
                 | "filter"
                 | "filters"
                 | "stats"
+                | "profile"
                 | "distinct"
         ) {
             return Err(format!("unknown page field '{k}'"));
@@ -547,18 +554,35 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
             stats.push(col(c, "'page.stats'")?);
         }
     }
+    let mut profile = Vec::new();
+    if let Some(cs) = p.get("profile") {
+        let cs = cs
+            .as_array()
+            .ok_or("'page.profile' must be an array of column names")?;
+        if cs.len() > MAX_STATS_COLS {
+            return Err(format!("more than {MAX_STATS_COLS} profile columns"));
+        }
+        for c in cs {
+            profile.push(col(c, "'page.profile'")?);
+        }
+    }
     let distinct = match p.get("distinct") {
         None | Some(serde_json::Value::Null) => None,
         Some(v) => Some(col(v, "'page.distinct'")?),
     };
     let count = p.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
-    if [count, !stats.is_empty(), distinct.is_some()]
-        .iter()
-        .filter(|b| **b)
-        .count()
+    if [
+        count,
+        !stats.is_empty(),
+        !profile.is_empty(),
+        distinct.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count()
         > 1
     {
-        return Err("a page request asks for one of: rows, count, stats, distinct".into());
+        return Err("a page request asks for one of: rows, count, stats, profile, distinct".into());
     }
     Ok(PageRequest {
         count,
@@ -569,6 +593,7 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
         filter,
         filters,
         stats,
+        profile,
         distinct,
     })
 }
@@ -649,6 +674,30 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
             ));
         }
         return format!("SELECT {} {from}", sel.join(", "));
+    }
+    if !p.profile.is_empty() {
+        let parts: Vec<String> = p
+            .profile
+            .iter()
+            .enumerate()
+            .map(|(i, col)| {
+                let c = quote_ident(col);
+                let x = num(&c);
+                format!(
+                    "SELECT {i} AS c, 'h' AS t, k, NULL::VARCHAR AS v, count(*) AS n FROM \
+                     (SELECT CASE WHEN _hi > _lo THEN least(9, floor((_x - _lo) / (_hi - _lo) * 10))::INTEGER \
+                     ELSE 0 END AS k FROM (SELECT {x} AS _x FROM _f) _v, \
+                     (SELECT min({x}) AS _lo, max({x}) AS _hi FROM _f) _b WHERE _x IS NOT NULL) _h GROUP BY k \
+                     UNION ALL SELECT {i}, 't', NULL::INTEGER, v, n FROM \
+                     (SELECT CAST({c} AS VARCHAR) AS v, count(*) AS n FROM _f WHERE {c} IS NOT NULL \
+                     GROUP BY v ORDER BY n DESC, v LIMIT 3) _t"
+                )
+            })
+            .collect();
+        return format!(
+            "WITH _f AS (SELECT * {from}) {} ORDER BY c, t, k, n DESC",
+            parts.join(" UNION ALL ")
+        );
     }
     let order = match &p.sort {
         Some(c) => format!(
@@ -894,6 +943,14 @@ mod tests {
         assert!(sql.starts_with("SELECT DISTINCT CAST(\"region\" AS VARCHAR) AS v FROM"));
         assert!(sql.ends_with("ORDER BY v NULLS LAST LIMIT 51"));
         assert_eq!(params, vec!["1"]);
+        // profile: per column a histogram and the top values, over the filtered rows
+        let p =
+            page(r#"{"profile":["amt"],"filters":[{"col":"amt","op":"lt","value":"5"}]}"#).unwrap();
+        let (sql, params) = page_sql("SELECT * FROM t", &p);
+        assert!(sql.starts_with("WITH _f AS (SELECT * FROM (SELECT * FROM t) _dp WHERE"));
+        assert!(sql.contains("SELECT 0 AS c, 'h' AS t"));
+        assert!(sql.contains("ORDER BY n DESC, v LIMIT 3"));
+        assert_eq!(params, vec!["5"]);
         // rejected
         for bad in [
             r#"{"filters":[{"col":"a","op":"like","value":"x"}]}"#,
@@ -901,6 +958,8 @@ mod tests {
             r#"{"filters":[{"col":"","op":"eq","value":"x"}]}"#,
             r#"{"stats":["a"],"count":true}"#,
             r#"{"distinct":"a","stats":["a"]}"#,
+            r#"{"profile":["a"],"stats":["a"]}"#,
+            r#"{"profile":"a"}"#,
             r#"{"limit":0}"#,
             r#"{"sql":"SELECT 1"}"#,
         ] {

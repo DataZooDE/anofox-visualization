@@ -2670,6 +2670,8 @@ async function runOnce(fresh = true) {
             },
             onColFilters: reload,
             distinct: (col) => pageReq({ distinct: col }).then((rs) => rs.map((r) => r.v)),
+            // the Stats strip's histograms / top values, once per filter state
+            profile: () => (stats._prof ||= pageReq({ profile: stats._cols })),
             fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }),
           };
           holder.appendChild(renderTable(rows, sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
@@ -3343,7 +3345,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // also turns the column filters into SQL.
   const saved = server ? server.colState : key != null ? dpTableUI[key] || {} : {};
   const persist = () => {
-    const st = { sortCol, dir, page, pageSize, colQ, colRange, colEq, agg: aggPick, q, hidden: [...hidden], showFilters, showTotals, view, compact };
+    const st = { sortCol, dir, page, pageSize, colQ, colRange, colEq, agg: aggPick, q, hidden: [...hidden], showFilters, showTotals, showStats, view, compact };
     if (server) Object.assign(server.colState, st);
     else if (key != null) dpTableUI[key] = st;
   };
@@ -3538,6 +3540,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // density: compact rows by default for long tables
   let compact = saved.compact ?? (server ? server.unfiltered ?? server.total : rows.length) > 50;
   let ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
+  let showStats = !!saved.showStats; // the column-stats strip under the header
   let showFilters =
     !!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0;
   // Σ for amounts and counts; a column named like a rate / share / score is averaged
@@ -3622,6 +3625,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     applyFilters();
     persist();
     body();
+    renderStatsRow();
     renderBar();
   };
 
@@ -3752,6 +3756,15 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           }
         )
       );
+    if (nTotal() > 1)
+      barRight.appendChild(
+        mkBtn("Stats", "column statistics under the header: each number column's distribution, each text column's top values", showStats, () => {
+          showStats = !showStats;
+          persist();
+          renderStatsRow();
+          renderBar();
+        })
+      );
     if (cols.length > 4) barRight.appendChild(columnsMenu());
     if (many) {
       const seg = document.createElement("span");
@@ -3811,6 +3824,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         else hidden.add(c);
         persist();
         renderHead();
+        renderStatsRow();
         renderFilterRow();
         body();
         s.textContent = lab();
@@ -3981,6 +3995,95 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     }
   }
 
+  // ── the column-stats strip (behind the Stats button): a 10-bin histogram of
+  // each number column, the top 3 values (with their share) of the others —
+  // over the matching rows; a ::PAGED table's come from SQL (server.profile) ──
+  let sRow = null;
+  const BINS = 10;
+  const profileOf = (c, prof) => {
+    const i = info[c];
+    const num = i.numeric && !i.label;
+    if (server) {
+      const j = server.statCols ? server.statCols.indexOf(c) : -1;
+      const st = sstat(c);
+      if (j < 0 || !prof) return null;
+      const mine = prof.filter((r) => Number(r.c) === j);
+      const hist = new Array(BINS).fill(0);
+      for (const r of mine) if (r.t === "h") hist[Math.min(BINS - 1, Number(r.k) || 0)] += Number(r.n);
+      const top = mine.filter((r) => r.t === "t").map((r) => [unquote(r.v), Number(r.n)]);
+      return { num, hist, lo: st?.lo, hi: st?.hi, top, n: st?.n ?? 0, distinct: st?.d ?? top.length };
+    }
+    const vals = filtered.map((r) => r[c]).filter((v) => v != null && unquote(v) !== "");
+    if (num) {
+      const xs = vals.map(cleanNum).filter((v) => v != null);
+      const lo = xs.length ? Math.min(...xs) : null;
+      const hi = xs.length ? Math.max(...xs) : null;
+      const hist = new Array(BINS).fill(0);
+      for (const x of xs) hist[hi > lo ? Math.min(BINS - 1, Math.floor(((x - lo) / (hi - lo)) * BINS)) : 0]++;
+      return { num, hist, lo, hi, n: xs.length };
+    }
+    const cnt = new Map();
+    for (const v of vals) cnt.set(unquote(v), (cnt.get(unquote(v)) || 0) + 1);
+    const top = [...cnt].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))).slice(0, 3);
+    return { num, top, n: vals.length, distinct: cnt.size };
+  };
+  const pctTxt = (x) => new Intl.NumberFormat(loc, { style: "percent", maximumFractionDigits: x < 0.1 ? 1 : 0 }).format(x);
+  function statCell(c, p) {
+    const i = info[c];
+    if (!p || i.f === "SPARKLINE") return "";
+    const empty = (server ? server.total || 0 : filtered.length) - p.n; // (a number column: values that aren't numbers too)
+    const foot = empty > 0 ? `<span class="st-empty">${empty.toLocaleString(loc)} empty</span>` : "";
+    if (p.num) {
+      const mx = Math.max(...p.hist, 1);
+      const w = 100 / BINS;
+      const step = p.hi > p.lo ? (p.hi - p.lo) / BINS : 0;
+      const bars = p.hist
+        .map((n, k) => {
+          const h = n ? Math.max(1.5, (22 * n) / mx) : 0;
+          const range = step ? `${cellText(p.lo + k * step, c)} – ${cellText(p.lo + (k + 1) * step, c)}` : cellText(p.lo, c);
+          return `<rect x="${(k * w + 0.6).toFixed(2)}" y="${(24 - h).toFixed(2)}" width="${(w - 1.2).toFixed(2)}" height="${h.toFixed(2)}"><title>${escapeHtml(range)}: ${n.toLocaleString(loc)}</title></rect>`;
+        })
+        .join("");
+      const ends =
+        p.lo == null ? "" : `<span class="st-ends"><span>${escapeHtml(cellText(p.lo, c))}</span><span>${escapeHtml(cellText(p.hi, c))}</span></span>`;
+      return `<svg class="st-hist" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label="distribution of ${escapeHtml(head(c))}">${bars}</svg>${ends}${foot}`;
+    }
+    if (!p.top || !p.top.length) return foot;
+    // every value once (ids, names): shares say nothing
+    if (p.top[0][1] <= 1 && p.n > 1) return `<span class="st-more">all ${p.n.toLocaleString(loc)} values distinct</span>${foot}`;
+    const distinct = Math.min(p.distinct, p.n); // (approx_count_distinct can overshoot)
+    const lines = p.top
+      .map(([v, n]) => {
+        const sh = p.n ? n / p.n : 0;
+        return `<span class="st-top" title="${escapeHtml(v)}: ${n.toLocaleString(loc)} (${pctTxt(sh)})"><span class="st-v">${escapeHtml(cellText(v, c) || v)}</span><span class="st-p">${pctTxt(sh)}</span><span class="st-bar" style="width:${(100 * sh).toFixed(1)}%"></span></span>`;
+      })
+      .join("");
+    const more = distinct > p.top.length ? `<span class="st-more">+${(distinct - p.top.length).toLocaleString(loc)} more</span>` : "";
+    return lines + more + foot;
+  }
+  function renderStatsRow() {
+    if (sRow) sRow.remove();
+    sRow = null;
+    if (!showStats) return;
+    sRow = thead.insertRow(hr.sectionRowIndex + 1);
+    sRow.className = "tbl-stats";
+    const fill = (prof) => {
+      sRow.innerHTML = "";
+      for (const c of visCols()) {
+        const th = document.createElement("th");
+        th.innerHTML = statCell(c, profileOf(c, prof));
+        sRow.appendChild(th);
+      }
+    };
+    if (!server) return fill(null);
+    const row = sRow;
+    fill(null);
+    server
+      .profile()
+      .then((prof) => row === sRow && fill(prof))
+      .catch(() => {});
+  }
+
   // ── the per-column filter row (behind the Filters button) ──
   let fRow = null;
   function renderFilterRow() {
@@ -4048,6 +4151,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
             page = 0;
             persist();
             body();
+            renderStatsRow();
             renderBar();
           }
         };
@@ -4068,6 +4172,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
                   page = 0;
                   persist();
                   body();
+                  renderStatsRow();
                   renderBar();
                 }
               },
@@ -4655,6 +4760,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     });
   setView();
   renderHead();
+  renderStatsRow();
   renderFilterRow();
   body();
   renderBar();

@@ -1,4 +1,4 @@
-//! The `::PAGED` request SQL (rows, count, column filters, stats, distinct) runs
+//! The `::PAGED` request SQL (rows, count, column filters, stats, profile, distinct) runs
 //! on a real DuckDB and returns what it should. Skips without a `duckdb` CLI.
 use anofox_visualization::host::serving::{page_sql_inline, parse_page};
 use std::process::Command;
@@ -69,4 +69,37 @@ fn paged_requests_run_on_duckdb() {
     let n =
         run(r#"{"count":true,"filters":[{"col":"note","op":"contains","value":"n1'"}]}"#).unwrap();
     assert_eq!(n[0]["n"], 0);
+    // profile: a 10-bin histogram of the numbers and the top 3 values, per column
+    let pr = run(&format!(r#"{{"profile":["amount","region","note"],{f}}}"#)).unwrap();
+    let rows = pr.as_array().unwrap();
+    let of = |c: i64, t: &str| -> Vec<&serde_json::Value> {
+        rows.iter().filter(|r| r["c"] == c && r["t"] == t).collect()
+    };
+    let hist = of(0, "h");
+    assert_eq!(
+        hist.iter().map(|r| r["n"].as_i64().unwrap()).sum::<i64>(),
+        27
+    );
+    assert!(hist
+        .iter()
+        .all(|r| (0..=9).contains(&r["k"].as_i64().unwrap())));
+    assert_eq!(hist.first().unwrap()["k"], 0);
+    assert_eq!(hist.last().unwrap()["k"], 9);
+    // the region filter leaves one value; text has no histogram
+    let top = of(1, "t");
+    assert_eq!(top.len(), 1);
+    assert_eq!(
+        (top[0]["v"].as_str(), top[0]["n"].as_i64()),
+        (Some("EU"), Some(27))
+    );
+    assert!(of(1, "h").is_empty());
+    // nulls are not counted among the top values
+    assert_eq!(of(2, "t").len(), 3);
+    assert!(of(2, "t").iter().all(|r| !r["v"].is_null()));
+    // a constant column falls into one bin
+    let c =
+        run(r#"{"profile":["region"],"filters":[{"col":"id","op":"eq","value":"3"}]}"#).unwrap();
+    assert_eq!(c.as_array().unwrap().len(), 1);
+    let c = run(r#"{"profile":["id"],"filters":[{"col":"id","op":"eq","value":"3"}]}"#).unwrap();
+    assert_eq!(c[0]["k"], 0);
 }
