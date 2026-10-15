@@ -300,7 +300,7 @@ SELECT 5::COL;
 SELECT 360::HEIGHT;
 SELECT to_colour ::XAXIS, from_colour ::YAXIS, minutes ::HEATMAP,
        'Changeover matrix (minutes, from row to column) — colours from light to dark'::TITLE
-FROM os_seq_matrix ORDER BY to_dark, from_dark DESC;
+FROM os_seq_matrix ORDER BY to_dark, from_dark;
 
 SELECT 12::COL;
 SELECT 'The four sequences'::TITLE,
