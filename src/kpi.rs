@@ -272,34 +272,37 @@ impl Kpi {
 
     /// The tile's natural height in px (its content plus padding) — the
     /// headless layouts size a KPI row to the tallest tile.
-    pub fn height(&self, w: f64) -> f64 {
+    pub fn height(&self) -> f64 {
         PAD * 2.0
             + VALUE_H
             + if self.delta.is_some() { DELTA_H } else { 0.0 }
-            + if self.label_wraps(w) { DELTA_H } else { 0.0 }
+            + if self.label_line() { DELTA_H } else { 0.0 }
             + if self.caption.is_empty() { 0.0 } else { CAP_H }
             + if self.spark.is_empty() { 0.0 } else { SPARK_H }
             + if self.goal.is_some() { GOAL_H } else { 0.0 }
     }
 
-    /// Does the `::DELTA_LABEL` go on its own line (the change and the label
-    /// don't fit side by side in a `w`-wide tile)? Estimated at ~0.58 em per
-    /// glyph of the 13 px text.
-    fn label_wraps(&self, w: f64) -> bool {
-        match (&self.delta, &self.label) {
-            (Some(d), Some(l)) => {
-                let glyphs = (d.text.chars().count() + 2 + l.chars().count()) as f64;
-                glyphs * 7.5 + 6.0 > w - 2.0 * PAD
-            }
-            _ => false,
-        }
+    /// The `::DELTA_LABEL` has its own line under the change (always — so the
+    /// tiles of a strip line up row by row).
+    fn label_line(&self) -> bool {
+        self.delta.is_some() && self.label.is_some()
     }
 
     /// The tile as SVG content (no `<svg>` wrapper) for a `w`×`h` box, the
     /// content block centred vertically: the value, the change line (arrow +
-    /// change in the good/bad colour, then the label muted), the caption, the
+    /// change in the good/bad colour), the label (muted), the caption, the
     /// sparkline and the goal bar.
     pub fn body(&self, w: f64, h: f64, o: &RenderOptions) -> String {
+        self.draw(w, h, o, true)
+    }
+
+    /// [`Kpi::body`] with the content at the top — the tiles of a KPI strip,
+    /// so values, changes, captions and sparklines line up across tiles.
+    pub fn body_top(&self, w: f64, h: f64, o: &RenderOptions) -> String {
+        self.draw(w, h, o, false)
+    }
+
+    fn draw(&self, w: f64, h: f64, o: &RenderOptions, center: bool) -> String {
         let t = &o.theme;
         let c = &t.colors;
         let (fd, fb) = (esc(&t.font.display), esc(&t.font.family));
@@ -307,7 +310,12 @@ impl Kpi {
         // Long values shrink to fit the tile (~0.6em per glyph at weight 800).
         let chars = self.value.chars().count().max(1) as f64;
         let vsize = (inner / (chars * 0.62)).clamp(16.0, 34.0);
-        let mut y = PAD + ((h - self.height(w)).max(0.0) / 2.0);
+        let mut y = PAD
+            + if center {
+                (h - self.height()).max(0.0) / 2.0
+            } else {
+                0.0
+            };
         let mut s = String::new();
         // the theme's KPI number colour (`chrome.kpi_value`; a gradient → its accent)
         let value_fill = match t.chrome.kpi_value.as_str() {
@@ -327,7 +335,7 @@ impl Kpi {
             let col = if d.good { c.positive } else { c.negative };
             // the label beside the change, or on the next line when it
             // doesn't fit (cut with "…" when even that is too narrow)
-            let wraps = self.label_wraps(w);
+            let wraps = self.label_line();
             let label = self
                 .label
                 .as_deref()
@@ -604,9 +612,7 @@ mod tests {
         c2[1] = col(Role::Delta, Value::Na);
         let k2 = Kpi::from_columns(&c2, &en()).unwrap();
         assert!(k2.delta.is_none() && k2.label.is_none());
-        assert!(k2.height(300.0) < k.height(300.0));
-        // a long label wraps in a narrow tile
-        assert!(k.height(160.0) > k.height(600.0));
+        assert!(k2.height() < k.height());
         // a table is never a KPI
         let mut t = cols;
         t.push(col(Role::Table, Value::Na));
@@ -632,7 +638,7 @@ mod tests {
             goal: goal(5.0, 4.0, MetricFmt::Plain, &en()),
             text_card: false,
         };
-        let s = k.body(300.0, k.height(300.0), &o);
+        let s = k.body(300.0, k.height(), &o);
         let c = &o.theme.colors;
         assert!(s.contains("class=\"kpi-delta good\""), "{s}");
         assert!(

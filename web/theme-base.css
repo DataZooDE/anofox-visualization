@@ -293,7 +293,7 @@ body.loading #dp-spinner{display:flex}
 .metric-delta{font-size:.85rem;font-weight:700;margin-top:.2rem;display:inline-flex;align-items:center;gap:.2rem}
 .metric-delta.good{color:var(--ax-positive)}.metric-delta.bad{color:var(--ax-negative)}
 .metric-delta{flex-wrap:wrap;column-gap:.45rem;row-gap:0}
-.metric-delta-label{color:var(--ax-muted);font-weight:500}
+.metric-delta-label{flex-basis:100%;color:var(--ax-muted);font-weight:500}
 .panel svg.metric-spark{display:block;width:100%;max-width:340px;height:34px;margin-top:.5rem;overflow:visible}
 .metric-goal{width:100%;max-width:340px;margin-top:.55rem}
 .metric-goal-bar{height:6px;border-radius:3px;background:var(--ax-line);overflow:hidden}

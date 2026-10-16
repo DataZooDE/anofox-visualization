@@ -1358,9 +1358,7 @@ fn render_inner(
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
     if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
-        let h = height
-            .min(k.height(width as f64).ceil() as u32)
-            .max(MIN_DIM);
+        let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
         return Ok(Panel::Own {
             width,
             height: h,
