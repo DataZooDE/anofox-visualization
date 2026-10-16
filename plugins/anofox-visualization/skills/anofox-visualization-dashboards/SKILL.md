@@ -52,7 +52,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
-`--check` gives each input a default (`SET VARIABLE`: the first option of a single input, every option of a `::MULTISELECT`, both ends of a `::DATERANGE`), so filtered panels are checked with real data. Variables nothing sets (`selected`, a clicked table's key) are unset: guard them with `COALESCE` / `NULLIF` as in the master-detail example. `--json` prints `{"ok": …, "diagnostics": [{"severity", "stmt", "code", "message", "sql"}]}`.
+`--check` gives each input a default (`SET VARIABLE`: the first option of a single input, every option of a `::MULTISELECT`, both ends of a `::DATERANGE`, the default period of a `::PERIOD`), so filtered panels are checked with real data. Variables nothing sets (`selected`, a clicked table's key) are unset: guard them with `COALESCE` / `NULLIF` as in the master-detail example. `--json` prints `{"ok": …, "diagnostics": [{"severity", "stmt", "code", "message", "sql"}]}`.
 
 ## Roles
 
@@ -65,11 +65,11 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` · `::BAND_LOWER` + `::BAND_UPPER` · `::MARKAREA` · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
 | Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
-| KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %, up = green) · `::DELTA_LOWER_GOOD` (the same, but a rise is red: churn, cost, errors) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
+| KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %, up = green) · `::DELTA_LOWER_GOOD` (the same, but a rise is red: churn, cost, errors) · `::DELTA_FORMAT` (`'pct'`/`'abs'`/`'both'`: `▲ 12% (+$1,200)`, `+2.3 pp` for a `::PERCENT`) · `::DELTA_LABEL` (`'vs last month'`, `getvariable('p_prev_label')`) · in a KPI: `list(v ORDER BY d)::SPARKLINE` (trend line), `::GOAL` (progress bar) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
 | Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` (low = good) `::COLORSCALE_HIGH_GOOD` `::COLORSCALE_DIVERGING` (around 0) `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
 | Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) · `'region'::SUBTOTAL` — see *Tables* |
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
-| Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::HINT` |
+| Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` |
 | Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` |
 
@@ -83,7 +83,26 @@ A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue
 - **Drill-down**: `SELECT 'region > country > city'::DRILL;` before a chart → a click goes one level deeper, a breadcrumb goes back. The chart's x is `CASE getvariable('drill_level') WHEN 'region' THEN region WHEN 'country' THEN country ELSE city END`, filtered by `getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)` (each level variable is `''` until drilled past; also `drill_depth`, `drill_path`; `'geo: …'` renames the prefix). **Drill-through**: a `::LINK` column holds a template — `'#Tab?v.x={value}'` (tab + variables), `'/d/<id>?v.x={value}'` (another served dashboard), `'https://…/{value}'` (new browser tab); `{value}` = the clicked key, `{column}` = a table row's column. In a table it renders as a link cell.
 - **The URL is the view**: `?tab=<name>` opens a tab, `?v.<name>=<value>` seeds a variable (an input — only a valid option / number / date —, `selected`, or a named selection; repeat the key for a list: `?v.channel=app&v.channel=web`). The address bar follows every change and **Share** includes it, so a link restores the exact view; use it to link one dashboard to another pre-filtered.
 - **Cross-filter**: a click on a chart mark sets `getvariable('selected')`. **Table rows are clickable only when the table opts in** (`'none'` is the default) with a `::ROWSELECT` directive before it: `SELECT 'single'::ROWSELECT;` (a click sets `getvariable('selected')` and `getvariable('<first column>')`) or `SELECT 'multi'::ROWSELECT;` (rows get check marks; `getvariable('<first column>')` is a list — guard with `len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku)`). Without it rows are not selectable. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
-- Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render skips them.
+- **Period vs previous period** — use one `::PERIOD`, never hand-written date math. The alias is the variable prefix:
+  ```sql
+  SELECT 'presets=7d,30d,90d,mtd,qtd,ytd,last_month; default=30d; compare=prev' AS p ::PERIOD, 'Period'::LABEL;
+  CREATE OR REPLACE MACRO in_period(d) AS d BETWEEN getvariable('p_from')::DATE AND getvariable('p_to')::DATE;
+  CREATE OR REPLACE MACRO in_prev(d) AS d BETWEEN getvariable('p_prev_from')::DATE AND getvariable('p_prev_to')::DATE;
+  SELECT sum(revenue) FILTER (WHERE in_period(day))::MONEY, sum(revenue) FILTER (WHERE in_prev(day))::DELTA, 'Revenue'::LABEL FROM orders;
+  SELECT date_trunc(getvariable('p_grain'), day)::DATE ::XAXIS, sum(revenue)::LINECHART, 'Revenue'::TITLE FROM orders WHERE in_period(day) GROUP BY ALL ORDER BY 1;
+  ```
+  Variables (text): `p_from`, `p_to`, `p_prev_from`, `p_prev_to` (NULL with "No comparison"), `p_grain` (`day`/`week`/`month`/`quarter`), `p_compare` (`none`/`prev`/`yoy`), `p_label` ("Sep 2026"), `p_prev_label` ("vs Aug 2026"). Spec keys: `presets` (`Nd`, `Nw`, `Nm`, `today`, `yesterday`, `wtd`, `mtd`, `qtd`, `ytd`, `last_week`, `last_month`, `last_quarter`, `last_year`), `default`, `from`/`to`, `grain` (`auto`), `grains` (`none` hides the switch), `compare` (`prev`/`yoy`/`none`), `today` (pin it for fixed sample data). Bad specs → `period/bad-spec`.
+- **KPI tile with change, trend and goal** (one statement; `NULL` comparison → no change line):
+
+  ```sql
+  SELECT sum(rev) FILTER (WHERE cur)::MONEY, sum(rev) FILTER (WHERE prev)::DELTA, 'both'::DELTA_FORMAT,
+         getvariable('p_prev_label')::DELTA_LABEL, list(rev ORDER BY b) FILTER (WHERE cur)::SPARKLINE,
+         750000::GOAL, 'Revenue'::LABEL
+  FROM (SELECT date_trunc(getvariable('p_grain'), day) AS b, in_period(day) AS cur, coalesce(in_prev(day), false) AS prev,
+               sum(revenue) AS rev FROM orders GROUP BY ALL);
+  ```
+  Lint: `kpi/bad-delta-format`, `kpi/no-delta`, `kpi/sparkline-not-list`.
+- Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render draws no controls but binds each input's default.
 
 ## Tables
 
@@ -154,7 +173,7 @@ FROM sales GROUP BY ALL ORDER BY 2 DESC;
 - **Variant.** No `::THEME`, or `'x+dark'`, follows the viewer (OS setting, the 🌙 toggle, `?theme=dark`); `'light'` / `'dark'` / `'print'` alone pin it. Charts are re-rendered dark, not just the cards.
 - **A corporate theme** is a JSON object (`{"extends":"light","palette":[…],"colors":{"accent":"#0b5fff",…},"chrome":{"negatives":"parens","zero":"dash",…},"brand":{…},"dark":{…}}`) — from a file (`SELECT content::THEME FROM read_text('acme.json')`), a table (`SELECT to_json(t)::THEME FROM themes t WHERE name = 'acme'`) or inline. Colours must be `#rrggbb`; unknown keys are an error. Full key list: `docs/DOCS.md` → *Themes*.
 - **The "Powered by DataZoo GmbH" credit is mandatory**: shown under every theme and in every output; author branding is added next to it, and no role, theme key or option hides or replaces it.
-- `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
+- `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `period/bad-spec`, `kpi/bad-delta-format`, `kpi/no-delta`, `kpi/sparkline-not-list`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
 - For interactions it reports `interaction/bad-value` (a malformed `::SELECT_AS` / `::DRILL` value), `interaction/name-clash` (an input, a `::SELECT_AS` and a `::DRILL` level writing the same variable — rename one) and `link/bad-url` (a `::LINK` that is not `#tab`, `?…`, a path or http(s)); it primes `::SELECT_AS` / `::DRILL` variables to "nothing selected / top level" like the browser.
 - `dashboard --themes` lists the built-ins; `dashboard file.sql --theme dark` / `serve … --theme T` set a default the script's `::THEME` overrides.
 

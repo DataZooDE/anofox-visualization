@@ -57,3 +57,13 @@ fn web_url_state_is_validated() {
 fn web_chart_interactions() {
     run_node("interaction_test.mjs");
 }
+
+#[test]
+fn web_period_control_matches_the_rust_vectors() {
+    run_node("period_test.mjs");
+}
+
+#[test]
+fn web_kpi_tile_parts() {
+    run_node("kpi_test.mjs");
+}

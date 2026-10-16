@@ -591,6 +591,27 @@ fn render_dashboard_page(
             .iter()
             .map(|(_, r)| *r)
             .find(|r| anofox_visualization::roles::is_chrome_directive(*r));
+        // An input binds its default (as the browser does on first load) so
+        // the getvariable() panels read it — unless a whitelisted `-- @param`
+        // already sets that variable.
+        if let Some(kind) = anofox_visualization::inputs::input_kind(&panel.roles) {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
+                panel.sql.trim().trim_end_matches(';'),
+                st.max_rows
+            );
+            let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
+            let rows: Rows = sql::parse_rows_json(json.trim())?;
+            let idx = anofox_visualization::inputs::input_index(&panel.roles);
+            for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
+                let name = set.split('"').nth(1).unwrap_or("");
+                if !resolved.iter().any(|(n, _)| n == name) {
+                    prefix.push_str(&set);
+                    prefix.push_str("; ");
+                }
+            }
+            continue;
+        }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()

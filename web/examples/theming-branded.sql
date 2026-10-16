@@ -42,36 +42,50 @@ SELECT d.day, r.region, c.channel, p.product,
            * CASE WHEN r.region = 'West' AND p.product = 'Monitors' THEN 2.2 ELSE 1 END AS return_rate  -- a bad monitor batch in the West
 FROM d, r, c, p;
 
--- The analysis window: the selected period ending on the last day of data, and
--- the window of the same length right before it.
-CREATE OR REPLACE MACRO acme_days() AS
-    CASE getvariable('period') WHEN 'Last 30 days' THEN 30 WHEN 'Last 90 days' THEN 91 ELSE 365 END;
-CREATE OR REPLACE MACRO acme_cur(d) AS d > DATE '2026-09-30' - acme_days();
-CREATE OR REPLACE MACRO acme_prev(d) AS d <= DATE '2026-09-30' - acme_days() AND d > DATE '2026-09-30' - 2 * acme_days();
+-- The analysis window: the ::PERIOD below (alias `period`) sets period_from /
+-- period_to and the comparison window period_prev_from / period_prev_to (NULL
+-- when the viewer picks "No comparison" — then the KPIs show no delta).
+CREATE OR REPLACE MACRO acme_cur(d) AS
+    d BETWEEN getvariable('period_from')::DATE AND getvariable('period_to')::DATE;
+CREATE OR REPLACE MACRO acme_prev(d) AS
+    d BETWEEN getvariable('period_prev_from')::DATE AND getvariable('period_prev_to')::DATE;
 CREATE OR REPLACE MACRO acme_in(rg, ch) AS
     getvariable('region') IN ('All regions', rg) AND list_contains(getvariable('channel'), ch);
 
 -- ── Filters (header, above the tabs) ─────────────────────────────────────────
 SELECT 'Filters'::GROUP;
-SELECT period ::DROPDOWN, 'Period'::LABEL FROM (VALUES (1, 'Last 12 months'), (2, 'Last 90 days'), (3, 'Last 30 days')) t(k, period) ORDER BY k;
+-- today= pins "today" to the last day of the data (a real dashboard leaves it out).
+SELECT 'presets=12m,90d,30d,qtd,ytd,last_month,last_quarter; default=12m; grains=none; today=2026-09-30' AS period ::PERIOD, 'Period'::LABEL;
 SELECT region ::DROPDOWN, 'Region'::LABEL FROM (SELECT 0 AS k, 'All regions' AS region UNION ALL SELECT DISTINCT 1, region FROM acme_orders) ORDER BY k, region;
 SELECT DISTINCT channel ::MULTISELECT, 'Channels'::LABEL FROM acme_orders ORDER BY channel;
 SELECT 1::ENDGROUP;
 
 -- ── KPIs: the period vs the one before ───────────────────────────────────────
+-- Each KPI compares with the previous period (::DELTA), says so
+-- (::DELTA_LABEL — the period's own "vs Sep 2024 – Aug 2025"), shows the
+-- change as a % and/or in its own unit (::DELTA_FORMAT), and the revenue and
+-- orders carry a monthly trend line (::SPARKLINE); the margin has a goal.
+CREATE OR REPLACE MACRO acme_monthly() AS TABLE
+SELECT date_trunc('month', day) AS m, sum(revenue) AS rev, sum(revenue / aov) AS n
+FROM acme_orders WHERE acme_in(region, channel) AND acme_cur(day) GROUP BY ALL;
 SELECT 'vs. the previous period'::GROUP;
-SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'Revenue'::LABEL
+SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'both'::DELTA_FORMAT,
+       getvariable('period_prev_label')::DELTA_LABEL, (SELECT list(rev ORDER BY m) FROM acme_monthly())::SPARKLINE, 'Revenue'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
-SELECT round(sum(revenue / aov) FILTER (WHERE acme_cur(day)))::COMPACT, sum(revenue / aov) FILTER (WHERE acme_prev(day))::DELTA, 'Orders'::LABEL
+SELECT round(sum(revenue / aov) FILTER (WHERE acme_cur(day)))::COMPACT, sum(revenue / aov) FILTER (WHERE acme_prev(day))::DELTA,
+       getvariable('period_prev_label')::DELTA_LABEL, (SELECT list(n ORDER BY m) FROM acme_monthly())::SPARKLINE, 'Orders'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (sum(revenue) FILTER (WHERE acme_cur(day)) / sum(revenue / aov) FILTER (WHERE acme_cur(day)))::MONEY,
-       (sum(revenue) FILTER (WHERE acme_prev(day)) / sum(revenue / aov) FILTER (WHERE acme_prev(day)))::DELTA, 'Average order'::LABEL
+       (sum(revenue) FILTER (WHERE acme_prev(day)) / sum(revenue / aov) FILTER (WHERE acme_prev(day)))::DELTA, 'abs'::DELTA_FORMAT,
+       getvariable('period_prev_label')::DELTA_LABEL, 'Average order'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue * margin_pct) FILTER (WHERE acme_cur(day)) / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
-       (100 * sum(revenue * margin_pct) FILTER (WHERE acme_prev(day)) / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'Gross margin'::LABEL
+       (100 * sum(revenue * margin_pct) FILTER (WHERE acme_prev(day)) / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'abs'::DELTA_FORMAT,
+       getvariable('period_prev_label')::DELTA_LABEL, 40::GOAL, 'Gross margin'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue) FILTER (WHERE acme_cur(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
-       (100 * sum(revenue) FILTER (WHERE acme_prev(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'Software share'::LABEL
+       (100 * sum(revenue) FILTER (WHERE acme_prev(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA,
+       getvariable('period_prev_label')::DELTA_LABEL, 'Software share'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT 1::ENDGROUP;
 

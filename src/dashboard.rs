@@ -20,7 +20,7 @@
 //! ```
 
 use crate::format::escape_xml as esc;
-use crate::format::{format_number_l, Locale};
+use crate::format::Locale;
 use crate::sql::contract_call;
 use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant, CREDIT_TEXT, CREDIT_URL};
 use crate::{
@@ -148,6 +148,17 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             chrome.apply(r, v);
             continue;
         }
+        // An input renders nothing headless, but its default value is bound
+        // (`SET VARIABLE`) so downstream getvariable() panels read it — the
+        // same default the browser picks on first load.
+        if crate::inputs::input_kind(&panel.roles).is_some() {
+            if let Ok(rows) = provider.query(&panel.sql) {
+                for set in crate::inputs::panel_defaults(&panel.roles, &rows) {
+                    provider.execute(&set).ok();
+                }
+            }
+            continue;
+        }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
         let layout =
             has(&|r| matches!(r, Role::Columns | Role::Span | Role::Height | Role::Section));
@@ -212,7 +223,24 @@ fn render_inner(
         *row_units = 0;
     };
 
-    for step in &steps {
+    // KPI tiles (not text cards), for the KPI strip.
+    let tiles: Vec<Option<crate::kpi::Kpi>> = steps
+        .iter()
+        .map(|st| {
+            let rows = st.rows.as_ref().ok()?;
+            if st.panel.contract.is_some() {
+                return None;
+            }
+            let cols = columns_from_result(rows, &st.panel.roles);
+            crate::kpi::Kpi::from_columns(&cols, &ropts.locale).filter(|k| !k.text_card)
+        })
+        .collect();
+    // A run of >= 2 consecutive KPI tiles (a ::GROUP of KPIs, or the
+    // browser's auto-strip) shares one row, split evenly (≤ 6 per row):
+    // (tiles left, tiles per row, tile width, tile height).
+    let mut strip: Option<(usize, usize, f64, f64)> = None;
+
+    for (si, step) in steps.iter().enumerate() {
         let panel = &step.panel;
         let roles = &panel.roles;
         let has = |r: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, role)| r(role));
@@ -315,32 +343,88 @@ fn render_inner(
             continue;
         }
 
+        // A KPI strip starts: the run's tiles side by side, as tall as the
+        // tallest tile.
+        if strip.is_none() && next_span == 0 && tiles[si].is_some() {
+            let run: Vec<&crate::kpi::Kpi> = tiles[si..].iter().map_while(|t| t.as_ref()).collect();
+            if run.len() >= 2 {
+                if row_units > 0 {
+                    new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+                }
+                let per_row = run.len().min(6);
+                let tw = (content_w + gap) / per_row as f64 - gap;
+                let th = run.iter().fold(96.0f64, |a, k| a.max(k.height()));
+                strip = Some((run.len(), per_row, tw, th));
+            }
+        }
         // Compute geometry.
-        let span = if next_span == 0 {
-            default_span
-        } else {
-            next_span.clamp(1, 12)
+        let span = match strip {
+            Some(_) => 0,
+            None if next_span == 0 => default_span,
+            None => next_span.clamp(1, 12),
         };
         next_span = 0;
-        let ch = if next_height > 0 {
-            next_height as f64
-        } else {
-            opts.panel_height as f64
+        let md = markdown_text(rows, roles);
+        let ch = match strip {
+            _ if next_height > 0 => next_height as f64,
+            Some((_, _, _, th)) => th,
+            // a ::MARKDOWN box: as tall as its wrapped text (≤ the default)
+            None => match &md {
+                Some(t) => {
+                    let mw = if span == 0 {
+                        content_w
+                    } else {
+                        unit_w * span as f64 - gap
+                    };
+                    let title = roles.iter().any(|(_, r)| matches!(r, Role::Title));
+                    let lines = markdown_lines(t, mw).len() as f64;
+                    (lines * MD_LINE + if title { 26.0 } else { 0.0 } + 26.0)
+                        .min(opts.panel_height as f64)
+                }
+                None => opts.panel_height as f64,
+            },
         };
         next_height = 0;
-        let cw = (unit_w * span as f64) - gap;
+        // The strip's last tile closes its row.
+        let strip_ends = match &mut strip {
+            Some((left, _, _, _)) => {
+                *left -= 1;
+                *left == 0
+            }
+            None => false,
+        };
+        let (cw, advance, units) = match strip {
+            Some((_, _, tw, _)) => (tw, tw + gap, 1),
+            None => ((unit_w * span as f64) - gap, unit_w * span as f64, span),
+        };
 
-        if row_units + span > 12 {
+        let full = match strip {
+            Some(_) => x + cw > pad + content_w + 0.5,
+            None => row_units + span > 12,
+        };
+        if full {
             new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
         }
 
         // Render the panel body to an inner SVG sized (cw, ch).
-        let inner = render_panel_svg(rows, roles, Place::At(x, row_y), cw, ch, &ropts);
+        let inner = render_panel_svg(
+            rows,
+            roles,
+            Place::At(x, row_y),
+            cw,
+            ch,
+            &ropts,
+            strip.is_some(),
+        );
         placed.push((x, row_y, cw, ch, inner));
 
-        x += unit_w * span as f64;
-        row_units += span;
+        x += advance;
+        row_units += units;
         row_h = row_h.max(ch);
+        if strip_ends {
+            strip = None;
+            new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+        }
     }
     // The mandatory credit line, below the last row.
     let credit_y = row_y + row_h + gap + 14.0;
@@ -458,6 +542,7 @@ fn render_panel_svg(
     w: f64,
     h: f64,
     ropts: &RenderOptions,
+    kpi_top: bool,
 ) -> String {
     let cols = columns_from_result(rows, roles);
     // Title bar (::TITLE) eats a strip off the top.
@@ -480,42 +565,53 @@ fn render_panel_svg(
         return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
     }
 
-    // A KPI / text card.
-    if let Some((i, fmt)) = roles.iter().find_map(|(i, r)| match r {
-        Role::Metric(f) => Some((*i, Some(*f))),
-        Role::Text(_) => Some((*i, None)),
-        _ => None,
-    }) {
-        let raw = column_at(rows, i).and_then(|(_, v)| v.first());
-        let val = match fmt {
-            Some(f) => raw
-                .and_then(|v| v.as_f64())
-                .map(|n| format_number_l(n, f, &ropts.locale))
-                .unwrap_or_else(|| "–".into()),
-            None => raw.map(value_str).unwrap_or_default(),
-        };
-        let cap = roles
-            .iter()
-            .find(|(_, r)| matches!(r, Role::Label))
-            .and_then(|(i, _)| column_at(rows, *i))
-            .and_then(|(_, v)| v.first())
-            .map(value_str)
-            .unwrap_or_default();
-        let cy = h / 2.0;
-        let t = &ropts.theme;
+    // A KPI / text card — the shared tile (crate::kpi), also used by the
+    // static HTML.
+    if let Some(k) = crate::kpi::Kpi::from_columns(&cols, &ropts.locale) {
         return format!(
-            "{open}<text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"{fd}\" font-size=\"34\" font-weight=\"800\" fill=\"{ink}\">{v}</text>\
-             <text x=\"{pad}\" y=\"{cy2:.0}\" font-family=\"{fb}\" font-size=\"13\" font-weight=\"600\" fill=\"{muted}\">{c}</text></svg>",
-            open = svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
-            fd = esc(&t.font.display),
-            fb = esc(&t.font.family),
-            ink = hex(t.colors.ink),
-            muted = hex(t.colors.muted),
-            ty = cy,
-            cy2 = cy + 24.0,
-            v = esc(&val),
-            c = esc(&cap),
+            "{}{}</svg>",
+            svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
+            if kpi_top {
+                k.body_top(w, h, ropts)
+            } else {
+                k.body(w, h, ropts)
+            }
         );
+    }
+
+    // A ::MARKDOWN box: its text, plain and wrapped (no rich formatting
+    // headless), under the title.
+    if let Some(md) = markdown_text(rows, roles) {
+        let t = &ropts.theme;
+        let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
+        if let Some(tt) = &title {
+            svg.push_str(&format!(
+                "<text x=\"{pad}\" y=\"20\" font-family=\"{}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
+                esc(&t.font.display),
+                hex(t.colors.heading),
+                esc(tt),
+            ));
+        }
+        svg.push_str(&format!(
+            "<g class=\"md-text\" font-family=\"{}\" font-size=\"13\" fill=\"{}\">",
+            esc(&t.font.family),
+            hex(t.colors.ink)
+        ));
+        let mut y = title_h + 22.0;
+        for line in markdown_lines(&md, w) {
+            if y > h - 8.0 {
+                break;
+            }
+            if !line.is_empty() {
+                svg.push_str(&format!(
+                    "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                    esc(&line)
+                ));
+            }
+            y += MD_LINE;
+        }
+        svg.push_str("</g></svg>");
+        return svg;
     }
 
     // Otherwise a chart — render at the content area, then wrap with a title.
@@ -798,4 +894,79 @@ fn table_svg(
     }
     s.push_str("</g></svg>");
     s
+}
+
+/// Line height of a headless ::MARKDOWN box.
+const MD_LINE: f64 = 18.0;
+
+/// The text of a ::MARKDOWN panel, if it is one.
+fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+    let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Markdown))?;
+    column_at(rows, *i)
+        .and_then(|(_, v)| v.first())
+        .map(value_str)
+}
+
+/// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
+/// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
+/// separated by an empty line.
+fn markdown_lines(md: &str, w: f64) -> Vec<String> {
+    let max = (((w - 28.0) / 6.6).floor() as usize).max(10);
+    let mut out: Vec<String> = Vec::new();
+    for para in md.split("\n\n") {
+        let mut plain = String::new();
+        let mut rest = para.trim();
+        // [text](url) → text
+        while let Some(a) = rest.find('[') {
+            let Some(b) = rest[a..].find("](").map(|b| a + b) else {
+                break;
+            };
+            let Some(c) = rest[b..].find(')').map(|c| b + c) else {
+                break;
+            };
+            plain.push_str(&rest[..a]);
+            plain.push_str(&rest[a + 1..b]);
+            rest = &rest[c + 1..];
+        }
+        plain.push_str(rest);
+        let plain = plain.replace(['*', '`'], "").replace("__", "");
+        let words: Vec<&str> = plain
+            .split_whitespace()
+            .filter(|w| !w.chars().all(|c| c == '#'))
+            .collect();
+        if words.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        let mut line = String::new();
+        for wd in words {
+            if !line.is_empty() && line.chars().count() + 1 + wd.chars().count() > max {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(wd);
+        }
+        out.push(line);
+    }
+    out
+}
+
+#[cfg(test)]
+mod md_tests {
+    #[test]
+    fn markdown_is_plain_and_wrapped() {
+        let l = super::markdown_lines(
+            "## Hi\n\nOne **bold** and `code` with a [link](https://x.y) — and a longer tail.",
+            200.0,
+        );
+        assert_eq!(l[0], "Hi");
+        assert_eq!(l[1], "");
+        assert!(l[2].starts_with("One bold and code with a"), "{l:?}");
+        assert!(l.iter().all(|x| x.chars().count() <= 26), "{l:?}");
+        assert!(l.join(" ").contains("link —"), "{l:?}");
+    }
 }

@@ -14,6 +14,8 @@ import init, {
   page_sql,
   table_profile,
   human_header,
+  period_resolve,
+  kpi_parts,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -898,6 +900,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // scripts/gen-showcase-data.sh) because their extension can't run in
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
+  { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
   { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
   { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
@@ -2004,7 +2007,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
-let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
@@ -2847,6 +2850,18 @@ async function runOnce(fresh = true) {
             : lr
               ? String(rows[0]["c" + lr[0]] ?? "")
               : "";
+        if (kind === "PERIOD") {
+          // ::PERIOD: the spec string's column (its alias = the variable
+          // prefix); the viewer's choice lives in dpVars[col] as an object.
+          const keys = Object.keys(rows[0]);
+          const col = keys[s.roles.find((r) => r[1] === "PERIOD")[0]] ?? keys[0];
+          const st = dpVars[col];
+          const res = periodResolve(String(rows[0][col] ?? ""), col, st && typeof st === "object" && !Array.isArray(st) ? st : {});
+          if (!res.vars) throw new Error("::PERIOD: " + (res.errors || []).join("; "));
+          dd[i] = { kind, varname: col, res, caption };
+          for (const q of periodSets(res.prefix, res.vars)) await runSql(q);
+          continue;
+        }
         if (kind === "DATERANGE") {
           const keys = Object.keys(rows[0]);
           const fk = keys[0];
@@ -3400,27 +3415,54 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
-          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost, errors)
+          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost,
+          // errors). ::DELTA_FORMAT / ::DELTA_LABEL shape the change line;
+          // ::SPARKLINE (a list) draws a trend, ::GOAL/::TARGET a progress bar.
+          // The texts come from Rust (wasm kpi_parts = the headless tile).
           const dr = s.roles.find((r) => r[1] === "DELTA" || r[1] === "DELTA_LOWER_GOOD");
+          const cell = (tok) => {
+            const r = s.roles.find((x) => x[1] === tok);
+            return r ? r0["c" + r[0]] : null;
+          };
           const fig = mkPanel();
           fig.classList.add("metric");
+          let parts = {};
+          try {
+            parts = JSON.parse(
+              kpi_parts(
+                JSON.stringify({
+                  value: r0["c" + mr[0]],
+                  prev: dr ? r0["c" + dr[0]] : null,
+                  goal: cell("REFLINE"),
+                  fmt: mr[1],
+                  delta_format: String(cell("DELTA_FORMAT") ?? ""),
+                  lower_good: !!dr && dr[1] === "DELTA_LOWER_GOOD",
+                  locale: dashLocale() || "",
+                }),
+              ),
+            );
+          } catch (_) {}
           let deltaHtml = "";
-          if (dr) {
-            const cur = parseFloat(r0["c" + mr[0]]);
-            const prev = parseFloat(r0["c" + dr[0]]);
-            if (!isNaN(cur) && !isNaN(prev) && prev !== 0) {
-              const pct = ((cur - prev) / Math.abs(prev)) * 100;
-              const up = pct >= 0;
-              const good = dr[1] === "DELTA_LOWER_GOOD" ? !up : up;
-              deltaHtml =
-                `<div class="metric-delta ${good ? "good" : "bad"}" title="${good ? "better" : "worse"} than the comparison">${up ? "▲" : "▼"} ` +
-                `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
-            }
+          const d = parts.delta;
+          if (d) {
+            const lab = cell("DELTA_LABEL");
+            deltaHtml =
+              `<div class="metric-delta ${d.good ? "good" : "bad"}" title="${d.good ? "better" : "worse"} than the comparison">` +
+              `<span class="metric-delta-chg">${d.arrow} ${escapeHtml(d.text)}</span>` +
+              (lab != null && String(lab).trim() ? `<span class="metric-delta-label">${escapeHtml(lab)}</span>` : "") +
+              `</div>`;
           }
+          const g = parts.goal;
+          const goalHtml = g
+            ? `<div class="metric-goal${g.reached ? " reached" : ""}"><div class="metric-goal-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(g.frac * 100)}" aria-label="${escapeHtml(g.text)}">` +
+              `<span style="width:${Math.max(0, Math.min(1, g.frac)) * 100}%"></span></div><div class="metric-goal-text">${escapeHtml(g.text)}</div></div>`
+            : "";
           fig.innerHTML =
             `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
-            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
+            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>` +
+            kpiSpark(cell("SPARKLINE")) +
+            goalHtml;
           container.appendChild(fig);
           panels++;
         } else {
@@ -3568,7 +3610,126 @@ function installMsAutoClose() {
   });
 }
 
+// ::PERIOD — every date computation is Rust (wasm period_resolve, src/period.rs);
+// JS keeps only the viewer's choice and binds the resolved variables.
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function periodResolve(spec, column, state) {
+  try {
+    return JSON.parse(period_resolve(spec, JSON.stringify({ ...state, column, today: localToday() })));
+  } catch (e) {
+    return { ok: false, errors: [String(e)] };
+  }
+}
+// The SET VARIABLE statements for a resolved period (unquoted names — the
+// served mode captures them by that shape; NULL without a comparison).
+function periodSets(prefix, vars) {
+  return Object.entries(vars).map(
+    ([k, v]) => `SET VARIABLE ${prefix}_${k} = ${v == null ? "NULL" : `'${String(v).replace(/'/g, "''")}'`}`
+  );
+}
+function makePeriodControl(meta, bar) {
+  const res = meta.res;
+  const key = meta.varname;
+  const commit = (patch) => {
+    const cur = dpVars[key] && typeof dpVars[key] === "object" ? dpVars[key] : {};
+    dpVars[key] = { ...cur, ...patch };
+    run(false);
+  };
+  const cont = document.createElement("div");
+  cont.className = "control dp-period";
+  cont.setAttribute("role", "group");
+  const capText = meta.caption || "Period";
+  cont.setAttribute("aria-label", capText);
+  const cap = document.createElement("span");
+  cap.textContent = capText + ":";
+  cont.appendChild(cap);
+
+  const sel = document.createElement("select");
+  sel.className = "dp-period-preset";
+  sel.setAttribute("aria-label", "Date range");
+  for (const p of res.presets) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label;
+    if (p.id === res.preset) o.selected = true;
+    sel.appendChild(o);
+  }
+  // Switching to "Custom range" starts from the range on screen.
+  sel.onchange = () => commit(sel.value === "custom" ? { preset: "custom", from: res.from, to: res.to } : { preset: sel.value });
+  cont.appendChild(sel);
+
+  if (res.preset === "custom") {
+    const mk = (k, label) => {
+      const inp = document.createElement("input");
+      inp.type = "date";
+      inp.value = res[k] || "";
+      inp.setAttribute("aria-label", label);
+      inp.onchange = () => {
+        if (inp.value) commit({ preset: "custom", from: res.from, to: res.to, [k]: inp.value });
+      };
+      return inp;
+    };
+    const arrow = document.createElement("span");
+    arrow.textContent = "→";
+    arrow.className = "daterange-arrow";
+    cont.append(mk("from", "From"), arrow, mk("to", "To"));
+  }
+
+  // The grain switch (grains=none in the spec hides it).
+  if (res.grains && res.grains.length) {
+    const seg = document.createElement("div");
+    seg.className = "dp-seg";
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "Time grain");
+    for (const g of res.grains) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = g[0].toUpperCase() + g.slice(1);
+      b.setAttribute("aria-pressed", String(g === res.grain));
+      if (g === res.grain && res.grain_auto) b.title = "Picked for this range — click to keep it";
+      b.onclick = () => commit({ grain: g });
+      seg.appendChild(b);
+    }
+    cont.appendChild(seg);
+  }
+
+  const cmp = document.createElement("select");
+  cmp.className = "dp-period-compare";
+  cmp.setAttribute("aria-label", "Compare with");
+  for (const c of res.compares) {
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = c.label;
+    if (c.id === res.compare) o.selected = true;
+    cmp.appendChild(o);
+  }
+  cmp.onchange = () => commit({ compare: cmp.value });
+  cont.appendChild(cmp);
+
+  const txt = document.createElement("span");
+  txt.className = "dp-period-range";
+  txt.setAttribute("aria-live", "polite");
+  const b = document.createElement("b");
+  b.textContent = res.vars.label;
+  txt.appendChild(b);
+  if (res.vars.prev_label) txt.appendChild(document.createTextNode(" " + res.vars.prev_label));
+  cont.appendChild(txt);
+
+  if (!res.ok && res.errors && res.errors.length) {
+    const e = document.createElement("span");
+    e.className = "dp-period-err";
+    e.textContent = "⚠ " + res.errors[0];
+    e.title = res.errors.join("\n");
+    cont.appendChild(e);
+  }
+  return finalizeControl(cont, bar);
+}
+
 function makeControl(meta, bar) {
+  if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
   wrap.className = "control";
   wrap.textContent = (meta.caption || meta.varname || "date") + ":";
@@ -5560,6 +5721,40 @@ function cellSpark(v) {
     `<polygon points="${area}" fill="var(--ax-spark)" fill-opacity="0.1"/>` +
     `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
     `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
+  );
+}
+
+// A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
+// value, stretched to the tile's width (non-scaling strokes), the last point
+// marked. "" without ≥ 2 numbers.
+function kpiSpark(v) {
+  let arr = Array.isArray(v) ? v : null;
+  if (!arr && typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) arr = p;
+    } catch (_) {}
+  }
+  const nums = (arr || []).filter((x) => x != null && x !== "").map(Number).filter((x) => isFinite(x));
+  if (nums.length < 2) return "";
+  const w = 200;
+  const h = 36;
+  const pad = 3;
+  const mn = Math.min(...nums);
+  const mx = Math.max(...nums);
+  const rng = mx - mn || 1;
+  const xs = (i) => (i * w) / (nums.length - 1);
+  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
+  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
+  const lx = xs(nums.length - 1).toFixed(1);
+  const ly = ys(nums[nums.length - 1]).toFixed(1);
+  const f = (n) => fmtNum(n, "COMPACT");
+  const tip = `${f(nums[0])} → ${f(nums[nums.length - 1])} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
+  return (
+    `<svg class="metric-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(tip)}"><title>${escapeHtml(tip)}</title>` +
+    `<polygon points="0,${h} ${pts} ${w},${h}" fill="var(--ax-spark)" fill-opacity="0.12"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
+    `<path d="M${lx} ${ly}h0" stroke="var(--ax-spark-dot)" stroke-width="5.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`
   );
 }
 

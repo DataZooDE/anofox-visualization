@@ -71,7 +71,7 @@ terminal.
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
-| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value |
+| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar |
 | `::XLINE` |  | annotation | vertical reference line at an x |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
@@ -98,6 +98,8 @@ terminal.
 | `::COMPACT` |  | kpi | compact-number KPI / table column format (1.2K) |
 | `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI (up = good) |
 | `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
+| `::DELTA_FORMAT` | `::DELTAFORMAT` | kpi | how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both' |
+| `::DELTA_LABEL` | `::DELTALABEL`, `::COMPARE_LABEL` | kpi | what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label') |
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
@@ -120,6 +122,7 @@ terminal.
 | `::DATE` | `::DATEPICKER` | input | date picker (value = default) |
 | `::TEXT` | `::SEARCH`, `::STRING` | input | free-text input (value = default) |
 | `::DATERANGE` | `::DATE_RANGE` | input | two date columns → from/to variables |
+| `::PERIOD` | `::PERIOD_PICKER`, `::DATE_PERIOD` | input | date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
@@ -179,8 +182,106 @@ the variable can stay a short identifier:
 SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
 ```
 
-Inputs work in the **browser builder** and **`serve`** (they re-query on change);
-the static CLI runner skips them.
+Inputs work in the **browser builder** and **`serve`** (they re-query on change).
+The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
+`serve --dashboards` page) draw no control but bind each input's **default**
+(the first option, every option of a `::MULTISELECT`, both ends of a
+`::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
+render as on first load in the browser.
+
+### Periods: presets, grain and comparison (`::PERIOD`)
+
+One input for "this period vs the previous one": a date range from presets
+(or a custom range), a time grain and a comparison. The statement is a spec
+string; the column's **alias is the variable prefix**:
+
+```sql
+SELECT 'presets=7d,30d,90d,mtd,qtd,ytd,last_month; default=30d; compare=prev' AS p ::PERIOD,
+       'Period'::LABEL;
+
+CREATE OR REPLACE MACRO in_period(d) AS d BETWEEN getvariable('p_from')::DATE AND getvariable('p_to')::DATE;
+CREATE OR REPLACE MACRO in_prev(d)   AS d BETWEEN getvariable('p_prev_from')::DATE AND getvariable('p_prev_to')::DATE;
+
+SELECT sum(revenue) FILTER (WHERE in_period(day))::MONEY,
+       sum(revenue) FILTER (WHERE in_prev(day))::DELTA, 'Revenue'::LABEL FROM orders;
+SELECT date_trunc(getvariable('p_grain'), day)::DATE ::XAXIS, sum(revenue)::LINECHART,
+       'Revenue per ' || getvariable('p_grain')::TITLE
+FROM orders WHERE in_period(day) GROUP BY ALL ORDER BY 1;
+```
+
+The control is a preset menu (*Last 30 days*, *Month to date*, …, *Custom range*
+with two date pickers), a Day / Week / Month / Quarter switch, a comparison menu
+(*No comparison* / *Previous period* / *Same period last year*) and the resolved
+range as text. It sets eight variables, all **text** (cast dates with `::DATE`;
+ranges are inclusive):
+
+| Variable | Value |
+|---|---|
+| `<p>_from`, `<p>_to` | the selected range, `YYYY-MM-DD` |
+| `<p>_prev_from`, `<p>_prev_to` | the comparison window — `NULL` with *No comparison* (a `::DELTA` over it is then empty) |
+| `<p>_grain` | `day` \| `week` \| `month` \| `quarter` — for `date_trunc(getvariable('<p>_grain'), d)` |
+| `<p>_compare` | `none` \| `prev` \| `yoy` |
+| `<p>_label` | the range in words: `Sep 2026`, `Q3 2026`, `Sep 1 – 15, 2026` |
+| `<p>_prev_label` | `vs Aug 2026`, `vs Aug 2 – 31, 2026` (`NULL` without a comparison) |
+
+Spec keys (`key=value; …`, all optional — an empty string gives presets
+`7d,30d,90d,mtd,qtd,ytd`, the first as default, an automatic grain and
+`compare=prev`):
+
+| Key | Values |
+|---|---|
+| `presets` | comma list: `Nd` / `Nw` / `Nm` (the last N days / weeks / months, ending today), `today`, `yesterday`, `wtd` (ISO week, from Monday), `mtd`, `qtd`, `ytd`, `last_week`, `last_month`, `last_quarter`, `last_year`; *Custom range* is always offered |
+| `default` | the preset selected first (default: the first one); `custom` with `from=` / `to=` |
+| `from`, `to` | an initial custom range (`YYYY-MM-DD`) |
+| `grain` | `auto` (default: ≤ 31 days daily, ≤ 120 weekly, ≤ 730 monthly, else quarterly), `day`, `week`, `month`, `quarter` |
+| `grains` | the grains the switch offers (`day,week,month`); `none` hides the switch |
+| `compare` | `prev` (default), `yoy`, `none` |
+| `today` | pin "today" (reproducible examples / tests); default: the viewer's local date in the browser, the UTC date headless |
+
+The comparison window: for a rolling preset (`30d`) and a custom range, the
+window of the same length right before it; for `wtd` / `mtd` / `qtd` / `ytd`,
+the same span of the previous week / month / quarter / year (a month end stays
+a month end: *month to date* on Mar 31 compares with Feb 1 – 28); for
+`last_month` & co., the month / quarter / … before. `yoy` moves both ends back
+one year (Feb 29 → Feb 28). All of it is computed in one place (Rust,
+`src/period.rs`; the browser calls it through wasm). `dashboard --check`
+reports a bad spec (unknown key, preset, grain or compare, a bad date) as
+`period/bad-spec`; the control then falls back to its defaults.
+
+### KPI tiles: change, trend and goal
+
+A KPI is one statement with a `::METRIC` / `::MONEY` / `::PERCENT` /
+`::COMPACT` column; more columns of the same statement add to the tile:
+
+| Column | Shows |
+|---|---|
+| `::LABEL` | the caption |
+| `::DELTA` / `::DELTA_LOWER_GOOD` | the comparison value → `▲`/`▼` and the change, green when it moves the good way (for `::DELTA_LOWER_GOOD` a fall is good). `NULL` (e.g. a `::PERIOD` with *No comparison*) → no change line |
+| `::DELTA_FORMAT` | `'pct'` (default) `▲ 12.3%`, `'abs'` `▲ +$1,200`, `'both'` `▲ 12.3% (+$1,200)`. The absolute change uses the KPI's own format with an explicit sign: `+$1,200` / `−$0.31` (`::MONEY`), `+2.3 pp` percentage points (`::PERCENT`), `+1.2K` (`::COMPACT`). A comparison of 0 has no percentage: the absolute part is shown |
+| `::DELTA_LABEL` | what the change compares against, after it: `'vs last month'`, or the period's own `getvariable('p_prev_label')` ("vs Aug 2026") |
+| `::SPARKLINE` | a list, `list(v ORDER BY d)`, → a trend line under the caption, the last point marked |
+| `::GOAL` / `::TARGET` | the goal → a progress bar, `82% of goal $1.2M` (the bar stops at 100%, the text does not; green once reached). Outside a KPI statement these stay a chart's reference line (`::REFLINE`) |
+
+```sql
+SELECT 'presets=30d,mtd,ytd; default=30d' AS p ::PERIOD;
+SELECT sum(rev) FILTER (WHERE cur)::MONEY, sum(rev) FILTER (WHERE prev)::DELTA,
+       'both'::DELTA_FORMAT, getvariable('p_prev_label')::DELTA_LABEL,
+       list(rev ORDER BY b) FILTER (WHERE cur)::SPARKLINE,
+       750000::GOAL, 'Revenue'::LABEL
+FROM (SELECT date_trunc(getvariable('p_grain'), day) AS b,
+             day BETWEEN getvariable('p_from')::DATE AND getvariable('p_to')::DATE AS cur,
+             coalesce(day BETWEEN getvariable('p_prev_from')::DATE AND getvariable('p_prev_to')::DATE, false) AS prev,
+             sum(revenue) AS rev
+      FROM orders GROUP BY ALL);
+```
+
+The browser, `serve`, the static `dashboard` HTML and `dashboard --svg` draw
+the same tile (value, change line, caption, sparkline, goal bar, on the
+theme's positive / negative / accent colours). KPIs in a `::GROUP` (or two or
+more in a row) share one row, sized to the tallest tile. `dashboard --check`
+reports `kpi/bad-delta-format` (an unknown format; the change is shown as a %),
+`kpi/no-delta` (a format or label without a `::DELTA`) and
+`kpi/sparkline-not-list`.
 
 ### Statistical graphics (intervals, facets, scales, reference lines)
 

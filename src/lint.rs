@@ -11,6 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
+use crate::inputs::{input_defaults, input_index, input_kind};
 use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
 use serde_json::{Map, Value};
 
@@ -38,7 +39,10 @@ pub struct Diagnostic {
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
     /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
-    /// | `chrome/bad-url`. Design advisories
+    /// | `chrome/bad-url` | `period/bad-spec` (a `::PERIOD` spec with an
+    /// unknown key / preset / grain / compare or a bad date) |
+    /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
+    /// `kpi/sparkline-not-list` (warning). Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -186,10 +190,39 @@ where
                         .map(|r| {
                             let n = if kind == InputKind::DateRange { 2 } else { 1 };
                             let at = input_index(&p.roles).min(r.len().saturating_sub(1));
-                            r.keys().skip(at).take(n).cloned().collect()
+                            let cols: Vec<String> = r.keys().skip(at).take(n).cloned().collect();
+                            if kind == InputKind::Period {
+                                let prefix = crate::period::var_prefix(
+                                    cols.first().map(String::as_str).unwrap_or(""),
+                                );
+                                crate::period::SUFFIXES
+                                    .iter()
+                                    .map(|sfx| format!("{prefix}_{sfx}"))
+                                    .collect()
+                            } else {
+                                cols
+                            }
                         })
                         .unwrap_or_default();
                     claim(&mut diags, &names, stmt, "input", &short);
+                    if kind == InputKind::Period {
+                        let spec = rows
+                            .first()
+                            .and_then(|r| r.values().nth(input_index(&p.roles)))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        for e in crate::period::parse_spec(spec).1 {
+                            diags.push(Diagnostic {
+                                severity: Severity::Error,
+                                stmt,
+                                code: "period/bad-spec",
+                                message: format!(
+                                    "::PERIOD spec: {e} — the control falls back to its defaults"
+                                ),
+                                sql: short.clone(),
+                            });
+                        }
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -441,6 +474,19 @@ where
             })),
         }
 
+        // A KPI's change line and trend line.
+        if is_kpi(&p.roles) {
+            diags.extend(kpi_checks(&p.roles, &rows).into_iter().map(
+                |(severity, code, message)| Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                },
+            ));
+        }
+
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
         if opts.design {
             // Count content panels (charts/tables/markdown) toward the
@@ -683,82 +729,6 @@ fn unknown_casts(sql: &str) -> Vec<String> {
     out
 }
 
-fn input_kind(roles: &[(usize, Role)]) -> Option<InputKind> {
-    roles.iter().find_map(|(_, r)| match r {
-        Role::Input(k) => Some(*k),
-        _ => None,
-    })
-}
-
-/// Output position of a panel's input column.
-fn input_index(roles: &[(usize, Role)]) -> usize {
-    roles
-        .iter()
-        .find(|(_, r)| matches!(r, Role::Input(_)))
-        .map(|(i, _)| *i)
-        .unwrap_or(0)
-}
-
-/// Quote a DuckDB identifier (`"a""b"`).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// `SET VARIABLE` statement(s) that give an input its default value — the first
-/// option for a single input, all options for a multiselect, both ends for a
-/// date range — so downstream `getvariable()` panels have something to read.
-/// `idx` is the input column's output position (rows keep SELECT column order,
-/// via serde_json's `preserve_order`); the variable name is quoted.
-fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> Vec<String> {
-    let Some(first) = rows.first() else {
-        return Vec::new();
-    };
-    let keys: Vec<&String> = first.keys().collect();
-    let Some(k) = keys.get(idx).or(keys.first()).copied() else {
-        return Vec::new();
-    };
-    match kind {
-        InputKind::DateRange => keys
-            .iter()
-            .skip(idx.min(keys.len().saturating_sub(1)))
-            .take(2)
-            .filter_map(|k| {
-                first
-                    .get(*k)
-                    .map(|v| format!("SET VARIABLE {} = {}", quote_ident(k), lit(v)))
-            })
-            .collect(),
-        InputKind::Multiselect => {
-            let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
-            vec![format!(
-                "SET VARIABLE {} = [{}]",
-                quote_ident(k),
-                vals.join(", ")
-            )]
-        }
-        _ => vec![format!(
-            "SET VARIABLE {} = {}",
-            quote_ident(k),
-            first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
-        )],
-    }
-}
-
-fn lit(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => {
-            if *b {
-                "TRUE".into()
-            } else {
-                "FALSE".into()
-            }
-        }
-        _ => "NULL".into(),
-    }
-}
-
 /// The first cell of a result as text (`""` when there is none).
 fn first_text(rows: &[Map<String, Value>]) -> String {
     rows.first()
@@ -857,6 +827,62 @@ fn one_line(s: &str) -> String {
 /// A KPI tile — a big-number card (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`).
 fn is_kpi(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| matches!(r, Role::Metric(_)))
+}
+
+/// A KPI statement's `::DELTA_FORMAT` / `::DELTA_LABEL` / `::SPARKLINE`
+/// columns: `kpi/bad-delta-format` (an unknown format — 'pct' is used),
+/// `kpi/no-delta` (a format or label but no `::DELTA`), `kpi/sparkline-not-list`
+/// (the trend column is not a `list()`).
+fn kpi_checks(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let cell = |want: &dyn Fn(Role) -> bool| {
+        roles
+            .iter()
+            .find(|(_, r)| want(*r))
+            .map(|(i, _)| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+    };
+    if let Some(Some(Value::String(f))) = cell(&|r| r == Role::DeltaFormat) {
+        if crate::kpi::DeltaFormat::parse(f).is_none() {
+            out.push((
+                Severity::Error,
+                "kpi/bad-delta-format",
+                format!(
+                    "::DELTA_FORMAT `{f}` is not one of {} — the change is shown as a %",
+                    crate::kpi::DeltaFormat::NAMES.join(", ")
+                ),
+            ));
+        }
+    }
+    let has = |want: &dyn Fn(Role) -> bool| roles.iter().any(|(_, r)| want(*r));
+    if has(&|r| matches!(r, Role::DeltaFormat | Role::DeltaLabel))
+        && !has(&|r| matches!(r, Role::Delta | Role::DeltaLowerGood))
+    {
+        out.push((
+            Severity::Warning,
+            "kpi/no-delta",
+            "::DELTA_FORMAT / ::DELTA_LABEL without a ::DELTA comparison column — nothing              to format or label"
+                .into(),
+        ));
+    }
+    if let Some(Some(v)) = cell(&|r| r == Role::Value(Kind::Sparkline)) {
+        let list = match v {
+            Value::Array(_) => true,
+            Value::String(s) => serde_json::from_str::<Vec<Value>>(s).is_ok(),
+            _ => false,
+        };
+        if !list && !v.is_null() {
+            out.push((
+                Severity::Warning,
+                "kpi/sparkline-not-list",
+                "a KPI's ::SPARKLINE must be a list of numbers — e.g.                  list(v ORDER BY d)::SPARKLINE"
+                    .into(),
+            ));
+        }
+    }
+    out
 }
 
 /// The panel's chart kind, if it's a chart (`count()::BARCHART` → `Kind::Bar`).
@@ -1099,6 +1125,41 @@ mod design_tests {
             vec![json!({ "c0": "not a name" }).as_object().unwrap().clone()],
         );
         assert!(has(&d, "interaction/bad-value"), "{d:?}");
+    }
+
+    #[test]
+    fn kpi_delta_format_and_sparkline_checks() {
+        let d = lint_one(
+            "SELECT 5::METRIC, 4::DELTA, 'percentage'::DELTA_FORMAT",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": 4.0, "c2": "percentage"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "kpi/bad-delta-format"), "{d:?}");
+        let d = lint_one(
+            "SELECT 5::METRIC, 'vs last month'::DELTA_LABEL, 7::SPARKLINE",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": "vs last month", "c2": 7.0})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "kpi/no-delta"), "{d:?}");
+        assert!(has(&d, "kpi/sparkline-not-list"), "{d:?}");
+        let d = lint_one(
+            "SELECT 5::METRIC, 4::DELTA, 'both'::DELTA_FORMAT, list(x)::SPARKLINE",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": 4.0, "c2": "both", "c3": [1, 2]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{d:?}");
     }
 
     #[test]

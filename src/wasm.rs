@@ -294,6 +294,59 @@ pub fn human_header(raw: &str) -> String {
     crate::table::human_header(raw)
 }
 
+/// Resolve a `::PERIOD` spec + the viewer's choice to the control's model and
+/// the variables to bind ([`crate::period::resolve_json`]): `state_json` =
+/// `{preset?, from?, to?, grain?, compare?, today?, column?}` (today = the
+/// viewer's local `YYYY-MM-DD`, column = the ::PERIOD column's name). Returns
+/// `{ok, errors, prefix, presets:[{id,label}], grains,
+/// compares:[{id,label}], preset, grain, grain_auto, compare, from, to, today,
+/// vars:{from,to,prev_from,prev_to,grain,compare,label,prev_label}}`.
+#[wasm_bindgen]
+pub fn period_resolve(spec: &str, state_json: &str) -> String {
+    guard(|| Ok(crate::period::resolve_json(spec, state_json).to_string()))
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "errors": [e.to_string()]}).to_string())
+}
+
+/// A KPI tile's change and goal texts — the same as the headless tile
+/// ([`crate::kpi`]). `req_json`: `{value, prev?, goal?, fmt, delta_format?,
+/// lower_good?, locale?}` (numbers or numeric strings; `fmt` a metric token).
+/// Returns `{delta: {up, good, arrow, pct, abs, text} | null, goal: {frac,
+/// reached, text} | null, delta_format_ok}`.
+#[wasm_bindgen]
+pub fn kpi_parts(req_json: &str) -> String {
+    use crate::kpi::{delta, goal, DeltaFormat};
+    let r: serde_json::Value = serde_json::from_str(req_json).unwrap_or_default();
+    let n = |k: &str| {
+        match r.get(k) {
+            Some(serde_json::Value::Number(x)) => x.as_f64(),
+            Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+        .filter(|f| f.is_finite())
+    };
+    let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let l = crate::format::Locale::from_tag(&s("locale")).unwrap_or_default();
+    let fmt = crate::format::metric_fmt_of(&s("fmt"));
+    let df = DeltaFormat::parse(&s("delta_format"));
+    let lower = r
+        .get("lower_good")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let cur = n("value");
+    let d = cur
+        .zip(n("prev"))
+        .and_then(|(c, p)| delta(c, p, fmt, df.unwrap_or_default(), lower, &l));
+    let g = cur.zip(n("goal")).and_then(|(c, g)| goal(c, g, fmt, &l));
+    serde_json::json!({
+        "delta": d.map(|d| serde_json::json!({
+            "up": d.up, "good": d.good, "arrow": d.arrow, "pct": d.pct, "abs": d.abs, "text": d.text,
+        })),
+        "goal": g.map(|g| serde_json::json!({"frac": g.frac, "reached": g.reached, "text": g.text})),
+        "delta_format_ok": df.is_some(),
+    })
+    .to_string()
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

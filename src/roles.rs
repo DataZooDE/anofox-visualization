@@ -140,7 +140,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "grey WKT backdrop layer under a ::MAP"),
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
-      "horizontal reference line per distinct value"),
+      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar"),
     e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
@@ -192,6 +192,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "comparison value → trend arrow + % on a KPI (up = good)"),
     e("DELTA_LOWER_GOOD", &["COMPARE_LOWER_GOOD", "DELTA_INVERSE"], R::DeltaLowerGood, "kpi", true,
       "comparison value where lower is better (churn, cost): a rise is drawn red"),
+    e("DELTA_FORMAT", &["DELTAFORMAT"], R::DeltaFormat, "kpi", true,
+      "how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both'"),
+    e("DELTA_LABEL", &["DELTALABEL", "COMPARE_LABEL"], R::DeltaLabel, "kpi", true,
+      "what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label')"),
     e("TEXT_SMALL", &[], R::Text(TextSize::Small), "kpi", true, "small text card"),
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
@@ -231,6 +235,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "free-text input (value = default)"),
     e("DATERANGE", &["DATE_RANGE"], R::Input(InputKind::DateRange), "input", false,
       "two date columns → from/to variables"),
+    e("PERIOD", &["PERIOD_PICKER", "DATE_PERIOD"], R::Input(InputKind::Period), "input", false,
+      "date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
@@ -598,6 +604,7 @@ mod tests {
                 I::Text,
                 I::Multiselect,
                 I::DateRange,
+                I::Period,
             ]
             .map(Role::Input),
         );
@@ -625,6 +632,8 @@ mod tests {
             Role::PagedTable,
             Role::Delta,
             Role::DeltaLowerGood,
+            Role::DeltaFormat,
+            Role::DeltaLabel,
             Role::RefLine,
             Role::VLine,
             Role::BandLower,
@@ -707,6 +716,8 @@ mod tests {
                 | Role::Metric(_)
                 | Role::Delta
                 | Role::DeltaLowerGood
+                | Role::DeltaFormat
+                | Role::DeltaLabel
                 | Role::RefLine
                 | Role::VLine
                 | Role::BandLower

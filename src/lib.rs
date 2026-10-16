@@ -27,9 +27,12 @@ pub mod dashboard;
 mod downsample;
 pub mod format;
 pub mod host;
+pub mod inputs;
+pub mod kpi;
 pub mod lint;
 pub mod macros;
 pub mod page;
+pub mod period;
 pub mod roles;
 mod smooth;
 pub mod sql;
@@ -144,6 +147,8 @@ pub enum InputKind {
     Text,
     Multiselect,
     DateRange,
+    /// `::PERIOD`: date presets + grain + comparison ([`period`]).
+    Period,
 }
 
 /// How a KPI value is formatted.
@@ -228,7 +233,14 @@ pub enum Role {
     /// A comparison value where lower is better (`::DELTA_LOWER_GOOD`: churn,
     /// cost, errors) — the same arrow, a rise drawn in the negative colour.
     DeltaLowerGood,
-    /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`).
+    /// How a KPI's change reads (`::DELTA_FORMAT`): `'pct'` (default),
+    /// `'abs'` (the absolute change in the KPI's own format) or `'both'`.
+    DeltaFormat,
+    /// What a KPI's change compares against (`::DELTA_LABEL`), e.g.
+    /// `'vs last month'` — shown after the change.
+    DeltaLabel,
+    /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`);
+    /// in a KPI statement (`::GOAL`/`::TARGET`) the KPI's goal → a progress bar.
     RefLine,
     /// A vertical reference line at an x-position (`::XLINE`).
     VLine,
@@ -1357,6 +1369,16 @@ fn render_inner(
         .and_then(|c| c.values.first())
         .map(value_str);
 
+    // A KPI / text card (value, change, sparkline, goal) — the same tile as
+    // the headless dashboard; at most its natural height.
+    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
+        let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
+        return Ok(Panel::Own {
+            width,
+            height: h,
+            body: k.body(width as f64, h as f64, o),
+        });
+    }
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
     if cols.iter().any(|c| c.role == Role::Geometry) {
         if map_geometry(cols).is_none() {
