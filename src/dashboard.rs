@@ -237,8 +237,13 @@ fn render_inner(
     // browser's auto-strip) shares one row, split evenly (≤ 6 per row):
     // (tiles left, tiles per row, tile width, tile height).
     let mut strip: Option<(usize, usize, f64, f64)> = None;
+    // Steps drawn as ::TRACKs under the chart before them.
+    let mut consumed = std::collections::HashSet::new();
 
     for (si, step) in steps.iter().enumerate() {
+        if consumed.contains(&si) {
+            continue;
+        }
         let panel = &step.panel;
         let roles = &panel.roles;
         let has = |r: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, role)| r(role));
@@ -383,6 +388,42 @@ fn render_inner(
             },
         };
         next_height = 0;
+        // ::TRACKs right after a chart (each optionally after a ::HEIGHT) go
+        // under it in its card, which grows by their heights.
+        let mut tracks: Vec<(Vec<Column>, u32)> = Vec::new();
+        if is_chart(rows, roles, &ropts) {
+            let mut j = si + 1;
+            let mut h = 0;
+            while let Some(st) = steps.get(j) {
+                let r = &st.panel.roles;
+                let first = || {
+                    st.rows.as_ref().ok().and_then(|rows| {
+                        rows.first()
+                            .and_then(|(_, v)| v.first())
+                            .and_then(|v| v.as_f64())
+                    })
+                };
+                if r.iter().any(|(_, r)| *r == Role::Height) {
+                    h = first().unwrap_or(0.0).clamp(0.0, 2000.0) as u32;
+                } else if crate::track::is_track(r) {
+                    let cols = st
+                        .rows
+                        .as_ref()
+                        .map(|rows| columns_from_result(rows, r))
+                        .unwrap_or_default();
+                    tracks.push((cols, std::mem::take(&mut h)));
+                } else {
+                    break;
+                }
+                consumed.insert(j);
+                j += 1;
+            }
+            // A ::HEIGHT after the last track sizes the next panel.
+            if h > 0 {
+                consumed.remove(&(j - 1));
+            }
+        }
+        let ch = ch + crate::track::heights(&tracks).iter().sum::<u32>() as f64;
         // The strip's last tile closes its row.
         let strip_ends = match &mut strip {
             Some((left, _, _, _)) => {
@@ -413,6 +454,7 @@ fn render_inner(
             ch,
             &ropts,
             strip.is_some(),
+            &tracks,
         );
         placed.push((x, row_y, cw, ch, inner));
 
@@ -547,7 +589,9 @@ fn json_rows(result: &[(String, Vec<Value>)]) -> Vec<serde_json::Map<String, ser
 }
 
 /// One panel body → an inner `<svg>` sized (w, h). Charts go through the normal
-/// renderer; KPIs / text / tables get a lightweight SVG.
+/// renderer (with the `::TRACK`s under a chart); KPIs / text / tables get a
+/// lightweight SVG.
+#[allow(clippy::too_many_arguments)]
 fn render_panel_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
@@ -556,6 +600,7 @@ fn render_panel_svg(
     h: f64,
     ropts: &RenderOptions,
     kpi_top: bool,
+    tracks: &[(Vec<Column>, u32)],
 ) -> String {
     let cols = columns_from_result(rows, roles);
     // Title bar (::TITLE) eats a strip off the top.
@@ -641,9 +686,15 @@ fn render_panel_svg(
     }
 
     // Otherwise a chart — render at the content area, then wrap with a title.
-    let body_h = (h - title_h - pad).max(30.0);
+    // Its ::TRACKs sit right under it, sharing its plot area and x window.
+    let tracks_h: u32 = crate::track::heights(tracks).iter().sum();
+    let body_h = (h - title_h - pad - tracks_h as f64).max(30.0);
     // The chart is nested below the title as a positioned fragment.
-    let chart = render_with_at(&cols, 0.0, title_h, w as u32, body_h as u32, ropts)
+    let draw = |cols: &[Column], w: u32, h: u32, o: &RenderOptions, y: f64| {
+        render_with_at(cols, 0.0, title_h + y, w, h, o)
+    };
+    let chart = crate::track::stack(&cols, tracks, w as u32, body_h as u32, ropts, &draw)
+        .map(|(svgs, _)| svgs.concat())
         .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(tt) = &title {
@@ -668,6 +719,19 @@ fn render_panel_svg(
     svg.push_str(&chart);
     svg.push_str("</svg>");
     svg
+}
+
+/// Does this panel draw a chart (that `::TRACK`s can go under)?
+fn is_chart(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], o: &RenderOptions) -> bool {
+    let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
+    has(&|r| matches!(r, Role::Value(_)))
+        && !has(&|r| {
+            matches!(
+                r,
+                Role::Table | Role::PagedTable | Role::Markdown | Role::Track
+            )
+        })
+        && crate::kpi::Kpi::from_columns(&columns_from_result(rows, roles), &o.locale).is_none()
 }
 
 fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> String {

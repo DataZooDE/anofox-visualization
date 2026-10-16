@@ -121,6 +121,9 @@ where
     };
     // A ::EMPTY message is waiting for the next panel (its 0 rows are expected).
     let mut empty_msg = false;
+    // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
+    // / date x, `Some(false)` one with a discrete x, `None` no chart.
+    let mut track_host: Option<bool> = None;
     // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
@@ -276,6 +279,34 @@ where
                 continue;
             }
         };
+
+        // A ::TRACK goes right after a chart with a numeric / date x (a
+        // ::HEIGHT may sit between; further tracks follow it).
+        let is_track = crate::track::is_track(&p.roles);
+        if is_track {
+            let message = match track_host {
+                Some(true) => None,
+                Some(false) => Some(
+                    "a ::TRACK shares the x axis of the chart above it, which needs a numeric \
+                     or date ::XAXIS (not categories)",
+                ),
+                None => Some(
+                    "a ::TRACK goes right after the chart it sits under (only a ::HEIGHT may \
+                     come between) — here it is drawn as a panel of its own",
+                ),
+            };
+            if let Some(m) = message {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "track/no-chart",
+                    message: m.into(),
+                    sql: short.clone(),
+                });
+            }
+        } else if !p.roles.iter().any(|(_, r)| *r == Role::Height) {
+            track_host = track_host_of(&p.roles, &rows);
+        }
 
         // Chrome directives: a bad theme / locale / logo URL is reported here
         // (the browser would fall back to the default look).
@@ -527,6 +558,22 @@ where
             }
         }
 
+        // Bands come in ::BAND_LOWER + ::BAND_UPPER pairs (several = a fan).
+        let count = |r: Role| p.roles.iter().filter(|(_, x)| *x == r).count();
+        let (lo, hi) = (count(Role::BandLower), count(Role::BandUpper));
+        if lo != hi {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "annotation/unpaired",
+                message: format!(
+                    "{lo} ::BAND_LOWER but {hi} ::BAND_UPPER — bands pair up in column order \
+                     (lower 1 with upper 1, …); the unpaired edge draws nothing"
+                ),
+                sql: short.clone(),
+            });
+        }
+
         // ::THRESHOLDS rules must parse; a table directive names its columns.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Thresholds) {
             let cell = rows.first().and_then(|row| {
@@ -657,8 +704,10 @@ where
         }
 
         let expect_empty = std::mem::take(&mut empty_msg);
-        if rows.is_empty() && expect_empty {
-            continue; // the author wrote a message for this case (::EMPTY)
+        if rows.is_empty() && (expect_empty || is_track) {
+            // the author wrote a message for this case (::EMPTY); a track
+            // without events still shows its lanes
+            continue;
         }
         if rows.is_empty() {
             diags.push(Diagnostic {
@@ -732,7 +781,8 @@ where
         }
 
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
-        if opts.design {
+        // (A track is part of the chart above it: no title, no panel of its own.)
+        if opts.design && !is_track {
             // Count content panels (charts/tables/markdown) toward the
             // scan-budget, but NOT individual KPI tiles — a strip of KPIs is one
             // band to scan, not N panels.
@@ -1310,6 +1360,19 @@ fn value_index(roles: &[(usize, Role)]) -> Option<usize> {
 }
 
 /// First non-null value of output column `c{col}` is a string → a discrete axis.
+/// What a `::TRACK` after this panel would sit under (see `track_host`).
+fn track_host_of(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<bool> {
+    let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
+    if !has(&|r| matches!(r, Role::Value(_)))
+        || has(&|r| matches!(r, Role::Table | Role::PagedTable | Role::Markdown))
+        || is_kpi(roles)
+    {
+        return None;
+    }
+    let x = role_index(roles, Role::X)?;
+    Some(!col_is_discrete(rows, x) || col_is_temporal(rows, x))
+}
+
 fn col_is_discrete(rows: &[Map<String, Value>], col: usize) -> bool {
     let key = format!("c{col}");
     rows.iter()
@@ -1532,6 +1595,61 @@ mod design_tests {
             data,
         );
         assert!(!has(&ok, "annotation/unpaired"), "{ok:?}");
+    }
+
+    #[test]
+    fn unequal_band_edges_warn() {
+        let data = rows(
+            3,
+            |i| json!({ "c0": i, "c1": i, "c2": i, "c3": i, "c4": i, "c5": "T" }),
+        );
+        let d = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, a::BAND_LOWER, b::BAND_UPPER, c::BAND_LOWER, 'T'::TITLE FROM t;",
+            data.clone(),
+        );
+        assert!(has(&d, "annotation/unpaired"), "{d:?}");
+        let ok = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, a::BAND_LOWER, b::BAND_UPPER, c::BAND_LOWER, d::BAND_UPPER FROM t;",
+            data,
+        );
+        assert!(!has(&ok, "annotation/unpaired"), "{ok:?}");
+    }
+
+    #[test]
+    fn a_track_follows_a_chart_with_a_continuous_x() {
+        let data = rows(
+            3,
+            |i| json!({ "c0": format!("2026-10-0{}", i + 1), "c1": i, "c2": "Promos" }),
+        );
+        let chart = "SELECT d::XAXIS, n::LINECHART, 'T'::TITLE FROM t;";
+        let track = "SELECT d::XAXIS, 'Promos'::TRACK FROM t;";
+        let lint = |sql: &str| check(sql, |_| Ok(data.clone()));
+        // Right after the chart, after a ::HEIGHT, and several in a row: fine
+        // (and a track needs no title of its own).
+        let ok = lint(&format!("{chart}\n{track}\nSELECT 40::HEIGHT;\n{track}"));
+        assert!(
+            !has(&ok, "track/no-chart") && !has(&ok, "design/untitled-chart"),
+            "{ok:?}"
+        );
+        // Alone, or after a table / a categorical chart: warned.
+        assert!(has(&lint(track), "track/no-chart"));
+        let table = "SELECT d::TABLE, n FROM t;";
+        assert!(has(&lint(&format!("{table}\n{track}")), "track/no-chart"));
+        let words = rows(
+            3,
+            |i| json!({ "c0": format!("W{i}"), "c1": i, "c2": "Promos" }),
+        );
+        let d = check(&format!("{chart}\n{track}"), |_| Ok(words.clone()));
+        assert!(has(&d, "track/no-chart"), "{d:?}");
+        // A track without events is no empty panel.
+        let d = check(&format!("{chart}\n{track}"), |q: &str| {
+            Ok(if q.contains("TRACK") || q.contains("'Promos'") {
+                Vec::new()
+            } else {
+                data.clone()
+            })
+        });
+        assert!(!has(&d, "empty-panel"), "{d:?}");
     }
 
     #[test]

@@ -154,11 +154,11 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,
-      "lower edge of a shaded band around a line"),
+      "lower edge of a shaded band around a line; several ::BAND_LOWER / ::BAND_UPPER pairs = a nested fan"),
     e("BAND_UPPER", &["BANDUPPER"], R::BandUpper, "annotation", true,
-      "upper edge of a shaded band"),
+      "upper edge of a shaded band (pairs with the ::BAND_LOWER in the same position)"),
     e("MARKAREA", &["MARK_AREA", "SHADE"], R::MarkArea, "annotation", true,
-      "shade the x-region [min, max] of this column"),
+      "shade each run of this column's x-values: CASE WHEN flag THEN day END shades every spell"),
     e("XLINE_LABEL", &["EVENT_LABEL"], R::VLineLabel, "annotation", true,
       "label of the ::XLINE on the same row, at the top of the line (events from data)"),
     e("REFLINE_LABEL", &["YLINE_LABEL", "TARGET_LABEL"], R::RefLineLabel, "annotation", true,
@@ -304,6 +304,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
+    e("TRACK", &["STRIP_BELOW", "STRIP_UNDER"], R::Track, "layout", true,
+      "a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar"),
     // ── chrome ─────────────────────────────────────────────────────────────
     e("RELOAD", &["REFRESH"], R::Reload, "chrome", false, "auto-refresh interval (seconds)"),
     e("HEADER_IMAGE", &["HEADERIMAGE"], R::HeaderImage, "chrome", false, "banner image URL"),
@@ -764,6 +766,7 @@ mod tests {
             Role::Story,
             Role::StoryBy,
             Role::Transition,
+            Role::Track,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -863,7 +866,8 @@ mod tests {
                 | Role::LineStyle
                 | Role::Story
                 | Role::StoryBy
-                | Role::Transition => {}
+                | Role::Transition
+                | Role::Track => {}
             }
         }
         v

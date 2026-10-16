@@ -4,6 +4,7 @@
 import init, {
   plan,
   render_panel,
+  render_stack,
   render_contract,
   map_bounds,
   roles_json,
@@ -964,6 +965,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 const FILE_SAMPLES = [
   { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
   { group: "Interactivity", name: "How will demand develop after today?", url: "examples/motion-demand.sql" },
+  { group: "Charts", name: "When could we run out of stock?", url: "examples/stock-outlook.sql" },
   { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
   { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
@@ -3439,6 +3441,7 @@ async function runOnce(fresh = true) {
   let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
   let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
   let nextEmpty = ""; // ::EMPTY → the next panel's message for an empty result
+  let lastChart = null; // the holder of the chart a ::TRACK right after it goes under
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -3464,6 +3467,9 @@ async function runOnce(fresh = true) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
+    // A ::TRACK (optionally after a ::HEIGHT) follows its chart directly.
+    const trackHost = role(s, "TRACK") ? lastChart : null;
+    if (d !== "HEIGHT" && !role(s, "TRACK")) lastChart = null;
     // Close an open auto-strip the moment a non-KPI statement appears; open one
     // when a fresh top-level run of >=2 KPI tiles begins.
     if (autoGroup && !isKpi(s)) {
@@ -3844,6 +3850,12 @@ async function runOnce(fresh = true) {
         nextEmpty = "";
       } else {
         const rowsJson = await runSql(s.sql);
+        if (trackHost) {
+          // A thin strip under the chart before it, on its x axis (same panel).
+          addTrack(trackHost, { rows: rowsJson, roles: s.roles, height: nextHeight || 0 });
+          nextHeight = 0;
+          continue;
+        }
         const span = Math.min(12, nextSpan || defaultSpan);
         const boxH = nextHeight;
         const made = []; // this statement's panels (an ::INFO decorates the first)
@@ -4050,6 +4062,7 @@ async function runOnce(fresh = true) {
             // Chart zoom/pan is OFF by default; enable per-view with ?zoom=1.
             else if (document.body.classList.contains("dp-zoom"))
               attachCartZoom(holder, rowsJson, s.roles, ph); // self-skips discrete x
+            if (!isMap) lastChart = holder;
           }
           container.appendChild(fig);
           panels++;
@@ -4174,10 +4187,61 @@ function animateIn() {
 
 // Render a chart's SVG into its holder — the dashboard run and every in-place
 // re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
-// Follow with wireCharts() once the holder is in the page.
+// A chart with ::TRACKs (holder._tracks) renders as one stack, so the strips
+// keep its plot area and x window. Follow with wireCharts() once the holder
+// is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
-  holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  const tracks = holder._tracks || [];
+  if (tracks.length) {
+    let svgs = [];
+    try {
+      svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, renderCtx(), zoom));
+    } catch (_) {}
+    holder.innerHTML = svgs[0] || "";
+    if (!holder._trackBox) {
+      holder._trackBox = document.createElement("div");
+      holder._trackBox.className = "panel-tracks";
+      holder.after(holder._trackBox);
+    }
+    holder._trackBox.innerHTML = svgs.slice(1).join("");
+    holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
+  } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
   markAnim(holder, roles);
+}
+
+// ::TRACK: add a strip under the chart in `holder` and redraw the stack.
+function addTrack(holder, track) {
+  (holder._tracks = holder._tracks || []).push(track);
+  const dp = holder.closest(".panel")?._dp;
+  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, dp.rw, dp.ph);
+}
+
+// A track's name (its ::TRACK value), for summaries and table captions.
+function trackName(track) {
+  const r = track && track.roles.find((x) => x[1] === "TRACK");
+  const row = r && (parseRowsLenient(track.rows) || [])[0];
+  return row ? String(row["c" + r[0]] ?? "") : "";
+}
+
+// A click on a track mark shades its x span on the chart above (again: off) —
+// "did the alarm precede the stockout?". The stack shares the plot area, so
+// the span's SVG x is the same in both.
+function toggleTrackShade(el) {
+  const main = el.closest(".panel")?.querySelector(".panel-svg > svg");
+  const plot = ((main && main.getAttribute("data-plot")) || "").split(/\s+/).map(Number);
+  if (!main || plot.length !== 4) return;
+  let x = +el.getAttribute("x"), w = +el.getAttribute("width");
+  if (el.tagName === "circle") (w = 6), (x = +el.getAttribute("cx") - 3);
+  if (!Number.isFinite(x) || !Number.isFinite(w)) return;
+  const key = `${x.toFixed(1)}:${w.toFixed(1)}`;
+  const old = main.querySelector(`rect.dp-track-shade[data-key="${key}"]`);
+  if (old) return old.remove();
+  const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  for (const [k, v] of [["x", x], ["y", plot[1]], ["width", Math.max(w, 2)], ["height", plot[3]], ["fill", el.getAttribute("fill") || axToken("accent", "#888")], ["fill-opacity", "0.18"], ["data-key", key], ["aria-hidden", "true"]])
+    r.setAttribute(k, v);
+  r.setAttribute("class", "dp-track-shade");
+  r.style.pointerEvents = "none";
+  main.appendChild(r);
 }
 
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
@@ -7309,8 +7373,31 @@ function addExportButtons() {
 
 // Open a chart panel large in a centred overlay. The SVG is vector, so we clone
 // it and let it scale to fill (Esc / backdrop / ✕ closes).
-function openFullSize(fig) {
+// A panel's chart as one SVG: the chart's own, or — with ::TRACK strips —
+// the chart and its strips stacked in a new one.
+function panelSvg(fig) {
   const svg = fig.querySelector("svg");
+  const strips = [...fig.querySelectorAll(".panel-tracks > svg")];
+  if (!svg || !strips.length) return svg;
+  const all = [svg, ...strips];
+  const w = svg.viewBox.baseVal.width;
+  const out = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  let y = 0;
+  for (const s of all) {
+    const c = s.cloneNode(true);
+    const h = s.viewBox.baseVal.height;
+    for (const [k, v] of [["x", 0], ["y", y], ["width", w], ["height", h]]) c.setAttribute(k, v);
+    out.appendChild(c);
+    y += h;
+  }
+  out.setAttribute("viewBox", `0 0 ${w} ${y}`);
+  out.setAttribute("width", w);
+  out.setAttribute("height", y);
+  return out;
+}
+
+function openFullSize(fig) {
+  const svg = panelSvg(fig);
   if (!svg) return;
   const title = fig.querySelector(".panel-title")?.textContent || "Full size";
   const back = document.createElement("div");
@@ -7708,26 +7795,30 @@ function attachHover() {
       pad.addEventListener("click", (e) => e.stopPropagation());
       el.after(pad);
     }
+    // The panel-level crosshair shows the tooltips of the chart's own marks;
+    // a ::TRACK strip's marks show their own.
+    const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
     el.addEventListener("mouseenter", () => {
-      // The panel-level crosshair shows the tooltip — except for a mark focused
-      // from the keyboard (a11y), which has no pointer to drive the crosshair.
-      if (el.closest(".has-axis-pointer") && document.activeElement !== el) return;
+      // The crosshair shows the tooltip — except for a mark focused from the
+      // keyboard (a11y), which has no pointer to drive the crosshair.
+      if (pointered() && document.activeElement !== el) return;
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
       tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {
-      if (el.closest(".has-axis-pointer")) return;
+      if (pointered()) return;
       tip.style.left = e.clientX + 14 + "px";
       tip.style.top = e.clientY + 14 + "px";
     });
     el.addEventListener("mouseleave", () => {
-      if (el.closest(".has-axis-pointer")) return;
+      if (pointered()) return;
       tip.classList.remove("show");
     });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       if (rule) return;
+      if (el.closest(".panel-tracks")) return toggleTrackShade(el);
       const ia = el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
@@ -7824,17 +7915,23 @@ function chartMarks(svg) {
 }
 
 function attachChartA11y() {
-  for (const fig of document.querySelectorAll(".dash .panel")) {
-    const svg = fig.querySelector(".panel-svg > svg");
-    if (!svg || svg.dataset.a11y) continue;
+  // Each chart, and each ::TRACK strip under it (its own summary and marks).
+  const charts = [...document.querySelectorAll(".dash .panel")].flatMap((fig) =>
+    [fig.querySelector(".panel-svg > svg"), ...fig.querySelectorAll(".panel-tracks > svg")].filter(Boolean).map((svg) => [fig, svg])
+  );
+  for (const [fig, svg] of charts) {
+    if (svg.dataset.a11y) continue;
     svg.dataset.a11y = "1";
     const marks = chartMarks(svg);
-    const title = fig.querySelector(".panel-title")?.textContent?.trim() || "";
+    const title = svg._track ? trackName(svg._track) : fig.querySelector(".panel-title")?.textContent?.trim() || "";
+    // A strip's ticks / tiles are events in lanes: their text is no value.
+    const lanes = !!svg._track && svg.hasAttribute("data-ylevels");
     const items = marks.map((el) => {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
-      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: markValue(el) };
+      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
     });
-    const summary = chartSummary(chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles)), title, items, (v) => fmtTipValue(String(v)));
+    const kind = svg._track ? "Strip under the chart" : chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles));
+    const summary = chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -7991,10 +8088,13 @@ function applyAsTables() {
       view = document.createElement("div");
       view.className = "dp-astable-view";
       const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
-      view.innerHTML = dataTableHtml(fig._dp, 200, title);
+      view.innerHTML =
+        dataTableHtml(fig._dp, 200, title) +
+        (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
       holder.after(view);
     }
     holder.hidden = dpAsTables;
+    if (holder._trackBox) holder._trackBox.hidden = dpAsTables;
     if (view) view.hidden = !dpAsTables;
   }
 }
@@ -8136,7 +8236,7 @@ function dataTableHtml(dp, limit, caption) {
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
-  const SKIP = new Set(["TITLE", "HINT", "LABEL"]);
+  const SKIP = new Set(["TITLE", "HINT", "LABEL", "TRACK"]);
   const keys = (rows.length ? Object.keys(rows[0]) : []).filter((k) => {
     const r = roleFor(k);
     return !r || !SKIP.has(r[1]);
@@ -8377,7 +8477,7 @@ function toggleVisualMap(panel) {
 }
 
 function savePanelPng(panel) {
-  const svg = panel.querySelector("svg");
+  const svg = panelSvg(panel);
   if (!svg) return;
   const vb = svg.viewBox.baseVal;
   const clone = svg.cloneNode(true);
@@ -8557,7 +8657,9 @@ function attachAxisPointer() {
       const colPts = pts.filter((p) => Math.round(p.cx) === best);
       cross.style.left = r.left + (best - vb.x) * scale + "px";
       cross.style.top = r.top + "px";
-      cross.style.height = r.height + "px";
+      // …down through the chart's ::TRACK strips (same x)
+      const tb = panel.querySelector(".panel-tracks");
+      cross.style.height = (tb && tb.offsetHeight ? tb.getBoundingClientRect().bottom - r.top : r.height) + "px";
       cross.style.display = "";
       pts.forEach((p) => (p.el.style.transform = ""));
       colPts.forEach((p) => {
