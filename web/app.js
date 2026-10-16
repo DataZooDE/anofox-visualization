@@ -7222,6 +7222,18 @@ function attachHover() {
     // is no value to click: it neither selects, drills nor cross-filters.
     const rule = el.hasAttribute("data-rule");
     el.style.cursor = rule ? "default" : "pointer";
+    // A thin dashed rule is hard to hover (the pointer falls into its dash
+    // gaps or onto the axis below): a transparent, wider twin on top hands the
+    // pointer on to it.
+    if (rule) {
+      const pad = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      for (const [k, v] of [["points", el.getAttribute("points")], ["fill", "none"], ["stroke", "transparent"], ["stroke-width", "8"], ["aria-hidden", "true"]])
+        pad.setAttribute(k, v);
+      for (const type of ["mouseenter", "mousemove", "mouseleave"])
+        pad.addEventListener(type, (e) => el.dispatchEvent(new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY })));
+      pad.addEventListener("click", (e) => e.stopPropagation());
+      el.after(pad);
+    }
     el.addEventListener("mouseenter", () => {
       // The panel-level crosshair shows the tooltip — except for a mark focused
       // from the keyboard (a11y), which has no pointer to drive the crosshair.

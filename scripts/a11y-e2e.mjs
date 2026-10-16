@@ -52,7 +52,15 @@ console.log("summary:", svgs[0]?.[1]);
 // A reference rule (data-rule: ::XLINE "Today", ::REFLINE) shows its tooltip
 // under the pointer (on a crosshair chart as a "Reference line" row) but is no
 // value: clicking it neither selects nor cross-filters.
-const rule = await page.$(".dash .panel-svg > svg [data-rule]");
+// The first rule on screen: one in a hidden tab has no box to hover.
+const rules = await page.$$(".dash .panel-svg > svg [data-rule]");
+let rule = null;
+for (const r of rules) {
+  if (await r.evaluate((e) => !!e.getClientRects().length && e.getBoundingClientRect().width + e.getBoundingClientRect().height > 0)) {
+    rule = r;
+    break;
+  }
+}
 if (rule) {
   const at = await rule.evaluate((e) => {
     e.closest(".panel").scrollIntoView({ block: "center" });
@@ -74,7 +82,7 @@ if (rule) {
   const sel = await page.evaluate(() => [...new URL(location.href).searchParams.keys()].filter((k) => k === "v.selected"));
   console.log("rule click selects:", sel.length > 0);
   if (sel.length) fail("clicking a reference rule set a selection");
-}
+} else if (rules.length) console.log("rule hover: no reference rule on screen (only in other tabs): skipped");
 
 // Tab until a chart has focus (a dashboard without charts skips this part).
 let onChart = false;
