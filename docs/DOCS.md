@@ -1635,7 +1635,10 @@ into a private temp directory and serves them through a fresh DuckDB instance
 with external access, extension loading and configuration changes disabled (it
 serves that snapshot; `anofox_serve_stop` + re-run to refresh). Each request
 gets its own connection, a row cap and a timeout (optional third argument:
-`'{"max_rows": …, "timeout_ms": …, "threads": …}'`).
+`'{"max_rows": …, "timeout_ms": …, "threads": …, "cache_mb": …}'`). Panel
+results are cached per server (`cache_mb`, default 64, `0` = off), identical
+concurrent requests run once, and a `::PAGED` table that is paged or scrolled
+quickly cancels its superseded queries.
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
