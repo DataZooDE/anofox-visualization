@@ -77,6 +77,60 @@ else {
   if (!out) fail("Esc did not return to the chart");
 }
 
+// The toolbox line/bar switch redraws a chart in place: after each switch it
+// keeps its summary and keyboard marks, and a ::STORY chart its stepper,
+// caption and connector, on the step it was on.
+const swapIdx = await page.$$eval(".dash .panel", (ps) => {
+  const sw = (p) => p.querySelector('.dp-tool[title="Line / bar"]');
+  const i = ps.findIndex((p) => sw(p) && p.querySelector(".dp-story")); // a ::STORY chart first
+  return i >= 0 ? i : ps.findIndex(sw);
+});
+if (swapIdx < 0) console.log("no line/bar toolbox switch: redraw check skipped");
+else {
+  const storyStep = () =>
+    page.evaluate((i) => {
+      const p = document.querySelectorAll(".dash .panel")[i];
+      p.querySelector(".dp-story-next")?.click();
+      return p.querySelector(".dp-story-pos")?.textContent || "";
+    }, swapIdx);
+  const story = await page.evaluate((i) => !!document.querySelectorAll(".dash .panel")[i].querySelector(".dp-story"), swapIdx);
+  const before = story ? await storyStep() : "";
+  for (const n of [1, 2]) {
+    const s = await page.evaluate((i) => {
+      const p = document.querySelectorAll(".dash .panel")[i];
+      p.querySelector('.dp-tool[title="Line / bar"]').click();
+      const svg = p.querySelector(".panel-svg > svg");
+      const h = p.querySelector(".panel-svg");
+      return {
+        role: svg.getAttribute("role"),
+        label: svg.getAttribute("aria-label") || "",
+        tab: svg.getAttribute("tabindex"),
+        marks: svg.querySelectorAll('.dp-hit[tabindex="-1"]').length,
+        bars: p.querySelectorAll(".dp-story").length,
+        cap: !!h.querySelector(":scope > .dp-story-cap:not([hidden])"),
+        link: !!h.querySelector(":scope > .dp-story-link path"),
+        pos: p.querySelector(".dp-story-pos")?.textContent || "",
+      };
+    }, swapIdx);
+    console.log(`switch ${n}:`, JSON.stringify({ ...s, label: s.label.slice(0, 40) }));
+    if (!s.role || !/\.$/.test(s.label)) fail(`switch ${n}: chart without a summary`);
+    if (s.tab !== "0" || !s.marks) fail(`switch ${n}: marks not keyboard reachable`);
+    if (story) {
+      if (s.bars !== 1 || !s.cap || !s.link) fail(`switch ${n}: story stepper, caption or connector missing`);
+      if (s.pos !== before) fail(`switch ${n}: story step not kept (${s.pos} vs ${before})`);
+    }
+  }
+  await page.evaluate((i) => document.querySelectorAll(".dash .panel")[i].querySelector(".panel-svg > svg").focus(), swapIdx);
+  await page.keyboard.press("ArrowRight");
+  const mark = await page.evaluate(() => document.activeElement.getAttribute("aria-label"));
+  if (!mark) fail("arrow keys did not reach a mark after the switch");
+  if (story) {
+    const after = await storyStep();
+    console.log("story:", before, "→", after);
+    if (after === before) fail("story stepping stopped after the switch");
+  }
+}
+
 // "Charts as tables".
 await page.click(".dp-astable-btn");
 const swapped = await page.evaluate(() => {

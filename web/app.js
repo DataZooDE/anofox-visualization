@@ -3774,16 +3774,15 @@ async function runOnce(fresh = true) {
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
-            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, renderCtx(), "");
+            renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
             const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
             if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
-            markAnim(holder, s.roles);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
-            fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
+            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -3878,8 +3877,7 @@ async function runOnce(fresh = true) {
   creditLink.textContent = "DataZoo GmbH";
   credit.append("Powered by ", creditLink);
   dash.append(credit);
-  attachHover();
-  mountStories();
+  wireCharts();
   for (const [stmt, old] of Object.entries(tweens)) {
     const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
     if (svg) dpAnim.tween(svg, old);
@@ -3913,12 +3911,36 @@ function animateIn() {
   });
 }
 
-// ::STORY steppers (web/anim.js) under every chart that has steps.
+// Render a chart's SVG into its holder — the dashboard run and every in-place
+// re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
+// Follow with wireCharts() once the holder is in the page.
+function renderChart(holder, rows, roles, w, ph, zoom = "") {
+  holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  markAnim(holder, roles);
+}
+
+// Wire freshly rendered charts: hover, selection, toolbox and accessibility
+// (attachHover), then the ::STORY steppers.
+function wireCharts() {
+  attachHover();
+  mountStories();
+}
+
+// ::STORY steppers (web/anim.js) under every chart that has steps. A chart
+// re-rendered in place keeps its step; one still showing its stepper's caption
+// is left as it is.
 let dpStorySteps = {}; // statement index → the step to restore after a re-run
 function mountStories() {
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     const svg = panel.querySelector(".panel-svg > svg[data-story]");
-    if (svg) panel._story = dpAnim.story(panel, svg, dpStorySteps[panel.dataset.stmt] || 0);
+    if (!svg) {
+      if (panel._story) panel.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link").forEach((e) => e.remove());
+      panel._story = null;
+      return;
+    }
+    if (panel._story && svg.parentElement.querySelector(":scope > .dp-story-cap")) return;
+    const step = panel._story ? panel._story.step() : dpStorySteps[panel.dataset.stmt] || 0;
+    panel._story = dpAnim.story(panel, svg, step);
   });
 }
 
@@ -7039,8 +7061,8 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
-      attachHover(); // re-wire hover + cross-filter clicks on the fresh marks
+      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
 
@@ -7320,7 +7342,7 @@ function attachChartA11y() {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
       return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: markValue(el) };
     });
-    const summary = chartSummary(chartKind(fig._dp && fig._dp.roles), title, items, (v) => fmtTipValue(String(v)));
+    const summary = chartSummary(chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles)), title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -7561,8 +7583,9 @@ function toggleMagicType(panel) {
     const vi = dp.roles.findIndex((r) => magicSwap([r])); // first line/bar value role
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
-  holder.innerHTML = render_panel(dp.rows, JSON.stringify(use), 460, dp.ph, renderCtx(), "");
-  attachHover();
+  dp.drawn = use; // the roles on screen (the summary names the chart kind shown)
+  renderChart(holder, dp.rows, use, dp.rw, dp.ph);
+  wireCharts();
 }
 
 // A modal listing the panel's rows as a table (ECharts toolbox "data view").
@@ -8052,7 +8075,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
   const full = svgDomain(svg0);
   if (!full) return; // not a continuous x/y chart → no zoom
-  const W = 460;
+  const W = svg0.viewBox.baseVal.width || 460; // the width the chart was drawn at
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -8061,8 +8084,8 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
-      attachHover();
+      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      wireCharts();
       syncSlider();
     });
   };

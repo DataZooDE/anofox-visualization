@@ -351,7 +351,7 @@ export function animKit(win) {
       play.setAttribute("aria-pressed", "true");
       show(k === steps.length ? 1 : k + 1);
       timer = win.setInterval(() => {
-        if (!panel.isConnected) return stop();
+        if (!svg.isConnected) return stop(); // the chart was re-rendered or removed
         if (k >= steps.length) return stop(), show(0);
         show(k + 1);
       }, 2600);
