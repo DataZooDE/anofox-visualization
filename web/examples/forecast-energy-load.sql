@@ -26,7 +26,7 @@
 
 LOAD anofox_forecast;
 
-SELECT 'anofox_forecast · live in your browser'::BRAND;
+SELECT 'anofox_forecast'::BRAND;
 SELECT 'Will any substation exceed its firm capacity next week?'::DASHBOARD_TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -105,6 +105,15 @@ SELECT substation, method,
 FROM el_cv GROUP BY ALL;
 CREATE OR REPLACE TABLE el_winner AS
 SELECT substation, arg_min(method, mae) AS method FROM el_score GROUP BY substation;
+
+-- A fixed 50 / 80 / 95 % conformal fan per substation for the drill-down
+-- chart (the winning method's absolute backtest errors, all folds).
+CREATE OR REPLACE TABLE el_fanq AS
+SELECT c.substation,
+       ts_conformal_quantile(list(abs(c.actual - c.yhat)), 0.50) AS q50,
+       ts_conformal_quantile(list(abs(c.actual - c.yhat)), 0.20) AS q80,
+       ts_conformal_quantile(list(abs(c.actual - c.yhat)), 0.05) AS q95
+FROM el_cv c JOIN el_winner USING (substation, method) GROUP BY c.substation;
 
 -- Next week (Mon 19 – Sun 25 Oct): each substation is refit on all 8 weeks
 -- with its winning method only.
@@ -186,7 +195,7 @@ FROM p JOIN h USING (substation) JOIN el_sub s USING (substation);
 -- Header: who asks, and the headline
 -- ─────────────────────────────────────────────────────────────────────────────
 SELECT 12::COL;
-SELECT 'Asked every Thursday by the **grid-operations planner** of a city utility: for the coming week (Mon 19 – Sun 25 Oct), which of our six primary substations could run above its **firm (N-1) capacity**, and when? The answer decides where to pre-arrange a **load transfer**, call **demand response** or **postpone planned maintenance**. Everything below is forecast **live** with anofox_forecast from 8 weeks of hourly load: three methods are backtested per substation, the best one forecasts, and its interval is calibrated on its own backtest errors.'::MARKDOWN,
+SELECT 'Asked every Thursday by the **grid-operations planner** of a city utility: for the coming week (Mon 19 – Sun 25 Oct), which of our six primary substations could run above its **firm (N-1) capacity**, and when? The answer decides where to pre-arrange a **load transfer**, call **demand response** or **postpone planned maintenance**. The forecast learns from 8 weeks of hourly load: three methods are backtested per substation, the best one forecasts, and its interval is calibrated on its own backtest errors. **Start with Capacity risk**; in **Decision**, each substation links to its week.'::MARKDOWN,
        'The question'::TITLE;
 
 -- The planning assumptions (inputs). The views above read them at query time.
@@ -198,18 +207,27 @@ SELECT 1::ENDGROUP;
 
 SELECT 'Next week at a glance'::GROUP;
 SELECT count(*) FILTER (WHERE status_rank <= 2)::METRIC,
-       ('of 6 substations may exceed firm capacity (' || getvariable('interval_level') || ' upper bound)')::LABEL
+       ('of 6 substations may exceed firm capacity (' || getvariable('interval_level') || ' upper bound)')::LABEL,
+       '=0:good; <3:warn; bad'::THRESHOLDS,
+       'Firm (N-1) capacity: the load a substation can carry with its largest transformer out of service. A substation counts when the upper bound of its forecast interval crosses it in any hour of next week.'::INFO
 FROM el_risk;
-SELECT round(max(sys))::METRIC, round((SELECT max(s) FROM (SELECT sum(load_mw) AS s FROM el_load WHERE ds >= TIMESTAMP '2026-10-12' GROUP BY ds)))::DELTA,
-       'system peak forecast (MW) vs this week'::LABEL
+SELECT round(max(sys))::METRIC, round((SELECT max(s) FROM (SELECT sum(load_mw) AS s FROM el_load WHERE ds >= TIMESTAMP '2026-10-12' GROUP BY ds)))::DELTA_LOWER_GOOD,
+       'vs this week'::DELTA_LABEL, 'system peak forecast (MW)'::LABEL
 FROM (SELECT sum(yhat) AS sys FROM el_plan GROUP BY ds);
-SELECT round(min(firm_mw - peak_hi), 1)::METRIC, 'tightest headroom at the upper bound (MW)'::LABEL FROM el_risk;
+SELECT round(min(firm_mw - peak_hi), 1)::METRIC, 'tightest headroom at the upper bound (MW)'::LABEL,
+       '<0:bad; <5:warn; good'::THRESHOLDS,
+       'Firm capacity minus the highest upper bound of next week, for the tightest substation. Below zero, the upper bound runs above firm capacity.'::INFO
+FROM el_risk;
 SELECT sum(hours_over_alarm)::METRIC, 'substation-hours above the alarm level'::LABEL FROM el_risk;
 SELECT round(100 - avg(s.mape), 1)::PERCENT,
        (SELECT round(100 - avg(mape), 1) FROM el_score WHERE method = 'SeasonalNaive')::DELTA,
-       'backtest accuracy (100 − MAPE), chosen methods vs repeating last week'::LABEL
+       'vs repeating last week'::DELTA_LABEL, 'backtest accuracy (100 − MAPE) of the chosen methods'::LABEL,
+       'MAPE: the mean absolute error as a % of the actual load, over three one-week backtest folds. SeasonalNaive repeats the same hour of last week.'::INFO
 FROM el_score s JOIN el_winner USING (substation, method);
-SELECT round(avg(conf_cov), 1)::PERCENT, ('coverage of the ' || getvariable('interval_level') || ' interval on the latest fold')::LABEL
+SELECT round(avg(conf_cov), 1)::PERCENT, ('coverage of the ' || getvariable('interval_level') || ' interval on the latest fold')::LABEL,
+       ('<' || (replace(getvariable('interval_level'), ' %', '')::DOUBLE - 10) || ':bad; <'
+            || (replace(getvariable('interval_level'), ' %', '')::DOUBLE - 3) || ':warn; good')::THRESHOLDS,
+       'The share of the hours of the latest backtest week whose actual load fell inside the interval (calibrated on the two weeks before). Close to the nominal level means the interval can be trusted.'::INFO
 FROM el_conf JOIN el_winner USING (substation, method);
 SELECT 1::ENDGROUP;
 
@@ -222,7 +240,7 @@ SELECT 12::COL;
 SELECT 340::HEIGHT;
 SELECT substation ::XAXIS, round(util_p50, 1) AS "Forecast peak" ::SCATTER,
        round(100 * peak_lo / firm_mw, 1) ::YMIN, round(util_hi, 1) ::YMAX,
-       100 ::REFLINE, 1 ::FLIP, ' %'::YFORMAT,
+       100 ::REFLINE, 'firm capacity' ::REFLINE_LABEL, 1 ::FLIP, ' %'::YFORMAT,
        ('Peak load next week, % of firm capacity — ' || (SELECT string_agg(substation, ' and ' ORDER BY util_hi DESC) FROM el_risk WHERE status_rank <= 2)
         || ' can cross 100 % (dot = forecast, bar = ' || getvariable('interval_level') || ' interval)') ::TITLE
 FROM el_risk ORDER BY util_hi DESC;
@@ -244,15 +262,31 @@ SELECT substation ::DROPDOWN, 'Substation'::LABEL FROM el_risk ORDER BY util_hi 
 
 SELECT 12::COL;
 SELECT 360::HEIGHT;
-SELECT ds ::XAXIS, 'Actual' ::CATEGORY, load_mw ::LINECHART, load_mw ::BAND_LOWER, load_mw ::BAND_UPPER,
-       (SELECT firm_mw FROM el_sub WHERE substation = getvariable('substation')) ::REFLINE, ' MW'::YFORMAT,
-       (getvariable('substation') || ': last two weeks and next week''s forecast (' || (SELECT method FROM el_winner WHERE substation = getvariable('substation'))
-        || ', shaded = ' || getvariable('interval_level') || ' conformal interval) against firm capacity (dashed)') ::TITLE
+-- History, then next week's forecast in a 95 / 80 / 50 % conformal fan that
+-- grows forward from the forecast start; grey = the hours whose upper bound
+-- (at the chosen level) runs above firm capacity.
+SELECT ds ::XAXIS, 'Actual' ::CATEGORY, load_mw ::LINECHART,
+       NULL::DOUBLE ::BAND_LOWER, NULL::DOUBLE ::BAND_UPPER,
+       NULL::DOUBLE ::BAND_LOWER, NULL::DOUBLE ::BAND_UPPER,
+       NULL::DOUBLE ::BAND_LOWER, NULL::DOUBLE ::BAND_UPPER,
+       NULL::TIMESTAMP ::MARKAREA,
+       (SELECT firm_mw FROM el_sub WHERE substation = getvariable('substation')) ::REFLINE, 'firm capacity' ::REFLINE_LABEL,
+       TIMESTAMP '2026-10-19 00:00:00' ::XLINE, 'forecast' ::XLINE_LABEL,
+       NULL ::LINESTYLE, 'reveal' ::ANIMATE, ' MW'::YFORMAT,
+       (getvariable('substation') || ': next week''s forecast (' || (SELECT method FROM el_winner WHERE substation = getvariable('substation'))
+        || ', bands 95 / 80 / 50 %) against firm capacity — grey: hours the ' || getvariable('interval_level') || ' upper bound crosses it') ::TITLE
 FROM el_load WHERE substation = getvariable('substation') AND ds >= TIMESTAMP '2026-10-05'
 UNION ALL
-SELECT ds, 'Forecast', round(yhat, 2), round(lo, 2), round(hi, 2), NULL, NULL, NULL
-FROM el_plan WHERE substation = getvariable('substation')
-ORDER BY 1;
+-- the forecast starts at the last actual hour, so the two lines join
+SELECT ds, 'Forecast', load_mw, load_mw, load_mw, load_mw, load_mw, load_mw, load_mw, NULL, NULL, NULL, NULL, NULL, 'flow', NULL, NULL, NULL
+FROM el_load WHERE substation = getvariable('substation') AND ds = TIMESTAMP '2026-10-18 23:00:00'
+UNION ALL
+SELECT p.ds, 'Forecast', round(p.yhat, 2),
+       round(p.yhat - q.q95, 2), round(p.yhat + q.q95, 2), round(p.yhat - q.q80, 2), round(p.yhat + q.q80, 2),
+       round(p.yhat - q.q50, 2), round(p.yhat + q.q50, 2),
+       CASE WHEN p.hi > p.firm_mw THEN p.ds END, NULL, NULL, NULL, NULL, 'flow', NULL, NULL, NULL
+FROM el_plan p JOIN el_fanq q USING (substation) WHERE p.substation = getvariable('substation')
+ORDER BY 1, 2;
 
 SELECT 6::COL;
 SELECT 420::HEIGHT;
@@ -325,6 +359,7 @@ SELECT ('**Recommendation for next week.** '
         || CASE WHEN (SELECT count(*) FROM el_risk WHERE status_rank <= 2) = 1 THEN ' needs' ELSE ' need' END || ' an action before Monday; '
         || coalesce((SELECT string_agg(substation, ', ' ORDER BY util_hi DESC) FROM el_risk WHERE status_rank = 3), 'no other substation')
         || CASE WHEN (SELECT count(*) FROM el_risk WHERE status_rank = 3) = 1 THEN ' stays' ELSE ' stay' END || ' on watch above the ' || getvariable('alarm_pct') || ' % alarm. Raise the interval level above to plan more conservatively; the table updates instantly.')::MARKDOWN,
+       CASE WHEN (SELECT count(*) FROM el_risk WHERE status_rank <= 2) > 0 THEN 'warning' ELSE 'success' END::CALLOUT,
        'What to do'::TITLE;
 
 SELECT 12::COL;
@@ -332,7 +367,7 @@ SELECT 'Status = breach expected, Status = at risk'::FLAG;
 SELECT 'Peak % of firm: top 2'::HIGHLIGHT;
 SELECT 'Peak % of firm: max, Hours ≥ alarm: sum, Headroom (MW): min'::TOTALS;
 SELECT substation AS "Substation" ::TABLE, status AS "Status" ::BADGE,
-       round(firm_mw, 0) AS "Firm (MW)", round(peak_p50, 1) AS "Forecast peak (MW)",
+       round(peak_p50, 1) AS "Forecast peak (MW)",
        round(peak_hi, 1) AS "Upper bound (MW)", round(firm_mw - peak_hi, 1) AS "Headroom (MW)",
        round(util_hi, 1) AS "Peak % of firm" ::COLORSCALE,
        strftime(peak_at, '%a %H:00') AS "Peak hour", hours_over_alarm AS "Hours ≥ alarm",
@@ -341,5 +376,6 @@ SELECT substation AS "Substation" ::TABLE, status AS "Status" ::BADGE,
          WHEN 2 THEN 'Arm the switching plan'
          WHEN 3 THEN 'Monitor, maintenance off-peak'
          ELSE 'No action' END AS "Recommended action",
+       '#Substation drill-down?v.substation={value}' AS "Its week" ::LINK,
        'Next week per substation — status at the chosen interval level and alarm, with the action for each'::TITLE
 FROM el_risk ORDER BY status_rank, util_hi DESC;

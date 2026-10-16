@@ -23,9 +23,11 @@ source the browser demo loads.
   checked on fold 3 with `ts_coverage`). `ts_detect_peaks_by` finds next week's
   daily peaks.
 - **Dashboard.** The question and who asks it, planning assumptions (interval
-  level, alarm threshold), a KPI strip, then four tabs: capacity risk ·
-  substation drill-down · backtest · decision (status and action per
-  substation).
+  level, alarm threshold), a KPI strip coloured by thresholds (with ⓘ
+  definitions), then four tabs: capacity risk · substation drill-down (a
+  50 / 80 / 95 % conformal fan revealed from the forecast start, the hours
+  whose upper bound crosses firm capacity shaded) · backtest (the conformal interval as a formula) · decision (status,
+  action and a link to its week per substation).
 
 ## Where it runs
 
