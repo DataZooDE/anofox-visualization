@@ -1,0 +1,263 @@
+line,from_product,from_ord,to_product,to_ord,minutes
+L1 glass,apple spritzer 0.33 l,20,apple spritzer 0.33 l,20,10.0
+L1 glass,apple spritzer 0.33 l,20,apple spritzer 0.7 l,21,45.0
+L1 glass,apple spritzer 0.33 l,20,cola 0.7 l,61,85.0
+L1 glass,apple spritzer 0.33 l,20,lemon 0.33 l,30,25.0
+L1 glass,apple spritzer 0.33 l,20,lemon 0.7 l,31,70.0
+L1 glass,apple spritzer 0.33 l,20,sparkling water 0.33 l,10,80.0
+L1 glass,apple spritzer 0.33 l,20,sparkling water 0.7 l,11,125.0
+L1 glass,apple spritzer 0.33 l,20,still water 0.33 l,0,80.0
+L1 glass,apple spritzer 0.33 l,20,still water 0.7 l,1,125.0
+L1 glass,apple spritzer 0.7 l,21,apple spritzer 0.33 l,20,45.0
+L1 glass,apple spritzer 0.7 l,21,apple spritzer 0.7 l,21,10.0
+L1 glass,apple spritzer 0.7 l,21,cola 0.7 l,61,40.0
+L1 glass,apple spritzer 0.7 l,21,lemon 0.33 l,30,70.0
+L1 glass,apple spritzer 0.7 l,21,lemon 0.7 l,31,25.0
+L1 glass,apple spritzer 0.7 l,21,sparkling water 0.33 l,10,125.0
+L1 glass,apple spritzer 0.7 l,21,sparkling water 0.7 l,11,80.0
+L1 glass,apple spritzer 0.7 l,21,still water 0.33 l,0,125.0
+L1 glass,apple spritzer 0.7 l,21,still water 0.7 l,1,80.0
+L1 glass,cola 0.7 l,61,apple spritzer 0.33 l,20,125.0
+L1 glass,cola 0.7 l,61,apple spritzer 0.7 l,21,80.0
+L1 glass,cola 0.7 l,61,cola 0.7 l,61,10.0
+L1 glass,cola 0.7 l,61,lemon 0.33 l,30,125.0
+L1 glass,cola 0.7 l,61,lemon 0.7 l,31,80.0
+L1 glass,cola 0.7 l,61,sparkling water 0.33 l,10,125.0
+L1 glass,cola 0.7 l,61,sparkling water 0.7 l,11,80.0
+L1 glass,cola 0.7 l,61,still water 0.33 l,0,125.0
+L1 glass,cola 0.7 l,61,still water 0.7 l,1,80.0
+L1 glass,lemon 0.33 l,30,apple spritzer 0.33 l,20,80.0
+L1 glass,lemon 0.33 l,30,apple spritzer 0.7 l,21,125.0
+L1 glass,lemon 0.33 l,30,cola 0.7 l,61,80.0
+L1 glass,lemon 0.33 l,30,lemon 0.33 l,30,10.0
+L1 glass,lemon 0.33 l,30,lemon 0.7 l,31,45.0
+L1 glass,lemon 0.33 l,30,sparkling water 0.33 l,10,80.0
+L1 glass,lemon 0.33 l,30,sparkling water 0.7 l,11,125.0
+L1 glass,lemon 0.33 l,30,still water 0.33 l,0,80.0
+L1 glass,lemon 0.33 l,30,still water 0.7 l,1,125.0
+L1 glass,lemon 0.7 l,31,apple spritzer 0.33 l,20,125.0
+L1 glass,lemon 0.7 l,31,apple spritzer 0.7 l,21,80.0
+L1 glass,lemon 0.7 l,31,cola 0.7 l,61,35.0
+L1 glass,lemon 0.7 l,31,lemon 0.33 l,30,45.0
+L1 glass,lemon 0.7 l,31,lemon 0.7 l,31,10.0
+L1 glass,lemon 0.7 l,31,sparkling water 0.33 l,10,125.0
+L1 glass,lemon 0.7 l,31,sparkling water 0.7 l,11,80.0
+L1 glass,lemon 0.7 l,31,still water 0.33 l,0,125.0
+L1 glass,lemon 0.7 l,31,still water 0.7 l,1,80.0
+L1 glass,sparkling water 0.33 l,10,apple spritzer 0.33 l,20,25.0
+L1 glass,sparkling water 0.33 l,10,apple spritzer 0.7 l,21,70.0
+L1 glass,sparkling water 0.33 l,10,cola 0.7 l,61,90.0
+L1 glass,sparkling water 0.33 l,10,lemon 0.33 l,30,30.0
+L1 glass,sparkling water 0.33 l,10,lemon 0.7 l,31,75.0
+L1 glass,sparkling water 0.33 l,10,sparkling water 0.33 l,10,10.0
+L1 glass,sparkling water 0.33 l,10,sparkling water 0.7 l,11,45.0
+L1 glass,sparkling water 0.33 l,10,still water 0.33 l,0,80.0
+L1 glass,sparkling water 0.33 l,10,still water 0.7 l,1,125.0
+L1 glass,sparkling water 0.7 l,11,apple spritzer 0.33 l,20,70.0
+L1 glass,sparkling water 0.7 l,11,apple spritzer 0.7 l,21,25.0
+L1 glass,sparkling water 0.7 l,11,cola 0.7 l,61,45.0
+L1 glass,sparkling water 0.7 l,11,lemon 0.33 l,30,75.0
+L1 glass,sparkling water 0.7 l,11,lemon 0.7 l,31,30.0
+L1 glass,sparkling water 0.7 l,11,sparkling water 0.33 l,10,45.0
+L1 glass,sparkling water 0.7 l,11,sparkling water 0.7 l,11,10.0
+L1 glass,sparkling water 0.7 l,11,still water 0.33 l,0,125.0
+L1 glass,sparkling water 0.7 l,11,still water 0.7 l,1,80.0
+L1 glass,still water 0.33 l,0,apple spritzer 0.33 l,20,30.0
+L1 glass,still water 0.33 l,0,apple spritzer 0.7 l,21,75.0
+L1 glass,still water 0.33 l,0,cola 0.7 l,61,95.0
+L1 glass,still water 0.33 l,0,lemon 0.33 l,30,35.0
+L1 glass,still water 0.33 l,0,lemon 0.7 l,31,80.0
+L1 glass,still water 0.33 l,0,sparkling water 0.33 l,10,25.0
+L1 glass,still water 0.33 l,0,sparkling water 0.7 l,11,70.0
+L1 glass,still water 0.33 l,0,still water 0.33 l,0,10.0
+L1 glass,still water 0.33 l,0,still water 0.7 l,1,45.0
+L1 glass,still water 0.7 l,1,apple spritzer 0.33 l,20,75.0
+L1 glass,still water 0.7 l,1,apple spritzer 0.7 l,21,30.0
+L1 glass,still water 0.7 l,1,cola 0.7 l,61,50.0
+L1 glass,still water 0.7 l,1,lemon 0.33 l,30,80.0
+L1 glass,still water 0.7 l,1,lemon 0.7 l,31,35.0
+L1 glass,still water 0.7 l,1,sparkling water 0.33 l,10,70.0
+L1 glass,still water 0.7 l,1,sparkling water 0.7 l,11,25.0
+L1 glass,still water 0.7 l,1,still water 0.33 l,0,45.0
+L1 glass,still water 0.7 l,1,still water 0.7 l,1,10.0
+L2 PET,apple spritzer 0.5 l,21,apple spritzer 0.5 l,21,10.0
+L2 PET,apple spritzer 0.5 l,21,apple spritzer 1.5 l,21,45.0
+L2 PET,apple spritzer 0.5 l,21,cola 0.5 l,61,40.0
+L2 PET,apple spritzer 0.5 l,21,cola zero 0.5 l,71,70.0
+L2 PET,apple spritzer 0.5 l,21,cola zero 1.5 l,71,115.0
+L2 PET,apple spritzer 0.5 l,21,ginger ale 0.5 l,51,35.0
+L2 PET,apple spritzer 0.5 l,21,lemon 0.5 l,31,25.0
+L2 PET,apple spritzer 0.5 l,21,orange 1.5 l,41,75.0
+L2 PET,apple spritzer 0.5 l,21,sparkling water 0.5 l,11,80.0
+L2 PET,apple spritzer 0.5 l,21,still water 0.5 l,1,80.0
+L2 PET,apple spritzer 1.5 l,21,apple spritzer 0.5 l,21,45.0
+L2 PET,apple spritzer 1.5 l,21,apple spritzer 1.5 l,21,10.0
+L2 PET,apple spritzer 1.5 l,21,cola 0.5 l,61,85.0
+L2 PET,apple spritzer 1.5 l,21,cola zero 0.5 l,71,115.0
+L2 PET,apple spritzer 1.5 l,21,cola zero 1.5 l,71,70.0
+L2 PET,apple spritzer 1.5 l,21,ginger ale 0.5 l,51,80.0
+L2 PET,apple spritzer 1.5 l,21,lemon 0.5 l,31,70.0
+L2 PET,apple spritzer 1.5 l,21,orange 1.5 l,41,30.0
+L2 PET,apple spritzer 1.5 l,21,sparkling water 0.5 l,11,125.0
+L2 PET,apple spritzer 1.5 l,21,still water 0.5 l,1,125.0
+L2 PET,cola 0.5 l,61,apple spritzer 0.5 l,21,80.0
+L2 PET,cola 0.5 l,61,apple spritzer 1.5 l,21,125.0
+L2 PET,cola 0.5 l,61,cola 0.5 l,61,10.0
+L2 PET,cola 0.5 l,61,cola zero 0.5 l,71,50.0
+L2 PET,cola 0.5 l,61,cola zero 1.5 l,71,95.0
+L2 PET,cola 0.5 l,61,ginger ale 0.5 l,51,80.0
+L2 PET,cola 0.5 l,61,lemon 0.5 l,31,80.0
+L2 PET,cola 0.5 l,61,orange 1.5 l,41,125.0
+L2 PET,cola 0.5 l,61,sparkling water 0.5 l,11,80.0
+L2 PET,cola 0.5 l,61,still water 0.5 l,1,80.0
+L2 PET,cola zero 0.5 l,71,apple spritzer 0.5 l,21,105.0
+L2 PET,cola zero 0.5 l,71,apple spritzer 1.5 l,21,150.0
+L2 PET,cola zero 0.5 l,71,cola 0.5 l,61,105.0
+L2 PET,cola zero 0.5 l,71,cola zero 0.5 l,71,10.0
+L2 PET,cola zero 0.5 l,71,cola zero 1.5 l,71,45.0
+L2 PET,cola zero 0.5 l,71,ginger ale 0.5 l,51,105.0
+L2 PET,cola zero 0.5 l,71,lemon 0.5 l,31,105.0
+L2 PET,cola zero 0.5 l,71,orange 1.5 l,41,150.0
+L2 PET,cola zero 0.5 l,71,sparkling water 0.5 l,11,105.0
+L2 PET,cola zero 0.5 l,71,still water 0.5 l,1,105.0
+L2 PET,cola zero 1.5 l,71,apple spritzer 0.5 l,21,150.0
+L2 PET,cola zero 1.5 l,71,apple spritzer 1.5 l,21,105.0
+L2 PET,cola zero 1.5 l,71,cola 0.5 l,61,150.0
+L2 PET,cola zero 1.5 l,71,cola zero 0.5 l,71,45.0
+L2 PET,cola zero 1.5 l,71,cola zero 1.5 l,71,10.0
+L2 PET,cola zero 1.5 l,71,ginger ale 0.5 l,51,150.0
+L2 PET,cola zero 1.5 l,71,lemon 0.5 l,31,150.0
+L2 PET,cola zero 1.5 l,71,orange 1.5 l,41,105.0
+L2 PET,cola zero 1.5 l,71,sparkling water 0.5 l,11,150.0
+L2 PET,cola zero 1.5 l,71,still water 0.5 l,1,150.0
+L2 PET,ginger ale 0.5 l,51,apple spritzer 0.5 l,21,80.0
+L2 PET,ginger ale 0.5 l,51,apple spritzer 1.5 l,21,125.0
+L2 PET,ginger ale 0.5 l,51,cola 0.5 l,61,25.0
+L2 PET,ginger ale 0.5 l,51,cola zero 0.5 l,71,55.0
+L2 PET,ginger ale 0.5 l,51,cola zero 1.5 l,71,100.0
+L2 PET,ginger ale 0.5 l,51,ginger ale 0.5 l,51,10.0
+L2 PET,ginger ale 0.5 l,51,lemon 0.5 l,31,80.0
+L2 PET,ginger ale 0.5 l,51,orange 1.5 l,41,125.0
+L2 PET,ginger ale 0.5 l,51,sparkling water 0.5 l,11,80.0
+L2 PET,ginger ale 0.5 l,51,still water 0.5 l,1,80.0
+L2 PET,lemon 0.5 l,31,apple spritzer 0.5 l,21,80.0
+L2 PET,lemon 0.5 l,31,apple spritzer 1.5 l,21,125.0
+L2 PET,lemon 0.5 l,31,cola 0.5 l,61,35.0
+L2 PET,lemon 0.5 l,31,cola zero 0.5 l,71,65.0
+L2 PET,lemon 0.5 l,31,cola zero 1.5 l,71,110.0
+L2 PET,lemon 0.5 l,31,ginger ale 0.5 l,51,30.0
+L2 PET,lemon 0.5 l,31,lemon 0.5 l,31,10.0
+L2 PET,lemon 0.5 l,31,orange 1.5 l,41,70.0
+L2 PET,lemon 0.5 l,31,sparkling water 0.5 l,11,80.0
+L2 PET,lemon 0.5 l,31,still water 0.5 l,1,80.0
+L2 PET,orange 1.5 l,41,apple spritzer 0.5 l,21,125.0
+L2 PET,orange 1.5 l,41,apple spritzer 1.5 l,21,80.0
+L2 PET,orange 1.5 l,41,cola 0.5 l,61,75.0
+L2 PET,orange 1.5 l,41,cola zero 0.5 l,71,105.0
+L2 PET,orange 1.5 l,41,cola zero 1.5 l,71,60.0
+L2 PET,orange 1.5 l,41,ginger ale 0.5 l,51,70.0
+L2 PET,orange 1.5 l,41,lemon 0.5 l,31,125.0
+L2 PET,orange 1.5 l,41,orange 1.5 l,41,10.0
+L2 PET,orange 1.5 l,41,sparkling water 0.5 l,11,125.0
+L2 PET,orange 1.5 l,41,still water 0.5 l,1,125.0
+L2 PET,sparkling water 0.5 l,11,apple spritzer 0.5 l,21,25.0
+L2 PET,sparkling water 0.5 l,11,apple spritzer 1.5 l,21,70.0
+L2 PET,sparkling water 0.5 l,11,cola 0.5 l,61,45.0
+L2 PET,sparkling water 0.5 l,11,cola zero 0.5 l,71,75.0
+L2 PET,sparkling water 0.5 l,11,cola zero 1.5 l,71,120.0
+L2 PET,sparkling water 0.5 l,11,ginger ale 0.5 l,51,40.0
+L2 PET,sparkling water 0.5 l,11,lemon 0.5 l,31,30.0
+L2 PET,sparkling water 0.5 l,11,orange 1.5 l,41,80.0
+L2 PET,sparkling water 0.5 l,11,sparkling water 0.5 l,11,10.0
+L2 PET,sparkling water 0.5 l,11,still water 0.5 l,1,80.0
+L2 PET,still water 0.5 l,1,apple spritzer 0.5 l,21,30.0
+L2 PET,still water 0.5 l,1,apple spritzer 1.5 l,21,75.0
+L2 PET,still water 0.5 l,1,cola 0.5 l,61,50.0
+L2 PET,still water 0.5 l,1,cola zero 0.5 l,71,80.0
+L2 PET,still water 0.5 l,1,cola zero 1.5 l,71,125.0
+L2 PET,still water 0.5 l,1,ginger ale 0.5 l,51,45.0
+L2 PET,still water 0.5 l,1,lemon 0.5 l,31,35.0
+L2 PET,still water 0.5 l,1,orange 1.5 l,41,85.0
+L2 PET,still water 0.5 l,1,sparkling water 0.5 l,11,25.0
+L2 PET,still water 0.5 l,1,still water 0.5 l,1,10.0
+L3 cans,cola 0.33 l,60,cola 0.33 l,60,10.0
+L3 cans,cola 0.33 l,60,cola 0.5 l,61,45.0
+L3 cans,cola 0.33 l,60,cola zero 0.33 l,70,50.0
+L3 cans,cola 0.33 l,60,ginger ale 0.33 l,50,80.0
+L3 cans,cola 0.33 l,60,ginger ale 0.5 l,51,125.0
+L3 cans,cola 0.33 l,60,lemon 0.5 l,31,125.0
+L3 cans,cola 0.33 l,60,orange 0.33 l,40,80.0
+L3 cans,cola 0.33 l,60,orange 0.5 l,41,125.0
+L3 cans,cola 0.33 l,60,sparkling water 0.33 l,10,80.0
+L3 cans,cola 0.5 l,61,cola 0.33 l,60,45.0
+L3 cans,cola 0.5 l,61,cola 0.5 l,61,10.0
+L3 cans,cola 0.5 l,61,cola zero 0.33 l,70,95.0
+L3 cans,cola 0.5 l,61,ginger ale 0.33 l,50,125.0
+L3 cans,cola 0.5 l,61,ginger ale 0.5 l,51,80.0
+L3 cans,cola 0.5 l,61,lemon 0.5 l,31,80.0
+L3 cans,cola 0.5 l,61,orange 0.33 l,40,125.0
+L3 cans,cola 0.5 l,61,orange 0.5 l,41,80.0
+L3 cans,cola 0.5 l,61,sparkling water 0.33 l,10,125.0
+L3 cans,cola zero 0.33 l,70,cola 0.33 l,60,105.0
+L3 cans,cola zero 0.33 l,70,cola 0.5 l,61,150.0
+L3 cans,cola zero 0.33 l,70,cola zero 0.33 l,70,10.0
+L3 cans,cola zero 0.33 l,70,ginger ale 0.33 l,50,105.0
+L3 cans,cola zero 0.33 l,70,ginger ale 0.5 l,51,150.0
+L3 cans,cola zero 0.33 l,70,lemon 0.5 l,31,150.0
+L3 cans,cola zero 0.33 l,70,orange 0.33 l,40,105.0
+L3 cans,cola zero 0.33 l,70,orange 0.5 l,41,150.0
+L3 cans,cola zero 0.33 l,70,sparkling water 0.33 l,10,105.0
+L3 cans,ginger ale 0.33 l,50,cola 0.33 l,60,25.0
+L3 cans,ginger ale 0.33 l,50,cola 0.5 l,61,70.0
+L3 cans,ginger ale 0.33 l,50,cola zero 0.33 l,70,55.0
+L3 cans,ginger ale 0.33 l,50,ginger ale 0.33 l,50,10.0
+L3 cans,ginger ale 0.33 l,50,ginger ale 0.5 l,51,45.0
+L3 cans,ginger ale 0.33 l,50,lemon 0.5 l,31,125.0
+L3 cans,ginger ale 0.33 l,50,orange 0.33 l,40,80.0
+L3 cans,ginger ale 0.33 l,50,orange 0.5 l,41,125.0
+L3 cans,ginger ale 0.33 l,50,sparkling water 0.33 l,10,80.0
+L3 cans,ginger ale 0.5 l,51,cola 0.33 l,60,70.0
+L3 cans,ginger ale 0.5 l,51,cola 0.5 l,61,25.0
+L3 cans,ginger ale 0.5 l,51,cola zero 0.33 l,70,100.0
+L3 cans,ginger ale 0.5 l,51,ginger ale 0.33 l,50,45.0
+L3 cans,ginger ale 0.5 l,51,ginger ale 0.5 l,51,10.0
+L3 cans,ginger ale 0.5 l,51,lemon 0.5 l,31,80.0
+L3 cans,ginger ale 0.5 l,51,orange 0.33 l,40,125.0
+L3 cans,ginger ale 0.5 l,51,orange 0.5 l,41,80.0
+L3 cans,ginger ale 0.5 l,51,sparkling water 0.33 l,10,125.0
+L3 cans,lemon 0.5 l,31,cola 0.33 l,60,80.0
+L3 cans,lemon 0.5 l,31,cola 0.5 l,61,35.0
+L3 cans,lemon 0.5 l,31,cola zero 0.33 l,70,110.0
+L3 cans,lemon 0.5 l,31,ginger ale 0.33 l,50,75.0
+L3 cans,lemon 0.5 l,31,ginger ale 0.5 l,51,30.0
+L3 cans,lemon 0.5 l,31,lemon 0.5 l,31,10.0
+L3 cans,lemon 0.5 l,31,orange 0.33 l,40,70.0
+L3 cans,lemon 0.5 l,31,orange 0.5 l,41,25.0
+L3 cans,lemon 0.5 l,31,sparkling water 0.33 l,10,125.0
+L3 cans,orange 0.33 l,40,cola 0.33 l,60,30.0
+L3 cans,orange 0.33 l,40,cola 0.5 l,61,75.0
+L3 cans,orange 0.33 l,40,cola zero 0.33 l,70,60.0
+L3 cans,orange 0.33 l,40,ginger ale 0.33 l,50,25.0
+L3 cans,orange 0.33 l,40,ginger ale 0.5 l,51,70.0
+L3 cans,orange 0.33 l,40,lemon 0.5 l,31,125.0
+L3 cans,orange 0.33 l,40,orange 0.33 l,40,10.0
+L3 cans,orange 0.33 l,40,orange 0.5 l,41,45.0
+L3 cans,orange 0.33 l,40,sparkling water 0.33 l,10,80.0
+L3 cans,orange 0.5 l,41,cola 0.33 l,60,75.0
+L3 cans,orange 0.5 l,41,cola 0.5 l,61,30.0
+L3 cans,orange 0.5 l,41,cola zero 0.33 l,70,105.0
+L3 cans,orange 0.5 l,41,ginger ale 0.33 l,50,70.0
+L3 cans,orange 0.5 l,41,ginger ale 0.5 l,51,25.0
+L3 cans,orange 0.5 l,41,lemon 0.5 l,31,80.0
+L3 cans,orange 0.5 l,41,orange 0.33 l,40,45.0
+L3 cans,orange 0.5 l,41,orange 0.5 l,41,10.0
+L3 cans,orange 0.5 l,41,sparkling water 0.33 l,10,125.0
+L3 cans,sparkling water 0.33 l,10,cola 0.33 l,60,45.0
+L3 cans,sparkling water 0.33 l,10,cola 0.5 l,61,90.0
+L3 cans,sparkling water 0.33 l,10,cola zero 0.33 l,70,75.0
+L3 cans,sparkling water 0.33 l,10,ginger ale 0.33 l,50,40.0
+L3 cans,sparkling water 0.33 l,10,ginger ale 0.5 l,51,85.0
+L3 cans,sparkling water 0.33 l,10,lemon 0.5 l,31,75.0
+L3 cans,sparkling water 0.33 l,10,orange 0.33 l,40,35.0
+L3 cans,sparkling water 0.33 l,10,orange 0.5 l,41,80.0
+L3 cans,sparkling water 0.33 l,10,sparkling water 0.33 l,10,10.0

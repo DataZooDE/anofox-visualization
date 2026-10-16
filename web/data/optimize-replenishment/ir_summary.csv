@@ -1,0 +1,190 @@
+service_level,budget,rule,ord,pallets,spent,exp_margin,exp_lost_units,exp_overstock_eur,fill_rate_pct,skus_covered
+90 %,10000,"forecast, exact (proven optimum)",3,10,9960,16334.0,1811.0,108.0,76.8,0
+90 %,10000,"forecast, top sellers first",2,7,9984,15609.0,2660.0,342.0,65.9,0
+90 %,10000,"today: last 4 weeks, top sellers first",1,6,9983,14471.0,3140.0,1638.0,59.7,1
+90 %,12500,"forecast, exact (proven optimum)",3,14,12457,17314.0,1501.0,108.0,80.7,0
+90 %,12500,"forecast, top sellers first",2,9,12494,16645.0,2396.0,342.0,69.3,0
+90 %,12500,"today: last 4 weeks, top sellers first",1,8,12373,15075.0,2771.0,2305.0,64.4,2
+90 %,15000,"forecast, exact (proven optimum)",3,15,14940,18221.0,1306.0,441.0,83.2,0
+90 %,15000,"forecast, top sellers first",2,12,14844,17936.0,1820.0,342.0,76.6,0
+90 %,15000,"today: last 4 weeks, top sellers first",1,11,14857,16178.0,2343.0,2305.0,69.9,2
+90 %,17500,"forecast, exact (proven optimum)",3,19,17497,19054.0,885.0,702.0,88.6,0
+90 %,17500,"forecast, top sellers first",2,14,17446,18849.0,1377.0,702.0,82.3,0
+90 %,17500,"today: last 4 weeks, top sellers first",1,14,17405,17245.0,2037.0,2305.0,73.9,2
+90 %,20000,"forecast, exact (proven optimum)",3,20,19989,19802.0,858.0,702.0,89.0,0
+90 %,20000,"forecast, top sellers first",2,17,19991,19622.0,1071.0,1398.0,86.2,0
+90 %,20000,"today: last 4 weeks, top sellers first",1,19,19821,18056.0,1624.0,2305.0,79.1,2
+90 %,22500,"forecast, exact (proven optimum)",3,23,22450,20506.0,691.0,702.0,91.1,0
+90 %,22500,"forecast, top sellers first",2,18,22485,19989.0,924.0,2694.0,88.1,1
+90 %,22500,"today: last 4 weeks, top sellers first",1,22,22435,18251.0,1577.0,4459.0,79.8,4
+90 %,25000,"forecast, exact (proven optimum)",3,26,24812,21162.0,409.0,1398.0,94.7,0
+90 %,25000,"forecast, top sellers first",2,22,24829,20691.0,837.0,2694.0,89.2,1
+90 %,25000,"today: last 4 weeks, top sellers first",1,23,24983,18317.0,1506.0,6759.0,80.7,5
+90 %,27500,"forecast, exact (proven optimum)",3,30,27488,21626.0,176.0,2826.0,97.7,2
+90 %,27500,"forecast, top sellers first",2,27,27306,21497.0,290.0,2694.0,96.3,1
+90 %,27500,"today: last 4 weeks, top sellers first",1,28,27410,18639.0,1320.0,8430.0,83.1,7
+90 %,30000,"forecast, exact (proven optimum)",3,31,29792,21949.0,133.0,4122.0,98.3,3
+90 %,30000,"forecast, top sellers first",2,31,29792,21949.0,133.0,4122.0,98.3,3
+90 %,30000,"today: last 4 weeks, top sellers first",1,32,29957,18705.0,1268.0,10902.0,83.7,7
+90 %,32500,"forecast, exact (proven optimum)",3,35,32280,22115.0,38.0,6455.0,99.5,6
+90 %,32500,"forecast, top sellers first",2,35,32280,22115.0,38.0,6455.0,99.5,6
+90 %,32500,"today: last 4 weeks, top sellers first",1,35,32452,19562.0,936.0,11622.0,88.0,7
+90 %,35000,"forecast, exact (proven optimum)",3,38,34763,22177.0,17.0,8939.0,99.8,9
+90 %,35000,"forecast, top sellers first",2,38,34763,22177.0,17.0,8939.0,99.8,9
+90 %,35000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,37500,"forecast, exact (proven optimum)",3,39,37063,22201.0,12.0,11239.0,99.8,10
+90 %,37500,"forecast, top sellers first",2,39,37063,22201.0,12.0,11239.0,99.8,10
+90 %,37500,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,40000,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,40000,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,40000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,42500,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,42500,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,42500,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,45000,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,45000,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,45000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,47500,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,47500,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,47500,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,50000,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,50000,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,50000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,52500,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,52500,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,52500,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,55000,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,55000,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,55000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,57500,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,57500,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,57500,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+90 %,60000,"forecast, exact (proven optimum)",3,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,60000,"forecast, top sellers first",2,41,38901,22212.0,5.0,13077.0,99.9,12
+90 %,60000,"today: last 4 weeks, top sellers first",1,38,34814,20312.0,679.0,12628.0,91.3,7
+95 %,10000,"forecast, exact (proven optimum)",3,10,9960,16334.0,1811.0,108.0,76.8,0
+95 %,10000,"forecast, top sellers first",2,7,9984,15609.0,2660.0,342.0,65.9,0
+95 %,10000,"today: last 4 weeks, top sellers first",1,6,9983,14471.0,3140.0,1638.0,59.7,0
+95 %,12500,"forecast, exact (proven optimum)",3,14,12457,17314.0,1501.0,108.0,80.7,0
+95 %,12500,"forecast, top sellers first",2,9,12494,16645.0,2396.0,342.0,69.3,0
+95 %,12500,"today: last 4 weeks, top sellers first",1,8,12373,15075.0,2771.0,2305.0,64.4,0
+95 %,15000,"forecast, exact (proven optimum)",3,15,14940,18221.0,1306.0,441.0,83.2,0
+95 %,15000,"forecast, top sellers first",2,12,14844,17936.0,1820.0,342.0,76.6,0
+95 %,15000,"today: last 4 weeks, top sellers first",1,11,14857,16178.0,2343.0,2305.0,69.9,0
+95 %,17500,"forecast, exact (proven optimum)",3,19,17497,19054.0,885.0,702.0,88.6,0
+95 %,17500,"forecast, top sellers first",2,14,17446,18849.0,1377.0,702.0,82.3,0
+95 %,17500,"today: last 4 weeks, top sellers first",1,14,17405,17245.0,2037.0,2305.0,73.9,0
+95 %,20000,"forecast, exact (proven optimum)",3,20,19989,19802.0,858.0,702.0,89.0,0
+95 %,20000,"forecast, top sellers first",2,17,19991,19622.0,1071.0,1398.0,86.2,0
+95 %,20000,"today: last 4 weeks, top sellers first",1,19,19821,18056.0,1624.0,2305.0,79.1,0
+95 %,22500,"forecast, exact (proven optimum)",3,23,22450,20506.0,691.0,702.0,91.1,0
+95 %,22500,"forecast, top sellers first",2,18,22485,19989.0,924.0,2694.0,88.1,0
+95 %,22500,"today: last 4 weeks, top sellers first",1,22,22435,18251.0,1577.0,4459.0,79.8,2
+95 %,25000,"forecast, exact (proven optimum)",3,26,24812,21162.0,409.0,1398.0,94.7,0
+95 %,25000,"forecast, top sellers first",2,22,24829,20691.0,837.0,2694.0,89.2,0
+95 %,25000,"today: last 4 weeks, top sellers first",1,23,24983,18317.0,1506.0,6759.0,80.7,3
+95 %,27500,"forecast, exact (proven optimum)",3,30,27488,21626.0,176.0,2826.0,97.7,1
+95 %,27500,"forecast, top sellers first",2,27,27306,21497.0,290.0,2694.0,96.3,0
+95 %,27500,"today: last 4 weeks, top sellers first",1,28,27410,18639.0,1320.0,8430.0,83.1,5
+95 %,30000,"forecast, exact (proven optimum)",3,31,29792,21949.0,133.0,4122.0,98.3,1
+95 %,30000,"forecast, top sellers first",2,31,29792,21949.0,133.0,4122.0,98.3,1
+95 %,30000,"today: last 4 weeks, top sellers first",1,32,29957,18705.0,1268.0,10902.0,83.7,6
+95 %,32500,"forecast, exact (proven optimum)",3,35,32280,22115.0,38.0,6455.0,99.5,4
+95 %,32500,"forecast, top sellers first",2,35,32280,22115.0,38.0,6455.0,99.5,4
+95 %,32500,"today: last 4 weeks, top sellers first",1,35,32452,19562.0,936.0,11622.0,88.0,6
+95 %,35000,"forecast, exact (proven optimum)",3,38,34763,22177.0,17.0,8939.0,99.8,7
+95 %,35000,"forecast, top sellers first",2,38,34763,22177.0,17.0,8939.0,99.8,7
+95 %,35000,"today: last 4 weeks, top sellers first",1,38,34955,20254.0,727.0,12844.0,90.7,6
+95 %,37500,"forecast, exact (proven optimum)",3,39,37063,22201.0,12.0,11239.0,99.8,8
+95 %,37500,"forecast, top sellers first",2,39,37063,22201.0,12.0,11239.0,99.8,8
+95 %,37500,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,40000,"forecast, exact (proven optimum)",3,41,39813,22219.0,4.0,13989.0,99.9,10
+95 %,40000,"forecast, top sellers first",2,41,39813,22219.0,4.0,13989.0,99.9,10
+95 %,40000,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,42500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,42500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,42500,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,45000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,45000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,45000,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,47500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,47500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,47500,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,50000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,50000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,50000,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,52500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,52500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,52500,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,55000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,55000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,55000,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,57500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,57500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,57500,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+95 %,60000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,60000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+95 %,60000,"today: last 4 weeks, top sellers first",1,39,35402,20312.0,679.0,13216.0,91.3,6
+98 %,10000,"forecast, exact (proven optimum)",3,10,9960,16334.0,1811.0,108.0,76.8,0
+98 %,10000,"forecast, top sellers first",2,7,9984,15609.0,2660.0,342.0,65.9,0
+98 %,10000,"today: last 4 weeks, top sellers first",1,6,9983,14471.0,3140.0,1638.0,59.7,0
+98 %,12500,"forecast, exact (proven optimum)",3,14,12457,17314.0,1501.0,108.0,80.7,0
+98 %,12500,"forecast, top sellers first",2,9,12494,16645.0,2396.0,342.0,69.3,0
+98 %,12500,"today: last 4 weeks, top sellers first",1,8,12373,15075.0,2771.0,2305.0,64.4,0
+98 %,15000,"forecast, exact (proven optimum)",3,15,14940,18221.0,1306.0,441.0,83.2,0
+98 %,15000,"forecast, top sellers first",2,12,14844,17936.0,1820.0,342.0,76.6,0
+98 %,15000,"today: last 4 weeks, top sellers first",1,11,14857,16178.0,2343.0,2305.0,69.9,0
+98 %,17500,"forecast, exact (proven optimum)",3,19,17497,19054.0,885.0,702.0,88.6,0
+98 %,17500,"forecast, top sellers first",2,14,17446,18849.0,1377.0,702.0,82.3,0
+98 %,17500,"today: last 4 weeks, top sellers first",1,14,17405,17245.0,2037.0,2305.0,73.9,0
+98 %,20000,"forecast, exact (proven optimum)",3,20,19989,19802.0,858.0,702.0,89.0,0
+98 %,20000,"forecast, top sellers first",2,17,19991,19622.0,1071.0,1398.0,86.2,0
+98 %,20000,"today: last 4 weeks, top sellers first",1,19,19821,18056.0,1624.0,2305.0,79.1,0
+98 %,22500,"forecast, exact (proven optimum)",3,23,22450,20506.0,691.0,702.0,91.1,0
+98 %,22500,"forecast, top sellers first",2,18,22485,19989.0,924.0,2694.0,88.1,0
+98 %,22500,"today: last 4 weeks, top sellers first",1,22,22435,18251.0,1577.0,4459.0,79.8,2
+98 %,25000,"forecast, exact (proven optimum)",3,26,24812,21162.0,409.0,1398.0,94.7,0
+98 %,25000,"forecast, top sellers first",2,22,24829,20691.0,837.0,2694.0,89.2,0
+98 %,25000,"today: last 4 weeks, top sellers first",1,23,24983,18317.0,1506.0,6759.0,80.7,3
+98 %,27500,"forecast, exact (proven optimum)",3,30,27488,21626.0,176.0,2826.0,97.7,1
+98 %,27500,"forecast, top sellers first",2,27,27306,21497.0,290.0,2694.0,96.3,0
+98 %,27500,"today: last 4 weeks, top sellers first",1,28,27410,18639.0,1320.0,8430.0,83.1,5
+98 %,30000,"forecast, exact (proven optimum)",3,31,29792,21949.0,133.0,4122.0,98.3,1
+98 %,30000,"forecast, top sellers first",2,31,29792,21949.0,133.0,4122.0,98.3,1
+98 %,30000,"today: last 4 weeks, top sellers first",1,32,29957,18705.0,1268.0,10902.0,83.7,6
+98 %,32500,"forecast, exact (proven optimum)",3,35,32280,22115.0,38.0,6455.0,99.5,4
+98 %,32500,"forecast, top sellers first",2,35,32280,22115.0,38.0,6455.0,99.5,4
+98 %,32500,"today: last 4 weeks, top sellers first",1,35,32452,19562.0,936.0,11622.0,88.0,6
+98 %,35000,"forecast, exact (proven optimum)",3,38,34763,22177.0,17.0,8939.0,99.8,7
+98 %,35000,"forecast, top sellers first",2,38,34763,22177.0,17.0,8939.0,99.8,7
+98 %,35000,"today: last 4 weeks, top sellers first",1,38,34955,20254.0,727.0,12844.0,90.7,6
+98 %,37500,"forecast, exact (proven optimum)",3,39,37063,22201.0,12.0,11239.0,99.8,8
+98 %,37500,"forecast, top sellers first",2,39,37063,22201.0,12.0,11239.0,99.8,8
+98 %,37500,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,40000,"forecast, exact (proven optimum)",3,41,39813,22219.0,4.0,13989.0,99.9,10
+98 %,40000,"forecast, top sellers first",2,41,39813,22219.0,4.0,13989.0,99.9,10
+98 %,40000,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,42500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,42500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,42500,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,45000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,45000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,45000,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,47500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,47500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,47500,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,50000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,50000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,50000,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,52500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,52500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,52500,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,55000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,55000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,55000,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,57500,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,57500,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,57500,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6
+98 %,60000,"forecast, exact (proven optimum)",3,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,60000,"forecast, top sellers first",2,43,42213,22230.0,0.0,16389.0,100.0,12
+98 %,60000,"today: last 4 weeks, top sellers first",1,42,37127,20312.0,679.0,14941.0,91.3,6

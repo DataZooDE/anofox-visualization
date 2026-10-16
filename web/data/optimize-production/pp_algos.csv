@@ -1,0 +1,145 @@
+volume,changeovers,line,rule,ord,weighted_late_min,late_orders,max_late_min,changeover_min,makespan_min
++10 % (heatwave),SMED project (-40 %),L1 glass,ATCS,3,1177.0,3,1121.0,516,6748.0
++10 % (heatwave),SMED project (-40 %),L1 glass,WSPT,2,10033.0,3,4405.0,522,6754.0
++10 % (heatwave),SMED project (-40 %),L1 glass,due date order (today),1,373.0,2,127.0,615,6847.0
++10 % (heatwave),SMED project (-40 %),L1 glass,exact (proven optimum),5,3.0,1,1.0,486,6718.0
++10 % (heatwave),SMED project (-40 %),L1 glass,fewest changeovers,6,17489.0,5,3160.0,279,6511.0
++10 % (heatwave),SMED project (-40 %),L1 glass,local search,4,107.0,2,97.0,498,6730.0
++10 % (heatwave),SMED project (-40 %),L2 PET,ATCS,3,2083.0,5,703.0,570,7294.0
++10 % (heatwave),SMED project (-40 %),L2 PET,WSPT,2,13276.0,4,6433.0,669,7393.0
++10 % (heatwave),SMED project (-40 %),L2 PET,due date order (today),1,2273.0,3,715.0,711,7435.0
++10 % (heatwave),SMED project (-40 %),L2 PET,exact (proven optimum),5,677.0,2,565.0,561,7285.0
++10 % (heatwave),SMED project (-40 %),L2 PET,fewest changeovers,6,14357.0,4,5107.0,303,7027.0
++10 % (heatwave),SMED project (-40 %),L2 PET,local search,4,677.0,2,565.0,561,7285.0
++10 % (heatwave),SMED project (-40 %),L3 cans,ATCS,3,513.0,1,513.0,648,6753.0
++10 % (heatwave),SMED project (-40 %),L3 cans,WSPT,2,9665.0,4,4444.0,681,6786.0
++10 % (heatwave),SMED project (-40 %),L3 cans,due date order (today),1,591.0,1,591.0,726,6831.0
++10 % (heatwave),SMED project (-40 %),L3 cans,exact (proven optimum),5,345.0,1,345.0,480,6585.0
++10 % (heatwave),SMED project (-40 %),L3 cans,fewest changeovers,6,14433.0,6,4141.0,303,6408.0
++10 % (heatwave),SMED project (-40 %),L3 cans,local search,4,345.0,1,345.0,480,6585.0
++10 % (heatwave),today's changeovers,L1 glass,ATCS,3,2045.0,3,1616.0,860,7092.0
++10 % (heatwave),today's changeovers,L1 glass,WSPT,2,10991.0,3,4685.0,870,7102.0
++10 % (heatwave),today's changeovers,L1 glass,due date order (today),1,1626.0,3,537.0,1025,7257.0
++10 % (heatwave),today's changeovers,L1 glass,exact (proven optimum),5,843.0,3,482.0,970,7202.0
++10 % (heatwave),today's changeovers,L1 glass,fewest changeovers,6,18679.0,5,3240.0,465,6697.0
++10 % (heatwave),today's changeovers,L1 glass,local search,4,892.0,4,394.0,810,7042.0
++10 % (heatwave),today's changeovers,L2 PET,ATCS,3,3257.0,5,954.0,950,7674.0
++10 % (heatwave),today's changeovers,L2 PET,WSPT,2,14997.0,6,6879.0,1115,7839.0
++10 % (heatwave),today's changeovers,L2 PET,due date order (today),1,5068.0,6,1189.0,1185,7909.0
++10 % (heatwave),today's changeovers,L2 PET,exact (proven optimum),5,1406.0,3,954.0,950,7674.0
++10 % (heatwave),today's changeovers,L2 PET,fewest changeovers,6,15225.0,4,5309.0,505,7229.0
++10 % (heatwave),today's changeovers,L2 PET,local search,4,1406.0,3,954.0,950,7674.0
++10 % (heatwave),today's changeovers,L3 cans,ATCS,3,1151.0,2,935.0,1070,7175.0
++10 % (heatwave),today's changeovers,L3 cans,WSPT,2,11101.0,4,4816.0,1135,7240.0
++10 % (heatwave),today's changeovers,L3 cans,due date order (today),1,2587.0,3,1075.0,1210,7315.0
++10 % (heatwave),today's changeovers,L3 cans,exact (proven optimum),5,761.0,2,745.0,880,6985.0
++10 % (heatwave),today's changeovers,L3 cans,fewest changeovers,6,15617.0,6,4308.0,505,6610.0
++10 % (heatwave),today's changeovers,L3 cans,local search,4,781.0,2,755.0,890,6995.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,ATCS,3,2842.0,4,2144.0,516,7314.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,WSPT,2,11555.0,3,4854.0,522,7320.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,due date order (today),1,2575.0,7,693.0,615,7413.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,exact (proven optimum),5,1458.0,5,591.0,513,7311.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,fewest changeovers,6,22458.0,6,3523.0,279,7077.0
++20 % (heatwave + promo),SMED project (-40 %),L1 glass,local search,4,1485.0,5,597.0,519,7317.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,ATCS,3,3945.0,5,1186.0,570,7906.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,WSPT,2,15846.0,7,7045.0,669,8005.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,due date order (today),1,6048.0,7,1327.0,711,8047.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,exact (proven optimum),5,2631.0,5,1174.0,558,7894.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,fewest changeovers,6,17070.0,5,5719.0,303,7639.0
++20 % (heatwave + promo),SMED project (-40 %),L2 PET,local search,4,2631.0,5,1174.0,558,7894.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,ATCS,3,1517.0,5,1062.0,642,7302.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,WSPT,2,11394.0,4,4884.0,681,7341.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,due date order (today),1,2985.0,4,1146.0,726,7386.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,exact (proven optimum),5,1295.0,5,954.0,534,7194.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,fewest changeovers,6,18290.0,6,4631.0,303,6963.0
++20 % (heatwave + promo),SMED project (-40 %),L3 cans,local search,4,1373.0,5,990.0,570,7230.0
++20 % (heatwave + promo),today's changeovers,L1 glass,ATCS,3,4141.0,6,2296.0,860,7658.0
++20 % (heatwave + promo),today's changeovers,L1 glass,WSPT,2,12808.0,5,5134.0,870,7668.0
++20 % (heatwave + promo),today's changeovers,L1 glass,due date order (today),1,6000.0,9,1103.0,1025,7823.0
++20 % (heatwave + promo),today's changeovers,L1 glass,exact (proven optimum),5,3192.0,7,828.0,750,7548.0
++20 % (heatwave + promo),today's changeovers,L1 glass,fewest changeovers,6,23834.0,6,3603.0,465,7263.0
++20 % (heatwave + promo),today's changeovers,L1 glass,local search,4,3787.0,7,1844.0,690,7488.0
++20 % (heatwave + promo),today's changeovers,L2 PET,ATCS,3,5282.0,7,1566.0,950,8286.0
++20 % (heatwave + promo),today's changeovers,L2 PET,WSPT,2,17826.0,7,7491.0,1115,8451.0
++20 % (heatwave + promo),today's changeovers,L2 PET,due date order (today),1,10612.0,9,1801.0,1185,8521.0
++20 % (heatwave + promo),today's changeovers,L2 PET,exact (proven optimum),5,4001.0,6,1496.0,880,8216.0
++20 % (heatwave + promo),today's changeovers,L2 PET,fewest changeovers,6,18118.0,5,5921.0,505,7841.0
++20 % (heatwave + promo),today's changeovers,L2 PET,local search,4,4001.0,6,1496.0,880,8216.0
++20 % (heatwave + promo),today's changeovers,L3 cans,ATCS,3,2744.0,6,1490.0,1070,7730.0
++20 % (heatwave + promo),today's changeovers,L3 cans,WSPT,2,12830.0,4,5256.0,1135,7795.0
++20 % (heatwave + promo),today's changeovers,L3 cans,due date order (today),1,6314.0,6,1630.0,1210,7870.0
++20 % (heatwave + promo),today's changeovers,L3 cans,exact (proven optimum),5,2291.0,6,1310.0,890,7550.0
++20 % (heatwave + promo),today's changeovers,L3 cans,fewest changeovers,6,19474.0,6,4829.0,505,7165.0
++20 % (heatwave + promo),today's changeovers,L3 cans,local search,4,2457.0,6,1370.0,950,7610.0
+-10 % (cool week),SMED project (-40 %),L1 glass,ATCS,3,0.0,0,0.0,579,5678.0
+-10 % (cool week),SMED project (-40 %),L1 glass,WSPT,2,6987.0,3,3506.0,522,5621.0
+-10 % (cool week),SMED project (-40 %),L1 glass,due date order (today),1,0.0,0,0.0,615,5714.0
+-10 % (cool week),SMED project (-40 %),L1 glass,exact (proven optimum),5,0.0,0,0.0,369,5468.0
+-10 % (cool week),SMED project (-40 %),L1 glass,fewest changeovers,6,8945.0,4,2432.0,279,5378.0
+-10 % (cool week),SMED project (-40 %),L1 glass,local search,4,0.0,0,0.0,579,5678.0
+-10 % (cool week),SMED project (-40 %),L2 PET,ATCS,3,0.0,0,0.0,591,6093.0
+-10 % (cool week),SMED project (-40 %),L2 PET,WSPT,2,9950.0,4,5211.0,669,6171.0
+-10 % (cool week),SMED project (-40 %),L2 PET,due date order (today),1,0.0,0,0.0,711,6213.0
+-10 % (cool week),SMED project (-40 %),L2 PET,exact (proven optimum),5,0.0,0,0.0,435,5937.0
+-10 % (cool week),SMED project (-40 %),L2 PET,fewest changeovers,6,9971.0,3,3885.0,303,5805.0
+-10 % (cool week),SMED project (-40 %),L2 PET,local search,4,0.0,0,0.0,591,6093.0
+-10 % (cool week),SMED project (-40 %),L3 cans,ATCS,3,0.0,0,0.0,648,5643.0
+-10 % (cool week),SMED project (-40 %),L3 cans,WSPT,2,6769.0,3,3563.0,681,5676.0
+-10 % (cool week),SMED project (-40 %),L3 cans,due date order (today),1,0.0,0,0.0,726,5721.0
+-10 % (cool week),SMED project (-40 %),L3 cans,exact (proven optimum),5,0.0,0,0.0,390,5385.0
+-10 % (cool week),SMED project (-40 %),L3 cans,fewest changeovers,6,7078.0,5,3245.0,303,5298.0
+-10 % (cool week),SMED project (-40 %),L3 cans,local search,4,0.0,0,0.0,648,5643.0
+-10 % (cool week),today's changeovers,L1 glass,ATCS,3,20.0,1,20.0,965,6064.0
+-10 % (cool week),today's changeovers,L1 glass,WSPT,2,7945.0,3,3786.0,870,5969.0
+-10 % (cool week),today's changeovers,L1 glass,due date order (today),1,0.0,0,0.0,1025,6124.0
+-10 % (cool week),today's changeovers,L1 glass,exact (proven optimum),5,0.0,0,0.0,690,5789.0
+-10 % (cool week),today's changeovers,L1 glass,fewest changeovers,6,10009.0,4,2512.0,465,5564.0
+-10 % (cool week),today's changeovers,L1 glass,local search,4,0.0,0,0.0,1055,6154.0
+-10 % (cool week),today's changeovers,L2 PET,ATCS,3,0.0,0,0.0,985,6487.0
+-10 % (cool week),today's changeovers,L2 PET,WSPT,2,11080.0,4,5657.0,1115,6617.0
+-10 % (cool week),today's changeovers,L2 PET,due date order (today),1,12.0,1,12.0,1185,6687.0
+-10 % (cool week),today's changeovers,L2 PET,exact (proven optimum),5,0.0,0,0.0,780,6282.0
+-10 % (cool week),today's changeovers,L2 PET,fewest changeovers,6,10497.0,3,4087.0,505,6007.0
+-10 % (cool week),today's changeovers,L2 PET,local search,4,0.0,0,0.0,985,6487.0
+-10 % (cool week),today's changeovers,L3 cans,ATCS,3,0.0,0,0.0,1080,6075.0
+-10 % (cool week),today's changeovers,L3 cans,WSPT,2,7751.0,3,3935.0,1135,6130.0
+-10 % (cool week),today's changeovers,L3 cans,due date order (today),1,0.0,0,0.0,1210,6205.0
+-10 % (cool week),today's changeovers,L3 cans,exact (proven optimum),5,0.0,0,0.0,670,5665.0
+-10 % (cool week),today's changeovers,L3 cans,fewest changeovers,6,8094.0,5,3363.0,505,5500.0
+-10 % (cool week),today's changeovers,L3 cans,local search,4,0.0,0,0.0,1080,6075.0
+as booked,SMED project (-40 %),L1 glass,ATCS,3,418.0,1,418.0,552,6217.0
+as booked,SMED project (-40 %),L1 glass,WSPT,2,8509.0,3,3955.0,522,6187.0
+as booked,SMED project (-40 %),L1 glass,due date order (today),1,0.0,0,0.0,615,6280.0
+as booked,SMED project (-40 %),L1 glass,exact (proven optimum),5,0.0,0,0.0,414,6079.0
+as booked,SMED project (-40 %),L1 glass,fewest changeovers,6,13068.0,4,2796.0,279,5944.0
+as booked,SMED project (-40 %),L1 glass,local search,4,0.0,0,0.0,633,6298.0
+as booked,SMED project (-40 %),L2 PET,ATCS,3,0.0,0,0.0,591,6704.0
+as booked,SMED project (-40 %),L2 PET,WSPT,2,11613.0,4,5822.0,669,6782.0
+as booked,SMED project (-40 %),L2 PET,due date order (today),1,149.0,2,104.0,711,6824.0
+as booked,SMED project (-40 %),L2 PET,exact (proven optimum),5,0.0,0,0.0,468,6581.0
+as booked,SMED project (-40 %),L2 PET,fewest changeovers,6,11816.0,4,4496.0,303,6416.0
+as booked,SMED project (-40 %),L2 PET,local search,4,0.0,0,0.0,591,6704.0
+as booked,SMED project (-40 %),L3 cans,ATCS,3,0.0,0,0.0,648,6198.0
+as booked,SMED project (-40 %),L3 cans,WSPT,2,7943.0,3,4003.0,681,6231.0
+as booked,SMED project (-40 %),L3 cans,due date order (today),1,36.0,1,36.0,726,6276.0
+as booked,SMED project (-40 %),L3 cans,exact (proven optimum),5,0.0,0,0.0,438,5988.0
+as booked,SMED project (-40 %),L3 cans,fewest changeovers,6,10577.0,6,3693.0,303,5853.0
+as booked,SMED project (-40 %),L3 cans,local search,4,0.0,0,0.0,648,6198.0
+as booked,today's changeovers,L1 glass,ATCS,3,552.0,1,552.0,920,6585.0
+as booked,today's changeovers,L1 glass,WSPT,2,9467.0,3,4235.0,870,6535.0
+as booked,today's changeovers,L1 glass,due date order (today),1,96.0,1,32.0,1025,6690.0
+as booked,today's changeovers,L1 glass,exact (proven optimum),5,0.0,0,0.0,845,6510.0
+as booked,today's changeovers,L1 glass,fewest changeovers,6,14132.0,4,2876.0,465,6130.0
+as booked,today's changeovers,L1 glass,local search,4,0.0,0,0.0,1035,6700.0
+as booked,today's changeovers,L2 PET,ATCS,3,985.0,4,378.0,985,7098.0
+as booked,today's changeovers,L2 PET,WSPT,2,12743.0,4,6268.0,1115,7228.0
+as booked,today's changeovers,L2 PET,due date order (today),1,1668.0,3,578.0,1185,7298.0
+as booked,today's changeovers,L2 PET,exact (proven optimum),5,245.0,2,238.0,845,6958.0
+as booked,today's changeovers,L2 PET,fewest changeovers,6,12684.0,4,4698.0,505,6618.0
+as booked,today's changeovers,L2 PET,local search,4,340.0,2,333.0,940,7053.0
+as booked,today's changeovers,L3 cans,ATCS,3,390.0,1,390.0,1080,6630.0
+as booked,today's changeovers,L3 cans,WSPT,2,9370.0,4,4375.0,1135,6685.0
+as booked,today's changeovers,L3 cans,due date order (today),1,520.0,1,520.0,1210,6760.0
+as booked,today's changeovers,L3 cans,exact (proven optimum),5,80.0,1,80.0,770,6320.0
+as booked,today's changeovers,L3 cans,fewest changeovers,6,11761.0,6,3811.0,505,6055.0
+as booked,today's changeovers,L3 cans,local search,4,110.0,3,85.0,775,6325.0

@@ -1,0 +1,43 @@
+line,order_id,seq_in_book,product,flavour,format,rank,sugar_free,customer,weight,volume_kbtl,proc_min,due_min
+L1 glass,O101,1,sparkling water 0.33 l,sparkling water,0.33 l,1,false,Hotel & Gastro Service,3.0,67.0,183.0,960
+L1 glass,O102,2,lemon 0.33 l,lemon,0.33 l,3,false,Kiosk-Großhandel,1.0,96.0,261.0,6240
+L1 glass,O103,3,cola 0.7 l,cola,0.7 l,6,false,Kiosk-Großhandel,3.0,197.0,538.0,2400
+L1 glass,O104,4,still water 0.7 l,still water,0.7 l,0,false,Export NL,1.0,88.0,239.0,6720
+L1 glass,O105,5,sparkling water 0.7 l,sparkling water,0.7 l,1,false,Kiosk-Großhandel,1.0,217.0,593.0,5280
+L1 glass,O106,6,apple spritzer 0.7 l,apple spritzer,0.7 l,2,false,Export NL,3.0,97.0,265.0,3360
+L1 glass,O107,7,lemon 0.7 l,lemon,0.7 l,3,false,Kiosk-Großhandel,3.0,117.0,320.0,5280
+L1 glass,O108,8,sparkling water 0.33 l,sparkling water,0.33 l,1,false,Nordmarkt,1.0,117.0,319.0,3840
+L1 glass,O109,9,sparkling water 0.33 l,sparkling water,0.33 l,1,false,Kiosk-Großhandel,1.0,212.0,577.0,1920
+L1 glass,O110,10,apple spritzer 0.33 l,apple spritzer,0.33 l,2,false,GetränkeWelt,1.0,203.0,554.0,6240
+L1 glass,O111,11,still water 0.7 l,still water,0.7 l,0,false,Export NL,3.0,158.0,431.0,3840
+L1 glass,O112,12,cola 0.7 l,cola,0.7 l,6,false,Export NL,1.0,210.0,574.0,960
+L1 glass,O113,13,still water 0.33 l,still water,0.33 l,0,false,Nordmarkt,1.0,184.0,501.0,6720
+L1 glass,O114,14,sparkling water 0.33 l,sparkling water,0.33 l,1,false,Frischkauf,1.0,114.0,310.0,3360
+L2 PET,O201,1,sparkling water 0.5 l,sparkling water,0.5 l,1,false,Nordmarkt,1.0,275.0,549.0,6720
+L2 PET,O202,2,cola zero 1.5 l,cola zero,1.5 l,7,true,Nordmarkt,1.0,222.0,444.0,1920
+L2 PET,O203,3,orange 1.5 l,orange,1.5 l,4,false,GetränkeWelt,3.0,224.0,448.0,6720
+L2 PET,O204,4,apple spritzer 0.5 l,apple spritzer,0.5 l,2,false,Frischkauf,1.0,95.0,190.0,1920
+L2 PET,O205,5,cola 0.5 l,cola,0.5 l,6,false,Export NL,3.0,261.0,522.0,6240
+L2 PET,O206,6,orange 1.5 l,orange,1.5 l,4,false,Hotel & Gastro Service,1.0,286.0,571.0,960
+L2 PET,O207,7,still water 0.5 l,still water,0.5 l,0,false,Frischkauf,1.0,269.0,537.0,6240
+L2 PET,O208,8,sparkling water 0.5 l,sparkling water,0.5 l,1,false,GetränkeWelt,1.0,141.0,282.0,3360
+L2 PET,O209,9,apple spritzer 1.5 l,apple spritzer,1.5 l,2,false,Nordmarkt,3.0,240.0,480.0,3360
+L2 PET,O210,10,cola zero 1.5 l,cola zero,1.5 l,7,true,Frischkauf,1.0,274.0,547.0,1920
+L2 PET,O211,11,ginger ale 0.5 l,ginger ale,0.5 l,5,false,Kiosk-Großhandel,3.0,256.0,512.0,3840
+L2 PET,O212,12,ginger ale 0.5 l,ginger ale,0.5 l,5,false,Export NL,1.0,104.0,207.0,6720
+L2 PET,O213,13,lemon 0.5 l,lemon,0.5 l,3,false,Export NL,1.0,265.0,529.0,4800
+L2 PET,O214,14,cola zero 0.5 l,cola zero,0.5 l,7,true,GetränkeWelt,1.0,148.0,295.0,6240
+L3 cans,O301,1,orange 0.33 l,orange,0.33 l,4,false,Export NL,1.0,223.0,279.0,2400
+L3 cans,O302,2,ginger ale 0.33 l,ginger ale,0.33 l,5,false,Nordmarkt,1.0,175.0,219.0,3360
+L3 cans,O303,3,cola 0.33 l,cola,0.33 l,6,false,GetränkeWelt,1.0,269.0,336.0,6240
+L3 cans,O304,4,cola 0.5 l,cola,0.5 l,6,false,Hotel & Gastro Service,3.0,194.0,243.0,4800
+L3 cans,O305,5,cola zero 0.33 l,cola zero,0.33 l,7,true,Hotel & Gastro Service,1.0,270.0,338.0,4800
+L3 cans,O306,6,lemon 0.5 l,lemon,0.5 l,3,false,Nordmarkt,1.0,332.0,415.0,6240
+L3 cans,O307,7,sparkling water 0.33 l,sparkling water,0.33 l,1,false,Nordmarkt,1.0,145.0,181.0,4800
+L3 cans,O308,8,cola 0.5 l,cola,0.5 l,6,false,GetränkeWelt,3.0,427.0,534.0,2400
+L3 cans,O309,9,cola 0.33 l,cola,0.33 l,6,false,Hotel & Gastro Service,1.0,338.0,422.0,6240
+L3 cans,O310,10,cola zero 0.33 l,cola zero,0.33 l,7,true,Hotel & Gastro Service,1.0,444.0,555.0,1920
+L3 cans,O311,11,ginger ale 0.5 l,ginger ale,0.5 l,5,false,Hotel & Gastro Service,1.0,407.0,509.0,960
+L3 cans,O312,12,orange 0.5 l,orange,0.5 l,4,false,Hotel & Gastro Service,3.0,449.0,561.0,3360
+L3 cans,O313,13,orange 0.5 l,orange,0.5 l,4,false,Frischkauf,3.0,294.0,368.0,6240
+L3 cans,O314,14,orange 0.33 l,orange,0.33 l,4,false,Nordmarkt,1.0,472.0,590.0,6240
