@@ -15,7 +15,7 @@
 // --width 390   view the builder at that viewport width (default 1440, where
 //                the sidebar is collapsed) and fail if the page scrolls
 //                sideways, the sidebar squeezes the dashboard (it must be a
-//                closed drawer), a chart's toolbox covers its title, or a
+//                closed drawer), a narrow panel's toolbox covers its title, or a
 //                chart's largest text is drawn below 8 px (ggplot-rs draws
 //                axis and legend text at 8.8 px; less means the chart was
 //                rendered wider than it is shown)
@@ -127,7 +127,8 @@ const shoot = async (name) => {
         if (!vis(panel) || !svg) continue;
         const title = panel.querySelector(".panel-title");
         const name = (title?.textContent || "untitled").slice(0, 60);
-        if (title) {
+        // wide panels keep the hover-only toolbar; narrow ones (<480 px) fold it
+        if (title && panel.clientWidth < 480) {
           const range = document.createRange();
           range.selectNodeContents(title);
           const text = [...range.getClientRects()];
