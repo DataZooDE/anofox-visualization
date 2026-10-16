@@ -136,6 +136,10 @@ SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapsho
 …plus a `dashboard` CLI (in the release CLI archive, or `cargo run --bin dashboard -- file.sql`) and the
 standalone browser app (`web/`).
 
+A runnable example of a served setup — result cache, refresh without a restart,
+a live data folder with the run picked by a variable, and a login proxy — is in
+[`examples/served/`](examples/served/): `examples/served/serve.sh start`.
+
 ## Installation
 
 ### Community Extension
@@ -268,7 +272,7 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 - **[Plotting results from Python and R](docs/python-r.md)** — statsmodels, scikit-learn, scipy, broom, … into the `anofox_plot_*` macros; the [`anofox_viz`](python/) helper package and an [example notebook](examples/python/plot-results.ipynb).
 - **[Dashboard design principles](docs/dashboard-design.md)** — what makes a dashboard good (enforced by `dashboard --check`).
 - **[Visual review rubric](docs/dashboard-visual-review.md)** — the appearance gate.
-- **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving.
+- **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving; [`examples/served/`](examples/served/) runs it end to end.
 - **[Claude Code plugin](#claude-code-plugin)** — four skills that document the SQL API for Claude Code, including the dashboard-authoring workflow (also available in this checkout as the project skill [`build-dashboard`](.claude/skills/build-dashboard/SKILL.md)).
 
 ### Conformance with anofox-statistics

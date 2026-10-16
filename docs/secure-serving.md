@@ -240,6 +240,11 @@ header is `400`.
 - The injected page config is script-safe JSON (`<` is emitted as `<`),
   titles and ids are HTML-escaped.
 
+**Try it:** [`examples/served/`](../examples/served/) serves two dashboards of
+a made-up bakery chain with the result cache, interval and on-demand refresh,
+and a data folder of forecast runs picked by a `run` variable, and has a smoke
+test for all of it (`node examples/served/smoke.mjs`).
+
 ```sql
 SELECT anofox_serve_dashboards('dashboards', 8095,
   '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8, "cache_mb": 256,
