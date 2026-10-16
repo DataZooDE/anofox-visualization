@@ -1,4 +1,5 @@
 use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
+use anofox_visualization::sql;
 use ggplot_rs::prelude::Value;
 
 // A tiny provider: setup is a no-op; queries return canned columns based on the
@@ -98,6 +99,32 @@ fn renders_contract_calls() {
     assert!(svg.contains("Coefficients — ols"), "{svg}");
     assert!(svg.contains("Coefficients — huber"));
     assert!(svg.contains("promo"));
+}
+
+// #56: the DuckDB CLI's `-json` writes a contract call's payload columns as
+// nested JSON (an array of rows, an object of arguments), not as text. Both
+// reach the renderer through `result_columns`, as in `dashboard --svg`.
+struct CliJson;
+impl DataProvider for CliJson {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        let out = r#"[{"c0":[{"term":"x1","estimate":0.5,"conf_low":0.2,"conf_high":0.8},
+                             {"term":"x2","estimate":-0.3,"conf_low":-0.7,"conf_high":0.1}],
+                       "c1":{"x_label":"effect on price"},"c2":"inline"}]"#;
+        Ok(sql::result_columns(&sql::parse_rows_json(out)?))
+    }
+}
+
+#[test]
+fn renders_contract_calls_from_cli_json() {
+    let script = "SELECT anofox_plot_terms(t, x_label := 'effect on price'), 'inline'::TITLE \
+                  FROM (VALUES ('x1', 0.5, 0.2, 0.8)) t(term, estimate, conf_low, conf_high);";
+    let svg = render_dashboard_svg(script, &mut CliJson, &DashboardOptions::default()).unwrap();
+    assert!(!svg.contains("No data"), "{svg}");
+    assert!(svg.contains(">x2<"), "{svg}");
+    assert!(svg.contains("effect on price"), "{svg}");
 }
 
 // Headless: an input renders nothing, but its default is bound with
