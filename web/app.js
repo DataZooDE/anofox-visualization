@@ -6757,7 +6757,9 @@ function attachHover() {
     el.classList.add("dp-hit");
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
-      if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
+      // The panel-level crosshair shows the tooltip — except for a mark focused
+      // from the keyboard (a11y), which has no pointer to drive the crosshair.
+      if (el.closest(".has-axis-pointer") && document.activeElement !== el) return;
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
       tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
       tip.classList.add("show");
@@ -6904,7 +6906,10 @@ function attachChartA11y() {
           tip.style.top = r.top + 8 + "px";
         }
       });
-      el.addEventListener("blur", () => el.dispatchEvent(new MouseEvent("mouseleave")));
+      el.addEventListener("blur", () => {
+        el.dispatchEvent(new MouseEvent("mouseleave"));
+        if (el.closest(".has-axis-pointer")) $("dp-tip")?.classList.remove("show"); // shown by the focus
+      });
     });
     svg.addEventListener("keydown", (e) => chartKey(e, svg, fig));
   }
