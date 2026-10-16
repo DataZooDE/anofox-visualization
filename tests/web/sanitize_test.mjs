@@ -11,7 +11,7 @@ const grab = (name) => {
   return m[0];
 };
 const { escapeHtml, safeUrl, renderMarkdown } = new Function(
-  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
+  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
 )();
 
 // escapeHtml is attribute-safe.

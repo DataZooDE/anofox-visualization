@@ -32,6 +32,7 @@ pub mod inputs;
 pub mod kpi;
 pub mod lint;
 pub mod macros;
+pub mod math;
 pub mod page;
 pub mod period;
 pub mod roles;
