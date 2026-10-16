@@ -1380,7 +1380,6 @@ async function boot() {
   renderSidebar();
   $("side-new").onclick = () => loadDash("", "");
   $("save").onclick = saveDash;
-  $("side-toggle").onclick = () => document.body.classList.toggle("side-collapsed");
   $("mode-edit").onclick = () => setMode("edit");
   $("mode-view").onclick = () => setMode("view");
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
@@ -1546,6 +1545,62 @@ function clampSideW(w) {
   const n = Math.round(Number(w));
   return Number.isFinite(n) && n > 0 ? Math.max(SIDE_W.min, Math.min(SIDE_W.max, n)) : SIDE_W.def;
 }
+// Phones (index.html's max-width:820px shell): the sidebar is an off-canvas
+// drawer behind ☰, closed by default. While it is open the rest of the page
+// is inert and Tab stays inside it; Esc, the scrim or picking an entry closes
+// it. Wider screens: ☰ collapses / restores the sidebar in place.
+const SIDE_DRAWER = "(max-width: 820px)";
+function initSideDrawer() {
+  const side = $("sidebar"),
+    btn = $("side-toggle");
+  const rest = [document.querySelector("header"), document.querySelector(".main")];
+  const isOpen = () => document.body.classList.contains("side-open");
+  const open = (on, refocus = true) => {
+    document.body.classList.toggle("side-open", on);
+    btn.setAttribute("aria-expanded", String(on));
+    rest.forEach((el) => el && (el.inert = on));
+    if (on) side.querySelector("button")?.focus();
+    else if (refocus) btn.focus();
+  };
+  const drawer = matchMedia(SIDE_DRAWER);
+  const sync = () => {
+    if (isOpen()) open(false, false);
+    btn.setAttribute("aria-expanded", String(drawer.matches ? false : !document.body.classList.contains("side-collapsed")));
+  };
+  drawer.addEventListener("change", sync);
+  sync();
+  btn.onclick = () => {
+    if (drawer.matches) open(!isOpen());
+    else {
+      document.body.classList.toggle("side-collapsed");
+      sync();
+    }
+  };
+  $("side-scrim").onclick = () => open(false);
+  side.addEventListener("click", (e) => {
+    if (isOpen() && e.target.closest(".side-item, #side-new, #side-explore") && !e.target.closest(".s-del")) open(false, false);
+  });
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!isOpen()) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        open(false);
+      } else if (e.key === "Tab") {
+        const f = [...side.querySelectorAll("button, a[href], [tabindex='0']")].filter((el) => el.offsetParent);
+        if (!f.length) return;
+        const [first, last] = [f[0], f[f.length - 1]];
+        if (!side.contains(document.activeElement) || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        }
+      }
+    },
+    true
+  );
+}
+
 function initSideResizer() {
   const h = $("side-resizer");
   if (!h) return;
@@ -3781,19 +3836,13 @@ async function runOnce(fresh = true) {
           holder.className = "panel-svg";
           const rw = Math.max(300, span * 100);
           const data = contractCell(r, s.contract.rows, "[]");
-          holder.innerHTML = render_contract(
-            s.contract.macro,
-            data,
-            contractCell(r, s.contract.args, "{}"),
-            rw,
-            ph,
-            renderCtx()
-          );
+          const args = contractCell(r, s.contract.args, "{}");
+          holder.innerHTML = render_contract(s.contract.macro, data, args, rw, ph, renderCtx());
           const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
           if (warn) console.warn(`${s.contract.macro}: ${warn}`);
           fig.appendChild(holder);
           // Data view (toolbox) lists the rows the plot was drawn from.
-          fig._dp = { rows: data, roles: [], ph, isMap: false, contract: true };
+          fig._dp = { rows: data, roles: [], rw, ph, isMap: false, contract: { macro: s.contract.macro, args } };
           container.appendChild(fig);
           panels++;
         }
@@ -4316,6 +4365,7 @@ async function runOnce(fresh = true) {
   creditLink.textContent = "DataZoo GmbH";
   credit.append("Powered by ", creditLink);
   dash.append(credit);
+  fitCharts(true);
   wireCharts();
   for (const [svg, old, drill] of tweens) drill ? dpAnim.zoom(svg, old, drill.key, drill.down) : dpAnim.tween(svg, old);
   // A drill / drill-through hands the focus on (a crumb, the opened tab) when
@@ -4372,6 +4422,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     holder._trackBox.innerHTML = svgs.slice(1).join("");
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
   } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
   markAnim(holder, roles);
 }
 
@@ -4379,7 +4430,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
 function addTrack(holder, track) {
   (holder._tracks = holder._tracks || []).push(track);
   const dp = holder.closest(".panel")?._dp;
-  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, dp.rw, dp.ph);
+  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, fitWidth(holder, dp.rw), dp.ph);
 }
 
 // A track's name (its ::TRACK value), for summaries and table captions.
@@ -4409,6 +4460,68 @@ function toggleTrackShade(el) {
   r.style.pointerEvents = "none";
   main.appendChild(r);
 }
+
+// The width a chart is drawn at. Desktop: its render width (span × 100), so
+// charts of any span line up at a given ::HEIGHT. Phone layout (panels stacked
+// full width, the theme's max-width:760px rule) and touch screens (a phone held
+// sideways, a tablet): the width it is shown at, so its text keeps its size
+// instead of shrinking with the SVG.
+const FIT_TO_PANEL = "(max-width: 760px), (hover: none)";
+function fitWidth(holder, rw) {
+  const w = Math.round(holder.clientWidth);
+  return w > 0 && matchMedia(FIT_TO_PANEL).matches ? Math.max(240, w) : rw;
+}
+
+// Redraw every chart whose fitted width changed (after a run, and debounced on
+// resize / orientation change / a tab coming into view), and re-fold the
+// toolboxes (foldTools). True when a chart was redrawn: follow with
+// wireCharts(). `watch` (after a run) re-points the resize observer at the
+// fresh charts.
+let dpFitObs = null,
+  dpFitTimer = 0;
+function fitCharts(watch = false) {
+  let changed = false;
+  if (watch) dpFitObs?.disconnect();
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    foldTools(panel);
+    const dp = panel._dp;
+    const holder = panel.querySelector(":scope > .panel-svg");
+    if (!dp || !holder) return;
+    if (watch) dpFitObs?.observe(holder);
+    const svg = holder.querySelector(":scope > svg");
+    const w = fitWidth(holder, dp.rw);
+    // hidden (a tab not shown, charts as tables): fitted once it shows
+    if (!svg || !holder.clientWidth || Math.abs(w - svg.viewBox.baseVal.width) < 2) return;
+    if (dp.contract) holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
+    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
+    changed = true;
+  });
+  return changed;
+}
+// Fold a panel's toolbox behind its "⋯" button (.dp-narrow) where the full
+// bar would cover the title: narrow panels, touch screens (no hover to hide
+// it), and a title long enough to run under it. Elsewhere it stays the
+// hover-only bar.
+function foldTools(panel) {
+  const bar = panel.querySelector(":scope > .dp-toolbox");
+  if (!bar || !panel.clientWidth) return;
+  let fold = matchMedia("(hover: none)").matches || panel.clientWidth < 480;
+  const title = !fold && panel.querySelector(":scope > .panel-title");
+  if (title) {
+    panel.classList.remove("dp-narrow"); // measure the unfolded bar and title
+    const b = bar.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(title);
+    fold = [...range.getClientRects()].some((t) => t.right > b.left && t.top < b.bottom && t.bottom > b.top);
+  }
+  panel.classList.toggle("dp-narrow", fold);
+}
+
+if (typeof ResizeObserver !== "undefined")
+  dpFitObs = new ResizeObserver(() => {
+    clearTimeout(dpFitTimer);
+    dpFitTimer = setTimeout(() => fitCharts() && wireCharts(), 150);
+  });
 
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
 // (attachHover), then the ::STORY steppers.
@@ -7663,9 +7776,10 @@ async function downloadHtml() {
   }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
   await typesetMath(document.querySelector(".dash"));
-  // A snapshot has no live tables: drop their search / filter / pager controls.
+  // A snapshot has no live tables or chart tools: drop their search / filter /
+  // pager controls and the panel toolboxes.
   const snap = document.querySelector(".dash").cloneNode(true);
-  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
   snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
@@ -7756,8 +7870,7 @@ function showError(grid, msg) {
 // seeded from the geometry bounds, padded to the panel's aspect so the first
 // zoom step doesn't jump.
 function attachMapZoom(holder, rowsJson, roles, ph) {
-  const W = 460,
-    aspect = W / ph;
+  const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
   let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
   let raf = 0;
 
@@ -7769,6 +7882,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
       b = [];
     }
     if (b.length !== 4) return { x0: -180, x1: 180, y0: -90, y1: 90 };
+    const aspect = W() / ph;
     let [x0, x1, y0, y1] = b;
     const w = x1 - x0,
       h = y1 - y0;
@@ -7791,7 +7905,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      renderChart(holder, rowsJson, roles, W(), ph, zoom);
       wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
@@ -8392,11 +8506,30 @@ function attachToolbox() {
       b.textContent = glyph;
       b.addEventListener("click", (e) => {
         e.stopPropagation();
+        openTools(bar, false);
         fn();
       });
       bar.appendChild(b);
       return b;
     };
+    // Where the bar would cover the title (.dp-narrow, set by foldTools) the
+    // tools fold behind this one button.
+    const more = document.createElement("button");
+    more.className = "dp-tool dp-tool-more";
+    more.title = "Chart tools";
+    more.textContent = "⋯";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openTools(bar, !bar.classList.contains("dp-open"));
+    });
+    bar.appendChild(more);
+    bar.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !bar.classList.contains("dp-open")) return;
+      e.preventDefault(); // the menu has the key, not the selection reset
+      openTools(bar, false);
+      more.focus();
+    });
     const dp = panel._dp;
     // magicType: swap a line chart to bars and back (only for line/bar charts).
     if (dp && !dp.isMap && magicSwap(dp.roles)) {
@@ -8428,7 +8561,19 @@ function attachToolbox() {
     mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
     panel.appendChild(bar);
+    foldTools(panel);
   });
+  if (!dpToolsAutoClose) {
+    dpToolsAutoClose = true;
+    document.addEventListener("click", () => document.querySelectorAll(".dp-toolbox.dp-open").forEach((b) => openTools(b, false)));
+  }
+}
+
+// Open / close a folded toolbox's menu.
+let dpToolsAutoClose = false;
+function openTools(bar, open) {
+  bar.classList.toggle("dp-open", open);
+  bar.querySelector(".dp-tool-more")?.setAttribute("aria-expanded", String(open));
 }
 
 // Return the swapped chart-type role string (LINE↔BAR family), or null if the
@@ -8458,7 +8603,7 @@ function toggleMagicType(panel) {
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
   dp.drawn = use; // the roles on screen (the summary names the chart kind shown)
-  renderChart(holder, dp.rows, use, dp.rw, dp.ph);
+  renderChart(holder, dp.rows, use, fitWidth(holder, dp.rw), dp.ph);
   wireCharts();
 }
 
@@ -8986,7 +9131,6 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
   const full = svgDomain(svg0);
   if (!full) return; // not a continuous x/y chart → no zoom
-  const W = svg0.viewBox.baseVal.width || 460; // the width the chart was drawn at
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -8995,6 +9139,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
+      const W = holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the chart is drawn at
       renderChart(holder, rowsJson, roles, W, ph, zoom);
       wireCharts();
       syncSlider();
@@ -9168,4 +9313,5 @@ document.addEventListener("keydown", (e) => {
 
 // Before boot, so a remembered sidebar width applies without a jump.
 initSideResizer();
+initSideDrawer();
 boot().catch((e) => status("boot failed: " + e));

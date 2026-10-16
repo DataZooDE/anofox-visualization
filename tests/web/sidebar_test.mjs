@@ -20,12 +20,18 @@ assert.equal(clampSideW(9999), 480);
 for (const bad of [null, "", "abc", NaN, -5, 0, Infinity]) assert.equal(clampSideW(bad), 238, String(bad));
 
 // The handle is a focusable separator with its bounds; the sidebar takes its
-// width from --side-w, and phone widths pin the default and hide the handle.
+// width from --side-w, and phone widths make it a fixed-width drawer (closed
+// by default, opened by ☰) and hide the handle.
 const handle = html.match(/<div class="side-resizer"[^>]*>/);
 assert.ok(handle, "side-resizer missing in index.html");
 for (const a of ['role="separator"', 'tabindex="0"', 'aria-valuemin="180"', 'aria-valuemax="480"', 'aria-valuenow="238"', 'aria-controls="sidebar"'])
   assert.ok(handle[0].includes(a), `side-resizer lacks ${a}`);
 assert.match(html, /\.sidebar\{width:var\(--side-w,238px\)/);
-assert.match(html, /@media\(max-width:820px\)\{\.sidebar\{width:238px\}\.side-resizer\{display:none\}/);
+const phone = html.match(/@media\(max-width:820px\)\{(.*)\n/);
+assert.ok(phone, "phone-width rule missing in index.html");
+assert.match(phone[1], /^\.sidebar,body\.side-collapsed \.sidebar\{[^}]*position:fixed;[^}]*width:min\(300px,86vw\);[^}]*visibility:hidden/);
+assert.match(phone[1], /body\.side-open \.sidebar\{transform:none;visibility:visible/);
+assert.match(phone[1], /\.side-resizer\{display:none\}/);
+assert.match(html, /<button id="side-toggle"[^>]*aria-controls="sidebar" aria-expanded=/);
 
 console.log("sidebar_test: ok");

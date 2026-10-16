@@ -278,13 +278,32 @@ await page.click(".dp-astable-btn");
   await bp.dblclick("#side-resizer");
   const s3 = await side();
   if (s3.w !== 238) fail(`sidebar double-click reset: ${JSON.stringify(s3)}`);
-  // Phone width: the stored width is ignored and the handle is gone.
+  // Phone width: the sidebar is a closed drawer (the stored width ignored, the
+  // handle gone); ☰ opens it with focus inside, Esc closes it back onto ☰.
   await bp.focus("#side-resizer");
   await bp.keyboard.press("End");
   await bp.setViewportSize({ width: 390, height: 844 });
-  const { w, now, handle } = await side();
-  const phone = { w, now, handle };
-  if (phone.now !== 480 || phone.w !== 238 || phone.handle !== "none") fail(`sidebar on a phone: ${JSON.stringify(phone)}`);
+  await bp.waitForTimeout(300); // the media-query change event
+  const drawer = () =>
+    bp.evaluate(() => ({
+      w: Math.round(document.getElementById("sidebar").getBoundingClientRect().width),
+      shown: getComputedStyle(document.getElementById("sidebar")).visibility === "visible",
+      handle: getComputedStyle(document.getElementById("side-resizer")).display,
+      now: Number(document.getElementById("side-resizer").getAttribute("aria-valuenow")),
+      expanded: document.getElementById("side-toggle").getAttribute("aria-expanded"),
+      focus: document.activeElement.id,
+    }));
+  const phone = await drawer();
+  if (phone.now !== 480 || phone.w !== 300 || phone.shown || phone.handle !== "none" || phone.expanded !== "false")
+    fail(`sidebar on a phone: ${JSON.stringify(phone)}`);
+  await bp.click("#side-toggle");
+  await bp.waitForTimeout(300);
+  const opened = await drawer();
+  if (!opened.shown || opened.expanded !== "true" || opened.focus !== "side-new") fail(`phone drawer open: ${JSON.stringify(opened)}`);
+  await bp.keyboard.press("Escape");
+  await bp.waitForTimeout(300);
+  const closed = await drawer();
+  if (closed.shown || closed.expanded !== "false" || closed.focus !== "side-toggle") fail(`phone drawer Esc: ${JSON.stringify(closed)}`);
   console.log("sidebar:", s0.w, "→", s1.w, "→ drag", s2.w, "→ reset", s3.w, "· chart", s0.chart, "→", s2.chart, "· phone", JSON.stringify(phone));
   await bp.close();
 }

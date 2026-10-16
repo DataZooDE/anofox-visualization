@@ -426,10 +426,17 @@ svg[data-kind="heatmap"] text{pointer-events:none}
 
 /* ---- per-panel toolbox, zoom bar, brush, value-map ---- */
 .dp-toolbox{position:absolute;top:9px;right:11px;display:flex;gap:4px;opacity:0;transition:opacity .15s;z-index:6}
-.panel:hover .dp-toolbox{opacity:1}
+.panel:hover .dp-toolbox,.dp-toolbox:focus-within{opacity:1}
 .dp-tool{border:1px solid var(--ax-tool-border);background:var(--ax-tool-bg);color:var(--ax-tool-ink);border-radius:6px;width:26px;height:26px;font-size:15px;line-height:1;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center}
 .dp-tool:hover{color:var(--ax-tool-hover-ink);border-color:var(--ax-tool-hover-border);background:var(--ax-tool-hover-bg)}
 .dp-tool.dp-tool-on{color:var(--ax-tool-on-ink);background:var(--ax-tool-on);border-color:var(--ax-tool-on)}
+/* narrow panels / touch screens (.dp-narrow): the tools fold behind one "⋯" button, kept clear of the title */
+.dp-tool.dp-tool-more{display:none}
+.panel.dp-narrow .dp-toolbox{flex-direction:column;align-items:flex-end}
+.panel.dp-narrow .dp-tool-more{display:flex}
+.panel.dp-narrow .dp-toolbox:not(.dp-open) .dp-tool:not(.dp-tool-more){display:none}
+.panel.dp-narrow .panel-title{padding-right:1.75rem}
+@media (hover:none){.dp-toolbox{opacity:1}.dp-tool{width:32px;height:32px}}
 .dp-zoom{margin:6px 8px 2px;height:20px}
 .dp-zoom-track{position:relative;height:100%;background:var(--ax-zoom-track);border:1px solid var(--ax-zoom-track-border);border-radius:5px}
 .dp-zoom-fill{position:absolute;top:-1px;bottom:-1px;left:0;width:100%;background:var(--ax-zoom-fill);border:1px solid var(--ax-zoom-fill-border);border-radius:5px;cursor:grab}
