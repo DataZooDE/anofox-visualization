@@ -3450,6 +3450,193 @@ function renderServedNav(served) {
   const dash = document.querySelector(".dash");
   if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
 }
+// ---- lazy tabs ----
+// A ::TAB / ::SUBTAB pane's panels run their queries and render only when the
+// pane is first shown: the run renders the visible pane, leaves a placeholder
+// (a job) for every other panel, and lazyPump() runs the jobs of a pane once
+// it is shown — and, in idle time, the light ones of the hidden panes, so a
+// later tab switch is instant. Setup statements inside a tab's section are
+// deferred too and run, in script order, before the first panel after them.
+// Jobs run one at a time on dpLazy.tail; a new run voids the old jobs (gen).
+// ?lazy=0 renders everything up front; ?prefetch=0 skips the idle prefetch.
+const dpLazyParams = new URLSearchParams(location.search);
+const dpLazyTabs = dpLazyParams.get("lazy") !== "0";
+const dpLazyPrefetch = dpLazyParams.get("prefetch") !== "0";
+const dpLazy = { gen: 0, tail: Promise.resolve(), cur: null, building: null, pumping: false, wake: null };
+let dpSetupRan = new Map(); // setup SQL run since the last full run -> its varSig
+let dpSetupEpoch = 0; // bumped by a setup statement that may change what a query read
+let dpCreated = new Set(); // objects setup created since the last full run
+const dpResults = new Map(); // panel query result cache (see panelSql)
+
+const yieldTask = () => (globalThis.scheduler?.yield ? scheduler.yield() : new Promise((r) => setTimeout(r, 0)));
+// Idle time (or a wake-up: a tab was shown, its panels go first).
+const idleTask = () =>
+  new Promise((r) => {
+    dpLazy.wake = r;
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => r(), { timeout: 1000 });
+    else setTimeout(r, 30);
+  }).finally(() => (dpLazy.wake = null));
+
+// Shown unless the element or a pane around it is display:none (works on the
+// detached grid a run builds as well).
+function paneShown(el) {
+  for (let e = el; e; e = e.parentElement) if (e.style && e.style.display === "none") return false;
+  return true;
+}
+
+// The values of the variables a statement reads (getvariable), as one string.
+const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join("\u0001");
+
+// Creating a new table / view / macro, or loading an extension, changes no
+// result a query already returned: the cache stays valid. Anything else (a
+// re-run, a replaced object, an INSERT…) starts a new epoch.
+const CREATE_RE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO|FUNCTION|SEQUENCE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w."]+)/i;
+async function runSetup(sql) {
+  const sig = varSig(sql);
+  await runSql(sql);
+  const code = sqlCode(sql);
+  const made = CREATE_RE.exec(code);
+  const name = made && made[1].toLowerCase();
+  const additive = (made && !dpCreated.has(name)) || /^\s*(INSTALL|LOAD)\b/i.test(code);
+  if (name) dpCreated.add(name);
+  if (!additive || dpSetupRan.has(sql)) dpSetupEpoch++;
+  dpSetupRan.set(sql, sig);
+}
+
+// Run the deferred setup statements that come before statement `upto` (all of
+// them for Infinity), in order. A failing one shows its error card before `at`.
+async function lazyFlushSetup(L, upto, at) {
+  while (L.setup.length && L.setup[0] < upto) {
+    const k = L.setup.shift();
+    try {
+      await runSetup(L.stmts[k].sql);
+    } catch (e) {
+      if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${L.stmts[k].requires.join(", ")}`);
+      else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
+    }
+  }
+}
+
+// A panel's query, cached per (statement, the variables it reads, setup epoch)
+// — a cross-filter re-run or a tab shown again skips the queries whose inputs
+// did not change. A full run clears the cache. A query that fails on a missing
+// table or function while setup is still deferred runs that setup and retries.
+async function panelSql(sql) {
+  const key = `${dpSetupEpoch}\u0000${varSig(sql)}\u0000${sql}`;
+  if (dpResults.has(key)) {
+    performance.mark("dp:cache-hit");
+    return dpResults.get(key);
+  }
+  let rows;
+  try {
+    rows = await runSql(sql);
+  } catch (e) {
+    const L = dpLazy.building;
+    if (!(L && L.setup.length && /does not exist|Catalog Error/i.test(String(e)))) throw e;
+    await lazyFlushSetup(L, Infinity, null);
+    return panelSql(sql);
+  }
+  if (rows.length < 4e6) {
+    dpResults.set(key, rows);
+    if (dpResults.size > 400) dpResults.delete(dpResults.keys().next().value);
+  }
+  return rows;
+}
+
+// Run one placeholder's statement (+ the ::TRACKs under it) and swap the
+// rendered panel(s) in. `inline`: the run is still building (it wires and
+// animates everything itself).
+async function lazyRunJob(job, inline = false) {
+  const L = job.run;
+  if (job.done || L.gen !== dpLazy.gen) return;
+  job.done = true;
+  performance.mark("dp:lazy", { detail: job.i });
+  await lazyFlushSetup(L, job.i, job.ph);
+  const frag = document.createDocumentFragment();
+  const base = { ...job.ctx, container: frag, curGrid: job.ctx.container === job.ctx.curGrid ? frag : null };
+  const tag = (i) => frag.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
+  const out = await L.panelBody(job.i, L.stmts[job.i], base);
+  tag(job.i);
+  for (const t of job.tracks) {
+    const ts = L.stmts[t.i];
+    if (out.lastChart) {
+      try {
+        addTrack(out.lastChart, { rows: await panelSql(ts.sql), roles: ts.roles, height: t.height });
+      } catch (e) {
+        frag.appendChild(mkErrorCard(e, ts.sql));
+      }
+    } else await L.panelBody(t.i, ts, { ...base, nextSpan: 0, nextHeight: t.height, nextRowSelect: "", nextTableOpts: {}, nextIa: {}, nextEmpty: "" });
+    tag(t.i);
+  }
+  if (L.gen !== dpLazy.gen) return;
+  const made = [...frag.querySelectorAll(".panel")];
+  const pane = job.ph.closest(".tabpane, .subtabpane");
+  job.ph.replaceWith(frag);
+  if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane") === pane)) pane.removeAttribute("aria-busy");
+  if (inline) return;
+  // Wired at once (hover, a11y summary, toolbox…): a panel is never on the
+  // page without its summary.
+  const t0 = performance.now();
+  fitCharts(true); // drawn at their shown width, and watched (a hidden pane: once it shows)
+  wireCharts();
+  addExportButtons();
+  performance.measure("dp:wire", { start: t0, detail: "lazy" });
+  if (L.fresh) animateIn(made);
+}
+
+// Queries that load an extension or remote files: not prefetched in idle time
+// (a click elsewhere would wait for them); they run when their tab is shown.
+const LAZY_HEAVY_RE = /\bST_Read\b|\bspatial\b|\bts_\w+\b|\banofox_forecast\b|m5_monthly|'data\/|\b(INSTALL|LOAD|ATTACH)\b|read_(parquet|csv|json)\w*\s*\(\s*'(https?|s3):/i;
+const lazyHeavy = (L, job) => [job.i, ...L.setup.filter((k) => k < job.i)].some((k) => LAZY_HEAVY_RE.test(L.stmts[k].sql) || STATS_RE.test(L.stmts[k].sql));
+
+async function lazyPump() {
+  if (dpLazy.pumping) return;
+  dpLazy.pumping = true;
+  try {
+    for (;;) {
+      const L = dpLazy.cur;
+      if (!L || runActive || L.gen !== dpLazy.gen) break;
+      const open = () => L.jobs.filter((j) => !j.done && j.ph.isConnected);
+      let job = open().find((j) => paneShown(j.ph));
+      if (!job && dpLazyPrefetch) {
+        await idleTask();
+        if (runActive || L.gen !== dpLazy.gen) break;
+        job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j));
+      }
+      if (!job) break;
+      const step = dpLazy.tail.then(() => lazyRunJob(job));
+      dpLazy.tail = step.catch((e) => console.error(e));
+      await dpLazy.tail;
+      await yieldTask();
+    }
+  } finally {
+    dpLazy.pumping = false;
+  }
+}
+
+// Every panel rendered (HTML export): run the jobs still waiting.
+async function lazyFlushAll() {
+  while (runActive) await runActive;
+  const L = dpLazy.cur;
+  if (!L) return;
+  for (const job of L.jobs) {
+    const step = dpLazy.tail.then(() => lazyRunJob(job, true));
+    dpLazy.tail = step.catch((e) => console.error(e));
+    await dpLazy.tail;
+  }
+  wireCharts();
+  addExportButtons();
+}
+
+// A pane was just shown: play the entrance of its panels rendered while it
+// was hidden, size its scrolling tables, and render its waiting panels.
+function lazyShown(pane) {
+  animateIn([...pane.querySelectorAll(".panel")].filter((p) => p._dpEnter));
+  requestAnimationFrame(keyboardScrollers);
+  dpLazy.wake?.();
+  lazyPump();
+}
+
 let dpTimer = null; // auto-refresh interval handle
 let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 
@@ -3476,6 +3663,8 @@ function run(fresh = true) {
   }
   runActive = (async () => {
     try {
+      dpLazy.gen++; // the old dashboard's lazy jobs are void …
+      await dpLazy.tail; // … once the one in flight (a single query) settles
       await runOnce(fresh);
     } finally {
       runActive = null;
@@ -3508,6 +3697,16 @@ async function runOnce(fresh = true) {
     return showError(grid, String(e));
   }
   markPending(grid, stmts, fresh);
+  if (fresh) {
+    dpSetupRan = new Map();
+    dpCreated = new Set();
+    dpResults.clear();
+  }
+  // Lazy tabs: this run's deferred setup statements and panel jobs.
+  const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
+  dpLazy.building = lazy;
+  const tabAt = []; // statement -> the ::TAB whose section it is in (-1: before the first)
+  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(directive(stmts[i]) === "TAB" ? (t = i) : t);
 
   await prepInteractions(stmts);
   await setSelectionVars();
@@ -3544,13 +3743,19 @@ async function runOnce(fresh = true) {
         continue;
       }
       if (s.setup) {
-        // On a cross-filter re-run, skip selection-independent setup (it already
-        // ran on the last full run) so clicks don't recompute forecasts etc.
-        if (!fresh && !/getvariable/i.test(s.sql)) continue;
-        await runSql(s.sql);
+        // On a cross-filter re-run, skip setup whose variables did not change
+        // since it last ran (selection-independent setup ran on the last full
+        // run) so clicks don't recompute forecasts etc.
+        if (!fresh && dpSetupRan.has(s.sql) && dpSetupRan.get(s.sql) === varSig(s.sql)) continue;
+        // Inside a tab's section: runs before the first panel after it does.
+        if (lazy && tabAt[i] >= 0 && !/^\s*(SET|USE|ATTACH|DETACH)\b/i.test(sqlCode(s.sql))) {
+          lazy.setup.push(i);
+          continue;
+        }
+        await runSetup(s.sql);
       } else if (isInput(s)) {
         const kind = inputKind(s);
-        const rows = JSON.parse(await runSql(s.sql));
+        const rows = JSON.parse(await panelSql(s.sql));
         if (!rows.length) continue;
         // Optional ::LABEL column → the control's caption (default: the variable
         // name). A ::DATERANGE keeps its columns as they are (from, to, label).
@@ -3678,166 +3883,28 @@ async function runOnce(fresh = true) {
   };
   let autoGroup = null; // open synthetic ::GROUP body element, or null
   const firstValue = async (s) => {
+    // A literal directive (SELECT 'Map'::TAB, SELECT 6::SPAN) needs no query.
+    const lit = /^\s*SELECT\s+(?:(-?\d+(?:\.\d+)?)|'((?:[^']|'')*)')\s+AS\s+c0\s*;?\s*$/i.exec(s.sql);
+    if (lit) return lit[2] !== undefined ? lit[2].replace(/''/g, "'") : Number(lit[1]);
     const rows = JSON.parse(await runSql(s.sql));
     return rows[0] ? Object.values(rows[0])[0] : null;
   };
-  for (let i = 0; i < stmts.length; i++) {
-    const s = stmts[i];
-    if (s.setup) continue;
-    const d = directive(s);
-    // A ::TRACK (optionally after a ::HEIGHT) follows its chart directly.
-    const trackHost = role(s, "TRACK") ? lastChart : null;
-    if (d !== "HEIGHT" && !role(s, "TRACK")) lastChart = null;
-    // Close an open auto-strip the moment a non-KPI statement appears; open one
-    // when a fresh top-level run of >=2 KPI tiles begins.
-    if (autoGroup && !isKpi(s)) {
-      container = curGrid;
-      autoGroup = null;
-    }
-    if (!autoGroup && container === curGrid && isKpi(s) && kpiRun(i) >= 2) {
-      const box = document.createElement("section");
-      box.className = "group";
-      const body = document.createElement("div");
-      body.className = "group-body";
-      box.appendChild(body);
-      curGrid.appendChild(box);
-      container = body;
-      autoGroup = body;
-    }
+  // One panel statement (a contract plot, a ::PAGED table, or a chart / table /
+  // KPI / text card…): run its query and append its panel(s) to ctx.container.
+  // The render loop calls it in place; a statement inside a hidden ::TAB pane
+  // runs later, as a lazy job, with the loop state it would have seen (ctx).
+  // Returns the chart holder a following ::TRACK attaches to, and the count.
+  const panelBody = async (i, s, ctx) => {
+    let { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty } = ctx;
+    const { defaultSpan, trackHost } = ctx;
+    let lastChart = null;
+    let panels = 0;
     try {
-      if (chromeRole(s)) {
-        // collected in the pre-pass
-      } else if (d === "COLUMNS") {
-        const n = parseInt(await firstValue(s));
-        if (n > 0) {
-          dpCols = n;
-          defaultSpan = Math.max(1, Math.round(12 / n));
-        }
-      } else if (d === "GROUP") {
-        const title = await firstValue(s);
-        const box = document.createElement("section");
-        box.className = "group";
-        if (title) {
-          const t = document.createElement("div");
-          t.className = "group-title";
-          t.textContent = title;
-          box.appendChild(t);
-        }
-        const body = document.createElement("div");
-        body.className = "group-body";
-        box.appendChild(body);
-        curGrid.appendChild(box);
-        container = body;
-      } else if (d === "ENDGROUP") {
-        container = curGrid;
-      } else if (d === "SPAN") {
-        nextSpan = parseInt(await firstValue(s)) || 0;
-      } else if (d === "HEIGHT") {
-        nextHeight = parseInt(await firstValue(s)) || 0;
-      } else if (d === "ROWSELECT") {
-        nextRowSelect = String((await firstValue(s)) ?? "")
-          .replace(/^"|"$/g, "")
-          .toLowerCase();
-      } else if (d === "EMPTY") {
-        nextEmpty = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
-      } else if (d === "SELECT_AS" || d === "DRILL") {
-        Object.assign(nextIa, dpIa[i] || {});
-      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS"].includes(d)) {
-        nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
-      } else if (d === "TAB") {
-        const name = String((await firstValue(s)) ?? "Tab");
-        if (!tabBar) {
-          tabBar = document.createElement("div");
-          tabBar.className = "tabbar";
-          tabWrap = document.createElement("div");
-          tabWrap.className = "tabwrap";
-        }
-        const pane = document.createElement("div");
-        pane.className = "grid tabpane";
-        pane.style.display = "none";
-        tabWrap.appendChild(pane);
-        const btn = document.createElement("button");
-        btn.className = "tab-btn";
-        btn.textContent = name;
-        btn.onclick = (e) => {
-          e.stopPropagation();
-          dpTab = name; // remember, so a cross-filter re-run keeps this tab
-          setTabParam(name); // deep-link: reflect the active tab in the URL
-          tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
-          tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-          pane.style.display = "";
-          btn.classList.add("active");
-        };
-        tabBar.appendChild(btn);
-        if (dpTab === name || (dpTab === null && tabBar.children.length === 1)) {
-          pane.style.display = "";
-          btn.classList.add("active");
-        }
-        curGrid = pane;
-        container = pane;
-        curPane = pane; // nesting host for ::SUBTAB
-        curTopName = name;
-        subBar = null; // start fresh sub-tabs for this top tab
-        subWrap = null;
-      } else if (d === "SUBTAB") {
-        const name = String((await firstValue(s)) ?? "Tab");
-        const host = curPane || curGrid; // nest inside the current top-level tab
-        if (!subBar) {
-          subBar = document.createElement("div");
-          subBar.className = "subtabbar";
-          subWrap = document.createElement("div");
-          subWrap.className = "subtabwrap";
-          host.append(subBar, subWrap);
-        }
-        const spane = document.createElement("div");
-        spane.className = "grid subtabpane";
-        spane.style.display = "none";
-        subWrap.appendChild(spane);
-        const sbtn = document.createElement("button");
-        sbtn.className = "tab-btn subtab-btn";
-        sbtn.textContent = name;
-        const topName = curTopName || "";
-        // Capture THIS sub-tab's bar/wrap — `subBar`/`subWrap` are shared loop
-        // variables that get reassigned for later top tabs, so the closure must
-        // not read them directly (that made a sub-tab operate on the last tab's
-        // bar: siblings stayed active + other tabs went blank).
-        const myBar = subBar;
-        const myWrap = subWrap;
-        sbtn.onclick = (e) => {
-          e.stopPropagation();
-          dpSubTab[topName] = name;
-          myWrap.querySelectorAll(".subtabpane").forEach((p) => (p.style.display = "none"));
-          myBar.querySelectorAll(".subtab-btn").forEach((b) => b.classList.remove("active"));
-          spane.style.display = "";
-          sbtn.classList.add("active");
-        };
-        subBar.appendChild(sbtn);
-        const activeSub = dpSubTab[topName];
-        if (activeSub === name || (activeSub == null && subBar.children.length === 1)) {
-          spane.style.display = "";
-          sbtn.classList.add("active");
-        }
-        curGrid = spane;
-        container = spane;
-      } else if (d === "PLACEHOLDER") {
-        const span = Math.min(12, nextSpan || defaultSpan);
-        const ph = document.createElement("div");
-        ph.className = "panel placeholder";
-        if (container === curGrid) ph.style.gridColumn = `span ${span}`;
-        container.appendChild(ph);
-        nextSpan = 0;
-        nextHeight = 0;
-        nextRowSelect = "";
-        nextTableOpts = {};
-        nextIa = {};
-        nextEmpty = "";
-      } else if (isInput(s)) {
-        if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
-      } else if (s.contract) {
+      if (s.contract) {
         // A contract plot call (SELECT anofox_plot_terms(t) FROM … t): the planner
         // rewrote it to return the rows (+ named args) as JSON; render each
         // result row (one per GROUP BY key) with the contract renderer.
-        const rows = JSON.parse(await runSql(s.sql));
+        const rows = JSON.parse(await panelSql(s.sql));
         const span = Math.min(12, nextSpan || defaultSpan);
         const title = titleOf(s, JSON.stringify(rows.slice(0, 1)));
         const mk = (caption) => {
@@ -4062,12 +4129,11 @@ async function runOnce(fresh = true) {
         nextIa = {};
         nextEmpty = "";
       } else {
-        const rowsJson = await runSql(s.sql);
+        const rowsJson = await panelSql(s.sql);
         if (trackHost) {
           // A thin strip under the chart before it, on its x axis (same panel).
           addTrack(trackHost, { rows: rowsJson, roles: s.roles, height: nextHeight || 0 });
-          nextHeight = 0;
-          continue;
+          return { lastChart: null, panels: 0 };
         }
         const span = Math.min(12, nextSpan || defaultSpan);
         const boxH = nextHeight;
@@ -4300,6 +4366,216 @@ async function runOnce(fresh = true) {
       const card = isOptionalMissing(s, e) ? mkNotAvailable(s) : mkErrorCard(e, s.sql);
       if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
       container.appendChild(card);
+    }
+    return { lastChart, panels };
+  };
+  if (lazy) lazy.panelBody = panelBody;
+  let lastYield = performance.now();
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
+    if (s.setup) continue;
+    const d = directive(s);
+    // A ::TRACK (optionally after a ::HEIGHT) follows its chart directly.
+    const trackHost = role(s, "TRACK") ? lastChart : null;
+    if (d !== "HEIGHT" && !role(s, "TRACK")) lastChart = null;
+    // Close an open auto-strip the moment a non-KPI statement appears; open one
+    // when a fresh top-level run of >=2 KPI tiles begins.
+    if (autoGroup && !isKpi(s)) {
+      container = curGrid;
+      autoGroup = null;
+    }
+    if (!autoGroup && container === curGrid && isKpi(s) && kpiRun(i) >= 2) {
+      const box = document.createElement("section");
+      box.className = "group";
+      const body = document.createElement("div");
+      body.className = "group-body";
+      box.appendChild(body);
+      curGrid.appendChild(box);
+      container = body;
+      autoGroup = body;
+    }
+    try {
+      if (chromeRole(s)) {
+        // collected in the pre-pass
+      } else if (d === "COLUMNS") {
+        const n = parseInt(await firstValue(s));
+        if (n > 0) {
+          dpCols = n;
+          defaultSpan = Math.max(1, Math.round(12 / n));
+        }
+      } else if (d === "GROUP") {
+        const title = await firstValue(s);
+        const box = document.createElement("section");
+        box.className = "group";
+        if (title) {
+          const t = document.createElement("div");
+          t.className = "group-title";
+          t.textContent = title;
+          box.appendChild(t);
+        }
+        const body = document.createElement("div");
+        body.className = "group-body";
+        box.appendChild(body);
+        curGrid.appendChild(box);
+        container = body;
+      } else if (d === "ENDGROUP") {
+        container = curGrid;
+      } else if (d === "SPAN") {
+        nextSpan = parseInt(await firstValue(s)) || 0;
+      } else if (d === "HEIGHT") {
+        nextHeight = parseInt(await firstValue(s)) || 0;
+      } else if (d === "ROWSELECT") {
+        nextRowSelect = String((await firstValue(s)) ?? "")
+          .replace(/^"|"$/g, "")
+          .toLowerCase();
+      } else if (d === "EMPTY") {
+        nextEmpty = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
+      } else if (d === "SELECT_AS" || d === "DRILL") {
+        Object.assign(nextIa, dpIa[i] || {});
+      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS"].includes(d)) {
+        nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
+      } else if (d === "TAB") {
+        const name = String((await firstValue(s)) ?? "Tab");
+        if (!tabBar) {
+          tabBar = document.createElement("div");
+          tabBar.className = "tabbar";
+          tabWrap = document.createElement("div");
+          tabWrap.className = "tabwrap";
+        }
+        const pane = document.createElement("div");
+        pane.className = "grid tabpane";
+        pane.style.display = "none";
+        tabWrap.appendChild(pane);
+        const btn = document.createElement("button");
+        btn.className = "tab-btn";
+        btn.textContent = name;
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          dpTab = name; // remember, so a cross-filter re-run keeps this tab
+          setTabParam(name); // deep-link: reflect the active tab in the URL
+          tabWrap.querySelectorAll(".tabpane").forEach((p) => (p.style.display = "none"));
+          tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+          pane.style.display = "";
+          btn.classList.add("active");
+          lazyShown(pane);
+        };
+        tabBar.appendChild(btn);
+        if (dpTab === name || (dpTab === null && tabBar.children.length === 1)) {
+          pane.style.display = "";
+          btn.classList.add("active");
+        }
+        curGrid = pane;
+        container = pane;
+        curPane = pane; // nesting host for ::SUBTAB
+        curTopName = name;
+        subBar = null; // start fresh sub-tabs for this top tab
+        subWrap = null;
+      } else if (d === "SUBTAB") {
+        const name = String((await firstValue(s)) ?? "Tab");
+        const host = curPane || curGrid; // nest inside the current top-level tab
+        if (!subBar) {
+          subBar = document.createElement("div");
+          subBar.className = "subtabbar";
+          subWrap = document.createElement("div");
+          subWrap.className = "subtabwrap";
+          host.append(subBar, subWrap);
+        }
+        const spane = document.createElement("div");
+        spane.className = "grid subtabpane";
+        spane.style.display = "none";
+        subWrap.appendChild(spane);
+        const sbtn = document.createElement("button");
+        sbtn.className = "tab-btn subtab-btn";
+        sbtn.textContent = name;
+        const topName = curTopName || "";
+        // Capture THIS sub-tab's bar/wrap — `subBar`/`subWrap` are shared loop
+        // variables that get reassigned for later top tabs, so the closure must
+        // not read them directly (that made a sub-tab operate on the last tab's
+        // bar: siblings stayed active + other tabs went blank).
+        const myBar = subBar;
+        const myWrap = subWrap;
+        sbtn.onclick = (e) => {
+          e.stopPropagation();
+          dpSubTab[topName] = name;
+          myWrap.querySelectorAll(".subtabpane").forEach((p) => (p.style.display = "none"));
+          myBar.querySelectorAll(".subtab-btn").forEach((b) => b.classList.remove("active"));
+          spane.style.display = "";
+          sbtn.classList.add("active");
+          lazyShown(spane);
+        };
+        subBar.appendChild(sbtn);
+        const activeSub = dpSubTab[topName];
+        if (activeSub === name || (activeSub == null && subBar.children.length === 1)) {
+          spane.style.display = "";
+          sbtn.classList.add("active");
+        }
+        curGrid = spane;
+        container = spane;
+      } else if (d === "PLACEHOLDER") {
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const ph = document.createElement("div");
+        ph.className = "panel placeholder";
+        if (container === curGrid) ph.style.gridColumn = `span ${span}`;
+        container.appendChild(ph);
+        nextSpan = 0;
+        nextHeight = 0;
+        nextRowSelect = "";
+        nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
+      } else if (isInput(s)) {
+        if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
+      } else if (trackHost && trackHost.lazy) {
+        // a ::TRACK under a chart that renders later: it renders with it
+        trackHost.lazy.tracks.push({ i, height: nextHeight || 0 });
+        nextHeight = 0;
+        continue;
+      } else if (lazy && curGrid !== newGrid && !role(s, "RELOAD")) {
+        // Inside a ::TAB / ::SUBTAB pane: a placeholder now; the query runs and
+        // the panel renders when the pane is shown (lazyRun).
+        const span = Math.min(12, nextSpan || defaultSpan);
+        const ph = document.createElement("div");
+        const kpi = !!metricRole(s) && !role(s, "TABLE");
+        ph.className = "panel dp-lazy" + (kpi ? " dp-skel-kpi" : "");
+        ph.setAttribute("aria-hidden", "true");
+        if (container === curGrid) ph.style.gridColumn = `span ${span}`;
+        if (nextHeight) ph.style.minHeight = nextHeight + "px";
+        ph.innerHTML = "<i></i><i></i><i></i>";
+        ph._async = true; // a re-run's patch (patchSlots) never keeps an old placeholder in its place
+        container.appendChild(ph);
+        curGrid.setAttribute("aria-busy", "true");
+        const job = { i, ph, run: lazy, tracks: [], ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
+        lazy.jobs.push(job);
+        lastChart = { lazy: job };
+        panels++;
+        nextSpan = 0;
+        nextHeight = 0;
+        nextRowSelect = "";
+        nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
+      } else {
+        const out = await panelBody(i, s, { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost });
+        if (out.lastChart) lastChart = out.lastChart;
+        panels += out.panels;
+        nextSpan = 0;
+        nextHeight = 0;
+        nextRowSelect = "";
+        nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
+        if (performance.now() - lastYield > 40) {
+          await yieldTask(); // keep the page responsive between panels
+          lastYield = performance.now();
+        }
+      }
+    } catch (e) {
+      // A failing panel becomes a card in its own grid slot — the others keep
+      // rendering. An optional input (`-- @requires`) that is missing reads
+      // "Not available" instead.
+      const card = isOptionalMissing(s, e) ? mkNotAvailable(s) : mkErrorCard(e, s.sql);
+      if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
+      container.appendChild(card);
       nextSpan = 0;
       nextHeight = 0;
       nextRowSelect = "";
@@ -4328,6 +4604,19 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
+  // Lazy tabs: render the panels of the panes on show now (off-screen, like
+  // the rest); the hidden panes' jobs wait for lazyPump().
+  if (lazy) {
+    for (const job of lazy.jobs) {
+      if (!paneShown(job.ph)) continue;
+      await lazyRunJob(job, true);
+      if (performance.now() - lastYield > 40) {
+        await yieldTask();
+        lastYield = performance.now();
+      }
+    }
+    lazy.jobs = lazy.jobs.filter((j) => !j.done);
+  }
   // A re-run keeps each chart's ::STORY step (a full run starts at the overview).
   if (fresh) dpStorySteps = {};
   else
@@ -4360,6 +4649,7 @@ async function runOnce(fresh = true) {
   }
   dash._shape = shape;
   performance.mark("dp:swap");
+  dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and
   // every chart on a drill / drill-through (the drilled one zooms).
   const tweens = [];
@@ -4416,22 +4706,33 @@ async function runOnce(fresh = true) {
   dpVarLast = { ...dpVarNow };
   document.body.classList.remove("loading");
   performance.measure("dp:run", { start: tRun, detail: fresh ? "fresh" : "rerun" });
+  if (lazy && lazy.jobs.length) setTimeout(lazyPump); // after the queued follow-up run, if any
 }
 
 // Entrance animation on a fresh render: panels fade+rise in and each chart
 // plays its ::ANIMATE mode (web/anim.js — only data marks move, never grid
 // lines). Skipped for cross-filter re-runs so interactions feel instant;
 // prefers-reduced-motion shows the final state at once.
-function animateIn() {
+// A panel in a hidden tab pane plays its entrance when the pane is shown
+// (lazyShown); `panels` defaults to every panel on the page.
+function animateIn(panels = document.querySelectorAll(".dash .panel")) {
   if (dpAnim.still()) return;
-  document.querySelectorAll(".dash .panel").forEach((panel) => {
+  const go = [];
+  panels.forEach((panel) => {
+    if (panel.classList.contains("dp-lazy")) return;
+    panel._dpEnter = !paneShown(panel);
+    if (panel._dpEnter) return;
     const svg = panel.querySelector(".panel-svg > svg");
     if (svg && svg.getAttribute("data-anim") === "none") return; // ::ANIMATE 'none' opts out entirely
     panel.classList.remove("dp-in");
-    void panel.offsetWidth; // reflow so the animation restarts
+    go.push([panel, svg]);
+  });
+  if (!go.length) return;
+  void document.body.offsetWidth; // one reflow, so the animations restart
+  for (const [panel, svg] of go) {
     panel.classList.add("dp-in");
     if (svg) dpAnim.enter(svg, svg.getAttribute("data-anim"));
-  });
+  }
 }
 
 // Render a chart's SVG into its holder — the dashboard run and every in-place
@@ -7806,6 +8107,7 @@ function shareLink(e) {
 // It carries the dashboard stylesheet (web/theme-base.css) and the CURRENT
 // theme variant's tokens, so a dark dashboard stays dark when opened alone.
 async function downloadHtml() {
+  await lazyFlushAll(); // the snapshot holds every tab
   const sheetText = (sheet) => {
     try {
       return [...sheet.cssRules].map((r) => r.cssText).join("\n");
@@ -8074,9 +8376,14 @@ let dpSelected = null;
 
 function attachHover() {
   const tip = $("dp-tip");
+  // Only the charts not seen yet (a lazily rendered tab adds some): a wired
+  // mark has given its <title> up already.
   const marks = [
-    ...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline"),
+    ...document.querySelectorAll(
+      ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline"
+    ),
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
+  document.querySelectorAll(".panel svg:not([data-hw])").forEach((svg) => svg.setAttribute("data-hw", ""));
 
   // Dim non-selected marks (the shared emphasis state's "select" layer), but
   // only inside a chart that actually contains the selected series. A chart
@@ -8484,8 +8791,9 @@ function chartKey(e, svg, fig) {
 
 // "Charts as tables": every chart panel shows its data table instead.
 function applyAsTables() {
+  // a focused mark may just have been hidden (a re-wire alone keeps the tooltip)
+  if (document.body.classList.contains("dp-as-tables") !== dpAsTables) $("dp-tip")?.classList.remove("show");
   document.body.classList.toggle("dp-as-tables", dpAsTables);
-  $("dp-tip")?.classList.remove("show"); // a focused mark may just have been hidden
   const btn = document.querySelector(".dp-astable-btn");
   if (btn) btn.setAttribute("aria-pressed", String(dpAsTables));
   for (const fig of document.querySelectorAll(".dash .panel")) {
@@ -8986,6 +9294,7 @@ function attachLegendToggle() {
   document.querySelectorAll(".panel").forEach((panel) => {
     const svg = panel.querySelector("svg");
     if (!svg || svg.dataset.legendWired || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    svg.dataset.legendWired = "0"; // looked at once (a re-render brings a new svg)
     // A heatmap's series are its rows (the y axis), not a legend.
     if (svg.getAttribute("data-kind") === "heatmap") return;
     const series = new Set([...svg.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series")));
