@@ -499,6 +499,7 @@ body.dp-static .controls select{margin-left:.3rem}
 .panel svg .dp-hit:focus{outline:none}
 .panel svg .dp-hit:focus-visible{stroke:var(--ax-ink);stroke-width:2.5px;filter:drop-shadow(0 0 3px var(--ax-accent));opacity:1 !important}
 .dp-astable-view{max-height:420px;overflow:auto}
+.dp-diagram-steps{margin:.2rem 0 .6rem;padding-left:1.4rem;font:400 .86rem/1.5 var(--ax-font-body);color:var(--ax-ink)}
 @media print{.dp-a11y-bar{display:none}}
 /* reduced motion: no animation or transition anywhere on the dashboard */
 @media (prefers-reduced-motion: reduce){

@@ -53,6 +53,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `animate/unknown`, `animate/reveal-no-xline`, `linestyle/unknown`, `story/bad-by`, `transition/unknown` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from; a `::LINESTYLE` that is not `flow`/`dashed`/`solid`; a `::STORY_BY` that is not `x`/`series` (or `series` without a `::CATEGORY`); a `::TRANSITION` that is not `tween`/`none` |
 | `track/no-chart` | warning | a `::TRACK` that does not directly follow a chart with a numeric / date `::XAXIS` (only a `::HEIGHT` may sit between): it is drawn as a panel of its own |
 | `annotation/unpaired` | warning | a label / range end without its partner, or unequal numbers of `::BAND_LOWER` and `::BAND_UPPER` |
+| `diagram/null-id`, `diagram/duplicate-node`, `diagram/unknown-node`, `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction`, `diagram/too-large` | warning | a `::DIAGRAM` row without an id; an id twice (the first row wins); an edge naming an id that is no row (not drawn); `::EDGES` that is not a list of `{from, to}` structs; an edge style that is not `solid`/`dashed`/`flow`; a `::DIRECTION` that is not `LR`/`TB`; more than 150 nodes / 300 edges (the first ones are drawn) |
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
@@ -64,7 +65,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 
 | Group | Roles (aliases in brackets) |
 |---|---|
-| Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::WATERFALL` `::BULLET` `::FUNNEL` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) |
+| Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::WATERFALL` `::BULLET` `::FUNNEL` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) · `::DIAGRAM` (on the node id, see *Diagrams*) |
 | Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble) · `::OPEN` `::HIGH` `::LOW` (candles) |
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` (number, date or timestamp) · `::BAND_LOWER` + `::BAND_UPPER` (several pairs, in column order = a nested fan: 95 / 80 / 50 %) · `CASE WHEN flag THEN day END::MARKAREA` (a shaded region per run of flagged days) · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
@@ -308,6 +309,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | how a total moved (budget → actual, last year → this year) | `::WATERFALL`: first row = start, then signed steps (NULL row = subtotal) |
 | conversion through ordered stages | `::FUNNEL` (stages in SQL order, first on top) |
 | geography (WKT) | `::MAP` |
+| a process, pipeline or lineage: steps and what flows between them | `::DIAGRAM` (one row per step; edges from `::UPSTREAM` or `::EDGES`) |
 | row-level detail | `::TABLE` (`::PAGED` if large / remote); flag / rank with `::FLAG` / `::HIGHLIGHT`, not colour alone |
 
 - **Inverted pyramid**: KPI strip of 2–6 tiles inside `::GROUP … ::ENDGROUP` **[lint: ungrouped-kpis]** → the primary full-width chart → 2-up breakdowns → a detail table.
@@ -348,6 +350,29 @@ WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat
 SELECT <cat>::XAXIS, <measure>::BOXPLOT, '<takeaway>'::TITLE FROM <t>
 WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat>));
 ```
+
+## Diagrams
+
+One row per node; the `::DIAGRAM` (`::NODE`) column is the id. In the box: `::LABEL`, a KPI format (`::COMPACT`, `::MONEY`, …) and `::BADGE` (status word → pill colour; `::THRESHOLDS` on the value wins). Edges: `inputs::UPSTREAM` (an id or a list of ids feeding this row), or for edges with a count, label or style one scalar subquery:
+
+```sql dashboard
+CREATE OR REPLACE TABLE run_manifest AS SELECT * FROM (VALUES
+  (1, 'ingest', 'Ingest', 10000, 'ok'), (2, 'build', 'Build twin', 9800, 'ok'),
+  (3, 'monitor', 'Monitor drift', 412, 'alarm'), (4, 'calibrate', 'Calibrate', 37, 'warn')
+) t(seq, stage, title, records, status);
+CREATE OR REPLACE TABLE run_edges AS SELECT * FROM (VALUES
+  ('ingest', 'build', 9800, false), ('build', 'monitor', 9800, false),
+  ('monitor', 'calibrate', 412, false), ('calibrate', 'build', 29, true)
+) t(from_stage, to_stage, n, loop);
+
+SELECT 12::COL; SELECT 320::HEIGHT;
+SELECT stage::DIAGRAM, title::LABEL, records::COMPACT, status::BADGE,
+       (SELECT list({'from': from_stage, 'to': to_stage, 'value': n, 'style': CASE WHEN loop THEN 'flow' END}) FROM run_edges)::EDGES,
+       'Drift sends 29 calibrations back to the twin'::TITLE
+FROM run_manifest ORDER BY seq;
+```
+
+Layers run left to right (`'TB'::DIRECTION` for top to bottom); loops are drawn as edges running back. Row order breaks ties, so order the rows by the process. Give it `12::COL` and a `::HEIGHT`; a click on a node cross-filters (`'stage'::SELECT_AS` → `getvariable('stage')`), edges are hover-only. Not for free drawings: no positions or shapes yet.
 
 ## Motion (browser only)
 

@@ -1,0 +1,39 @@
+# name: test/sql/anofox_diagram.test
+# description: anofox_render draws a ::DIAGRAM (node/edge diagram) from one row per node
+# group: [anofox_visualization]
+
+require anofox_visualization
+
+# json_object (the anofox_render options) lives in the json extension.
+require json
+
+statement ok
+LOAD anofox_visualization
+
+statement ok
+CREATE TABLE stages AS SELECT * FROM (VALUES
+  (1, 'ingest', 'Ingest', 10000, []::VARCHAR[]),
+  (2, 'build', 'Build twin', 9800, ['ingest', 'calibrate']),
+  (3, 'monitor', 'Monitor drift', 412, ['build']),
+  (4, 'calibrate', 'Calibrate', 37, ['monitor'])
+) t(seq, stage, title, n, inputs);
+
+# Nodes from the rows, edges from each row's ::UPSTREAM list; a loop is drawn
+# back and named in the screen-reader summary.
+query I
+SELECT anofox_render(json_object(
+  'rows', (SELECT to_json(list({c0: stage, c1: title, c2: n, c3: inputs} ORDER BY seq)) FROM stages),
+  'roles', json('[[0,"DIAGRAM"],[1,"LABEL"],[2,"COMPACT"],[3,"UPSTREAM"]]'),
+  'width', 800, 'height', 300)) LIKE '<svg%data-summary="4 steps in 4 stages, from Ingest; 4 connections; 1 loop (Calibrate → Build twin); largest Ingest (10K)" data-diagram="LR"%data-node="build"%';
+----
+true
+
+# Edges with attributes from a list of structs (::EDGES), top to bottom.
+query I
+SELECT anofox_render(json_object(
+  'rows', (SELECT to_json(list({c0: stage, c1: e, c2: 'TB'} ORDER BY seq)) FROM stages,
+           (SELECT list({'from': 'ingest', 'to': 'build', 'value': 9800, 'style': 'flow'}) AS e)),
+  'roles', json('[[0,"NODE"],[1,"EDGES"],[2,"DIRECTION"]]'),
+  'width', 400, 'height', 400)) LIKE '<svg%data-diagram="TB"%class="dp-flow" data-edge="ingest&gt;build"%';
+----
+true

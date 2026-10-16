@@ -47,7 +47,10 @@ pub struct Diagnostic {
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
     /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
-    /// `transition/unknown` (warnings) | `optional/missing` (a note: a
+    /// `transition/unknown` (warnings) | `diagram/null-id` |
+    /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
+    /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
+    /// (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -745,6 +748,19 @@ where
             })),
         }
 
+        // A diagram's ids, edges, direction, size and loops.
+        if let Some(d) =
+            crate::diagram::Diagram::from_columns(&cols, &crate::format::Locale::default())
+        {
+            diags.extend(d.problems.into_iter().map(|pr| Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: pr.code,
+                message: pr.message,
+                sql: short.clone(),
+            }));
+        }
+
         // A KPI's change line and trend line.
         if is_kpi(&p.roles) {
             diags.extend(kpi_checks(&p.roles, &rows).into_iter().map(
@@ -1249,6 +1265,7 @@ fn one_line(s: &str) -> String {
 /// A KPI tile — a big-number card (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`).
 fn is_kpi(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| matches!(r, Role::Metric(_)))
+        && !roles.iter().any(|(_, r)| *r == Role::Diagram)
 }
 
 /// A KPI statement's `::DELTA_FORMAT` / `::DELTA_LABEL` / `::SPARKLINE`

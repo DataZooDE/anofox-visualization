@@ -365,6 +365,21 @@ same route KPI tiles take, and it needs no ggplot-rs release.
 Total ≈ L, in line with the issue's estimate. M1 alone already replaces the
 "bar chart of counts per stage" fallback in #65.
 
+**M1 status (branch `feat/issue-43-diagram-m1`):** implemented —
+`src/diagram.rs` (model, own layered layout LR/TB, polyline routing with
+spread ports, back edges, self-loops, own SVG in theme tokens), roles
+`::DIAGRAM`/`::NODE`, `::UPSTREAM`/`::PARENTS`, `::EDGES`, `::DIRECTION`,
+headless / `--svg` / `anofox_render` parity, lint `diagram/*`, the
+screen-reader summary (`data-summary`) and the text alternative (`<desc>`
+headless; ordered list + connections table under *Charts as tables*),
+hover-only edges, the builder example "How does data move through our
+pipeline?". Changes against this note: `diagram/cycle` is not a lint note (a
+loop is intended in a pipeline; the summary names it), and badge words colour
+a node the way table pills do. Not in M1, as planned: lanes, pins, mini-charts,
+the contract macro, story/animate, the graph keyboard walk (M1 walks the nodes
+in reading order). wasm growth: +57 KB raw / +23 KB gzip (over the 50 KB
+target; the layout, SVG writer and parser are ~20 KB each).
+
 ## 5. Risks
 
 | Risk | Mitigation |

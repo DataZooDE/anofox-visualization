@@ -24,6 +24,7 @@ use ggplot_rs::prelude::*;
 
 pub mod contract;
 pub mod dashboard;
+pub mod diagram;
 mod downsample;
 pub mod format;
 pub mod freshness;
@@ -453,6 +454,17 @@ pub enum Role {
     /// How the chart changes on a re-run (`::TRANSITION`): `'tween'` moves
     /// the marks to their new values, `'none'` (default) swaps the chart.
     Transition,
+    /// A node/edge diagram (`::DIAGRAM`/`::NODE`): the column is the node id,
+    /// one row per node (see [`diagram`]).
+    Diagram,
+    /// The node(s) feeding a `::DIAGRAM` row (`::UPSTREAM`): an id or a list
+    /// of ids → edges `upstream → this node`.
+    Upstream,
+    /// A `::DIAGRAM`'s edges with attributes (`::EDGES`): a list of structs
+    /// `{from, to [, value, label, style]}` (the first non-NULL cell).
+    Edges,
+    /// A `::DIAGRAM`'s direction (`::DIRECTION`): `'LR'` (default) or `'TB'`.
+    Direction,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1272,7 +1284,7 @@ fn with_warnings_attr(svg: String, warnings: &[String]) -> String {
 
 /// Add `name="value"` (escaped) to the root `<svg>` start tag. The root start
 /// tag ends at the first `>`: every writer escapes `>` inside attribute values.
-fn with_root_attr(mut svg: String, name: &str, value: &str) -> String {
+pub(crate) fn with_root_attr(mut svg: String, name: &str, value: &str) -> String {
     if !svg.starts_with("<svg") {
         return svg;
     }
@@ -1315,6 +1327,11 @@ fn render_placed(
 ) -> Result<(String, Vec<String>), RenderError> {
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+        // A diagram draws its own SVG: none of the chart post-passes apply.
+        if let Some(d) = diagram::Diagram::from_columns(cols, &o.locale) {
+            let svg = diagram::render(&d, place, w, h, o);
+            return Ok((o.theme.finish_svg(svg), Vec::new()));
+        }
         let cols = downsample::prepare(cols, o);
         let draw = |fit: Option<track::Fit>| {
             render_inner(&cols, w, h, o)
@@ -1559,7 +1576,7 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
 }
 
 /// A cell as the mark's `data-x` / `data-series` spells it.
-fn key_text(v: &Value) -> Option<String> {
+pub(crate) fn key_text(v: &Value) -> Option<String> {
     match v {
         Value::Str(s) => Some(s.clone()),
         Value::Na => None,

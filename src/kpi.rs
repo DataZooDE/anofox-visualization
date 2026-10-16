@@ -209,7 +209,7 @@ impl Kpi {
     pub fn from_columns(cols: &[Column], l: &Locale) -> Option<Kpi> {
         if cols
             .iter()
-            .any(|c| matches!(c.role, Role::Table | Role::PagedTable))
+            .any(|c| matches!(c.role, Role::Table | Role::PagedTable | Role::Diagram))
         {
             return None;
         }
