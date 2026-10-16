@@ -1237,16 +1237,21 @@ fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
         return svg;
     };
     for v in &c.values {
-        let Some(d) = v.as_str().map(str::trim) else {
-            continue;
+        let (e, d) = match v {
+            Value::DateTime(e) => (*e, xline_date_text(*e)),
+            Value::Str(s) => {
+                let s = s.trim();
+                if s.parse::<f64>().is_ok() {
+                    continue;
+                }
+                let Some(e) = sql::parse_iso_epoch(s) else {
+                    continue;
+                };
+                (e, s.strip_suffix(" 00:00:00").unwrap_or(s).to_string())
+            }
+            _ => continue,
         };
-        if d.parse::<f64>().is_ok() {
-            continue;
-        }
-        let Some(e) = sql::parse_iso_epoch(d) else {
-            continue;
-        };
-        let d = format::escape_xml(d.strip_suffix(" 00:00:00").unwrap_or(d));
+        let d = format::escape_xml(&d);
         svg = svg
             .replace(
                 &format!(" data-x=\"{e}\" data-value=\"{e}\">"),
@@ -1258,6 +1263,17 @@ fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
             );
     }
     svg
+}
+
+/// Epoch seconds as `2026-10-12` (or `2026-10-12 08:30:00` off midnight).
+fn xline_date_text(secs: i64) -> String {
+    let day = crate::period::Date::from_days(secs.div_euclid(86_400)).iso();
+    let s = secs.rem_euclid(86_400);
+    if s == 0 {
+        day
+    } else {
+        format!("{day} {:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    }
 }
 
 /// The `::LINESTYLE` values.
@@ -3969,9 +3985,7 @@ fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) ->
     max(&mut ycols.chain(extra).filter_map(Value::as_f64))
 }
 
-/// Distinct finite numeric values from a column, in first-seen order — used to
-/// draw one reference line per value.
-/// An `::XLINE`'s positions (the query sends it as text): numbers as they
+/// An `::XLINE`'s positions (a DATE arrives as epoch seconds, text as is): numbers as they
 /// are, a date / timestamp (`DATE '2026-06-30'::XLINE`, "Today" on a date
 /// axis) as its epoch seconds — the unit a date x is drawn in.
 fn xline_nums(vals: &[Value]) -> Vec<f64> {
@@ -3992,6 +4006,8 @@ fn xline_nums(vals: &[Value]) -> Vec<f64> {
     distinct_nums(&parsed)
 }
 
+/// Distinct finite numeric values from a column, in first-seen order — used to
+/// draw one reference line per value.
 fn distinct_nums(vals: &[Value]) -> Vec<f64> {
     // O(n) dedup on the exact bit pattern (+0.0 normalised); capped so a
     // pathological column can't draw thousands of reference lines.

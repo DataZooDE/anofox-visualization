@@ -71,6 +71,22 @@ fn reveal_starts_at_a_date_xline() {
 }
 
 #[test]
+fn a_coerced_date_xline_also_says_its_date() {
+    // The query path (sql::coerce_for_role) hands a DATE ::XLINE over as epoch
+    // seconds, not text.
+    let svg = line(vec![
+        Column::new("t", Role::VLine, vec![Value::DateTime(1_791_763_200); 4]),
+        Column::new("a", Role::Animate, strs(&["reveal"; 4])),
+    ]);
+    assert!(root(&svg).contains(r#"data-xline="1791763200""#));
+    assert!(
+        svg.contains("<title>2026-10-12</title>"),
+        "date XLINE tooltip"
+    );
+    assert!(!svg.contains("x = 1791763200"));
+}
+
+#[test]
 fn numeric_xline_still_draws() {
     let cols = vec![
         Column::new("x", Role::X, nums(&[1.0, 2.0, 3.0])),
