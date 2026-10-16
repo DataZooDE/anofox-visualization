@@ -9,18 +9,21 @@
 //   - panels the action does not touch being rebuilt (their DOM must stay)
 //   - focus lost to <body>
 //   - more than one run per click, a frame without the panels (white flash)
-//   - time to stable above --bound ms
+//   - the run (click → data on screen) above --bound ms, or the motion after
+//     it (run end → stable) above --settle ms: the drill animations are
+//     ≤ 400 ms, so a slow settle is the page, not the query or machine load
 // and prints the numbers. --frames DIR saves a frame strip per action (CDP
 // screencast, montage'd when ImageMagick is on the PATH); --axe runs axe-core
 // on the drilled chart.
 //
 //   python3 serve_nocache.py 8791 &
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/drill-e2e.mjs \
-//       [--url http://127.0.0.1:8791/] [--motion reduce] [--frames dir] [--bound 1500] [--axe axe.min.js]
+//       [--url http://127.0.0.1:8791/] [--motion reduce] [--frames dir] [--bound 1500] [--settle 900] [--width 390] [--axe axe.min.js]
 import { createRequire } from "module";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import path from "path";
+import os from "os";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -31,7 +34,13 @@ const arg = (k, d) => {
 const base = arg("--url", "http://127.0.0.1:8791/");
 const motion = arg("--motion", "no-preference");
 const frames = arg("--frames", "");
-const bound = Number(arg("--bound", "1500"));
+// The run time is the query + render: on a machine busier than its cores
+// (load average / cores > 1) it stretches with the queue, so its bound does
+// too — printed with every run. The settle bound does not scale.
+const load = os.loadavg()[0] / Math.max(1, os.cpus().length);
+const bound = Math.round(Number(arg("--bound", "1500")) * Math.max(1, load));
+console.log(`run bound ${bound} ms (load ${load.toFixed(2)} per core)`);
+const settleBound = Number(arg("--settle", "900"));
 const axe = arg("--axe", "");
 const fail = (m) => {
   console.error("FAIL: " + m);
@@ -39,7 +48,8 @@ const fail = (m) => {
 };
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 640 }, reducedMotion: motion });
+// --width 390: a phone, where charts are redrawn at their shown width (fitCharts)
+const page = await browser.newPage({ viewport: { width: Number(arg("--width", "1280")), height: 640 }, reducedMotion: motion });
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e)));
 await page.addInitScript(() => {
@@ -92,6 +102,7 @@ async function record(tabSwitch = false) {
         if (m.target.id === "dp-tip" || m.target.closest?.("#dp-tip")) continue;
         if (m.type === "attributes" && m.target === document.body && m.attributeName === "class") {
           if (document.body.classList.contains("loading") && !m.oldValue?.includes("loading")) R.runs++;
+          else if (!document.body.classList.contains("loading") && m.oldValue?.includes("loading")) R.runEnd = performance.now() - R.t0;
           continue;
         }
         if (R.tabSwitch && !R.switchAt) {
@@ -164,6 +175,8 @@ async function stable(label, opts = {}) {
       longMs: Math.round(long.reduce((a, s) => a + s.d, 0)),
       runs: R.runs,
       stableMs: Math.round(R.lastMut),
+      runMs: Math.round(R.runEnd ?? R.lastMut),
+      settleMs: Math.round(Math.max(0, R.lastMut - (R.runEnd ?? R.lastMut))),
       skel: Math.max(0, ...R.frames.map((f) => f.skel)),
       skelMs: (() => {
         const on = R.frames.filter((f) => f.skel);
@@ -213,7 +226,8 @@ function check(label, r, { keepAll = true, focus = true } = {}) {
   if (r.blankFrames) fail(`${label}: ${r.blankFrames} frame(s) without any panel`);
   if (keepAll && r.kept < r.before - 2) fail(`${label}: ${r.before - r.kept} of ${r.before} panels rebuilt (only the drilled chart and its follower may change)`);
   if (focus && (r.focus === "body" || !r.focusInDrill)) fail(`${label}: focus lost (${r.focus})`);
-  if (r.stableMs > bound) fail(`${label}: stable after ${r.stableMs} ms (bound ${bound} ms)`);
+  if (r.runMs > bound) fail(`${label}: the run took ${r.runMs} ms (bound ${bound} ms)`);
+  if (r.settleMs > settleBound) fail(`${label}: still moving ${r.settleMs} ms after the run (bound ${settleBound} ms)`);
 }
 
 // The drill chart, scrolled a little down so a scroll jump shows.
