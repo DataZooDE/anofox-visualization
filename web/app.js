@@ -402,7 +402,8 @@ SELECT 'Fully **in-browser forecasting**: DuckDB-Wasm loads a Parquet and runs t
 
 -- The chart, prominent: history (lx_m) + 12-month SeasonalES forecast (lx_fc,
 -- shaded 95% interval) + BOTH methods' backtest predictions over the 12-month
--- holdout (lx_bt), for the selected item (defaults to the largest by forecast).
+-- holdout (lx_bt), for the selected item (defaults to the largest by forecast;
+-- a click on the chart itself selects a series name, not an item, and is ignored).
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
@@ -410,18 +411,18 @@ SELECT ds       ::XAXIS,
        y        ::BAND_LOWER,
        y        ::BAND_UPPER,
        'History + 12-month SeasonalES forecast (shaded = 95% interval) + backtest'::TITLE
-FROM lx_m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+FROM lx_m WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'Forecast', y, y, y, '' FROM lx_m
-  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
+  WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
 UNION ALL
-SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'SeasonalES (backtest)', predicted, predicted, predicted, '' FROM lx_bt
-  WHERE method='SeasonalES' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+  WHERE method='SeasonalES' AND series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'SeasonalNaive (backtest)', predicted, predicted, predicted, '' FROM lx_bt
-  WHERE method='SeasonalNaive' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+  WHERE method='SeasonalNaive' AND series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;
 
 -- Two tabs share the chart above: a per-series Summary and the Backtest
@@ -6153,6 +6154,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     infoEl.textContent = `${from.toLocaleString(loc)}–${to.toLocaleString(loc)} of ${total.toLocaleString(loc)}`;
     const sizeSel = document.createElement("select");
     sizeSel.className = "page-size";
+    sizeSel.setAttribute("aria-label", "Rows per page");
     for (const nn of [10, 20, 50, 100]) {
       const o = document.createElement("option");
       o.value = String(nn);
@@ -7314,6 +7316,27 @@ function attachChartA11y() {
     (marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0] || svg)?.focus();
   }
   applyAsTables();
+  requestAnimationFrame(keyboardScrollers);
+}
+
+// A table that scrolls but holds nothing focusable (no row selection, links or
+// buttons) becomes a Tab stop itself, so the keyboard can scroll it (WCAG
+// scrollable-region-focusable).
+function keyboardScrollers() {
+  for (const el of document.querySelectorAll(".dash .tbl-scroll")) {
+    const scrolls = el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1;
+    const focusable = el.querySelector("a[href], button, input, select, [tabindex]:not([tabindex='-1'])");
+    if (scrolls && !focusable) {
+      el.tabIndex = 0;
+      el.setAttribute("role", "region");
+      const t = el.closest(".panel")?.querySelector(".panel-title")?.textContent?.trim();
+      el.setAttribute("aria-label", t ? `${t} (scrollable table)` : "Scrollable table");
+    } else if (el.getAttribute("role") === "region") {
+      el.removeAttribute("tabindex");
+      el.removeAttribute("role");
+      el.removeAttribute("aria-label");
+    }
+  }
 }
 
 // Marks of a chart in reading order: series by first appearance, each sorted by x.
@@ -7498,10 +7521,21 @@ function toggleMagicType(panel) {
 
 // A modal listing the panel's rows as a table (ECharts toolbox "data view").
 // A panel's data (fig._dp: rows + roles) as an HTML table, data columns only.
+// Rows JSON as DuckDB writes it: a DOUBLE can be a bare Infinity / NaN (an
+// ROC curve's first threshold), which JSON.parse rejects — read them as text.
+function parseRowsLenient(json) {
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    const fixed = json.replace(/([:,\[]\s*)(-?Infinity|NaN)(?=\s*[,}\]])/g, '$1"$2"');
+    if (fixed === json) throw e;
+    return JSON.parse(fixed);
+  }
+}
 function dataTableHtml(dp, limit, caption) {
   let rows;
   try {
-    rows = typeof dp.rows === "string" ? JSON.parse(dp.rows) : dp.rows;
+    rows = typeof dp.rows === "string" ? parseRowsLenient(dp.rows) : dp.rows;
   } catch (_) {
     return "";
   }
