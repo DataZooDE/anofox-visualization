@@ -84,13 +84,18 @@ pub fn random_token() -> String {
     out
 }
 
-/// Constant-time string comparison (for tokens).
+/// Constant-time string comparison (for tokens and secrets). No early return
+/// on a length mismatch either: every byte of the longer input is visited.
 pub fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
+    let n = a.len().max(b.len());
+    let mut diff = (a.len() ^ b.len()) as u64;
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= u64::from(x ^ y);
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    std::hint::black_box(diff) == 0
 }
 
 /// Is `bind` a loopback address (`127.0.0.0/8`, `::1`, `localhost`)?
@@ -470,7 +475,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
             }
             if crate::host::access::is_reserved_var(k) {
                 return Err(format!(
-                    "variable '{k}' is reserved: __claim_* variables are set by the server from the viewer's login"
+                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
                 ));
             }
             let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
@@ -1164,6 +1169,16 @@ mod tests {
         assert!(
             parse_panel_request(r#"{"dashboard":"d","panel":1,"vars":{"claim_user":"x"}}"#).is_ok()
         );
+        for name in ["anofox_data", "ANOFOX_Data"] {
+            let body = format!(r#"{{"dashboard":"d","panel":1,"vars":{{"{name}":"/etc"}}}}"#);
+            assert!(
+                parse_panel_request(&body).unwrap_err().contains("reserved"),
+                "{name}"
+            );
+        }
+        // ct_eq: equal only when equal, whatever the lengths
+        assert!(ct_eq("abc", "abc") && !ct_eq("abc", "abd") && !ct_eq("abc", "abcd"));
+        assert!(!ct_eq("", "a") && ct_eq("", "") && !ct_eq("abc\0", "abc"));
     }
 
     #[test]

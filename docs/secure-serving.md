@@ -116,7 +116,8 @@ rebuilt while the server runs — no restart, no failed requests:
   the log (and to the caller of `anofox_serve_refresh`).
 - `GET /healthz` reports `epoch` (1 at start, +1 per refresh),
   `snapshot_age_s`, `refresh_s`, `refreshing` and `refresh_failed` (no error
-  text — `/healthz` is public).
+  text — `/healthz` is public). With `auth`, a caller that is not signed in
+  through the proxy gets only `{"status":"ok"}`.
 - While a rebuild runs, the old and the new snapshot both exist: plan for twice
   the snapshot's disk and memory.
 
@@ -298,7 +299,8 @@ otherwise an absent claim is `NULL` (groups: `[]`). The start message lists the
 identity headers the server trusts — compare it with the proxy configuration.
 
 **How a request is checked.** With `auth` set, every request except `GET
-/health` must (1) come from a `trusted_proxies` address (when given), (2) carry
+/health` (`/healthz`; it answers `{"status":"ok"}` without a login and its full
+body only with one) must (1) come from a `trusted_proxies` address (when given), (2) carry
 the shared secret exactly once (constant-time comparison), and (3) carry a
 non-empty user header exactly once. Otherwise the answer is `401` with the same
 body for every reason (the reason goes to the request log only). Identity
@@ -328,7 +330,9 @@ server sets, on the request's private connection:
 All three are typed literals like any variable value. A viewer can **never**
 set a `__claim_*` variable (any case): a panel request naming one is `400`, a
 `-- @param` or `-- @vars` entry naming one is ignored, and the browser client
-ignores `?v.__claim_*` in the URL. Without `auth` the claims are simply unset
+ignores `?v.__claim_*` in the URL. The same holds for `anofox_data` (the data
+folder, see above), whether or not a data folder is configured. Without `auth`
+the claims are simply unset
 (`NULL`), so a panel that filters on them returns no rows instead of every row.
 
 ```sql
@@ -495,8 +499,10 @@ every refused request (static assets are not logged):
 | A client sends identity headers the proxy **doesn't set** (groups, extra claims) — the secret still matches | Groups and claims are opt-in (only `header_user` by default); the proxy must set or remove every configured header on every request (each recipe does; checked with forged headers through nginx and Caddy); `required` claims make a missing value `401`; the start message lists the trusted headers |
 | Folded (obs-fold) header lines smuggling an identity header past the proxy | The proxy must reject or unfold them (nginx: `400`, Caddy: unfolds); the server can't tell a folded line from a header |
 | The secret leaks (config file, `ps`, SQL history) | `shared_secret_env`, `trusted_proxies` as a second factor; the secret never appears in errors, `Debug` output or the log. Rotate by restarting with a new value |
-| Brute-forcing the secret | ≥ 32 characters, constant-time comparison |
-| A viewer sets `__claim_user` / `__claim_groups` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored; claims are set by the server after the viewer's variables |
+| Brute-forcing the secret | ≥ 32 characters, constant-time comparison (no early return on a length mismatch either) |
+| A viewer sets `__claim_user` / `__claim_groups` / `anofox_data` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored, in any case and in every configuration; claims and `anofox_data` are set by the server after the viewer's variables (a unit test pins this order) |
+| Snapshot refresh (`refresh_s`) mixing users or snapshots | Each snapshot generation has its own cache; keys include the claims, supersession tickets the user (tested with two users under constant refreshes) |
+| `/healthz` leaks snapshot state | With `auth`, only `status` without a login |
 | A panel filters on a viewer-settable variable | Documented rule: filter only on `__claim_*`; `-- @vars` limits what viewers can set |
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (both servers) |
 | One viewer cancels another's query | Supersession tickets are scoped to user + 128-bit page id |

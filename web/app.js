@@ -2644,8 +2644,8 @@ function readUrlSeed(search = location.search) {
     for (const [k, v] of new URLSearchParams(search)) {
       if (!k.startsWith("v.")) continue;
       const name = k.slice(2);
-      // __claim_* are the login's claims, set by a locked server only.
-      if (!URL_VAR_RE.test(name) || /^__claim_/i.test(name) || String(v).length > 1000) continue;
+      // __claim_* (the login's claims) and anofox_data are set by a locked server only.
+      if (!URL_VAR_RE.test(name) || /^(__claim_|anofox_data$)/i.test(name) || String(v).length > 1000) continue;
       if (!seed[name] && Object.keys(seed).length >= 64) continue;
       (seed[name] ||= []).length < 200 && seed[name].push(String(v));
     }

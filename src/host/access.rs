@@ -31,11 +31,16 @@ use std::sync::Mutex;
 /// Prefix of the variables the server reserves for the viewer's claims.
 pub const CLAIM_PREFIX: &str = "__claim_";
 
-/// Is `name` a reserved claim variable (`__claim_*`, any case — DuckDB
-/// variable names are case-insensitive)?
+/// The variable a locked server sets to its data folder (`options.data`).
+pub const DATA_VAR: &str = "anofox_data";
+
+/// Is `name` a variable only the server sets — a claim (`__claim_*`) or
+/// `anofox_data` — in any case (DuckDB variable names are case-insensitive)?
+/// Reserved whether or not auth or a data folder is configured.
 pub fn is_reserved_var(name: &str) -> bool {
-    name.len() >= CLAIM_PREFIX.len()
-        && name.as_bytes()[..CLAIM_PREFIX.len()].eq_ignore_ascii_case(CLAIM_PREFIX.as_bytes())
+    (name.len() >= CLAIM_PREFIX.len()
+        && name.as_bytes()[..CLAIM_PREFIX.len()].eq_ignore_ascii_case(CLAIM_PREFIX.as_bytes()))
+        || name.eq_ignore_ascii_case(DATA_VAR)
 }
 
 /// Default header names (oauth2-proxy / Caddy / nginx conventions).
@@ -738,6 +743,8 @@ mod tests {
         assert!(!is_reserved_var("claim_user"));
         assert!(!is_reserved_var("__clai"));
         assert!(!is_reserved_var("region"));
+        assert!(is_reserved_var("anofox_data") && is_reserved_var("ANOFOX_DATA"));
+        assert!(!is_reserved_var("anofox_data2"));
     }
 
     #[test]

@@ -599,9 +599,9 @@ struct Locked {
     server_id: String,
 }
 
-/// The `SET VARIABLE` that tells panels where `options.data` is; viewers
-/// can't set it.
-const DATA_VAR: &str = "anofox_data";
+// `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
+// is. Viewers can never set it (`access::is_reserved_var`, any request).
+use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
@@ -1109,8 +1109,10 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     let health = req.method() == &Method::Get && (path == "/health" || path == "/healthz");
     // Login: with `options.auth` every request but the health check carries
     // the proxy's identity (and secret); without it, nobody gets anything.
-    let claims = match (&st.opts.auth, health) {
-        (Some(auth), false) => {
+    // The health check answers anyone, but only signed-in callers see more
+    // than `status`.
+    let claims = match &st.opts.auth {
+        Some(auth) => {
             let headers: Vec<(&str, &str)> = req
                 .headers()
                 .iter()
@@ -1121,16 +1123,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     info.user = Some(c.user.clone());
                     Some(c)
                 }
+                Err(_) if health => None,
                 Err(e) => {
                     info.deny = Some(e.reason());
                     return reply(req, 401, access::UNAUTHORIZED);
                 }
             }
         }
-        _ => None,
+        None => None,
     };
     match (req.method(), path) {
         (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
+            if st.opts.auth.is_some() && claims.is_none() {
+                respond(req, 200, "application/json", &b"{\"status\":\"ok\"}"[..]);
+                return 200;
+            }
             let gen = st.current.get();
             let body = serde_json::json!({
                 "status": "ok",
@@ -1263,9 +1270,6 @@ fn locked_panel(
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
     for (name, lit) in &r.vars {
-        if st.opts.data.is_some() && name.eq_ignore_ascii_case(DATA_VAR) {
-            return Err((400, format!("variable '{name}' is set by the server")));
-        }
         if st
             .opts
             .path_vars
@@ -1340,6 +1344,28 @@ fn locked_panel(
     out.map(|json| (json, etag(&st.server_id, gen.epoch, &key)))
 }
 
+/// The `SET VARIABLE`s that open every panel request, in order: the viewer's
+/// variables, then the login's claims and `anofox_data` — set by the server
+/// after the viewer's (who can't name them: both are reserved when the
+/// request is parsed).
+fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Path>) -> Vec<String> {
+    let mut out: Vec<String> = r
+        .vars
+        .iter()
+        .map(|(name, lit)| format!("SET VARIABLE {name} = {lit}"))
+        .collect();
+    for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
+        out.push(format!("SET VARIABLE {name} = {lit}"));
+    }
+    if let Some(data) = data {
+        out.push(format!(
+            "SET VARIABLE {DATA_VAR} = {}",
+            sql_string_literal(&data.to_string_lossy())
+        ));
+    }
+    out
+}
+
 /// Run one panel of one dashboard. Fresh connection per request (variables
 /// and temp objects never leak between viewers), variables set as typed
 /// literals, the dashboard's preceding setup statements re-run (only TEMP
@@ -1364,19 +1390,8 @@ fn run_panel(
     };
     conn.with_deadline(st.opts.timeout, |c| {
         c.exec(&format!("USE {}", quote_ident(&gen.snap.default_db)))?;
-        for (name, lit) in &r.vars {
-            c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
-        }
-        // The login's claims, after the viewer's variables (which can't name
-        // them: `__claim_*` is rejected when the request is parsed).
-        for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
-            c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
-        }
-        if let Some(data) = &st.opts.data {
-            c.exec(&format!(
-                "SET VARIABLE {DATA_VAR} = {}",
-                sql_string_literal(&data.to_string_lossy())
-            ))?;
+        for set in request_sets(r, claims, st.opts.data.as_deref()) {
+            c.exec(&set)?;
         }
         for (setup, sql) in &dash.stmts[..r.panel] {
             if *setup {
@@ -1675,6 +1690,113 @@ mod tests {
         let kb = panel_key(&r, Some(&bob));
         let (out, how) = cache.run(&kb, None, |_| Ok("bob rows".to_string()));
         assert_eq!((out.unwrap().as_str(), how), ("bob rows", Served::Executed));
+    }
+
+    #[test]
+    fn every_request_sets_the_claims_after_the_viewer_vars() {
+        // A run_panel that forgot the claims would still compile — and fail
+        // open for filters such as `coalesce(getvariable('__claim_user'), …)`.
+        let r = sv::parse_panel_request(r#"{"dashboard":"d","panel":1,"vars":{"region":"EU"}}"#)
+            .unwrap();
+        let alice = Claims {
+            user: "alice".into(),
+            groups: vec!["hr".into()],
+            attrs: vec![("tenant".into(), None)],
+        };
+        let sets = request_sets(&r, Some(&alice), Some(Path::new("/srv/data")));
+        assert_eq!(
+            sets,
+            vec![
+                "SET VARIABLE region = 'EU'".to_string(),
+                "SET VARIABLE __claim_user = 'alice'".to_string(),
+                "SET VARIABLE __claim_groups = ['hr']".to_string(),
+                "SET VARIABLE __claim_tenant = NULL::VARCHAR".to_string(),
+                "SET VARIABLE anofox_data = '/srv/data'".to_string(),
+            ]
+        );
+        // without a login: no claims (they read as NULL), never a default user
+        let sets = request_sets(&r, None, None);
+        assert_eq!(sets, vec!["SET VARIABLE region = 'EU'".to_string()]);
+        // a viewer can't get a reserved name into the list at all
+        for v in ["__claim_user", "anofox_data", "ANOFOX_DATA"] {
+            let body = format!(r#"{{"dashboard":"d","panel":1,"vars":{{"{v}":"x"}}}}"#);
+            assert!(sv::parse_panel_request(&body).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn auth_and_refresh_never_cross_users() {
+        // Two users hammer the same panel while the snapshot is refreshed:
+        // every answer must be the asking user's, from some snapshot; the
+        // cache is per user (key) and per snapshot (generation).
+        use crate::generation::Current;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let current = Arc::new(Current::new(1u32, 1 << 20));
+        let stop = Arc::new(AtomicBool::new(false));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let r = sv::parse_panel_request(r#"{"dashboard":"who","panel":0}"#).unwrap();
+        let refresher = {
+            let (current, stop) = (current.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut v = 1u32;
+                while !stop.load(Ordering::SeqCst) {
+                    v += 1;
+                    current.rebuild(true, || Ok(v)).unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                v
+            })
+        };
+        let workers: Vec<_> = (0..8)
+            .map(|w| {
+                let (current, runs, r) = (current.clone(), runs.clone(), r.clone());
+                std::thread::spawn(move || {
+                    let user = if w % 2 == 0 { "alice" } else { "bob" };
+                    let claims = Claims {
+                        user: user.into(),
+                        ..Default::default()
+                    };
+                    let mut seen = std::collections::BTreeSet::new();
+                    for _ in 0..400 {
+                        let gen = current.get();
+                        let key = panel_key(&r, Some(&claims));
+                        let (out, _) = gen.cache.run(&key, None, |_| {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            // The "session": what the panel reads is what the
+                            // request's SETs put there.
+                            let sets = request_sets(&r, Some(&claims), None);
+                            let who = sets
+                                .iter()
+                                .find_map(|s| s.strip_prefix("SET VARIABLE __claim_user = "))
+                                .map(|l| l.trim_matches('\'').to_string())
+                                .unwrap_or_default();
+                            Ok(format!("{who}@{}", gen.snap))
+                        });
+                        let out = out.unwrap();
+                        let (who, snap) = out.split_once('@').unwrap();
+                        assert_eq!(who, user, "cross-user answer {out}");
+                        assert_eq!(
+                            snap.parse::<u32>().unwrap(),
+                            gen.snap,
+                            "cross-snapshot answer"
+                        );
+                        seen.insert(gen.snap);
+                    }
+                    seen.len()
+                })
+            })
+            .collect();
+        let snapshots_seen: Vec<usize> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        stop.store(true, Ordering::SeqCst);
+        let last = refresher.join().unwrap();
+        assert!(last > 2, "the snapshot was refreshed during the run");
+        assert!(
+            snapshots_seen.iter().any(|n| *n > 1),
+            "requests spanned refreshes"
+        );
+        // cached: far fewer executions than requests, but at least one per user
+        let n = runs.load(Ordering::SeqCst);
+        assert!((2..8 * 400).contains(&n), "{n} executions");
     }
 
     #[test]
