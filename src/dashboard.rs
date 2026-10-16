@@ -498,6 +498,15 @@ fn render_panel_svg(
             .and_then(|(_, v)| v.first())
             .map(value_str)
             .unwrap_or_default();
+        // `::THRESHOLDS` colours the value by its status (good / warn / bad).
+        let status = roles
+            .iter()
+            .find(|(_, r)| *r == Role::Thresholds)
+            .and_then(|(i, _)| column_at(rows, *i))
+            .and_then(|(_, v)| v.first())
+            .and_then(|spec| crate::thresholds::Rules::parse(&value_str(spec)).ok())
+            .zip(raw.and_then(|v| v.as_f64()))
+            .and_then(|(rules, n)| rules.status(n));
         let cy = h / 2.0;
         let t = &ropts.theme;
         return format!(
@@ -506,7 +515,7 @@ fn render_panel_svg(
             open = svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
             fd = esc(&t.font.display),
             fb = esc(&t.font.family),
-            ink = hex(t.colors.ink),
+            ink = hex(status.map_or(t.colors.ink, |st| st.color(t))),
             muted = hex(t.colors.muted),
             ty = cy,
             cy2 = cy + 24.0,

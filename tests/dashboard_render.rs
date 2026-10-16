@@ -175,3 +175,45 @@ fn annotations_from_data_rows() {
         assert!(svg.contains(label), "{label} missing");
     }
 }
+
+// #30: ::THRESHOLDS colours a KPI value, a gauge's zones and a chart's
+// threshold lines in the theme's status colours (light: warning #b45309,
+// negative #dc2626).
+#[test]
+fn thresholds_colour_kpis_gauges_and_charts() {
+    let render = |script: &str, cols: Vec<(String, Vec<Value>)>| {
+        render_dashboard_svg(script, &mut Fixed(cols), &DashboardOptions::default()).unwrap()
+    };
+    let rules = "<0:bad; <5:warn; good";
+    let kpi = render(
+        "SELECT 3.1::PERCENT, '<0:bad; <5:warn; good'::THRESHOLDS;",
+        vec![("c0".into(), f(&[3.1])), ("c1".into(), s(&[rules]))],
+    );
+    assert!(
+        kpi.contains("fill=\"#b45309\""),
+        "KPI value not in the warning colour"
+    );
+    let gauge = render(
+        "SELECT 72::GAUGE, '<50:bad; <80:warn; good'::THRESHOLDS;",
+        vec![
+            ("c0".into(), f(&[72.0])),
+            ("c1".into(), s(&["<50:bad; <80:warn; good"])),
+        ],
+    );
+    assert!(
+        gauge.to_lowercase().contains("b45309"),
+        "gauge has no warning zone"
+    );
+    let chart = render(
+        "SELECT x::XAXIS, y::LINECHART, '<50:bad; good'::THRESHOLDS FROM t;",
+        vec![
+            ("c0".into(), f(&[1.0, 2.0, 3.0])),
+            ("c1".into(), f(&[40.0, 60.0, 55.0])),
+            ("c2".into(), s(&["<50:bad; good"; 3])),
+        ],
+    );
+    assert!(
+        chart.to_lowercase().contains("dc2626"),
+        "no threshold line at 50"
+    );
+}

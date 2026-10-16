@@ -249,6 +249,11 @@ body.loading #dp-spinner{display:flex}
 .dp-table tr.th-group .th-g{display:block;padding-bottom:.25rem;border-bottom:1px solid var(--ax-line);font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;color:var(--ax-muted)}
 .dp-table tbody tr td.flag{background-color:var(--ax-badge-warn-bg);color:var(--ax-badge-warn-ink)}
 .dp-table .flag-i{font-size:.72rem;margin-right:.35rem}
+.dp-table tbody tr td.th-good{background-color:var(--ax-badge-good-bg);color:var(--ax-badge-good-ink)}
+.dp-table tbody tr td.th-warn{background-color:var(--ax-badge-warn-bg);color:var(--ax-badge-warn-ink)}
+.dp-table tbody tr td.th-bad{background-color:var(--ax-badge-bad-bg);color:var(--ax-badge-bad-ink)}
+.dp-table .th-i{font-size:.62rem;margin-right:.35rem;vertical-align:.06em}
+.metric-value.th-good{background:none;color:var(--ax-positive)}.metric-value.th-warn{background:none;color:var(--ax-warning)}.metric-value.th-bad{background:none;color:var(--ax-negative)}
 .dp-table td.hl{font-weight:600}
 .dp-table .hl-r{font-size:.64rem;font-weight:600;color:var(--ax-muted);margin-right:.4rem;letter-spacing:.02em}
 .dp-table tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}

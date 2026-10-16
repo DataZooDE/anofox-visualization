@@ -35,6 +35,7 @@ mod smooth;
 pub mod sql;
 pub mod table;
 pub mod theme;
+pub mod thresholds;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -307,6 +308,10 @@ pub enum Role {
     XBandLabel,
     /// A text callout at the row's (x, y) (`::ANNOTATE`); NULL rows draw nothing.
     Annotate,
+    /// Threshold rules (`::THRESHOLDS '<0:bad; <0.05:warn; good'`): the status
+    /// colours a KPI value, a gauge's zones and a chart's threshold lines; a
+    /// lone `::THRESHOLDS` statement is the next table's per-column rules.
+    Thresholds,
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
@@ -1447,6 +1452,14 @@ fn role_str(cols: &[Column], role: Role) -> Option<String> {
     })
 }
 
+/// The panel's `::THRESHOLDS` rules: `None` without the role, an error for a
+/// malformed rule set.
+fn thresholds_of(cols: &[Column]) -> Result<Option<thresholds::Rules>, String> {
+    role_str(cols, Role::Thresholds)
+        .map(|s| thresholds::Rules::parse(&s))
+        .transpose()
+}
+
 /// A format spec (`::YFORMAT` / `::XFORMAT`) as written: a leading space is
 /// meaningful (`' kg'` = a suffix), so only an all-blank value counts as unset.
 fn role_fmt(cols: &[Column], role: Role) -> Option<String> {
@@ -2396,6 +2409,24 @@ fn cartesian(
         .layer_data(frame);
     }
     plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
+    // Threshold lines (`::THRESHOLDS`): one at each bound where the status
+    // changes, in the colour of the worse side.
+    if let Some(rules) = thresholds_of(cols)? {
+        for (y, st) in rules.boundaries() {
+            plot = plot
+                .geom_hline_aes_with(
+                    GeomHline {
+                        yintercept: 0.0,
+                        color: st.color(&o.theme),
+                        width: 1.1,
+                        linetype: Linetype::Dashed,
+                        alpha: 0.9,
+                    },
+                    Aes::new().yintercept("ty"),
+                )
+                .layer_data(vec![("ty".to_string(), vec![Value::Float(y)])]);
+        }
+    }
     // Cook's-distance contours (`::COOKS_CONTOUR p`) on residuals vs leverage.
     if let Some(p) = role_num(cols, Role::CooksContour).filter(|p| *p >= 1.0) {
         plot = plot.stat_cooks_contour(p.min(1e6) as usize, &[0.5, 1.0]);
@@ -3752,7 +3783,17 @@ fn render_gauge(
                 .collect()
         })
         .unwrap_or_default();
-    let n_zones = if zone_cols.is_empty() {
+    // `::THRESHOLDS` zones (status colours over the range) replace the equal
+    // `::COLORS` zones; the zone holding the value is drawn at full strength.
+    let rules = thresholds_of(cols)?;
+    let status_zones = rules
+        .as_ref()
+        .map(|r| r.zones(min, max))
+        .unwrap_or_default();
+    let value_status = rules.as_ref().and_then(|r| r.status(val));
+    let n_zones = if !status_zones.is_empty() {
+        0 // ::LABELS name equal zones only
+    } else if zone_cols.is_empty() {
         zone_labels.len()
     } else {
         zone_cols.len()
@@ -3766,7 +3807,16 @@ fn render_gauge(
 
     // Bands: the zones, or a light track + a brand progress band.
     let (mut x0, mut x1, mut fill, mut pairs) = (vec![], vec![], vec![], vec![]);
-    if zone_cols.is_empty() {
+    if !status_zones.is_empty() {
+        for (i, (a, b, st)) in status_zones.iter().enumerate() {
+            x0.push(*a);
+            x1.push(*b);
+            fill.push(format!("z{i}"));
+            let on = (*a..=*b).contains(&shown);
+            let c = st.color(&o.theme);
+            pairs.push((format!("z{i}"), if on { c } else { wash(o, c, 0.6) }));
+        }
+    } else if zone_cols.is_empty() {
         x0.extend([min, min]);
         x1.extend([max, shown]);
         fill.extend(["track".to_string(), "value".to_string()]);
@@ -3804,7 +3854,7 @@ fn render_gauge(
                 .fill("fill"),
         );
     // Zone boundaries: thin white separators across the band (label-only zones).
-    if zone_cols.is_empty() && n_zones > 1 {
+    if zone_cols.is_empty() && status_zones.is_empty() && n_zones > 1 {
         let xs: Vec<f64> = (1..n_zones)
             .map(|i| at(i as f64 / n_zones as f64))
             .collect();
@@ -3891,7 +3941,7 @@ fn render_gauge(
         x: at(0.5),
         y: 0.0,
         size: big,
-        color: o.theme.colors.ink,
+        color: value_status.map_or(o.theme.colors.ink, |st| st.color(&o.theme)),
     });
     let caption = GeomText {
         size: 11.0,

@@ -95,6 +95,7 @@ terminal.
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
+| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
@@ -263,6 +264,45 @@ labels that would overlap are skipped. Up to 64 annotations of each kind are
 drawn. The same roles render in the browser and headless (`dashboard --svg`).
 `dashboard --check` warns (`annotation/unpaired`) about a label or range end
 without its partner.
+
+### Thresholds (good / warn / bad)
+
+One rule set gives a value a status, and the status colours it the same way
+everywhere — in the theme's `positive` / `warning` / `negative` colours, so dark
+mode and the colour-blind theme follow:
+
+```sql
+SELECT margin::PERCENT, 'Margin'::LABEL, '<0:bad; <5:warn; good'::THRESHOLDS FROM kpis;       -- KPI value colour
+SELECT 72::GAUGE, '0,100'::RANGE, '<50:bad; <80:warn; good'::THRESHOLDS, 'Service level'::TITLE;  -- gauge zones
+SELECT day::XAXIS, sl::LINECHART, '<50:bad; <80:warn; good'::THRESHOLDS, 'Service level by day'::TITLE FROM t;  -- threshold lines
+
+SELECT 'Margin %: <10:bad; <15:warn; good | accuracy: <0.85:bad; good'::THRESHOLDS;  -- the next table's cells
+SELECT region::TABLE, margin AS "Margin %", accuracy FROM regions;
+```
+
+- **Rules** are `condition:status`, separated by `;`, checked in order — the
+  first match wins. Conditions: `<x`, `<=x`, `>x`, `>=x`, `=x`, `a..b`
+  (inclusive), `else` (or a bare status) for the rest. Numbers take `%` (÷100)
+  and `k` / `M` / `B`. Statuses: `good` (`ok`, `positive`), `warn` (`warning`),
+  `bad` (`critical`, `negative`), `neutral`. Use the value's own units (a
+  `::PERCENT` KPI of `12.5` means 12.5 %).
+- **KPI**: the value takes its status colour (`th-good` / `th-warn` / `th-bad`
+  on `.metric-value`; a tooltip names the rule).
+- **Gauge**: the rules become zones over `::RANGE`; the zone holding the value
+  is drawn at full strength, the value in its colour. They replace `::COLORS`.
+- **Chart**: a dashed line at each bound where the status changes, in the
+  colour of the worse side.
+- **Table**: a lone `::THRESHOLDS` statement before the table names columns
+  (`'column: rules | column: rules'`, raw or readable header names); each
+  cell gets its status tint and a shape — ● good, ▲ warn, ◆ bad — so colour is
+  never the only signal.
+- The rule set is SQL like any value, so it can come from data:
+  `'<' || target * 0.9 || ':bad; <' || target || ':warn; good'`.
+- KPI, gauge and chart thresholds render headless too (`dashboard --svg`); table
+  thresholds are browser-only, like `::FLAG`. `dashboard --check` reports
+  `thresholds/bad-rule`, `thresholds/no-column` (a table rule set without a
+  column) and `thresholds/in-table` (`::THRESHOLDS` inside the `::TABLE`
+  statement, where it would be shown as a column).
 
 ### Plotting model output (contract macros)
 

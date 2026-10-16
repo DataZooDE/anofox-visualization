@@ -366,6 +366,59 @@ where
             }
         }
 
+        // ::THRESHOLDS rules must parse; a table directive names its columns.
+        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Thresholds) {
+            let cell = rows.first().and_then(|row| {
+                row.get(&format!("c{idx}"))
+                    .or_else(|| row.values().nth(*idx))
+                    .and_then(|v| v.as_str())
+            });
+            let mut warn = |severity, code, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if let Some(spec) = cell {
+                if roles::is_table_thresholds(&p.roles) {
+                    match crate::thresholds::parse_table(spec) {
+                        Err(e) => warn(Severity::Error, "thresholds/bad-rule", e),
+                        Ok(g) if g.iter().any(|(c, _)| c.is_none()) => warn(
+                            Severity::Warning,
+                            "thresholds/no-column",
+                            "a lone ::THRESHOLDS colours the next table's cells by column — \
+                             name them: 'Margin %: <10:bad; good | accuracy: <0.85:bad'"
+                                .into(),
+                        ),
+                        Ok(_) => {}
+                    }
+                } else if let Err(e) = crate::thresholds::Rules::parse(spec) {
+                    warn(Severity::Error, "thresholds/bad-rule", e);
+                }
+            }
+        }
+        if p.roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+            && cast_tokens(raws.get(i).map_or("", String::as_str))
+                .iter()
+                .any(|t| roles::lookup(t).is_some_and(|s| s.role == Role::Thresholds))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "thresholds/in-table",
+                message:
+                    "::THRESHOLDS inside a ::TABLE is shown as a column — put it in its own \
+                          statement before the table: SELECT 'Margin %: <10:bad; good'::THRESHOLDS;"
+                        .into(),
+                sql: short.clone(),
+            });
+        }
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -1023,6 +1076,29 @@ mod design_tests {
 
     fn has(diags: &[Diagnostic], code: &str) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn threshold_rules_are_checked() {
+        let kpi = |spec: &str| rows(1, |_| json!({ "c0": 0.12, "c1": spec }));
+        let d = lint_one(
+            "SELECT 0.12::PERCENT, '<0:purple'::THRESHOLDS;",
+            kpi("<0:purple"),
+        );
+        assert!(has(&d, "thresholds/bad-rule"), "{d:?}");
+        let ok = lint_one(
+            "SELECT 0.12::PERCENT, '<0:bad; good'::THRESHOLDS;",
+            kpi("<0:bad; good"),
+        );
+        assert!(!has(&ok, "thresholds/bad-rule"), "{ok:?}");
+        let lone = rows(1, |_| json!({ "c0": "<0:bad; good" }));
+        let d = lint_one("SELECT '<0:bad; good'::THRESHOLDS;", lone);
+        assert!(has(&d, "thresholds/no-column"), "{d:?}");
+        let d = lint_one(
+            "SELECT region::TABLE, m, '<0:bad'::THRESHOLDS FROM t;",
+            rows(2, |i| json!({ "region": "N", "m": i, "x": "<0:bad" })),
+        );
+        assert!(has(&d, "thresholds/in-table"), "{d:?}");
     }
 
     #[test]

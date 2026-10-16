@@ -187,6 +187,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
+    e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
+      "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100)"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
       "gauge zone colours, comma-separated hex"),
@@ -338,7 +340,13 @@ impl Role {
 /// True when any role in a planned panel is a non-rendering directive — static
 /// renderers (CLI, `serve`, headless SVG) and the linter skip such statements.
 pub fn is_directive_panel(roles: &[(usize, Role)]) -> bool {
-    roles.iter().any(|(_, r)| !r.renders())
+    roles.iter().any(|(_, r)| !r.renders()) || is_table_thresholds(roles)
+}
+
+/// A lone `::THRESHOLDS` statement: the next table's per-column rules (a
+/// directive), not a panel. Beside other roles it modifies that panel.
+pub fn is_table_thresholds(roles: &[(usize, Role)]) -> bool {
+    matches!(roles, [(_, Role::Thresholds)])
 }
 
 /// Canonical tokens by category (aliases exist but prefer these).
@@ -673,6 +681,7 @@ mod tests {
             Role::XBandTo,
             Role::XBandLabel,
             Role::Annotate,
+            Role::Thresholds,
             Role::Markdown,
             Role::Open,
             Role::High,
@@ -761,6 +770,7 @@ mod tests {
                 | Role::XBandTo
                 | Role::XBandLabel
                 | Role::Annotate
+                | Role::Thresholds
                 | Role::Markdown
                 | Role::Open
                 | Role::High

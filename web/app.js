@@ -14,6 +14,7 @@ import init, {
   page_sql,
   table_profile,
   human_header,
+  threshold_rules,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -73,7 +74,7 @@ SELECT 12::COL;
 SELECT 'The point of this example: **you don''t need a data source.** Every panel is a formula over DuckDB''s **range()** (a row-number generator), so the entire dashboard is computed on the fly — no table, file, or database. Handy for **synthetic demos, parametric what-ifs, and teaching**. It still exercises the full chart vocabulary from math alone: a **line with a ± confidence band** (::BAND_LOWER / ::BAND_UPPER), a **gauge**, a **scatter**, a **histogram**, and a **heatmap surface**, plus a KPI strip. Hover any chart for the toolbox.'::MARKDOWN, 'What this shows'::TITLE;
 
 SELECT 'Signal stats'::GROUP;
-SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL FROM range(0,120) t(i);
+SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL, '<40:bad; <55:warn; good'::THRESHOLDS FROM range(0,120) t(i);
 SELECT round(max(sin(i/6.0)*40+50),1)::METRIC, 'Peak'::LABEL FROM range(0,120) t(i);
 SELECT round(stddev(sin(i/6.0)*40+50),1)::METRIC, 'Std dev'::LABEL FROM range(0,120) t(i);
 SELECT 1::ENDGROUP;
@@ -203,6 +204,9 @@ SELECT 'Pie, gauge & radar'::TAB;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
 SELECT 6::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
+-- ::THRESHOLDS: one rule set gives a gauge its status zones and a chart its threshold lines
+SELECT 6::COL; SELECT 72::GAUGE, '0,100'::RANGE, '<50:bad; <80:warn; good'::THRESHOLDS, 'Gauge zones from ::THRESHOLDS — 72 is a warning'::TITLE;
+SELECT 6::COL; SELECT day::XAXIS, y::LINECHART, '<35:bad; <70:warn; good'::THRESHOLDS, 'Threshold lines from the same kind of rules'::TITLE FROM ts ORDER BY day;
 -- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
 SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
 
@@ -782,7 +786,7 @@ SELECT 'Tables — rich per-column formatting & scalable paging'::LABEL;
 -- Rich formatting: each column picks its own presentation role.
 SELECT 'Formatted'::TAB;
 SELECT 12::COL;
-SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL**.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL** and marks each margin good / warn / bad with **::THRESHOLDS**.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
@@ -813,8 +817,9 @@ ORDER BY revenue DESC;
 SELECT 12::COL;
 SELECT 'region'::SUBTOTAL;
 SELECT 'Margin %: mean'::TOTALS;
+SELECT 'Margin %: <14:bad; <18:warn; good'::THRESHOLDS;
 SELECT region::TABLE, store, revenue::MONEY, orders, margin AS "Margin %",
-       'Stores by region — a subtotal per region (sort any column: it sorts within the regions)'::TITLE
+       'Stores by region — a subtotal per region, margins by status (sort any column: it sorts within the regions)'::TITLE
 FROM (VALUES ('North', 'Hamburg', 1.92e6, 18400, 19.1), ('North', 'Bremen', 1.21e6, 11900, 17.4),
              ('North', 'Kiel', 0.68e6, 7100, 16.0), ('South', 'Munich', 2.05e6, 19800, 13.9),
              ('South', 'Stuttgart', 1.37e6, 13300, 11.2), ('East', 'Berlin', 3.10e6, 29400, 22.3),
@@ -2053,7 +2058,10 @@ const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => DIRECTIVES.find((d) => role(s, d));
+// A lone ::THRESHOLDS statement is the next table's rules (beside other roles
+// it colours that KPI / gauge / chart).
+const directive = (s) =>
+  DIRECTIVES.find((d) => role(s, d)) || (s.roles.length === 1 && s.roles[0][1] === "THRESHOLDS" ? "THRESHOLDS" : undefined);
 // Dashboard chrome directives (::THEME, ::LOCALE, ::DASHBOARD_TITLE, ::BRAND,
 // ::LOGO, ::FAVICON) — collected in the pre-pass, before any panel renders.
 let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON"];
@@ -3003,7 +3011,7 @@ async function runOnce(fresh = true) {
           .toLowerCase();
       } else if (d === "SELECT_AS" || d === "DRILL") {
         Object.assign(nextIa, dpIa[i] || {});
-      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
+      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
@@ -3427,8 +3435,12 @@ async function runOnce(fresh = true) {
                 `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
             }
           }
+          // ::THRESHOLDS: the value takes its status colour (good / warn / bad)
+          const thr = s.roles.find((r) => r[1] === "THRESHOLDS");
+          const st = thr && thresholdRule((parseThresholds(r0["c" + thr[0]])[0] || {}).rules, r0["c" + mr[0]]);
+          const stAttr = st ? ` th-${st.status}" title="${escapeHtml(`${st.status}: ${st.text}`)}` : "";
           fig.innerHTML =
-            `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
+            `<div class="metric-value${stAttr}">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
           container.appendChild(fig);
@@ -3795,6 +3807,26 @@ function mkNoData() {
   return d;
 }
 
+// ::THRESHOLDS rules, parsed by the wasm `threshold_rules` (src/thresholds.rs):
+// [{column, rules: [{lo, hi, status, text}]}] — [] for a malformed spec
+// (`dashboard --check` reports it).
+function parseThresholds(spec) {
+  try {
+    const j = JSON.parse(threshold_rules(String(spec ?? "")));
+    return j.ok ? j.groups : [];
+  } catch (_) {
+    return [];
+  }
+}
+// The first rule a number meets (its status: good / warn / bad / neutral), or null.
+function thresholdRule(rules, v) {
+  const n = typeof v === "number" ? v : cleanNum(v);
+  if (n == null || !isFinite(n)) return null;
+  const ok = (b, below) => !b || (below ? (b[1] ? n <= b[0] : n < b[0]) : b[1] ? n >= b[0] : n > b[0]);
+  return (rules || []).find((r) => ok(r.lo, false) && ok(r.hi, true)) || null;
+}
+const STATUS_ICON = { good: "●", warn: "▲", bad: "◆", neutral: "○" };
+
 const cleanNum = (v) => {
   if (v == null) return null;
   if (typeof v === "number") return v;
@@ -4016,6 +4048,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       const a = unquote(v).toLowerCase();
       return op === "=" ? a === w.toLowerCase() : op === "!=" || op === "<>" ? a !== w.toLowerCase() : false;
     });
+  // ::THRESHOLDS 'Margin %: <10:bad; <15:warn; good | …': each named column's
+  // cells take their status tint and shape (● good, ▲ warn, ◆ bad — never colour alone)
+  const thresholds = {};
+  for (const g of opts.thresholds ? parseThresholds(opts.thresholds) : []) {
+    const c = g.column != null && colNamed(g.column);
+    if (c) thresholds[c] = g.rules;
+  }
   // ::HIGHLIGHT 'Revenue: top 3, Margin: bottom 2' ('top 3' alone: the first numeric column)
   const hlSpec = {};
   for (const part of String(opts.highlight || "").split(",")) {
@@ -4994,6 +5033,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         .sort((a, b) => (sp.top ? b - a : a - b));
   };
   function decorate(td, v, c) {
+    const th = thresholds[c] && thresholdRule(thresholds[c], v);
+    if (th) {
+      td.classList.add("th", `th-${th.status}`);
+      td.title = `${th.status}: ${th.text}`;
+      td.insertAdjacentHTML("afterbegin", `<span class="th-i" aria-label="${th.status}">${STATUS_ICON[th.status] || ""}</span>`);
+    }
     const fl = flags[c] && flagOf(c, v);
     if (fl) {
       td.classList.add("flag");

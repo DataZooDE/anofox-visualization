@@ -294,6 +294,13 @@ pub fn human_header(raw: &str) -> String {
     crate::table::human_header(raw)
 }
 
+/// Parse `::THRESHOLDS` rules (a panel's, or a table directive's `column:
+/// rules | …`) for the browser — see [`crate::thresholds::table_json`].
+#[wasm_bindgen]
+pub fn threshold_rules(spec: &str) -> String {
+    crate::thresholds::table_json(spec)
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

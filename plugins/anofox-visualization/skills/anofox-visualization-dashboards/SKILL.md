@@ -65,6 +65,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` (number, date or timestamp) · `::BAND_LOWER` + `::BAND_UPPER` · `::MARKAREA` · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
 | Annotations from data (per row — `LEFT JOIN events ON events.day = t.day`) | `::XLINE` + `::XLINE_LABEL` (labelled event line) · `::XBAND_FROM` + `::XBAND_TO` + `::XBAND_LABEL` (labelled shaded range) · `::REFLINE` + `::REFLINE_LABEL` · `::ANNOTATE` (text callout at the row's x, y; NULL = none) |
+| Thresholds | `'<0:bad; <5:warn; good'::THRESHOLDS` beside a KPI (value colour), a `::GAUGE` (zones) or a chart (threshold lines) · alone before a table: `'Margin %: <10:bad; good \| accuracy: <0.85:bad'::THRESHOLDS` (cell tint + ● ▲ ◆) · first match wins; value's own units |
 | Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
 | KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %, up = green) · `::DELTA_LOWER_GOOD` (the same, but a rise is red: churn, cost, errors) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` |
 | Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` (low = good) `::COLORSCALE_HIGH_GOOD` `::COLORSCALE_DIVERGING` (around 0) `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
@@ -333,6 +334,8 @@ These silently break a panel (it renders wrong or vanishes):
 8. **Large or remote sources** (parquet, MotherDuck): `::PAGED` instead of `::TABLE`.
 9. **Clickable table rows need `'single'::ROWSELECT` / `'multi'::ROWSELECT`** before the table; without it a click does nothing and `getvariable('<first column>')` stays unset. The first column is the key and must be non-numeric (a text id / name). Table directives (`::ROWSELECT`, `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`, `::SUBTOTAL`) apply to the next table only.
 10. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
+11. **Annotations are per row.** `::XLINE_LABEL`, `::XBAND_FROM`/`_TO`/`_LABEL` and `::ANNOTATE` read the row they are on: `LEFT JOIN events e ON e.day = s.day` and select `e.day::XLINE, e.note::XLINE_LABEL` — only the rows that carry an event draw it.
+12. **`::THRESHOLDS` inside a `::TABLE` statement is just a column.** Put the table's rules in their own statement before it, naming the columns.
 
 ## Running it
 
