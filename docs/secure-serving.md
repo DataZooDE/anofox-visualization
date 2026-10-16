@@ -16,7 +16,7 @@ other two never accept SQL from the client at all.
 | What the client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
 | Database | the live read-write session / file | private read-only snapshot (refreshable), locked config; optionally one data folder | `duckdb -readonly`, locked config |
 | Bind | loopback only (enforced) | `127.0.0.1` | `--bind` (default `127.0.0.1`) |
-| Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; put auth/TLS in a proxy | put auth/TLS in a proxy |
+| Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; login via an auth proxy (`options.auth`) | login via an auth proxy (`--auth`) |
 
 Available in the **from-source build** only (`duckext/`, see
 [`BUILD.md`](../BUILD.md)); the community extension is render-only.
@@ -175,7 +175,9 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
   `threads` (worker pool, default 4), `cache_mb` (see below), `attach`, `load`,
-  `hosts` (see below), `refresh_s`, `data`, `path_vars` (see above).
+  `hosts` (see below), `refresh_s`, `data`, `path_vars` (see above), `auth`,
+  `log`, `log_vars` (see
+  [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)).
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy
@@ -238,6 +240,11 @@ Consumers pick a dashboard id and whitelisted params
   doubles as the freshness knob).
 - `--init setup.sql` runs once, read-write, before serving (attach sources,
   create views/tables). CLI dot-commands are refused there too.
+- `--auth '<json>'` (or `--auth @auth.json`) — login via an auth proxy, the
+  same object as `options.auth` below; `--log <path|stderr>` and
+  `--log-vars none|names|values` — the request log. With `--auth` the render
+  cache (`--cache`) is kept per viewer. A non-loopback `--bind` without
+  `--auth` prints a `WARNING`.
 
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
@@ -251,17 +258,189 @@ examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
   `*` disables the check); anything else gets `421`. Behind a proxy that
   forwards the original `Host`, pass its public name with `--allow-host`.
 
+## Login via an auth proxy (access control P1)
+
+DuckDB has no users, roles, `GRANT` or row-level security, so who sees what is
+enforced by the server. Phase 1 takes the viewer's identity from an **auth
+proxy** that already does the login (oauth2-proxy, Caddy `forward_auth`, nginx
+`auth_request`, Cloudflare Access, …) and hands it to the dashboard SQL.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "hosts": ["dash.example.com"],
+  "auth": {
+    "mode": "proxy",
+    "shared_secret_env": "ANOFOX_PROXY_SECRET",
+    "trusted_proxies": ["127.0.0.1"],
+    "header_user": "X-Forwarded-User",
+    "header_groups": "X-Forwarded-Groups",
+    "claims": {"tenant": "X-Forwarded-Tenant"}
+  },
+  "log": "/var/log/anofox/requests.jsonl"
+}');
+```
+
+| `auth` key | Default | Meaning |
+|---|---|---|
+| `mode` | (required) | `"proxy"` — the only mode in P1 |
+| `shared_secret` / `shared_secret_env` | (one is required) | The secret the proxy sends on every request; ≥ 32 printable characters (`openssl rand -hex 32`). Prefer `shared_secret_env` (the name of an environment variable of the DuckDB process): a literal in the SQL ends up in shell history and query logs |
+| `secret_header` | `X-Anofox-Proxy-Secret` | Header carrying the secret |
+| `trusted_proxies` | any peer | Addresses / CIDR ranges (`10.0.0.0/8`, `::1`) the proxy connects from; any other peer is refused even with the right secret |
+| `header_user` | `X-Forwarded-User` | Header with the user name / e-mail (required, non-empty) |
+| `header_groups` | `X-Forwarded-Groups` | Groups, split on `groups_separator` (default `,`); `null` = none |
+| `claims` | — | Extra claims: `{name: header}` → `__claim_<name>` (up to 16) |
+
+**How a request is checked.** With `auth` set, every request except `GET
+/health` must (1) come from a `trusted_proxies` address (when given), (2) carry
+the shared secret exactly once (constant-time comparison), and (3) carry a
+non-empty user header exactly once. Otherwise the answer is `401` with the same
+body for every reason (the reason goes to the request log only). Identity
+headers are read **only after** the secret checks out, so identity headers a
+client sends directly are never believed. A repeated identity header (a proxy
+that appends instead of replacing) is refused rather than guessed at. A broken
+`auth` object fails the server start: the server never falls back to serving
+without login.
+
+**Claims are reserved variables.** After the viewer's own variables, the
+server sets, on the request's private connection:
+
+| Variable | Type | Value |
+|---|---|---|
+| `__claim_user` | `VARCHAR` | the user header |
+| `__claim_groups` | `VARCHAR[]` | the groups, trimmed, sorted, deduplicated (`[]` if none) |
+| `__claim_<name>` | `VARCHAR` | each `claims` header (`NULL` if absent) |
+
+All three are typed literals like any variable value. A viewer can **never**
+set a `__claim_*` variable (any case): a panel request naming one is `400`, a
+`-- @param` or `-- @vars` entry naming one is ignored, and the browser client
+ignores `?v.__claim_*` in the URL. Without `auth` the claims are simply unset
+(`NULL`), so a panel that filters on them returns no rows instead of every row.
+
+```sql
+-- rows of the viewer's regions; the 'admins' group sees all
+SELECT region::XAXIS, sum(revenue)::BARCHART FROM orders
+WHERE region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))
+   OR list_contains(getvariable('__claim_groups'), 'admins')
+GROUP BY region;
+```
+
+**Only filter on claims, never on viewer variables.** Any variable that is not
+a claim is set by the viewer and can hold any value. Optionally restrict the
+viewer-settable variables of a dashboard with a header line
+`-- @vars region, channel, selected`; variables not listed are dropped (never
+set) on a locked server. List the dashboard's inputs, named selections and
+`selected` (the client sends the shared click selection).
+
+**Per-viewer caching.** The result cache and the single-flight key include the
+viewer's claims (user, groups, every extra claim), so a result computed for one
+viewer is never served to — and a running query never shared with — a viewer
+with different claims. The static server's `--cache` key includes the claims
+too. Supersession tickets are scoped to the user as well.
+
+### Proxy recipes
+
+The proxy must **authenticate every request, overwrite (not append) the
+identity headers, add the secret, and be the only way to reach the server**.
+Keep the server on loopback (or on a private network with `trusted_proxies`).
+
+nginx + oauth2-proxy (`auth_request`):
+
+```nginx
+location /oauth2/ { proxy_pass http://127.0.0.1:4180; }
+location / {
+  auth_request /oauth2/auth;
+  auth_request_set $user   $upstream_http_x_auth_request_email;
+  auth_request_set $groups $upstream_http_x_auth_request_groups;
+  proxy_set_header X-Forwarded-User   $user;      # replaces any client value
+  proxy_set_header X-Forwarded-Groups $groups;
+  proxy_set_header X-Anofox-Proxy-Secret "<secret>";
+  proxy_set_header Host $host;                    # list it in options.hosts
+  proxy_pass http://127.0.0.1:8095;
+}
+```
+
+Caddy (`forward_auth`; `copy_headers` replaces the client's headers):
+
+```caddy
+dash.example.com {
+  forward_auth 127.0.0.1:4180 {
+    uri /oauth2/auth
+    copy_headers X-Auth-Request-Email>X-Forwarded-User X-Auth-Request-Groups>X-Forwarded-Groups
+  }
+  request_header X-Anofox-Proxy-Secret {env.ANOFOX_PROXY_SECRET}
+  reverse_proxy 127.0.0.1:8095
+}
+```
+
+Cloudflare Access: `cloudflared` forwards `Cf-Access-Authenticated-User-Email`;
+set `"header_user": "Cf-Access-Authenticated-User-Email"`, add the secret with a
+Transform Rule (or run a local proxy that adds it), and only let `cloudflared`
+reach the server. P1 does not verify the `Cf-Access-Jwt-Assertion` itself
+(that is JWT verification, P3).
+
+### Request log
+
+`"log": "/var/log/anofox/requests.jsonl"` (or `"stderr"`; `serve`: `--log`)
+appends one JSON object per line for page views, `/api/panel` requests and
+every refused request (static assets are not logged):
+
+```json
+{"ts":"2026-10-16T20:47:19.487Z","user":"alice@example.com","method":"POST","path":"/api/panel","status":200,"ms":25,"dashboard":"rls","panel":1,"cache":"run","bytes":68,"peer":"127.0.0.1","vars":["channel"]}
+{"ts":"2026-10-16T20:47:19.762Z","user":null,"method":"POST","path":"/api/panel","status":401,"ms":0,"peer":"127.0.0.1","deny":"bad_secret","vars":[]}
+```
+
+- `ts` UTC, `ms` latency, `cache` = `hit` / `shared` (joined a running
+  identical query) / `run`, `bytes` = response size, `deny` = `untrusted_peer` /
+  `bad_secret` / `no_user` / `malformed_identity`.
+- `log_vars` (`--log-vars`): `"names"` (default) logs variable names only;
+  `"values"` logs their SQL literals (may be personal data — opt in);
+  `"none"` omits them. The path is logged without its query string. Headers,
+  cookies, the secret and claims other than the user are never logged.
+- The file is created `0600` and reopened for every line, so a rename-based
+  rotation needs no signal (logrotate: `daily`, `rotate 14`, `compress`,
+  `delaycompress`, no `copytruncate` needed). Each line is one `write` with
+  `O_APPEND`.
+
+### Threat model (P1)
+
+| Threat | Mitigation |
+|---|---|
+| A client sends `X-Forwarded-User: admin` directly to the server | No secret → `401`; identity headers are only read after the secret matches. Keep the server reachable only by the proxy (loopback / private network + `trusted_proxies`) |
+| A client sends identity headers *through* the proxy | The proxy must overwrite them (recipes above); a duplicated header is `401` |
+| The secret leaks (config file, `ps`, SQL history) | `shared_secret_env`, `trusted_proxies` as a second factor; the secret never appears in errors, `Debug` output or the log. Rotate by restarting with a new value |
+| Brute-forcing the secret | ≥ 32 characters, constant-time comparison |
+| A viewer sets `__claim_user` / `__claim_groups` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored; claims are set by the server after the viewer's variables |
+| A panel filters on a viewer-settable variable | Documented rule: filter only on `__claim_*`; `-- @vars` limits what viewers can set |
+| One viewer's cached result served to another | Claims are part of the cache and single-flight key (both servers) |
+| One viewer cancels another's query | Supersession tickets are scoped to user + 128-bit page id |
+| A misconfigured `auth` serves without login | A bad `auth` fails the start; there is no fallback to anonymous |
+| Server reachable from the network without login | `serve --bind` beyond loopback without `--auth` prints a `WARNING`; the extension binds loopback |
+| Log injection / personal data in logs | JSON-escaped lines; variable values only with `log_vars: "values"` |
+| DNS rebinding, CSRF, SQL from the client | Unchanged: Host allowlist (`421`), same-origin `POST`s, no SQL endpoint |
+
+**Out of scope for P1** (see #49, #50): column masking and policies the server
+enforces regardless of the panel SQL (P1 relies on the dashboard author writing
+the claim filter into every panel); verifying JWTs/OIDC tokens itself; signed
+embed links; API keys.
+
+**What can never enforce access:** a static HTML export or the browser /
+DuckDB-Wasm demo (the data is in the client, whoever opens it can read all of
+it), and a MotherDuck token (it grants the whole database). Only the locked
+server (A) and the static render server (B) keep data on the server.
+
 ## What remains the operator's job
 
 - **Authentication + TLS** for consumer-facing modes: terminate both at a reverse
   proxy (nginx / Caddy / Cloudflare) in front of the server; bind the server to
-  loopback and let only the proxy reach it.
+  loopback and let only the proxy reach it. Pass the identity on with `auth`
+  (above) when dashboards show different rows to different viewers.
 - **Least privilege on the data**: the snapshot contains everything in the
   session's DuckDB databases, and every file in `options.data` is readable. Serve from a session (or `--db`) that only holds
   the tables/views the dashboards need.
 - **Variable values are not whitelisted in mode A**: a viewer can set any
-  identifier-named variable to any literal. Panels see them only through
-  `getvariable()`, so write panel SQL that treats variables as untrusted
-  *values* (they cannot change the query's structure).
+  identifier-named variable (except `__claim_*`; `-- @vars` limits the names)
+  to any literal. Panels see them only through `getvariable()`, so write panel
+  SQL that treats variables as untrusted *values* (they cannot change the
+  query's structure), and never use one as an access filter.
 - **Process isolation**: run the server as an OS user without access to more
   than it needs.

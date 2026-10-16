@@ -11,6 +11,7 @@
 //!   tokens, typed SQL literals, dashboard header parsing) shared by
 //!   `src/bin/serve.rs` and the extension's `anofox_serve*` functions.
 
+pub mod access;
 pub mod serving;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};

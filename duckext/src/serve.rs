@@ -31,6 +31,7 @@
 use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
 use crate::panel_cache::{Served, SUPERSEDED};
+use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
     AuthoringGuard, RequestMeta,
@@ -405,6 +406,11 @@ pub struct LockedOptions {
     /// Variables whose values name a file or folder inside `data`: each must
     /// be a plain name (`[A-Za-z0-9_.-]`, not starting with `.`).
     pub path_vars: Vec<String>,
+    /// `auth`: viewer identity from a trusted auth proxy (every request but
+    /// `/health` needs it; the claims become `__claim_*` variables).
+    pub auth: Option<ProxyAuth>,
+    /// `log` (+ `log_vars`): JSON-lines request log.
+    pub log: Option<Arc<RequestLog>>,
 }
 
 impl Default for LockedOptions {
@@ -422,6 +428,8 @@ impl Default for LockedOptions {
             refresh: None,
             data: None,
             path_vars: Vec::new(),
+            auth: None,
+            log: None,
         }
     }
 }
@@ -435,6 +443,7 @@ impl LockedOptions {
         let v: serde_json::Value =
             serde_json::from_str(json).map_err(|e| format!("options: bad JSON: {e}"))?;
         let m = v.as_object().ok_or("options must be a JSON object")?;
+        let (mut log, mut log_vars) = (None, None);
         for (k, val) in m {
             let num = || {
                 val.as_u64()
@@ -499,11 +508,23 @@ impl LockedOptions {
                         o.path_vars.push(v.to_string());
                     }
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars)")),
+                "auth" => o.auth = Some(ProxyAuth::from_json(val, |k| std::env::var(k).ok()).map_err(|e| format!("options.{e}"))?),
+                "log" => log = Some(val.as_str().ok_or("options.log must be \"stderr\" or a file path")?),
+                "log_vars" => log_vars = Some(val.as_str().ok_or("options.log_vars must be none, names or values")?),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars)")),
             }
         }
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
+        }
+        match (log, log_vars) {
+            (Some(l), v) => {
+                o.log = Some(Arc::new(
+                    RequestLog::new(l, v).map_err(|e| format!("options.{e}"))?,
+                ))
+            }
+            (None, Some(_)) => return Err("options.log_vars needs options.log".into()),
+            (None, None) => {}
         }
         Ok(o)
     }
@@ -515,6 +536,8 @@ struct Dash {
     sql: String,
     /// Planned statements: (is_setup, sql), indexed like the client's plan().
     stmts: Vec<(bool, String)>,
+    /// `-- @vars`: the variables a viewer may set (others are dropped).
+    vars: Option<Vec<String>>,
 }
 
 /// A private, randomly named 0700 directory holding the snapshot files;
@@ -688,6 +711,13 @@ pub fn start_locked(
         loads,
         server_id: sv::random_token()[..8].to_string(),
     });
+    let auth_note = match &state.opts.auth {
+        Some(a) => format!(
+            "; login via auth proxy (identity from {}, secret in {})",
+            a.header_user, a.secret_header
+        ),
+        None => String::new(),
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let st = state.clone();
     let mut workers = spawn_workers(
@@ -717,7 +747,7 @@ pub fn start_locked(
         format!(" (warnings: {})", warnings.join("; "))
     };
     Ok(format!(
-        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{warn}"
+        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{warn}"
     ))
 }
 
@@ -834,6 +864,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             title: meta.title,
             sql,
             stmts,
+            vars: meta.vars,
         });
     }
     if out.is_empty() {
@@ -1003,14 +1034,57 @@ fn build_snapshot(
     ))
 }
 
-fn handle_locked(st: &Locked, mut req: Request) {
-    let url = req.url().to_string();
-    let path = url.split('?').next().unwrap_or("/").to_string();
+/// What the request log records about one request beyond method/path/status.
+#[derive(Default)]
+struct LogInfo {
+    user: Option<String>,
+    dashboard: Option<String>,
+    panel: Option<usize>,
+    cache: Option<&'static str>,
+    vars: Vec<(String, String)>,
+    bytes: Option<usize>,
+    deny: Option<&'static str>,
+}
+
+fn reply(req: Request, status: u16, msg: &str) -> u16 {
+    text(req, status, msg);
+    status
+}
+
+fn handle_locked(st: &Locked, req: Request) {
+    let t0 = std::time::Instant::now();
+    let method = req.method().to_string();
+    let path = req.url().split('?').next().unwrap_or("/").to_string();
+    let peer = req.remote_addr().map(|a| a.ip());
+    let mut info = LogInfo::default();
+    let status = route_locked(st, req, &path, &mut info);
+    if let Some(log) = &st.opts.log {
+        // Page views, data requests and refusals; not every static asset.
+        if path == "/api/panel" || path == "/" || path.starts_with("/d/") || status >= 400 {
+            log.write(&LogEntry {
+                method: &method,
+                path: &path,
+                status,
+                ms: t0.elapsed().as_millis(),
+                user: info.user.as_deref(),
+                peer,
+                dashboard: info.dashboard.as_deref(),
+                panel: info.panel,
+                cache: info.cache,
+                vars: &info.vars,
+                bytes: info.bytes,
+                deny: info.deny,
+            });
+        }
+    }
+}
+
+fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -> u16 {
     let m = meta(&req);
     eprintln!("[anofox-serve] {} {}", req.method(), path);
     // DNS rebinding: only loopback names (or `options.hosts`) are served.
     if !sv::host_allowed(m.host, st.port, &st.opts.hosts) {
-        return text(
+        return reply(
             req,
             421,
             "misdirected request: unknown Host — add it to options.hosts (e.g. {\"hosts\": [\"dash.example.com\"]})",
@@ -1018,9 +1092,32 @@ fn handle_locked(st: &Locked, mut req: Request) {
     }
     // CSRF: a browser request from another origin is refused outright.
     if !sv::origin_matches_host(m.origin, m.host) {
-        return text(req, 403, "forbidden: cross-origin request");
+        return reply(req, 403, "forbidden: cross-origin request");
     }
-    match (req.method(), path.as_str()) {
+    let health = req.method() == &Method::Get && (path == "/health" || path == "/healthz");
+    // Login: with `options.auth` every request but the health check carries
+    // the proxy's identity (and secret); without it, nobody gets anything.
+    let claims = match (&st.opts.auth, health) {
+        (Some(auth), false) => {
+            let headers: Vec<(&str, &str)> = req
+                .headers()
+                .iter()
+                .map(|h| (h.field.as_str().as_str(), h.value.as_str()))
+                .collect();
+            match auth.authenticate(req.remote_addr().map(|a| a.ip()), &headers) {
+                Ok(c) => {
+                    info.user = Some(c.user.clone());
+                    Some(c)
+                }
+                Err(e) => {
+                    info.deny = Some(e.reason());
+                    return reply(req, 401, access::UNAUTHORIZED);
+                }
+            }
+        }
+        _ => None,
+    };
+    match (req.method(), path) {
         (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
             let gen = st.current.get();
             let body = serde_json::json!({
@@ -1033,44 +1130,64 @@ fn handle_locked(st: &Locked, mut req: Request) {
                 // The error itself is only logged / returned to the operator.
                 "refresh_failed": st.current.last_failed(),
             });
-            respond(req, 200, "application/json", body.to_string().into_bytes())
+            respond(req, 200, "application/json", body.to_string().into_bytes());
+            200
         }
         (&Method::Post, "/api/panel") => {
             let body = match read_body(&mut req, st.opts.max_body) {
                 Ok(b) => b,
-                Err((code, e)) => return text(req, code, &e),
+                Err((code, e)) => return reply(req, code, &e),
             };
             let supersede = req_header(&req, SUPERSEDE_HEADER).map(str::to_string);
-            match locked_panel(st, &body, supersede.as_deref()) {
-                Ok((json, etag)) => respond_panel(req, json, &etag),
+            match locked_panel(st, &body, supersede.as_deref(), claims.as_ref(), info) {
+                Ok((json, etag)) => {
+                    info.bytes = Some(json.len());
+                    respond_panel(req, json, &etag);
+                    200
+                }
                 Err((code, e)) => {
                     if code != SUPERSEDED.0 {
                         eprintln!("[anofox-serve] {code}: {e}");
                     }
-                    text(req, code, &e)
+                    reply(req, code, &e)
                 }
             }
         }
-        (_, "/query") => text(
+        (_, "/query") => reply(
             req,
             410,
             "this server is locked: there is no SQL endpoint (use POST /api/panel)",
         ),
-        (&Method::Get, "/") => respond(
-            req,
-            200,
-            "text/html; charset=utf-8",
-            list_page(st).into_bytes(),
-        ),
+        (&Method::Get, "/") => {
+            respond(
+                req,
+                200,
+                "text/html; charset=utf-8",
+                list_page(st).into_bytes(),
+            );
+            200
+        }
         (&Method::Get, p) if p.starts_with("/d/") => {
             let id = p["/d/".len()..].trim_end_matches('/');
             match st.dashboards.iter().find(|d| d.id == id) {
-                Some(d) => respond(req, 200, "text/html; charset=utf-8", served_index(st, d)),
-                None => text(req, 404, "no such dashboard"),
+                Some(d) => {
+                    info.dashboard = Some(d.id.clone());
+                    respond(req, 200, "text/html; charset=utf-8", served_index(st, d));
+                    200
+                }
+                None => reply(req, 404, "no such dashboard"),
             }
         }
-        (&Method::Get, p) => serve_asset(req, p),
-        _ => text(req, 405, "method not allowed"),
+        (&Method::Get, p) => {
+            let found = WEB.get_file(p.trim_start_matches('/')).is_some() || p == "/";
+            serve_asset(req, p);
+            if found {
+                200
+            } else {
+                404
+            }
+        }
+        _ => reply(req, 405, "method not allowed"),
     }
 }
 
@@ -1096,10 +1213,21 @@ fn valid_supersede(v: &str) -> bool {
 /// (a refresh drops the cache) and the dashboards — the parsed request, with
 /// the variables in a canonical order. Debug formatting quotes and escapes
 /// every string, so distinct requests never collide.
-fn panel_key(r: &sv::PanelRequest) -> String {
+/// With a login the viewer's claims are part of the key, so one viewer's
+/// result (or running query) is never handed to a viewer with other claims.
+fn panel_key(r: &sv::PanelRequest, claims: Option<&Claims>) -> String {
     let mut vars: Vec<&(String, String)> = r.vars.iter().collect();
     vars.sort();
-    format!("{:?}", (&r.dashboard, r.panel, vars, &r.page))
+    format!(
+        "{:?}",
+        (
+            claims.map(Claims::key),
+            &r.dashboard,
+            r.panel,
+            vars,
+            &r.page
+        )
+    )
 }
 
 fn etag(server: &str, epoch: u64, key: &str) -> String {
@@ -1116,8 +1244,12 @@ fn locked_panel(
     st: &Locked,
     body: &str,
     supersede: Option<&str>,
+    claims: Option<&Claims>,
+    info: &mut LogInfo,
 ) -> Result<(Arc<String>, String), (u16, String)> {
-    let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    info.dashboard = Some(r.dashboard.clone());
+    info.panel = Some(r.panel);
     for (name, lit) in &r.vars {
         if st.opts.data.is_some() && name.eq_ignore_ascii_case(DATA_VAR) {
             return Err((400, format!("variable '{name}' is set by the server")));
@@ -1143,6 +1275,12 @@ fn locked_panel(
         .iter()
         .find(|d| d.id == r.dashboard)
         .ok_or((404, "no such dashboard".to_string()))?;
+    // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
+    if let Some(allowed) = &dash.vars {
+        r.vars
+            .retain(|(k, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(k)));
+    }
+    info.vars = r.vars.clone();
     let (is_setup, panel_sql) = dash
         .stmts
         .get(r.panel)
@@ -1156,8 +1294,10 @@ fn locked_panel(
     }
     let ticket = match supersede {
         None => None,
-        // Namespaced by dashboard: a viewer id is per page.
-        Some(v) if valid_supersede(v) => Some(format!("{}/{v}", r.dashboard)),
+        // Namespaced by viewer login and dashboard: a viewer id is per page.
+        Some(v) if valid_supersede(v) => {
+            Some(format!("{:?}/{}/{v}", claims.map(|c| &c.user), r.dashboard))
+        }
         Some(_) => {
             return Err((
                 400,
@@ -1165,10 +1305,15 @@ fn locked_panel(
             ))
         }
     };
-    let key = panel_key(&r);
+    let key = panel_key(&r, claims);
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
-        run_panel(st, &gen, dash, panel_sql, &r, abort)
+        run_panel(st, &gen, dash, panel_sql, &r, claims, abort)
+    });
+    info.cache = Some(match how {
+        Served::Hit => "hit",
+        Served::Shared => "shared",
+        Served::Executed => "run",
     });
     if how == Served::Executed {
         let cancelled = matches!(&out, Err((code, _)) if *code == SUPERSEDED.0);
@@ -1195,6 +1340,7 @@ fn run_panel(
     dash: &Dash,
     panel_sql: &str,
     r: &sv::PanelRequest,
+    claims: Option<&Claims>,
     abort: &crate::panel_cache::Abort,
 ) -> Result<String, (u16, String)> {
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
@@ -1207,6 +1353,11 @@ fn run_panel(
     conn.with_deadline(st.opts.timeout, |c| {
         c.exec(&format!("USE {}", quote_ident(&gen.snap.default_db)))?;
         for (name, lit) in &r.vars {
+            c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
+        }
+        // The login's claims, after the viewer's variables (which can't name
+        // them: `__claim_*` is rejected when the request is parsed).
+        for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
             c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
         }
         if let Some(data) = &st.opts.data {
@@ -1336,7 +1487,7 @@ mod tests {
         assert!(LockedOptions::parse(Some(r#"{"cache_mb":-1}"#)).is_err());
         // The variables' order doesn't matter; their values, the panel, the
         // dashboard and the page do.
-        let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap());
+        let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap(), None);
         let k = key(r#"{"dashboard":"d","panel":1,"vars":{"a":1,"b":"x"}}"#);
         assert_eq!(
             k,
@@ -1456,6 +1607,61 @@ mod tests {
         ] {
             assert_eq!(writes_files(sql), None, "{sql}");
         }
+    }
+
+    #[test]
+    fn auth_and_log_options() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let o = LockedOptions::parse(Some(&format!(
+            r#"{{"auth":{{"mode":"proxy","shared_secret":"{secret}","trusted_proxies":["127.0.0.1"]}},"log":"stderr","log_vars":"none"}}"#
+        )))
+        .unwrap();
+        assert_eq!(o.auth.as_ref().unwrap().header_user, "X-Forwarded-User");
+        assert!(o.log.is_some());
+        // a broken auth config fails the start (fail closed), never serves open
+        assert!(LockedOptions::parse(Some(r#"{"auth":{"mode":"proxy"}}"#)).is_err());
+        assert!(
+            LockedOptions::parse(Some(r#"{"auth":{"mode":"proxy","shared_secret":"short"}}"#))
+                .is_err()
+        );
+        assert!(LockedOptions::parse(Some(r#"{"auth":true}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"log_vars":"names"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"log":"stderr","log_vars":"all"}"#)).is_err());
+        // the error never echoes the secret
+        let e = LockedOptions::parse(Some(&format!(
+            r#"{{"auth":{{"mode":"proxy","shared_secret":"{secret}","nope":1}}}}"#
+        )))
+        .unwrap_err();
+        assert!(!e.contains(secret), "{e}");
+    }
+
+    #[test]
+    fn claims_isolate_cache_entries() {
+        let claims = |user: &str, groups: &[&str]| Claims {
+            user: user.into(),
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            attrs: vec![],
+        };
+        let (alice, bob) = (claims("alice", &[]), claims("bob", &[]));
+        let alice_hr = claims("alice", &["hr"]);
+        let r = sv::parse_panel_request(r#"{"dashboard":"d","panel":1,"vars":{"a":1}}"#).unwrap();
+        let ka = panel_key(&r, Some(&alice));
+        assert_eq!(ka, panel_key(&r, Some(&alice.clone())));
+        assert_ne!(ka, panel_key(&r, Some(&bob)));
+        assert_ne!(ka, panel_key(&r, Some(&alice_hr)));
+        assert_ne!(ka, panel_key(&r, None));
+        // through the real cache: bob never gets alice's rows
+        let cache = crate::panel_cache::PanelCache::new(1 << 20);
+        let (out, how) = cache.run(&ka, None, |_| Ok("alice rows".to_string()));
+        assert_eq!(
+            (out.unwrap().as_str(), how),
+            ("alice rows", Served::Executed)
+        );
+        let (out, how) = cache.run(&ka, None, |_| Ok("rerun".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("alice rows", Served::Hit));
+        let kb = panel_key(&r, Some(&bob));
+        let (out, how) = cache.run(&kb, None, |_| Ok("bob rows".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("bob rows", Served::Executed));
     }
 
     #[test]
