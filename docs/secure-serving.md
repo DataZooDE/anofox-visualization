@@ -229,7 +229,8 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     a `USE` in the SQL that starts the server does not reach the server, so
     pass it on with `json_object('search_path', current_database() || '.' ||
     current_schema())`. With `attach: false`, the databases it names are
-    snapshotted.
+    snapshotted. With an access policy it must name one database (its
+    `main` schema), where the policy resolves names.
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy
