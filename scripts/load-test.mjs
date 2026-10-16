@@ -10,6 +10,7 @@
 //       [--duckdb duckdb] [--port 8845] [--rows 2000000] [--server-options '{"threads":16}'] \
 //       [--scenario all|burst|cold|hot|scroll|abuse|smoke] [--viewers N] [--duration 30] \
 //       [--think 1000] [--scroll-ms 25] [--refresh-s 5] [--timeout 60] [--cpus 0-3] [--json out.json]
+//       [--rss-overhead-mb 400]
 //   node scripts/load-test.mjs --url http://127.0.0.1:8845 [--pid <server pid>] …
 //
 // With --ext the script starts a fresh server per scenario (DuckDB CLI with
@@ -27,7 +28,9 @@
 //   refresh the "hot" viewers while the server rebuilds its snapshot every
 //           --refresh-s seconds (refresh_s): no errors, no latency cliff
 //   abuse   20 abusive clients (huge pages, wide filters, every column's
-//           stats + distributions, bad requests) next to 10 ordinary viewers
+//           stats + distributions, bad requests) next to 10 ordinary viewers;
+//           with a memory_limit in --server-options, fails (exit 1) when the
+//           peak RSS exceeds memory_limit + max_inflight_mb + --rss-overhead-mb
 //   burst   viewers arriving at once on a fresh server (one dashboard load each)
 //   smoke   all six for a few seconds on 200k rows; exits 1 on any 5xx,
 //           network error or timeout, missing 409s or a cold cache (for CI)
@@ -60,6 +63,7 @@ const cpusArg = arg("--cpus", "");
 const timeoutMs = Number(arg("--timeout", smoke ? "15" : "60")) * 1000;
 const viewersArg = arg("--viewers", "");
 const jsonOut = arg("--json", "");
+const rssOverheadMb = Number(arg("--rss-overhead-mb", "400"));
 const target = arg("--url", ext ? `http://127.0.0.1:${port}` : "");
 if (!target) {
   console.error("usage: node scripts/load-test.mjs --ext <extension> | --url <server> (see the header)");
@@ -256,6 +260,7 @@ async function abuser() {
   }
 }
 let abuserStats = [];
+const failures = [];
 
 // ------------------------------------------------------------- the server --
 let server = null;
@@ -383,6 +388,19 @@ async function run(name, viewers, body) {
       res.server.wastedPct = Math.round((Math.max(0, log.ran - log.superseded - ok) / pageReqs) * 1000) / 10;
     }
   }
+  if (name === "abuse") {
+    // The memory bound of #103: DuckDB's memory_limit, the server's in-flight
+    // results, and a fixed overhead (the CLI, thread stacks, DuckDB's memory
+    // outside its buffer pool for max_queries queries, the allocator).
+    const o = JSON.parse(options);
+    const m = /^\s*([\d.]+)\s*(KB|MB|GB|TB|KIB|MIB|GIB|TIB)?\s*$/i.exec(o.memory_limit ?? "");
+    if (m) {
+      const unit = { KB: 1 / 1000, MB: 1, GB: 1000, TB: 1e6, KIB: 1 / 1024, MIB: 1, GIB: 1024, TIB: 1 << 20 }[(m[2] || "MB").toUpperCase()];
+      const bound = Math.round(Number(m[1]) * unit) + (o.max_inflight_mb ?? 256) + rssOverheadMb;
+      res.rssBoundMb = bound;
+      if (rssPeak > bound) failures.push(`abuse: peak RSS ${rssPeak} MB > memory_limit + max_inflight_mb + ${rssOverheadMb} MB = ${bound} MB`);
+    }
+  }
   if (abuserStats.length) {
     const st = {};
     for (const a of abuserStats) for (const [k, n] of Object.entries(a.status)) st[k] = (st[k] || 0) + n;
@@ -429,6 +447,11 @@ for (const r of results) {
   console.log(`| ${r.scenario} | ${r.viewers} | ${r.throughput} | ${f(p.p50)} / ${f(p.p95)} / ${f(p.p99)} | ${f(g.p50)} / ${f(g.p95)} / ${f(g.p99)} | ${f(d.p50)} / ${f(d.p95)} | ${r.status[409] || 0} | ${errs} | ${f(r.server?.executions)} | ${r.server?.cacheHitRate != null ? r.server.cacheHitRate + " %" : "–"} | ${f(r.rssMb.start)} / ${f(r.rssMb.peak)} |`);
 }
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify({ cpu: cpus()[0]?.model, cores: cpus().length, rows, serverOptions, duration, think, results }, null, 2));
+
+if (failures.length) {
+  console.error("load-test FAILED:\n  " + failures.join("\n  "));
+  process.exit(1);
+}
 
 // Smoke assertions: ordinary viewers never see a 5xx or a network error, the
 // table's superseded requests get 409, the shared filters hit the cache.

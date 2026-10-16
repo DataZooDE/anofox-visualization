@@ -33,6 +33,7 @@
 
 use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
+use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
@@ -361,6 +362,7 @@ fn authoring_query(conn: &Conn, sql: &str) -> Result<String, String> {
                     strip_trailing_semicolons(cand),
                     &[],
                     AUTHORING_MAX_ROWS,
+                    &mut |_, want| Ok(want),
                 ) {
                     Ok(json) => return Ok(json),
                     Err(e) if e.contains("row limit") => return Err(e),
@@ -431,6 +433,17 @@ pub struct LockedOptions {
     /// Key of the policy's `hash` mask (`policy_key_env`; random per server
     /// start when not given).
     pub policy_key: Option<PolicyKey>,
+    /// Bytes of executed results held at once, until their responses are
+    /// written (`max_inflight_mb`; [`crate::limits`]).
+    pub max_inflight: usize,
+    /// Bytes of one response (`max_response_mb`).
+    pub max_response: usize,
+    /// Panel queries running at once (`max_queries`); others wait.
+    pub max_queries: usize,
+    /// Where the panels' unqualified names resolve (`search_path`):
+    /// `db[.schema]` entries, the first one `USE`d. Empty: the serving
+    /// database's default database.
+    pub search_path: Vec<(String, Option<String>)>,
 }
 
 /// The `hash` mask's HMAC key. Never printed.
@@ -466,6 +479,10 @@ impl Default for LockedOptions {
             policy: None,
             policy_none: false,
             policy_key: None,
+            max_inflight: 256 << 20,
+            max_response: 32 << 20,
+            max_queries: 4,
+            search_path: Vec::new(),
         }
     }
 }
@@ -578,9 +595,20 @@ impl LockedOptions {
                     }
                     o.policy_key = Some(PolicyKey(Arc::new(key.into_bytes())));
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env)")),
+                "max_inflight_mb" => o.max_inflight = (num()?.min(1 << 20) as usize) << 20,
+                "max_response_mb" => o.max_response = (num()?.min(1 << 12) as usize) << 20,
+                "max_queries" => o.max_queries = num()?.min(1024) as usize,
+                "search_path" => {
+                    let p = val.as_str().map(str::trim).ok_or("options.search_path must be a string like \"warehouse\" or \"warehouse.sales\"")?;
+                    o.search_path = parse_search_path(p).map_err(|e| format!("options.search_path: {e}"))?;
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path)")),
             }
         }
+        // A response larger than the in-flight budget could never be sent.
+        o.max_response = o
+            .max_response
+            .min(o.max_inflight.max(crate::limits::FREE_BYTES));
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
         }
@@ -638,6 +666,27 @@ fn read_policy(path: &Path) -> Result<Policy, String> {
     Policy::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// `db[.schema][, db[.schema] …]` (plain identifiers) as (database, schema)
+/// pairs.
+fn parse_search_path(p: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut out = Vec::new();
+    for e in p.split(',').map(str::trim) {
+        let mut parts = e.split('.');
+        let (db, schema) = (parts.next().unwrap_or(""), parts.next());
+        if !sv::valid_ident(db)
+            || schema.is_some_and(|s| !sv::valid_ident(s))
+            || parts.next().is_some()
+        {
+            return Err(format!("'{e}' is not a database or database.schema name"));
+        }
+        out.push((db.to_string(), schema.map(str::to_string)));
+    }
+    if out.is_empty() || out.len() > 16 {
+        return Err("expected 1 to 16 entries".into());
+    }
+    Ok(out)
+}
+
 struct Dash {
     id: String,
     title: String,
@@ -688,8 +737,12 @@ impl Drop for SnapshotDir {
 struct Snapshot {
     // Field order = drop order: close the database before deleting its files.
     db: Database,
-    /// The source session's default database (each request connection `USE`s it).
+    /// The database unqualified names resolve in (the source session's
+    /// default database, or the first of `options.search_path`).
     default_db: String,
+    /// What every request connection runs first: `USE` it, and set
+    /// `options.search_path`.
+    enter: String,
     /// The access policy, checked against this snapshot, and the dashboards
     /// rewritten for it (indexed like `Locked::dashboards`).
     policy: Option<Enforced>,
@@ -745,6 +798,9 @@ struct Locked {
     current: Current<Snapshot>,
     /// Random per server; qualifies the ETags (with the epoch).
     server_id: String,
+    /// Memory bounds: results in flight, queries at once.
+    inflight: Inflight,
+    queries: Queries,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -821,6 +877,16 @@ pub fn start_locked(
         }
     }
     if opts.policy.is_some() {
+        // The policy resolves unqualified names in one database's `main`
+        // schema: a search path must not send them anywhere else.
+        if opts.search_path.len() > 1
+            || opts
+                .search_path
+                .iter()
+                .any(|(_, s)| s.as_ref().is_some_and(|s| !s.eq_ignore_ascii_case("main")))
+        {
+            return Err("anofox-visualization: with an access policy, options.search_path must name one database (its main schema)".into());
+        }
         // json_serialize_sql: the policy rewrite parses with DuckDB.
         loads.push("json".into());
         if opts.policy_key.is_none() {
@@ -889,6 +955,10 @@ pub fn start_locked(
     let n = dashboards.len();
     let threads = opts.threads;
     let refresh = opts.refresh;
+    let (inflight, queries) = (
+        Inflight::new(opts.max_inflight),
+        Queries::new(opts.max_queries),
+    );
     let state = Arc::new(Locked {
         port,
         dashboards,
@@ -897,6 +967,8 @@ pub fn start_locked(
         ctx,
         loads,
         server_id: sv::random_token()[..8].to_string(),
+        inflight,
+        queries,
     });
     let auth_note = match &state.opts.auth {
         Some(a) => format!(
@@ -1149,12 +1221,17 @@ fn build_snapshot(
              WHERE NOT internal AND database_name NOT IN ('system', 'temp') ORDER BY database_name",
         )?
         .string_rows(10_000)?;
+    // The databases the panels must find: the default one, or the search path's.
+    let mut needed: Vec<&str> = opts.search_path.iter().map(|(d, _)| d.as_str()).collect();
+    if needed.is_empty() {
+        needed.push(&current);
+    }
     let mut copied: Vec<(String, PathBuf)> = Vec::new();
     for row in dbs {
         let (Some(name), ty) = (row[0].clone(), row[1].clone().unwrap_or_default()) else {
             continue;
         };
-        if name != current && !attach_all {
+        if !attach_all && !needed.contains(&name.as_str()) {
             continue;
         }
         if ty != "duckdb" {
@@ -1164,8 +1241,10 @@ fn build_snapshot(
         let file = dir.0.join(format!("db{}.duckdb", copied.len()));
         let alias = format!("__anofox_snap_{}", sv::random_token());
         let f = file.to_string_lossy().into_owned();
+        // READ_WRITE explicitly: a read-only session (`duckdb -readonly`)
+        // attaches new databases read-only by default.
         live.exec(&format!(
-            "ATTACH {} AS {}",
+            "ATTACH {} AS {} (READ_WRITE)",
             sql_string_literal(&f),
             quote_ident(&alias)
         ))?;
@@ -1179,11 +1258,37 @@ fn build_snapshot(
             .map_err(|e| format!("snapshot of '{name}' failed: {e}"))?;
         copied.push((name, file));
     }
-    if !copied.iter().any(|(n, _)| *n == current) {
-        return Err(format!(
-            "could not snapshot the current database '{current}'"
-        ));
+    for n in &needed {
+        if !copied.iter().any(|(c, _)| c == n) {
+            return Err(if opts.search_path.is_empty() {
+                format!("could not snapshot the current database '{n}'")
+            } else {
+                format!("options.search_path: '{n}' is not an attached DuckDB database")
+            });
+        }
     }
+    let enter = match opts.search_path.split_first() {
+        None => format!("USE {}", quote_ident(&current)),
+        Some(((db, schema), rest)) => {
+            let qualified = |db: &String, schema: &Option<String>| match schema {
+                Some(s) => format!("{}.{}", quote_ident(db), quote_ident(s)),
+                None => quote_ident(db),
+            };
+            let mut sql = format!("USE {}", qualified(db, schema));
+            if !rest.is_empty() {
+                let path: Vec<String> = opts
+                    .search_path
+                    .iter()
+                    .map(|(d, s)| s.as_ref().map_or(d.clone(), |s| format!("{d}.{s}")))
+                    .collect();
+                sql += &format!(
+                    "; SET search_path = {}",
+                    sql_string_literal(&path.join(","))
+                );
+            }
+            sql
+        }
+    };
     let loaded: Vec<String> = live
         .query(
             "SELECT extension_name::VARCHAR FROM duckdb_extensions() \
@@ -1275,11 +1380,18 @@ fn build_snapshot(
         }
         c.exec("SET enable_external_access = false")?;
         c.exec("SET lock_configuration = true")?;
+        // Fail now, not on every request (e.g. a schema that doesn't exist).
+        c.exec(&enter)
+            .map_err(|e| format!("options.search_path: {}", e.lines().next().unwrap_or("")))?;
     }
     Ok((
         Snapshot {
             db,
-            default_db: current,
+            default_db: opts
+                .search_path
+                .first()
+                .map_or(current, |(db, _)| db.clone()),
+            enter,
             policy: None,
             _dir: dir,
         },
@@ -1297,6 +1409,20 @@ struct LogInfo {
     vars: Vec<(String, String)>,
     bytes: Option<usize>,
     deny: Option<&'static str>,
+}
+
+/// `503` with `Retry-After` (memory or query slots exhausted: [`crate::limits`]).
+fn busy(req: Request, msg: &str) {
+    let resp = Response::from_data(msg.as_bytes().to_vec())
+        .with_status_code(503)
+        .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header(
+            "Retry-After",
+            &crate::limits::RETRY_AFTER_S.to_string(),
+        ));
+    let _ = req.respond(resp);
 }
 
 fn reply(req: Request, status: u16, msg: &str) -> u16 {
@@ -1400,6 +1526,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 "refreshing": st.current.refreshing(),
                 // The error itself is only logged / returned to the operator.
                 "refresh_failed": st.current.last_failed(),
+                "limits": limits_json(st),
             });
             respond(req, 200, "application/json", body.to_string().into_bytes());
             200
@@ -1410,7 +1537,16 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Err((code, e)) => return reply(req, code, &e),
             };
             let supersede = req_header(&req, SUPERSEDE_HEADER).map(str::to_string);
-            match locked_panel(st, &body, supersede.as_deref(), claims.as_ref(), info) {
+            // Held until the response is written.
+            let mut charge = st.inflight.charge();
+            match locked_panel(
+                st,
+                &body,
+                supersede.as_deref(),
+                claims.as_ref(),
+                info,
+                &mut charge,
+            ) {
                 Ok((json, etag)) => {
                     info.bytes = Some(json.len());
                     respond_panel(req, json, &etag);
@@ -1419,6 +1555,10 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Err((code, e)) => {
                     if code != SUPERSEDED.0 {
                         eprintln!("[anofox-serve] {code}: {}", access::diag(&e));
+                    }
+                    if code == 503 {
+                        busy(req, &e);
+                        return 503;
                     }
                     reply(req, code, &e)
                 }
@@ -1460,6 +1600,31 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         }
         _ => reply(req, 405, "method not allowed"),
     }
+}
+
+/// The effective limits and how much of them is in use (`/healthz`, signed-in
+/// callers only).
+fn limits_json(st: &Locked) -> serde_json::Value {
+    let o = &st.opts;
+    let (running, waiting, timed_out) = st.queries.stats();
+    serde_json::json!({
+        "threads": o.threads,
+        "max_queries": o.max_queries,
+        "max_rows": o.max_rows,
+        "max_response_bytes": o.max_response,
+        "max_inflight_bytes": o.max_inflight,
+        "cache_bytes": o.cache_bytes,
+        "timeout_ms": o.timeout.as_millis() as u64,
+        "memory_limit": o.memory_limit,
+        "duckdb_threads": o.duckdb_threads,
+        "queries_running": running,
+        "queries_waiting": waiting,
+        "inflight_bytes": st.inflight.used(),
+        "inflight_peak_bytes": st.inflight.peak(),
+        // 503s: in-flight budget exceeded / no query slot within the timeout.
+        "refused_inflight": st.inflight.refused(),
+        "refused_queries": timed_out,
+    })
 }
 
 /// `X-Anofox-Supersede: <viewer>/<panel>/<kind>` — a newer request with the
@@ -1517,6 +1682,7 @@ fn locked_panel(
     supersede: Option<&str>,
     claims: Option<&Claims>,
     info: &mut LogInfo,
+    charge: &mut Charge,
 ) -> Result<(Arc<String>, String), (u16, String)> {
     let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     info.dashboard = Some(r.dashboard.clone());
@@ -1589,7 +1755,7 @@ fn locked_panel(
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
-            st, &gen, &dash.id, stmts, script, panel_sql, &r, claims, abort,
+            st, &gen, &dash.id, stmts, script, panel_sql, &r, claims, abort, charge,
         )
     });
     info.cache = Some(match how {
@@ -1638,6 +1804,8 @@ fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Pat
 /// objects can be created — the snapshot is read-only), and the panel query
 /// executed as a single prepared statement under the row cap + timeout. The
 /// query is interrupted when every request waiting for it has been superseded.
+/// It waits for a query slot first, and its JSON is charged to the in-flight
+/// budget as it grows ([`crate::limits`]).
 #[allow(clippy::too_many_arguments)]
 fn run_panel(
     st: &Locked,
@@ -1649,8 +1817,30 @@ fn run_panel(
     r: &sv::PanelRequest,
     claims: Option<&Claims>,
     abort: &crate::panel_cache::Abort,
+    charge: &mut Charge,
 ) -> Result<String, (u16, String)> {
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
+    let Some(_slot) = st
+        .queries
+        .acquire(Instant::now() + st.opts.timeout, || abort.abandoned())
+    else {
+        return Err(if abort.abandoned() {
+            cancelled()
+        } else {
+            (503, crate::limits::BUSY.to_string())
+        });
+    };
+    let max_response = st.opts.max_response;
+    let mut grow = |len: usize, want: usize| {
+        if len > max_response {
+            return Err(format!(
+                "result exceeds the size limit ({} MB)",
+                max_response >> 20
+            ));
+        }
+        let cap = want.min(max_response);
+        charge.hold(cap).map(|_| cap)
+    };
     let conn = gen.snap.db.connect().map_err(|e| (500, e))?;
     // Declared after `conn`, so dropped before it: no interrupt after that.
     let intr = conn.interrupter();
@@ -1658,7 +1848,7 @@ fn run_panel(
         return Err(cancelled());
     };
     conn.with_deadline(st.opts.timeout, |c| {
-        c.exec(&format!("USE {}", quote_ident(&gen.snap.default_db)))?;
+        c.exec(&gen.snap.enter)?;
         for set in request_sets(r, claims, st.opts.data.as_deref()) {
             c.exec(&set)?;
         }
@@ -1694,15 +1884,17 @@ fn run_panel(
             Some(p) => {
                 let (q, params) = sv::page_sql(panel_sql, p);
                 let params: Vec<&str> = params.iter().map(String::as_str).collect();
-                json_rows(c, &q, &params, st.opts.max_rows)
+                json_rows(c, &q, &params, st.opts.max_rows, &mut grow)
             }
-            None => json_rows(c, panel_sql, &[], st.opts.max_rows),
+            None => json_rows(c, panel_sql, &[], st.opts.max_rows, &mut grow),
         }
     })
     .map_err(|e| {
         if abort.abandoned() {
             cancelled()
-        } else if e.contains("row limit") {
+        } else if e == crate::limits::BUSY {
+            (503, e)
+        } else if e.contains("row limit") || e.contains("size limit") {
             (413, e)
         } else if gen.snap.policy.is_some() && !e.starts_with("query timed out") {
             // Under a policy, a DuckDB error could quote a value from a row or
@@ -1797,6 +1989,60 @@ mod tests {
             r##"{"theme":{"extends":"light","palette":["#123456"]}}"##
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn limit_options() {
+        let o = LockedOptions::parse(None).unwrap();
+        assert_eq!(
+            (o.max_inflight, o.max_response, o.max_queries),
+            (256 << 20, 32 << 20, 4)
+        );
+        let o = LockedOptions::parse(Some(
+            r#"{"max_inflight_mb":64,"max_response_mb":8,"max_queries":2}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            (o.max_inflight, o.max_response, o.max_queries),
+            (64 << 20, 8 << 20, 2)
+        );
+        // A response can't be larger than the in-flight budget.
+        let o =
+            LockedOptions::parse(Some(r#"{"max_inflight_mb":4,"max_response_mb":100}"#)).unwrap();
+        assert_eq!(o.max_response, 4 << 20);
+        for bad in [
+            r#"{"max_inflight_mb":0}"#,
+            r#"{"max_response_mb":-1}"#,
+            r#"{"max_queries":"4"}"#,
+        ] {
+            assert!(LockedOptions::parse(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn search_path_option() {
+        assert!(LockedOptions::parse(None).unwrap().search_path.is_empty());
+        let o = LockedOptions::parse(Some(r#"{"search_path":"warehouse"}"#)).unwrap();
+        assert_eq!(o.search_path, vec![("warehouse".into(), None)]);
+        let o = LockedOptions::parse(Some(r#"{"search_path":"warehouse.sales, memory.main"}"#))
+            .unwrap();
+        assert_eq!(
+            o.search_path,
+            vec![
+                ("warehouse".into(), Some("sales".into())),
+                ("memory".into(), Some("main".into()))
+            ]
+        );
+        for bad in [
+            r#"{"search_path":""}"#,
+            r#"{"search_path":"a.b.c"}"#,
+            r#"{"search_path":"a;DROP"}"#,
+            r#"{"search_path":""a""}"#,
+            r#"{"search_path":"a,,b"}"#,
+            r#"{"search_path":["a"]}"#,
+        ] {
+            assert!(LockedOptions::parse(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

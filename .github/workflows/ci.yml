@@ -69,6 +69,9 @@ jobs:
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
 
+      - name: Locked server end to end (read-only session, search_path, limits)
+        run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # The Python helper (python/), the snippets of docs/python-r.md and the
       # example notebook (examples/python), rendered through the extension
       # built above.

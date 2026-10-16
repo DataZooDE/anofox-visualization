@@ -1127,7 +1127,16 @@ async function servedRequest(sql, page, kind) {
     headers["X-Anofox-Supersede"] = `${servedViewer}/${slot}`;
   }
   try {
-    const r = await fetch("/api/panel", { method: "POST", headers, body: JSON.stringify(body), signal: ac?.signal });
+    let r;
+    for (let attempt = 1; ; attempt++) {
+      r = await fetch("/api/panel", { method: "POST", headers, body: JSON.stringify(body), signal: ac?.signal });
+      // 503: the server has too many results in flight or queries waiting;
+      // try again after its Retry-After (twice at most).
+      if (r.status !== 503 || attempt > 2) break;
+      const wait = Math.min(5, Number(r.headers.get("Retry-After")) || 1) * attempt;
+      await new Promise((res) => setTimeout(res, wait * 1000));
+      if (ac?.signal.aborted) throw new DOMException("superseded", "AbortError");
+    }
     if (r.status === 409) throw new DOMException("superseded", "AbortError");
     if (!r.ok) throw new Error(await r.text());
     return (await r.text()) || "[]";

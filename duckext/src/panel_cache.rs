@@ -27,6 +27,12 @@ pub const SUPERSEDED: (u16, &str) = (409, "superseded by a newer request");
 /// Fixed per-entry overhead counted against the byte cap (maps, LRU index).
 const ENTRY_OVERHEAD: usize = 128;
 
+/// What an entry costs: the serialized body as allocated (its capacity), and
+/// the key twice (the map and the LRU index each own a copy).
+fn entry_size(key: &str, body: &String) -> usize {
+    2 * key.len() + body.capacity() + ENTRY_OVERHEAD
+}
+
 pub struct PanelCache {
     cap: usize,
     inner: Mutex<Inner>,
@@ -279,7 +285,7 @@ impl Inner {
     }
 
     fn store(&mut self, cap: usize, key: &str, body: std::sync::Arc<String>) {
-        let size = key.len() + body.len() + ENTRY_OVERHEAD;
+        let size = entry_size(key, &body);
         // One result may take at most a quarter of the cache.
         if size > cap / 4 || self.entries.contains_key(key) {
             return;
@@ -289,7 +295,7 @@ impl Inner {
                 break;
             };
             if let Some(e) = self.entries.remove(&old) {
-                self.bytes -= old.len() + e.body.len() + ENTRY_OVERHEAD;
+                self.bytes -= entry_size(&old, &e.body);
                 self.stats.evicted += 1;
             }
         }
@@ -469,7 +475,7 @@ mod tests {
     #[test]
     fn lru_eviction_respects_the_cap() {
         let body = "x".repeat(100);
-        let size = 2 + body.len() + ENTRY_OVERHEAD; // keys are 2 bytes
+        let size = 2 * 2 + body.len() + ENTRY_OVERHEAD; // keys are 2 bytes
         let c = PanelCache::new(size * 8); // 8 entries
         for i in 10..18 {
             let _ = c.run(&i.to_string(), None, |_| ok(&body));
@@ -485,6 +491,15 @@ mod tests {
         let big = "y".repeat(size * 3);
         let _ = c.run("bg", None, |_| ok(&big));
         assert_eq!(c.run("bg", None, |_| ok(&big)).1, Served::Executed);
+    }
+
+    #[test]
+    fn the_cache_counts_what_a_result_allocates() {
+        let c = PanelCache::new(1 << 20);
+        let mut body = String::with_capacity(10_000);
+        body.push_str("[1]");
+        let _ = c.run("k", None, move |_| Ok(body));
+        assert_eq!(c.lock().bytes, 2 + 10_000 + ENTRY_OVERHEAD);
     }
 
     #[test]

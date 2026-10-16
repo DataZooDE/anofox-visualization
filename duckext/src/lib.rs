@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 #[cfg(not(target_arch = "wasm32"))]
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
+mod limits;
+#[cfg(not(target_arch = "wasm32"))]
 mod panel_cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
