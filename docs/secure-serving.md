@@ -14,7 +14,7 @@ other two never accept SQL from the client at all.
 | Audience | the author, on this machine | untrusted consumers (interactive) | untrusted consumers (static) |
 | UI | full builder + editor | real client, editor removed | server-side SVG only |
 | What the client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
-| Database | the live read-write session / file | private read-only snapshot, locked config | `duckdb -readonly`, locked config |
+| Database | the live read-write session / file | private read-only snapshot (refreshable), locked config; optionally one data folder | `duckdb -readonly`, locked config |
 | Bind | loopback only (enforced) | `127.0.0.1` | `--bind` (default `127.0.0.1`) |
 | Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; put auth/TLS in a proxy | put auth/TLS in a proxy |
 
@@ -97,7 +97,73 @@ directory** and opens them in a **separate DuckDB instance**:
   handles keep working); the directory is removed when the server stops
   (`anofox_serve_stop`) or a start fails. On Windows the files remain until stop.
 
-The snapshot is taken at startup: stop and re-start to refresh.
+**Refreshing the snapshot.** The snapshot is taken at startup and can be
+rebuilt while the server runs — no restart, no failed requests:
+
+- `options.refresh_s` rebuilds it every *n* seconds in the background;
+  `SELECT anofox_serve_refresh(port)` rebuilds it now (from the session that
+  started the server, so it sees that session's *committed* data) and returns
+  once the new one serves. Rebuilds never overlap: an on-demand refresh waits
+  for a running one, the interval refresher skips its turn.
+- The swap is atomic: a request takes the current snapshot when it starts and
+  finishes on it; later requests get the new one. The old snapshot (its
+  DuckDB instance and its directory) is closed and deleted when its last
+  request ends.
+- Each snapshot has its own result cache, single-flight and supersession
+  table, so nothing is cached, shared or cancelled across snapshots; the
+  ETags carry the snapshot's epoch.
+- A failed rebuild leaves the current snapshot in service; the error goes to
+  the log (and to the caller of `anofox_serve_refresh`).
+- `GET /healthz` reports `epoch` (1 at start, +1 per refresh),
+  `snapshot_age_s`, `refresh_s`, `refreshing` and `refresh_failed` (no error
+  text — `/healthz` is public).
+- While a rebuild runs, the old and the new snapshot both exist: plan for twice
+  the snapshot's disk and memory.
+
+There is no HTTP endpoint for refreshing: it is a SQL call in the serving
+session (or the interval), so no viewer can trigger one.
+
+**A live data folder (`options.data`).** Data that is too large or changes
+too often to copy at every refresh — e.g. a folder with one parquet directory
+per forecast run — can be read in place:
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095,
+  '{"data": "/srv/runs", "path_vars": ["run"]}');
+```
+
+```sql
+-- a panel: the run is picked by a variable (a dropdown, a ?v.run= link, …)
+SELECT ds::XAXIS, yhat::LINECHART
+FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/forecast.parquet');
+```
+
+- The folder (canonicalised: no `..` or symlink in the configured path; not
+  `/`) is the only path the snapshot instance may open — DuckDB's
+  `allowed_directories` with `enable_external_access = false` and
+  `lock_configuration = true`. DuckDB refuses any path outside it, including
+  `…/run/../../etc`.
+- Each request gets `SET VARIABLE anofox_data = '<folder>'` after the viewer's
+  variables; a viewer can't set `anofox_data` (`400`).
+- `path_vars` lists the variables whose values become path segments: each
+  value must be a plain name — `[A-Za-z0-9_.-]`, not starting with `.` (so not
+  `.`, `..` or a hidden file), no `/` — a non-negative integer, or `null`;
+  anything else is `400` before any SQL runs.
+- **Read-only.** DuckDB can also *write* inside `allowed_directories`, so a
+  server with `data` refuses to start when a dashboard statement writes files
+  (`COPY`, `EXPORT`, `IMPORT`, `ATTACH`, `DETACH`, `INSTALL`, `LOAD`, `FORCE`,
+  `CHECKPOINT`). For defence in depth, make the folder read-only for the
+  server's OS user (or mount it read-only).
+- Files appear live: a new run is readable as soon as it is written, without a
+  refresh. The result cache does *not* see file changes — runs that are
+  rewritten in place need a refresh (which starts a new cache) or
+  `cache_mb: 0`.
+- Views in the session over files in the folder (`CREATE VIEW v AS SELECT …
+  FROM read_parquet('/srv/runs/…')`) are copied into the snapshot as views and
+  read the files live too.
+- Every viewer can read every file in the folder (by any `path_vars` value):
+  serve one folder per audience. (DuckDB 1.5 resolves symlinks, so a link
+  inside the folder that points outside it is refused too.)
 
 **Per-request isolation and limits.**
 
@@ -109,7 +175,7 @@ The snapshot is taken at startup: stop and re-start to refresh.
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
   `threads` (worker pool, default 4), `cache_mb` (see below), `attach`, `load`,
-  `hosts` (see below).
+  `hosts` (see below), `refresh_s`, `data`, `path_vars` (see above).
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy
@@ -117,9 +183,9 @@ The snapshot is taken at startup: stop and re-start to refresh.
   (a name without a port matches any port; `"*"` disables the check).
 - Cross-origin `POST`s are refused (CSRF).
 
-**Result cache and single-flight.** The snapshot never changes while the server
-runs, so a panel's result is a pure function of its request. Results are cached
-per server, keyed by the parsed request — dashboard, panel, every variable value
+**Result cache and single-flight.** A snapshot never changes, so a panel's
+result is a pure function of its request. Results are cached per snapshot (a
+refresh starts an empty cache), keyed by the parsed request — dashboard, panel, every variable value
 (in a canonical order) and the `page` object — so a different value is a
 different entry and nothing is shared across dashboards or servers. Identical
 requests that arrive while one is running wait for it instead of running again
@@ -128,9 +194,10 @@ requests that arrive while one is running wait for it instead of running again
 - `cache_mb` (default 64; `0` turns the cache off — the single-flight stays):
   least-recently-used entries are evicted beyond it; one result may take at most
   a quarter of the cache.
-- Responses carry an `ETag` (a random per-server epoch + a digest of the key).
+- Responses carry an `ETag` (a random per-server id, the snapshot epoch and a
+  digest of the key).
 - Panels that read the clock or random numbers (`now()`, `random()`) are cached
-  like any other: their first result is served until the server restarts.
+  like any other: their first result is served until the next refresh.
   Use `cache_mb: 0` for those.
 - A cache hit answers faster than a query, so a viewer can tell whether some
   other viewer requested exactly the same panel + values recently. All viewers
@@ -152,7 +219,9 @@ header is `400`.
 
 ```sql
 SELECT anofox_serve_dashboards('dashboards', 8095,
-  '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8, "cache_mb": 256}');
+  '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8, "cache_mb": 256,
+    "refresh_s": 300}');
+SELECT anofox_serve_refresh(8095);   -- fresh data now, without a restart
 SELECT anofox_serve_stop(8095);
 ```
 
@@ -188,7 +257,7 @@ examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
   proxy (nginx / Caddy / Cloudflare) in front of the server; bind the server to
   loopback and let only the proxy reach it.
 - **Least privilege on the data**: the snapshot contains everything in the
-  session's DuckDB databases. Serve from a session (or `--db`) that only holds
+  session's DuckDB databases, and every file in `options.data` is readable. Serve from a session (or `--db`) that only holds
   the tables/views the dashboards need.
 - **Variable values are not whitelisted in mode A**: a viewer can set any
   identifier-named variable to any literal. Panels see them only through

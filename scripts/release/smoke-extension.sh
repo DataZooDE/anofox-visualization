@@ -38,8 +38,8 @@ cv="$(q "SELECT anofox_contract_version();")"
 echo "OK: anofox_contract_version() = $cv"
 
 fns="$(q "SELECT string_agg(DISTINCT function_name, ',' ORDER BY function_name) FROM duckdb_functions()
-          WHERE function_name IN ('anofox_serve','anofox_serve_dashboards','anofox_serve_stop','anofox_bar');")"
-[ "$fns" = "anofox_bar,anofox_serve,anofox_serve_dashboards,anofox_serve_stop" ] || fail "functions: $fns"
+          WHERE function_name IN ('anofox_serve','anofox_serve_dashboards','anofox_serve_refresh','anofox_serve_stop','anofox_bar');")"
+[ "$fns" = "anofox_bar,anofox_serve,anofox_serve_dashboards,anofox_serve_refresh,anofox_serve_stop" ] || fail "functions: $fns"
 echo "OK: functions registered: $fns"
 
 ver="$(q "SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'anofox_visualization';")"

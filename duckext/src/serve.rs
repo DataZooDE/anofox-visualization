@@ -15,9 +15,13 @@
 //!   read-only snapshot with external access, extension loading and config
 //!   changes disabled, one fresh connection per request (no variable leakage
 //!   between viewers), under a row cap and a query timeout. Results are cached
-//!   per server (the snapshot never changes), identical concurrent requests run
-//!   once, and a request superseded by the same viewer's newer one is
-//!   interrupted ([`crate::panel_cache`]).
+//!   per snapshot, identical concurrent requests run once, and a request
+//!   superseded by the same viewer's newer one is interrupted
+//!   ([`crate::panel_cache`]). The snapshot can be rebuilt while serving
+//!   (`refresh_s`, `anofox_serve_refresh`) and is swapped atomically
+//!   ([`crate::generation`]); `data` opens one folder of files read-only to
+//!   the panels, for data too large or too live to snapshot.
+//! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
 //! Each server's state is owned by the server (no process-wide "last load
@@ -25,7 +29,8 @@
 //! nothing is registered until the snapshot is built and the port is bound.
 
 use crate::db::{json_rows, Conn, Database};
-use crate::panel_cache::{PanelCache, Served, SUPERSEDED};
+use crate::generation::{Current, Generation};
+use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
     AuthoringGuard, RequestMeta,
@@ -37,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 // The browser builder, embedded at compile time (needs web/pkg from wasm-pack —
@@ -57,6 +62,8 @@ struct Running {
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
+    /// A locked server's state (for `anofox_serve_refresh`).
+    locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
     /// deletes its directory for locked servers).
     _state: Box<dyn Send>,
@@ -259,6 +266,7 @@ pub fn start_authoring(ctx: Arc<DbCtx>, port: u16) -> Result<String, String> {
             server,
             stop,
             workers,
+            locked: None,
             _state: Box::new(state),
         },
     );
@@ -389,6 +397,14 @@ pub struct LockedOptions {
     pub hosts: Vec<String>,
     /// Panel result cache size in bytes (`cache_mb`; 0 = off).
     pub cache_bytes: usize,
+    /// Rebuild the snapshot this often (`refresh_s`; `None` = never).
+    pub refresh: Option<Duration>,
+    /// A folder the panels may read (not write: see `writes_files`) — the
+    /// canonical path of `options.data`.
+    pub data: Option<PathBuf>,
+    /// Variables whose values name a file or folder inside `data`: each must
+    /// be a plain name (`[A-Za-z0-9_.-]`, not starting with `.`).
+    pub path_vars: Vec<String>,
 }
 
 impl Default for LockedOptions {
@@ -403,6 +419,9 @@ impl Default for LockedOptions {
             theme: None,
             hosts: Vec::new(),
             cache_bytes: 64 << 20,
+            refresh: None,
+            data: None,
+            path_vars: Vec::new(),
         }
     }
 }
@@ -459,8 +478,32 @@ impl LockedOptions {
                         o.hosts.push(h.to_string());
                     }
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts)")),
+                "refresh_s" => o.refresh = Some(Duration::from_secs(num()?)),
+                "data" => {
+                    let d = val.as_str().filter(|d| !d.trim().is_empty()).ok_or("options.data must be a directory path")?;
+                    // Canonical: DuckDB compares paths as text, and `..` or a
+                    // symlink in the configured path would make that brittle.
+                    let p = std::fs::canonicalize(d).map_err(|e| format!("options.data: '{d}': {e}"))?;
+                    if !p.is_dir() {
+                        return Err(format!("options.data: '{d}' is not a directory"));
+                    }
+                    if p.parent().is_none() {
+                        return Err("options.data: refusing to open the filesystem root".into());
+                    }
+                    o.data = Some(p);
+                }
+                "path_vars" => {
+                    let arr = val.as_array().ok_or("options.path_vars must be a list of variable names")?;
+                    for v in arr {
+                        let v = v.as_str().filter(|v| sv::valid_ident(v)).ok_or("options.path_vars: invalid variable name")?;
+                        o.path_vars.push(v.to_string());
+                    }
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars)")),
             }
+        }
+        if !o.path_vars.is_empty() && o.data.is_none() {
+            return Err("options.path_vars needs options.data".into());
         }
         Ok(o)
     }
@@ -522,12 +565,59 @@ struct Snapshot {
 struct Locked {
     port: u16,
     dashboards: Vec<Dash>,
-    snap: Snapshot,
     opts: LockedOptions,
-    /// Panel results of this server's snapshot (a new snapshot = a new cache).
-    cache: PanelCache,
-    /// Random per snapshot; qualifies the ETags.
-    epoch: String,
+    /// What a (re)build snapshots: the serving database's context and the
+    /// extensions to load into the snapshot.
+    ctx: Arc<DbCtx>,
+    loads: Vec<String>,
+    /// The snapshot (+ its result cache and epoch) new requests run on.
+    current: Current<Snapshot>,
+    /// Random per server; qualifies the ETags (with the epoch).
+    server_id: String,
+}
+
+/// The `SET VARIABLE` that tells panels where `options.data` is; viewers
+/// can't set it.
+const DATA_VAR: &str = "anofox_data";
+
+impl Locked {
+    fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
+        let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        build_snapshot(&conn, &self.opts, &self.loads)
+    }
+
+    /// Rebuild the snapshot and swap it in (`wait`: see [`Current::rebuild`]).
+    fn refresh(&self, wait: bool) -> Result<Option<String>, String> {
+        let t0 = Instant::now();
+        let mut warnings = Vec::new();
+        let gen = self
+            .current
+            .rebuild(wait, || {
+                let (snap, w) = self.build()?;
+                warnings = w;
+                Ok(snap)
+            })
+            .map_err(|e| {
+                eprintln!("[anofox-serve] snapshot refresh failed (still serving the previous one): {e}");
+                format!("anofox-visualization: refresh failed, still serving the previous snapshot: {e}")
+            })?;
+        let Some(gen) = gen else {
+            return Ok(None);
+        };
+        let warn = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" (warnings: {})", warnings.join("; "))
+        };
+        let msg = format!(
+            "anofox-visualization: port {} now serves snapshot epoch {} (built in {} ms){warn}",
+            self.port,
+            gen.epoch,
+            t0.elapsed().as_millis()
+        );
+        eprintln!("[anofox-serve] {msg}");
+        Ok(Some(msg))
+    }
 }
 
 /// `anofox_serve_dashboards(dir, port[, options])`.
@@ -545,9 +635,23 @@ pub fn start_locked(
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     loads.extend(opts.load.iter().cloned());
+    if opts.data.is_some() {
+        // The data folder is writable to DuckDB (`allowed_directories` has no
+        // read-only form): refuse statements that write files.
+        for d in &dashboards {
+            for (i, (_, sql)) in d.stmts.iter().enumerate() {
+                if let Some(kw) = writes_files(sql) {
+                    return Err(format!(
+                        "dashboard '{}' statement {i}: {kw} is not allowed when serving a data folder",
+                        d.id
+                    ));
+                }
+            }
+        }
+    }
     let (snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, opts.attach, &loads)?
+        build_snapshot(&conn, &opts, &loads)?
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -574,22 +678,28 @@ pub fn start_locked(
     );
     let n = dashboards.len();
     let threads = opts.threads;
+    let refresh = opts.refresh;
     let state = Arc::new(Locked {
         port,
         dashboards,
-        snap,
-        cache: PanelCache::new(opts.cache_bytes),
-        epoch: sv::random_token()[..8].to_string(),
+        current: Current::new(snap, opts.cache_bytes),
         opts,
+        ctx,
+        loads,
+        server_id: sv::random_token()[..8].to_string(),
     });
     let stop = Arc::new(AtomicBool::new(false));
     let st = state.clone();
-    let workers = spawn_workers(
+    let mut workers = spawn_workers(
         &server,
         &stop,
         threads,
         Arc::new(move |req| handle_locked(&st, req)),
     );
+    if let Some(every) = refresh {
+        let (st, stop) = (state.clone(), stop.clone());
+        workers.push(std::thread::spawn(move || refresher(&st, &stop, every)));
+    }
     servers.insert(
         port,
         Running {
@@ -597,6 +707,7 @@ pub fn start_locked(
             server,
             stop,
             workers,
+            locked: Some(state.clone()),
             _state: Box::new(state),
         },
     );
@@ -608,6 +719,88 @@ pub fn start_locked(
     Ok(format!(
         "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{warn}"
     ))
+}
+
+/// The `refresh_s` thread: rebuild every `every`, skipping a turn while an
+/// on-demand refresh runs; stops with the server.
+fn refresher(st: &Locked, stop: &AtomicBool, every: Duration) {
+    let mut next = Instant::now() + every;
+    loop {
+        while Instant::now() < next {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100).min(every));
+        }
+        let _ = st.refresh(false);
+        next = Instant::now() + every;
+    }
+}
+
+/// `anofox_serve_refresh(port)`: rebuild the snapshot of the locked server on
+/// `port` now (waiting for a refresh already running), and swap it in.
+/// Requests already running finish on the old snapshot.
+pub fn refresh(port: u16) -> Result<String, String> {
+    let locked = match lock_servers().get(&port) {
+        Some(r) => r.locked.clone().ok_or_else(|| {
+            format!(
+                "anofox-visualization: the server on port {port} is not a locked dashboard server"
+            )
+        })?,
+        None => {
+            return Err(format!(
+                "anofox-visualization: nothing is serving on port {port}"
+            ))
+        }
+    };
+    Ok(locked.refresh(true)?.unwrap_or_default())
+}
+
+/// The leading keyword of `sql` if it is a statement that writes files
+/// (`COPY`, `EXPORT`, `ATTACH`, …) — refused when a data folder is open,
+/// since DuckDB lets `allowed_directories` be written to, too.
+fn writes_files(sql: &str) -> Option<&'static str> {
+    const DENY: [&str; 9] = [
+        "COPY",
+        "EXPORT",
+        "IMPORT",
+        "ATTACH",
+        "DETACH",
+        "INSTALL",
+        "LOAD",
+        "FORCE",
+        "CHECKPOINT",
+    ];
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(' || c == ';');
+        if let Some(r) = rest.strip_prefix("--") {
+            rest = r.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.split_once("*/").map_or("", |(_, r)| r);
+        } else {
+            break;
+        }
+    }
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    DENY.into_iter().find(|k| *k == word)
+}
+
+/// Is `lit` (a typed literal from `sv::sql_literal`) an acceptable value for a
+/// `path_vars` variable: a string or integer that is one plain path segment —
+/// `[A-Za-z0-9_.-]`, not starting with `.` (so never `.`, `..` or a hidden
+/// file), no `/` — or NULL?
+fn valid_path_value(lit: &str) -> bool {
+    if lit == "NULL" || (!lit.is_empty() && lit.bytes().all(|b| b.is_ascii_digit())) {
+        return true;
+    }
+    lit.strip_prefix('\'')
+        .and_then(|l| l.strip_suffix('\''))
+        .is_some_and(sv::valid_dashboard_id)
 }
 
 /// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
@@ -661,14 +854,16 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
 /// * extensions loaded in the session (and `-- @load`/`options.load`) are
 ///   loaded, best-effort, while that is still allowed;
 /// * then `enable_external_access = false` (no file / network access: no
-///   `COPY … TO`, `read_text`, `ATTACH`, `INSTALL`, `LOAD`), extension
+///   `COPY … TO`, `read_text`, `ATTACH`, `INSTALL`, `LOAD`) — except for the
+///   `options.data` folder, which goes in `allowed_directories` — extension
 ///   auto-install/-load off, and `lock_configuration = true` so no request can
 ///   undo any of it.
 fn build_snapshot(
     live: &Conn,
-    attach_all: bool,
+    opts: &LockedOptions,
     extra_loads: &[String],
 ) -> Result<(Snapshot, Vec<String>), String> {
+    let attach_all = opts.attach;
     let mut warnings = Vec::new();
     let dir = SnapshotDir::create()?;
     let current = live
@@ -788,6 +983,13 @@ fn build_snapshot(
                 warnings.push(format!("LOAD {e}: {first}"));
             }
         }
+        if let Some(data) = &opts.data {
+            let d = data.to_string_lossy();
+            c.exec(&format!(
+                "SET allowed_directories = [{}]",
+                sql_string_literal(&d)
+            ))?;
+        }
         c.exec("SET enable_external_access = false")?;
         c.exec("SET lock_configuration = true")?;
     }
@@ -820,11 +1022,18 @@ fn handle_locked(st: &Locked, mut req: Request) {
     }
     match (req.method(), path.as_str()) {
         (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
-            let body = format!(
-                "{{\"status\":\"ok\",\"dashboards\":{}}}",
-                st.dashboards.len()
-            );
-            respond(req, 200, "application/json", body.into_bytes())
+            let gen = st.current.get();
+            let body = serde_json::json!({
+                "status": "ok",
+                "dashboards": st.dashboards.len(),
+                "epoch": gen.epoch,
+                "snapshot_age_s": gen.built.elapsed().as_secs(),
+                "refresh_s": st.opts.refresh.map(|d| d.as_secs()),
+                "refreshing": st.current.refreshing(),
+                // The error itself is only logged / returned to the operator.
+                "refresh_failed": st.current.last_failed(),
+            });
+            respond(req, 200, "application/json", body.to_string().into_bytes())
         }
         (&Method::Post, "/api/panel") => {
             let body = match read_body(&mut req, st.opts.max_body) {
@@ -883,7 +1092,8 @@ fn valid_supersede(v: &str) -> bool {
 }
 
 /// The cache key of a panel request: everything its result depends on
-/// besides the (immutable) snapshot and dashboards — the parsed request, with
+/// besides the snapshot (each snapshot has its own cache), the `data` files
+/// (a refresh drops the cache) and the dashboards — the parsed request, with
 /// the variables in a canonical order. Debug formatting quotes and escapes
 /// every string, so distinct requests never collide.
 fn panel_key(r: &sv::PanelRequest) -> String {
@@ -892,11 +1102,11 @@ fn panel_key(r: &sv::PanelRequest) -> String {
     format!("{:?}", (&r.dashboard, r.panel, vars, &r.page))
 }
 
-fn etag(epoch: &str, key: &str) -> String {
+fn etag(server: &str, epoch: u64, key: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
-    format!("\"{epoch}-{:016x}\"", h.finish())
+    format!("\"{server}.{epoch}-{:016x}\"", h.finish())
 }
 
 /// Serve one panel of one dashboard for a viewer — from the cache, by joining
@@ -908,6 +1118,26 @@ fn locked_panel(
     supersede: Option<&str>,
 ) -> Result<(Arc<String>, String), (u16, String)> {
     let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    for (name, lit) in &r.vars {
+        if st.opts.data.is_some() && name.eq_ignore_ascii_case(DATA_VAR) {
+            return Err((400, format!("variable '{name}' is set by the server")));
+        }
+        if st
+            .opts
+            .path_vars
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(name))
+            && !valid_path_value(lit)
+        {
+            return Err((
+                400,
+                format!("variable '{name}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.'"),
+            ));
+        }
+    }
+    // The snapshot this request runs on, start to end (a refresh only changes
+    // what later requests get).
+    let gen = st.current.get();
     let dash = st
         .dashboards
         .iter()
@@ -919,7 +1149,10 @@ fn locked_panel(
         .ok_or((404, "no such panel".to_string()))?;
     if *is_setup {
         // setup runs server-side, per request (run_panel)
-        return Ok((Arc::new("[]".into()), etag(&st.epoch, "setup")));
+        return Ok((
+            Arc::new("[]".into()),
+            etag(&st.server_id, gen.epoch, "setup"),
+        ));
     }
     let ticket = match supersede {
         None => None,
@@ -934,8 +1167,8 @@ fn locked_panel(
     };
     let key = panel_key(&r);
     let t0 = std::time::Instant::now();
-    let (out, how) = st.cache.run(&key, ticket, |abort| {
-        run_panel(st, dash, panel_sql, &r, abort)
+    let (out, how) = gen.cache.run(&key, ticket, |abort| {
+        run_panel(st, &gen, dash, panel_sql, &r, abort)
     });
     if how == Served::Executed {
         let cancelled = matches!(&out, Err((code, _)) if *code == SUPERSEDED.0);
@@ -947,7 +1180,7 @@ fn locked_panel(
             if cancelled { " (superseded)" } else { "" }
         );
     }
-    out.map(|json| (json, etag(&st.epoch, &key)))
+    out.map(|json| (json, etag(&st.server_id, gen.epoch, &key)))
 }
 
 /// Run one panel of one dashboard. Fresh connection per request (variables
@@ -958,22 +1191,29 @@ fn locked_panel(
 /// query is interrupted when every request waiting for it has been superseded.
 fn run_panel(
     st: &Locked,
+    gen: &Generation<Snapshot>,
     dash: &Dash,
     panel_sql: &str,
     r: &sv::PanelRequest,
     abort: &crate::panel_cache::Abort,
 ) -> Result<String, (u16, String)> {
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
-    let conn = st.snap.db.connect().map_err(|e| (500, e))?;
+    let conn = gen.snap.db.connect().map_err(|e| (500, e))?;
     // Declared after `conn`, so dropped before it: no interrupt after that.
     let intr = conn.interrupter();
     let Some(_registered) = abort.register(move || intr.interrupt()) else {
         return Err(cancelled());
     };
     conn.with_deadline(st.opts.timeout, |c| {
-        c.exec(&format!("USE {}", quote_ident(&st.snap.default_db)))?;
+        c.exec(&format!("USE {}", quote_ident(&gen.snap.default_db)))?;
         for (name, lit) in &r.vars {
             c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
+        }
+        if let Some(data) = &st.opts.data {
+            c.exec(&format!(
+                "SET VARIABLE {DATA_VAR} = {}",
+                sql_string_literal(&data.to_string_lossy())
+            ))?;
         }
         for (setup, sql) in &dash.stmts[..r.panel] {
             if *setup {
@@ -1115,8 +1355,107 @@ mod tests {
             key(r#"{"dashboard":"d","panel":1,"page":{"limit":10,"offset":10}}"#),
             key(r#"{"dashboard":"d","panel":1,"page":{"limit":10,"offset":20}}"#)
         );
-        assert!(etag("e1", &k).starts_with("\"e1-"));
-        assert_ne!(etag("e1", &k), etag("e2", &k));
+        assert!(etag("s1", 1, &k).starts_with("\"s1.1-"));
+        assert_ne!(etag("s1", 1, &k), etag("s1", 2, &k));
+        assert_ne!(etag("s1", 1, &k), etag("s2", 1, &k));
+    }
+
+    #[test]
+    fn refresh_and_data_options() {
+        let o = LockedOptions::parse(Some(r#"{"refresh_s":60}"#)).unwrap();
+        assert_eq!(o.refresh, Some(Duration::from_secs(60)));
+        assert!(LockedOptions::parse(None).unwrap().refresh.is_none());
+        assert!(LockedOptions::parse(Some(r#"{"refresh_s":0}"#)).is_err());
+        // `data` is canonicalised (no `..` or symlink survives) and must be a
+        // directory other than the root.
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        let json = |d: &str| format!(r#"{{"data":{}}}"#, serde_json::json!(d));
+        let sub = SnapshotDir::create().unwrap(); // any existing subdirectory
+        let name = sub.0.file_name().unwrap().to_string_lossy().into_owned();
+        let o =
+            LockedOptions::parse(Some(&json(&format!("{}/./{name}/..", tmp.display())))).unwrap();
+        assert_eq!(o.data.as_deref(), Some(tmp.as_path()));
+        assert!(LockedOptions::parse(Some(&json("/no/such/dir/anofox"))).is_err());
+        assert!(LockedOptions::parse(Some(&json("/"))).is_err());
+        assert!(LockedOptions::parse(Some(&json(""))).is_err());
+        let f = tmp.join(format!("anofox-opt-{}", sv::random_token()));
+        std::fs::write(&f, "x").unwrap();
+        assert!(LockedOptions::parse(Some(&json(&f.to_string_lossy()))).is_err());
+        let _ = std::fs::remove_file(&f);
+        // path_vars: identifiers, and only together with data.
+        let ok = format!(
+            r#"{{"data":{},"path_vars":["run"]}}"#,
+            serde_json::json!(tmp.to_string_lossy())
+        );
+        assert_eq!(
+            LockedOptions::parse(Some(&ok)).unwrap().path_vars,
+            vec!["run".to_string()]
+        );
+        assert!(LockedOptions::parse(Some(r#"{"path_vars":["run"]}"#)).is_err());
+        let bad = ok.replace("\"run\"", "\"a-b\"");
+        assert!(LockedOptions::parse(Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn path_values_cannot_traverse() {
+        let lit = |v: serde_json::Value| sv::sql_literal(&v).unwrap();
+        for ok in ["run_2026-10-16", "r1.v2", "42"] {
+            assert!(valid_path_value(&lit(serde_json::json!(ok))), "{ok}");
+        }
+        assert!(valid_path_value(&lit(serde_json::json!(42))));
+        assert!(valid_path_value(&lit(serde_json::Value::Null)));
+        for bad in [
+            "..",
+            ".",
+            ".hidden",
+            "../secret",
+            "a/b",
+            "/etc/passwd",
+            "a\\b",
+            "",
+            "a'b",
+            "run 1",
+            "*",
+            "r?n",
+            "~",
+            "%2e%2e",
+        ] {
+            assert!(
+                !valid_path_value(&lit(serde_json::json!(bad))),
+                "{bad:?} must be refused"
+            );
+        }
+        for bad in [
+            serde_json::json!(["a", "b"]),
+            serde_json::json!(true),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            assert!(!valid_path_value(&lit(bad.clone())), "{bad}");
+        }
+    }
+
+    #[test]
+    fn file_writing_statements_are_spotted() {
+        for (sql, kw) in [
+            ("COPY (SELECT 1) TO 'x.csv'", "COPY"),
+            ("  copy t TO 'x'", "COPY"),
+            ("-- note\n/* c */ (EXPORT DATABASE 'x')", "EXPORT"),
+            ("ATTACH 'x.db'", "ATTACH"),
+            ("install httpfs", "INSTALL"),
+            ("FORCE INSTALL x", "FORCE"),
+        ] {
+            assert_eq!(writes_files(sql), Some(kw), "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM read_parquet(getvariable('anofox_data') || '/x.parquet')",
+            "CREATE TEMP TABLE copy_of AS SELECT 1",
+            "FROM t",
+            "WITH copy AS (SELECT 1) SELECT * FROM copy",
+            "-- COPY\nSELECT 1",
+        ] {
+            assert_eq!(writes_files(sql), None, "{sql}");
+        }
     }
 
     #[test]
