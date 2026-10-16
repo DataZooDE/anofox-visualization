@@ -16,7 +16,7 @@ cd "$ROOT"
 for case in "$@"; do
   case "$case" in
     feed)  tables="fm_checks fm_fill fm_schema fm_profile fm_price_moves fm_deliveries" ;;
-    dedup) tables="dd_records dd_pairs dd_clusters dd_key_checks dd_profile" ;;
+    dedup) tables="dd_records dd_pairs dd_clusters dd_key_checks dd_key_quality" ;;
     *) echo "unknown case: $case" >&2; exit 2 ;;
   esac
   out="web/data/tabular-$case"

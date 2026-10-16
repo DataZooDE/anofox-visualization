@@ -1,0 +1,10 @@
+source,match_key,filled,valid
+erp,Email,1.0,1.0
+erp,Phone,0.9707,1.0
+erp,VAT ID,0.7897,1.0
+loyalty,Email,0.4597,1.0
+loyalty,Phone,0.6388,1.0
+loyalty,VAT ID,0.0776,1.0
+webshop,Email,1.0,0.9831
+webshop,Phone,0.7512,1.0
+webshop,VAT ID,0.0632,1.0
