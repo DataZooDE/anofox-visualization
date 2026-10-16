@@ -85,6 +85,14 @@ if (width && width <= 820) {
 } else if (!width) await page.evaluate(() => document.body.classList.add("side-collapsed"));
 const slug = (s) => s.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
 const tabs = await page.$$eval(".tabbar > .tab-btn", (bs) => bs.map((b) => b.textContent));
+// A tab's panels run and render when it is first shown (lazy tabs): wait until
+// no placeholder is left on screen and the fresh panels are wired.
+const lazyDone = async () => {
+  await page.waitForFunction(() => ![...document.querySelectorAll(".dash .dp-lazy")].some((e) => e.offsetParent !== null), null, {
+    timeout: Number(arg("--timeout", "240000")),
+  });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+};
 const shoot = async (name) => {
   // errors: error boxes, error SVGs (red text) and "ships with the next release" notes
   const found = await page.evaluate((width) => {
@@ -164,11 +172,13 @@ if (!tabs.length) await shoot("dashboard");
 for (const t of tabs) {
   await page.click(`.tabbar > .tab-btn:text-is("${t}")`);
   await page.waitForTimeout(400);
+  await lazyDone();
   const subs = await page.$$eval(".tabpane:not([style*='none']) .subtab-btn", (bs) => bs.map((b) => b.textContent));
   if (!subs.length) await shoot(t);
   for (const s of subs) {
     await page.click(`.tabpane:not([style*='none']) .subtab-btn:text-is("${s}")`);
     await page.waitForTimeout(300);
+    await lazyDone();
     await shoot(`${t} - ${s}`);
   }
 }
