@@ -15,7 +15,7 @@ other two never accept SQL from the client at all.
 | UI | full builder + editor | real client, editor removed | server-side SVG only |
 | What the client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
 | Database | the live read-write session / file | private read-only snapshot (refreshable), locked config; optionally one data folder | `duckdb -readonly`, locked config |
-| Bind | loopback only (enforced) | `127.0.0.1` | `--bind` (default `127.0.0.1`) |
+| Bind | loopback only (enforced) | `bind` option (default `127.0.0.1`) | `--bind` (default `127.0.0.1`) |
 | Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; login via an auth proxy (`options.auth`) | login via an auth proxy (`--auth`) |
 
 Available in the **from-source build** only (`duckext/`, see
@@ -195,10 +195,18 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
-  `threads` (worker pool, default 4), `cache_mb` (see below), `attach`, `load`,
-  `hosts` (see below), `refresh_s`, `data`, `path_vars` (see above), `auth`,
-  `log`, `log_vars` (see
-  [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)).
+  `threads` (HTTP worker pool = concurrent requests, default 4), `cache_mb`
+  (see below), `attach`, `load`, `hosts` (see below), `refresh_s`, `data`,
+  `path_vars` (see above), `auth`, `log`, `log_vars` (see
+  [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)), and
+  for [deployment](deployment.md):
+  - `bind` — listen address, default `127.0.0.1`. `"0.0.0.0"` (or `"::"`) is
+    for containers and replicas behind a load balancer. A specific address is
+    also accepted as a `Host`; other names still need `hosts`.
+  - `memory_limit` — DuckDB `memory_limit` of the snapshot instance (`"2GB"`,
+    `"50%"`). The default is DuckDB's 80 % of RAM, shared by all queries.
+  - `duckdb_threads` — DuckDB `threads` of the snapshot instance, shared by all
+    queries. The default is the number of cores.
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy
@@ -414,7 +422,7 @@ location / {
   proxy_set_header X-Forwarded-Groups $groups;  # (only if header_groups is set)
   proxy_set_header X-Forwarded-Tenant $tenant;  # one line per claims header
   proxy_set_header X-Anofox-Proxy-Secret "<secret>";
-  proxy_set_header Host $host;                  # list it in options.hosts
+  proxy_set_header Host $http_host;             # with its port; list it in options.hosts
   proxy_pass http://127.0.0.1:8095;
 }
 ```
@@ -532,7 +540,7 @@ every refused request (static assets are not logged):
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (both servers) |
 | One viewer cancels another's query | Supersession tickets are scoped to user + 128-bit page id |
 | A misconfigured `auth` serves without login | A bad `auth` fails the start; there is no fallback to anonymous |
-| Server reachable from the network without login | `serve --bind` beyond loopback without `--auth` prints a `WARNING`; the extension binds loopback |
+| Server reachable from the network without login | `serve --bind` beyond loopback without `--auth` prints a `WARNING`; so does the extension's start message for `bind` beyond loopback without `auth` (the default is loopback) |
 | Log injection / personal data in logs | JSON-escaped lines; diagnostics on the same stderr escape control characters, and a URL with one is `400`; variable values only with `log_vars: "values"`; the log file is `0600` and never opened through a symlink |
 | Many viewers fill the static server's `--cache` | Capped at 1,024 pages / 64 MiB, expired pages purged |
 | DNS rebinding, CSRF, SQL from the client | Unchanged: Host allowlist (`421`), same-origin `POST`s, no SQL endpoint |
@@ -546,6 +554,13 @@ embed links; API keys.
 DuckDB-Wasm demo (the data is in the client, whoever opens it can read all of
 it), and a MotherDuck token (it grants the whole database). Only the locked
 server (A) and the static render server (B) keep data on the server.
+
+## Deployment
+
+[`deployment.md`](deployment.md) covers deploying a locked server: one process
+under systemd or in a container, TLS and auth at a reverse proxy (Caddy, nginx)
+with the `Host` allowlist, resource limits, replicas behind a load balancer,
+and sizing from the load test (`scripts/load-test.mjs`).
 
 ## What remains the operator's job
 

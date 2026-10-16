@@ -1932,6 +1932,14 @@ Panel results are cached per snapshot (`cache_mb`, default 64, `0` = off),
 identical concurrent requests run once, and a `::PAGED` table that is paged or
 scrolled quickly cancels its superseded queries.
 
+**Deployment options.** `bind` sets the listen address (default `127.0.0.1`;
+`"0.0.0.0"` in a container or behind a load balancer on another host — the
+server warns at start if that happens without `auth`). `memory_limit`
+(`"2GB"`, `"50%"`) and `duckdb_threads` set DuckDB's limits for the snapshot,
+shared by all requests. Bad values fail when the server starts. Running it
+under systemd or in a container, behind a TLS proxy, as several replicas, and
+sizing from the load test: [`deployment.md`](deployment.md).
+
 **Fresh data without a restart.** `'{"refresh_s": 300}'` rebuilds the snapshot
 every 5 minutes, `SELECT anofox_serve_refresh(8095)` right now; the new
 snapshot is swapped in atomically (requests already running finish on the old

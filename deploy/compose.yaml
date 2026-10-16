@@ -1,0 +1,33 @@
+# Two locked replicas behind Caddy — docs/deployment.md.
+#   docker compose -f deploy/compose.yaml up --build -d
+#   curl -k -u viewer:demo https://localhost:8443/healthz
+x-replica: &replica
+  image: anofox-dashboards
+  build: { context: .., dockerfile: deploy/Dockerfile }
+  volumes:
+    - ./compose-serve.sql:/etc/anofox/serve.sql:ro
+    - ../examples/load-test:/etc/anofox/example:ro
+  read_only: true
+  # The snapshot lives in /tmp: tmpfs (RAM) is fine for the small demo data;
+  # use a volume for real data.
+  tmpfs: [/tmp]
+  mem_limit: 2g
+  cpus: 4
+  restart: unless-stopped
+  healthcheck:
+    # No curl in the image: bash's /dev/tcp. The Host must be one the server accepts.
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.1\\r\\nHost: 127.0.0.1:8080\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"ok\"' <&3"]
+    interval: 10s
+    timeout: 3s
+    start_period: 60s
+
+services:
+  dash1: *replica
+  dash2: *replica
+  proxy:
+    image: caddy:2-alpine
+    ports: ["127.0.0.1:8443:443"]
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro]
+    depends_on:
+      dash1: { condition: service_healthy }
+      dash2: { condition: service_healthy }
