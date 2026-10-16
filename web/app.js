@@ -160,7 +160,7 @@ SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bars & columns'::TAB;
 SELECT 12::COL;
-SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, waterfall/bullet/funnel, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week × channel (stacked, € axis)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
 SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
@@ -195,6 +195,18 @@ SELECT 6::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITL
 SELECT 6::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
 -- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
 SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
+
+SELECT 'Waterfall, bullet & funnel'::TAB;
+-- Waterfall (::WATERFALL): the first row is the start total, the others signed steps;
+-- a NULL value (or ::CATEGORY 'total') is a subtotal, and the bridge closes with an End total.
+SELECT 12::COL; SELECT step::XAXIS, eur::WATERFALL, '€'::YFORMAT, 'Volume beat budget; price and FX gave half of it back'::TITLE
+FROM (VALUES (1, 'Budget', 480), (2, 'Volume', 95), (3, 'Price', -38), (4, 'Mix', 22), (5, 'FX', -17)) t(i, step, eur) ORDER BY i;
+-- Bullet (::BULLET): the measure per row against its ::GOAL tick over ::RANGE bands.
+SELECT 6::COL; SELECT region::XAXIS, attained::BULLET, goal::GOAL, '60,85,110'::RANGE, '%'::YFORMAT, 'Two regions short of target'::TITLE
+FROM (VALUES (1, 'North', 92, 90), (2, 'South', 71, 85), (3, 'East', 104, 95), (4, 'West', 66, 80)) t(i, region, attained, goal) ORDER BY i;
+-- Funnel (::FUNNEL): ordered stages, widths by value, conversion from the previous stage.
+SELECT 6::COL; SELECT stage::XAXIS, n::FUNNEL, 'A quarter of sign-ups never start a trial'::TITLE
+FROM (VALUES (1, 'Visits', 48000), (2, 'Sign-ups', 6200), (3, 'Trials', 4650), (4, 'Paid', 1180)) t(i, stage, n) ORDER BY i;
 
 SELECT 'Heatmap, calendar & candlestick'::TAB;
 -- Heatmap (::HEATMAP): x × y tiles; rows keep the SQL order (first on top),
@@ -6839,9 +6851,10 @@ function attachAxisPointer() {
     // highlight every point sharing the nearest x (two far-apart dots at once).
     // Skip it — the per-point (<title>) hover shows the individual point instead.
     const roles = (panel._dp && panel._dp.roles) || [];
-    // Radar is polar and jitter/scatter has no shared-x series — a vertical
-    // x-crosshair is wrong for both; their per-point (<title>) hover takes over.
-    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK)$/.test(r[1]))) return;
+    // Radar is polar, bullet/funnel are horizontal and jitter/scatter has no
+    // shared-x series — a vertical x-crosshair is wrong for all of them; their
+    // per-point (<title>) hover takes over.
+    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART)$/.test(r[1]))) return;
     const scatterOnly =
       roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
       !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));

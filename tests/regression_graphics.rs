@@ -1193,3 +1193,227 @@ fn contract_terms_colour_by_sign() {
     .unwrap();
     assert!(s.split("<circle ").skip(1).any(|c| c.contains(&red)), "{s}");
 }
+
+// ── #32: waterfall / bullet / funnel ─────────────────────────────────────
+/// Every start tag carrying `attr="v"`.
+fn tags_with<'a>(svg: &'a str, attr: &str, v: &str) -> Vec<&'a str> {
+    let needle = format!(" {attr}=\"{v}\"");
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find(&needle) {
+        let start = rest[..i].rfind('<').unwrap();
+        let end = i + rest[i..].find('>').unwrap();
+        out.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    out
+}
+fn attr_of<'a>(tag: &'a str, a: &str) -> Option<&'a str> {
+    let k = tag.find(&format!(" {a}=\""))? + a.len() + 3;
+    Some(&tag[k..k + tag[k..].find('"')?])
+}
+fn dump(name: &str, s: &str) {
+    if let Ok(dir) = std::env::var("ANOFOX_DUMP_SVG") {
+        std::fs::write(format!("{dir}/{name}.svg"), s).unwrap();
+    }
+}
+
+fn waterfall_cols() -> Vec<Column> {
+    vec![
+        Column::new(
+            "step",
+            Role::X,
+            strs(&["Budget", "Volume", "Price", "Mix", "FX"]),
+        ),
+        Column::new(
+            "eur",
+            Role::Value(Kind::Waterfall),
+            nums(&[100.0, 25.0, -12.0, 8.0, -6.0]),
+        ),
+        Column::new("t", Role::Label, strs(&["Budget to actual"])),
+    ]
+}
+
+#[test]
+fn waterfall_bridges_start_to_end() {
+    let s = svg(waterfall_cols());
+    dump("waterfall", &s);
+    // Start total, four steps and the closing End total.
+    for x in ["Budget", "Volume", "Price", "Mix", "FX", "End"] {
+        let t = tags_with(&s, "data-x", x);
+        assert!(t.iter().any(|t| t.starts_with("<rect")), "bar for {x}: {s}");
+    }
+    let end = tags_with(&s, "data-x", "End");
+    let end = end.iter().find(|t| t.starts_with("<rect")).unwrap();
+    // Each bar reports its own value: the steps signed, the totals their level.
+    assert_eq!(attr_of(end, "data-value"), Some("115"));
+    // The series is the step itself: a click selects the step.
+    assert_eq!(attr_of(end, "data-series"), Some("End"));
+    let price = tags_with(&s, "data-x", "Price");
+    let price = price.iter().find(|t| t.starts_with("<rect")).unwrap();
+    assert_eq!(attr_of(price, "data-value"), Some("-12"));
+    assert_eq!(attr_of(price, "data-series"), Some("Price"));
+    // Increases / decreases in the theme's positive / negative colours.
+    let th = anofox_visualization::theme::default_light();
+    assert_eq!(
+        attr_of(price, "fill"),
+        Some(hexu(th.colors.negative).as_str())
+    );
+    let vol = tags_with(&s, "data-x", "Volume");
+    let vol = vol.iter().find(|t| t.starts_with("<rect")).unwrap();
+    assert_eq!(
+        attr_of(vol, "fill"),
+        Some(hexu(th.colors.positive).as_str())
+    );
+    // The Price step floats: it starts at the running level, not at 0, so it
+    // is shorter than the Budget bar.
+    let budget = tags_with(&s, "data-x", "Budget");
+    let budget = budget.iter().find(|t| t.starts_with("<rect")).unwrap();
+    let h = |t: &str| attr_of(t, "height").unwrap().parse::<f64>().unwrap();
+    assert!(h(price) < h(budget) / 4.0, "{price} vs {budget}");
+    // Signed data labels and connectors between the bars.
+    assert!(
+        s.contains(">+25<") && s.contains(">-12<") && s.contains(">115<"),
+        "{s}"
+    );
+    assert!(s.matches("<line ").count() + s.matches("<polyline ").count() >= 5);
+}
+
+#[test]
+fn waterfall_null_and_tagged_rows_are_totals() {
+    let s = svg(vec![
+        Column::new("s", Role::X, strs(&["Q1", "+A", "-B", "Q2", "+C", "Q3"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Waterfall),
+            vec![
+                Value::Float(50.0),
+                Value::Float(10.0),
+                Value::Float(-5.0),
+                Value::Na,
+                Value::Float(20.0),
+                Value::Float(70.0),
+            ],
+        ),
+        Column::new("k", Role::Category, strs(&["", "", "", "", "", "total"])),
+    ]);
+    let bar = |x: &str| {
+        tags_with(&s, "data-x", x)
+            .into_iter()
+            .find(|t| t.starts_with("<rect"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(attr_of(&bar("Q2"), "data-value"), Some("55"));
+    let th = anofox_visualization::theme::default_light();
+    let brand = hexu(th.color(0));
+    assert_eq!(attr_of(&bar("Q2"), "fill"), Some(brand.as_str()));
+    assert_eq!(attr_of(&bar("Q3"), "data-value"), Some("70"));
+    // The last row is a total: no extra End bar.
+    assert!(tags_with(&s, "data-x", "End").is_empty());
+}
+
+#[test]
+fn bullet_draws_bands_measure_and_goal() {
+    let s = svg(vec![
+        Column::new("r", Role::X, strs(&["North", "South"])),
+        Column::new("v", Role::Value(Kind::Bullet), nums(&[72.0, 91.0])),
+        Column::new("g", Role::RefLine, nums(&[80.0, 85.0])),
+        Column::new("b", Role::Range, strs(&["50,75,100"])),
+    ]);
+    dump("bullet", &s);
+    let north: Vec<&str> = tags_with(&s, "data-x", "North")
+        .into_iter()
+        .filter(|t| t.starts_with("<rect"))
+        .collect();
+    // Three bands, the measure and the goal tick.
+    assert_eq!(north.len(), 5, "{north:#?}");
+    // Every mark of the row selects the row; only the measure has a value.
+    assert!(north
+        .iter()
+        .all(|t| attr_of(t, "data-series") == Some("North")));
+    let valued: Vec<_> = north
+        .iter()
+        .filter_map(|t| attr_of(t, "data-value"))
+        .collect();
+    assert_eq!(valued, ["72"]);
+    // The goal tick and the bands say what they are in the tooltip.
+    assert!(s.contains("<title>Goal 80</title>"), "{s}");
+    assert!(s.contains("<title>Range 50 – 75</title>"), "{s}");
+    // Horizontal: the measure bar is wider than tall, and North (first row)
+    // sits above South.
+    let m = north
+        .iter()
+        .find(|t| attr_of(t, "data-value") == Some("72"))
+        .unwrap();
+    let f = |t: &str, a: &str| attr_of(t, a).unwrap().parse::<f64>().unwrap();
+    assert!(f(m, "width") > f(m, "height"), "{m}");
+    let south = tags_with(&s, "data-x", "South")
+        .into_iter()
+        .find(|t| t.starts_with("<rect") && attr_of(t, "data-value") == Some("91"))
+        .unwrap();
+    assert!(f(m, "y") < f(south, "y"));
+}
+
+#[test]
+fn funnel_widths_by_value_with_conversion() {
+    let s = svg(vec![
+        Column::new(
+            "st",
+            Role::X,
+            strs(&["Visits", "Signups", "Trials", "Paid"]),
+        ),
+        Column::new(
+            "n",
+            Role::Value(Kind::Funnel),
+            nums(&[10000.0, 2500.0, 1000.0, 250.0]),
+        ),
+    ]);
+    dump("funnel", &s);
+    let bar = |x: &str| {
+        tags_with(&s, "data-x", x)
+            .into_iter()
+            .find(|t| t.starts_with("<rect"))
+            .unwrap()
+            .to_string()
+    };
+    let f = |t: &str, a: &str| attr_of(t, a).unwrap().parse::<f64>().unwrap();
+    let (v, p) = (bar("Visits"), bar("Paid"));
+    assert_eq!(attr_of(&v, "data-value"), Some("10000"));
+    // Widths by value, centred on one axis, first stage on top.
+    assert!((f(&v, "width") / f(&p, "width") - 40.0).abs() < 1.0);
+    let mid = |t: &str| f(t, "x") + f(t, "width") / 2.0;
+    assert!((mid(&v) - mid(&p)).abs() < 0.5);
+    assert!(f(&v, "y") < f(&p, "y"));
+    // Conversion from the previous stage.
+    assert!(s.contains("25%") && s.contains("40%"), "{s}");
+}
+
+#[test]
+fn bullet_bands_stay_quiet_in_dark_mode() {
+    let cols = vec![
+        Column::new("r", Role::X, strs(&["North"])),
+        Column::new("v", Role::Value(Kind::Bullet), nums(&[72.0])),
+        Column::new("b", Role::Range, strs(&["50,75,100"])),
+    ];
+    let lum = |hex: &str| {
+        let p = |i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap() as f64;
+        (0.299 * p(1) + 0.587 * p(3) + 0.114 * p(5)) / 255.0
+    };
+    for dark in [false, true] {
+        let s = render_in(&cols, "default", dark);
+        let bands: Vec<f64> = tags_with(&s, "data-x", "North")
+            .into_iter()
+            .filter(|t| t.contains("<title>Range") || attr_of(t, "data-value").is_none())
+            .filter_map(|t| attr_of(t, "fill").map(lum))
+            .collect();
+        assert_eq!(bands.len(), 3, "{s}");
+        // Light: pale greys; dark: close to the dark card, never light.
+        for l in &bands {
+            assert!(
+                if dark { *l < 0.4 } else { *l > 0.7 },
+                "dark={dark} {bands:?}"
+            );
+        }
+    }
+}
