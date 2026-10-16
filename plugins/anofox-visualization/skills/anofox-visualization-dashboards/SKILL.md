@@ -374,13 +374,15 @@ FROM run_manifest ORDER BY seq;
 
 Layers run left to right (`'TB'::DIRECTION` for top to bottom); loops are drawn as edges running back. Row order breaks ties, so order the rows by the process. Give it `12::COL` and a `::HEIGHT`; a click on a node cross-filters (`'stage'::SELECT_AS` → `getvariable('stage')`), edges are hover-only. Not for free drawings: no positions or shapes yet.
 
+Motion: stages appear one after another by default (`'none'::ANIMATE` = off). `style` in `::EDGES` or `::LINESTYLE` on a row (styles the edges into that node; a constant = every edge): `'flow'` moving dashes, `'flow-dots'` travelling dots, `'dashed'`. `CASE stage WHEN 'monitor' THEN '412 twins drift' END::STORY` makes Step / Play steps that light the node and every edge touching it. Keyboard: the arrow keys follow the connections.
+
 ## Motion (browser only)
 
 Use motion where it tells the story, not as decoration; `--svg`/PNG/PDF stay static and *reduce motion* shows the final state.
 - Default entrance (`'auto'`): lines draw, bars grow by x, points pop in. Opt out per chart with `'none'::ANIMATE`.
 - Forecasts: `DATE '…'::XLINE` (Today) + `'reveal'::ANIMATE` — history wipes in, then the fan grows forward from Today.
 - `CASE WHEN series = 'Forecast' THEN 'flow' END ::LINESTYLE` — moving dashes for the predicted series (`'dashed'` = still); static output shows dashes.
-- `CASE x WHEN 'W48' THEN 'caption' END ::STORY` — Step / Play controls that light up one x (or series: `'series'::STORY_BY`) and dim the rest, with the caption. 2–5 steps that each say what to look at and why. Never name it `::STEP` (that is the step-line chart).
+- `CASE x WHEN 'W48' THEN 'caption' END ::STORY` (on a `::DIAGRAM`: per node) — Step / Play controls that light up one x (or series: `'series'::STORY_BY`) and dim the rest, with the caption. 2–5 steps that each say what to look at and why. Never name it `::STEP` (that is the step-line chart).
 - `'tween'::TRANSITION` on a chart an input or cross-filter changes: its marks move to the new values (≤ 300 ms) instead of a swap — the eye follows what changed.
 
 ## Accessibility (built in)

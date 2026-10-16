@@ -54,6 +54,8 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     | "data-fx"
                     | "data-summary"
                     | "data-badge"
+                    | "data-of"
+                    | "data-story"
                     | "class"
                     | "id"
             ) {

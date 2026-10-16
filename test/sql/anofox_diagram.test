@@ -37,3 +37,15 @@ SELECT anofox_render(json_object(
   'width', 400, 'height', 400)) LIKE '<svg%data-diagram="TB"%class="dp-flow" data-edge="ingest&gt;build"%';
 ----
 true
+
+# Motion: a ::STORY caption per node becomes a step keyed by its id, a row's
+# ::LINESTYLE styles the edges into it ('flow-dots': travelling dots).
+query I
+SELECT anofox_render(json_object(
+  'rows', (SELECT to_json(list({c0: stage, c1: inputs,
+                                c2: CASE stage WHEN 'monitor' THEN 'Twins drift' END,
+                                c3: CASE stage WHEN 'build' THEN 'flow-dots' END} ORDER BY seq)) FROM stages),
+  'roles', json('[[0,"DIAGRAM"],[1,"UPSTREAM"],[2,"STORY"],[3,"LINESTYLE"]]'),
+  'width', 800, 'height', 300)) LIKE '<svg%data-story="[{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]"%class="dp-flow dp-dots" data-edge="ingest&gt;build"%';
+----
+true

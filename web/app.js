@@ -3024,7 +3024,7 @@ function chartLink(link, el, key, series) {
     rows = JSON.parse(link.rows);
   } catch (_) {}
   const col = (name) => link.roles.find((r) => r[1] === name);
-  const xr = col("XAXIS");
+  const xr = col("XAXIS") || col("DIAGRAM"); // a ::DIAGRAM node's x is its id
   const cr = col("CATEGORY");
   const x = el.getAttribute("data-x") || "";
   const ds = el.getAttribute("data-series");
@@ -4285,6 +4285,8 @@ function markAnim(holder, roles) {
   const svg = holder.querySelector(":scope > svg");
   if (!svg) return;
   let mode = svg.getAttribute("data-animate") || "auto";
+  // a ::DIAGRAM plays its own entrance (stage by stage) for any mode but 'none'
+  if (svg.hasAttribute("data-diagram") && mode !== "none") mode = "draw";
   if (mode === "auto") {
     const kinds = roles.map((r) => r[1]);
     if (kinds.some((k) => /^(LINECHART|LINECHART_PERCENT|STEP|SMOOTH|AREACHART|AREACHART_STACKED|DENSITY)$/.test(k)))
@@ -7961,11 +7963,17 @@ function attachChartA11y() {
     }
     svg.setAttribute("role", "group");
     svg.setAttribute("tabindex", "0");
-    svg.setAttribute("aria-description", "Arrow keys move between data points, Enter selects, Escape leaves.");
+    const tb = svg.getAttribute("data-diagram") === "TB";
+    svg.setAttribute(
+      "aria-description",
+      svg.hasAttribute("data-diagram")
+        ? `Arrow keys follow the connections (${tb ? "down" : "right"} to the next step, ${tb ? "up" : "left"} to the previous), ${tb ? "left and right" : "up and down"} move within a stage, Enter selects, Escape leaves.`
+        : "Arrow keys move between data points, Enter selects, Escape leaves."
+    );
     marks.forEach((el) => {
       el.setAttribute("tabindex", "-1");
       el.setAttribute("role", "img");
-      el.setAttribute("aria-label", el.getAttribute("data-tip"));
+      el.setAttribute("aria-label", diagramNodeLabel(svg, el) || el.getAttribute("data-tip"));
       el.addEventListener("focus", () => {
         el.dispatchEvent(new MouseEvent("mouseenter"));
         const r = el.getBoundingClientRect();
@@ -7976,6 +7984,8 @@ function attachChartA11y() {
         }
       });
       el.addEventListener("blur", () => {
+        // a diagram node reached along an edge announced it: back to its own label
+        if (el._dpVia) (el._dpVia = null), el.setAttribute("aria-label", diagramNodeLabel(svg, el));
         el.dispatchEvent(new MouseEvent("mouseleave"));
         if (el.closest(".has-axis-pointer")) $("dp-tip")?.classList.remove("show"); // shown by the focus
       });
@@ -8057,12 +8067,66 @@ function markKey(fig, el) {
   return { stmt: fig.dataset.stmt, series: el.getAttribute("data-series"), x: el.getAttribute("data-x") || "" };
 }
 
+// A ::DIAGRAM node's spoken label: its tooltip and where it connects.
+function diagramNodeLabel(svg, el) {
+  const id = el.getAttribute("data-node");
+  if (id == null || !svg.hasAttribute("data-diagram")) return "";
+  const name = (n) => svg.querySelector(`rect[data-node="${CSS.escape(n)}"]`)?.getAttribute("data-fx") || n;
+  const edges = [...svg.querySelectorAll("polyline[data-edge]")];
+  const from = edges.filter((e) => e.getAttribute("data-to") === id).map((e) => name(e.getAttribute("data-from")));
+  const to = edges.filter((e) => e.getAttribute("data-from") === id).map((e) => name(e.getAttribute("data-to")));
+  return [el.getAttribute("data-tip"), from.length && `from ${from.join(", ")}`, to.length && `to ${to.join(", ")}`].filter(Boolean).join(". ");
+}
+
+// The keyboard walk of a ::DIAGRAM: along the edges (→ out, ← in; ↓ / ↑ on
+// a top-to-bottom one), within a stage (↑/↓, ←/→), Home / End. Repeated
+// steps out of a node take its next connection in turn; a step back returns
+// along the edge it came by. The target announces the edge it was reached by.
+function diagramStep(svg, cur, key) {
+  const tb = svg.getAttribute("data-diagram") === "TB";
+  const nodes = markGrid(svg)[0] || [];
+  const byId = new Map(nodes.map((n) => [n.getAttribute("data-node"), n]));
+  const id = cur.getAttribute("data-node");
+  if (key === "Home") return [nodes[0]];
+  if (key === "End") return [nodes.at(-1)];
+  const [fwd, back, up, down] = tb ? ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"] : ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
+  if (key === up || key === down) {
+    const layer = nodes.filter((n) => n.getAttribute("data-layer") === cur.getAttribute("data-layer"));
+    return [layer[layer.indexOf(cur) + (key === down ? 1 : -1)]];
+  }
+  const out = key === fwd;
+  if (!out && key !== back) return [];
+  const [mine, other] = out ? ["data-from", "data-to"] : ["data-to", "data-from"];
+  const hops = [...svg.querySelectorAll("polyline[data-edge]")]
+    .filter((e) => e.getAttribute(mine) === id && e.getAttribute(other) !== id && byId.has(e.getAttribute(other)))
+    .map((e) => [byId.get(e.getAttribute(other)), e])
+    .sort((a, b) => +a[0].getAttribute("data-order") - +b[0].getAttribute("data-order"));
+  if (!hops.length) return [];
+  let i = 0;
+  if (!out && cur._dpCameFrom) i = Math.max(0, hops.findIndex((h) => h[0] === cur._dpCameFrom));
+  if (out) i = cur._dpNextOut = ((cur._dpNextOut ?? -1) + 1) % hops.length;
+  return hops[i];
+}
+
 function chartKey(e, svg, fig) {
   const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "Escape"];
   if (!keys.includes(e.key)) return;
   const grid = markGrid(svg);
   if (!grid.length) return;
   const cur = e.target;
+  if (cur !== svg && cur.hasAttribute?.("data-node") && !["Enter", " ", "Escape"].includes(e.key)) {
+    e.preventDefault();
+    e.stopPropagation();
+    const [to, edge] = diagramStep(svg, cur, e.key);
+    if (!to) return;
+    if (edge) {
+      to._dpVia = edge;
+      if (e.key !== (svg.getAttribute("data-diagram") === "TB" ? "ArrowUp" : "ArrowLeft")) to._dpCameFrom = cur;
+      to.setAttribute("aria-label", `${edge.getAttribute("data-tip") || edge.getAttribute("data-fx")}. ${diagramNodeLabel(svg, to)}`);
+    }
+    to.focus();
+    return;
+  }
   if (cur === svg) {
     if (e.key === "Escape") return;
     e.preventDefault();

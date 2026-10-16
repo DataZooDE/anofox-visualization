@@ -148,7 +148,9 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 /* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10) */
 @keyframes dp-flow{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow{animation:dp-flow 1.2s linear infinite}
-@media (prefers-reduced-motion: reduce){.panel svg .dp-flow{animation:none}}
+@keyframes dp-dots{to{stroke-dashoffset:-14}}
+.panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg .dp-flow.dp-dots{animation:none}}
 /* ::STORY: step controls under the chart, the caption + connector over it */
 .dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
 .dp-story-btn{font:inherit;font-size:.78rem;font-weight:600;line-height:1;padding:.38rem .62rem;border-radius:var(--ax-radius-sm);border:1px solid var(--ax-tool-border);background:var(--ax-btn2-bg);color:var(--ax-ink);cursor:pointer}

@@ -26,8 +26,9 @@ assert.ok(!metricRole({ roles: [[0, "DIAGRAM"], [1, "COMPACT"]] }));
 assert.deepEqual(metricRole({ roles: [[0, "COMPACT"], [1, "LABEL"]] }), [0, "COMPACT"]);
 
 const kinds = line(/^const CHART_KINDS = \[[\s\S]*?^\];/m);
-const { chartKind, chartMarks, markGrid, diagramTextHtml } = new Function(
-  `${kinds}\n${grab("chartKind")}\n${grab("chartMarks")}\n${grab("markGrid")}\n${grab("escapeHtml")}\n${grab("diagramTextHtml")}\nreturn { chartKind, chartMarks, markGrid, diagramTextHtml };`
+globalThis.CSS = { escape: (v) => String(v).replace(/["\\]/g, "\\$&") };
+const { chartKind, chartMarks, markGrid, diagramTextHtml, diagramNodeLabel, diagramStep } = new Function(
+  `${kinds}\n${grab("chartKind")}\n${grab("chartMarks")}\n${grab("markGrid")}\n${grab("escapeHtml")}\n${grab("diagramTextHtml")}\n${grab("diagramNodeLabel")}\n${grab("diagramStep")}\nreturn { chartKind, chartMarks, markGrid, diagramTextHtml, diagramNodeLabel, diagramStep };`
 )();
 assert.equal(chartKind([[0, "DIAGRAM", ""], [1, "LABEL", ""]]), "Diagram");
 
@@ -47,11 +48,15 @@ const stub = (tagName, attrs) => ({
 const svgOf = (svg) => {
   const els = [...svg.matchAll(/<(rect|polyline)( [^>]*)>/g)].map((m) => stub(m[1], attrsOf(m[2])));
   // what attachHover leaves: titled marks become .dp-hit with a data-tip
-  for (const e of els) if (e.attrs["data-node"] || e.attrs["data-edge"]) e.attrs["data-tip"] = "tip";
+  for (const e of els) if (e.attrs["data-node"] || e.attrs["data-edge"]) e.attrs["data-tip"] = e.attrs["data-node"] ? "tip" : e.attrs["data-fx"];
   const root = attrsOf(svg.slice(0, svg.indexOf(">")));
   return {
     hasAttribute: (k) => k in root,
     getAttribute: (k) => root[k] ?? null,
+    querySelector: (sel) => {
+      const m = sel.match(/^rect\[data-node="(.*)"\]$/);
+      return m ? els.find((e) => e.tagName === "rect" && e.attrs["data-node"] === m[1]) || null : null;
+    },
     querySelectorAll: (sel) =>
       sel === ".dp-hit"
         ? els.filter((e) => "data-tip" in e.attrs)
@@ -93,6 +98,50 @@ assert.match(html, /^<ol class="dp-diagram-steps" aria-label="Pipeline"><li>Inge
 assert.match(html, /<li>Monitor drift \(412, alarm\) → Calibrate<\/li><li>Calibrate \(37, warn\) → Build twin<\/li><\/ol>/);
 assert.match(html, /<table class="dp-dv" aria-label="Pipeline: connections">/);
 assert.equal((html.match(/<tr><td>/g) || []).length, 4);
+// The keyboard walk follows the connections and names the edge it took.
+const node = (sv, id) => markGrid(sv)[0].find((e) => e.attrs["data-node"] === id);
+const step = (sv, id, key) => (diagramStep(sv, node(sv, id), key)[0] || {}).attrs?.["data-node"];
+assert.equal(diagramNodeLabel(svg, node(svg, "build")), "tip. from Ingest, Calibrate. to Monitor drift");
+const [to, edge] = diagramStep(svg, node(svg, "ingest"), "ArrowRight");
+assert.equal(to.attrs["data-node"], "build");
+assert.equal(edge.attrs["data-tip"], "Ingest → Build twin");
+assert.equal(step(svg, "build", "ArrowRight"), "monitor");
+assert.equal(step(svg, "monitor", "ArrowLeft"), "build");
+assert.equal(step(svg, "build", "ArrowLeft"), "ingest", "back: the first input in reading order");
+node(svg, "build")._dpCameFrom = node(svg, "calibrate");
+assert.equal(step(svg, "build", "ArrowLeft"), "calibrate", "back the way it came");
+assert.equal(step(svg, "monitor", "Home"), "ingest");
+assert.equal(step(svg, "monitor", "End"), "calibrate");
+assert.equal(step(svg, "ingest", "ArrowLeft"), undefined, "no input: stays");
+// A fork: repeated → from one node takes its connections in turn; ↑/↓ within a stage.
+const fork = svgOf(
+  wasm.render_panel(
+    JSON.stringify([{ c0: "a", c1: null }, { c0: "b", c1: "a" }, { c0: "c", c1: "a" }]),
+    JSON.stringify([[0, "DIAGRAM"], [1, "UPSTREAM"]]),
+    400,
+    300,
+    "",
+    ""
+  )
+);
+assert.deepEqual(["ArrowRight", "ArrowRight", "ArrowRight"].map((k) => step(fork, "a", k)), ["b", "c", "b"]);
+assert.equal(step(fork, "b", "ArrowDown"), "c");
+assert.equal(step(fork, "c", "ArrowDown"), undefined);
+// Top to bottom: ↓ follows the connections, →/← move within a stage.
+const tb = svgOf(
+  wasm.render_panel(
+    JSON.stringify([{ c0: "a", c1: null, c2: "TB" }, { c0: "b", c1: "a", c2: "TB" }, { c0: "c", c1: "a", c2: "TB" }]),
+    JSON.stringify([[0, "DIAGRAM"], [1, "UPSTREAM"], [2, "DIRECTION"]]),
+    400,
+    300,
+    "",
+    ""
+  )
+);
+assert.equal(step(tb, "a", "ArrowDown"), "b");
+assert.equal(step(tb, "b", "ArrowRight"), "c");
+assert.equal(step(tb, "b", "ArrowUp"), "a");
+
 // A hostile label stays text.
 const evil = wasm.render_panel(JSON.stringify([{ c0: "a", c1: "<img src=x onerror=alert(1)>" }]), JSON.stringify([[0, "DIAGRAM"], [1, "LABEL"]]), 400, 200, "", "");
 assert.ok(!/<img/.test(diagramTextHtml(svgOf(evil), "x")));

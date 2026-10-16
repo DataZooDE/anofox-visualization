@@ -172,8 +172,42 @@ export function animKit(win) {
   //            the rest (forecast fan, median, points) grows forward from it
   //   none / fade — nothing here (the panel itself still fades in)
   // Above MANY marks the per-mark stagger becomes one clip reveal.
+  // A ::DIAGRAM (root data-diagram) enters stage by stage: each layer's
+  // nodes fade and settle in turn, every edge draws from its source once
+  // that node is in, then its arrowhead and label appear.
+  function enterDiagram(svg) {
+    const nodes = [...svg.querySelectorAll("rect[data-node]")];
+    const layer = new Map(nodes.map((n) => [n.getAttribute("data-node"), +n.getAttribute("data-layer") || 0]));
+    const step = Math.min(260, 1200 / (Math.max(0, ...layer.values()) + 1));
+    const NODE = 320;
+    const fade = (el, delay, dur, grow) => {
+      if (!can(el)) return;
+      if (grow) {
+        el.style.transformBox = "fill-box";
+        el.style.transformOrigin = "center";
+      }
+      el.animate([{ opacity: 0, transform: grow ? "scale(.9)" : "none" }, { opacity: 1, transform: "none" }], { duration: dur, delay, easing: EASE, fill: "backwards" });
+    };
+    const of = (id) => [...svg.querySelectorAll("[data-of]")].filter((g) => g.getAttribute("data-of") === id);
+    for (const n of nodes) {
+      const id = n.getAttribute("data-node");
+      for (const el of [n, ...of(id)]) fade(el, layer.get(id) * step, NODE, nodes.length <= MANY);
+    }
+    for (const pl of svg.querySelectorAll("polyline[data-edge]")) {
+      const from = layer.get(pl.getAttribute("data-from")) || 0;
+      const to = layer.get(pl.getAttribute("data-to")) || 0;
+      const delay = from * step + NODE * 0.6;
+      const dur = Math.max(step, Math.abs(to - from) * step);
+      if (pl.classList.contains("dp-flow")) fade(pl, delay, dur, false);
+      else drawLine(pl, delay, dur);
+      for (const el of svg.querySelectorAll("[data-from]:not(polyline)"))
+        if (el.getAttribute("data-from") === pl.getAttribute("data-from") && el.getAttribute("data-to") === pl.getAttribute("data-to")) fade(el, delay + dur, 200, false);
+    }
+  }
+
   function enter(svg, mode) {
     if (!svg || still() || !mode || mode === "none" || mode === "fade") return;
+    if (svg.hasAttribute("data-diagram")) return enterDiagram(svg);
     const P = plotOf(svg);
     const lines = linesOf(svg);
     const flowing = lines.filter((l) => l.classList.contains("dp-flow"));
@@ -206,7 +240,8 @@ export function animKit(win) {
   // another (keyboard focus overrides all in CSS).
   const dimmable = (svg) => {
     const set = new Set(marksOf(svg));
-    svg.querySelectorAll("[data-series], .dp-hit").forEach((e) => set.add(e));
+    // a ::DIAGRAM's box contents (data-of) and arrowheads / edge labels (data-from)
+    svg.querySelectorAll("[data-series], .dp-hit, [data-of], [data-from]").forEach((e) => set.add(e));
     return set;
   };
   function emph(svg, layer, fn) {
@@ -319,8 +354,16 @@ export function animKit(win) {
 
     let k = Math.max(0, Math.min(steps.length, start | 0));
     let timer = null;
+    const diagram = svg.hasAttribute("data-diagram");
     const lit = (el) => {
       const st = steps[k - 1];
+      // a ::DIAGRAM step lights its node and every edge touching it
+      if (diagram) {
+        const id = el.getAttribute("data-node") ?? el.getAttribute("data-of");
+        if (id != null) return id === st.k;
+        const from = el.getAttribute("data-from");
+        return from == null ? null : from === st.k || el.getAttribute("data-to") === st.k;
+      }
       if (by === "series") {
         const s = el.getAttribute("data-series");
         return s == null ? null : s === st.k;

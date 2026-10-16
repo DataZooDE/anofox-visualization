@@ -33,7 +33,7 @@ pub const MAX_EDGES: usize = 300;
 /// The `::DIRECTION` values.
 pub const DIRECTIONS: &[&str] = &["LR", "TB"];
 /// The edge `style` values of `::EDGES`.
-pub const EDGE_STYLES: &[&str] = &["solid", "dashed", "flow"];
+pub const EDGE_STYLES: &[&str] = &["solid", "dashed", "flow", "flow-dots"];
 
 /// Layout direction: layers run left to right or top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +58,23 @@ pub enum EdgeStyle {
     /// Moving dashes in the browser (`class="dp-flow"`), still dashes in
     /// static output.
     Flow,
+    /// Moving dots (`'flow-dots'`): dots travelling along the edge, still
+    /// dots in static output.
+    Dots,
+}
+
+impl EdgeStyle {
+    /// A style word (`solid`, `dashed`, `flow`, `flow-dots`); `None` for an
+    /// unknown one.
+    fn parse(s: &str) -> Option<EdgeStyle> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "" | "solid" => EdgeStyle::Solid,
+            "dashed" => EdgeStyle::Dashed,
+            "flow" => EdgeStyle::Flow,
+            "flow-dots" | "dots" => EdgeStyle::Dots,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +88,8 @@ pub struct Node {
     pub status: Option<Status>,
     /// Palette slot of the node's `::CATEGORY` (first-appearance order).
     pub category: Option<usize>,
+    /// The node's `::STORY` caption: a story step that lights it up.
+    pub story: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +114,8 @@ pub struct Diagram {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub dir: Dir,
+    /// The `::ANIMATE` mode, when it is one the browser plays.
+    pub animate: Option<String>,
     /// Nodes / edges in the data before the [`MAX_NODES`] / [`MAX_EDGES`] cut.
     pub total_nodes: usize,
     pub total_edges: usize,
@@ -181,6 +202,8 @@ impl Diagram {
         let category = col(Role::Category);
         let upstream = col(Role::Upstream);
         let edges_col = col(Role::Edges);
+        let story = col(Role::Story);
+        let line_style = col(Role::LineStyle);
         let first_text = |r: Role| col(r).and_then(|c| c.values.iter().find_map(text));
         let mut problems = Vec::new();
         let mut problem = |code, message: String| problems.push(Problem { code, message });
@@ -241,6 +264,7 @@ impl Diagram {
                 badge,
                 status,
                 category,
+                story: cell(story).and_then(text),
             });
             rows.push(i);
         }
@@ -297,20 +321,15 @@ impl Diagram {
                             });
                             let label =
                                 field(o, &["label"]).and_then(json_id).filter(|l| !l.is_empty());
-                            let style = match field(o, &["style"]).and_then(|v| v.as_str()) {
-                                None => EdgeStyle::Solid,
-                                Some(s) => match s.trim().to_ascii_lowercase().as_str() {
-                                    "" | "solid" => EdgeStyle::Solid,
-                                    "dashed" => EdgeStyle::Dashed,
-                                    "flow" => EdgeStyle::Flow,
-                                    other => {
-                                        if !bad_styles.iter().any(|b| b == other) {
-                                            bad_styles.push(other.to_string());
-                                        }
-                                        EdgeStyle::Solid
+                            let style = field(o, &["style"])
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| {
+                                    let st = EdgeStyle::parse(s);
+                                    if st.is_none() && !bad_styles.iter().any(|b| b == s) {
+                                        bad_styles.push(s.to_string());
                                     }
-                                },
-                            };
+                                    st
+                                });
                             raw.push((from, to, value.filter(|v| v.is_finite()), label, style));
                         }
                         if missing > 0 {
@@ -330,6 +349,19 @@ impl Diagram {
                 }
             }
         }
+        // ::LINESTYLE per row: the default style of the edges into the row's
+        // node (a constant column styles every edge)
+        let row_style: Vec<Option<EdgeStyle>> = rows
+            .iter()
+            .map(|&r| {
+                let s = line_style.and_then(|c| c.values.get(r)).and_then(text)?;
+                let st = EdgeStyle::parse(&s);
+                if st.is_none() && !bad_styles.contains(&s) {
+                    bad_styles.push(s);
+                }
+                st
+            })
+            .collect();
         if !bad_styles.is_empty() {
             problem(
                 "diagram/bad-style",
@@ -343,12 +375,13 @@ impl Diagram {
         if let Some(up) = upstream {
             for (n, &row) in rows.iter().enumerate() {
                 for from in up.values.get(row).map(upstream_ids).unwrap_or_default() {
-                    raw.push((from, nodes[n].id.clone(), None, None, EdgeStyle::Solid));
+                    raw.push((from, nodes[n].id.clone(), None, None, None));
                 }
             }
         }
 
         let mut edges: Vec<Edge> = Vec::new();
+        let mut styles: Vec<Option<EdgeStyle>> = Vec::new(); // as given in ::EDGES
         let mut unknown: Vec<String> = Vec::new();
         let mut total_edges = 0usize;
         for (from, to, value, label, style) in raw {
@@ -364,13 +397,12 @@ impl Diagram {
                 }
                 continue;
             };
-            match edges.iter_mut().find(|e| e.from == f && e.to == t) {
-                Some(e) => {
+            match edges.iter().position(|e| e.from == f && e.to == t) {
+                Some(k) => {
+                    let e = &mut edges[k];
                     e.value = e.value.or(value);
                     e.label = e.label.take().or(label);
-                    if e.style == EdgeStyle::Solid {
-                        e.style = style;
-                    }
+                    styles[k] = styles[k].or(style);
                 }
                 None => {
                     total_edges += 1;
@@ -381,14 +413,16 @@ impl Diagram {
                             value,
                             fvalue: None,
                             label,
-                            style,
+                            style: EdgeStyle::Solid,
                         });
+                        styles.push(style);
                     }
                 }
             }
         }
-        for e in &mut edges {
+        for (e, st) in edges.iter_mut().zip(styles) {
             e.fvalue = e.value.map(|v| format_number_l(v, fmt, locale));
+            e.style = st.or(row_style[e.to]).unwrap_or(EdgeStyle::Solid);
         }
         if !unknown.is_empty() {
             problem(
@@ -407,10 +441,14 @@ impl Diagram {
                 ),
             );
         }
+        let animate = first_text(Role::Animate)
+            .map(|a| a.to_ascii_lowercase())
+            .filter(|a| crate::ANIMATE_MODES.contains(&a.as_str()));
         Some(Diagram {
             nodes,
             edges,
             dir,
+            animate,
             total_nodes,
             total_edges,
             problems,
@@ -620,7 +658,13 @@ fn box_of(n: &Node) -> Box_ {
 /// A DAG edge: `(u, v, edge index, reversed)`.
 type DagEdge = (usize, usize, usize, bool);
 /// An edge as read: `(from id, to id, value, label, style)`.
-type RawEdge = (String, String, Option<f64>, Option<String>, EdgeStyle);
+type RawEdge = (
+    String,
+    String,
+    Option<f64>,
+    Option<String>,
+    Option<EdgeStyle>,
+);
 
 /// DAG edges `(u, v, edge index, reversed)` — the cycle-free orientation:
 /// a DFS in row order reverses every edge that closes a cycle — and the
@@ -1422,13 +1466,14 @@ pub(crate) fn render(
         let last = pts.len() - 1;
         pts[last] = base;
         let colour = match e.style {
-            EdgeStyle::Flow => hex(t.color(0)),
+            EdgeStyle::Flow | EdgeStyle::Dots => hex(t.color(0)),
             _ => muted.clone(),
         };
-        let dash = match e.style {
-            EdgeStyle::Solid => "",
-            EdgeStyle::Dashed => " stroke-dasharray=\"6 4\"",
-            EdgeStyle::Flow => " stroke-dasharray=\"6 4\" class=\"dp-flow\"",
+        let (width, dash) = match e.style {
+            EdgeStyle::Solid => ("1.6", ""),
+            EdgeStyle::Dashed => ("1.6", " stroke-dasharray=\"6 4\""),
+            EdgeStyle::Flow => ("1.6", " stroke-dasharray=\"6 4\" class=\"dp-flow\""),
+            EdgeStyle::Dots => ("3", " stroke-dasharray=\"0 7\" class=\"dp-flow dp-dots\""),
         };
         let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
         let name = format!("{} → {}", a.label, b.label);
@@ -1447,7 +1492,7 @@ pub(crate) fn render(
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"1.6\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{}><title>{}</title></polyline>",
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{}><title>{}</title></polyline>",
             pts_attr(&pts),
             esc(&a.id),
             esc(&b.id),
@@ -1458,8 +1503,9 @@ pub(crate) fn render(
             esc(&tip)
         ));
         let (px, py) = (-uy, ux);
+        let ends = format!(" data-from=\"{}\" data-to=\"{}\"", esc(&a.id), esc(&b.id));
         out.push_str(&format!(
-            "<polygon points=\"{},{} {},{} {},{}\" fill=\"{colour}\" aria-hidden=\"true\"/>",
+            "<polygon points=\"{},{} {},{} {},{}\" fill=\"{colour}\"{ends} aria-hidden=\"true\"/>",
             f1(tx_),
             f1(ty_),
             f1(base.0 + px * 4.0),
@@ -1470,7 +1516,7 @@ pub(crate) fn render(
         if let Some(l) = &e.label {
             let (mx, my) = midpoint(&p.edges[k]);
             out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"11\" fill=\"{muted}\" stroke=\"{card}\" stroke-width=\"3\" paint-order=\"stroke\" pointer-events=\"none\" aria-hidden=\"true\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"11\" fill=\"{muted}\" stroke=\"{card}\" stroke-width=\"3\" paint-order=\"stroke\" pointer-events=\"none\"{ends} aria-hidden=\"true\">{}</text>",
                 f1(mx),
                 f1(my - 4.0),
                 esc(l)
@@ -1533,9 +1579,14 @@ pub(crate) fn render(
             esc(&tip),
             id = esc(&nd.id),
         ));
+        // what the box shows: dims / lights with its node (`data-of`)
+        out.push_str(&format!(
+            "<g data-of=\"{}\" pointer-events=\"none\" aria-hidden=\"true\">",
+            esc(&nd.id)
+        ));
         if let Some(a) = accent {
             out.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"3\" height=\"{}\" rx=\"1.5\" fill=\"{}\" pointer-events=\"none\" aria-hidden=\"true\"/>",
+                "<rect x=\"{}\" y=\"{}\" width=\"3\" height=\"{}\" rx=\"1.5\" fill=\"{}\"/>",
                 f1(x + 1.5),
                 f1(y + 6.0),
                 f1((pn.h - 12.0).max(4.0)),
@@ -1545,7 +1596,7 @@ pub(crate) fn render(
         let mut ty_ = y + BOX_PAD_Y + 12.0;
         for line in &pn.lines {
             out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{LABEL_PX}\" font-weight=\"600\" fill=\"{}\" pointer-events=\"none\" aria-hidden=\"true\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{LABEL_PX}\" font-weight=\"600\" fill=\"{}\">{}</text>",
                 f1(pn.cx),
                 f1(ty_),
                 hex(t.colors.heading),
@@ -1555,7 +1606,7 @@ pub(crate) fn render(
         }
         if let Some(fv) = &nd.fvalue {
             out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{VALUE_PX}\" font-weight=\"700\" fill=\"{ink}\" pointer-events=\"none\" aria-hidden=\"true\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{VALUE_PX}\" font-weight=\"700\" fill=\"{ink}\">{}</text>",
                 f1(pn.cx),
                 f1(ty_),
                 esc(fv)
@@ -1570,7 +1621,7 @@ pub(crate) fn render(
                 .unwrap_or_else(|| muted.clone());
             let (bx, by) = (pn.cx - bw / 2.0, ty_ - 9.0);
             out.push_str(&format!(
-                "<g pointer-events=\"none\" aria-hidden=\"true\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"16\" rx=\"8\" fill=\"none\" stroke=\"{dot}\" stroke-width=\"1\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\" fill=\"{dot}\"/><text x=\"{}\" y=\"{}\" font-size=\"{BADGE_PX}\" fill=\"{ink}\">{}</text></g>",
+                "<g><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"16\" rx=\"8\" fill=\"none\" stroke=\"{dot}\" stroke-width=\"1\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\" fill=\"{dot}\"/><text x=\"{}\" y=\"{}\" font-size=\"{BADGE_PX}\" fill=\"{ink}\">{}</text></g>",
                 f1(bx),
                 f1(by),
                 f1(bw),
@@ -1581,6 +1632,7 @@ pub(crate) fn render(
                 esc(b)
             ));
         }
+        out.push_str("</g>");
     }
     out.push_str("</g></g>");
     if let Some(nt) = note {
@@ -1593,7 +1645,20 @@ pub(crate) fn render(
         ));
     }
     out.push_str("</svg>");
-    let out = with_root_attr(out, "data-summary", &summary);
+    let mut out = with_root_attr(out, "data-summary", &summary);
+    // motion (web/anim.js): steps keyed by node id, the entrance mode
+    let steps: Vec<J> = d
+        .nodes
+        .iter()
+        .filter_map(|n| Some(serde_json::json!({ "k": n.id, "t": n.story.as_ref()? })))
+        .collect();
+    if !steps.is_empty() {
+        out = with_root_attr(out, "data-story-by", "x");
+        out = with_root_attr(out, "data-story", &J::Array(steps).to_string());
+    }
+    if let Some(a) = &d.animate {
+        out = with_root_attr(out, "data-animate", a);
+    }
     with_root_attr(out, "data-diagram", d.dir.as_str())
 }
 
@@ -1914,6 +1979,92 @@ mod tests {
         assert_eq!(badge_status("alarm"), Some(Status::Bad));
         assert_eq!(badge_status("Fehler"), Some(Status::Bad));
         assert_eq!(badge_status("rerun"), None);
+    }
+
+    /// M2 motion: story steps keyed by node id, the entrance mode, edge
+    /// styles from ::EDGES over a per-row ::LINESTYLE, and everything a step
+    /// dims tagged with the node (`data-of`) or edge (`data-from`) it belongs to.
+    #[test]
+    fn motion_attributes() {
+        let mut cols = pipeline();
+        let story = |v: &[Option<&str>]| v.iter().map(|c| c.map_or(Value::Na, s)).collect();
+        cols.push(Column::new(
+            "c5",
+            Role::Story,
+            story(&[
+                Some("Records arrive"),
+                None,
+                None,
+                Some("Twins drift"),
+                None,
+                None,
+                None,
+            ]),
+        ));
+        cols.push(Column::new("c6", Role::Animate, vec![s("auto"); 7]));
+        cols.push(Column::new(
+            "c7",
+            Role::LineStyle,
+            story(&[
+                None,
+                Some("flow-dots"),
+                None,
+                None,
+                None,
+                None,
+                Some("wobbly"),
+            ]),
+        ));
+        cols.push(Column::new(
+            "c8",
+            Role::Edges,
+            vec![
+                s(r#"[{"from":"calibrate","to":"build","style":"dashed"}]"#),
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+            ],
+        ));
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        let style = |f: &str, t: &str| {
+            d.edges
+                .iter()
+                .find(|e| d.nodes[e.from].id == f && d.nodes[e.to].id == t)
+                .unwrap()
+                .style
+        };
+        assert_eq!(
+            style("ingest", "build"),
+            EdgeStyle::Dots,
+            "the row's ::LINESTYLE"
+        );
+        assert_eq!(
+            style("calibrate", "build"),
+            EdgeStyle::Dashed,
+            "::EDGES wins"
+        );
+        assert_eq!(style("build", "step"), EdgeStyle::Solid);
+        let codes: Vec<&str> = d.problems.iter().map(|p| p.code).collect();
+        assert_eq!(codes, ["diagram/bad-style"]);
+
+        let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        let root = &svg[..svg.find('>').unwrap()];
+        assert!(root.contains(
+            r#"data-story="[{&quot;k&quot;:&quot;ingest&quot;,&quot;t&quot;:&quot;Records arrive&quot;},{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]""#
+        ));
+        assert!(root.contains(r#"data-story-by="x""#) && root.contains(r#"data-animate="auto""#));
+        assert!(svg.contains(
+            r#"stroke-dasharray="0 7" class="dp-flow dp-dots" data-edge="ingest&gt;build""#
+        ));
+        assert!(svg.contains(r#"<g data-of="build" pointer-events="none" aria-hidden="true">"#));
+        assert!(svg.contains(r#"data-from="ingest" data-to="build" aria-hidden="true"/>"#));
+        // no story, no animate: no motion attributes
+        let plain = render_with(&pipeline(), 900, 320, &RenderOptions::default()).unwrap();
+        assert!(!plain.contains("data-story") && !plain.contains("data-animate"));
     }
 
     #[test]
