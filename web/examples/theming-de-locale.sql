@@ -85,14 +85,9 @@ FROM nl_umsatz WHERE nl_in(region, warengruppe) AND nl_akt(tag) GROUP BY ALL ORD
 
 SELECT 12::COL;
 SELECT 300::HEIGHT;
-SELECT monat ::XAXIS, wochentag ::YAXIS, round(avg(ums) / 1000) ::HEATMAP, ''::DATALABELS,
-       'Ø Tagesumsatz in Tsd. € nach Wochentag und Monat — samstags der stärkste Tag, sonntags geschlossen'::TITLE
-FROM (SELECT tag, sum(umsatz) AS ums,
-             ['Jan.','Feb.','März','Apr.','Mai','Juni','Juli','Aug.','Sep.'][month(tag)] AS monat,
-             ['Mo','Di','Mi','Do','Fr','Sa','So'][isodow(tag)] AS wochentag,
-             month(tag) AS m, isodow(tag) AS wd
-      FROM nl_umsatz WHERE nl_in(region, warengruppe) AND nl_akt(tag) AND isodow(tag) < 7 GROUP BY tag)
-GROUP BY monat, wochentag ORDER BY any_value(m), any_value(wd);
+SELECT tag ::XAXIS, round(sum(umsatz) / 1000, 1) ::CALENDAR, ' Tsd. €'::YFORMAT,
+       'Tagesumsatz in Tsd. € — samstags am stärksten (sonntags geschlossen: leer)'::TITLE
+FROM nl_umsatz WHERE nl_in(region, warengruppe) AND nl_akt(tag) AND isodow(tag) < 7 GROUP BY tag ORDER BY tag;
 
 -- ── 2 · Filialen ─────────────────────────────────────────────────────────────
 SELECT 'Filialen'::TAB;

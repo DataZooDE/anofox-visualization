@@ -425,6 +425,12 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
         ..Default::default()
     };
     th.panel_grid_minor = ggplot_rs::theme::ElementLine::blank();
+    // a colourbar (heatmap, calendar) framed in the quiet card line
+    th.legend_bar_border = Some(ggplot_rs::theme::ElementLine {
+        color: o.theme.colors.line,
+        width: 0.6,
+        ..Default::default()
+    });
     th
 }
 
@@ -1146,7 +1152,7 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
         return svg;
     }
     let fmt = value_fmt(cols, kind, &value.values);
-    let xfmt = role_str(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
+    let xfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
     let attr = |tag: &str, name: &str| -> Option<String> {
         let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
         Some(tag[k..k + tag[k..].find('"')?].to_string())
@@ -1405,6 +1411,17 @@ fn role_str(cols: &[Column], role: Role) -> Option<String> {
     find_role(cols, role).and_then(|c| {
         c.values.iter().find_map(|v| match v {
             Value::Str(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        })
+    })
+}
+
+/// A format spec (`::YFORMAT` / `::XFORMAT`) as written: a leading space is
+/// meaningful (`' kg'` = a suffix), so only an all-blank value counts as unset.
+fn role_fmt(cols: &[Column], role: Role) -> Option<String> {
+    find_role(cols, role).and_then(|c| {
+        c.values.iter().find_map(|v| match v {
+            Value::Str(s) if !s.trim().is_empty() => Some(s.trim_end().to_string()),
             _ => None,
         })
     })
@@ -2425,7 +2442,7 @@ fn cartesian(
     // percent kinds), transform (`::YSCALE`) and — for a dodged discrete x —
     // the level breaks/labels.
     use ggplot_rs::scale::continuous::ScaleContinuous;
-    let y_fmt = role_str(cols, Role::YFormat).and_then(|s| axis_formatter(&s, &o.locale));
+    let y_fmt = role_fmt(cols, Role::YFormat).and_then(|s| axis_formatter(&s, &o.locale));
     let y_fmt = if percent {
         let f: Box<dyn Fn(f64) -> String + Send + Sync> = if kind == Kind::LinePercent {
             percent_axis(&value.values)
@@ -2464,7 +2481,7 @@ fn cartesian(
                 .with_labels(d.labels.clone()),
         );
     } else if !x_discrete {
-        let x_fmt = role_str(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
+        let x_fmt = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
@@ -2890,7 +2907,7 @@ pub(crate) fn value_fmt(cols: &[Column], kind: Kind, values: &[Value]) -> format
         Kind::LinePercent => return format::ValueFmt::Percent,
         _ => {}
     }
-    role_str(cols, Role::YFormat)
+    role_fmt(cols, Role::YFormat)
         .map(|s| format::ValueFmt::parse(&s))
         .unwrap_or(format::ValueFmt::Plain)
 }
@@ -3127,6 +3144,12 @@ fn render_calendar(
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
     th.legend_key.color = Some(o.theme.colors.card);
     th.legend_key_width = 9.0;
+    // the month outlines in the theme's muted ink (light and dark)
+    th.calendar_month_border = ggplot_rs::theme::ElementLine {
+        color: o.theme.colors.muted,
+        width: 1.1,
+        ..Default::default()
+    };
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").fill("fill").label("label"))
         .geom_calendar_with(
@@ -3814,7 +3837,12 @@ fn render_pie(
     ];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y").fill("cat").label("label"))
-        .geom_col_with(card_col(o))
+        // full-width slices + no discrete padding: a solid pie (a donut keeps
+        // its `inner_radius` hole)
+        .geom_col_with(GeomCol {
+            width: 1.0,
+            ..card_col(o)
+        })
         .position(PositionStack)
         .scale_fill(dz_scale(o, Aesthetic::Fill, category))
         // No y-axis padding, so the stack maps to a full 360° (closes the pie).
@@ -3824,7 +3852,8 @@ fn render_pie(
         .coord_polar_with(
             ggplot_rs::coord::polar::CoordPolar::new()
                 .theta("y")
-                .inner_radius(inner),
+                .inner_radius(inner)
+                .expand(false),
         )
         .house_void(o)
         .legend_position(ggplot_rs::theme::LegendPosition::Top);

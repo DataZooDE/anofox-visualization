@@ -1150,3 +1150,16 @@ fn bar_line_combo_line_is_visible() {
         "line drawn above the bars"
     );
 }
+
+// ── a ::YFORMAT starting with a space is a suffix (`' kg'` → "12 kg"), on the
+// axis and in tooltips — the spec must reach the formatter untrimmed ──
+#[test]
+fn yformat_leading_space_is_a_suffix() {
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W2"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[12.0, 30.0])),
+        Column::new("f", Role::YFormat, strs(&[" kg", " kg"])),
+    ]);
+    assert!(s.contains("12 kg"), "suffix in the tooltip value: {s}");
+    assert!(!s.contains(">kg"), "no unit before the number: {s}");
+}
