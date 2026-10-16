@@ -103,3 +103,42 @@ fn paged_requests_run_on_duckdb() {
     let c = run(r#"{"profile":["id"],"filters":[{"col":"id","op":"eq","value":"3"}]}"#).unwrap();
     assert_eq!(c[0]["k"], 0);
 }
+
+/// Text that merely reads as a huge number — an md5 like `1e99…` — must not
+/// turn the stats / profile into ±inf (bare `Infinity` is not JSON).
+#[test]
+fn stats_ignore_text_that_reads_as_infinity() {
+    let base = "SELECT * FROM (VALUES ('12e45678901234567890123456789012', 1), \
+                ('9e999', 2), ('nan', 3), ('inf', 4), ('5', 5)) t(h, k)";
+    let page = |j: &str| {
+        let p = parse_page(&serde_json::from_str(j).unwrap()).unwrap();
+        duck(&page_sql_inline(base, &p))
+    };
+    let Some(out) = page(r#"{"stats":["h","k"]}"#) else {
+        eprintln!("skipped: no duckdb CLI");
+        return;
+    };
+    let s: serde_json::Value = serde_json::from_str(&out).expect("stats are valid JSON");
+    let s = &s[0];
+    assert_eq!(s["n0"], 5);
+    // only "5" is a finite number
+    assert_eq!(
+        (s["s0"].as_f64(), s["lo0"].as_f64(), s["hi0"].as_f64()),
+        (Some(5.0), Some(5.0), Some(5.0))
+    );
+    assert_eq!(s["s1"].as_f64(), Some(15.0));
+    let out = page(r#"{"profile":["h"]}"#).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("profile is valid JSON");
+    let hist: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["t"] == "h")
+        .collect();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0]["n"], 1);
+    // a numeric filter skips them too
+    let out = page(r#"{"count":true,"filters":[{"col":"h","op":"gt","value":0}]}"#).unwrap();
+    let n: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(n[0]["n"], 1);
+}

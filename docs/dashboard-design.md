@@ -145,9 +145,13 @@ well placed." All **[guide]** unless noted.
   doesn't blank the sector panels.
 
 **Serving**
-- ❌ **Don't use `::PAGED` in a *locked-served* dashboard** — the allow-list
-  rejects its dynamic LIMIT/OFFSET queries ("query not permitted"). `::TABLE`
-  paginates client-side and works.
+- ✅ **`::PAGED` works in a locked-served dashboard** (`anofox_serve_dashboards`):
+  the client sends only the page, sort and filter values; the server builds the
+  LIMIT/OFFSET, count, statistics and distinct-value queries itself and binds
+  the values as parameters. Results are cached per server, and fast paging or
+  scrolling cancels the superseded queries. The static render (`serve
+  --dashboards`) has no client data API: a `::PAGED` table there is one static
+  render under `--max-rows`, so prefer a top-N or an aggregate.
 
 The interactive, cross-filtered reference that applies all of the above:
 `examples/sp500-dashboard/sp500.sql`.
