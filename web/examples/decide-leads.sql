@@ -58,7 +58,7 @@ SELECT 12::COL;
 SELECT ('**Asked by** the head of sales development, every Monday. **The decision:** which inbound messages go to the sales team, in which order the reps call them, and what to open the call with. Today a coordinator sorts the shared inbox by hand and the reps call the sales enquiries first come, first served.')::MARKDOWN;
 
 SELECT 'Routing and call list'::GROUP;
-SELECT model ::DROPDOWN, 'Decision model'::LABEL FROM (SELECT DISTINCT model FROM ld_scored) ORDER BY model DESC;
+SELECT model ::BUTTONS, 'Decision model'::LABEL FROM (SELECT DISTINCT model FROM ld_scored) ORDER BY model DESC;
 SELECT 25 AS sales_at_pct ::NUMBER, 'To sales at P(sales) ≥ (%)'::LABEL;
 SELECT 10 AS calls_per_week ::NUMBER, 'Calls per week (rep capacity)'::LABEL;
 SELECT 3 AS w_budget ::NUMBER, 'Weight: budget approved'::LABEL;
@@ -66,17 +66,18 @@ SELECT 1 AS w_authority ::NUMBER, 'Weight: decision maker'::LABEL;
 SELECT 3 AS w_timeline ::NUMBER, 'Weight: decides this quarter'::LABEL;
 SELECT 1::ENDGROUP;
 
-SELECT 'Six weeks of calls at these settings (arrow: change from today''s first come, first served)'::GROUP;
+SELECT 'Six weeks of calls at these settings'::GROUP;
 SELECT count(*) FILTER (WHERE call_rank <= ld_cap() AND converted)::METRIC,
-       count(*) FILTER (WHERE inbox_rank <= ld_cap() AND converted)::DELTA,
+       count(*) FILTER (WHERE inbox_rank <= ld_cap() AND converted)::DELTA, 'both'::DELTA_FORMAT, 'vs first come, first served'::DELTA_LABEL,
        ('opportunities from ' || 6 * ld_cap() || ' calls')::LABEL
 FROM ld_now();
 SELECT sum(deal_value_eur) FILTER (WHERE call_rank <= ld_cap() AND converted)::METRIC,
-       sum(deal_value_eur) FILTER (WHERE inbox_rank <= ld_cap() AND converted)::DELTA,
+       sum(deal_value_eur) FILTER (WHERE inbox_rank <= ld_cap() AND converted)::DELTA, 'vs first come, first served'::DELTA_LABEL,
        'pipeline from those calls (€ a year)'::LABEL
 FROM ld_now();
 SELECT round(100 * count(*) FILTER (WHERE call_rank <= ld_cap() AND converted) / nullif(count(*) FILTER (WHERE call_rank <= ld_cap()), 0), 1)::PERCENT,
        round(100 * count(*) FILTER (WHERE inbox_rank <= ld_cap() AND converted) / nullif(count(*) FILTER (WHERE inbox_rank <= ld_cap()), 0), 1)::DELTA,
+       'abs'::DELTA_FORMAT, 'vs first come, first served'::DELTA_LABEL,
        'of calls become an opportunity'::LABEL
 FROM ld_now();
 SELECT round(100 * count(*) FILTER (WHERE to_sales AND team = 'sales') / count(*) FILTER (WHERE team = 'sales'), 1)::PERCENT,
@@ -97,20 +98,30 @@ g AS (
     SELECT k.k, 'Lead score (model)' AS ranking, count(*) FILTER (WHERE l.call_rank <= k.k AND l.converted) AS opps FROM k, ld_now() l GROUP BY k.k
     UNION ALL SELECT k.k, 'Today: first come, first served', count(*) FILTER (WHERE l.inbox_rank <= k.k AND l.converted) FROM k, ld_now() l GROUP BY k.k
     UNION ALL SELECT k.k, 'Upper bound: hindsight', sum(least(k.k, w.n)) FROM k, (SELECT week, count(*) FILTER (WHERE converted) AS n FROM ld_now() GROUP BY week) w GROUP BY k.k)
-SELECT k ::XAXIS, ranking ::CATEGORY, opps ::LINECHART, ld_cap() ::XLINE,
+SELECT k ::XAXIS, ranking ::CATEGORY, opps ::LINECHART, ld_cap() ::XLINE, 'tween'::TRANSITION,
        ('Opportunities in six weeks by calls a week — at ' || ld_cap() || ' calls the score finds '
         || (SELECT opps FROM g WHERE k = ld_cap() AND ranking LIKE 'Lead%') || ', arrival order '
         || (SELECT opps FROM g WHERE k = ld_cap() AND ranking LIKE 'Today%') || ' (your capacity dashed)')::TITLE
 FROM g ORDER BY k, ranking;
 
-SELECT 6::COL;
+SELECT 4::COL;
+SELECT 320::HEIGHT;
+SELECT stage ::XAXIS, n ::FUNNEL, 'tween'::TRANSITION,
+       'Six weeks from inbox to opportunity, at your settings'::TITLE
+FROM (SELECT 1 AS i, 'Inbound messages' AS stage, count(*) AS n FROM ld_now()
+      UNION ALL SELECT 2, 'Routed to sales', count(*) FILTER (WHERE to_sales) FROM ld_now()
+      UNION ALL SELECT 3, 'Called (' || ld_cap() || ' a week)', count(*) FILTER (WHERE call_rank <= ld_cap()) FROM ld_now()
+      UNION ALL SELECT 4, 'Became an opportunity', count(*) FILTER (WHERE call_rank <= ld_cap() AND converted) FROM ld_now())
+ORDER BY i;
+
+SELECT 4::COL;
 SELECT 320::HEIGHT;
 WITH b AS (SELECT least(floor(score / 20), 4)::INTEGER AS band, avg(converted::INTEGER) AS rate FROM ld_now() WHERE to_sales GROUP BY ALL)
-SELECT 20 * band || '–' || 20 * band + 19 ::XAXIS, round(100 * rate, 1) ::BARCHART, 'percent'::YFORMAT,
+SELECT 20 * band || '–' || 20 * band + 19 ::XAXIS, round(100 * rate, 1) ::BARCHART, 'percent'::YFORMAT, 'tween'::TRANSITION,
        'Deal rate by lead score (sales queue) — a higher score, more deals'::TITLE
 FROM b ORDER BY band;
 
-SELECT 6::COL;
+SELECT 4::COL;
 SELECT 320::HEIGHT;
 WITH m AS (
     SELECT l.model AS ranking, count(*) FILTER (WHERE l.call_rank <= ld_cap() AND l.converted) AS opps
@@ -124,7 +135,12 @@ FROM m ORDER BY opps DESC;
 SELECT 'Reasons'::TAB;
 
 SELECT 12::COL;
-SELECT 'The score is built from three yes/no questions the model answers about each message — *"A budget has been approved."*, *"The writer is a director, head or managing director."*, *"They want to decide this quarter or within weeks."* — weighted with the weights above. Each answer is checked against what the reps found out on the call. A reason the model cannot read reliably should get a low weight.'::MARKDOWN,
+SELECT 'The score is built from three yes/no questions the model answers about each message — *"A budget has been approved."* ($p_b$), *"The writer is a director, head or managing director."* ($p_a$), *"They want to decide this quarter or within weeks."* ($p_t$) — weighted with the weights above:
+
+$$\text{score} = 100 \cdot \frac{ {{wb}}\,p_b + {{wa}}\,p_a + {{wt}}\,p_t }{ {{wb}} + {{wa}} + {{wt}} }$$
+
+Each answer is checked against what the reps found out on the call. A reason the model cannot read reliably should get a low weight.'::MARKDOWN,
+       getvariable('w_budget') AS wb, getvariable('w_authority') AS wa, getvariable('w_timeline') AS wt,
        'What the reasons are'::TITLE;
 
 SELECT 6::COL;
