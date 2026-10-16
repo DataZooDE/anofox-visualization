@@ -160,7 +160,7 @@ terminal.
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
-| `::TRACK` | `::STRIP_BELOW`, `::LANE` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
+| `::TRACK` | `::STRIP_BELOW`, `::STRIP_UNDER` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
 | `::HEADER_IMAGE` | `::HEADERIMAGE` | chrome | banner image URL |
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |

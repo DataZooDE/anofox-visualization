@@ -304,7 +304,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
-    e("TRACK", &["STRIP_BELOW", "LANE"], R::Track, "layout", true,
+    e("TRACK", &["STRIP_BELOW", "STRIP_UNDER"], R::Track, "layout", true,
       "a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar"),
     // ── chrome ─────────────────────────────────────────────────────────────
     e("RELOAD", &["REFRESH"], R::Reload, "chrome", false, "auto-refresh interval (seconds)"),
