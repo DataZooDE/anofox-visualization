@@ -517,6 +517,56 @@ required columns, non-numeric values, an unknown `kind`/`curve_type` or a
 mixed `curve_type` are SQL errors naming the problem; no rows give a "No data"
 SVG.
 
+**Other column names.** Raw statsmodels, R, broom or pingouin tables plot
+without renaming: before the schema lookup every column name is compared with
+case, `.`, spaces and symbols ignored (`Std. Error`, `std.error` and
+`std_error` are one name; broom's `.fitted` is `fitted`), and these common
+spellings are read as the contract column (the first one present wins; a
+column the contract name already has, or one an option names — `x :=
+'Price'` — is left alone; `anofox_plot_compare` reads its rows as given):
+
+<!-- contract-aliases:start -->
+| Contract column | Also read from (case, `.`, spaces and symbols ignored) |
+|---|---|
+| `estimate` | `coef`, `params`, `coefficient` |
+| `std_error` | `std_err`, `bse`, `std_errors`, `se` |
+| `statistic` | `t`, `z`, `tvalues`, `zvalues`, `t_value`, `z_value`, `t_stat` |
+| `p_value` | `p_t`, `p_z`, `pr_t`, `pr_z`, `p_val`, `p_unc`, `pvalues`, `pval`, `p` |
+| `p_adj` | `p_corr`, `padj`, `p_adjusted` |
+| `conf_low` | `ci_lower`, `lower`, `mean_ci_lower`, `conf_lower`, `[0.025` |
+| `conf_high` | `ci_upper`, `upper`, `mean_ci_upper`, `conf_upper`, `0.975]` |
+| `fitted` | `fittedvalues`, `fitted_values` |
+| `residual` | `resid`, `residuals` |
+| `std_residual` | `std_resid`, `standard_resid` |
+| `leverage` | `hat`, `hat_diag` |
+| `cooks_d` | `cooksd`, `cooks_distance`, `cook_d` |
+<!-- contract-aliases:end -->
+
+So `p_t` is statsmodels' `P>|t|`, `pr_t` R's `Pr(>|t|)`, `p_unc` pingouin's
+`p-unc`; statsmodels' interval columns are matched by their bracket (`[0.025`
+/ `0.975]`, any level). In a table with `yhat`, `lower` / `upper`,
+`mean_ci_lower` / `mean_ci_upper`, `ci_lower` / `ci_upper`, `conf_low` /
+`conf_high` and the bracket columns are the forecast interval (`yhat_lower` /
+`yhat_upper`).
+
+**When a table doesn't plot**, the error says why:
+
+- a missing column, the columns it got (a renamed one as `coef → estimate`)
+  and either the near miss — *needs column(s) estimate (got: term, estimat) —
+  did you mean \`estimat\` for estimate?* — or the other names it accepts —
+  *… — estimate is also read from coef, params, coefficient*;
+- a table that follows another schema says so — *anofox_plot_terms: needs
+  column(s) term, estimate (got: ds, yhat) — … — the columns follow the
+  prediction schema (anofox_plot_prediction)*;
+- `anofox_plot(tbl)` names the schema it detected — *anofox_plot (anofox
+  contract v1, detected the curve schema): needs column(s) y …* — and when
+  none matches, the closest one and what it misses — *…; closest: terms,
+  missing estimate (did you mean \`estimat\`?)*;
+- a list where a number is read — *column \`estimate\` must be numeric, got
+  a list — take one element (estimate[1]) or unnest it*.
+
+The same messages show in `dashboard --check` and on the dashboard panel.
+
 **Adapting producer output.** `*_fit_predict_by` (anofox-statistics) keeps
 the input columns: `anofox_plot_prediction(p, x := 'x1', facet := 'grp')`.
 `ts_forecast_by` (anofox-forecast) has no `y`; union the history to draw it:

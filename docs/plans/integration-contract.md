@@ -38,6 +38,12 @@ Principles
 null_dist, pdp, lift, lowess` (`lowess`: a smoothed y over x per group, e.g.
 anofox-statistics `lowess_by` — drawn as a plain line like `pdp`).
 
+Producers write these names. The visualization side also reads common other
+spellings (statsmodels `coef` / `P>|t|` / `[0.025`, broom `.fitted`, R
+`Std. Error`, pingouin `p-unc`; table in `docs/DOCS.md`, *Other column
+names*), so outside tables plot without a reshaping step — this does not
+change contract version `1`.
+
 ## Model objects between extensions
 
 The fit STRUCT stays the in-SQL model object, with a `model_type` tag
