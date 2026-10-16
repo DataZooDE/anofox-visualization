@@ -9,6 +9,9 @@
 
 SELECT 'de-DE'::LOCALE;
 SELECT 'Filialbericht Januar – September 2026'::DASHBOARD_TITLE;
+-- Datenstand: the last load was three days ago, the report wants daily data —
+-- the header chip turns amber (stale=24h).
+SELECT make_timestamp((epoch_ms(now()) - 3 * 86400 * 1000) * 1000)::ASOF, 'stale=24h';
 SELECT 'Drogeriemarkt Nordlicht · Controlling'::BRAND;
 SELECT '{"name":"nordlicht","extends":"light","colors":{"accent":"#0a0a0a","accent2":"#0a0a0a","info":"#0a0a0a"},"dark":{"colors":{"accent":"#ededed","accent2":"#ededed","info":"#ededed"}}}'::THEME;  -- the default look with a black accent
 
@@ -71,6 +74,17 @@ SELECT 1::ENDGROUP;
 
 -- ── 1 · Überblick ────────────────────────────────────────────────────────────
 SELECT 'Überblick'::TAB;
+
+-- Werte im Fließtext: {{spalte:format}} füllt die Zeile derselben Abfrage ein,
+-- formatiert wie die KPIs (Gebietsschema de-DE).
+SELECT 12::COL;
+SELECT '**Januar bis September:** Die Filialen setzten **{{umsatz:money}}** um, **{{wachstum:pct}}** mehr als im Vorjahreszeitraum. Ein Kassenbon brachte im Schnitt {{bon:metric}} €; die Daten reichen bis zum {{stand:date}}.'::MARKDOWN,
+       'So lief das Jahr'::TITLE,
+       sum(umsatz) FILTER (WHERE nl_akt(tag)) AS umsatz,
+       100 * (sum(umsatz) FILTER (WHERE nl_akt(tag)) / sum(umsatz) FILTER (WHERE nl_vj(tag)) - 1) AS wachstum,
+       sum(umsatz) FILTER (WHERE nl_akt(tag)) / sum(umsatz / bon) FILTER (WHERE nl_akt(tag)) AS bon,
+       max(tag)::VARCHAR AS stand
+FROM nl_umsatz WHERE nl_in(region, warengruppe);
 
 SELECT 8::COL;
 SELECT 340::HEIGHT;

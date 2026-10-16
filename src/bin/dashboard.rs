@@ -8,6 +8,7 @@
 //! `anofox_visualization::sql`, shared with the wasm browser build.
 
 use anofox_visualization::format::{escape_xml, Locale};
+use anofox_visualization::inputs;
 use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::theme::{self, DashboardChrome, Variant};
 use anofox_visualization::{
@@ -89,9 +90,28 @@ fn cmd_render(args: &[String]) {
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
     let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    // Every `duckdb` call is a fresh session: bound variables (a script's own
+    // SET VARIABLE, the inputs' defaults) are replayed before each query.
+    let mut vars = String::new();
     for p in sql::plan(&script) {
         if p.setup {
-            run(&db, &p.sql, false); // DDL/insert — run for effect
+            if inputs::is_set_variable(&p.sql) {
+                vars.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';')));
+            } else {
+                run(&db, &p.sql, false); // DDL/insert — run for effect
+            }
+            continue;
+        }
+        // An input renders nothing in the static output, but binds its default
+        // (as the browser does on first load) for the getvariable() panels.
+        if let Some(kind) = inputs::input_kind(&p.roles) {
+            let json = run(&db, &format!("{vars}{}", p.sql), true);
+            if let Ok(rows) = sql::parse_rows_json(json.trim()) {
+                for set in inputs::input_defaults(kind, inputs::input_index(&p.roles), &rows) {
+                    vars.push_str(&set);
+                    vars.push_str(";\n");
+                }
+            }
             continue;
         }
         if let Some(r) = p
@@ -100,25 +120,27 @@ fn cmd_render(args: &[String]) {
             .map(|(_, r)| *r)
             .find(|r| roles::is_chrome_directive(*r))
         {
-            let json = run(&db, &p.sql, true);
-            let v = sql::parse_rows_json(&json)
+            let json = run(&db, &format!("{vars}{}", p.sql), true);
+            let cell = |v: &serde_json::Value| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Null => None,
+                v => Some(v.to_string()),
+            };
+            // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
+            let cells = sql::parse_rows_json(&json)
                 .ok()
-                .and_then(|rows| rows.first().and_then(|r| r.values().next().cloned()))
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s),
-                    serde_json::Value::Null => None,
-                    v => Some(v.to_string()),
-                });
-            chrome.apply(r, v);
+                .and_then(|rows| rows.first().map(|r| r.values().map(cell).collect()))
+                .unwrap_or_default();
+            chrome.apply_row(r, cells);
             continue;
         }
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
-        // Inputs + layout directives are interactive — the browser builder /
-        // `serve` handle them; the static CLI output skips them (role registry).
+        // Layout directives are interactive — the browser builder / `serve`
+        // handle them; the static CLI output skips them (role registry).
         if roles::is_directive_panel(&p.roles) && !section {
             continue;
         }
-        let json = run(&db, &p.sql, true);
+        let json = run(&db, &format!("{vars}{}", p.sql), true);
         let rows = sql::parse_rows_json(&json);
         queried.push((p, rows));
     }
@@ -200,18 +222,26 @@ fn cmd_render(args: &[String]) {
 /// setup statements persist between calls).
 struct CliProvider {
     db: String,
+    /// `SET VARIABLE`s replayed before every query (each `duckdb` call is a
+    /// fresh session; tables persist in the db file, variables don't).
+    vars: String,
 }
 
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
-        run(&self.db, sql, false);
+        if inputs::is_set_variable(sql) {
+            self.vars
+                .push_str(&format!("{};\n", sql.trim().trim_end_matches(';')));
+        } else {
+            run(&self.db, sql, false);
+        }
         Ok(())
     }
     fn query(
         &mut self,
         sql: &str,
     ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
-        let json = run(&self.db, sql, true);
+        let json = run(&self.db, &format!("{}{sql}", self.vars), true);
         let rows = sql::parse_rows_json(json.trim())?;
         Ok(sql::result_columns(&rows))
     }
@@ -244,6 +274,7 @@ fn cmd_svg(args: &[String]) {
     let _ = std::fs::remove_file(&db);
     let mut p = CliProvider {
         db: db.to_string_lossy().to_string(),
+        vars: String::new(),
     };
     let svg = dashboard::render_dashboard_svg(&script, &mut p, &o);
     let _ = std::fs::remove_file(&db);
