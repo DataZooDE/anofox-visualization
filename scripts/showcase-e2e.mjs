@@ -19,7 +19,9 @@
 //                dashboard (it must be a closed drawer), and (≤760 px, where
 //                charts are drawn at their shown width) if a chart's largest
 //                text is below 8 px (ggplot-rs draws axis and legend text at
-//                8.8 px; less means the chart was rendered wider than shown)
+//                8.8 px; less means the chart was rendered wider than shown),
+//                or if an x tick label is clipped by its chart's edge or
+//                overlaps its neighbour (measured with getBBox)
 // Every run also fails when the "Powered by DataZoo GmbH" credit is missing.
 import { createRequire } from "module";
 import { mkdirSync, readFileSync } from "fs";
@@ -121,7 +123,8 @@ const shoot = async (name) => {
     // width; the largest, as heatmap cell and radar grid labels are drawn
     // smaller on purpose)
     const covered = [],
-      tiny = [];
+      tiny = [],
+      clipped = [];
     if (width)
       for (const panel of document.querySelectorAll(".dash .panel")) {
         const svg = panel.querySelector(":scope > .panel-svg > svg");
@@ -146,8 +149,62 @@ const shoot = async (name) => {
           .filter((t) => t.textContent.trim() && t.getClientRects().length)
           .map((t) => parseFloat(getComputedStyle(t).fontSize) * scale);
         if (px.length && Math.max(...px) < 8) tiny.push(`${name} (${Math.max(...px).toFixed(1)} px)`);
+        // x tick labels (#108): each chart's runs of same-style texts on one
+        // baseline below its panel; their drawn boxes must lie inside the
+        // chart and not overlap
+        for (const chart of [svg, ...svg.querySelectorAll("svg")]) {
+          const plot = (chart.getAttribute("data-plot") || "").split(" ").map(Number);
+          const vb = chart.viewBox && chart.viewBox.baseVal;
+          if (plot.length < 4 || !vb || !vb.width) continue;
+          const bottom = plot[1] + plot[3];
+          const toChart = chart.getScreenCTM().inverse();
+          const box = (t) => {
+            const b = t.getBBox();
+            const m = toChart.multiply(t.getScreenCTM());
+            const ps = [
+              [b.x, b.y],
+              [b.x + b.width, b.y],
+              [b.x, b.y + b.height],
+              [b.x + b.width, b.y + b.height],
+            ].map(([x, y]) => new DOMPoint(x, y).matrixTransform(m));
+            const xs = ps.map((p) => p.x),
+              ys = ps.map((p) => p.y);
+            return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+          };
+          const angle = (t) => +((t.getAttribute("transform") || "").match(/rotate\(([-\d.]+)/) || [0, 0])[1];
+          const key = (t) =>
+            ["y", "font-size", "text-anchor", "fill"].map((k) => t.getAttribute(k)).join(" ") + " " + angle(t);
+          const rows = [];
+          let run = [];
+          const flush = () => {
+            if (run.length >= 2) rows.push(run);
+            run = [];
+          };
+          for (const t of chart.querySelectorAll(":scope > text")) {
+            const prev = run[run.length - 1];
+            if (!prev || key(prev) !== key(t) || +prev.getAttribute("x") >= +t.getAttribute("x")) flush();
+            if (+t.getAttribute("y") > bottom) run.push(t);
+          }
+          flush();
+          for (const row of rows) {
+            const bs = row.map(box);
+            row.forEach((t, i) => {
+              const [x0, y0, x1, y1] = bs[i];
+              if (x0 < -0.5 || y0 < -0.5 || x1 > vb.width + 0.5 || y1 > vb.height + 0.5)
+                clipped.push(`${name}: "${t.textContent}" [${bs[i].map((v) => v.toFixed(1))}] outside ${vb.width}×${vb.height}`);
+            });
+            for (let i = 1; i < row.length; i++) {
+              const a = angle(row[i]);
+              const hit = Math.abs(a) < 1
+                ? bs[i - 1][2] > bs[i][0] + 0.5
+                : Math.abs(+row[i].getAttribute("x") - +row[i - 1].getAttribute("x")) * Math.abs(Math.sin((a * Math.PI) / 180)) <
+                  +row[i].getAttribute("font-size");
+              if (hit) clipped.push(`${name}: "${row[i - 1].textContent}" overlaps "${row[i].textContent}"`);
+            }
+          }
+        }
       }
-    return { errs, svgErr, notes, panels, whiteCards, whiteSvg, creditOk, covered, tiny };
+    return { errs, svgErr, notes, panels, whiteCards, whiteSvg, creditOk, covered, tiny, clipped };
   }, width);
   for (const e of [...found.errs, ...found.svgErr]) problems.push(`${name}: ${e}`);
   for (const n of found.notes) console.log(`  note (${name}): ${n}`);
@@ -155,6 +212,7 @@ const shoot = async (name) => {
   if (theme === "dark" && found.whiteSvg) problems.push(`${name}: ${found.whiteSvg} chart(s) with a white background in dark mode`);
   for (const t of found.covered) problems.push(`${name}: the chart toolbox covers the title of "${t}"`);
   for (const t of found.tiny) problems.push(`${name}: chart text too small in "${t}"`);
+  for (const t of found.clipped) problems.push(`${name}: x tick label ${t}`);
   if (!found.creditOk) problems.push(`${name}: the "Powered by DataZoo GmbH" credit is missing`);
   const file = path.join(out, `${slug(name)}.png`);
   await page.screenshot({ path: file, fullPage: true });
