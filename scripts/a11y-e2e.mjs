@@ -49,6 +49,17 @@ for (const [role, label] of svgs) {
 }
 console.log("summary:", svgs[0]?.[1]);
 
+// A reference rule (data-rule: ::XLINE "Today", ::REFLINE) shows its tooltip
+// but is no value: clicking it neither selects nor cross-filters.
+const rule = await page.$(".dash .panel-svg > svg [data-rule]");
+if (rule) {
+  await rule.dispatchEvent("click");
+  await page.waitForTimeout(1000);
+  const sel = await page.evaluate(() => [...new URL(location.href).searchParams.keys()].filter((k) => k === "v.selected"));
+  console.log("rule click selects:", sel.length > 0);
+  if (sel.length) fail("clicking a reference rule set a selection");
+}
+
 // Tab until a chart has focus (a dashboard without charts skips this part).
 let onChart = false;
 for (let i = 0; i < 80 && !onChart && svgs.length; i++) {

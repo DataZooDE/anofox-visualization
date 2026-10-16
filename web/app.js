@@ -7218,7 +7218,10 @@ function attachHover() {
     el.setAttribute("data-series", series);
     el.setAttribute("data-tip", txt);
     el.classList.add("dp-hit");
-    el.style.cursor = "pointer";
+    // A reference rule (::XLINE, ::REFLINE, thresholds) keeps its tooltip but
+    // is no value to click: it neither selects, drills nor cross-filters.
+    const rule = el.hasAttribute("data-rule");
+    el.style.cursor = rule ? "default" : "pointer";
     el.addEventListener("mouseenter", () => {
       // The panel-level crosshair shows the tooltip — except for a mark focused
       // from the keyboard (a11y), which has no pointer to drive the crosshair.
@@ -7238,6 +7241,7 @@ function attachHover() {
     });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (rule) return;
       const ia = el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
