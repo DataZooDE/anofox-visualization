@@ -243,14 +243,19 @@ fn test_group(t: &Table) -> Option<String> {
             return Some(k.into());
         }
     }
+    // Else a text column, such as an unnested aggregate's GROUP BY key. Text
+    // that is all numbers (pingouin's BF10 "1.2e+04") is a value, not a group.
     let first = t.rows.first()?;
     first
         .keys()
         .filter(|k| !TEST_COLS.contains(&k.as_str()))
         .find(|k| {
-            t.rows
-                .iter()
-                .all(|r| matches!(r.get(k.as_str()), Some(J::String(_)) | Some(J::Null) | None))
+            let vals = t.rows.iter().map(|r| r.get(k.as_str()));
+            vals.clone()
+                .all(|v| matches!(v, Some(J::String(_)) | Some(J::Null) | None))
+                && vals
+                    .filter_map(|v| v.and_then(J::as_str))
+                    .any(|s| s.trim().parse::<f64>().is_err())
                 && t.distinct(k) > 1
         })
         .cloned()
@@ -1334,14 +1339,32 @@ const HIGHER_BETTER: &[&str] = &[
     "r_squared",
     "adj_r_squared",
     "pseudo_r_squared",
+    "r2",
+    "r2_score",
+    "explained_variance",
+    "explained_variance_score",
     "auc",
     "roc_auc",
+    "roc_auc_score",
+    "average_precision",
+    "average_precision_score",
     "accuracy",
+    "accuracy_score",
     "balanced_accuracy",
+    "balanced_accuracy_score",
+    "top_k_accuracy",
     "f1",
     "f1_score",
     "precision",
+    "precision_score",
     "recall",
+    "recall_score",
+    "matthews_corrcoef",
+    "mcc",
+    "cohen_kappa",
+    "cohen_kappa_score",
+    "jaccard",
+    "jaccard_score",
     "log_likelihood",
 ];
 const LOWER_BETTER: &[&str] = &[
@@ -1355,8 +1378,25 @@ const LOWER_BETTER: &[&str] = &[
     "crps",
     "brier",
     "brier_score",
+    "brier_score_loss",
     "log_loss",
     "logloss",
+    "hamming_loss",
+    "zero_one_loss",
+    "hinge_loss",
+    "mean_absolute_error",
+    "mean_squared_error",
+    "root_mean_squared_error",
+    "mean_squared_log_error",
+    "root_mean_squared_log_error",
+    "median_absolute_error",
+    "mean_absolute_percentage_error",
+    "max_error",
+    "mean_pinball_loss",
+    "pinball_loss",
+    "mean_poisson_deviance",
+    "mean_gamma_deviance",
+    "mean_tweedie_deviance",
     "residual_std_error",
     "sigma",
     "aic",
@@ -1371,9 +1411,14 @@ pub(super) fn direction_of(m: &str) -> f64 {
 }
 
 /// Which way a metric improves: -1 higher is better, 1 lower is better, 0
-/// unknown (case ignored: `AUC`, `MAPE`).
+/// unknown (case ignored: `AUC`, `MAPE`; `-` and spaces read as `_`). A
+/// scikit-learn scorer name `neg_<loss>` (`neg_mean_squared_error`) is the
+/// negated loss, so higher is better.
 fn direction(m: &str) -> f64 {
-    let m = m.to_ascii_lowercase();
+    let m = m.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    if let Some(loss) = m.strip_prefix("neg_") {
+        return -direction(loss);
+    }
     if HIGHER_BETTER.contains(&m.as_str()) {
         -1.0
     } else if LOWER_BETTER.contains(&m.as_str()) {
@@ -1399,6 +1444,9 @@ fn metric_title(m: &str) -> String {
         "smape" => "sMAPE".into(),
         "mase" => "MASE".into(),
         "f1" => "F1".into(),
+        "r2" => "R²".into(),
+        "average_precision" => "average precision".into(),
+        "matthews_corrcoef" | "mcc" => "MCC".into(),
         "brier" => "Brier score".into(),
         "log_loss" => "log loss".into(),
         "residual_std_error" => "residual SE".into(),

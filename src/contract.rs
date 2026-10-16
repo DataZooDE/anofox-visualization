@@ -62,6 +62,40 @@ pub(crate) fn render(
     o: &RenderOptions,
     place: Place,
 ) -> Result<(String, Vec<String>), RenderError> {
+    render_plot(plot, rows, options, width, height, o, place)
+        .map(|(svg, warnings)| (slim_points(svg), warnings))
+}
+
+/// ggplot-rs writes `fill-opacity="1.000"` on every point; 1 is the SVG
+/// default and no ancestor sets another, so drop it from `<circle>` marks
+/// (about a tenth of a scatter's bytes: diagnostics are mostly points).
+fn slim_points(svg: String) -> String {
+    const OPAQUE: &str = " fill-opacity=\"1.000\"";
+    if !svg.contains(OPAQUE) {
+        return svg;
+    }
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg.as_str();
+    while let Some(i) = rest.find("<circle ") {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+        out.push_str(&rest[..end].replacen(OPAQUE, "", 1));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn render_plot(
+    plot: &str,
+    rows: &[Row],
+    options: &Row,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+    place: Place,
+) -> Result<(String, Vec<String>), RenderError> {
     // Producer spellings (`coef`, `P>|t|`, `.fitted`, …) read as contract
     // columns; `compare` takes raw rows whose columns the options name.
     let mut renamed = Vec::new();
@@ -1042,6 +1076,50 @@ mod tests {
         let nested = format!(r#"[{{"r":{TUKEY}}}]"#);
         assert!(go("tests", &nested, "{}").is_ok());
         assert!(go("auto", &nested, "{}").is_ok());
+        // pingouin's pairwise_tests: BF10 is text but a number, p-adjust one
+        // value; neither splits the forest into panels.
+        let pw = r#"[{"Contrast":"g","A":"0","B":"10","T":-3.9,"p-unc":0.0005,"p-corr":0.001,"p-adjust":"holm","BF10":"156.665"},
+            {"Contrast":"g","A":"0","B":"20","T":-7.1,"p-unc":1e-9,"p-corr":3e-9,"p-adjust":"holm","BF10":"2.648e+09"},
+            {"Contrast":"g","A":"10","B":"20","T":-2.2,"p-unc":0.03,"p-corr":0.03,"p-adjust":"holm","BF10":"1.2"}]"#;
+        let svg = go("tests", pw, "{}").unwrap();
+        assert_eq!(svg.matches("<svg").count(), 1, "one panel: {svg}");
+        assert!(!svg.contains("156.665"), "BF10 is not a panel title");
+    }
+
+    #[test]
+    fn opaque_points_carry_no_fill_opacity() {
+        let s = super::slim_points(
+            r#"<circle cx="1" fill-opacity="1.000"><title>a</title></circle><circle fill-opacity="0.500"/><rect fill-opacity="1.000"/>"#
+                .into(),
+        );
+        assert_eq!(
+            s,
+            r#"<circle cx="1"><title>a</title></circle><circle fill-opacity="0.500"/><rect fill-opacity="1.000"/>"#
+        );
+        let obs: Vec<String> = (0..30)
+            .map(|i| {
+                format!(
+                    r#"{{"fitted":{i},"residual":{},"row_id":{i}}}"#,
+                    (i as f64).sin()
+                )
+            })
+            .collect();
+        let svg = go("diagnostics", &format!("[{}]", obs.join(",")), "{}").unwrap();
+        let circles: Vec<&str> = svg
+            .split("<circle ")
+            .skip(1)
+            .map(|c| &c[..c.find('>').unwrap()])
+            .collect();
+        assert!(
+            !circles.is_empty()
+                && circles
+                    .iter()
+                    .all(|c| !c.contains("fill-opacity=\"1.000\""))
+        );
+        assert!(
+            svg.contains("data-value=") && svg.contains("<title>"),
+            "hover kept"
+        );
     }
 
     #[test]
@@ -1161,14 +1239,8 @@ mod tests {
         let x2 = marks(&svg, "x2");
         let x3 = marks(&svg, "x3");
         assert!(!x1.is_empty() && !x2.is_empty() && !x3.is_empty(), "{svg}");
-        assert!(
-            x1.iter().all(|m| m.contains("fill-opacity=\"1.000\"")),
-            "{x1:?}"
-        );
-        assert!(
-            x3.iter().all(|m| m.contains("fill-opacity=\"1.000\"")),
-            "{x3:?}"
-        );
+        assert!(x1.iter().all(|m| !m.contains("fill-opacity")), "{x1:?}");
+        assert!(x3.iter().all(|m| !m.contains("fill-opacity")), "{x3:?}");
         assert!(
             x2.iter().all(|m| m.contains("fill-opacity=\"0.500\"")),
             "{x2:?}"
@@ -1188,7 +1260,7 @@ mod tests {
             .all(|m| m.contains("fill-opacity=\"0.500\"")));
         assert!(marks(&svg, "x2")
             .iter()
-            .all(|m| m.contains("fill-opacity=\"1.000\"")));
+            .all(|m| !m.contains("fill-opacity")));
         assert!(svg.contains("faded = interval crosses 0.5"));
         // All significant: no caption about fading.
         let svg = go(
@@ -1339,6 +1411,29 @@ mod tests {
         assert_eq!(super::stats::direction_of("auc"), -1.0);
         assert_eq!(super::stats::direction_of("accuracy"), -1.0);
         assert_eq!(super::stats::direction_of("f1"), -1.0);
+        // scikit-learn names and scorers.
+        for m in [
+            "average_precision",
+            "roc_auc_score",
+            "matthews_corrcoef",
+            "r2",
+            "explained_variance",
+            "balanced_accuracy",
+            "neg_mean_squared_error",
+        ] {
+            assert_eq!(super::stats::direction_of(m), -1.0, "{m}");
+        }
+        for m in [
+            "mean_pinball_loss",
+            "mean_absolute_error",
+            "hamming_loss",
+            "brier_score_loss",
+            "Mean Squared Error",
+            "neg_r2",
+        ] {
+            assert_eq!(super::stats::direction_of(m), 1.0, "{m}");
+        }
+        assert_eq!(super::stats::direction_of("n_trees"), 0.0);
         // A near-perfect AUC keeps its digits.
         let roc = r#"[{"curve_type":"roc","x":0,"y":0,"auc":0.9952},{"curve_type":"roc","x":0.01,"y":0.99,"auc":0.9952},
             {"curve_type":"roc","x":1,"y":1,"auc":0.9952}]"#;
