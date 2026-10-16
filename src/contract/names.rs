@@ -179,17 +179,15 @@ pub(super) fn normalize(
     options: &Row,
     renamed: &mut Vec<(String, String)>,
 ) -> Option<Vec<Row>> {
-    let mut out: Option<Vec<Row>> = None;
-    let steps: [&dyn Fn(&[Row], &mut Vec<(String, String)>) -> Option<Vec<Row>>; 4] = [
-        &|r, n| melt_wide(r, n),
-        &|r, n| split_intervals(r, options, n),
-        &|r, n| rename(r, options, n),
-        &|r, _| scale_levels(r),
-    ];
-    for step in steps {
-        if let Some(next) = step(out.as_deref().unwrap_or(rows), renamed) {
-            out = Some(next);
-        }
+    let mut out = melt_wide(rows, renamed);
+    if let Some(next) = split_intervals(out.as_deref().unwrap_or(rows), options, renamed) {
+        out = Some(next);
+    }
+    if let Some(next) = rename(out.as_deref().unwrap_or(rows), options, renamed) {
+        out = Some(next);
+    }
+    if let Some(next) = scale_levels(out.as_deref().unwrap_or(rows)) {
+        out = Some(next);
     }
     out
 }
