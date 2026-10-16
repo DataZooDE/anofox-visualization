@@ -63,8 +63,8 @@ jobs:
       - name: test (core incl. serve)
         run: cargo test --locked --features serve
 
-      - name: test (ffi + duckext)
-        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb
+      - name: test (ffi + duckext + vendored tiny_http)
+        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
 
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh

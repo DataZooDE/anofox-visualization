@@ -2,7 +2,7 @@
 # extension crates share the core's version via `version.workspace = true`, so
 # this is the single version source of truth (CalVer YYYY.M.D) — see BUILD.md.
 [workspace]
-members = [".", "duckext", "crates/anofox-viz-ffi"]
+members = [".", "duckext", "crates/anofox-viz-ffi", "vendor/tiny_http"]
 # `cargo build`/`cargo test` at the root keep meaning "the core crate"; the
 # extension crates are built explicitly (-p …), duckext needs libclang (bindgen).
 default-members = ["."]
@@ -58,3 +58,10 @@ required-features = ["serve"]
 [dev-dependencies]
 # Tests parse every rendered SVG as XML (well-formedness + XSS checks).
 roxmltree = "0.21"
+
+# tiny_http 0.12.0 with a lost wake-up fix in its worker pool (#86) and the
+# security fixes backported from tiny_http_dh 0.12.2. Every crate in the
+# workspace (core `serve`, the DuckDB extension, the FFI build) picks it up.
+# What changed and why: vendor/tiny_http/PATCHES.md.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }

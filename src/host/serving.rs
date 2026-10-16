@@ -276,6 +276,17 @@ impl AuthoringGuard {
             return None;
         }
         let path = url.split('?').next().unwrap_or("/");
+        // The Location comes from the request: keep it a same-site path. HTTP
+        // rejects control characters in a header value (the header would
+        // fail to build), and `//host` would redirect off-site.
+        let path = if path.starts_with('/')
+            && !path.starts_with("//")
+            && !path.bytes().any(|b| b.is_ascii_control())
+        {
+            path
+        } else {
+            "/"
+        };
         let cookie = format!(
             "{}={}; Path=/; HttpOnly; SameSite=Strict",
             self.cookie_name(),
@@ -1130,6 +1141,12 @@ mod tests {
         assert_eq!(loc, "/");
         assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"));
         assert!(g.bootstrap("/?token=nope").is_none());
+        for odd in ["//evil.example/", "/a\rb", "/a\x0bb", "x"] {
+            let (loc, _) = g.bootstrap(&format!("{odd}?token={}", g.token)).unwrap();
+            assert_eq!(loc, "/", "{odd:?}");
+        }
+        let (loc, _) = g.bootstrap(&format!("/d/sales?token={}", g.token)).unwrap();
+        assert_eq!(loc, "/d/sales");
     }
 
     #[test]

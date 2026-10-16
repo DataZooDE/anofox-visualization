@@ -7,6 +7,7 @@ One Cargo workspace (root `Cargo.toml`):
 | `anofox-visualization` | `.` | the core renderer (annotated rows → SVG), the `dashboard` and `serve` binaries, the wasm build for `web/` |
 | `anofox_viz_ffi` | `crates/anofox-viz-ffi` | Rust staticlib behind the **C++** extension (render-only) |
 | `anofox-visualization-duckdb` | `duckext` | the **C-API** extension (render + serving) |
+| `tiny_http` | `vendor/tiny_http` | tiny_http 0.12.0 with fixes, used via `[patch.crates-io]` (see its `PATCHES.md`) |
 
 ## Two extension builds
 
