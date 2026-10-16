@@ -116,8 +116,13 @@ rebuilt while the server runs — no restart, no failed requests:
   the log (and to the caller of `anofox_serve_refresh`).
 - `GET /healthz` reports `epoch` (1 at start, +1 per refresh),
   `snapshot_age_s`, `refresh_s`, `refreshing` and `refresh_failed` (no error
-  text — `/healthz` is public). With `auth`, a caller that is not signed in
-  through the proxy gets only `{"status":"ok"}`.
+  text — `/healthz` is public), and `limits`: the effective limits (`threads`,
+  `max_queries`, `max_rows`, `max_response_bytes`, `max_inflight_bytes`,
+  `cache_bytes`, `timeout_ms`, `memory_limit`, `duckdb_threads`) and their use
+  (`queries_running`, `queries_waiting`, `inflight_bytes`,
+  `inflight_peak_bytes`, `refused_inflight`, `refused_queries`). With `auth`,
+  a caller that is not signed in through the proxy gets only
+  `{"status":"ok"}`.
 - While a rebuild runs, the old and the new snapshot both exist: plan for twice
   the snapshot's disk and memory.
 
@@ -209,6 +214,22 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     `"50%"`). The default is DuckDB's 80 % of RAM, shared by all queries.
   - `duckdb_threads` — DuckDB `threads` of the snapshot instance, shared by all
     queries. The default is the number of cores.
+  - `max_queries` (default 4) — panel queries running at once. Others wait for
+    a slot (up to `timeout_ms`, then `503` with `Retry-After`); cache hits and
+    requests that join an identical running query don't need one.
+  - `max_inflight_mb` (default 256) — results held outside DuckDB at once,
+    from their first row until their response is written. A request that
+    would exceed it answers `503` with `Retry-After` (the first 256 KiB of
+    every request always pass). The browser retries a `503` twice.
+  - `max_response_mb` (default 32, at most `max_inflight_mb`) — one
+    response; a larger result is an error (`413`), like `max_rows`.
+  - `search_path` — where the panels' unqualified names resolve:
+    `"warehouse"`, `"warehouse.sales"`, or several, comma-separated (the first
+    is `USE`d). The default is the serving database's default database:
+    a `USE` in the SQL that starts the server does not reach the server, so
+    pass it on with `json_object('search_path', current_database() || '.' ||
+    current_schema())`. With `attach: false`, the databases it names are
+    snapshotted.
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy

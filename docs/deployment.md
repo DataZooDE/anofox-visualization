@@ -33,14 +33,25 @@ SELECT anofox_serve_dashboards('/etc/anofox/dashboards', 8080, '{
 }');
 ```
 
-Attach the data `READ_ONLY`. Two things don't work here:
+Attach the data `READ_ONLY`, or open the file itself read-only
+(`duckdb -readonly /data/warehouse.duckdb`): the snapshot is copied out of a
+read-only session too.
 
-- `USE warehouse`: the server takes its snapshot through the extension's own
-  connection, which keeps the CLI's main database as its current database. So
-  either qualify the tables in the dashboards (`warehouse.sales`) or expose
-  them as views in the main database, as above.
-- Opening the file with `duckdb -readonly`: the snapshot has to be written
-  through that session, which a read-only session refuses.
+Where do the dashboards' unqualified names (`FROM sales`) resolve? In the
+serving database's default database, unless `search_path` says otherwise. A
+`USE warehouse` in SERVE_SQL does not reach the server (it takes its snapshot
+through the extension's own connection), so either qualify the tables
+(`warehouse.sales`), expose them as views in the main database as above, or
+pass the search path:
+
+```sql
+ATTACH '/data/warehouse.duckdb' AS warehouse (READ_ONLY);
+USE warehouse;
+SELECT anofox_serve_dashboards('/etc/anofox/dashboards', 8080,
+  json_merge_patch('{"threads": 16, "memory_limit": "2GB"}',
+                   json_object('search_path', current_database() || '.' || current_schema())));
+-- or simply  ..., '{"search_path": "warehouse", ...}'
+```
 
 At startup the server copies the session's DuckDB databases into a private
 snapshot and checks every dashboard statement. Only then does it bind the
@@ -82,6 +93,10 @@ The extension is unsigned, so `run-locked.sh` passes `-unsigned`.
 | `cache_mb` | 64 | Result cache. 0 turns it off; single-flight stays on. |
 | `timeout_ms` | 30 000 | Per request; the query is interrupted. Keep the proxy's timeout above it. |
 | `max_rows`, `max_body_bytes` | 100 000, 64 KiB | Per result / request body. |
+| `max_queries` | 4 | Panel queries running at once. The others wait for a slot (up to `timeout_ms`, then `503`); cache hits don't. Bounds DuckDB's memory outside `memory_limit` (§6). |
+| `max_inflight_mb` | 256 | Results held outside DuckDB at once, until their responses are written. Over it: `503` + `Retry-After`. |
+| `max_response_mb` | 32 | One response; larger is `413`. |
+| `search_path` | default database | `"warehouse"`, `"warehouse.sales"`, or several comma-separated: where unqualified names resolve. |
 
 The DuckDB settings apply before the configuration is locked. A request cannot
 change them.
@@ -322,17 +337,26 @@ health check keeps traffic off a replica until its snapshot is ready.
 - query working memory: sorts, hash tables, large pages, also under
   `memory_limit`;
 - the result cache: up to `cache_mb`;
-- results in flight, outside `memory_limit`: each of up to `threads` requests
-  holds its query result and its JSON. That's tens of MB for the largest
-  pages, statistics and distributions;
+- results in flight, outside `memory_limit`: up to `max_inflight_mb`. The
+  JSON is reserved before it is written, and a request that would go over
+  answers `503` with `Retry-After` (the browser retries). The largest page of
+  the load test (10,000 rows) is 1.5 MB;
+- DuckDB's memory outside its buffer pool: per-thread sort and aggregate
+  state, which `memory_limit` doesn't count. It grows with the queries that
+  run at once, so `max_queries` bounds it: up to 100–350 MB per query for
+  the heaviest requests on 2M rows (a column profile of every column);
 - one thread stack per worker and per DuckDB thread.
 
 In the load test, ordinary viewers stayed under 450 MB on 2 million rows,
 including a snapshot refresh. The abusive clients pushed the server to
-1.1–1.4 GB with 16 workers, whether or not `memory_limit` was 512 MB, and to
-0.8 GB with 4 workers (§7). A safe `MemoryMax`:
+0.8–0.85 GB with 16 workers and `max_queries` 2–4, against 1.1–1.3 GB before
+`max_queries` existed (§7). A safe `MemoryMax`:
 
-    memory_limit + cache_mb + threads × 60 MB + 200 MB
+    memory_limit + cache_mb + max_inflight_mb + max_queries × 100 MB + 200 MB
+
+`threads` no longer matters here: workers beyond `max_queries` answer from
+the cache or wait. Lower `max_queries` when heavy requests (statistics,
+distributions, sorting a large table) are common.
 
 If SERVE_SQL also creates tables in memory, add their size: they live in the
 CLI's own DuckDB instance, besides the snapshot. Attach a file instead.
@@ -455,19 +479,38 @@ started in 2.1–3.2 s, including copying the 2M-row snapshot.
   non-stop, each sorting up to 1M rows by a random column, still saturate any
   box (p50 1.9 s on the whole machine). Sorting a large table by an arbitrary
   column is the most expensive request a viewer can make.
-- **Abuse is contained but costs memory.**
+- **Abuse is contained, and its memory is bounded.**
   - 20 clients sent the largest pages (10,000 rows), statistics and value
     distributions of every column, and oversized and unknown requests, without
     pause. Ordinary viewers next to them got no errors. Their panels slowed to
     a p50 of 48 ms (1.1 ms in the "hot" run, which has the same viewers without
     the abusers).
   - Rejected requests were answered `400`, `404` and `413`.
-  - Peak RSS reached 1.4 GB. `memory_limit` didn't bound it: with
-    `"memory_limit": "512MB"` the peak was still 1.1 GB, and with 4 workers
-    instead of 16 it was 0.8 GB. Results in flight and the allocator's caches
-    sit outside DuckDB's buffer pool.
-  - **Size memory per worker** (§6), and keep heavy requests out with proxy
-    rate limits.
+  - Before `max_queries` (#103), peak RSS reached 1.3 GB, and
+    `"memory_limit": "512MB"` only brought it to 1.1 GB: each of the 16
+    workers ran its own query, and DuckDB's per-query memory outside its
+    buffer pool added up. The results themselves are small (the largest page
+    is 1.5 MB).
+  - With the default `max_queries` of 4, the same run peaked at 0.79–0.85 GB
+    (table below). `scripts/load-test.mjs` fails the abuse scenario when the
+    peak exceeds `memory_limit + max_inflight_mb + 400 MB`. The price: the
+    abusers' queries queue, so ordinary viewers' uncached panels wait behind
+    them (panel p50 57–64 → 100–136 ms).
+  - **Size memory per running query** (§6), and keep heavy requests out with
+    proxy rate limits.
+
+  Abuse scenario, whole machine, `"threads": 16`, 30 s each (2026-10-17):
+
+  | Build | Options | Peak RSS MB | Bound MB | Panel p50 / p95 ms | Abuser requests (200 / 4xx) |
+  |---|---|---|---|---|---|
+  | before | `memory_limit` 512MB | 1,086 | – | 64 / 280 | 1,792 (1,134 / 658) |
+  | before | (DuckDB defaults) | 1,267 | – | 57 / 153 | 3,293 (2,051 / 1,242) |
+  | after | `memory_limit` 512MB, `max_inflight_mb` 64 (`max_queries` 4) | 849 | 976 | 101 / 528 | 2,231 (1,422 / 809) |
+  | after | same, `max_queries` 2 | 816 | 976 | 101 / 588 | 2,219 (1,403 / 816) |
+  | after | (DuckDB defaults, `max_queries` 4) | 791 | – | 136 / 635 | 2,493 (1,536 / 957) |
+
+  No request was refused for memory (`503`): the results in flight stayed far
+  below `max_inflight_mb`.
 - **Idle footprint:** about 90 MB RSS with the 2M-row snapshot (the snapshot
   stays on disk until queries touch it).
 
@@ -488,7 +531,7 @@ delayed ACK: "hot" panel p95 was 47 ms (now 14), and a dashboard load took
 | wasted executions, scroll | ≤ 10 % | 0 %: every superseded query was interrupted |
 | refresh under load (L4) | no error spike or latency cliff | 0 errors; panel p95 14 → 18 ms |
 | errors (not 4xx by design) | 0 | 0 in every scenario |
-| RSS ≤ snapshot + `memory_limit` + cache | | missed under abuse: results in flight sit outside `memory_limit` (§6) |
+| RSS ≤ `memory_limit` + `max_inflight_mb` + 400 MB under abuse (#103) | 976 MB at 512MB | 849 MB (before `max_queries`: 1,086 MB) |
 
 ## Checklist
 
@@ -497,7 +540,9 @@ delayed ACK: "hot" panel p95 was 47 ms (now 14), and a dashboard load took
 - [ ] `bind` is loopback, or the port is reachable only from the proxy.
 - [ ] `hosts` lists the public name; the proxy forwards `Host` with its port.
 - [ ] TLS and authentication at the proxy; proxy timeout above `timeout_ms`.
-- [ ] `memory_limit`, `duckdb_threads`, `cache_mb` and `threads` set;
-      `MemoryMax`/`--memory` above them (§6); `$TMPDIR` on disk.
+- [ ] `memory_limit`, `duckdb_threads`, `cache_mb`, `threads` and
+      `max_queries` set; `MemoryMax`/`--memory` above them (§6); `$TMPDIR`
+      on disk. `/healthz` (signed in) shows the effective limits.
+- [ ] Unqualified table names resolve where intended (`search_path`, §1).
 - [ ] Health check on `/healthz` with an accepted `Host`.
 - [ ] Replicas: sticky routing; every replica serves the same data file.
