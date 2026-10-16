@@ -739,6 +739,10 @@ pub fn start_locked(
             a.trusted_headers(),
             a.secret_header
         ),
+        None if !state.opts.bind.is_loopback() => format!(
+            "; WARNING: bound to {} without auth — every viewer who can reach this address sees every dashboard; put an auth proxy in front",
+            state.opts.bind
+        ),
         None => String::new(),
     };
     let stop = Arc::new(AtomicBool::new(false));
