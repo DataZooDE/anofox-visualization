@@ -104,6 +104,8 @@ terminal.
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
+| `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
+| `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
@@ -1296,6 +1298,28 @@ SELECT week ::XAXIS, series ::CATEGORY, demand ::LINECHART,
        CASE WHEN series = 'Forecast' THEN 'flow' END ::LINESTYLE
 FROM outlook;
 ```
+
+**Stories (`::STORY`).** A text column whose non-empty rows become story
+steps on the chart: *‹ / Play / ›* controls appear under it; each step lights
+up the marks at that row's x (or its series with `'series'::STORY_BY`), dims
+the rest and shows the caption with a connector to them. Step 0 is the
+overview. Several rows at the same x share the first caption.
+
+```sql
+SELECT week ::XAXIS, channel ::CATEGORY, demand ::BARCHART,
+       CASE week WHEN 'W43' THEN 'First forecast week: Store ahead of Online'
+                 WHEN 'W48' THEN 'Online dips — a quiet slot for the migration' END ::STORY
+FROM plan;
+```
+
+The controls are buttons (keyboard: Tab, Enter / Space) and the caption is an
+`aria-live="polite"` region, so screen readers hear each step. Under *reduce
+motion* steps switch instantly and there is no Play. A re-run (input change,
+cross-filter) keeps the current step. Dimming is one shared state: a story
+step, a click selection, a brush or named selection and legend focus each
+dim on their own, and clearing one keeps the others. The HTML export carries
+a working stepper, starting at the overview. `--check` warns on a
+`::STORY_BY` that is not `'x'` / `'series'` (`story/bad-by`).
 
 ### Tables
 

@@ -204,6 +204,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "gauge zone labels, comma-separated (drawn at each zone)"),
     e("ANIMATE", &["ANIMATION", "ENTRANCE"], R::Animate, "modifier", true,
       "entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none'"),
+    e("STORY", &["STORYLINE", "NARRATIVE"], R::Story, "annotation", true,
+      "per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims)"),
+    e("STORY_BY", &["STORYBY"], R::StoryBy, "modifier", true,
+      "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
@@ -755,6 +759,8 @@ mod tests {
             Role::Empty,
             Role::Animate,
             Role::LineStyle,
+            Role::Story,
+            Role::StoryBy,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -851,7 +857,9 @@ mod tests {
                 | Role::Link
                 | Role::Empty
                 | Role::Animate
-                | Role::LineStyle => {}
+                | Role::LineStyle
+                | Role::Story
+                | Role::StoryBy => {}
             }
         }
         v

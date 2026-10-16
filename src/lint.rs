@@ -46,7 +46,8 @@ pub struct Diagnostic {
     /// unknown key / preset / grain / compare or a bad date) |
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
-    /// `animate/reveal-no-xline` | `linestyle/unknown` (warnings) | `optional/missing` (a note: a
+    /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by`
+    /// (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -1016,7 +1017,9 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 }
 
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
-/// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`.
+/// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
+/// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
+/// `::CATEGORY`).
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1040,6 +1043,19 @@ fn motion_diags(
                         "::LINESTYLE `{bad}` is not a style ({}) — that series stays solid",
                         crate::LINE_STYLES.join(", ")
                     ),
+                ));
+            }
+        }
+        if *r == Role::StoryBy {
+            if v != "x" && v != "series" {
+                out.push((
+                    "story/bad-by",
+                    format!("::STORY_BY `{v}` is not 'x' or 'series' — steps light up their x"),
+                ));
+            } else if v == "series" && !has(Role::Category) {
+                out.push((
+                    "story/bad-by",
+                    "::STORY_BY 'series' needs a ::CATEGORY — steps light up their x".to_string(),
                 ));
             }
         }
@@ -1801,7 +1817,11 @@ mod design_tests {
             check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
                 .into_iter()
                 .map(|d| d.code)
-                .filter(|c| c.starts_with("animate/") || c.starts_with("linestyle/"))
+                .filter(|c| {
+                    ["animate/", "linestyle/", "story/"]
+                        .iter()
+                        .any(|p| c.starts_with(p))
+                })
                 .collect()
         };
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "wobble" });
@@ -1827,6 +1847,14 @@ mod design_tests {
                 row
             ),
             vec!["linestyle/unknown"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "hi", "c3": "series" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'hi'::STORY, 'series'::STORY_BY FROM t;",
+                row
+            ),
+            vec!["story/bad-by"]
         );
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());

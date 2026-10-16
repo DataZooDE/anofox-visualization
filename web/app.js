@@ -3838,6 +3838,9 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
+  // A re-run keeps each chart's ::STORY step; a full run starts at the overview.
+  if (fresh) dpStorySteps = {};
+  else document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => p._story && (dpStorySteps[p.dataset.stmt] = p._story.step()));
   // Atomic swap: replace the visible content in one synchronous step (no flash).
   grid.replaceChildren(...newGrid.childNodes);
   const dash = document.querySelector(".dash");
@@ -3869,6 +3872,7 @@ async function runOnce(fresh = true) {
   credit.append("Powered by ", creditLink);
   dash.append(credit);
   attachHover();
+  mountStories();
   addExportButtons();
   syncUrlState();
   if (dpSeedRerun) {
@@ -3895,6 +3899,15 @@ function animateIn() {
     void panel.offsetWidth; // reflow so the animation restarts
     panel.classList.add("dp-in");
     if (svg) dpAnim.enter(svg, svg.getAttribute("data-anim"));
+  });
+}
+
+// ::STORY steppers (web/anim.js) under every chart that has steps.
+let dpStorySteps = {}; // statement index → the step to restore after a re-run
+function mountStories() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const svg = panel.querySelector(".panel-svg > svg[data-story]");
+    if (svg) panel._story = dpAnim.story(panel, svg, dpStorySteps[panel.dataset.stmt] || 0);
   });
 }
 
@@ -6937,10 +6950,12 @@ async function downloadHtml() {
 }
 
 // The export's chart motion: web/anim.js's kit (its own source, so there is
-// one implementation) replaying each chart's entrance.
+// one implementation) replaying each chart's entrance and rebuilding its
+// ::STORY stepper at the overview.
 function snapshotMotion() {
   return `(function(){var K=(${animKit})(window);
   document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
+  document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){K.story(s.closest('.panel'),s);});
 })();`;
 }
 
@@ -7138,25 +7153,25 @@ function attachHover() {
     ...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline"),
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
 
+  // Dim non-selected marks (the shared emphasis state's "select" layer), but
+  // only inside a chart that actually contains the selected series. A chart
+  // keyed by a different dimension (e.g. a line filtered to one channel, keyed
+  // by week) has no matching mark, so it stays fully visible instead of every
+  // point dimming away.
+  const markSet = new Set(marks);
   const apply = () => {
-    if (!dpSelected) {
-      for (const el of marks) el.style.opacity = "";
-      return;
-    }
-    // Dim non-selected marks, but only inside a panel that actually contains the
-    // selected series. A panel keyed by a different dimension (e.g. a line
-    // filtered to one channel, keyed by week) has no matching mark, so it stays
-    // fully visible instead of every point dimming away.
-    const byPanel = new Map();
+    const bySvg = new Map();
     for (const el of marks) {
-      const fig = el.closest(".panel") || document.body;
-      (byPanel.get(fig) || byPanel.set(fig, []).get(fig)).push(el);
+      const svg = rootSvg(el);
+      (bySvg.get(svg) || bySvg.set(svg, []).get(svg)).push(el);
     }
-    for (const els of byPanel.values()) {
-      const hasSel = els.some((el) => el.getAttribute("data-series") === dpSelected);
-      for (const el of els) {
-        el.style.opacity = !hasSel || el.getAttribute("data-series") === dpSelected ? "" : "0.15";
-      }
+    for (const [svg, els] of bySvg) {
+      const hasSel = !!dpSelected && els.some((el) => el.getAttribute("data-series") === dpSelected);
+      dpAnim.emph(
+        svg,
+        "select",
+        hasSel ? (el) => (markSet.has(el) && el.getAttribute("data-series") !== dpSelected ? 0.15 : null) : null
+      );
     }
   };
 
@@ -7621,11 +7636,20 @@ function marksOf(panel) {
   return panel.querySelectorAll("svg .dp-hit");
 }
 
-// Dim every data mark that fails `keep(el)`; pass null to clear the emphasis.
+// Dim every data mark that fails `keep(el)`; pass null to clear the emphasis
+// (the shared emphasis state's "filter" layer: brush, value filter, named
+// selections).
 function filterMarks(panel, keep) {
-  marksOf(panel).forEach((el) => {
-    el.style.opacity = keep && !keep(el) ? "0.12" : "";
-  });
+  const hits = new Set(marksOf(panel));
+  const svgs = new Set([...hits].map(rootSvg));
+  for (const svg of svgs) dpAnim.emph(svg, "filter", keep ? (el) => (hits.has(el) && !keep(el) ? 0.12 : null) : null);
+}
+
+// The panel-level <svg> a mark belongs to (the root of nested plot svgs).
+function rootSvg(el) {
+  let s = el.ownerSVGElement || el;
+  while (s.ownerSVGElement) s = s.ownerSVGElement;
+  return s;
 }
 
 // ECharts-style brush: toggle a drag-to-select overlay; marks inside the box
@@ -7880,11 +7904,16 @@ function attachLegendToggle() {
     // ECharts-style focus: hovering a legend entry emphasises that series and
     // fades the others (visible ones only; hidden/toggled-off series stay off).
     const emphasize = (only) => {
-      svg.querySelectorAll("[data-series]").forEach((el) => {
-        const s = el.getAttribute("data-series");
-        if (hidden.has(s)) return;
-        el.style.opacity = only && s !== only ? "0.15" : "";
-      });
+      dpAnim.emph(
+        svg,
+        "legend",
+        only
+          ? (el) => {
+              const s = el.getAttribute("data-series");
+              return s != null && !hidden.has(s) && s !== only ? 0.15 : null;
+            }
+          : null
+      );
       entries.forEach((e) => {
         if (hidden.has(e.s)) return;
         e.text.style.fontWeight = only === e.s ? "700" : "";

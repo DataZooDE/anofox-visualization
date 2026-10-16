@@ -3,7 +3,9 @@
 --   * the outlook chart wipes in up to "Today", pauses, then the forecast fan
 --     grows forward from it ('reveal'::ANIMATE + a DATE ::XLINE), and the
 --     forecast line is drawn with moving dashes ('flow'::LINESTYLE);
---   * the weekly bars grow in week by week (the default 'auto' entrance).
+--   * the weekly bars grow in week by week (the default 'auto' entrance), and
+--     a ::STORY walks through three weeks: Step / Play light one week up and
+--     dim the rest, with a caption pointing at it.
 -- Motion is browser only — PNG/PDF/--svg output is static — and under
 -- "reduce motion" every chart shows its final state at once.
 --
@@ -44,5 +46,10 @@ ORDER BY 1, 2;
 
 SELECT 12::COL;
 SELECT strftime(week, 'W%V') ::XAXIS, channel ::CATEGORY, demand ::BARCHART,
-       'Forecast demand per channel, next 11 weeks' ::TITLE
+       CASE strftime(week, 'W%V')
+         WHEN 'W43' THEN 'W43, the first forecast week: Store still sells about 50 units a week more than Online'
+         WHEN 'W48' THEN 'W48: Online dips for one week — a quiet slot for the shop migration'
+         WHEN 'W53' THEN 'W53, year end: both channels reach their highest forecast demand'
+       END ::STORY,
+       'Forecast demand per channel, next 11 weeks — step through the story' ::TITLE
 FROM md_weeks WHERE future ORDER BY week, channel;

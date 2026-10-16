@@ -1,11 +1,12 @@
-// Chart motion over the renderer's SVG: entrance animations (::ANIMATE).
+// Chart motion over the renderer's SVG: entrance animations (::ANIMATE),
+// one shared emphasis (dimming) state, and ::STORY steppers.
 //
 // Driven only by what the SVG carries — `data-plot` / `data-xdomain` on the
 // plot <svg>, `data-x` / `data-series` on marks, and the panel directives
-// src/lib.rs writes on the root (`data-animate`, `data-xline`). Everything
-// runs through Web Animations with fill:"backwards", so a finished animation
-// leaves no state behind; under prefers-reduced-motion nothing animates and
-// the chart is simply in its final state.
+// src/lib.rs writes on the root (`data-animate`, `data-xline`, `data-story`).
+// Everything runs through Web Animations with fill:"backwards", so a finished
+// animation leaves no state behind; under prefers-reduced-motion nothing
+// animates and the chart is simply in its final state.
 //
 // `animKit` is self-contained (no imports, no app.js globals): the static HTML
 // export embeds its source (`animKit.toString()`) to replay the same motion.
@@ -196,12 +197,177 @@ export function animKit(win) {
     clipReveal(svg, wipe, [[0, 0], [1, P ? P.w + 16 : 0]], T, 0, EASE);
   }
 
+  // ---- emphasis: one opacity per mark from every layer that dims ----------
+  // Hover/click selection, brush & named selections, legend focus and story
+  // steps each own a layer: `fn(el)` → an opacity below 1 to dim, or null.
+  // A mark shows the lowest of them, so clearing one layer never undoes
+  // another (keyboard focus overrides all in CSS).
+  const dimmable = (svg) => {
+    const set = new Set(marksOf(svg));
+    svg.querySelectorAll("[data-series], .dp-hit").forEach((e) => set.add(e));
+    return set;
+  };
+  function emph(svg, layer, fn) {
+    if (!svg) return;
+    const st = svg._dpEmph || (svg._dpEmph = new Map());
+    if (fn) st.set(layer, fn);
+    else if (!st.delete(layer)) return;
+    for (const el of dimmable(svg)) {
+      let o = 1;
+      for (const f of st.values()) {
+        const v = f(el);
+        if (v != null && v < o) o = v;
+      }
+      el.style.opacity = o < 1 ? String(o) : "";
+    }
+  }
+
+  // ---- ::STORY: step through captions, lighting one x (or series) --------
+  // Same x? Exact text, else equal numbers / dates (a date key "2026-10-12"
+  // against a mark's "2026-10-12 00:00:00").
+  function sameX(a, b) {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    const n = Number(a);
+    const m = Number(b);
+    if (a !== "" && b !== "" && Number.isFinite(n) && Number.isFinite(m)) return n === m;
+    const d = Date.parse(a);
+    const e = Date.parse(b);
+    return Number.isFinite(d) && d === e;
+  }
+  const svgEl = (tag, attrs) => {
+    const e = doc.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  };
+  // Build the stepper for a chart whose root <svg> carries data-story
+  // ([{k, t}, …]) and data-story-by ("x" | "series"). Step 0 is the overview;
+  // each step dims the other marks, shows its caption (an aria-live region)
+  // and draws a connector to the lit marks. Returns {show, step}.
+  function story(panel, svg, start = 0) {
+    let steps;
+    try {
+      steps = JSON.parse(svg.getAttribute("data-story") || "[]");
+    } catch (_) {
+      steps = [];
+    }
+    const holder = svg.parentElement;
+    if (!steps.length || !panel || !holder) return null;
+    const by = svg.getAttribute("data-story-by") === "series" ? "series" : "x";
+    panel.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link").forEach((e) => e.remove());
+    const bar = doc.createElement("div");
+    bar.className = "dp-story";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "Story steps");
+    const btn = (cls, text, label) => {
+      const b = doc.createElement("button");
+      b.type = "button";
+      b.className = "dp-story-btn " + cls;
+      b.textContent = text;
+      if (label) b.setAttribute("aria-label", label);
+      bar.append(b);
+      return b;
+    };
+    const prev = btn("dp-story-prev", "‹", "Previous step");
+    const play = btn("dp-story-play", "▶ Play", "");
+    const next = btn("dp-story-next", "›", "Next step");
+    const pos = doc.createElement("span");
+    pos.className = "dp-story-pos";
+    bar.append(pos);
+    play.hidden = still(); // reduced motion: step by hand, no autoplay
+    const cap = doc.createElement("div");
+    cap.className = "dp-story-cap";
+    cap.setAttribute("aria-live", "polite");
+    const link = svgEl("svg", { class: "dp-story-link", "aria-hidden": "true" });
+    holder.append(link, cap);
+    holder.after(bar);
+
+    let k = Math.max(0, Math.min(steps.length, start | 0));
+    let timer = null;
+    const lit = (el) => {
+      const st = steps[k - 1];
+      if (by === "series") {
+        const s = el.getAttribute("data-series");
+        return s == null ? null : s === st.k;
+      }
+      return el.hasAttribute("data-x") ? sameX(el.getAttribute("data-x"), st.k) : false;
+    };
+    const place = () => {
+      link.replaceChildren();
+      if (!k) return;
+      const marks = [...dimmable(svg)].filter((el) => lit(el) === true);
+      const hb = holder.getBoundingClientRect();
+      const bs = marks.map((m) => m.getBoundingClientRect()).filter((b) => b.width || b.height);
+      if (!bs.length || !hb.width) return;
+      const l = Math.min(...bs.map((b) => b.left)) - hb.left;
+      const r = Math.max(...bs.map((b) => b.right)) - hb.left;
+      const t = Math.min(...bs.map((b) => b.top)) - hb.top;
+      const cw = cap.offsetWidth;
+      const ch = cap.offsetHeight;
+      const mx = (l + r) / 2;
+      let cx;
+      let cy = 2;
+      let path;
+      if (t > ch + 18) {
+        // above the lit marks, a short drop down to them
+        cx = Math.max(0, Math.min(hb.width - cw, mx - cw / 2));
+        path = `M${mx},${cy + ch} L${mx},${t - 4}`;
+      } else {
+        // the marks reach the top: beside them, a level run across
+        const right = r + 14 + cw <= hb.width;
+        cx = right ? r + 14 : Math.max(0, l - 14 - cw);
+        cy = Math.max(2, t);
+        path = right ? `M${cx},${cy + ch / 2} L${r + 3},${cy + ch / 2}` : `M${cx + cw},${cy + ch / 2} L${l - 3},${cy + ch / 2}`;
+      }
+      cap.style.left = cx + "px";
+      cap.style.top = cy + "px";
+      link.setAttribute("viewBox", `0 0 ${hb.width} ${hb.height}`);
+      link.append(svgEl("path", { d: path, class: "dp-flow" }));
+    };
+    const show = (i) => {
+      k = (i + steps.length + 1) % (steps.length + 1);
+      emph(svg, "story", k ? (el) => (lit(el) === false ? (el.tagName === "polyline" || el.tagName === "polygon" ? 0.35 : 0.2) : null) : null);
+      cap.textContent = k ? steps[k - 1].t : "";
+      cap.hidden = !k;
+      pos.textContent = k ? `Step ${k} of ${steps.length}` : `Overview · ${steps.length} steps`;
+      panel.classList.toggle("dp-story-on", !!k);
+      place();
+    };
+    const stop = () => {
+      if (timer) win.clearInterval(timer);
+      timer = null;
+      play.textContent = "▶ Play";
+      play.setAttribute("aria-pressed", "false");
+    };
+    prev.onclick = () => (stop(), show(k - 1));
+    next.onclick = () => (stop(), show(k + 1));
+    play.onclick = () => {
+      if (timer) return stop();
+      play.textContent = "❚❚ Pause";
+      play.setAttribute("aria-pressed", "true");
+      show(k === steps.length ? 1 : k + 1);
+      timer = win.setInterval(() => {
+        if (!panel.isConnected) return stop();
+        if (k >= steps.length) return stop(), show(0);
+        show(k + 1);
+      }, 2600);
+    };
+    if (win.ResizeObserver) new win.ResizeObserver(() => place()).observe(holder);
+    show(k);
+    return { show, step: () => k };
+  }
+
   // A copy of the dashboard for the static export must not freeze motion
-  // state: drop running clips (WAAPI itself is never serialised).
+  // state: drop running clips (WAAPI itself is never serialised), story
+  // controls and overlays, and every dimmed mark — the snapshot script
+  // rebuilds the stepper at its overview.
   function strip(root) {
     root.querySelectorAll("clipPath.dp-clip").forEach((c) => c.remove());
     root.querySelectorAll('[clip-path^="url(#dp-clip-"]').forEach((e) => e.removeAttribute("clip-path"));
+    root.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link").forEach((e) => e.remove());
+    root.querySelectorAll(".dp-story-on").forEach((e) => e.classList.remove("dp-story-on"));
+    root.querySelectorAll(".panel svg [style*='opacity']").forEach((e) => (e.style.opacity = ""));
   }
 
-  return { enter, strip, marksOf, plotOf, xPx, still };
+  return { enter, strip, emph, story, marksOf, plotOf, xPx, still };
 }

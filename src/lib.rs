@@ -438,6 +438,12 @@ pub enum Role {
     /// `::CATEGORY`): `'flow'` = dashes that move in the browser (a forecast,
     /// "predicted"), `'dashed'` = still dashes; static output shows dashes.
     LineStyle,
+    /// A story caption per row (`::STORY`): rows with text become steps that
+    /// light up their x (or their series, see [`Role::StoryBy`]) in the browser.
+    Story,
+    /// What a `::STORY` step lights up (`::STORY_BY`): `'x'` (default) or
+    /// `'series'` (the row's `::CATEGORY`).
+    StoryBy,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1339,7 +1345,8 @@ pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 /// Pass a panel's motion directives to the browser as attributes on the SVG
 /// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
 /// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
-/// (epoch seconds on a date axis, a level on a discrete one).
+/// (epoch seconds on a date axis, a level on a discrete one); `data-story` +
+/// `data-story-by` (`::STORY`, `::STORY_BY`).
 fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
         if ANIMATE_MODES.contains(&mode.as_str()) {
@@ -1357,7 +1364,58 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
             svg = with_root_attr(svg, "data-animate", &mode);
         }
     }
+    if let Some(steps) = story_steps(cols) {
+        let by = match role_str(cols, Role::StoryBy).map(|b| b.to_ascii_lowercase()) {
+            Some(b) if b == "series" && find_role(cols, Role::Category).is_some() => "series",
+            _ => "x",
+        };
+        svg = with_root_attr(svg, "data-story-by", by);
+        svg = with_root_attr(svg, "data-story", &steps);
+    }
     svg
+}
+
+/// A cell as the mark's `data-x` / `data-series` spells it.
+fn key_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.clone()),
+        Value::Na => None,
+        v => v.as_f64().map(|f| f.to_string()),
+    }
+}
+
+/// `::STORY` steps as JSON `[{"k": key, "t": caption}, …]`, in row order:
+/// one per distinct key (the row's x, or its `::CATEGORY` with
+/// `'series'::STORY_BY`) whose caption is non-empty; the first caption wins.
+fn story_steps(cols: &[Column]) -> Option<String> {
+    let story = find_role(cols, Role::Story)?;
+    let by_series = role_str(cols, Role::StoryBy).is_some_and(|b| b.eq_ignore_ascii_case("series"));
+    let keys = if by_series {
+        find_role(cols, Role::Category)
+    } else {
+        None
+    }
+    .or_else(|| find_role(cols, Role::X))?;
+    let mut steps: Vec<(String, String)> = Vec::new();
+    for (i, v) in story.values.iter().enumerate() {
+        let Some(t) = v.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let Some(k) = keys.values.get(i).and_then(key_text) else {
+            continue;
+        };
+        if !steps.iter().any(|(sk, _)| *sk == k) {
+            steps.push((k, t.to_string()));
+        }
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    let json: Vec<serde_json::Value> = steps
+        .into_iter()
+        .map(|(k, t)| serde_json::json!({ "k": k, "t": t }))
+        .collect();
+    serde_json::to_string(&json).ok()
 }
 
 /// Give every hoverable mark its value as the panel formats it: the

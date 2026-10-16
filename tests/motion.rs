@@ -139,3 +139,45 @@ fn dashed_without_a_category_styles_the_one_line() {
     );
     assert!(!svg.contains("dp-flow"));
 }
+
+#[test]
+fn story_steps_ride_on_the_root() {
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W1", "W2", "W2", "W3", "W3"])),
+        Column::new("c", Role::Category, strs(&["a", "b", "a", "b", "a", "b"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Bar),
+            nums(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        ),
+        Column::new(
+            "s",
+            Role::Story,
+            vec![
+                Value::Na,
+                Value::Na,
+                Value::Str("W2: \"both\" <peak>".into()),
+                Value::Str("ignored: W2 already has a caption".into()),
+                Value::Str("  ".into()),
+                Value::Str("W3 & after".into()),
+            ],
+        ),
+    ];
+    let svg = render(&cols, 480, 300).unwrap();
+    let r = root(&svg);
+    assert!(r.contains(r#"data-story-by="x""#), "{r}");
+    // escaped JSON in the attribute; one step per x, in row order
+    assert!(
+        r.contains(r#"data-story="[{&quot;k&quot;:&quot;W2&quot;,&quot;t&quot;:&quot;W2: \&quot;both\&quot; &lt;peak&gt;&quot;},{&quot;k&quot;:&quot;W3&quot;,&quot;t&quot;:&quot;W3 &amp; after&quot;}]""#),
+        "{r}"
+    );
+    // by series
+    let mut by = cols.clone();
+    by.push(Column::new("b", Role::StoryBy, strs(&["series"; 6])));
+    let svg = render(&by, 480, 300).unwrap();
+    let r = root(&svg);
+    assert!(
+        r.contains(r#"data-story-by="series""#) && r.contains("&quot;k&quot;:&quot;a&quot;"),
+        "{r}"
+    );
+}
