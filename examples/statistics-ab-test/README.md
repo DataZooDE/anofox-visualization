@@ -3,7 +3,7 @@
 **Who asks:** the head of e-commerce, before the Q4 release freeze: ship the
 one-page checkout (B) or keep the three-step checkout (A)? A live
 anofox_statistics use case; in the [live demo](https://datazoode.github.io/anofox-visualization/)
-it is "A/B test readout".
+it is "Did the new checkout lift conversion?".
 
 `showcase.sql` is a link to `web/examples/statistics-ab-test.sql`, the single
 source the browser demo loads. The setup builds 96,000 synthetic visitors

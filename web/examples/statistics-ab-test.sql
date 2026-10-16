@@ -18,7 +18,7 @@
 LOAD anofox_statistics;
 
 SELECT 'Did the new checkout lift conversion?'::DASHBOARD_TITLE;
-SELECT 'anofox_statistics · live'::BRAND;
+SELECT 'anofox_statistics'::BRAND;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Data (setup statements: plain SQL, no files)
@@ -191,15 +191,20 @@ SELECT 1::ENDGROUP;
 SELECT 'Readout'::TAB;
 
 SELECT 12::COL;
-SELECT '**Who asks:** the head of e-commerce, before the Q4 release freeze — *ship the one-page checkout (B) to everyone, or keep the three-step checkout (A)?* **The test:** 96,000 visitors who reached the basket, 1–21 September 2026, randomly split 50/50, sized to see a lift of **+0.4 pp** (≈ 10% relative) with 80% power. **Primary metric:** conversion (order placed). **Pre-registered rule:** ship if the 95% interval of the lift lies above zero, the split is healthy and no guardrail breaks. Computed live with `prop_test_two_agg`, `t_test_agg`, `tost_t_test_agg` and `chisq_gof_agg` of **anofox_statistics**; the inputs above re-run every test.'::MARKDOWN,
+SELECT '**Who asks:** the head of e-commerce, before the Q4 release freeze — *ship the one-page checkout (B) to everyone, or keep the three-step checkout (A)?* **The test:** 96,000 visitors who reached the basket, 1–21 September 2026, randomly split 50/50, sized to see a lift of **+0.4 pp** (≈ 10% relative) with 80% power. **Primary metric:** conversion (order placed). **Pre-registered rule:** ship if the 95% interval of the lift lies above zero, the split is healthy and no guardrail breaks. The settings above re-run every test.'::MARKDOWN,
        'The question'::TITLE;
 
 SELECT 'Headline: B against A'::GROUP;
 SELECT round(100 * p_b, 2)::PERCENT, round(100 * p_a, 2)::DELTA, 'Conversion B (arrow vs A)'::LABEL FROM ab_head;
 SELECT round(100 * conv.estimate, 2)::METRIC,
-       ('Lift (pp), 95% CI ' || printf('%+.2f', 100 * conv.conf_low) || ' to ' || printf('%+.2f', 100 * conv.conf_high))::LABEL FROM ab_head;
+       ('Lift (pp), 95% CI ' || printf('%+.2f', 100 * conv.conf_low) || ' to ' || printf('%+.2f', 100 * conv.conf_high))::LABEL,
+       (CASE WHEN conv.conf_low > 0 THEN 'good' WHEN conv.conf_high < 0 THEN 'bad' ELSE 'warn' END)::THRESHOLDS,
+       'Conversion of B minus conversion of A, in percentage points (pp): +0.50 pp lifts 4.00 % to 4.50 %. Green when the whole 95 % interval lies above zero (two-sample proportion test).'::INFO
+FROM ab_head;
 SELECT round(rpv_b, 2)::METRIC, round(rpv_a, 2)::DELTA, 'Revenue per visitor B (€, arrow vs A)'::LABEL FROM ab_head;
-SELECT printf('%.2g', conv.p_value)::TEXT_LARGE, 'p-value of the lift'::LABEL FROM ab_head;
+SELECT printf('%.2g', conv.p_value)::TEXT_LARGE, 'p-value of the lift'::LABEL,
+       'The chance of a lift at least this large if B truly made no difference. Below 0.05 counts as significant here; it says nothing about how large the lift is — read the interval for that.'::INFO
+FROM ab_head;
 SELECT verdict::TEXT_LARGE, 'Verdict (pre-registered rule)'::LABEL FROM ab_verdict;
 SELECT 1::ENDGROUP;
 
@@ -212,7 +217,11 @@ cum AS (
 )
 SELECT d::XAXIS, round(100 * r.estimate, 3) AS "lift (pp)" ::LINECHART,
        round(100 * r.conf_low, 3)::BAND_LOWER, round(100 * r.conf_high, 3)::BAND_UPPER,
-       0::REFLINE,
+       0::REFLINE, 'no effect'::REFLINE_LABEL,
+       CASE d WHEN DATE '2026-09-01' THEN 'Day 1: peeking now would claim a lift of ' || printf('%+.1f', 100 * r.estimate) || ' pp — the novelty bump of new visitors, on a tiny sample'
+              WHEN DATE '2026-09-04' THEN 'Day 4: the novelty fades and the interval narrows as visitors accumulate'
+              WHEN DATE '2026-09-21' THEN 'Day 21: the lift settles at ' || printf('%+.2f', 100 * r.estimate) || ' pp, its 95 % interval (' || printf('%+.2f', 100 * r.conf_low) || ' to ' || printf('%+.2f', 100 * r.conf_high) || ') clear of zero'
+       END::STORY,
        'Cumulative lift with its 95% CI — peeking on day 1 would have claimed +1.6 pp; the lift settles near +0.5 pp, clear of zero'::TITLE
 FROM cum ORDER BY d;
 
@@ -245,6 +254,7 @@ SELECT ('### ' || verdict || E'\n\n'
                 ELSE 'All five guardrails hold' END
         || ' and the split is ' || CASE WHEN srm_p < 0.001 THEN '**broken** (sample-ratio mismatch)' ELSE 'healthy (SRM p = ' || printf('%.2f', srm_p) || ')' END
         || '. Details in the next tabs; the rollout case in **Decision**.')::MARKDOWN,
+       CASE WHEN verdict LIKE 'Ship%' THEN 'success' WHEN verdict = 'Keep running' THEN 'note' ELSE 'warning' END::CALLOUT,
        'Verdict'::TITLE
 FROM ab_verdict;
 
@@ -296,7 +306,9 @@ SELECT 'Guardrails at a glance'::GROUP;
 SELECT count(*) FILTER (WHERE verdict = 'pass')::METRIC, 'guardrails pass (of 5)'::LABEL FROM ab_guard;
 SELECT count(*) FILTER (WHERE verdict = 'watch')::METRIC, 'on watch'::LABEL FROM ab_guard;
 SELECT count(*) FILTER (WHERE verdict = 'fail')::METRIC, 'fail'::LABEL FROM ab_guard;
-SELECT printf('%.2f', srm_p)::TEXT_LARGE, ('Sample-ratio p (' || n_b || ' B vs ' || n_a || ' A)')::LABEL FROM ab_verdict;
+SELECT printf('%.2f', srm_p)::TEXT_LARGE, ('Sample-ratio p (' || n_b || ' B vs ' || n_a || ' A)')::LABEL,
+       'Sample-ratio mismatch: a χ² goodness-of-fit test of the visitor counts against the planned 50/50 split. A p below 0.001 means the randomisation or the tracking is broken, and the readout cannot be trusted.'::INFO
+FROM ab_verdict;
 SELECT 1::ENDGROUP;
 
 SELECT 12::COL;
@@ -327,12 +339,20 @@ FROM (SELECT variant, page_load_ms, arm FROM ab_view WHERE user_id % 16 = 0) r;
 SELECT 'Power & sample size'::TAB;
 
 SELECT 12::COL;
-SELECT '**Was the test big enough?** A test that cannot see the lift that matters can only say "no evidence", never "no effect". With base conversion **p** and a lift **d**, each arm needs n = (z₀.₉₇₅ + z₀.₈)² · (p(1−p) + (p+d)(1−p−d)) / d² visitors for 80% power at α = 5% (normal approximation, plain SQL). **What to look for:** the power at the lift the test was sized for (input above), and how many days the test would have needed at the current traffic. Change the device: desktop alone has a third of the traffic, so on its own it is badly underpowered for the same lift — its "no effect" is really "not enough data".'::MARKDOWN,
+SELECT '**Was the test big enough?** A test that cannot see the lift that matters can only say "no evidence", never "no effect". With base conversion $p$ and a lift $d$, each arm needs
+
+$$n = \frac{(z_{0.975} + z_{0.8})^2 \, s^2}{d^2}$$
+
+$$s^2 = p(1-p) + (p+d)(1-p-d)$$
+
+visitors for 80% power at α = 5% (normal approximation). **What to look for:** the power at the lift the test was sized for (input above), and how many days the test would have needed at the current traffic. Change the device: desktop alone has a third of the traffic, so on its own it is badly underpowered for the same lift — its "no effect" is really "not enough data".'::MARKDOWN,
        'What to look for'::TITLE;
 
 SELECT 'Design check (for the lift the test was sized for)'::GROUP;
 SELECT round(100 * ab_power(p_a, ab_mde(), least(n_a, n_b)), 0)::METRIC,
-       ('power at +' || printf('%.2f', 100 * ab_mde()) || ' pp (%)')::LABEL FROM ab_head;
+       ('power at +' || printf('%.2f', 100 * ab_mde()) || ' pp (%)')::LABEL, '<50:bad; <80:warn; good'::THRESHOLDS,
+       'Power: the chance that this test detects the lift if it is real. Below 80 %, a "no significant lift" is more likely a test that was too small than a checkout that does not work.'::INFO
+FROM ab_head;
 SELECT ab_n_needed(p_a, ab_mde())::COMPACT, 'visitors per arm needed (80% power)'::LABEL FROM ab_head;
 SELECT least(n_a, n_b)::COMPACT, ab_n_needed(p_a, ab_mde())::DELTA, 'visitors per arm in the test (arrow vs needed)'::LABEL FROM ab_head;
 SELECT ceil(2 * ab_n_needed(p_a, ab_mde()) / ((n_a + n_b) / 21.0))::METRIC, 'days needed at today''s traffic'::LABEL FROM ab_head;
