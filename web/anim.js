@@ -260,14 +260,24 @@ export function animKit(win) {
   }
 
   // ---- ::STORY: step through captions, lighting one x (or series) --------
+  // An ISO date (time) as epoch seconds, read as UTC like the renderer; else NaN.
+  const isoSecs = (s) => {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?))?$/.exec(String(s).trim());
+    return m ? Date.parse(`${m[1]}T${m[2] || "00:00"}Z`) / 1000 : NaN;
+  };
+  const EPOCH = /^-?\d{9,11}$/;
   // Same x? Exact text, else equal numbers / dates (a date key "2026-10-12"
-  // against a mark's "2026-10-12 00:00:00").
+  // against a mark's "2026-10-12 00:00:00", or an older SVG's epoch-seconds
+  // key "1791763200" against a mark's "2026-10-12").
   function sameX(a, b) {
     if (a === b) return true;
     if (a == null || b == null) return false;
     const n = Number(a);
     const m = Number(b);
     if (a !== "" && b !== "" && Number.isFinite(n) && Number.isFinite(m)) return n === m;
+    const s = EPOCH.test(a) ? n : isoSecs(a);
+    const t = EPOCH.test(b) ? m : isoSecs(b);
+    if (Number.isFinite(s) && s === t) return true;
     const d = Date.parse(a);
     const e = Date.parse(b);
     return Number.isFinite(d) && d === e;
@@ -688,5 +698,5 @@ export function animKit(win) {
     root.querySelectorAll(".panel svg [style*='opacity']").forEach((e) => (e.style.opacity = ""));
   }
 
-  return { enter, strip, emph, story, geom, tween, zoom, marksOf, plotOf, xPx, still };
+  return { enter, strip, emph, story, geom, tween, zoom, marksOf, plotOf, xPx, still, sameX };
 }
