@@ -406,3 +406,23 @@ Total ≈ L, in line with the issue's estimate. M1 alone already replaces the
     OK?
 11. **Edges as marks:** should edges be clickable / selectable (select their
     source), or hover-only?
+
+## 7. Decisions (2026-10-16)
+
+The owner accepted the proposals; M1 starts.
+
+1. **Scope:** yes — data-driven diagrams in, free-form explainer drawing out.
+2. **SQL surface:** yes — one row per node, `::UPSTREAM` / `::EDGES`.
+3. **Role names:** as listed — `::DIAGRAM` (alias `::NODE`), `::UPSTREAM`,
+   `::EDGES`, `::LANE`, `::DIRECTION`.
+4. **Layout engine:** our own small Sugiyama, no layout crate.
+5. **Rendering:** our own SVG writer, no ggplot-rs work.
+6. **Contract:** a `graph` contract schema with Grafana-style names
+   (`id/title/mainstat`, `source/target/value`), plus aliases for
+   inventory-rs's current names (`stage`, `from_stage`, …) via the alias table
+   from #71 (`src/contract/names.rs`).
+7. **Story:** a step lights **all edges touching the node**, both directions.
+8. **Lanes / pins:** in M3.
+9. **Mini-charts:** sparkline only (M3).
+10. **Limits:** 150 nodes / 300 edges, with a note above that.
+11. **Edges:** hover-only in M1; whether they become clickable is decided in M2.
