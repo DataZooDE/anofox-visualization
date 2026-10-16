@@ -15,6 +15,7 @@ import init, {
   table_profile,
   human_header,
   period_resolve,
+  kpi_parts,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -2837,27 +2838,54 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
-          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost, errors)
+          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost,
+          // errors). ::DELTA_FORMAT / ::DELTA_LABEL shape the change line;
+          // ::SPARKLINE (a list) draws a trend, ::GOAL/::TARGET a progress bar.
+          // The texts come from Rust (wasm kpi_parts = the headless tile).
           const dr = s.roles.find((r) => r[1] === "DELTA" || r[1] === "DELTA_LOWER_GOOD");
+          const cell = (tok) => {
+            const r = s.roles.find((x) => x[1] === tok);
+            return r ? r0["c" + r[0]] : null;
+          };
           const fig = mkPanel();
           fig.classList.add("metric");
+          let parts = {};
+          try {
+            parts = JSON.parse(
+              kpi_parts(
+                JSON.stringify({
+                  value: r0["c" + mr[0]],
+                  prev: dr ? r0["c" + dr[0]] : null,
+                  goal: cell("REFLINE"),
+                  fmt: mr[1],
+                  delta_format: String(cell("DELTA_FORMAT") ?? ""),
+                  lower_good: !!dr && dr[1] === "DELTA_LOWER_GOOD",
+                  locale: dashLocale() || "",
+                }),
+              ),
+            );
+          } catch (_) {}
           let deltaHtml = "";
-          if (dr) {
-            const cur = parseFloat(r0["c" + mr[0]]);
-            const prev = parseFloat(r0["c" + dr[0]]);
-            if (!isNaN(cur) && !isNaN(prev) && prev !== 0) {
-              const pct = ((cur - prev) / Math.abs(prev)) * 100;
-              const up = pct >= 0;
-              const good = dr[1] === "DELTA_LOWER_GOOD" ? !up : up;
-              deltaHtml =
-                `<div class="metric-delta ${good ? "good" : "bad"}" title="${good ? "better" : "worse"} than the comparison">${up ? "▲" : "▼"} ` +
-                `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
-            }
+          const d = parts.delta;
+          if (d) {
+            const lab = cell("DELTA_LABEL");
+            deltaHtml =
+              `<div class="metric-delta ${d.good ? "good" : "bad"}" title="${d.good ? "better" : "worse"} than the comparison">` +
+              `<span class="metric-delta-chg">${d.arrow} ${escapeHtml(d.text)}</span>` +
+              (lab != null && String(lab).trim() ? `<span class="metric-delta-label">${escapeHtml(lab)}</span>` : "") +
+              `</div>`;
           }
+          const g = parts.goal;
+          const goalHtml = g
+            ? `<div class="metric-goal${g.reached ? " reached" : ""}"><div class="metric-goal-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(g.frac * 100)}" aria-label="${escapeHtml(g.text)}">` +
+              `<span style="width:${Math.max(0, Math.min(1, g.frac)) * 100}%"></span></div><div class="metric-goal-text">${escapeHtml(g.text)}</div></div>`
+            : "";
           fig.innerHTML =
             `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
-            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
+            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>` +
+            kpiSpark(cell("SPARKLINE")) +
+            goalHtml;
           container.appendChild(fig);
           panels++;
         } else {
@@ -5101,6 +5129,40 @@ function cellSpark(v) {
     `<polygon points="${area}" fill="var(--ax-spark)" fill-opacity="0.1"/>` +
     `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
     `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
+  );
+}
+
+// A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
+// value, stretched to the tile's width (non-scaling strokes), the last point
+// marked. "" without ≥ 2 numbers.
+function kpiSpark(v) {
+  let arr = Array.isArray(v) ? v : null;
+  if (!arr && typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) arr = p;
+    } catch (_) {}
+  }
+  const nums = (arr || []).filter((x) => x != null && x !== "").map(Number).filter((x) => isFinite(x));
+  if (nums.length < 2) return "";
+  const w = 200;
+  const h = 36;
+  const pad = 3;
+  const mn = Math.min(...nums);
+  const mx = Math.max(...nums);
+  const rng = mx - mn || 1;
+  const xs = (i) => (i * w) / (nums.length - 1);
+  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
+  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
+  const lx = xs(nums.length - 1).toFixed(1);
+  const ly = ys(nums[nums.length - 1]).toFixed(1);
+  const f = (n) => fmtNum(n, "COMPACT");
+  const tip = `${f(nums[0])} → ${f(nums[nums.length - 1])} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
+  return (
+    `<svg class="metric-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(tip)}"><title>${escapeHtml(tip)}</title>` +
+    `<polygon points="0,${h} ${pts} ${w},${h}" fill="var(--ax-spark)" fill-opacity="0.12"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
+    `<path d="M${lx} ${ly}h0" stroke="var(--ax-spark-dot)" stroke-width="5.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`
   );
 }
 

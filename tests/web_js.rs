@@ -52,3 +52,8 @@ fn web_locale_formatting_matches_the_cli() {
 fn web_period_control_matches_the_rust_vectors() {
     run_node("period_test.mjs");
 }
+
+#[test]
+fn web_kpi_tile_parts() {
+    run_node("kpi_test.mjs");
+}

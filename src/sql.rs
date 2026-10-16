@@ -37,7 +37,7 @@ pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
 
 use crate::roles::is_sql_type_token;
-use crate::{parse_role, Column, InputKind, Role};
+use crate::{parse_role, Column, InputKind, Kind, Role};
 use ggplot_rs::prelude::Value;
 
 /// A planned statement: either setup (run for effect) or a panel (rewritten SQL
@@ -160,6 +160,9 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
             false => Value::Str(s.clone()),
         },
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
+        // A list (a KPI's `list(v)::SPARKLINE`, a table's list column) keeps
+        // its JSON text.
+        Some(v @ serde_json::Value::Array(_)) => Value::Str(v.to_string()),
         _ => Value::Na,
     }
 }
@@ -535,12 +538,21 @@ pub fn rewrite(stmt: &str) -> Rewritten {
     let mut roles = Vec::new();
     let mut names = Vec::new();
     let mut items = Vec::new();
+    // A KPI statement (a ::METRIC/::MONEY/… column): its ::SPARKLINE column
+    // is the tile's trend line, a list.
+    let kpi_stmt = unambiguous.iter().any(|r| matches!(r, Role::Metric(_)));
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
         if let Some((expr, role)) = item_role(item, inputs_ok) {
             // Cast measures/metrics to DOUBLE so sum()/BIGINT/HUGEINT come back
             // as real numbers (DuckDB-Wasm otherwise serialises HUGEINT as str).
             let rewritten = match role {
+                // A KPI's sparkline is a list (`list(v ORDER BY d)`): cast
+                // to DOUBLE[] (a list of HUGEINT sums would not read as
+                // numbers in DuckDB-Wasm).
+                Role::Value(Kind::Sparkline) if kpi_stmt => {
+                    format!("CAST({} AS DOUBLE[]) AS c{i}", trailing_alias(expr).0)
+                }
                 Role::Value(_)
                 | Role::Metric(_)
                 | Role::Delta

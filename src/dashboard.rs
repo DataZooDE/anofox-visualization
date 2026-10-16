@@ -20,7 +20,7 @@
 //! ```
 
 use crate::format::escape_xml as esc;
-use crate::format::{format_number_l, Locale};
+use crate::format::Locale;
 use crate::sql::contract_call;
 use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant, CREDIT_TEXT, CREDIT_URL};
 use crate::{
@@ -223,7 +223,24 @@ fn render_inner(
         *row_units = 0;
     };
 
-    for step in &steps {
+    // KPI tiles (not text cards), for the KPI strip.
+    let tiles: Vec<Option<crate::kpi::Kpi>> = steps
+        .iter()
+        .map(|st| {
+            let rows = st.rows.as_ref().ok()?;
+            if st.panel.contract.is_some() {
+                return None;
+            }
+            let cols = columns_from_result(rows, &st.panel.roles);
+            crate::kpi::Kpi::from_columns(&cols, &ropts.locale).filter(|k| !k.text_card)
+        })
+        .collect();
+    // A run of >= 2 consecutive KPI tiles (a ::GROUP of KPIs, or the
+    // browser's auto-strip) shares one row, split evenly (≤ 6 per row):
+    // (tiles left, tiles per row, tile width, tile height).
+    let mut strip: Option<(usize, usize, f64, f64)> = None;
+
+    for (si, step) in steps.iter().enumerate() {
         let panel = &step.panel;
         let roles = &panel.roles;
         let has = |r: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, role)| r(role));
@@ -326,22 +343,51 @@ fn render_inner(
             continue;
         }
 
+        // A KPI strip starts: the run's tiles side by side, as tall as the
+        // tallest tile.
+        if strip.is_none() && next_span == 0 && tiles[si].is_some() {
+            let run: Vec<&crate::kpi::Kpi> = tiles[si..].iter().map_while(|t| t.as_ref()).collect();
+            if run.len() >= 2 {
+                if row_units > 0 {
+                    new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+                }
+                let per_row = run.len().min(6);
+                let tw = (content_w + gap) / per_row as f64 - gap;
+                let th = run.iter().fold(96.0f64, |a, k| a.max(k.height(tw)));
+                strip = Some((run.len(), per_row, tw, th));
+            }
+        }
         // Compute geometry.
-        let span = if next_span == 0 {
-            default_span
-        } else {
-            next_span.clamp(1, 12)
+        let span = match strip {
+            Some(_) => 0,
+            None if next_span == 0 => default_span,
+            None => next_span.clamp(1, 12),
         };
         next_span = 0;
-        let ch = if next_height > 0 {
-            next_height as f64
-        } else {
-            opts.panel_height as f64
+        let ch = match strip {
+            _ if next_height > 0 => next_height as f64,
+            Some((_, _, _, th)) => th,
+            None => opts.panel_height as f64,
         };
         next_height = 0;
-        let cw = (unit_w * span as f64) - gap;
+        // The strip's last tile closes its row.
+        let strip_ends = match &mut strip {
+            Some((left, _, _, _)) => {
+                *left -= 1;
+                *left == 0
+            }
+            None => false,
+        };
+        let (cw, advance, units) = match strip {
+            Some((_, _, tw, _)) => (tw, tw + gap, 1),
+            None => ((unit_w * span as f64) - gap, unit_w * span as f64, span),
+        };
 
-        if row_units + span > 12 {
+        let full = match strip {
+            Some(_) => x + cw > pad + content_w + 0.5,
+            None => row_units + span > 12,
+        };
+        if full {
             new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
         }
 
@@ -349,9 +395,13 @@ fn render_inner(
         let inner = render_panel_svg(rows, roles, Place::At(x, row_y), cw, ch, &ropts);
         placed.push((x, row_y, cw, ch, inner));
 
-        x += unit_w * span as f64;
-        row_units += span;
+        x += advance;
+        row_units += units;
         row_h = row_h.max(ch);
+        if strip_ends {
+            strip = None;
+            new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+        }
     }
     // The mandatory credit line, below the last row.
     let credit_y = row_y + row_h + gap + 14.0;
@@ -491,41 +541,13 @@ fn render_panel_svg(
         return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
     }
 
-    // A KPI / text card.
-    if let Some((i, fmt)) = roles.iter().find_map(|(i, r)| match r {
-        Role::Metric(f) => Some((*i, Some(*f))),
-        Role::Text(_) => Some((*i, None)),
-        _ => None,
-    }) {
-        let raw = column_at(rows, i).and_then(|(_, v)| v.first());
-        let val = match fmt {
-            Some(f) => raw
-                .and_then(|v| v.as_f64())
-                .map(|n| format_number_l(n, f, &ropts.locale))
-                .unwrap_or_else(|| "–".into()),
-            None => raw.map(value_str).unwrap_or_default(),
-        };
-        let cap = roles
-            .iter()
-            .find(|(_, r)| matches!(r, Role::Label))
-            .and_then(|(i, _)| column_at(rows, *i))
-            .and_then(|(_, v)| v.first())
-            .map(value_str)
-            .unwrap_or_default();
-        let cy = h / 2.0;
-        let t = &ropts.theme;
+    // A KPI / text card — the shared tile (crate::kpi), also used by the
+    // static HTML.
+    if let Some(k) = crate::kpi::Kpi::from_columns(&cols, &ropts.locale) {
         return format!(
-            "{open}<text x=\"{pad}\" y=\"{ty:.0}\" font-family=\"{fd}\" font-size=\"34\" font-weight=\"800\" fill=\"{ink}\">{v}</text>\
-             <text x=\"{pad}\" y=\"{cy2:.0}\" font-family=\"{fb}\" font-size=\"13\" font-weight=\"600\" fill=\"{muted}\">{c}</text></svg>",
-            open = svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
-            fd = esc(&t.font.display),
-            fb = esc(&t.font.family),
-            ink = hex(t.colors.ink),
-            muted = hex(t.colors.muted),
-            ty = cy,
-            cy2 = cy + 24.0,
-            v = esc(&val),
-            c = esc(&cap),
+            "{}{}</svg>",
+            svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
+            k.body(w, h, ropts)
         );
     }
 

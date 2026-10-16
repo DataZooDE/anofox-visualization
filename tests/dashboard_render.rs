@@ -141,3 +141,78 @@ fn headless_binds_input_defaults() {
         .contains(&"SET VARIABLE \"p_prev_to\" = '2025-09-30'".to_string()));
     assert_eq!(db.executed.len(), 8);
 }
+
+/// A KPI with a change (lower is good), its label, a sparkline and a goal —
+/// drawn headless in the theme's good/bad colours; two KPIs in a ::GROUP share
+/// one row, sized to the tile (not the 320 px panel default).
+#[test]
+fn headless_kpi_tile_has_delta_sparkline_and_goal() {
+    struct Kpis;
+    impl DataProvider for Kpis {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            // a KPI's list is cast to DOUBLE[], not DOUBLE
+            if sql.contains("list(") {
+                assert!(sql.contains("AS DOUBLE[]) AS c4"), "{sql}");
+            }
+            if sql.contains("'Cost'") {
+                return Ok(vec![
+                    ("c0".into(), f(&[1100.0])),
+                    ("c1".into(), f(&[1000.0])),
+                    ("c2".into(), s(&["both"])),
+                    ("c3".into(), s(&["vs last month"])),
+                    ("c4".into(), s(&["[3, 5, 4, 6]"])),
+                    ("c5".into(), f(&[1600.0])),
+                    ("c6".into(), s(&["Cost"])),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[7.0])), ("c1".into(), s(&["Other"]))])
+        }
+    }
+    let script = "\
+        SELECT 'KPIs'::GROUP;\n\
+        SELECT sum(c)::MONEY, sum(p)::DELTA_LOWER_GOOD, 'both'::DELTA_FORMAT, 'vs last month'::DELTA_LABEL, \
+               list(c ORDER BY d)::SPARKLINE, 1600::GOAL, 'Cost'::LABEL FROM t;\n\
+        SELECT 7::METRIC, 'Other'::LABEL;\n\
+        SELECT 1::ENDGROUP;";
+    let o = DashboardOptions::default();
+    let svg = render_dashboard_svg(script, &mut Kpis, &o).unwrap();
+    let t = anofox_visualization::theme::resolve("light").unwrap();
+    let th = t.pick(anofox_visualization::theme::Variant::Light);
+    let hex = anofox_visualization::theme::hex;
+    // a rise in a lower-is-better KPI: the negative colour
+    assert!(svg.contains("class=\"kpi-delta bad\""), "{svg}");
+    assert!(
+        svg.contains(&format!(
+            "<tspan fill=\"{}\">▲ 10% (+$100)",
+            hex(th.colors.negative)
+        )),
+        "{svg}"
+    );
+    assert!(svg.contains(">vs last month</tspan>"), "{svg}");
+    assert!(
+        svg.contains("class=\"kpi-spark\"") && svg.contains("<polyline"),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("class=\"kpi-goal\"") && svg.contains("69% of goal $1,600"),
+        "{svg}"
+    );
+    // both tiles in one row, each as tall as the tallest tile (< 320)
+    let heights: Vec<f64> = svg
+        .match_indices("rx=\"")
+        .filter_map(|(i, _)| {
+            let tag = &svg[svg[..i].rfind("<rect").unwrap()..i];
+            let h = tag.split("height=\"").nth(1)?.split('"').next()?;
+            let y = tag.split(" y=\"").nth(1)?.split('"').next()?;
+            Some((y.parse::<f64>().ok()?, h.parse::<f64>().ok()?))
+        })
+        .filter(|(_, h)| *h > 50.0)
+        .map(|(y, h)| y * 1000.0 + h)
+        .collect();
+    assert_eq!(heights.len(), 2, "{heights:?}");
+    assert_eq!(heights[0], heights[1], "same row, same height");
+    assert!(heights[0] % 1000.0 < 320.0, "{heights:?}");
+}

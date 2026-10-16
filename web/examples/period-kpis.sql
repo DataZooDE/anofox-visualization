@@ -36,17 +36,35 @@ SELECT 'One **::PERIOD** input: pick a **date range** (presets or *Custom range*
 
 SELECT 'presets=7d,30d,90d,mtd,qtd,ytd,last_month,last_quarter,12m; default=30d; compare=prev; today=2026-09-30' AS p ::PERIOD, 'Period'::LABEL;
 
+-- One row per grain bucket (day / week / month / quarter), flagged as in the
+-- range or in the comparison window — so a KPI sums the flagged rows and its
+-- ::SPARKLINE is list(… ORDER BY b) over the range's buckets.
+CREATE OR REPLACE MACRO buckets() AS TABLE
+SELECT date_trunc(getvariable('p_grain'), day) AS b, in_period(day) AS cur, coalesce(in_prev(day), false) AS prev,
+       sum(orders * aov) AS rev, sum(orders) AS n, sum(orders) FILTER (WHERE channel = 'Online') AS online
+FROM shop GROUP BY ALL;
+
+-- Each KPI: the value, the comparison (::DELTA — NULL with "No comparison",
+-- then no change is shown), how the change reads (::DELTA_FORMAT 'pct' |
+-- 'abs' | 'both'), what it compares against (::DELTA_LABEL, here the
+-- period's own "vs Aug 2026"), a trend line (::SPARKLINE) and, for the
+-- revenue, a goal (::GOAL: $25k a day over the selected range).
 SELECT 'This period vs the comparison'::GROUP;
-SELECT sum(orders * aov) FILTER (WHERE in_period(day))::MONEY, sum(orders * aov) FILTER (WHERE in_prev(day))::DELTA, 'Revenue'::LABEL
-FROM shop;
-SELECT sum(orders) FILTER (WHERE in_period(day))::COMPACT, sum(orders) FILTER (WHERE in_prev(day))::DELTA, 'Orders'::LABEL
-FROM shop;
-SELECT (sum(orders * aov) FILTER (WHERE in_period(day)) / sum(orders) FILTER (WHERE in_period(day)))::MONEY,
-       (sum(orders * aov) FILTER (WHERE in_prev(day)) / sum(orders) FILTER (WHERE in_prev(day)))::DELTA, 'Average order'::LABEL
-FROM shop;
-SELECT (100 * sum(orders) FILTER (WHERE in_period(day) AND channel = 'Online') / sum(orders) FILTER (WHERE in_period(day)))::PERCENT,
-       (100 * sum(orders) FILTER (WHERE in_prev(day) AND channel = 'Online') / sum(orders) FILTER (WHERE in_prev(day)))::DELTA, 'Online share'::LABEL
-FROM shop;
+SELECT sum(rev) FILTER (WHERE cur)::MONEY, sum(rev) FILTER (WHERE prev)::DELTA, 'both'::DELTA_FORMAT,
+       getvariable('p_prev_label')::DELTA_LABEL, list(rev ORDER BY b) FILTER (WHERE cur)::SPARKLINE,
+       25000 * (getvariable('p_to')::DATE - getvariable('p_from')::DATE + 1)::GOAL, 'Revenue'::LABEL
+FROM buckets();
+SELECT sum(n) FILTER (WHERE cur)::COMPACT, sum(n) FILTER (WHERE prev)::DELTA, 'both'::DELTA_FORMAT,
+       getvariable('p_prev_label')::DELTA_LABEL, list(n ORDER BY b) FILTER (WHERE cur)::SPARKLINE, 'Orders'::LABEL
+FROM buckets();
+SELECT (sum(rev) FILTER (WHERE cur) / sum(n) FILTER (WHERE cur))::MONEY,
+       (sum(rev) FILTER (WHERE prev) / sum(n) FILTER (WHERE prev))::DELTA, 'both'::DELTA_FORMAT,
+       getvariable('p_prev_label')::DELTA_LABEL, list(rev / n ORDER BY b) FILTER (WHERE cur)::SPARKLINE, 'Average order'::LABEL
+FROM buckets();
+SELECT (100 * sum(online) FILTER (WHERE cur) / sum(n) FILTER (WHERE cur))::PERCENT,
+       (100 * sum(online) FILTER (WHERE prev) / sum(n) FILTER (WHERE prev))::DELTA, 'both'::DELTA_FORMAT,
+       getvariable('p_prev_label')::DELTA_LABEL, list(100 * online / n ORDER BY b) FILTER (WHERE cur)::SPARKLINE, 'Online share'::LABEL
+FROM buckets();
 SELECT 1::ENDGROUP;
 
 -- The comparison window is shifted onto the selected range, so both lines

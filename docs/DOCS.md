@@ -71,7 +71,7 @@ terminal.
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
-| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value |
+| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar |
 | `::XLINE` |  | annotation | vertical reference line at an x |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
@@ -98,6 +98,8 @@ terminal.
 | `::COMPACT` |  | kpi | compact-number KPI / table column format (1.2K) |
 | `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI (up = good) |
 | `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
+| `::DELTA_FORMAT` | `::DELTAFORMAT` | kpi | how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both' |
+| `::DELTA_LABEL` | `::DELTALABEL`, `::COMPARE_LABEL` | kpi | what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label') |
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
@@ -242,6 +244,41 @@ one year (Feb 29 → Feb 28). All of it is computed in one place (Rust,
 `src/period.rs`; the browser calls it through wasm). `dashboard --check`
 reports a bad spec (unknown key, preset, grain or compare, a bad date) as
 `period/bad-spec`; the control then falls back to its defaults.
+
+### KPI tiles: change, trend and goal
+
+A KPI is one statement with a `::METRIC` / `::MONEY` / `::PERCENT` /
+`::COMPACT` column; more columns of the same statement add to the tile:
+
+| Column | Shows |
+|---|---|
+| `::LABEL` | the caption |
+| `::DELTA` / `::DELTA_LOWER_GOOD` | the comparison value → `▲`/`▼` and the change, green when it moves the good way (for `::DELTA_LOWER_GOOD` a fall is good). `NULL` (e.g. a `::PERIOD` with *No comparison*) → no change line |
+| `::DELTA_FORMAT` | `'pct'` (default) `▲ 12.3%`, `'abs'` `▲ +$1,200`, `'both'` `▲ 12.3% (+$1,200)`. The absolute change uses the KPI's own format with an explicit sign: `+$1,200` / `−$0.31` (`::MONEY`), `+2.3 pp` percentage points (`::PERCENT`), `+1.2K` (`::COMPACT`). A comparison of 0 has no percentage: the absolute part is shown |
+| `::DELTA_LABEL` | what the change compares against, after it: `'vs last month'`, or the period's own `getvariable('p_prev_label')` ("vs Aug 2026") |
+| `::SPARKLINE` | a list, `list(v ORDER BY d)`, → a trend line under the caption, the last point marked |
+| `::GOAL` / `::TARGET` | the goal → a progress bar, `82% of goal $1.2M` (the bar stops at 100%, the text does not; green once reached). Outside a KPI statement these stay a chart's reference line (`::REFLINE`) |
+
+```sql
+SELECT 'presets=30d,mtd,ytd; default=30d' AS p ::PERIOD;
+SELECT sum(rev) FILTER (WHERE cur)::MONEY, sum(rev) FILTER (WHERE prev)::DELTA,
+       'both'::DELTA_FORMAT, getvariable('p_prev_label')::DELTA_LABEL,
+       list(rev ORDER BY b) FILTER (WHERE cur)::SPARKLINE,
+       750000::GOAL, 'Revenue'::LABEL
+FROM (SELECT date_trunc(getvariable('p_grain'), day) AS b,
+             day BETWEEN getvariable('p_from')::DATE AND getvariable('p_to')::DATE AS cur,
+             coalesce(day BETWEEN getvariable('p_prev_from')::DATE AND getvariable('p_prev_to')::DATE, false) AS prev,
+             sum(revenue) AS rev
+      FROM orders GROUP BY ALL);
+```
+
+The browser, `serve`, the static `dashboard` HTML and `dashboard --svg` draw
+the same tile (value, change line, caption, sparkline, goal bar, on the
+theme's positive / negative / accent colours). KPIs in a `::GROUP` (or two or
+more in a row) share one row, sized to the tallest tile. `dashboard --check`
+reports `kpi/bad-delta-format` (an unknown format; the change is shown as a %),
+`kpi/no-delta` (a format or label without a `::DELTA`) and
+`kpi/sparkline-not-list`.
 
 ### Statistical graphics (intervals, facets, scales, reference lines)
 
