@@ -444,6 +444,9 @@ pub enum Role {
     /// What a `::STORY` step lights up (`::STORY_BY`): `'x'` (default) or
     /// `'series'` (the row's `::CATEGORY`).
     StoryBy,
+    /// How the chart changes on a re-run (`::TRANSITION`): `'tween'` moves
+    /// the marks to their new values, `'none'` (default) swaps the chart.
+    Transition,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1346,7 +1349,8 @@ pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 /// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
 /// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
 /// (epoch seconds on a date axis, a level on a discrete one); `data-story` +
-/// `data-story-by` (`::STORY`, `::STORY_BY`).
+/// `data-story-by` (`::STORY`, `::STORY_BY`); `data-transition`
+/// (`'tween'::TRANSITION`).
 fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
         if ANIMATE_MODES.contains(&mode.as_str()) {
@@ -1363,6 +1367,9 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
             }
             svg = with_root_attr(svg, "data-animate", &mode);
         }
+    }
+    if role_str(cols, Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween")) {
+        svg = with_root_attr(svg, "data-transition", "tween");
     }
     if let Some(steps) = story_steps(cols) {
         let by = match role_str(cols, Role::StoryBy).map(|b| b.to_ascii_lowercase()) {

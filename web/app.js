@@ -3838,9 +3838,16 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
-  // A re-run keeps each chart's ::STORY step; a full run starts at the overview.
+  // A re-run keeps each chart's ::STORY step (a full run starts at the
+  // overview) and remembers its 'tween'::TRANSITION charts' marks.
+  const tweens = {};
   if (fresh) dpStorySteps = {};
-  else document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => p._story && (dpStorySteps[p.dataset.stmt] = p._story.step()));
+  else
+    document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => {
+      if (p._story) dpStorySteps[p.dataset.stmt] = p._story.step();
+      const svg = p.querySelector('.panel-svg > svg[data-transition="tween"]');
+      if (svg) tweens[p.dataset.stmt] = dpAnim.geom(svg);
+    });
   // Atomic swap: replace the visible content in one synchronous step (no flash).
   grid.replaceChildren(...newGrid.childNodes);
   const dash = document.querySelector(".dash");
@@ -3873,6 +3880,10 @@ async function runOnce(fresh = true) {
   dash.append(credit);
   attachHover();
   mountStories();
+  for (const [stmt, old] of Object.entries(tweens)) {
+    const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
+    if (svg) dpAnim.tween(svg, old);
+  }
   addExportButtons();
   syncUrlState();
   if (dpSeedRerun) {

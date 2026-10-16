@@ -159,8 +159,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-story-cap{position:absolute;z-index:2;max-width:min(320px,60%);padding:.42rem .62rem;font-size:.8rem;line-height:1.35;color:var(--ax-tip-ink);background:var(--ax-tip-bg);border:1px solid var(--ax-callout-border);border-left:3px solid var(--ax-accent);border-radius:var(--ax-radius-sm);box-shadow:var(--ax-tip-shadow);pointer-events:none}
 .dp-story-link{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
 .dp-story-link path{fill:none;stroke:var(--ax-accent);stroke-width:1.5;stroke-dasharray:6 4}
-.panel svg [data-series],.panel svg [data-x]{transition:opacity .25s,filter .12s}
+/* story steps fade (a re-run re-applies its dimming at once: no flash) */
+.panel svg.dp-emph-fade [data-series],.panel svg.dp-emph-fade [data-x]{transition:opacity .25s,filter .12s}
 @media print{.dp-story{display:none}}
+.panel svg .dp-ghost{pointer-events:none}
 @media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}

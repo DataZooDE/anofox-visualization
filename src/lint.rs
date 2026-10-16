@@ -46,8 +46,8 @@ pub struct Diagnostic {
     /// unknown key / preset / grain / compare or a bad date) |
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
-    /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by`
-    /// (warnings) | `optional/missing` (a note: a
+    /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
+    /// `transition/unknown` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -1019,7 +1019,7 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
 /// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
-/// `::CATEGORY`).
+/// `::CATEGORY`), an unknown `::TRANSITION`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1045,6 +1045,12 @@ fn motion_diags(
                     ),
                 ));
             }
+        }
+        if *r == Role::Transition && v != "tween" && v != "none" {
+            out.push((
+                "transition/unknown",
+                format!("::TRANSITION `{v}` is not 'tween' or 'none' — the chart is swapped"),
+            ));
         }
         if *r == Role::StoryBy {
             if v != "x" && v != "series" {
@@ -1818,7 +1824,7 @@ mod design_tests {
                 .into_iter()
                 .map(|d| d.code)
                 .filter(|c| {
-                    ["animate/", "linestyle/", "story/"]
+                    ["animate/", "linestyle/", "story/", "transition/"]
                         .iter()
                         .any(|p| c.starts_with(p))
                 })
@@ -1855,6 +1861,14 @@ mod design_tests {
                 row
             ),
             vec!["story/bad-by"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "morph" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'morph'::TRANSITION FROM t;",
+                row
+            ),
+            vec!["transition/unknown"]
         );
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());

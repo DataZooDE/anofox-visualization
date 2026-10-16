@@ -181,3 +181,15 @@ fn story_steps_ride_on_the_root() {
         "{r}"
     );
 }
+
+#[test]
+fn tween_rides_on_the_root() {
+    let svg = line(vec![Column::new(
+        "t",
+        Role::Transition,
+        strs(&["Tween"; 4]),
+    )]);
+    assert!(root(&svg).contains(r#"data-transition="tween""#));
+    let svg = line(vec![Column::new("t", Role::Transition, strs(&["none"; 4]))]);
+    assert!(!svg.contains("data-transition"));
+}

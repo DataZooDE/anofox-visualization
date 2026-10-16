@@ -106,6 +106,7 @@ terminal.
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
 | `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
 | `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
+| `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
@@ -1320,6 +1321,28 @@ step, a click selection, a brush or named selection and legend focus each
 dim on their own, and clearing one keeps the others. The HTML export carries
 a working stepper, starting at the overview. `--check` warns on a
 `::STORY_BY` that is not `'x'` / `'series'` (`story/bad-by`).
+
+**Transitions (`::TRANSITION`).** By default a re-run (an input change, a
+cross-filter click) swaps the chart for its new render. With `'tween'`, the
+new chart (with its new axes) comes in and its marks move from where they
+were to their new values in 300 ms: bars and points by position and size,
+lines and bands point by point when the number of points is unchanged (else
+they cross-fade). Marks are matched by their x and series; new ones fade in,
+removed ones fade out. Above about 500 marks the chart cross-fades instead.
+`'none'` is the default. A tween only plays on re-runs (a full run plays the
+entrance), not under *reduce motion*, and not in the static export (which has
+no inputs). `--check` warns on an unknown value (`transition/unknown`).
+
+```sql
+SELECT week ::XAXIS, channel ::CATEGORY,
+       demand * md_factor(week, getvariable('scenario')) ::BARCHART,
+       'tween' ::TRANSITION
+FROM plan;
+```
+
+The builder example *How will demand develop after today?* (Interactivity)
+combines all four: a reveal from Today, a flowing forecast line, a story on
+the weekly bars and a scenario input whose changes tween both charts.
 
 ### Tables
 

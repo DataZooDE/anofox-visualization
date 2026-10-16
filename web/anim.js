@@ -1,9 +1,11 @@
 // Chart motion over the renderer's SVG: entrance animations (::ANIMATE),
-// one shared emphasis (dimming) state, and ::STORY steppers.
+// one shared emphasis (dimming) state, ::STORY steppers and re-run tweens
+// (::TRANSITION).
 //
 // Driven only by what the SVG carries — `data-plot` / `data-xdomain` on the
 // plot <svg>, `data-x` / `data-series` on marks, and the panel directives
-// src/lib.rs writes on the root (`data-animate`, `data-xline`, `data-story`).
+// src/lib.rs writes on the root (`data-animate`, `data-xline`, `data-story`,
+// `data-transition`).
 // Everything runs through Web Animations with fill:"backwards", so a finished
 // animation leaves no state behind; under prefers-reduced-motion nothing
 // animates and the chart is simply in its final state.
@@ -339,6 +341,8 @@ export function animKit(win) {
       play.textContent = "▶ Play";
       play.setAttribute("aria-pressed", "false");
     };
+    // steps the viewer takes fade; the first show (also after a re-run) is instant
+    bar.addEventListener("click", () => svg.classList.add("dp-emph-fade"), true);
     prev.onclick = () => (stop(), show(k - 1));
     next.onclick = () => (stop(), show(k + 1));
     play.onclick = () => {
@@ -357,6 +361,96 @@ export function animKit(win) {
     return { show, step: () => k };
   }
 
+  // ---- ::TRANSITION 'tween': marks move to their new values on a re-run ---
+  const GEOM = { rect: ["x", "y", "width", "height"], circle: ["cx", "cy", "r"], polyline: ["points"], polygon: ["points"] };
+  // Each data mark by (tag, data-x, data-series) — the keyed join between
+  // two renders of the same chart (repeats get a #n suffix).
+  function keyed(svg) {
+    const m = new Map();
+    for (const el of marksOf(svg)) {
+      const t = el.tagName.toLowerCase();
+      let k = `${t}|${el.getAttribute("data-x") ?? ""}|${el.getAttribute("data-series") ?? ""}`;
+      for (let n = 1; m.has(k); n++) k = k.replace(/#\d+$/, "") + "#" + n;
+      m.set(k, el);
+    }
+    return m;
+  }
+  // Remember a chart's marks before it is replaced (null for many marks).
+  function geom(svg) {
+    if (!svg) return null;
+    const m = keyed(svg);
+    if (m.size > MANY) return { many: true };
+    const out = new Map();
+    for (const [k, el] of m) out.set(k, { clone: el.cloneNode(true), attrs: (GEOM[el.tagName.toLowerCase()] || []).map((a) => el.getAttribute(a)) });
+    return { marks: out };
+  }
+  const nums = (pts) => (pts || "").trim().split(/[\s,]+/).map(Number);
+  // Move the new chart's marks from where `old` had them: bars and points
+  // tween x/y/size, lines and bands their points when the counts match (else
+  // cross-fade); new marks fade in, gone ones fade out. Above MANY marks the
+  // whole chart cross-fades.
+  function tween(svg, old, dur = 300) {
+    if (!svg || !old || still()) return;
+    const fresh = keyed(svg);
+    if (old.many || fresh.size > MANY) {
+      if (can(svg)) svg.animate([{ opacity: 0.35 }, { opacity: 1 }], { duration: dur, easing: EASE });
+      return;
+    }
+    const P = plotOf(svg);
+    const jobs = [];
+    const fade = (el, from, to) => can(el) && el.animate([{ opacity: from }, { opacity: to }], { duration: dur, easing: EASE, fill: "backwards" });
+    const ghost = (clone) => {
+      clone.classList.add("dp-ghost");
+      clone.removeAttribute("tabindex");
+      (P ? P.el : svg).append(clone);
+      const a = can(clone) && clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur, easing: EASE, fill: "forwards" });
+      if (a && a.finished) a.finished.then(() => clone.remove(), () => clone.remove());
+      else clone.remove();
+    };
+    for (const [k, el] of fresh) {
+      const o = old.marks.get(k);
+      if (!o) {
+        fade(el, 0, 1); // enters
+        continue;
+      }
+      old.marks.delete(k);
+      const names = GEOM[el.tagName.toLowerCase()] || [];
+      const to = names.map((a) => el.getAttribute(a));
+      if (names[0] === "points") {
+        const a = nums(o.attrs[0]);
+        const b = nums(to[0]);
+        if (a.length === b.length && a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, pts: [a, b], to });
+        else ghost(o.clone), fade(el, 0, 1); // reshaped: cross-fade
+        continue;
+      }
+      const a = o.attrs.map(Number);
+      const b = to.map(Number);
+      if (a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, from: a, b, to });
+    }
+    for (const o of old.marks.values()) ghost(o.clone); // leaves
+    if (!jobs.length) return;
+    const set = (k) => {
+      for (const j of jobs) {
+        if (j.pts) {
+          const [a, b] = j.pts;
+          let p = "";
+          for (let i = 0; i < a.length; i += 2) p += (i ? " " : "") + (a[i] + (b[i] - a[i]) * k).toFixed(2) + "," + (a[i + 1] + (b[i + 1] - a[i + 1]) * k).toFixed(2);
+          j.el.setAttribute("points", p);
+        } else j.names.forEach((n, i) => j.el.setAttribute(n, (j.from[i] + (j.b[i] - j.from[i]) * k).toFixed(2)));
+      }
+    };
+    set(0);
+    const t0 = win.performance.now();
+    const frame = (t) => {
+      const u = Math.max(0, Math.min(1, (t - t0) / dur)); // a frame's time can precede t0
+      if (u < 1) {
+        set(1 - Math.pow(1 - u, 3));
+        win.requestAnimationFrame(frame);
+      } else for (const j of jobs) j.names.forEach((n, i) => j.el.setAttribute(n, j.to[i])); // exact end state
+    };
+    win.requestAnimationFrame(frame);
+  }
+
   // A copy of the dashboard for the static export must not freeze motion
   // state: drop running clips (WAAPI itself is never serialised), story
   // controls and overlays, and every dimmed mark — the snapshot script
@@ -364,10 +458,11 @@ export function animKit(win) {
   function strip(root) {
     root.querySelectorAll("clipPath.dp-clip").forEach((c) => c.remove());
     root.querySelectorAll('[clip-path^="url(#dp-clip-"]').forEach((e) => e.removeAttribute("clip-path"));
-    root.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link").forEach((e) => e.remove());
+    root.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link, .dp-ghost").forEach((e) => e.remove());
     root.querySelectorAll(".dp-story-on").forEach((e) => e.classList.remove("dp-story-on"));
+    root.querySelectorAll(".dp-emph-fade").forEach((e) => e.classList.remove("dp-emph-fade"));
     root.querySelectorAll(".panel svg [style*='opacity']").forEach((e) => (e.style.opacity = ""));
   }
 
-  return { enter, strip, emph, story, marksOf, plotOf, xPx, still };
+  return { enter, strip, emph, story, geom, tween, marksOf, plotOf, xPx, still };
 }

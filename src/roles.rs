@@ -208,6 +208,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims)"),
     e("STORY_BY", &["STORYBY"], R::StoryBy, "modifier", true,
       "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
+    e("TRANSITION", &["TWEEN"], R::Transition, "modifier", true,
+      "on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
@@ -761,6 +763,7 @@ mod tests {
             Role::LineStyle,
             Role::Story,
             Role::StoryBy,
+            Role::Transition,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -859,7 +862,8 @@ mod tests {
                 | Role::Animate
                 | Role::LineStyle
                 | Role::Story
-                | Role::StoryBy => {}
+                | Role::StoryBy
+                | Role::Transition => {}
             }
         }
         v
