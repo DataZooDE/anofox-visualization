@@ -167,9 +167,10 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   (`json_serialize_sql`, which parses without running and accepts only
   `SELECT` statements): panels must be queries (`SELECT`, `WITH`, `FROM`,
   `VALUES`, set operations; a `PIVOT` only as a subquery with its `IN (…)`
-  values listed), and setup statements must be `SET VARIABLE <name> =
+  values listed), and setup statements must be queries, `SET VARIABLE <name> =
   <expression>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>`
-  with a query that passes the same check. Everything else — `EXPLAIN`,
+  with a query that passes the same check (the same classifier the
+  [access policy](#row-and-column-policies-access-control-p2) uses). Everything else — `EXPLAIN`,
   `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
   the start. The check needs DuckDB's `json` extension (loaded into the
   snapshot automatically; without it the server refuses to start).

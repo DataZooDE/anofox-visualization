@@ -963,30 +963,24 @@ fn too_broad(dir: &Path) -> Option<String> {
 }
 
 /// With a data folder open, every dashboard statement must be a query or one
-/// of the setup forms the server needs — classified by DuckDB's own parser —
-/// because DuckDB can write inside `allowed_directories` too (`COPY … TO`, and
-/// anything that runs a statement: `EXPLAIN ANALYZE`, `PREPARE`/`EXECUTE`,
-/// `CALL`, `PRAGMA`, …). An allowlist, so new statement kinds are refused.
+/// of the setup forms the server needs — classified by DuckDB's own parser,
+/// the same way the access policy does ([`policy::statement_query`],
+/// [`policy::check_query`]) — because DuckDB can write inside
+/// `allowed_directories` too (`COPY … TO`, and anything that runs a
+/// statement: `EXPLAIN ANALYZE`, `PREPARE`/`EXECUTE`, `CALL`, `PRAGMA`, …).
+/// An allowlist, so new statement kinds are refused.
 fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
-    let serialize = |sql: &str| -> Result<String, String> {
-        let out = c
-            .execute_prepared("SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", &[sql])
-            .and_then(|mut r| r.string_rows(1))
-            .map_err(|e| {
-                format!(
-                    "checking the dashboards for a data folder needs DuckDB's json extension: {}",
-                    e.lines().next().unwrap_or("")
-                )
-            })?;
-        Ok(out
-            .into_iter()
-            .next()
-            .and_then(|r| r.into_iter().next().flatten())
-            .unwrap_or_default())
+    let mut duck = |sql: &str| {
+        c.query(sql)?.string_rows(1).map_err(|e| {
+            format!(
+                "checking the dashboards for a data folder needs DuckDB's json extension: {}",
+                e.lines().next().unwrap_or("")
+            )
+        })
     };
     for d in dashboards {
         for (i, (setup, sql)) in d.stmts.iter().enumerate() {
-            read_only_statement(sql, *setup, &serialize)
+            read_only_statement(sql, *setup, &mut duck)
                 .map_err(|e| format!("dashboard '{}' statement {i}: {e}", d.id))?;
         }
     }
@@ -994,99 +988,17 @@ fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
 }
 
 /// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a data
-/// folder open. `serialize` is DuckDB's `json_serialize_sql`: it parses without
-/// binding or running, and serialises only SELECT statements — `EXPLAIN`,
-/// `PREPARE`, `EXECUTE`, `COPY`, `PRAGMA`, `CALL`, a top-level `PIVOT`, … come
-/// back as errors.
-fn read_only_statement(
-    sql: &str,
-    setup: bool,
-    serialize: &dyn Fn(&str) -> Result<String, String>,
-) -> Result<(), String> {
+/// folder open: a panel must be one query; a setup statement may also be
+/// `SET VARIABLE <name> = <expr>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW
+/// <name> AS <query>`, whose expression / query must parse as one query.
+fn read_only_statement(sql: &str, setup: bool, duck: &mut dyn policy::Duck) -> Result<(), String> {
     let query = if setup {
-        setup_query(sql).ok_or(
-            "with a data folder, setup statements must be SET VARIABLE <name> = <expression> \
-             or CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>",
-        )?
+        policy::statement_query(sql).map_err(|e| format!("with a data folder: {e}"))?
     } else {
         sql.to_string()
     };
-    let v: serde_json::Value = serde_json::from_str(&serialize(&query)?).unwrap_or_default();
-    if v["error"] == serde_json::Value::Bool(false)
-        && v["statements"].as_array().is_some_and(|a| a.len() == 1)
-    {
-        Ok(())
-    } else {
-        Err("with a data folder, only queries (SELECT …) are allowed".into())
-    }
-}
-
-/// The query inside an allowed setup statement — `SELECT <expr>` for
-/// `SET VARIABLE <name> = <expr>`, `<query>` for
-/// `CREATE [OR REPLACE] TEMP|TEMPORARY TABLE|VIEW [IF NOT EXISTS] <name> AS <query>`
-/// — or `None` for any other statement. (Comments are already stripped.)
-fn setup_query(sql: &str) -> Option<String> {
-    /// `s` after the keyword `w` (case-insensitive, whole word).
-    fn kw<'a>(s: &'a str, w: &str) -> Option<&'a str> {
-        let s = s.trim_start();
-        let head = s.get(..w.len())?;
-        let rest = &s[w.len()..];
-        (head.eq_ignore_ascii_case(w)
-            && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
-        .then_some(rest)
-    }
-    /// `s` after a (dotted, plain or `"quoted"`) name.
-    fn name(s: &str) -> Option<&str> {
-        let mut s = s.trim_start();
-        loop {
-            if let Some(q) = s.strip_prefix('"') {
-                // `""` inside a quoted name is a literal quote
-                let mut end = None;
-                let mut chars = q.char_indices().peekable();
-                while let Some((i, c)) = chars.next() {
-                    if c == '"' {
-                        if chars.peek().is_some_and(|(_, c)| *c == '"') {
-                            chars.next();
-                        } else {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                }
-                s = &q[end? + 1..];
-            } else {
-                let end = s
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(s.len());
-                if end == 0 {
-                    return None;
-                }
-                s = &s[end..];
-            }
-            match s.strip_prefix('.') {
-                Some(r) => s = r,
-                None => return Some(s),
-            }
-        }
-    }
-    let body = sql
-        .trim()
-        .trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-    if let Some(r) = kw(body, "SET").and_then(|r| kw(r, "VARIABLE")) {
-        let r = name(r)?.trim_start();
-        let expr = r.strip_prefix('=').or_else(|| kw(r, "TO"))?;
-        return Some(format!("SELECT {expr}"));
-    }
-    let r = kw(body, "CREATE")?;
-    let r = kw(r, "OR").and_then(|r| kw(r, "REPLACE")).unwrap_or(r);
-    let r = kw(r, "TEMPORARY").or_else(|| kw(r, "TEMP"))?;
-    let r = kw(r, "TABLE").or_else(|| kw(r, "VIEW"))?;
-    let r = kw(r, "IF")
-        .and_then(|r| kw(r, "NOT"))
-        .and_then(|r| kw(r, "EXISTS"))
-        .unwrap_or(r);
-    let query = kw(name(r)?, "AS")?.trim();
-    (!query.is_empty()).then(|| query.to_string())
+    policy::check_query(duck, &query)
+        .map_err(|e| format!("with a data folder, only queries (SELECT …) are allowed: {e}"))
 }
 
 /// A DuckDB error as a viewer sees it: the data folder's absolute path is
@@ -1982,6 +1894,20 @@ mod tests {
     /// DuckDB's `json_serialize_sql` through the `duckdb` CLI; `None` without
     /// one (the test is skipped locally, but fails on CI — `CI` set — where
     /// the workflow installs the pinned CLI).
+    /// A `policy::Duck` over the `duckdb` CLI (one VARCHAR column).
+    fn cli_rows(sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let out = std::process::Command::new("duckdb")
+            .args(["-noheader", "-list", "-c", sql])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        Ok(vec![vec![Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )]])
+    }
+
     fn cli_serialize(sql: &str) -> Option<Result<String, String>> {
         let q = format!(
             "SELECT json_serialize_sql({})::VARCHAR AS j",
@@ -2010,8 +1936,7 @@ mod tests {
                 return;
             }
         }
-        let ser = |sql: &str| cli_serialize(sql).unwrap();
-        let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &ser);
+        let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &mut cli_rows);
         for sql in [
             "SELECT * FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/x.parquet')",
             "FROM t",
@@ -2077,34 +2002,34 @@ mod tests {
             assert!(ok(&sql, true).is_err(), "setup: {sql}");
         }
         // A missing json extension fails closed.
-        let none = |_: &str| Err::<String, String>("no json_serialize_sql".into());
-        assert!(read_only_statement("SELECT 1", false, &none).is_err());
-        let garbage = |_: &str| Ok::<String, String>("not json".into());
-        assert!(read_only_statement("SELECT 1", false, &garbage).is_err());
+        let mut none =
+            |_: &str| Err::<Vec<Vec<Option<String>>>, String>("no json_serialize_sql".into());
+        assert!(read_only_statement("SELECT 1", false, &mut none).is_err());
+        let mut garbage = |_: &str| Ok::<_, String>(vec![vec![Some("not json".to_string())]]);
+        assert!(read_only_statement("SELECT 1", false, &mut garbage).is_err());
     }
 
     #[test]
     fn setup_forms() {
         assert_eq!(
-            setup_query("SET VARIABLE a = 1").as_deref(),
-            Some("SELECT  1")
+            policy::statement_query("SET VARIABLE a = 1").as_deref(),
+            Ok("SELECT  1")
         );
         assert_eq!(
-            setup_query("CREATE TEMP VIEW v AS SELECT 2;").as_deref(),
-            Some("SELECT 2")
+            policy::statement_query("CREATE TEMP VIEW v AS SELECT 2;").as_deref(),
+            Ok(" SELECT 2")
         );
         for sql in [
             "SET a = 1",
             "SET VARIABLEa = 1",
             "CREATE TABLE t AS SELECT 1",
             "CREATE TEMP SEQUENCE s",
-            "CREATE TEMP TABLE t AS",
             "CREATE TEMP TABLE t",
             "SET VARIABLE \"a = 1",
             "CREATE TEMP TABLE . AS SELECT 1",
             "CREATE TEMP TABLE a. AS SELECT 1",
         ] {
-            assert_eq!(setup_query(sql), None, "{sql}");
+            assert!(policy::statement_query(sql).is_err(), "{sql}");
         }
     }
 

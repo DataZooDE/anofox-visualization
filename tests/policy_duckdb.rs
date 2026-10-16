@@ -2,7 +2,8 @@
 //! masks columns per viewer, and every bypass we know of is refused. Each
 //! statement is rewritten exactly as the locked server does it, then run in a
 //! read-only session with the viewer's claims set. Skips without a `duckdb`
-//! CLI.
+//! CLI (fails without one on CI, see `common::skip_without`).
+mod common;
 
 use anofox_visualization::host::policy::{Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{page_sql_inline, parse_page, sql_literal};
@@ -10,7 +11,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn have_duckdb() -> bool {
-    Command::new("duckdb").arg("-version").output().is_ok()
+    let ok = Command::new("duckdb").arg("-version").output().is_ok();
+    if !ok {
+        common::skip_without("duckdb", "policy_duckdb");
+    }
+    ok
 }
 
 struct Db {
@@ -120,7 +125,6 @@ fn fx() -> Option<Fx> {
 
 fn fx_with(policy: &str) -> Option<Fx> {
     if !have_duckdb() {
-        eprintln!("skipped: no duckdb CLI");
         return None;
     }
     let db = db();
