@@ -68,11 +68,26 @@ impl TaskPool {
     /// If no thread is available, spawns a new one.
     pub fn spawn(&self, code: Box<dyn FnMut() + Send>) {
         let mut queue = self.sharing.todo.lock().unwrap();
+        self.spawn_locked(&mut queue, code);
+    }
 
-        if self.sharing.waiting_tasks.load(Ordering::Acquire) == 0 {
-            self.add_thread(Some(code));
+    /// `spawn` with the `todo` lock already held (`queue` is its contents).
+    fn spawn_locked(
+        &self,
+        queue: &mut VecDeque<Box<dyn FnMut() + Send>>,
+        code: Box<dyn FnMut() + Send>,
+    ) {
+        queue.push_back(code);
+
+        // An idle thread woken by `notify_one` stays counted in `waiting_tasks`
+        // until it re-takes the lock. Checking `waiting_tasks > 0` alone loses
+        // the second wake-up when two tasks are spawned before that happens,
+        // and the second task then waits for some thread to finish its current
+        // task (a keep-alive connection: minutes). So make sure every queued
+        // task has an idle thread of its own, and start one if it does not.
+        if queue.len() > self.sharing.waiting_tasks.load(Ordering::Acquire) {
+            self.add_thread(None);
         } else {
-            queue.push_back(code);
             self.sharing.condvar.notify_one();
         }
     }
@@ -133,5 +148,57 @@ impl Drop for TaskPool {
             .active_tasks
             .store(999_999_999, Ordering::Release);
         self.sharing.condvar.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskPool, MIN_THREADS};
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    // Several connections accepted before the woken idle thread re-takes the
+    // lock: every task must still start, while all of them stay busy (as
+    // keep-alive connections do). Before the fix only MIN_THREADS of them ran.
+    #[test]
+    fn spawns_burst_without_losing_a_wake_up() {
+        let pool = TaskPool::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.sharing.waiting_tasks.load(Ordering::Acquire) < MIN_THREADS {
+            assert!(Instant::now() < deadline, "pool threads never went idle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let n = MIN_THREADS + 2;
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new(Barrier::new(n + 1));
+        {
+            // Holding the lock across the burst is the race window made
+            // deterministic: no woken thread can re-take it in between.
+            let mut queue = pool.sharing.todo.lock().unwrap();
+            for _ in 0..n {
+                let started_tx = started_tx.clone();
+                let release = release.clone();
+                pool.spawn_locked(
+                    &mut queue,
+                    Box::new(move || {
+                        started_tx.send(()).unwrap();
+                        release.wait();
+                    }),
+                );
+            }
+        }
+
+        for i in 0..n {
+            assert!(
+                started_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "only {} of {} tasks started: a wake-up was lost",
+                i,
+                n
+            );
+        }
+        release.wait();
     }
 }
