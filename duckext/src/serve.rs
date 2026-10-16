@@ -411,6 +411,13 @@ pub struct LockedOptions {
     pub auth: Option<ProxyAuth>,
     /// `log` (+ `log_vars`): JSON-lines request log.
     pub log: Option<Arc<RequestLog>>,
+    /// Listen address (`bind`; default loopback). A specific address is also
+    /// accepted as a `Host`.
+    pub bind: std::net::IpAddr,
+    /// DuckDB `memory_limit` of the snapshot instance (e.g. `"2GB"`).
+    pub memory_limit: Option<String>,
+    /// DuckDB `threads` of the snapshot instance, shared by all queries.
+    pub duckdb_threads: Option<usize>,
 }
 
 impl Default for LockedOptions {
@@ -430,6 +437,9 @@ impl Default for LockedOptions {
             path_vars: Vec::new(),
             auth: None,
             log: None,
+            bind: std::net::Ipv4Addr::LOCALHOST.into(),
+            memory_limit: None,
+            duckdb_threads: None,
         }
     }
 }
@@ -511,7 +521,22 @@ impl LockedOptions {
                 "auth" => o.auth = Some(ProxyAuth::from_json(val, |k| std::env::var(k).ok()).map_err(|e| format!("options.{e}"))?),
                 "log" => log = Some(val.as_str().ok_or("options.log must be \"stderr\" or a file path")?),
                 "log_vars" => log_vars = Some(val.as_str().ok_or("options.log_vars must be none, names or values")?),
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars)")),
+                "bind" => {
+                    o.bind = val
+                        .as_str()
+                        .and_then(|b| b.trim().trim_matches(['[', ']']).parse().ok())
+                        .ok_or("options.bind must be an IP address (e.g. \"0.0.0.0\")")?;
+                }
+                "memory_limit" => {
+                    let m = val
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty() && m.len() <= 32 && m.chars().all(|c| c.is_ascii_alphanumeric() || " .%".contains(c)))
+                        .ok_or("options.memory_limit must be a size like \"2GB\" or \"50%\"")?;
+                    o.memory_limit = Some(m.to_string());
+                }
+                "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads)")),
             }
         }
         if !o.path_vars.is_empty() && o.data.is_none() {
@@ -648,7 +673,7 @@ pub fn start_locked(
     ctx: Arc<DbCtx>,
     dir: &str,
     port: u16,
-    opts: LockedOptions,
+    mut opts: LockedOptions,
 ) -> Result<String, String> {
     let mut servers = lock_servers();
     if servers.contains_key(&port) {
@@ -683,9 +708,17 @@ pub fn start_locked(
             check_read_only(&c, &dashboards)?;
         }
     }
-    let addr = format!("127.0.0.1:{port}");
+    let addr = std::net::SocketAddr::new(opts.bind, port);
+    if !opts.bind.is_unspecified() && !opts.bind.is_loopback() {
+        // Requests addressed to the bound IP itself (health checks) pass the
+        // Host check.
+        opts.hosts.push(match opts.bind {
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+            ip => ip.to_string(),
+        });
+    }
     let server = Arc::new(
-        Server::http(&addr)
+        Server::http(addr)
             .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
     );
     let n = dashboards.len();
@@ -1098,6 +1131,13 @@ fn build_snapshot(
     ];
     if allow_unsigned {
         cfg.push(("allow_unsigned_extensions", "true"));
+    }
+    let threads = opts.duckdb_threads.map(|t| t.to_string());
+    if let Some(t) = &threads {
+        cfg.push(("threads", t));
+    }
+    if let Some(m) = &opts.memory_limit {
+        cfg.push(("memory_limit", m));
     }
     // A host in-memory DB with the snapshots attached READ_ONLY under their own
     // names. (Opening ":memory:<name>" through the C API creates a FILE of that
@@ -1643,6 +1683,22 @@ mod tests {
         let o = LockedOptions::parse(Some(r#"{"cache_mb":0}"#)).unwrap();
         assert_eq!(o.cache_bytes, 0);
         assert!(LockedOptions::parse(Some(r#"{"cache_mb":-1}"#)).is_err());
+        let o = LockedOptions::parse(None).unwrap();
+        assert!(o.bind.is_loopback() && o.memory_limit.is_none() && o.duckdb_threads.is_none());
+        let o = LockedOptions::parse(Some(
+            r#"{"bind":"0.0.0.0","memory_limit":"2GB","duckdb_threads":2}"#,
+        ))
+        .unwrap();
+        assert!(o.bind.is_unspecified());
+        assert_eq!(o.memory_limit.as_deref(), Some("2GB"));
+        assert_eq!(o.duckdb_threads, Some(2));
+        assert!(LockedOptions::parse(Some(r#"{"bind":"[::]"}"#))
+            .unwrap()
+            .bind
+            .is_unspecified());
+        assert!(LockedOptions::parse(Some(r#"{"bind":"example.com"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"memory_limit":"1GB'; x"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"duckdb_threads":0}"#)).is_err());
         // The variables' order doesn't matter; their values, the panel, the
         // dashboard and the page do.
         let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap(), None);
