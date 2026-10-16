@@ -108,7 +108,12 @@ The snapshot is taken at startup: stop and re-start to refresh.
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
-  `threads` (worker pool, default 4), `attach`, `load`.
+  `threads` (worker pool, default 4), `attach`, `load`, `hosts` (see below).
+- **DNS rebinding.** Only requests whose `Host` is a loopback name on the
+  server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
+  gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy
+  does by default), list the public name: `{"hosts": ["dash.example.com"]}`
+  (a name without a port matches any port; `"*"` disables the check).
 - Cross-origin `POST`s are refused (CSRF).
 - The injected page config is script-safe JSON (`<` is emitted as `<`),
   titles and ids are HTML-escaped.
@@ -139,6 +144,11 @@ examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
 ![serve mode — sales dashboard with a whitelisted region param](img/serve-sales.png)
 
 ---
+
+- **DNS rebinding.** The `Host` must be a loopback name on the server's port,
+  the `--bind` address, or a name given with `--allow-host NAME` (repeatable;
+  `*` disables the check); anything else gets `421`. Behind a proxy that
+  forwards the original `Host`, pass its public name with `--allow-host`.
 
 ## What remains the operator's job
 

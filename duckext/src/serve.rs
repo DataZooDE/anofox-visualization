@@ -354,6 +354,9 @@ pub struct LockedOptions {
     /// Default theme (a name, `a+b`, or a JSON object) for dashboards without
     /// their own `::THEME` — validated and frozen when the server starts.
     pub theme: Option<String>,
+    /// Extra `Host` names accepted besides the loopback names (e.g. the public
+    /// name a reverse proxy forwards); `"*"` disables the Host check.
+    pub hosts: Vec<String>,
 }
 
 impl Default for LockedOptions {
@@ -366,6 +369,7 @@ impl Default for LockedOptions {
             attach: true,
             load: Vec::new(),
             theme: None,
+            hosts: Vec::new(),
         }
     }
 }
@@ -407,7 +411,18 @@ impl LockedOptions {
                     anofox_visualization::theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
                     o.theme = Some(spec);
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load, theme)")),
+                "hosts" => {
+                    let arr = val.as_array().ok_or("options.hosts must be a list of host names")?;
+                    for h in arr {
+                        let h = h
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || "-.:[]*".contains(c)))
+                            .ok_or("options.hosts: invalid host name")?;
+                        o.hosts.push(h.to_string());
+                    }
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load, theme, hosts)")),
             }
         }
         Ok(o)
@@ -468,6 +483,7 @@ struct Snapshot {
 }
 
 struct Locked {
+    port: u16,
     dashboards: Vec<Dash>,
     snap: Snapshot,
     opts: LockedOptions,
@@ -518,6 +534,7 @@ pub fn start_locked(
     let n = dashboards.len();
     let threads = opts.threads;
     let state = Arc::new(Locked {
+        port,
         dashboards,
         snap,
         opts,
@@ -746,6 +763,14 @@ fn handle_locked(st: &Locked, mut req: Request) {
     let path = url.split('?').next().unwrap_or("/").to_string();
     let m = meta(&req);
     eprintln!("[anofox-serve] {} {}", req.method(), path);
+    // DNS rebinding: only loopback names (or `options.hosts`) are served.
+    if !sv::host_allowed(m.host, st.port, &st.opts.hosts) {
+        return text(
+            req,
+            421,
+            "misdirected request: unknown Host — add it to options.hosts (e.g. {\"hosts\": [\"dash.example.com\"]})",
+        );
+    }
     // CSRF: a browser request from another origin is refused outright.
     if !sv::origin_matches_host(m.origin, m.host) {
         return text(req, 403, "forbidden: cross-origin request");
@@ -903,6 +928,14 @@ mod tests {
         assert!(LockedOptions::parse(Some(r#"{"nope":1}"#)).is_err());
         assert!(LockedOptions::parse(Some(r#"{"load":["x; DROP"]}"#)).is_err());
         assert!(LockedOptions::parse(None).is_ok());
+        let o = LockedOptions::parse(Some(r#"{"hosts":["dash.example.com","intranet:8443"]}"#))
+            .unwrap();
+        assert_eq!(
+            o.hosts,
+            vec!["dash.example.com".to_string(), "intranet:8443".to_string()]
+        );
+        assert!(LockedOptions::parse(Some(r#"{"hosts":["a b"]}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"hosts":"x"}"#)).is_err());
         let t = LockedOptions::parse(Some(r#"{"theme":"dark"}"#)).unwrap();
         assert_eq!(t.theme.as_deref(), Some("dark"));
         assert!(LockedOptions::parse(Some(r#"{"theme":"nope"}"#)).is_err());

@@ -133,6 +133,31 @@ pub fn host_is_loopback(host: Option<&str>, port: u16) -> bool {
     port_ok && is_loopback_bind(h)
 }
 
+/// Host check for the dashboard servers (locked and static): the `Host` header
+/// must be a loopback name on this server's port, or one of the `allowed`
+/// names (from `options.hosts` / `--allow-host`, e.g. the public name a reverse
+/// proxy forwards). This defeats DNS rebinding, where an attacker's domain is
+/// re-pointed at a server that is only reachable from the victim's machine or
+/// network. An allowed entry without a port matches that name on any port;
+/// `"*"` disables the check (an explicit opt-out). A missing `Host` is refused.
+pub fn host_allowed(host: Option<&str>, port: u16, allowed: &[String]) -> bool {
+    let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+        return false;
+    };
+    if host_is_loopback(Some(host), port) {
+        return true;
+    }
+    let (h, p) = split_host_port(host);
+    allowed.iter().any(|a| {
+        let a = a.trim();
+        if a == "*" {
+            return true;
+        }
+        let (ah, ap) = split_host_port(a);
+        ah.eq_ignore_ascii_case(h) && (ap.is_none() || ap == p)
+    })
+}
+
 /// CSRF check: an `Origin` header (browsers send it on every cross-origin
 /// request and on all POSTs) must name the same host:port the request was sent
 /// to. A missing `Origin` (curl, same-origin GET) passes — authentication then
@@ -965,6 +990,34 @@ mod tests {
         ] {
             assert!(page(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn host_allowlist() {
+        let none: Vec<String> = vec![];
+        let ok = |h: &str, allowed: &[String]| host_allowed(Some(h), 8095, allowed);
+        // loopback names on the right port
+        for h in [
+            "127.0.0.1:8095",
+            "localhost:8095",
+            "[::1]:8095",
+            "LOCALHOST:8095",
+        ] {
+            assert!(ok(h, &none), "{h}");
+        }
+        // DNS rebinding: an attacker's name pointed at 127.0.0.1 is refused
+        assert!(!ok("evil.example:8095", &none));
+        assert!(!ok("127.0.0.1:9999", &none));
+        assert!(!host_allowed(None, 8095, &none));
+        assert!(!ok("", &none));
+        // allowlisted names: with any port, or with an exact port
+        let allowed = vec!["dash.example.com".to_string(), "intranet:8443".to_string()];
+        assert!(ok("dash.example.com", &allowed));
+        assert!(ok("Dash.Example.com:443", &allowed));
+        assert!(ok("intranet:8443", &allowed));
+        assert!(!ok("intranet:8444", &allowed));
+        assert!(!ok("evil.example", &allowed));
+        assert!(ok("anything:1", &["*".to_string()]));
     }
 
     #[test]
