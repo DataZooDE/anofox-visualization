@@ -34,7 +34,9 @@ builder running in your browser on DuckDB-Wasm. Its sidebar has two areas:
   (a data-quality report), [optimize](examples/optimize-showcase/)
   (decisions at a distribution centre) and [decide](examples/decide-showcase/)
   (support-ticket triage with a decision model) as **stored results** computed
-  natively, because those extensions can't run in DuckDB-Wasm yet.
+  natively, because those extensions can't run in DuckDB-Wasm yet; and an
+  [inventory digital twin](examples/inventory-twin/) (stock, risk, drift
+  monitoring, calibration and replay of inventory-rs twins).
 
 ## Features
 

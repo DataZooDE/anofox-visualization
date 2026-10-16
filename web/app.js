@@ -947,8 +947,9 @@ const FORECAST_GROUP = "Forecast";
 const TABULAR_GROUP = "Tabular";
 const OPTIMIZE_GROUP = "Optimize";
 const DECIDE_GROUP = "Decide";
+const INVENTORY_GROUP = "Inventory";
 const THEMING_GROUP = "Theming";
-const EXT_GROUPS = [STATS_GROUP, FORECAST_GROUP, TABULAR_GROUP, OPTIMIZE_GROUP, DECIDE_GROUP];
+const EXT_GROUPS = [STATS_GROUP, FORECAST_GROUP, TABULAR_GROUP, OPTIMIZE_GROUP, DECIDE_GROUP, INVENTORY_GROUP];
 const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", THEMING_GROUP, ...EXT_GROUPS];
 const sortGroups = () =>
   SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
@@ -1004,6 +1005,11 @@ const FILE_SAMPLES = [
   },
   { group: DECIDE_GROUP, name: "Which claims can we fast-track?", url: "examples/decide-claims.sql" },
   { group: DECIDE_GROUP, name: "Who should sales call first?", url: "examples/decide-leads.sql" },
+  {
+    group: INVENTORY_GROUP,
+    name: "Where will stock run short, and can we trust the plan?",
+    url: "examples/inventory-twin.sql",
+  },
 ];
 async function loadFileSamples() {
   // Fetch in parallel, register in FILE_SAMPLES order (stable sidebar order).

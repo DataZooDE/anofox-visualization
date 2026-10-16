@@ -1,0 +1,1 @@
+../../web/examples/inventory-twin.sql
