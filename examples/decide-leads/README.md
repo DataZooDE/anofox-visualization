@@ -21,9 +21,10 @@ anofox extensions → Decide).
 
 1. **Overview** — opportunities found by calls a week for the lead score,
    today's arrival order and a hindsight upper bound; the deal rate by score
-   band; opportunities at your capacity per model (the model matters:
+   band; a funnel from inbox to opportunity at your settings; opportunities
+   at your capacity per model (the model matters:
    laya-typed-decisions beats arrival order, laya-multilingual does not).
-2. **Reasons** — does each answer agree with the rep's finding (AUROC per
+2. **Reasons** — the lead-score formula with your weights filled in, does each answer agree with the rep's finding (AUROC per
    reason and model), the chosen model's mean P(yes) split by the finding,
    and both models scored with `decide_accuracy`, `decide_brier_score`,
    `decide_ece`.
@@ -36,7 +37,7 @@ anofox extensions → Decide).
 
 ## Controls
 
-- `model` — laya-typed-decisions or laya-multilingual (stored answers of
+- `model` — laya-typed-decisions or laya-multilingual, a button pair (stored answers of
   both; the queries are the same, only the model differs);
 - `sales_at_pct` — a message goes to sales when P(sales) reaches it;
 - `calls_per_week` — rep capacity;

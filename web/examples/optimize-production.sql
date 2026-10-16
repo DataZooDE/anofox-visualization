@@ -52,25 +52,29 @@ SELECT volume ::DROPDOWN, 'Demand scenario'::LABEL
 FROM (SELECT DISTINCT volume, volume_factor FROM pp_scenarios) ORDER BY volume_factor = 1 DESC, volume_factor;
 SELECT changeovers ::DROPDOWN, 'Changeover times'::LABEL
 FROM (SELECT DISTINCT changeovers, changeover_factor FROM pp_scenarios) ORDER BY changeover_factor DESC;
-SELECT line ::DROPDOWN, 'Line to drill into'::LABEL
+SELECT line ::BUTTONS, 'Line to drill into'::LABEL
 FROM (SELECT line, sum(weighted_late_min) AS wl FROM pp_algos WHERE rule = pp_today() AND volume = 'as booked' AND changeovers = 'today''s changeovers' GROUP BY line)
 ORDER BY wl DESC;
 SELECT 1::ENDGROUP;
 
-SELECT 'Selected rule vs. today''s due-date order, all three lines (arrow = change from today; up is better)'::GROUP;
+SELECT 'Selected rule vs. today''s due-date order, all three lines'::GROUP;
 SELECT (42 - sum(late_orders) FILTER (WHERE rule = pp_rule()))::METRIC,
-       (42 - sum(late_orders) FILTER (WHERE rule = pp_today()))::DELTA,
+       (42 - sum(late_orders) FILTER (WHERE rule = pp_today()))::DELTA, 'abs'::DELTA_FORMAT, 'vs today'::DELTA_LABEL,
+       '<42:warn; good'::THRESHOLDS,
        'Orders on their truck (of 42)'::LABEL FROM pp_kpi();
+-- Promotions must not miss their truck: any key-account order late is red.
 SELECT count(*) FILTER (WHERE rule = pp_rule() AND weight > 1 AND late_min = 0)::METRIC,
-       count(*) FILTER (WHERE rule = pp_today() AND weight > 1 AND late_min = 0)::DELTA,
+       count(*) FILTER (WHERE rule = pp_today() AND weight > 1 AND late_min = 0)::DELTA, 'abs'::DELTA_FORMAT, 'vs today'::DELTA_LABEL,
+       '<13:bad; good'::THRESHOLDS,
        'Key-account orders on time (of 13)'::LABEL FROM pp_run();
 SELECT round(100 * sum(end_min - start_min) FILTER (WHERE rule = pp_rule()) / sum(end_min - start_min + changeover_min) FILTER (WHERE rule = pp_rule()), 1)::PERCENT,
        round(100 * sum(end_min - start_min) FILTER (WHERE rule = pp_today()) / sum(end_min - start_min + changeover_min) FILTER (WHERE rule = pp_today()), 1)::DELTA,
+       'abs'::DELTA_FORMAT, 'vs today'::DELTA_LABEL,
        'Line time spent filling (not changing over)'::LABEL FROM pp_run();
 SELECT round(sum(changeover_min) FILTER (WHERE rule = pp_today()) / 60 - sum(changeover_min) FILTER (WHERE rule = pp_rule()) / 60, 1)::METRIC,
        'Changeover hours saved vs. today'::LABEL FROM pp_kpi();
 SELECT round(sum(7200 - makespan_min) FILTER (WHERE rule = pp_rule()) / 60, 1)::METRIC,
-       round(sum(7200 - makespan_min) FILTER (WHERE rule = pp_today()) / 60, 1)::DELTA,
+       round(sum(7200 - makespan_min) FILTER (WHERE rule = pp_today()) / 60, 1)::DELTA, 'vs today'::DELTA_LABEL,
        'Line hours left before Sat 06:00'::LABEL FROM pp_kpi();
 SELECT 1::ENDGROUP;
 
@@ -79,7 +83,8 @@ SELECT 'Overview'::TAB;
 
 SELECT 6::COL;
 SELECT 400::HEIGHT;
-SELECT rule ::XAXIS, line ::CATEGORY, round(weighted_late_min / 60, 1) ::BARCHART_STACKED, 1 ::FLIP, ' h'::YFORMAT,
+SELECT rule ::XAXIS, line ::CATEGORY, round(weighted_late_min / 60, 1) ::BARCHART_STACKED, 1 ::FLIP, ' h'::YFORMAT, 'tween'::TRANSITION,
+       'Minutes each order misses its truck, key-account orders counted three times, summed per line.'::INFO,
        'Weighted lateness by rule (h) — the exact schedule is the proven optimum, "fewest changeovers" ignores the trucks'::TITLE
 FROM pp_kpi() ORDER BY sum(weighted_late_min) OVER (PARTITION BY rule) DESC, line;
 
@@ -87,7 +92,7 @@ SELECT 6::COL;
 SELECT 400::HEIGHT;
 SELECT round(sum(changeover_min) / 60, 1) ::XAXIS, sum(late_orders) ::SCATTER,
        replace(replace(rule, ' (proven optimum)', ''), 'due date order (today)', 'today') ::CATEGORY,
-       ' h'::XFORMAT,
+       ' h'::XFORMAT, 'tween'::TRANSITION,
        'The trade-off: changeover hours (x) vs. orders late (y) — down and left is better'::TITLE
 FROM pp_kpi() GROUP BY rule ORDER BY rule;
 
@@ -96,6 +101,7 @@ SELECT 'sum'::TOTALS;
 SELECT 'Late: today, selected | Changeover hours: co_today, co_selected'::COLGROUP;
 SELECT 'selected > 0'::FLAG;
 SELECT line AS "Line" ::TABLE,
+       '#Run plan?v.line={value}' AS "Run plan" ::LINK,
        sum(late_orders) FILTER (WHERE rule = pp_today()) AS today,
        sum(late_orders) FILTER (WHERE rule = pp_rule()) AS selected,
        round(sum(changeover_min) FILTER (WHERE rule = pp_today()) / 60, 1) AS co_today,

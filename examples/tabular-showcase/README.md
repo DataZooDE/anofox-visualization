@@ -31,18 +31,18 @@ cd web && ../target/release/dashboard --check ../examples/tabular-showcase/showc
 
 ## The dashboard
 
-A clean editorial theme (inlined `::THEME`, violet accent) with a header that
-says the results are stored, four filters and a KPI strip. The filters only
+The question, four filters and a KPI strip. The filters only
 re-slice the stored tables:
 
-- **Checks on** (all tables / orders / customers) — the check panels and KPIs;
+- **Checks on** (all tables / orders / customers, buttons) — the check panels and KPIs;
 - **Countries** — field validity, the legacy-vs-new comparison and the diff;
 - **Order dates** — the weekly rule runs, the daily checks and the anomalies;
 - **Outlier cut-off** — the isolation-forest score above which an order counts
   as an outlier (the stored scores are thresholded in SQL).
 
 Clicking a channel bar filters the flagged-order list; clicking a diff type
-filters the migration list.
+filters the migration list — each chart has its own selection, so the two
+don't interfere.
 
 1. **Overview** — share of passing check results (gauge), rows to fix per
    failing check, and the failing checks with their weekly trend (sparkline)
@@ -51,7 +51,8 @@ filters the migration list.
    checks against the 99 % line, weekly volume against its floor, and every
    check result.
 3. **Over time** — orders and revenue per day with the days the time-aware
-   checks flag (the outage, a false alarm a week later, the pricing bug).
+   checks flag (the outage, a false alarm a week later, the pricing bug); a
+   strip under the orders chart marks which check fired on which day.
 4. **Anomalies** — order amounts by quantity, the score distribution, flagged
    orders by channel and the `outlier_tree` explanation of each.
 5. **Profiles** — validity of email, phone and VAT ID by country, legacy vs. new

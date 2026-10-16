@@ -45,17 +45,18 @@ SELECT ('**The dispatcher** of a food wholesaler plans tomorrow''s deliveries at
         || 'The optimised plans assign stops by a capacity-balanced sweep around the depot and order each van with `opt_sequence_best_of` (shortest route) or `opt_schedule_exact` (least lateness against the deadlines).')::MARKDOWN;
 
 SELECT 'Planning inputs'::GROUP;
-SELECT plan ::DROPDOWN, 'Plan (vs. today''s districts)'::LABEL FROM (VALUES (1, 'deadline-aware'), (2, 'shortest route')) t(k, plan) ORDER BY k;
-SELECT vans ::DROPDOWN, 'Vans on the road'::LABEL FROM (VALUES (1, '4'), (2, '5'), (3, '6')) t(k, vans) ORDER BY k;
+SELECT plan ::BUTTONS, 'Plan (vs. today''s districts)'::LABEL FROM (VALUES (1, 'deadline-aware'), (2, 'shortest route')) t(k, plan) ORDER BY k;
+SELECT vans ::BUTTONS, 'Vans on the road'::LABEL FROM (VALUES (1, '4'), (2, '5'), (3, '6')) t(k, vans) ORDER BY k;
 SELECT ('Van ' || k) AS van ::DROPDOWN, 'Van to drill into'::LABEL FROM (SELECT DISTINCT van AS k FROM dr_vans) ORDER BY k;
 SELECT 0.45 AS eur_per_km ::NUMBER, 'Cost per km (€)'::LABEL;
 SELECT 32 AS eur_per_driver_hour ::NUMBER, 'Driver cost per hour (€)'::LABEL;
 SELECT 90 AS eur_per_van_day ::NUMBER, 'Van cost per day (€)'::LABEL;
 SELECT 1::ENDGROUP;
 
-SELECT 'Selected plan vs. today''s districts (arrow = change from today; up is better)'::GROUP;
+SELECT 'Selected plan vs. today''s districts'::GROUP;
 SELECT (40 - (SELECT late_stops FROM dr_summary WHERE plan = dr_plan() AND vans = dr_n()))::METRIC,
        (40 - (SELECT late_stops FROM dr_summary WHERE plan = dr_today() AND vans = dr_n()))::DELTA,
+       'abs'::DELTA_FORMAT, 'vs today''s districts'::DELTA_LABEL, '<40:bad; good'::THRESHOLDS,
        'Stops served by their deadline (of 40)'::LABEL;
 SELECT ((SELECT km FROM dr_summary WHERE plan = dr_today() AND vans = dr_n()) - (SELECT km FROM dr_summary WHERE plan = dr_plan() AND vans = dr_n()))::METRIC,
        'Kilometres saved'::LABEL;
@@ -64,7 +65,9 @@ SELECT ((SELECT dr_cost(km, driver_h, vans) FROM dr_summary WHERE plan = dr_toda
        'Saved per day (€: km, drivers, vans)'::LABEL;
 SELECT round((SELECT 100.0 * sum(least(cages, dr_cap())) / sum(cages) FROM dr_vans WHERE plan = dr_plan() AND vans = dr_n()), 1)::PERCENT,
        round((SELECT 100.0 * sum(least(cages, dr_cap())) / sum(cages) FROM dr_vans WHERE plan = dr_today() AND vans = dr_n()), 1)::DELTA,
-       'Cages that fit the first trip'::LABEL;
+       'abs'::DELTA_FORMAT, 'vs today''s districts'::DELTA_LABEL, '<100:bad; good'::THRESHOLDS,
+       'Cages that fit the first trip'::LABEL,
+       'A van takes 32 roll cages; cages beyond that wait at the depot for a second trip.'::INFO;
 SELECT 1::ENDGROUP;
 
 -- ── 1 · Map ──────────────────────────────────────────────────────────────────
@@ -98,14 +101,16 @@ SELECT 'Vans'::TAB;
 
 SELECT 6::COL;
 SELECT 360::HEIGHT;
-SELECT 'Van ' || van ::XAXIS, CASE WHEN plan = dr_today() THEN 'today' ELSE dr_plan() END ::CATEGORY, cages ::BARCHART, dr_cap() ::REFLINE,
-       'Roll cages per van — dashed: van capacity; today''s districts overload one van'::TITLE
+SELECT 'Van ' || van ::XAXIS, CASE WHEN plan = dr_today() THEN 'today' ELSE dr_plan() END ::CATEGORY, cages ::BARCHART,
+       dr_cap() ::REFLINE, 'van capacity'::REFLINE_LABEL, '#Stop list?v.van={x}'::LINK,
+       'Roll cages per van — today''s districts overload one van; click a van for its stop list'::TITLE
 FROM dr_vans WHERE vans = dr_n() AND plan IN (dr_today(), dr_plan()) ORDER BY van, 2 DESC;
 
 SELECT 6::COL;
 SELECT 360::HEIGHT;
 SELECT 'Van ' || van ::XAXIS, CASE WHEN plan = dr_today() THEN 'today' ELSE dr_plan() END ::CATEGORY, round(back_min / 60, 2) ::BARCHART, ' h'::YFORMAT,
-       'Hours on the road per van (06:00 → back at the depot)'::TITLE
+       '#Stop list?v.van={x}'::LINK,
+       'Hours on the road per van (06:00 → back at the depot); click a van for its stop list'::TITLE
 FROM dr_vans WHERE vans = dr_n() AND plan IN (dr_today(), dr_plan()) ORDER BY van, 2 DESC;
 
 SELECT 12::COL;
@@ -156,7 +161,7 @@ FROM dr_summary ORDER BY vans, ord;
 SELECT 6::COL;
 SELECT 380::HEIGHT;
 SELECT vans || ' vans' ::XAXIS, CASE WHEN plan = dr_today() THEN 'today' ELSE plan END ::CATEGORY, dr_cost(km, driver_h, vans) ::BARCHART, '€'::YFORMAT,
-       'Daily cost (km + driver hours + van day rate)'::TITLE
+       'tween'::TRANSITION, 'Daily cost (km + driver hours + van day rate) — change the cost inputs to re-price'::TITLE
 FROM dr_summary ORDER BY vans, ord;
 
 SELECT 12::COL;
@@ -184,6 +189,16 @@ SELECT ('### Recommendation' || chr(10) || chr(10) ||
 FROM dr_best() b
 JOIN dr_summary t ON t.plan = dr_today() AND t.vans = b.vans
 JOIN dr_summary s ON s.plan = 'shortest route' AND s.vans = b.vans;
+
+SELECT 12::COL;
+SELECT 300::HEIGHT;
+SELECT step ::XAXIS, eur ::WATERFALL, '€'::YFORMAT, 'tween'::TRANSITION,
+       ('Where the recommended plan saves, per day, against today''s districts with ' || dr_n() || ' vans')::TITLE
+FROM (SELECT 1 AS i, 'Fewer kilometres' AS step, round((t.km - b.km) * dr_eur_km()) AS eur FROM dr_best() b, dr_summary t WHERE t.plan = dr_today() AND t.vans = dr_n()
+      UNION ALL SELECT 2, 'Fewer driver hours', round((t.driver_h - b.driver_h) * dr_eur_h()) FROM dr_best() b, dr_summary t WHERE t.plan = dr_today() AND t.vans = dr_n()
+      UNION ALL SELECT 3, 'Van day rates', round((t.vans - b.vans) * dr_eur_van()) FROM dr_best() b, dr_summary t WHERE t.plan = dr_today() AND t.vans = dr_n()
+      UNION ALL SELECT 4, 'Saved per day', NULL)
+ORDER BY i;
 
 SELECT 12::COL;
 SELECT 'late_stops > 0'::FLAG;

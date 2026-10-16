@@ -77,17 +77,22 @@ SELECT 'The delivery at a glance'::GROUP;
 SELECT (SELECT decision FROM fm_verdict WHERE delivery_date = fm_day()) ::TEXT_LARGE,
        ('decision for ' || strftime(fm_day(), '%a %d %b')) ::LABEL;
 SELECT (SELECT blocking FROM fm_verdict WHERE delivery_date = fm_day()) ::METRIC,
-       (SELECT blocking FROM fm_verdict WHERE delivery_date = fm_day() - 1) ::DELTA,
-       'blocking checks failing, vs. the day before' ::LABEL;
+       (SELECT blocking FROM fm_verdict WHERE delivery_date = fm_day() - 1) ::DELTA_LOWER_GOOD,
+       'abs' ::DELTA_FORMAT, 'vs the day before' ::DELTA_LABEL, '>0:bad; good' ::THRESHOLDS,
+       'blocking checks failing' ::LABEL;
 SELECT (SELECT warnings FROM fm_verdict WHERE delivery_date = fm_day()) ::METRIC,
-       (SELECT warnings FROM fm_verdict WHERE delivery_date = fm_day() - 1) ::DELTA,
-       'warnings, vs. the day before' ::LABEL;
+       (SELECT warnings FROM fm_verdict WHERE delivery_date = fm_day() - 1) ::DELTA_LOWER_GOOD,
+       'abs' ::DELTA_FORMAT, 'vs the day before' ::DELTA_LABEL, '>0:warn; good' ::THRESHOLDS,
+       'warnings' ::LABEL;
 SELECT (SELECT row_count FROM fm_deliveries WHERE delivery_date = fm_day()) ::COMPACT,
        (SELECT avg(row_count) FROM fm_deliveries WHERE delivery_date BETWEEN fm_day() - 7 AND fm_day() - 1) ::DELTA,
-       'rows delivered, vs. the 7-day mean' ::LABEL;
+       'vs the 7-day mean' ::DELTA_LABEL,
+       'rows delivered' ::LABEL;
 SELECT (SELECT 100 * ean_missing_rate FROM fm_deliveries WHERE delivery_date = fm_day()) ::PERCENT,
-       (SELECT 100 * ean_missing_rate FROM fm_deliveries WHERE delivery_date = fm_day() - 1) ::DELTA,
-       'EANs missing, vs. the day before' ::LABEL;
+       (SELECT 100 * ean_missing_rate FROM fm_deliveries WHERE delivery_date = fm_day() - 1) ::DELTA_LOWER_GOOD,
+       'abs' ::DELTA_FORMAT, 'vs the day before' ::DELTA_LABEL,
+       ('>' || 100 * fm_limit() || ':bad; good') ::THRESHOLDS,
+       'EANs missing' ::LABEL;
 SELECT (SELECT strftime(received_at, '%H:%M') FROM fm_deliveries WHERE delivery_date = fm_day()) ::TEXT_LARGE,
        'file received (contract: by 06:00)' ::LABEL;
 SELECT 1::ENDGROUP;
@@ -101,10 +106,15 @@ SELECT ('**What to look for:** most nights pass every check. Seven incidents sta
 
 SELECT 12::COL;
 SELECT 320::HEIGHT;
+WITH incidents(day, what) AS (VALUES
+    (DATE '2026-08-29', 'cut-off file'), (DATE '2026-09-08', 'duplicated SKUs'), (DATE '2026-09-16', 'USD prices'),
+    (DATE '2026-09-29', 'prices in cents'), (DATE '2026-10-08', 're-send'), (DATE '2026-10-15', 'new format'))
 SELECT d.delivery_date ::XAXIS, k.category ::CATEGORY, count(e.check_name) ::BARCHART_STACKED,
+       any_value(i.day) ::XLINE, any_value(i.what) ::XLINE_LABEL,
        'Failing checks per delivery, by kind — today fails five at once'::TITLE
 FROM fm_deliveries d CROSS JOIN (SELECT DISTINCT category FROM fm_checks) k
 LEFT JOIN fm_eval e ON e.delivery_date = d.delivery_date AND e.category = k.category AND e.verdict <> 'pass'
+LEFT JOIN incidents i ON i.day = d.delivery_date
 WHERE fm_days(d.delivery_date)
 GROUP BY ALL ORDER BY d.delivery_date, k.category;
 
@@ -127,7 +137,8 @@ SELECT 'Every delivery with a finding'::TITLE,
        v.blocking AS "Blocking" ::PLAIN, v.warnings AS "Warnings" ::PLAIN,
        d.row_count AS "Rows" ::PLAIN, strftime(d.received_at, '%H:%M') AS "Received",
        (SELECT string_agg(check_name, ', ' ORDER BY severity, check_name) FROM fm_eval e
-        WHERE e.delivery_date = v.delivery_date AND e.verdict <> 'pass') AS "Failing checks"
+        WHERE e.delivery_date = v.delivery_date AND e.verdict <> 'pass') AS "Failing checks",
+       '#Go / no-go?v.delivery=' || strftime(v.delivery_date, '%Y-%m-%d') AS "Judge" ::LINK
 FROM fm_verdict v JOIN fm_deliveries d USING (delivery_date)
 WHERE v.decision <> 'GO' AND fm_days(v.delivery_date)
 ORDER BY v.delivery_date DESC;

@@ -43,8 +43,9 @@ The **Decision rules** box drives every panel, in SQL, over the stored answers:
   minutes; the cost curve marks the cheapest threshold next to yours;
 - `autoroute_at_pct` — the confidence a team choice needs to be applied
   without a human;
-- `language`, `team` — filter the tickets. A click on a team bar (Routing)
-  lists that team's routing mistakes.
+- `language`, `team` (buttons) — filter the tickets. A click on a team bar
+  (Routing) lists only that team's routing mistakes (its own selection,
+  `clicked_team`, so other clicks don't filter the list).
 
 ## Tabs
 
@@ -52,7 +53,7 @@ The **Decision rules** box drives every panel, in SQL, over the stored answers:
    the confusion at your threshold and every mistake.
 2. **Calibration** — calibration and ROC (`anofox_plot_curve`), precision and
    recall by threshold, P(refund) per ticket and language, and Brier score /
-   calibration error per language.
+   calibration error per language (defined behind the table's ⓘ).
 3. **Routing** — right team per labelled team, the confusion matrix, what a
    confidence gate buys (coverage drops, accuracy doesn't rise) and the
    routing mistakes.

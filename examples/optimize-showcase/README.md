@@ -46,14 +46,16 @@ cd web && ../target/release/dashboard --check ../examples/optimize-showcase/show
 The header holds six inputs: container size, carrier booking (snapped to the
 nearest stored 250 kg step), wave size, the packing-line rule to compare with
 today's, and the portfolio's holdings limit and cap per asset. They only
-select among the stored sweeps — nothing is re-solved in the browser. A KPI
+select among the stored sweeps — nothing is re-solved in the browser; the
+inputs with a few options are button groups, and the charts they drive move
+to their new values. A KPI
 strip compares the optimiser with today's rule at the chosen inputs.
 
 ## Tabs
 
 1. **Overview** — the gain over today's rule per decision, and which solver
    family (with which guarantee) handles it.
-2. **Containers** — fill gauges, containers used vs the volume lower bound,
+2. **Containers** — fill gauges (red below 70 %, amber below 90 %), containers used vs the volume lower bound,
    the fill profile and containers needed per container size (next fit needs
    46 containers at 1,000 units, every decreasing packer 39 = the bound).
 3. **Carrier** — saving vs booked capacity for three rules, the shipments each

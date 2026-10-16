@@ -49,13 +49,15 @@ cd web && ../target/release/dashboard --check --strict examples/optimize-product
 ## Inputs and tabs
 
 Inputs: sequencing rule (compared with today's due-date order), demand
-scenario, changeover times, and the line to drill into. They only pick among
+scenario, changeover times, and the line to drill into (buttons). They only pick among
 stored runs. KPIs: orders on their truck, key-account orders on time, share of
 line time spent filling, changeover hours saved, line hours left before
-Saturday 06:00.
+Saturday 06:00; the truck tiles turn amber / red when an order or a
+key-account order misses its truck.
 
 1. **Overview** — weighted lateness by rule and line; the changeover-vs-lateness
-   trade-off; per-line table (today vs selected).
+   trade-off; per-line table (today vs selected) with a link to each line's
+   run plan.
 2. **Run plan** — Gantt of one line, today vs the selected rule (changeovers as
    separate bars), and the sequence as the shift leader's list.
 3. **Orders** — all 42 orders, subtotalled by line, rescued / still-late badges.

@@ -57,34 +57,34 @@ CREATE OR REPLACE MACRO os_shift() AS 480;  -- paint-line minutes in an 8-hour s
 -- ── Header: planning inputs, KPIs ────────────────────────────────────────────
 
 SELECT 'Planning inputs'::GROUP;
-SELECT container_size ::DROPDOWN, 'Container size (units)'::LABEL FROM (VALUES (1, '1000'), (2, '800'), (3, '1250'), (4, '1500')) t(k, container_size) ORDER BY k;
+SELECT container_size ::BUTTONS, 'Container size (units)'::LABEL FROM (VALUES (1, '1000'), (2, '800'), (3, '1250'), (4, '1500')) t(k, container_size) ORDER BY k;
 SELECT 2000 AS booking_kg ::NUMBER, 'Carrier booking (kg, 250–5,000)'::LABEL;
-SELECT wave_size ::DROPDOWN, 'Wave size (order lines)'::LABEL FROM (VALUES (1, '120'), (2, '80'), (3, '160'), (4, '200')) t(k, wave_size) ORDER BY k;
+SELECT wave_size ::BUTTONS, 'Wave size (order lines)'::LABEL FROM (VALUES (1, '120'), (2, '80'), (3, '160'), (4, '200')) t(k, wave_size) ORDER BY k;
 SELECT algorithm AS schedule_rule ::DROPDOWN, 'Packing-line rule'::LABEL FROM os_sched_algos WHERE algorithm NOT LIKE '%(today)' ORDER BY ord DESC;
 SELECT holdings ::DROPDOWN, 'Max. holdings'::LABEL FROM (SELECT DISTINCT max_holdings::VARCHAR AS holdings, max_holdings FROM os_portfolio) ORDER BY max_holdings DESC;
-SELECT position_cap ::DROPDOWN, 'Cap per asset'::LABEL FROM (VALUES (1, '25 %'), (2, '40 %'), (3, 'no cap')) t(k, position_cap) ORDER BY k;
+SELECT position_cap ::BUTTONS, 'Cap per asset'::LABEL FROM (VALUES (1, '25 %'), (2, '40 %'), (3, 'no cap')) t(k, position_cap) ORDER BY k;
 SELECT 1::ENDGROUP;
 
-SELECT 'Optimiser vs. today''s rule (arrow = change from today)'::GROUP;
+SELECT 'Optimiser vs. today''s rule'::GROUP;
 SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'best of')::PERCENT,
-       (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')::DELTA,
+       (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Container fill'::LABEL;
 SELECT (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE 'exact%')::METRIC,
-       (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE '%(today)')::DELTA,
+       (SELECT saving_eur FROM os_knap_curve WHERE capacity = os_book() AND algorithm LIKE '%(today)')::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Carrier saving (€)'::LABEL;
 SELECT round(100 * sum(lines) FILTER (WHERE algorithm = 'best of' AND wave <= 3) / sum(lines) FILTER (WHERE algorithm = 'best of'), 1)::PERCENT,
-       round(100 * sum(lines) FILTER (WHERE algorithm LIKE '%(today)' AND wave <= 3) / sum(lines) FILTER (WHERE algorithm LIKE '%(today)'), 1)::DELTA,
+       round(100 * sum(lines) FILTER (WHERE algorithm LIKE '%(today)' AND wave <= 3) / sum(lines) FILTER (WHERE algorithm LIKE '%(today)'), 1)::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Express lines in waves 1–3'::LABEL
 FROM os_wave_load WHERE capacity = os_wave() AND class = 'express';
 SELECT count(*) FILTER (WHERE algorithm = os_rule() AND late_min = 0)::METRIC,
-       count(*) FILTER (WHERE algorithm LIKE '%(today)' AND late_min = 0)::DELTA,
+       count(*) FILTER (WHERE algorithm LIKE '%(today)' AND late_min = 0)::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Packing jobs on time (of 12)'::LABEL
 FROM os_sched_gantt;
 SELECT (os_shift() - (SELECT changeover_min FROM os_seq_algos WHERE algorithm = 'best of'))::METRIC,
-       (os_shift() - (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)'))::DELTA,
+       (os_shift() - (SELECT changeover_min FROM os_seq_algos WHERE algorithm LIKE '%(today)'))::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Paint minutes left per shift'::LABEL;
 SELECT (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm = 'best of')::METRIC,
-       (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm LIKE 'top return%')::DELTA,
+       (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm LIKE 'top return%')::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Reserve-fund Sharpe ratio'::LABEL;
 SELECT 1::ENDGROUP;
 
@@ -112,7 +112,7 @@ WITH g AS (
     UNION ALL SELECT 'higher Sharpe ratio',
            100 * ((SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm = 'best of')
                 / (SELECT sharpe FROM os_portfolio WHERE max_holdings = os_hold() AND cap = os_pcap() AND algorithm LIKE 'top return%') - 1))
-SELECT gain ::XAXIS, round(pct, 1) ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT,
+SELECT gain ::XAXIS, round(pct, 1) ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT, 'tween'::TRANSITION,
        'Gain over today''s rule at the chosen inputs — paint changeovers and the carrier gain most'::TITLE
 FROM g ORDER BY pct;
 
@@ -140,12 +140,12 @@ SELECT ('**What to look for:** 150 cartons into **' || os_cap() || '-unit** cont
 SELECT 4::COL;
 SELECT 300::HEIGHT;
 SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'best of')::GAUGE, '50,100'::RANGE,
-       '#c93636,#b45309,#13803b'::COLORS, 'Average fill, optimised'::TITLE;
+       '<70:bad; <90:warn; good'::THRESHOLDS, 'Average fill, optimised'::TITLE;
 
 SELECT 4::COL;
 SELECT 300::HEIGHT;
 SELECT (SELECT avg_fill_pct FROM os_pack_algos WHERE capacity = os_cap() AND algorithm = 'next fit (today)')::GAUGE, '50,100'::RANGE,
-       '#c93636,#b45309,#13803b'::COLORS, 'Average fill, today (next fit)'::TITLE;
+       '<70:bad; <90:warn; good'::THRESHOLDS, 'Average fill, today (next fit)'::TITLE;
 
 SELECT 4::COL;
 SELECT 300::HEIGHT;
@@ -187,7 +187,7 @@ FROM os_knap_curve ORDER BY algorithm, capacity;
 
 SELECT 4::COL;
 SELECT 360::HEIGHT;
-SELECT algorithm ::XAXIS, saving_eur ::BARCHART, 1 ::FLIP,
+SELECT algorithm ::XAXIS, saving_eur ::BARCHART, 1 ::FLIP, 'tween'::TRANSITION,
        ('Saving (€) at ' || os_book() || ' kg')::TITLE
 FROM os_knap_curve WHERE capacity = os_book() ORDER BY 2;
 
@@ -324,7 +324,7 @@ FROM os_portfolio ORDER BY 3, max_holdings, cap;
 SELECT 5::COL;
 SELECT 400::HEIGHT;
 SELECT asset ::XAXIS, CASE WHEN algorithm = 'best of' THEN 'optimised (best of)' ELSE 'top return (naive)' END ::CATEGORY,
-       weight_pct ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT,
+       weight_pct ::BARCHART, 1 ::FLIP, 'percent'::YFORMAT, 'tween'::TRANSITION,
        'Weights at the selected setting'::TITLE
 FROM os_portfolio_alloc WHERE max_holdings = os_hold() AND cap = os_pcap() ORDER BY 2, asset DESC;
 
