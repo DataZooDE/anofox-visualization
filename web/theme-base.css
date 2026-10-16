@@ -408,6 +408,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-tip{position:fixed;pointer-events:none;background:var(--ax-tip-bg);backdrop-filter:blur(6px);color:var(--ax-tip-ink);padding:.55rem .7rem;border-radius:8px;font-size:.8rem;font-weight:500;border:1px solid var(--ax-tip-border);box-shadow:var(--ax-tip-shadow);opacity:0;transform:translateY(3px) scale(.98);transition:opacity .11s,transform .11s;z-index:50;white-space:nowrap;min-width:96px}
 .dp-tip.show{opacity:1;transform:none}
 .dp-tip .tip-dot{display:inline-block;width:.55rem;height:.55rem;border-radius:50%;margin-right:.45rem;vertical-align:middle}
+.dp-tip .tip-rule{display:inline-block;width:.75rem;border-top:2px dashed currentColor;margin-right:.45rem;vertical-align:middle}
 .dp-tip .tip-head{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head);font-size:.78rem}
 .dp-tip .tip-row{display:flex;align-items:center;justify-content:space-between;gap:1.4rem;line-height:1.65}
 .dp-tip .tip-row b{font-variant-numeric:tabular-nums;color:var(--ax-tip-head);font-weight:700}

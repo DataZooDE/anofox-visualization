@@ -50,9 +50,25 @@ for (const [role, label] of svgs) {
 console.log("summary:", svgs[0]?.[1]);
 
 // A reference rule (data-rule: ::XLINE "Today", ::REFLINE) shows its tooltip
-// but is no value: clicking it neither selects nor cross-filters.
+// under the pointer (on a crosshair chart as a "Reference line" row) but is no
+// value: clicking it neither selects nor cross-filters.
 const rule = await page.$(".dash .panel-svg > svg [data-rule]");
 if (rule) {
+  const at = await rule.evaluate((e) => {
+    e.closest(".panel").scrollIntoView({ block: "center" });
+    const r = e.getBoundingClientRect();
+    const cross = !!e.closest(".has-axis-pointer");
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, want: cross ? "Reference line" : e.getAttribute("data-tip") };
+  });
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await page.waitForTimeout(300);
+  const hover = await page.evaluate(() => {
+    const t = document.getElementById("dp-tip");
+    return t?.classList.contains("show") ? t.textContent : "";
+  });
+  console.log("rule hover:", hover);
+  if (!hover.includes(at.want)) fail("hovering a reference rule shows no tooltip for it");
+  await page.mouse.move(0, 0);
   await rule.dispatchEvent("click");
   await page.waitForTimeout(1000);
   const sel = await page.evaluate(() => [...new URL(location.href).searchParams.keys()].filter((k) => k === "v.selected"));

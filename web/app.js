@@ -7532,6 +7532,13 @@ function tipRow(info, fill) {
   );
 }
 
+// A reference rule's tooltip row: a dashed swatch, and where the rule sits
+// (its formatted value, or the date / x it was drawn at).
+function ruleRow(el) {
+  const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip") || "");
+  return `<div class="tip-row"><span><span class="tip-rule"></span>Reference line</span><b>${escapeHtml(info.value || info.x)}</b></div>`;
+}
+
 // ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
 // toggle (line↔bar), data view, restore (reset zoom), and save-as-PNG.
 function attachToolbox() {
@@ -8072,8 +8079,17 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
+      // Reference rules (data-rule) are no column value, but the crosshair names
+      // them: a vertical one (an ::XLINE, "Today") at the column nearest to it,
+      // a horizontal one (::REFLINE, a threshold) while the pointer is near it.
+      const uy = vb.y + (e.clientY - r.top) / scale;
+      const nearest = (x) => pts.reduce((a, p) => (Math.abs(p.cx - x) < Math.abs(a - x) ? p.cx : a), Infinity);
+      const rules = [...svg.querySelectorAll("[data-rule]")].filter((el) => {
+        const [x, y] = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
+        return el.getAttribute("data-rule") === "x" ? Math.round(nearest(x)) === best : Math.abs(y - uy) * scale <= 8;
+      });
       const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
-      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("");
+      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
