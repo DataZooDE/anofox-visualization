@@ -52,6 +52,8 @@ pub struct Diagnostic {
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
+    /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
+    /// (errors) | `policy/denied-column` | `policy/masked-column` (a note).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.

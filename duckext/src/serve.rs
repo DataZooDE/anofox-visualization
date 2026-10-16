@@ -20,7 +20,10 @@
 //!   ([`crate::panel_cache`]). The snapshot can be rebuilt while serving
 //!   (`refresh_s`, `anofox_serve_refresh`) and is swapped atomically
 //!   ([`crate::generation`]); `data` opens one folder of files read-only to
-//!   the panels, for data too large or too live to snapshot.
+//!   the panels, for data too large or too live to snapshot. An access policy
+//!   (`policy`, [`anofox_visualization::host::policy`]) rewrites every
+//!   dashboard statement to read per-viewer views (row filters, column
+//!   masks) and refuses to start on anything that could get around them.
 //! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
@@ -792,12 +795,16 @@ pub fn start_locked(
     if let Some(p) = &opts.policy {
         enforce(&mut snap, &dashboards, p)?;
     }
-    let policy_note = match &opts.policy {
-        Some(p) => format!(
+    let policy_note = match (&opts.policy, &opts.auth) {
+        (Some(p), Some(_)) => format!(
             "; access policy on {} table(s) — every other table is refused",
             p.tables.len()
         ),
-        None => String::new(),
+        (Some(p), None) => format!(
+            "; access policy on {} table(s) — every other table is refused; WARNING: no auth, so every viewer is anonymous (no claims)",
+            p.tables.len()
+        ),
+        (None, _) => String::new(),
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -1557,11 +1564,12 @@ fn locked_panel(
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
     for (name, lit) in &r.vars {
-        // The policy's row filters read the claims: no viewer may set them.
+        // (`__claim_*` and `anofox_data` are refused when the request is
+        // parsed.) The policy's own names are reserved, too.
         if st.opts.policy.is_some()
-            && [policy::CLAIM_PREFIX, policy::RESERVED_PREFIX]
-                .iter()
-                .any(|p| name.to_ascii_lowercase().starts_with(p))
+            && name
+                .to_ascii_lowercase()
+                .starts_with(policy::RESERVED_PREFIX)
         {
             return Err((400, format!("variable '{name}' is set by the server")));
         }
@@ -1696,9 +1704,15 @@ fn run_panel(
         for set in request_sets(r, claims, st.opts.data.as_deref()) {
             c.exec(&set)?;
         }
-        // The policy's views, for this viewer (before any dashboard SQL).
+        // The policy's views, for this viewer (before any dashboard SQL). The
+        // row filters read the claims set above; the column rules are decided
+        // here from the same claims.
         if let (Some(p), Some(s)) = (&gen.snap.policy, script) {
-            for v in p.enf.view_statements(&s.tables, &Viewer::default()) {
+            let viewer = claims.map_or_else(Viewer::default, |c| Viewer {
+                user: Some(c.user.clone()),
+                groups: c.groups.clone(),
+            });
+            for v in p.enf.view_statements(&s.tables, &viewer) {
                 c.exec(&v)?;
             }
         }

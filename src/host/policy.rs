@@ -40,8 +40,7 @@ use crate::sql::lex::{self, TokKind};
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
 
-/// Prefix of the claim variables the server sets (issue #48).
-pub const CLAIM_PREFIX: &str = "__claim_";
+pub use crate::host::access::CLAIM_PREFIX;
 /// Names starting with this are reserved for the server (views, CTEs).
 pub const RESERVED_PREFIX: &str = "__anofox";
 /// The per-request view of policy table `i` is `temp.main.__anofox_rls_<i>`.

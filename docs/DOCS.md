@@ -1817,6 +1817,9 @@ dashboard --check mydash.sql            # (add --json for machine output)
 #   sql-error     the query failed         render-error  missing required aesthetic
 #   empty-panel   query returned 0 rows (blank card)
 #   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer)
+# With an access policy (locked server): what it refuses, which panels use hidden columns.
+dashboard --check mydash.sql --db data.duckdb --policy policy.json
+#   policy/refused  policy/denied-column  policy/masked-column
 
 # Ground on the data before writing SQL: types, cardinality, min/max, null %.
 dashboard --describe 'sales.parquet'    # or a table name, read_csv(...), --db file.db
@@ -1973,6 +1976,27 @@ panel can filter rows by the viewer
 (`WHERE region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))`).
 Viewers can't set `__claim_*`, and cached results are kept per viewer.
 `options.log` writes a JSON-lines request log.
+
+**Row and column policies.** Instead of a claim filter in every panel, put a
+`policy.json` next to the dashboards (or pass `options.policy`): every table a
+dashboard reads needs a rule — a row condition over the claims and per-column
+`deny` / `null` / `mask` / `hash` unless the viewer is in an allowed group.
+The server rewrites every statement to read per-viewer views and refuses to
+start when a statement could get around them (a table without a rule,
+`query()`, catalog functions, macros, database-qualified names, …).
+
+```json
+{"tables": {
+  "sales": {"rows": "region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))"},
+  "employees": {"rows": true, "columns": {"salary": {"allow_groups": ["hr"], "else": "null"}, "ssn": "deny"}}
+}}
+```
+
+`dashboard --check dash.sql --db data.duckdb --policy policy.json` shows what
+the policy refuses and which panels use a column some viewers can't see. Only
+the locked server enforces policies: a static HTML export and the browser demo
+hold the data in the client and can't. Reference and threat model:
+[`secure-serving.md`](secure-serving.md#row-and-column-policies-access-control-p2).
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`

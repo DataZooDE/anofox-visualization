@@ -298,6 +298,10 @@ fn queries_through_ctes_subqueries_joins_and_unions_stay_filtered() {
         "SELECT id FROM sales UNION SELECT id FROM sales",
         "SELECT id FROM sales EXCEPT SELECT 99",
         "SELECT sales.id FROM sales POSITIONAL JOIN (SELECT 1)",
+        "SELECT s1.id FROM sales s1 ASOF JOIN sales s2 ON s1.id >= s2.id AND s1.region = s2.region",
+        "SELECT id FROM sales UNION ALL BY NAME SELECT id FROM sales WHERE false",
+        "SELECT id FROM sales QUALIFY row_number() OVER (PARTITION BY region) >= 1",
+        "FROM sales SELECT id",
         "SELECT id FROM \"SALES\"",
         "SELECT id FROM main.sales",
         "SELECT id FROM sales USING SAMPLE 100%",
@@ -416,6 +420,16 @@ fn tables_without_a_policy_are_refused() {
         "SELECT * FROM 'data.csv'",
         "SELECT * FROM 'payroll.parquet'",
         "FROM payroll PIVOT (sum(bonus) FOR note IN ('secret'))",
+        "SELECT list_transform([1], x -> (SELECT max(bonus) FROM payroll))",
+        "VALUES ((SELECT max(bonus) FROM payroll))",
+        "SELECT * FROM (VALUES (1)) v(x) WHERE x IN (FROM payroll SELECT id)",
+        "SELECT id FROM sales UNION ALL BY NAME FROM payroll",
+        "SELECT max(amount) FILTER (WHERE id IN (SELECT id FROM payroll)) FROM sales",
+        "SELECT id FROM sales ORDER BY (SELECT max(bonus) FROM payroll)",
+        "SELECT id FROM sales GROUP BY GROUPING SETS ((id), ()) HAVING count(*) < (SELECT max(bonus) FROM payroll)",
+        "SELECT sum(amount) OVER (ORDER BY (SELECT bonus FROM payroll)) FROM sales",
+        "SELECT * FROM sales s1 ASOF JOIN payroll p ON s1.id >= p.id",
+        "WITH a AS (SELECT * FROM sales) SELECT * FROM (SELECT * FROM __anofox_cte_1)",
     ] {
         f.refused(&[q], "no access policy");
     }
