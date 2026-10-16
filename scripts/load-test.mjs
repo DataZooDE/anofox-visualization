@@ -9,7 +9,7 @@
 //   node scripts/load-test.mjs --ext /tmp/anofox_visualization.duckdb_extension \
 //       [--duckdb duckdb] [--port 8845] [--rows 2000000] [--server-options '{"threads":16}'] \
 //       [--scenario all|burst|cold|hot|scroll|abuse|smoke] [--viewers N] [--duration 30] \
-//       [--think 1000] [--scroll-ms 25] [--timeout 60] [--cpus 0-3] [--json out.json]
+//       [--think 1000] [--scroll-ms 25] [--refresh-s 5] [--timeout 60] [--cpus 0-3] [--json out.json]
 //   node scripts/load-test.mjs --url http://127.0.0.1:8845 [--pid <server pid>] …
 //
 // With --ext the script starts a fresh server per scenario (DuckDB CLI with
@@ -24,10 +24,12 @@
 //   hot     five filter combinations shared by all viewers
 //   scroll  viewers only page the table: 10 page requests --scroll-ms apart,
 //           each superseding the last (a fast drag in the Scroll view)
+//   refresh the "hot" viewers while the server rebuilds its snapshot every
+//           --refresh-s seconds (refresh_s): no errors, no latency cliff
 //   abuse   20 abusive clients (huge pages, wide filters, every column's
 //           stats + distributions, bad requests) next to 10 ordinary viewers
 //   burst   viewers arriving at once on a fresh server (one dashboard load each)
-//   smoke   all five for a few seconds on 200k rows; exits 1 on any 5xx,
+//   smoke   all six for a few seconds on 200k rows; exits 1 on any 5xx,
 //           network error or timeout, missing 409s or a cold cache (for CI)
 import { spawn } from "child_process";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
@@ -50,6 +52,7 @@ const duckdb = arg("--duckdb", "duckdb");
 const port = Number(arg("--port", "8845"));
 const rows = Number(arg("--rows", smoke ? "200000" : "2000000"));
 const serverOptions = arg("--server-options", '{"threads": 16}');
+const refreshS = Number(arg("--refresh-s", smoke ? "1" : "5"));
 const duration = Number(arg("--duration", smoke ? "4" : "30")) * 1000;
 const think = Number(arg("--think", smoke ? "200" : "1000"));
 const scrollMs = Number(arg("--scroll-ms", smoke ? "5" : "25"));
@@ -257,7 +260,7 @@ let abuserStats = [];
 // ------------------------------------------------------------- the server --
 let server = null;
 const log = { ran: 0, superseded: 0, execMs: [] };
-async function startServer(cpus = cpusArg) {
+async function startServer(cpus = cpusArg, options = serverOptions) {
   if (await request("/healthz").then(() => true, () => false)) throw new Error(`${target} is already in use`);
   const dir = mkdtempSync(join(tmpdir(), "anofox-load-"));
   const setup = readFileSync(join(ROOT, "examples/load-test/setup.sql"), "utf8").replace(/range\(\d+\)/, `range(${rows})`);
@@ -265,7 +268,7 @@ async function startServer(cpus = cpusArg) {
   const q = (s) => `'${s.replace(/'/g, "''")}'`;
   writeFileSync(join(dir, "serve.sql"),
     `LOAD ${q(resolve(ext))};\n.read ${join(dir, "setup.sql")}\n` +
-    `SELECT anofox_serve_dashboards(${q(join(ROOT, "examples/load-test/dash"))}, ${port}, ${q(serverOptions)});\n`);
+    `SELECT anofox_serve_dashboards(${q(join(ROOT, "examples/load-test/dash"))}, ${port}, ${q(options)});\n`);
   const t0 = Date.now();
   const cmd = [duckdb, "-unsigned", "-init", join(dir, "serve.sql"), join(dir, "data.duckdb")];
   if (cpus) cmd.unshift("taskset", "-c", cpus);
@@ -334,7 +337,8 @@ const summary = (a) => ({ n: a.length, p50: pct(a, 50), p95: pct(a, 95), p99: pc
 async function run(name, viewers, body) {
   // On one CPU a burst of new connections reliably finds a server that leaves
   // some of them waiting for a thread (the regression check of the smoke run).
-  if (ext) await startServer(name === "burst" && smoke && !cpusArg && process.platform === "linux" ? "0" : cpusArg);
+  const options = name === "refresh" ? JSON.stringify({ ...JSON.parse(serverOptions), refresh_s: refreshS }) : serverOptions;
+  if (ext) await startServer(name === "burst" && smoke && !cpusArg && process.platform === "linux" ? "0" : cpusArg, options);
   // Warm-up check: the model still matches the dashboard.
   const probe = await new Viewer(new Stats()).req(PAGED, HOT[0], { limit: 10, offset: 0 }, "page");
   if (probe.status !== 200 || JSON.parse(probe.text).length !== 10)
@@ -363,6 +367,10 @@ async function run(name, viewers, body) {
     rssMb: { start: rss0, peak: rssPeak, end: rssMb() },
     loadavg: loadavg().map((x) => Math.round(x * 10) / 10),
   };
+  if (name === "refresh") {
+    const h = await request("/healthz").then((r) => JSON.parse(r.text), () => ({}));
+    res.refreshes = h.epoch ? h.epoch - 1 : null; // epoch: 1 at start, +1 per refresh
+  }
   if (server) {
     res.server = {
       startMs: server.startMs, executions: log.ran, interrupted: log.superseded,
@@ -388,6 +396,7 @@ const scenarios = {
   burst: [viewersArg || (smoke ? 32 : 100), (n) => Promise.all(Array.from({ length: n }, () => arrive()))],
   cold: [viewersArg || (smoke ? 4 : 20), (n) => Promise.all(Array.from({ length: n }, () => browse(coldVars, true)))],
   hot: [viewersArg || (smoke ? 8 : 200), (n) => Promise.all(Array.from({ length: n }, () => browse(() => pick(HOT), false)))],
+  refresh: [viewersArg || (smoke ? 8 : 100), (n) => Promise.all(Array.from({ length: n }, () => browse(() => pick(HOT), false)))],
   scroll: [viewersArg || (smoke ? 4 : 100), (n) => Promise.all(Array.from({ length: n }, () => scroller()))],
   abuse: [viewersArg || (smoke ? 4 : 20), (n) => Promise.all([
     ...Array.from({ length: n }, () => abuser()),
@@ -433,6 +442,7 @@ if (smoke) {
   const by = Object.fromEntries(results.map((r) => [r.scenario, r]));
   if (!(by.scroll.status[409] > 0)) bad.push("scroll: no superseded request (409)");
   if (by.hot.server && !(by.hot.server.cacheHitRate >= 50)) bad.push(`hot: cache hit rate ${by.hot.server.cacheHitRate} %`);
+  if (!(by.refresh.refreshes >= 1)) bad.push(`refresh: ${by.refresh.refreshes} snapshot refreshes`);
   if (by.abuse.abusers && Object.keys(by.abuse.abusers.status).some((k) => /^network/.test(k))) bad.push("abuse: abusers lost connections");
   if (bad.length) {
     console.error("load-test smoke FAILED:\n  " + bad.join("\n  "));
