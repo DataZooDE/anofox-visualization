@@ -25,8 +25,9 @@ RUN="$WORK/run"
 DUCKDB="${DUCKDB:-$(command -v duckdb || echo "$HOME/.local/bin/duckdb")}"
 export DUCKDB WORK
 
-# A SQL string literal.
+# A SQL string literal; a JSON string.
 q() { printf "'%s'" "${1//\'/\'\'}"; }
+j() { local s="${1//\\/\\\\}"; printf '"%s"' "${s//\"/\\\"}"; }
 die() { echo "serve.sh: $*" >&2; exit 1; }
 
 port() { cat "$RUN/port" 2>/dev/null || die "no server running (start one with: serve.sh start)"; }
@@ -97,6 +98,9 @@ start() {
       *) die "unknown option $1" ;;
     esac
   done
+  for n in "$port" "$cache_mb" "$refresh_s"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || die "not a number: $n"
+  done
   [ -x "$DUCKDB" ] || command -v "$DUCKDB" >/dev/null || die "DuckDB CLI not found (set DUCKDB)"
   if [ -e "$RUN/port" ] && health "$(cat "$RUN/port")" >/dev/null 2>&1; then
     die "already running on port $(cat "$RUN/port")"
@@ -111,7 +115,7 @@ start() {
 
   # The served folder: the dashboards, plus the per-user one with --auth.
   local dash="$HERE/dashboards"
-  local opts="\"cache_mb\": $cache_mb, \"data\": \"$WORK/data\", \"path_vars\": [\"run\"]"
+  local opts="\"cache_mb\": $cache_mb, \"data\": $(j "$WORK/data"), \"path_vars\": [\"run\"]"
   [ "$refresh_s" -gt 0 ] && opts="$opts, \"refresh_s\": $refresh_s"
   if [ "$auth" = 1 ]; then
     command -v node >/dev/null || die "--auth needs Node.js (for auth-proxy.mjs)"
@@ -124,7 +128,7 @@ start() {
     opts="$opts, \"hosts\": [\"127.0.0.1:$((port + 1))\", \"localhost:$((port + 1))\"],
       \"auth\": {\"mode\": \"proxy\", \"shared_secret_env\": \"ANOFOX_PROXY_SECRET\",
                  \"trusted_proxies\": [\"127.0.0.1\"], \"header_groups\": \"X-Forwarded-Groups\"},
-      \"log\": \"$RUN/requests.jsonl\""
+      \"log\": $(j "$RUN/requests.jsonl")"
   fi
 
   cat >"$RUN/session.sql" <<SQL
