@@ -121,15 +121,17 @@ fn cmd_render(args: &[String]) {
             .find(|r| roles::is_chrome_directive(*r))
         {
             let json = run(&db, &format!("{vars}{}", p.sql), true);
-            let v = sql::parse_rows_json(&json)
+            let cell = |v: &serde_json::Value| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Null => None,
+                v => Some(v.to_string()),
+            };
+            // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
+            let cells = sql::parse_rows_json(&json)
                 .ok()
-                .and_then(|rows| rows.first().and_then(|r| r.values().next().cloned()))
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s),
-                    serde_json::Value::Null => None,
-                    v => Some(v.to_string()),
-                });
-            chrome.apply(r, v);
+                .and_then(|rows| rows.first().map(|r| r.values().map(cell).collect()))
+                .unwrap_or_default();
+            chrome.apply_row(r, cells);
             continue;
         }
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);

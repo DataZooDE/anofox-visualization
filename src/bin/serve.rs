@@ -634,15 +634,17 @@ fn render_dashboard_page(
             ));
         }
         if let Some(r) = chrome_role {
-            let v = rows
+            let cell = |v: &serde_json::Value| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Null => None,
+                v => Some(v.to_string()),
+            };
+            // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
+            let cells = rows
                 .first()
-                .and_then(|row| row.values().next())
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Null => None,
-                    v => Some(v.to_string()),
-                });
-            chrome.apply(r, v);
+                .map(|row| row.values().map(cell).collect())
+                .unwrap_or_default();
+            chrome.apply_row(r, cells);
             continue;
         }
         queried.push((panel, rows));

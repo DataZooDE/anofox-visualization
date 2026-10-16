@@ -26,6 +26,7 @@ pub mod contract;
 pub mod dashboard;
 mod downsample;
 pub mod format;
+pub mod freshness;
 pub mod host;
 pub mod inputs;
 pub mod kpi;
@@ -162,6 +163,10 @@ pub enum InputKind {
     DateRange,
     /// `::PERIOD`: date presets + grain + comparison ([`period`]).
     Period,
+    /// A segmented button group (`::BUTTONS`): one of a few options.
+    Buttons,
+    /// A boolean switch (`::TOGGLE`): `TRUE` / `FALSE`.
+    Toggle,
 }
 
 /// How a KPI value is formatted.
@@ -339,6 +344,11 @@ pub enum Role {
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
+    Info,
+    /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
+    /// `'warning'` or `'success'` (the value).
+    Callout,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).
@@ -398,6 +408,9 @@ pub enum Role {
     Logo,
     /// Page favicon URL (`::FAVICON`).
     Favicon,
+    /// The data's freshness (`::ASOF`): a "Data as of …" chip in the header,
+    /// amber once older than an optional `'stale=24h'` column.
+    AsOf,
     /// A section heading that always starts a new row (`::SECTION`).
     Section,
     /// Interaction: `::SELECT_AS` names the *next* chart's selection — a click

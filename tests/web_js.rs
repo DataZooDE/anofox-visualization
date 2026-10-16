@@ -67,3 +67,13 @@ fn web_period_control_matches_the_rust_vectors() {
 fn web_kpi_tile_parts() {
     run_node("kpi_test.mjs");
 }
+
+#[test]
+fn web_freshness_chip_matches_the_cli() {
+    run_node("asof_test.mjs");
+}
+
+#[test]
+fn web_markdown_values_are_inert() {
+    run_node("md_values_test.mjs");
+}

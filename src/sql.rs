@@ -579,7 +579,9 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
                     if let Some(rr) = parse_role(tok) {
-                        if rr == Role::Title || crate::roles::is_table_format(rr) {
+                        if matches!(rr, Role::Title | Role::Info)
+                            || crate::roles::is_table_format(rr)
+                        {
                             roles.push((idx, rr));
                         }
                     }
@@ -595,6 +597,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         );
     }
 
+    let markdown = unambiguous.contains(&Role::Markdown);
     let mut roles = Vec::new();
     let mut names = Vec::new();
     let mut items = Vec::new();
@@ -654,6 +657,13 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         }
         if lex::is_star_item(item) {
             items.push(item.to_string()); // `*`, `t.*`, COLUMNS(…) expand in place
+        } else if markdown && {
+            let (core, alias) = trailing_alias(item);
+            alias.is_some() || lex::simple_ident(core).is_some()
+        } {
+            // A ::MARKDOWN statement's other columns keep their names: the
+            // text's {{name}} placeholders read them.
+            items.push(item.to_string());
         } else {
             items.push(format!("{} AS c{i}", trailing_alias(item).0));
         }

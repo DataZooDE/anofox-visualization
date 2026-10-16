@@ -14,6 +14,9 @@
 -- ── Brand ────────────────────────────────────────────────────────────────────
 SELECT 'ACME Analytics'::BRAND;
 SELECT 'Sales cockpit'::DASHBOARD_TITLE;
+-- Data freshness: a "Data as of …" chip in the header, amber once older than a
+-- day. A real dashboard reads its load log: SELECT max(loaded_at)::ASOF FROM …
+SELECT make_timestamp((epoch_ms(now()) - 95 * 60 * 1000) * 1000)::ASOF, 'stale=24h';
 SELECT 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCA0MCA0MCc+PHJlY3Qgd2lkdGg9JzQwJyBoZWlnaHQ9JzQwJyByeD0nOScgZmlsbD0nIzQzMzhjYScvPjxwYXRoIGQ9J00xMSAyOSAyMCAxMGw5IDE5aC01bC00LTktNCA5eicgZmlsbD0nI2ZmZicvPjwvc3ZnPg=='::LOGO;
 SELECT 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCA0MCA0MCc+PHJlY3Qgd2lkdGg9JzQwJyBoZWlnaHQ9JzQwJyByeD0nOScgZmlsbD0nIzQzMzhjYScvPjxwYXRoIGQ9J00xMSAyOSAyMCAxMGw5IDE5aC01bC00LTktNCA5eicgZmlsbD0nI2ZmZicvPjwvc3ZnPg=='::FAVICON;
 SELECT '{"name":"acme","extends":"light","mode":"auto","palette":["#4338ca","#eb6834","#1baf7a","#eda100","#e87ba4","#008300","#0891b2","#e34948"],"sequential":["#e0e7ff","#3730a3"],"diverging":["#dc2626","#f1f2f6","#4338ca"],"colors":{"bg":"#f5f6fb","bg2":"#f5f6fb","card":"#ffffff","ink":"#111827","muted":"#6b7280","line":"#e4e6ef","heading":"#0b0d1a","accent":"#4338ca","accent2":"#4338ca","positive":"#15803d","negative":"#dc2626","warning":"#b45309","info":"#4338ca","link":"#3730a3","other":"#8b929e"},"chart":{"heading":"#0b0d1a","note":"#9ca3af","ink":"#111827","muted":"#6b7280","line":"#eceef4","seq_low":"#e0e7ff"},"font":{"family":"''Hanken Grotesk'',system-ui,-apple-system,''Segoe UI'',sans-serif","display":"''Hanken Grotesk'',system-ui,sans-serif"},"radius":10,"chrome":{"gradient":false,"background":"plain","kpi_value":"accent","table_zebra":false,"shadow":"sm"},"brand":{"title_suffix":" · ACME"},"dark":{"palette":["#6366f1","#d95926","#199e70","#c98500","#d55181","#008300","#0891b2","#e66767"],"colors":{"bg":"#0c0e1a","bg2":"#0c0e1a","card":"#151826","ink":"#e5e7f0","muted":"#a3a8bd","line":"#262a3d","heading":"#ffffff","accent":"#818cf8","accent2":"#818cf8","positive":"#4ade80","negative":"#f87171","warning":"#fbbf24","info":"#a5b4fc","link":"#a5b4fc","other":"#7d8296"},"chart":{"heading":"#ffffff","note":"#8b90a6","ink":"#e5e7f0","muted":"#a3a8bd","line":"#262a3d","seq_low":"#1e2240"}}}'::THEME;
@@ -69,8 +72,9 @@ CREATE OR REPLACE MACRO acme_monthly() AS TABLE
 SELECT date_trunc('month', day) AS m, sum(revenue) AS rev, sum(revenue / aov) AS n
 FROM acme_orders WHERE acme_in(region, channel) AND acme_cur(day) GROUP BY ALL;
 SELECT 'vs. the previous period'::GROUP;
-SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'both'::DELTA_FORMAT,
-       getvariable('period_prev_label')::DELTA_LABEL, (SELECT list(rev ORDER BY m) FROM acme_monthly())::SPARKLINE, 'Revenue'::LABEL
+SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'both'::DELTA_FORMAT, 'Revenue'::LABEL,
+       getvariable('period_prev_label')::DELTA_LABEL, (SELECT list(rev ORDER BY m) FROM acme_monthly())::SPARKLINE,
+       'Invoiced revenue net of returns, in USD; source: the ERP''s order ledger. Compared with the period of the same length before.'::INFO
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT round(sum(revenue / aov) FILTER (WHERE acme_cur(day)))::COMPACT, sum(revenue / aov) FILTER (WHERE acme_prev(day))::DELTA,
        getvariable('period_prev_label')::DELTA_LABEL, (SELECT list(n ORDER BY m) FROM acme_monthly())::SPARKLINE, 'Orders'::LABEL
@@ -81,7 +85,8 @@ SELECT (sum(revenue) FILTER (WHERE acme_cur(day)) / sum(revenue / aov) FILTER (W
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue * margin_pct) FILTER (WHERE acme_cur(day)) / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
        (100 * sum(revenue * margin_pct) FILTER (WHERE acme_prev(day)) / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'abs'::DELTA_FORMAT,
-       getvariable('period_prev_label')::DELTA_LABEL, 40::GOAL, 'Gross margin'::LABEL
+       getvariable('period_prev_label')::DELTA_LABEL, 40::GOAL, 'Gross margin'::LABEL,
+       'Revenue minus cost of goods sold, as a share of revenue (revenue-weighted across orders).'::INFO
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue) FILTER (WHERE acme_cur(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
        (100 * sum(revenue) FILTER (WHERE acme_prev(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA,
@@ -122,6 +127,7 @@ FROM acme_orders WHERE acme_in(region, channel) AND acme_cur(day) GROUP BY ALL O
 
 SELECT 12::COL;
 SELECT 'Product lines by region'::TITLE,
+       'Revenue and margin in the selected period; Returns % is refunded revenue over revenue. Status compares revenue with the period before: growing ≥ +5 %, shrinking < −3 %.'::INFO,
        product AS "Product line" ::TABLE, region AS "Region",
        list(rev ORDER BY wk) FILTER (WHERE nd = 7) AS "Weekly revenue" ::SPARKLINE,
        sum(rev) AS "Revenue" ::MONEY,
@@ -139,6 +145,10 @@ FROM (SELECT product, region, date_trunc('week', day) AS wk, sum(revenue) AS rev
 JOIN (SELECT product, region, sum(revenue) AS prev FROM acme_orders WHERE acme_in(region, channel) AND acme_prev(day) GROUP BY ALL)
   USING (product, region)
 GROUP BY product, region ORDER BY "Revenue" DESC;
+
+SELECT 12::COL;
+SELECT '**Margins of the last two weeks are provisional.** Returns are booked when the goods arrive back, so recent weeks still lose about 1–2 points of margin as late returns come in.'::MARKDOWN,
+       'warning'::CALLOUT;
 
 -- ── 2 · Regions ──────────────────────────────────────────────────────────────
 SELECT 'Regions'::TAB;

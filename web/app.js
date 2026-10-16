@@ -670,6 +670,28 @@ SELECT 12::COL;
 SELECT day::XAXIS, score::LINECHART, 'Anomaly score (optional output)'::TITLE
 FROM 'data/events/anomalies.parquet';
 
+SELECT 'Switch the view'::TAB;
+SELECT 12::COL;
+SELECT 'Compact inputs for a few choices: **::BUTTONS** is a segmented button group (one option pressed; the arrow keys move between them) and **::TOGGLE** an on/off switch whose variable is a BOOLEAN. Together they make a **metric / dimension switcher**: the chart picks its measure with **CASE getvariable(''metric'') WHEN …** and its grouping column with **COLUMNS(getvariable(''dim''))**. Like every input they land in the URL (\`?v.metric=Peak%20day\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 'View'::GROUP;
+SELECT m AS metric::BUTTONS, 'Measure'::LABEL FROM (VALUES (1, 'Sessions'), (2, 'Peak day'), (3, 'Active days')) t(o, m) ORDER BY o;
+SELECT d AS dim::BUTTONS, 'Split by'::LABEL FROM (VALUES (1, 'channel'), (2, 'region')) t(o, d) ORDER BY o;
+SELECT false AS launches_only::TOGGLE, 'Launch days only'::LABEL;
+SELECT 1::ENDGROUP;
+
+SELECT 12::COL;
+SELECT COLUMNS(getvariable('dim'))::XAXIS,
+       CASE getvariable('metric')
+         WHEN 'Sessions' THEN sum(n)
+         WHEN 'Peak day' THEN max(n)
+         ELSE count(DISTINCT day)
+       END::BARCHART,
+       (getvariable('metric') || ' by ' || getvariable('dim'))::TITLE
+FROM events
+WHERE NOT getvariable('launches_only') OR note = 'launch'
+GROUP BY ALL ORDER BY 2 DESC;
+
 SELECT 'Date range'::TAB;
 SELECT 12::COL;
 SELECT 'A **::DATERANGE** control — two columns (from / to) become a pair of linked date pickers seeded from the data''s min/max. **Drag the dates** and the KPI and chart below recompute for the selected window via **getvariable(''from_day'')** / **getvariable(''to_day'')**.'::MARKDOWN, 'What this shows'::TITLE;
@@ -2045,7 +2067,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
-let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD"];
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
@@ -2090,7 +2112,7 @@ const directive = (s) =>
   DIRECTIVES.find((d) => role(s, d)) || (s.roles.length === 1 && s.roles[0][1] === "THRESHOLDS" ? "THRESHOLDS" : undefined);
 // Dashboard chrome directives (::THEME, ::LOCALE, ::DASHBOARD_TITLE, ::BRAND,
 // ::LOGO, ::FAVICON) — collected in the pre-pass, before any panel renders.
-let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON"];
+let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON", "ASOF"];
 const chromeRole = (s) => CHROME.find((d) => role(s, d));
 
 // ---- theme (src/theme.rs is the source of truth; plan T1/T4/T12) ----
@@ -2185,10 +2207,78 @@ function axToken(name, fallback = "") {
   return v || fallback;
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
+// ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
+let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+// A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
+// ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
+function asofParse(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const m = String(v)
+    .trim()
+    .match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(:\d{2}(?:\.\d+)?)?)?\s*(Z|UTC|[+-]\d{2}(?::?\d{2})?)?$/);
+  if (!m) return null;
+  let off = m[4] || "Z";
+  if (off === "UTC") off = "Z";
+  else if (/^[+-]\d{2}$/.test(off)) off += ":00";
+  else if (/^[+-]\d{4}$/.test(off)) off = off.slice(0, 3) + ":" + off.slice(3);
+  const t = Date.parse(`${m[1]}T${m[2] || "00:00"}${m[3] || ""}${off}`);
+  return Number.isNaN(t) ? null : t;
+}
+// 'stale=24h' / '90m' / '2d' / '1w' → seconds (0 = never stale).
+function asofStale(v) {
+  const m = String(v ?? "").match(/^\s*(?:stale\s*=?\s*)?(\d+)\s*([smhdw])\s*$/i);
+  return m ? Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2].toLowerCase()] : 0;
+}
+function asofRelative(sec) {
+  sec = Math.max(0, sec);
+  if (sec < 60) return "just now";
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+  if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
+  return `${Math.floor(sec / 86400)} d ago`;
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const d = new Date(a.at);
+  const now = Date.now();
+  const age = (now - a.at) / 1000;
+  const loc = dashLocale() || undefined;
+  let t;
+  try {
+    t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() !== new Date(now).toDateString()) t = d.toLocaleDateString(loc) + " " + t;
+  } catch (_) {
+    t = d.toISOString().slice(0, 16).replace("T", " ");
+  }
+  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
+  el.title = d.toString();
+  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+}
+let asofTimer = null;
+function mkAsof() {
+  if (!dpAsof || dpAsof.at == null) return null;
+  const c = document.createElement("div");
+  c.className = "dp-asof";
+  c.setAttribute("role", "status");
+  paintAsof(c, dpAsof);
+  // keep the relative time current while the dashboard is open
+  asofTimer ||= setInterval(() => {
+    document.querySelectorAll(".dash .dp-asof").forEach((el) => dpAsof && dpAsof.at != null && paintAsof(el, dpAsof));
+  }, 60000);
+  return c;
+}
 function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
-  if (!b.title && !b.name && !b.logo) return null;
+  const chip = mkAsof();
+  if (!b.title && !b.name && !b.logo) {
+    if (!chip) return null;
+    const h = document.createElement("div");
+    h.className = "dp-head";
+    h.appendChild(chip);
+    return h;
+  }
   const h = document.createElement("div"); // not <header>: the builder styles that
   h.className = "dp-head";
   const logo = b.logo && safeUrl(b.logo, { image: true });
@@ -2214,6 +2304,7 @@ function dashHeader() {
     txt.appendChild(t);
   }
   h.appendChild(txt);
+  if (chip) h.appendChild(chip);
   return h;
 }
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
@@ -2308,7 +2399,10 @@ function validSeed(kind, vals, options) {
   const one = vals.length === 1 ? vals[0] : undefined;
   switch (kind) {
     case "DROPDOWN":
+    case "BUTTONS":
       return options && options.includes(one) ? one : undefined;
+    case "TOGGLE":
+      return one !== undefined && /^(true|false|t|f|1|0|yes|no|on|off)$/i.test(one) ? toggleValue(one) : undefined;
     case "MULTISELECT": {
       const want = vals.filter((v) => v !== "");
       const ok = want.filter((v) => options && options.includes(v));
@@ -2369,13 +2463,25 @@ function periodUrlParams(prefix, st, def) {
   if (st.compare && st.compare !== def.compare) out.push([prefix + "_compare", st.compare]);
   return out;
 }
+// A ::TOGGLE value as "true" / "false" (its default may be a BOOLEAN, a number
+// or text such as 'on'); unknown text is "false".
+function toggleValue(v) {
+  return /^(true|t|1|yes|on)$/i.test(String(v ?? "").trim()) ? "true" : "false";
+}
 // Record an input's default and apply its URL seed (first run only, while the
 // variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
 function seedInputFromUrl(kind, names, rows) {
   for (const name of names) {
-    const options = kind === "DROPDOWN" || kind === "MULTISELECT" ? rows.map((r) => String(r[name])) : null;
+    const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+    const options = listed ? rows.map((r) => String(r[name])) : null;
     dpVarDefault[name] = JSON.stringify(
-      kind === "DROPDOWN" ? options[0] : kind === "MULTISELECT" ? options : String(rows[0][name] ?? "")
+      kind === "MULTISELECT"
+        ? options
+        : listed
+          ? options[0]
+          : kind === "TOGGLE"
+            ? toggleValue(rows[0][name])
+            : String(rows[0][name] ?? "")
     );
     const vals = dpUrlSeed[name];
     if (!vals) continue;
@@ -2936,6 +3042,7 @@ async function runOnce(fresh = true) {
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
   dpTheme.chrome = {};
+  dpAsof = null;
   const CHROME_KEY = { LOCALE: "locale", DASHBOARD_TITLE: "title", BRAND: "brand", LOGO: "logo", FAVICON: "favicon" };
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
@@ -2948,7 +3055,11 @@ async function runOnce(fresh = true) {
         if (v != null && typeof v === "object") v = JSON.stringify(v);
         v = v == null ? "" : String(v);
         if (cr === "THEME") dpTheme.spec = v;
-        else dpTheme.chrome[CHROME_KEY[cr]] = v;
+        else if (cr === "ASOF") {
+          // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
+          const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
+          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+        } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }
       if (s.setup) {
@@ -3005,7 +3116,7 @@ async function runOnce(fresh = true) {
         const varname = Object.keys(rows[0])[0];
         seedInputFromUrl(kind, [varname], rows);
         let lit;
-        if (kind === "DROPDOWN") {
+        if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const options = rows.map((r) => String(r[varname]));
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
           // Optional ::HINT column → a hint shown next to each option.
@@ -3013,6 +3124,11 @@ async function runOnce(fresh = true) {
           const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
           dd[i] = { kind, varname, options, hints, caption };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
+        } else if (kind === "TOGGLE") {
+          // A BOOLEAN variable; the query's value is the default.
+          if (dpVars[varname] === undefined) dpVars[varname] = toggleValue(rows[0][varname]);
+          dd[i] = { kind, varname, caption };
+          lit = dpVars[varname] === "true" ? "TRUE" : "FALSE";
         } else if (kind === "MULTISELECT") {
           const options = rows.map((r) => String(r[varname]));
           if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
@@ -3465,9 +3581,11 @@ async function runOnce(fresh = true) {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
         const boxH = nextHeight;
+        const made = []; // this statement's panels (an ::INFO decorates the first)
         const mkPanel = () => {
           const fig = document.createElement("figure");
           fig.className = "panel";
+          made.push(fig);
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           if (boxH) fig.style.minHeight = boxH + "px";
           return fig;
@@ -3519,9 +3637,17 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
           const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
+          // ::CALLOUT 'note' | 'warning' | 'success': a tinted box with an icon.
+          const cr = s.roles.find((r) => r[1] === "CALLOUT");
+          if (cr) {
+            const kind = calloutKind(r0["c" + cr[0]]);
+            fig.classList.add("dp-callout", "dp-callout-" + kind);
+            fig.setAttribute("role", "note"); // static text: never an assertive alert
+            fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+          }
           const body = document.createElement("div");
           body.className = "md-body";
-          body.innerHTML = renderMarkdown(mdr ? r0["c" + mdr[0]] : firstCell());
+          body.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : firstCell(), r0, mdValue);
           fig.appendChild(body);
           container.appendChild(fig);
           panels++;
@@ -3536,9 +3662,18 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         } else if (role(s, "TABLE")) {
-          const rows = JSON.parse(rowsJson);
+          let rows = JSON.parse(rowsJson);
           const fig = mkPanel();
-          const tr = s.roles.find((r) => r[1] === "TITLE");
+          // An ::INFO column is the ⓘ text, not a cell: drop it (by key).
+          let troles = s.roles;
+          const infoR = troles.find((r) => r[1] === "INFO");
+          if (infoR && rows.length) {
+            const k = Object.keys(rows[0])[infoR[0]];
+            const shift = (ri) => (ri[0] > infoR[0] ? [ri[0] - 1, ri[1]] : ri);
+            rows = rows.map(({ [k]: _, ...rest }) => rest);
+            troles = troles.filter((r) => r !== infoR).map(shift);
+          }
+          const tr = troles.find((r) => r[1] === "TITLE");
           let skip = -1;
           let caption = "";
           if (tr && rows.length) {
@@ -3550,7 +3685,7 @@ async function runOnce(fresh = true) {
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
           const fmtByIdx = {};
-          for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
+          for (const [idx, r] of troles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
           else fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
           container.appendChild(fig);
@@ -3653,6 +3788,8 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         }
+        const ir = s.roles.find((r) => r[1] === "INFO");
+        if (ir && made.length) addInfo(made[0], cellAt(rowsJson, ir[0]));
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
@@ -3932,6 +4069,27 @@ function makeControl(meta, bar) {
     wrap.appendChild(mk(meta.varnames[1]));
     return finalizeControl(wrap, bar);
   }
+  if (meta.kind === "BUTTONS") return finalizeControl(mkButtons(meta), bar);
+  if (meta.kind === "TOGGLE") {
+    // A native checkbox with the switch role: Space toggles it, screen readers
+    // announce on/off; the caption is its label.
+    wrap.textContent = "";
+    wrap.classList.add("dp-toggle");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.setAttribute("role", "switch");
+    cb.checked = dpVars[meta.varname] === "true";
+    refocus("toggle:" + meta.varname, cb);
+    cb.onchange = () => {
+      if (document.activeElement === cb) dpRefocus = "toggle:" + meta.varname;
+      dpVars[meta.varname] = cb.checked ? "true" : "false";
+      run(false);
+    };
+    const cap = document.createElement("span");
+    cap.textContent = meta.caption || meta.varname;
+    wrap.append(cb, cap);
+    return finalizeControl(wrap, bar);
+  }
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
@@ -4072,6 +4230,62 @@ function makeControl(meta, bar) {
   return finalizeControl(wrap, bar);
 }
 
+// The control to focus again after the re-run a keyboard change triggers
+// (re-running rebuilds the controls): "<kind>:<variable>".
+let dpRefocus = null;
+function refocus(key, el) {
+  if (dpRefocus !== key) return;
+  dpRefocus = null;
+  // The new controls are attached once the whole run has rendered.
+  let tries = 0;
+  const go = () => (el.isConnected ? el.focus() : ++tries < 120 && requestAnimationFrame(go));
+  requestAnimationFrame(go);
+}
+// A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys
+// move between the options (roving tabindex), like a native radio group.
+function mkButtons(meta) {
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || meta.varname || "") + ":";
+  cap.id = "dp-seg-" + meta.varname;
+  const seg = document.createElement("div");
+  seg.className = "dp-seg";
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-labelledby", cap.id);
+  const btns = meta.options.map((o, k) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = o;
+    b.setAttribute("role", "radio");
+    const on = o === dpVars[meta.varname];
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+    if (on) refocus("seg:" + meta.varname, b);
+    const hint = meta.hints && meta.hints[k];
+    if (hint) b.title = hint;
+    b.onclick = () => {
+      if (dpVars[meta.varname] === o) return;
+      if (document.activeElement === b) dpRefocus = "seg:" + meta.varname;
+      dpVars[meta.varname] = o;
+      run(false);
+    };
+    return b;
+  });
+  seg.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const at = btns.indexOf(document.activeElement);
+    const nb = btns[(at + step + btns.length) % btns.length];
+    dpRefocus = "seg:" + meta.varname;
+    nb.click();
+  });
+  seg.append(...btns);
+  cont.append(cap, seg);
+  return cont;
+}
+
 // A contract panel's payload cell (`c{idx}`) as JSON text: DuckDB-Wasm returns
 // the JSON column as a string, a native backend may return it nested.
 function contractCell(row, idx, empty) {
@@ -4111,6 +4325,130 @@ function titleOf(s, rowsJson) {
   }
   const v = rows[0] ? rows[0]["c" + tr[0]] : null;
   return v == null ? null : String(v).replace(/^"|"$/g, "");
+}
+
+// {{col}} / {{col:fmt}} in a ::MARKDOWN text → the statement's own row,
+// formatted like a KPI. The Markdown is rendered (and sanitised) with inert
+// private-use tokens in their place; each token in text then becomes the
+// HTML-escaped value, a token inside a tag (a link URL, an attribute) is
+// dropped — a value can never become markup or a URL. Unknown columns stay
+// as written. `fmt(value, spec)` formats one value.
+function markdownWithValues(src, row, fmt) {
+  const vals = [];
+  const keys = Object.keys(row || {});
+  const md = String(src ?? "").replace(/\{\{\s*([A-Za-z_][\w ]*?)\s*(?::\s*([A-Za-z_]+)\s*)?\}\}/g, (m, name, spec) => {
+    const key = keys.find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) return m;
+    vals.push(String(fmt(row[key], (spec || "").toLowerCase())));
+    return `\uE000${vals.length - 1}\uE001`;
+  });
+  const html = renderMarkdown(md);
+  if (!vals.length) return html;
+  const tok = /\uE000(\d+)\uE001/g;
+  return html.replace(/<[^>]*>|[^<]+/g, (part) =>
+    part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => escapeHtml(vals[+k] ?? ""))
+  );
+}
+// One {{col:fmt}} value: money / percent / compact / metric (numbers, as the
+// KPI roles), date, text; no spec = a number or ISO date in the dashboard
+// locale (like a table cell), other text as is.
+const MD_FMT = { money: "MONEY", currency: "MONEY", usd: "MONEY", eur: "MONEY", dollar: "MONEY", percent: "PERCENT", pct: "PERCENT", compact: "COMPACT", metric: "METRIC", number: "METRIC", num: "METRIC" };
+function mdValue(v, spec) {
+  if (v == null) return "–";
+  if (MD_FMT[spec]) return fmtNum(v, MD_FMT[spec]);
+  if (spec === "text") return String(v);
+  const loc = dashLocale();
+  if (spec === "date") {
+    // DuckDB-Wasm may hand a DATE / TIMESTAMP over as epoch ms
+    const iso = typeof v === "number" ? new Date(v).toISOString().slice(0, 10) : String(v).slice(0, 10);
+    return loc ? format_date_locale(iso, loc) : iso;
+  }
+  if (typeof v === "number" || /^-?\d+(\.\d+)?$/.test(String(v))) return fmtNum(v, "METRIC");
+  return loc ? format_date_locale(String(v), loc) : String(v);
+}
+// ::CALLOUT value → 'note' | 'warning' | 'success' (src/lint.rs CALLOUT_KINDS).
+function calloutKind(v) {
+  const k = String(v ?? "").trim().toLowerCase();
+  if (k === "warning" || k === "caution" || k === "danger") return "warning";
+  if (k === "success" || k === "tip") return "success";
+  return "note";
+}
+// One cell of a result (by output position) as text.
+function cellAt(rowsJson, idx) {
+  let r0;
+  try {
+    r0 = JSON.parse(rowsJson)[0];
+  } catch (_) {
+    return "";
+  }
+  const v = r0 ? (r0["c" + idx] ?? Object.values(r0)[idx]) : null;
+  return v == null ? "" : String(v).replace(/^"|"$/g, "");
+}
+// ::INFO: an ⓘ button on the panel's title bar (top-right corner without one)
+// that shows the definition on hover, keyboard focus or click; Esc closes it.
+// The tooltip is placed on <body> while open, so a tile's clipping or
+// stacking never hides it.
+let dpInfoSeq = 0;
+function addInfo(fig, text) {
+  if (!text.trim()) return;
+  const id = "dp-info-" + ++dpInfoSeq;
+  const wrap = document.createElement("span");
+  wrap.className = "dp-info";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-info-btn";
+  btn.textContent = "ⓘ";
+  btn.setAttribute("aria-label", "About this panel");
+  btn.setAttribute("aria-describedby", id);
+  btn.setAttribute("aria-expanded", "false");
+  const pop = document.createElement("div");
+  pop.className = "dp-info-pop";
+  pop.id = id;
+  pop.setAttribute("role", "tooltip");
+  pop.textContent = text;
+  pop.hidden = true;
+  wrap.append(btn, pop);
+  let pinned = false;
+  const show = (on) => {
+    btn.setAttribute("aria-expanded", on ? "true" : "false");
+    wrap.classList.toggle("open", on);
+    if (!on) {
+      pop.hidden = true;
+      if (pop.parentNode !== wrap) wrap.appendChild(pop); // keep it in the panel (aria, export)
+      return;
+    }
+    document.body.appendChild(pop);
+    pop.hidden = false;
+    const r = btn.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    const left = Math.max(8, Math.min(r.left - 6, innerWidth - w - 8));
+    const below = r.bottom + 6 + pop.offsetHeight < innerHeight;
+    pop.style.left = left + scrollX + "px";
+    pop.style.top = (below ? r.bottom + 6 : r.top - 6 - pop.offsetHeight) + scrollY + "px";
+  };
+  btn.onmouseenter = () => show(true);
+  btn.onmouseleave = () => pinned || show(false);
+  btn.onfocus = () => show(true);
+  btn.onblur = () => {
+    pinned = false;
+    show(false);
+  };
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    pinned = !pinned;
+    show(pinned);
+  };
+  btn.onkeydown = (e) => {
+    if (e.key !== "Escape") return;
+    pinned = false;
+    show(false);
+  };
+  const title = fig.querySelector(".panel-title");
+  if (title) title.appendChild(wrap);
+  else {
+    wrap.classList.add("corner");
+    fig.appendChild(wrap);
+  }
 }
 
 function mkTitle(text) {

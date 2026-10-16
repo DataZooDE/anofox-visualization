@@ -68,6 +68,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LABEL", &[], R::Label, "encoding", true,
       "section heading when alone; chart title / per-mark or per-feature label otherwise"),
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
+    e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
+      "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
@@ -221,7 +223,9 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
     e("MARKDOWN", &["MD", "TEXTBOX", "RICHTEXT"], R::Markdown, "kpi", true,
-      "a Markdown box (browser)"),
+      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row"),
+    e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
+      "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     // ── tables ─────────────────────────────────────────────────────────────
     e("TABLE", &["GRID"], R::Table, "table", true,
       "the whole result as a table (one marker per panel)"),
@@ -258,6 +262,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "two date columns → from/to variables"),
     e("PERIOD", &["PERIOD_PICKER", "DATE_PERIOD"], R::Input(InputKind::Period), "input", false,
       "date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label"),
+    e("BUTTONS", &["BUTTON_GROUP", "SEGMENTED"], R::Input(InputKind::Buttons), "input", false,
+      "segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher)"),
+    e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
+      "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
@@ -302,6 +310,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "brand / organisation name shown above the dashboard title"),
     e("LOGO", &[], R::Logo, "chrome", false, "header logo image URL (relative, https: or data:image/)"),
     e("FAVICON", &[], R::Favicon, "chrome", false, "browser-tab icon URL"),
+    e("ASOF", &["AS_OF", "FRESHNESS", "DATA_AS_OF"], R::AsOf, "chrome", false,
+      "data freshness: a 'Data as of 14:02 (2 h ago)' chip in the header; a 'stale=24h' column turns it amber"),
 ];
 
 /// Role tokens that are **also DuckDB type names** (`x::DATE` is a real cast).
@@ -466,6 +476,7 @@ pub fn is_chrome_directive(r: Role) -> bool {
             | Role::Brand
             | Role::Logo
             | Role::Favicon
+            | Role::AsOf
     )
 }
 
@@ -637,6 +648,8 @@ mod tests {
                 I::Multiselect,
                 I::DateRange,
                 I::Period,
+                I::Buttons,
+                I::Toggle,
             ]
             .map(Role::Input),
         );
@@ -728,6 +741,9 @@ mod tests {
             Role::Brand,
             Role::Logo,
             Role::Favicon,
+            Role::AsOf,
+            Role::Info,
+            Role::Callout,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -820,6 +836,9 @@ mod tests {
                 | Role::Brand
                 | Role::Logo
                 | Role::Favicon
+                | Role::AsOf
+                | Role::Info
+                | Role::Callout
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

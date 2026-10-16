@@ -138,11 +138,12 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             .map(|(_, r)| *r)
             .find(|r| roles::is_chrome_directive(*r));
         if let Some(r) = chrome_role {
-            let v = provider
+            // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
+            let cells = provider
                 .query(&panel.sql)
-                .ok()
-                .and_then(|rows| first_text(&rows));
-            chrome.apply(r, v);
+                .map(|cols| cols.iter().map(|(_, v)| v.first().map(value_str)).collect())
+                .unwrap_or_default();
+            chrome.apply_row(r, cells);
             continue;
         }
         // An input renders nothing headless, but its default value is bound
@@ -460,7 +461,7 @@ fn render_inner(
 /// no branding. Returns the fragment and its height.
 fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)> {
     let b = &t.brand;
-    if b.title.is_none() && b.name.is_none() && b.logo.is_none() {
+    if b.title.is_none() && b.name.is_none() && b.logo.is_none() && b.asof.is_none() {
         return None;
     }
     let h = 52.0;
@@ -493,6 +494,21 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
             hd = hex(t.colors.heading),
         )),
         (None, None) => {}
+    }
+    // The ::ASOF freshness chip, right-aligned (amber text once stale).
+    if let (Some(at), Some(now)) = (b.asof, crate::freshness::now_epoch()) {
+        let l = t
+            .locale
+            .as_deref()
+            .and_then(Locale::from_tag)
+            .unwrap_or_default();
+        let (text, stale) = crate::freshness::chip_text(at, b.stale_secs, now, &l);
+        s.push_str(&format!(
+            "<text class=\"dp-asof\" x=\"{w:.0}\" y=\"30\" text-anchor=\"end\" font-family=\"{f}\" font-size=\"12\" font-weight=\"600\" fill=\"{c}\">{}</text>",
+            esc(&text),
+            f = esc(&t.font.family),
+            c = hex(if stale { t.colors.warning } else { t.colors.muted }),
+        ));
     }
     s.push_str("</svg>");
     Some((s, h))
@@ -550,6 +566,19 @@ fn render_panel_svg(
         .and_then(|(_, v)| v.first())
         .map(value_str)
         .filter(|s| !s.is_empty());
+    // ::INFO: an ⓘ after the title whose SVG <title> is the definition (a
+    // hover tooltip wherever the SVG is shown).
+    let info = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Info))
+        .and_then(|(i, _)| column_at(rows, *i))
+        .and_then(|(_, v)| v.first())
+        .map(value_str)
+        .filter(|s| !s.trim().is_empty());
+    let title = match (title, &info) {
+        (None, Some(_)) => Some(String::new()),
+        (t, _) => t,
+    };
     let title_h = if title.is_some() { 26.0 } else { 0.0 };
     let pad = 14.0;
 
@@ -618,8 +647,19 @@ fn render_panel_svg(
         .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(tt) = &title {
+        let mark = info
+            .as_deref()
+            .map(|i| {
+                format!(
+                    "<tspan class=\"dp-info\" fill=\"{m}\" font-weight=\"400\">{sp}ⓘ<title>{}</title></tspan>",
+                    esc(i),
+                    m = hex(ropts.theme.colors.muted),
+                    sp = if tt.is_empty() { "" } else { " " },
+                )
+            })
+            .unwrap_or_default();
         svg.push_str(&format!(
-            "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}</text>",
+            "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}{mark}</text>",
             esc(tt),
             f = esc(&ropts.theme.font.display),
             hd = hex(ropts.theme.colors.heading),

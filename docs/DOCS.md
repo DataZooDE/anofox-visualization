@@ -31,6 +31,7 @@ terminal.
 | `::CATEGORY` | `::SERIES`, `::COLOR`, `::COLOUR` | encoding | grouping / colour series (discrete) |
 | `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
+| `::INFO` | `::DESCRIPTION`, `::DEFINITION` | encoding | a definition behind an ⓘ on the panel's title bar (hover, focus or click) |
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
@@ -113,7 +114,8 @@ terminal.
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
-| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser) |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row |
+| `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
@@ -133,6 +135,8 @@ terminal.
 | `::TEXT` | `::SEARCH`, `::STRING` | input | free-text input (value = default) |
 | `::DATERANGE` | `::DATE_RANGE` | input | two date columns → from/to variables |
 | `::PERIOD` | `::PERIOD_PICKER`, `::DATE_PERIOD` | input | date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label |
+| `::BUTTONS` | `::BUTTON_GROUP`, `::SEGMENTED` | input | segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher) |
+| `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
@@ -161,6 +165,7 @@ terminal.
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
 | `::FAVICON` |  | chrome | browser-tab icon URL |
+| `::ASOF` | `::AS_OF`, `::FRESHNESS`, `::DATA_AS_OF` | chrome | data freshness: a 'Data as of 14:02 (2 h ago)' chip in the header; a 'stale=24h' column turns it amber |
 <!-- roles-table:end -->
 
 **Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
@@ -293,6 +298,44 @@ more in a row) share one row, sized to the tallest tile. `dashboard --check`
 reports `kpi/bad-delta-format` (an unknown format; the change is shown as a %),
 `kpi/no-delta` (a format or label without a `::DELTA`) and
 `kpi/sparkline-not-list`.
+
+#### Button groups, toggles and the metric / dimension switcher
+
+For a handful of choices, `::BUTTONS` draws a **segmented button group** instead
+of a dropdown (the first option is the default, a `::HINT` column becomes each
+button's tooltip, the arrow keys move between the buttons). `::TOGGLE` is an
+**on/off switch**: the query's value is the default and the variable is always a
+`BOOLEAN` (`TRUE`/`FALSE`; a default written as `'on'`, `1` or `'true'` counts as
+on). Both are seeded from and written to the URL (`?v.metric=Peak%20day`,
+`?v.launches_only=true`) and, on a locked server, travel as typed values like
+every other input.
+
+The two make a **switcher**: pick the shown measure with `CASE getvariable(…)`
+and the grouping column with `COLUMNS(getvariable(…))` — one chart, any view:
+
+```sql
+SELECT m AS metric::BUTTONS, 'Measure'::LABEL
+FROM (VALUES (1, 'Sessions'), (2, 'Peak day'), (3, 'Active days')) t(o, m) ORDER BY o;
+SELECT d AS dim::BUTTONS, 'Split by'::LABEL
+FROM (VALUES (1, 'channel'), (2, 'region')) t(o, d) ORDER BY o;
+SELECT false AS launches_only::TOGGLE, 'Launch days only'::LABEL;
+
+SELECT COLUMNS(getvariable('dim'))::XAXIS,
+       CASE getvariable('metric')
+         WHEN 'Sessions' THEN sum(n)
+         WHEN 'Peak day' THEN max(n)
+         ELSE count(DISTINCT day)
+       END::BARCHART,
+       (getvariable('metric') || ' by ' || getvariable('dim'))::TITLE
+FROM events
+WHERE NOT getvariable('launches_only') OR note = 'launch'
+GROUP BY ALL ORDER BY 2 DESC;
+```
+
+`COLUMNS(getvariable('dim'))` resolves the column by name at bind time, so the
+options must be real column names; the `CASE` branches must share a type (cast
+them, e.g. `sum(n)::DOUBLE`, if they differ). The *Filters & inputs* sample's
+**Switch the view** tab is this dashboard.
 
 ### Statistical graphics (intervals, facets, scales, reference lines)
 
@@ -714,6 +757,64 @@ FROM funnel ORDER BY i;
   first stage).
 - Each needs an `::XAXIS` — `--check` reports `chart/needs-xaxis` otherwise.
 
+### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)
+
+A `::MARKDOWN` text can carry numbers from **its own row**, formatted in the
+dashboard locale exactly like the KPIs — no string concatenation that loses the
+locale (`1234.5` instead of `1.235 €`):
+
+```sql
+SELECT 'Revenue grew **{{growth:pct}}** to **{{revenue:money}}** (data until {{day:date}}).'::MARKDOWN,
+       100 * (sum(rev) FILTER (WHERE yr = 2026) / sum(rev) FILTER (WHERE yr = 2025) - 1) AS growth,
+       sum(rev) FILTER (WHERE yr = 2026) AS revenue,
+       max(day) AS day
+FROM sales;
+```
+
+`{{name}}` names a column of the same `SELECT` (case-insensitive; the other
+columns of a `::MARKDOWN` statement keep their names), `:fmt` picks the format:
+`money` (`currency`, `eur`, `usd`), `percent` (`pct`; the value is in percent
+points, like `::PERCENT`), `compact`, `metric` (`number`), `date`, `text`. No
+format: a number or an ISO date in the locale, other text as is. Values are
+inserted as **text** — HTML-escaped, never Markdown or markup, and a placeholder
+inside a link URL is dropped — after the Markdown is rendered and sanitised (the
+sanitiser is unchanged). An unknown name stays as written; `--check` warns
+(`markdown/unknown-placeholder`, `markdown/unknown-format`). The *A German branch
+report* sample opens with such a summary.
+
+### Definitions and callouts (`::INFO`, `::CALLOUT`)
+
+A panel's fine print doesn't need its own box. An `::INFO` column puts an **ⓘ**
+on the panel's title bar (top-right corner when it has no title); hovering it,
+tabbing to it or clicking it shows the text, `Esc` dismisses it:
+
+```sql
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL,
+       'Net of returns, in USD; source: the ERP order ledger.'::INFO
+FROM orders;
+SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly orders'::TITLE,
+       'Orders by ISO week; cancelled orders excluded.'::INFO
+FROM orders GROUP BY ALL ORDER BY 1;
+```
+
+It works on charts, KPIs, `::TABLE`s (the column is not shown as a cell) and
+Markdown boxes; in headless SVG the ⓘ follows the title and carries the text as
+its tooltip (`<title>`).
+
+`::CALLOUT` turns a `::MARKDOWN` box into a highlighted **note**, **warning**
+or **success** box (tinted, with an icon; theme tokens, so dark mode follows):
+
+```sql
+SELECT '**Margins of the last two weeks are provisional** — late returns still come in.'::MARKDOWN,
+       'warning'::CALLOUT;
+```
+
+`info` counts as `note`, `tip` as `success`, `caution` / `danger` as `warning`;
+`--check` warns on an unknown kind (`callout/unknown`) or a `::CALLOUT` without
+`::MARKDOWN` text (`callout/no-text`). Like `::MARKDOWN`, callouts are drawn by the
+browser (builder, `serve`, locked servers). The *A sales cockpit in your brand*
+sample has both.
+
 ### Formatted tooltips
 
 Hover tooltips show values the way the panel formats them: its `::YFORMAT`
@@ -854,6 +955,29 @@ SELECT anofox_plot_terms(t, theme := 'colorblind') FROM coefs t;
 
 `dashboard --theme-css <T> [--dark]` prints a theme's CSS tokens (to style your
 own page around exported SVGs).
+
+#### Data freshness (`::ASOF`)
+
+Viewers of a locked dashboard or an exported page can't tell how current the
+data is. `::ASOF` puts a chip in the dashboard header — **"Data as of 14:02
+(2 h ago)"** — and an optional `'stale=…'` column turns it **amber** (with a ⚠)
+once the data is older than that:
+
+```sql
+SELECT max(loaded_at)::ASOF, 'stale=24h' FROM etl_log;   -- s, m, h, d or w
+```
+
+The value is a `TIMESTAMP`, `TIMESTAMPTZ` or `DATE`; a timestamp without a time
+zone is read as **UTC** (prefer `TIMESTAMPTZ`, e.g. `now()` or a `loaded_at`
+written with one). The chip shows the time in the viewer's zone and the
+dashboard locale (the date is added when it isn't today) and keeps its relative
+age current while the page is open. It is in every output: the browser, a
+locked server, the static HTML of `dashboard file.sql out.html` /
+`serve --dashboards` (rendered at build time, then refreshed by the page's
+script against the viewer's clock) and headless SVG (`dashboard --svg`,
+`render_dashboard_svg`: rendered at render time, in UTC). `--check` warns when
+the value isn't a date or timestamp (`asof/unparseable`) or the threshold
+can't be read (`asof/bad-stale`). The last `::ASOF` wins.
 
 ### Accessibility
 

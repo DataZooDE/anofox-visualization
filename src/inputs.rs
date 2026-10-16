@@ -1,6 +1,6 @@
 //! Input defaults outside the browser: the `SET VARIABLE`s that give each
 //! `::DROPDOWN`/`::MULTISELECT`/`::NUMBER`/`::DATE`/`::TEXT`/`::DATERANGE`/
-//! `::PERIOD` input its default value, so downstream `getvariable()` panels
+//! `::PERIOD`/`::BUTTONS`/`::TOGGLE` input its default value, so downstream `getvariable()` panels
 //! read something. Shared by the linter (`dashboard --check`) and the headless
 //! renderers (`dashboard` static HTML, `dashboard --svg`,
 //! [`crate::dashboard::render_dashboard_svg`]) — the same defaults the
@@ -71,6 +71,16 @@ pub fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Json>]) -
                 vals.join(", ")
             )]
         }
+        // A toggle is a BOOLEAN whatever its default was written as.
+        InputKind::Toggle => vec![format!(
+            "SET VARIABLE {} = {}",
+            quote_ident(k),
+            if first.get(k).is_some_and(truthy) {
+                "TRUE"
+            } else {
+                "FALSE"
+            }
+        )],
         _ => vec![format!(
             "SET VARIABLE {} = {}",
             quote_ident(k),
@@ -115,6 +125,20 @@ fn cell_json(v: Option<&Value>) -> Json {
             })
         }
         _ => Json::Null,
+    }
+}
+
+/// A `::TOGGLE` default as a boolean: `true`, a non-zero number, or the text
+/// `true` / `1` / `yes` / `on` (as the browser reads it).
+fn truthy(v: &Json) -> bool {
+    match v {
+        Json::Bool(b) => *b,
+        Json::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Json::String(s) => matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "true" | "t" | "1" | "yes" | "on"
+        ),
+        _ => false,
     }
 }
 

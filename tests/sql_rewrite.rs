@@ -24,3 +24,21 @@ fn plain_measure_cast_still_rewrites() {
     assert!(sql.contains("AS c0") && sql.contains("AS c1"));
     assert_eq!(roles.len(), 2);
 }
+
+/// #38: a ::MARKDOWN statement's other columns keep their names, so the text's
+/// `{{name}}` placeholders can read them; a computed column without an alias
+/// stays positional.
+#[test]
+fn markdown_value_columns_keep_their_names() {
+    let (sql, roles, _) = sql::rewrite(
+        "SELECT 'Grew {{growth:pct}}'::MARKDOWN, 100 * (a / b - 1) AS growth, revenue, a + 1 FROM t",
+    );
+    assert!(sql.contains("AS c0"), "{sql}");
+    assert!(sql.contains("100 * (a / b - 1) AS growth"), "{sql}");
+    assert!(sql.contains(", revenue,"), "{sql}");
+    assert!(sql.contains("a + 1 AS c3"), "{sql}");
+    assert_eq!(roles.len(), 1);
+    // Other statements are unchanged: untagged columns are positional.
+    let (sql, _, _) = sql::rewrite("SELECT x::XAXIS, y::BARCHART, z AS extra FROM t");
+    assert!(sql.contains("z AS c2"), "{sql}");
+}

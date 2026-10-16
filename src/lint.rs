@@ -244,6 +244,18 @@ where
                             });
                         }
                     }
+                    if kind == InputKind::Buttons && rows.len() > 7 {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "input/many-buttons",
+                            message: format!(
+                                "::BUTTONS has {} options — a button group reads well up to ~7; use ::DROPDOWN",
+                                rows.len()
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -310,6 +322,27 @@ where
                     ),
                     Severity::Error,
                 ),
+                Role::AsOf => {
+                    if crate::freshness::parse_timestamp(&v).is_none() {
+                        bad(
+                            "asof/unparseable",
+                            format!("::ASOF value `{v}` is not a date or timestamp — the freshness chip is hidden"),
+                            Severity::Warning,
+                        );
+                    }
+                    let opt = rows.first().and_then(|row| {
+                        row.values().skip(1).find_map(|c| {
+                            c.as_str().filter(|c| crate::freshness::is_stale_option(c))
+                        })
+                    });
+                    if let Some(o) = opt.filter(|o| crate::freshness::parse_stale(o).is_none()) {
+                        bad(
+                            "asof/bad-stale",
+                            format!("`{o}` is not a stale threshold — write 'stale=24h' (s, m, h, d or w)"),
+                            Severity::Warning,
+                        );
+                    }
+                }
                 Role::Logo | Role::Favicon if !crate::theme::safe_url(&v) => bad(
                     "chrome/bad-url",
                     format!("`{v}` is not an allowed image URL (relative, https: or data:image/)"),
@@ -318,6 +351,76 @@ where
                 _ => {}
             }
             continue;
+        }
+
+        // ::CALLOUT styles a ::MARKDOWN box: an unknown kind falls back to 'note',
+        // a callout without Markdown text shows nothing.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::Callout) {
+            let kind = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !CALLOUT_KINDS.contains(&kind.as_str()) {
+                warn(
+                    "callout/unknown",
+                    format!(
+                        "::CALLOUT `{kind}` — use 'note', 'warning' or 'success' (drawn as a note)"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "callout/no-text",
+                    "::CALLOUT needs a ::MARKDOWN column in the same SELECT (the callout's text)"
+                        .into(),
+                );
+            }
+        }
+
+        // {{col}} / {{col:fmt}} placeholders in a ::MARKDOWN text must name a
+        // column of the same SELECT and a known format.
+        if let (Some((i, _)), Some(row)) = (
+            p.roles.iter().find(|(_, r)| *r == Role::Markdown),
+            rows.first(),
+        ) {
+            let md = row.values().nth(*i).and_then(Value::as_str).unwrap_or("");
+            for (name, spec) in md_placeholders(md) {
+                let mut warn = |code: &'static str, message: String| {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code,
+                        message,
+                        sql: short.clone(),
+                    })
+                };
+                if !row.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
+                    warn(
+                        "markdown/unknown-placeholder",
+                        format!("{{{{{name}}}}} names no column of this SELECT — add `… AS {name}` (it is shown as written)"),
+                    );
+                }
+                if let Some(sp) =
+                    spec.filter(|sp| !MD_FORMATS.contains(&sp.to_ascii_lowercase().as_str()))
+                {
+                    warn(
+                        "markdown/unknown-format",
+                        format!("{{{{{name}:{sp}}}}}: unknown format — use money, percent, compact, metric, date or text"),
+                    );
+                }
+            }
         }
 
         // Interaction directives: prime their variables the way the browser does
@@ -847,6 +950,43 @@ fn unknown_casts(sql: &str) -> Vec<String> {
     }
     out
 }
+
+/// `{{col:fmt}}` formats the browser knows (`web/app.js` `MD_FMT` + date / text).
+const MD_FORMATS: &[&str] = &[
+    "money", "currency", "usd", "eur", "dollar", "percent", "pct", "compact", "metric", "number",
+    "num", "date", "text",
+];
+
+/// The `{{name}}` / `{{name:fmt}}` placeholders of a Markdown text.
+fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = md;
+    while let Some(a) = rest.find("{{") {
+        let Some(b) = rest[a + 2..].find("}}") else {
+            break;
+        };
+        let inner = &rest[a + 2..a + 2 + b];
+        rest = &rest[a + 2 + b + 2..];
+        let (name, spec) = match inner.split_once(':') {
+            Some((n, f)) => (n.trim(), Some(f.trim().to_string())),
+            None => (inner.trim(), None),
+        };
+        let ident = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ' ');
+        if ident {
+            out.push((name.to_string(), spec));
+        }
+    }
+    out
+}
+
+/// `::CALLOUT` kinds the browser draws (`info` = note, `tip` = success,
+/// `caution` / `danger` = warning).
+const CALLOUT_KINDS: &[&str] = &[
+    "note", "info", "warning", "caution", "danger", "success", "tip",
+];
 
 /// The first cell of a result as text (`""` when there is none).
 fn first_text(rows: &[Map<String, Value>]) -> String {
@@ -1618,6 +1758,86 @@ mod design_tests {
         // Multiselect: all options as a list.
         let d = input_defaults(InputKind::Multiselect, 0, &opts);
         assert_eq!(d, vec!["SET VARIABLE \"zone\" = ['EU', 'US']".to_string()]);
+        // Buttons: the first option, like a dropdown.
+        let d = input_defaults(InputKind::Buttons, 0, &opts);
+        assert_eq!(d, vec!["SET VARIABLE \"zone\" = 'EU'".to_string()]);
+        // Toggle: always a BOOLEAN, whatever the default was written as.
+        for (v, want) in [
+            (json!(true), "TRUE"),
+            (json!("on"), "TRUE"),
+            (json!(0), "FALSE"),
+            (json!("false"), "FALSE"),
+        ] {
+            let r = rows(1, |_| json!({ "net": v.clone() }));
+            let d = input_defaults(InputKind::Toggle, 0, &r);
+            assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
+        }
+    }
+
+    #[test]
+    fn markdown_placeholders_are_checked() {
+        let data = |_q: &str| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "Grew {{growth:pct}} to {{revenue:eur}}; {{nope}} {{growth:fancy}}", "growth": 12.5, "revenue": 1.0 }),
+            ))
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 12.5 AS growth, 1.0 AS revenue;",
+            data,
+        );
+        let msgs: Vec<_> = d.iter().map(|x| (x.code, x.message.clone())).collect();
+        let unknown: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-placeholder")
+            .collect();
+        assert_eq!(unknown.len(), 1, "{msgs:?}");
+        assert!(unknown[0].1.contains("{{nope}}"), "{msgs:?}");
+        let fmt: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-format")
+            .collect();
+        assert_eq!(fmt.len(), 1, "{msgs:?}");
+        assert_eq!(
+            md_placeholders("a {{ x : money }} {{ 1bad }} {{y}}"),
+            vec![("x".into(), Some("money".into())), ("y".into(), None)]
+        );
+    }
+
+    #[test]
+    fn callout_kind_and_text_are_checked() {
+        let one = |c1: &str| {
+            let c1 = c1.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": c1.clone() }),
+                ))
+            }
+        };
+        let d = check("SELECT 'x'::MARKDOWN, 'warning'::CALLOUT;", one("warning"));
+        assert!(!d.iter().any(|x| x.code.starts_with("callout/")), "{d:?}");
+        let d = check("SELECT 'x'::MARKDOWN, 'alarm'::CALLOUT;", one("alarm"));
+        assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
+        let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
+        assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    #[test]
+    fn asof_value_and_stale_option_are_checked() {
+        let d = check("SELECT 'yesterday'::ASOF, 'stale=soon';", |_q| {
+            Ok(rows(1, |_| json!({ "c0": "yesterday", "o": "stale=soon" })))
+        });
+        let codes: Vec<_> = d.iter().map(|x| x.code).collect();
+        assert!(codes.contains(&"asof/unparseable"), "{d:?}");
+        assert!(codes.contains(&"asof/bad-stale"), "{d:?}");
+        let d = check("SELECT max(t)::ASOF, 'stale=24h' FROM x;", |_q| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "2026-10-16 09:24:16.87+02", "o": "stale=24h" }),
+            ))
+        });
+        assert!(!d.iter().any(|x| x.code.starts_with("asof/")), "{d:?}");
     }
 
     #[test]

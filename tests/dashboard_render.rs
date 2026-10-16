@@ -334,3 +334,73 @@ fn thresholds_colour_kpis_gauges_and_charts() {
         "no threshold line at 50"
     );
 }
+
+/// `::ASOF` (#34): the headless header carries the freshness chip, amber
+/// (the theme's warning colour) once older than its `stale=` threshold.
+#[test]
+fn headless_header_shows_the_freshness_chip() {
+    struct Fresh(&'static str);
+    impl DataProvider for Fresh {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("stale") {
+                return Ok(vec![
+                    ("c0".into(), s(&[self.0])),
+                    ("o".into(), s(&["stale=24h"])),
+                ]);
+            }
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+            ])
+        }
+    }
+    let script = "SELECT '2020-01-01 10:00:00'::ASOF, 'stale=24h';\n\
+                  SELECT week::XAXIS, sum(n)::BARCHART FROM t GROUP BY ALL;";
+    let svg = render_dashboard_svg(
+        script,
+        &mut Fresh("2020-01-01 10:00:00"),
+        &DashboardOptions::default(),
+    )
+    .unwrap();
+    let chip = svg
+        .split("class=\"dp-asof\"")
+        .nth(1)
+        .expect("a freshness chip");
+    assert!(chip.contains("Data as of"), "{chip}");
+    assert!(chip.contains(" d ago)"), "{chip}");
+    let warn = anofox_visualization::theme::resolve("")
+        .unwrap()
+        .light
+        .colors
+        .warning;
+    assert!(
+        chip.contains(&anofox_visualization::theme::hex(warn)),
+        "stale chip not amber: {chip}"
+    );
+}
+
+/// `::INFO` (#36): headless panels carry an ⓘ whose SVG `<title>` is the
+/// definition (a hover tooltip wherever the SVG is shown).
+#[test]
+fn headless_info_is_a_tooltip_on_the_title() {
+    let script = "SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::INFO FROM t GROUP BY ALL;";
+    struct Bars;
+    impl DataProvider for Bars {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+                ("c2".into(), s(&["Weekly", "Weekly"])),
+            ])
+        }
+    }
+    let svg = render_dashboard_svg(script, &mut Bars, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains("class=\"dp-info\""), "no ⓘ: {svg}");
+    assert!(svg.contains("ⓘ<title>Weekly</title>"), "no definition");
+}
