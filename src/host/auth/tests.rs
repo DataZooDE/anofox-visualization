@@ -37,7 +37,7 @@ fn all_methods(f: Arc<FakeIdp>, dir: &std::path::Path) -> (Auth, String) {
     apikey::write_file(&keys, &[apikey::entry_json(&e, None, None)]).unwrap();
     let cfg = json!([
         {"mode": "proxy", "shared_secret": PROXY_SECRET},
-        {"mode": "jwt", "issuer": ISS, "audience": "dash", "groups_claim": "groups",
+        {"mode": "jwt", "issuer": ISS, "audience": "dash-api", "groups_claim": "groups",
          "claims": {"tenant": "tid"}},
         {"mode": "oidc", "issuer": ISS, "client_id": "dash",
          "redirect_url": "https://dash.test/auth/callback"},
@@ -64,7 +64,7 @@ fn req<'a>(method: &'a str, url: &'a str, headers: &'a [(&'a str, &'a str)]) -> 
 
 fn jwt_payload(extra: serde_json::Value) -> serde_json::Value {
     let now = now_s();
-    let mut p = json!({"iss": ISS, "aud": "dash", "sub": "alice", "groups": ["eu"],
+    let mut p = json!({"iss": ISS, "aud": "dash-api", "sub": "alice", "groups": ["eu"],
         "tid": "acme", "exp": now + 300, "iat": now});
     for (k, v) in extra.as_object().unwrap() {
         p[k] = v.clone();
@@ -183,6 +183,73 @@ fn each_method_yields_the_same_claims_shape() {
 }
 
 #[test]
+fn successful_uses_are_audited_once_per_window() {
+    let dir = tmpdir();
+    let k = es256("k1");
+    let (a, key) = all_methods(idp(&[&k]), &dir);
+    let bearer = format!("Bearer {key}");
+    let t = format!("Bearer {}", sign(&k, Some("k1"), &jwt_payload(json!({}))));
+    for _ in 0..5 {
+        for h in [&bearer, &t] {
+            assert!(a
+                .authenticate(&req("POST", "/api/panel", &[("Authorization", h)]))
+                .is_ok());
+        }
+    }
+    let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+    let ok: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|l: &serde_json::Value| l["audit"] == "auth" && l["outcome"] == "ok")
+        .collect();
+    assert_eq!(ok.len(), 2, "{log}");
+    let k = ok.iter().find(|l| l["method"] == "api_key").unwrap();
+    assert_eq!(
+        (k["user"].as_str(), k["key_id"].as_str()),
+        (Some("svc-etl"), Some(&key[4..16]))
+    );
+    assert!(ok
+        .iter()
+        .any(|l| l["method"] == "jwt" && l["user"] == "alice"));
+    assert!(!log.contains(&key[17..]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn id_tokens_are_not_bearer_tokens() {
+    let dir = tmpdir();
+    let k = es256("k1");
+    let (a, _) = all_methods(idp(&[&k]), &dir);
+    for extra in [
+        json!({"nonce": "n"}),
+        json!({"at_hash": "x"}),
+        json!({"token_use": "id"}),
+    ] {
+        let t = sign(&k, Some("k1"), &jwt_payload(extra.clone()));
+        let h = format!("Bearer {t}");
+        let d = a
+            .authenticate(&req("GET", "/api/panel", &[("Authorization", &h)]))
+            .unwrap_err();
+        assert_eq!(d.reason, "id_token", "{extra}");
+    }
+    // a jwt audience equal to the oidc client_id fails the start
+    let f = idp(&[]);
+    let fetch = move |_: Option<&std::path::Path>| -> Result<Arc<dyn http::Fetch>, String> {
+        Ok(f.clone())
+    };
+    let cfg = |accept: bool| {
+        json!([
+            {"mode": "oidc", "issuer": ISS, "client_id": "dash",
+             "redirect_url": "https://dash.test/auth/callback"},
+            {"mode": "jwt", "issuer": ISS, "audience": "dash", "accept_id_tokens": accept},
+        ])
+    };
+    assert!(Auth::from_json_with(&cfg(false), &|_| None, &fetch).is_err());
+    assert!(Auth::from_json_with(&cfg(true), &|_| None, &fetch).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_invalid_credential_never_falls_back() {
     let dir = tmpdir();
     let k = es256("k1");
@@ -253,6 +320,18 @@ fn embed_links_become_scoped_page_sessions() {
         a.authenticate(&req("GET", &two, &[])).unwrap_err().reason,
         "malformed_token"
     );
+    // a page without script (serve --dashboards) carries the page session
+    // in its URL instead; it is checked like the header, on /d/ only
+    let q = format!("/d/sales?embed_session={page}");
+    assert_eq!(
+        a.authenticate(&req("GET", &q, &[])).unwrap().scope,
+        id.scope
+    );
+    let q = format!("/api/panel?embed_session={page}");
+    assert_eq!(
+        a.authenticate(&req("POST", &q, &[])).unwrap_err().reason,
+        "no_credentials"
+    );
     // the page session is not a login cookie (another key and audience)
     let c = format!("{}={page}", oidc::SESSION_COOKIE);
     assert_eq!(
@@ -299,7 +378,7 @@ fn oidc_login_session_logout_and_audit() {
         &k,
         Some("k1"),
         &json!({"iss": ISS, "aud": "dash", "sub": "s1",
-        "email": "alice@example.com", "nonce": q["nonce"], "iat": now, "exp": now + 60}),
+        "email": "alice@example.com", "email_verified": true, "nonce": q["nonce"], "iat": now, "exp": now + 60}),
     );
     f.set(&format!("{ISS}/token"), json!({"id_token": idt}));
     let cb = format!("/auth/callback?code=abc&state={}", q["state"]);

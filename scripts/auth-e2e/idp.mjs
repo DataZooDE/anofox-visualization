@@ -17,6 +17,8 @@ const USERS = {
   alice: { email: "alice@example.com", groups: ["sales"] },
   bob: { email: "bob@example.com", groups: ["sales"] },
   admin: { email: "root@example.com", groups: ["admins"] },
+  // claims alice's address without the IdP having verified it (nOAuth, #115)
+  mallory: { email: "alice@example.com", groups: ["admins"], unverified: true },
 };
 const codes = new Map();
 const b64u = (b) => Buffer.from(b).toString("base64url");
@@ -60,7 +62,7 @@ https.createServer({ key: fs.readFileSync(process.env.IDP_KEY), cert: fs.readFil
       if (!c || f.grant_type !== "authorization_code" || f.redirect_uri !== c.redirect) return json(res, 400, { error: "invalid_grant" });
       if (crypto.createHash("sha256").update(f.code_verifier || "").digest("base64url") !== c.challenge) return json(res, 400, { error: "invalid_grant", why: "pkce" });
       const now = Math.floor(Date.now() / 1000), who = USERS[c.user];
-      const id_token = sign({ iss: ISS, aud: CLIENT, sub: c.user, email: who.email, groups: who.groups, nonce: c.nonce, iat: now, exp: now + 300 });
+      const id_token = sign({ iss: ISS, aud: CLIENT, sub: c.user, email: who.email, email_verified: !who.unverified, groups: who.groups, nonce: c.nonce, iat: now, exp: now + 300 });
       json(res, 200, { id_token, access_token: "opaque", token_type: "Bearer", expires_in: 300 });
     });
     return;
@@ -69,6 +71,7 @@ https.createServer({ key: fs.readFileSync(process.env.IDP_KEY), cert: fs.readFil
     // A bearer token for the API tests: ?user=&aud=&exp_in=
     const now = Math.floor(Date.now() / 1000), who = USERS[u.searchParams.get("user") || "alice"];
     const p = { iss: ISS, aud: u.searchParams.get("aud") || "dash-api", sub: who.email, groups: who.groups, iat: now, exp: now + Number(u.searchParams.get("exp_in") || 300) };
+    if (u.searchParams.get("id_token")) p.nonce = "n"; // shaped like an ID token
     return json(res, 200, { token: sign(p), jwk });
   }
   json(res, 404, { error: "not found" });

@@ -199,14 +199,17 @@ fn load_key(jwk: &Jwk, allowed: &[Algorithm]) -> Option<Key> {
 
 #[derive(Default)]
 struct JwksState {
-    keys: Vec<Key>,
+    /// Shared with verifications in flight; replaced whole by a refetch.
+    keys: Arc<Vec<Key>>,
     /// When the keys were last fetched successfully.
     fetched: Option<Instant>,
     /// When a fetch was last attempted.
     tried: Option<Instant>,
 }
 
-/// The cached key set of a provider.
+/// The cached key set of a provider. A refetch runs outside the state lock
+/// and only one at a time (single-flight): meanwhile other requests verify
+/// against the cached keys instead of waiting for the IdP.
 pub struct Jwks {
     provider: Arc<Provider>,
     /// `None`: from the discovery document.
@@ -214,6 +217,7 @@ pub struct Jwks {
     ttl: Duration,
     allowed: Vec<Algorithm>,
     state: Mutex<JwksState>,
+    fetching: Mutex<()>,
 }
 
 impl Jwks {
@@ -237,11 +241,16 @@ impl Jwks {
             ttl,
             allowed,
             state: Mutex::new(JwksState::default()),
+            fetching: Mutex::new(()),
         }
     }
 
-    fn refetch(&self, st: &mut JwksState) -> Result<(), String> {
-        st.tried = Some(Instant::now());
+    fn lock(&self) -> std::sync::MutexGuard<'_, JwksState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Download and parse the key set (no lock held).
+    fn download(&self) -> Result<Vec<Key>, String> {
         let url = match &self.url {
             Some(u) => u.clone(),
             None => self.provider.discover()?.jwks_uri,
@@ -260,50 +269,87 @@ impl Jwks {
         if keys.is_empty() {
             return Err(format!("{url}: no usable signing key"));
         }
-        st.keys = keys;
+        Ok(keys)
+    }
+
+    fn may_fetch(st: &JwksState) -> bool {
+        st.tried.is_none_or(|t| t.elapsed() >= MIN_REFETCH)
+    }
+
+    /// Refetch unless one runs already (`wait`: wait for it instead) or one
+    /// ran within [`MIN_REFETCH`] (unless `force`).
+    fn refresh(&self, wait: bool, force: bool) -> Result<(), String> {
+        let _flight = if wait {
+            self.fetching.lock().unwrap_or_else(|p| p.into_inner())
+        } else {
+            match self.fetching.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(()),
+            }
+        };
+        {
+            let mut st = self.lock();
+            if !force && !Jwks::may_fetch(&st) {
+                return Ok(());
+            }
+            st.tried = Some(Instant::now());
+        }
+        let keys = self.download()?;
+        let mut st = self.lock();
+        st.keys = Arc::new(keys);
         st.fetched = Some(Instant::now());
         Ok(())
     }
 
     /// Fetch the keys now (at startup; errors are only reported).
     pub fn prefetch(&self) -> Result<usize, String> {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        self.refetch(&mut st)?;
-        Ok(st.keys.len())
+        self.refresh(true, true)?;
+        Ok(self.lock().keys.len())
+    }
+
+    /// The current keys (empty once stale for [`MAX_STALE`]: fail closed),
+    /// and whether a refetch is due.
+    fn current(&self) -> (Arc<Vec<Key>>, bool, bool) {
+        let st = self.lock();
+        let old = st.fetched.is_none_or(|t| t.elapsed() >= self.ttl);
+        let keys = if st.fetched.is_some_and(|t| t.elapsed() >= MAX_STALE) {
+            Arc::new(Vec::new())
+        } else {
+            st.keys.clone()
+        };
+        (keys, old, Jwks::may_fetch(&st))
     }
 
     /// Run `f` with the key for (`kid`, `alg`), refreshing the set when it
-    /// is old or the `kid` is unknown (rate-limited).
+    /// is old or the `kid` is unknown (rate-limited, single-flight).
     fn with_key<T>(
         &self,
         kid: Option<&str>,
         alg: Algorithm,
         f: impl FnOnce(&DecodingKey) -> T,
     ) -> Result<T, &'static str> {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let may_fetch = |st: &JwksState| st.tried.is_none_or(|t| t.elapsed() >= MIN_REFETCH);
-        let old = st.fetched.is_none_or(|t| t.elapsed() >= self.ttl);
-        if old && may_fetch(&st) {
-            let _ = self.refetch(&mut st);
+        let (mut keys, old, may) = self.current();
+        // A first fetch is waited for; a periodic one isn't.
+        if old && may {
+            let _ = self.refresh(keys.is_empty(), false);
+            keys = self.current().0;
         }
-        // Fail closed: a set that could not be refreshed for MAX_STALE is gone.
-        if st.fetched.is_some_and(|t| t.elapsed() >= MAX_STALE) {
-            st.keys.clear();
-        }
-        let find = |st: &JwksState| -> Option<usize> {
+        let find = |keys: &[Key]| -> Option<usize> {
             match kid {
-                Some(kid) => st.keys.iter().position(|k| k.kid.as_deref() == Some(kid)),
+                Some(kid) => keys.iter().position(|k| k.kid.as_deref() == Some(kid)),
                 // No kid: only unambiguous with a single key.
-                None if st.keys.len() == 1 => Some(0),
+                None if keys.len() == 1 => Some(0),
                 None => None,
             }
         };
-        let mut i = find(&st);
-        if i.is_none() && kid.is_some() && may_fetch(&st) {
-            let _ = self.refetch(&mut st);
-            i = find(&st);
+        let mut i = find(&keys);
+        if i.is_none() && kid.is_some() && self.current().2 {
+            let _ = self.refresh(false, false);
+            keys = self.current().0;
+            i = find(&keys);
         }
-        let key = i.map(|i| &st.keys[i]).ok_or("unknown_kid")?;
+        let key = i.map(|i| &keys[i]).ok_or("unknown_kid")?;
         if !key.algs.contains(&alg) {
             return Err("bad_alg");
         }
@@ -412,6 +458,12 @@ impl ClaimMap {
         if user.is_empty() {
             return Err(AuthError::NoUser);
         }
+        // An e-mail address as the identity only when the IdP verified it:
+        // on IdPs where users can set their own address, an unverified one
+        // would let anyone become anyone (nOAuth, #115).
+        if self.user.eq_ignore_ascii_case("email") && !verified(payload.get("email_verified")) {
+            return Err(AuthError::Unverified);
+        }
         let mut groups = Vec::new();
         if let Some(f) = &self.groups {
             match lookup(payload, f) {
@@ -455,6 +507,11 @@ impl ClaimMap {
             attrs,
         })
     }
+}
+
+/// `email_verified` is `true` (some IdPs send the string `"true"`).
+fn verified(v: Option<&Value>) -> bool {
+    matches!(v, Some(Value::Bool(true))) || matches!(v, Some(Value::String(s)) if s == "true")
 }
 
 /// A token field: the top-level key `f` (namespaced URLs contain dots), or
@@ -721,6 +778,8 @@ pub(crate) mod testkit {
         pub docs: Mutex<HashMap<String, Value>>,
         pub gets: Mutex<Vec<String>>,
         pub posts: Mutex<Vec<Post>>,
+        /// Every GET takes this long (a slow IdP).
+        pub delay: Mutex<Duration>,
     }
 
     impl FakeIdp {
@@ -739,6 +798,8 @@ pub(crate) mod testkit {
 
     impl Fetch for FakeIdp {
         fn get_json(&self, url: &str) -> Result<Value, String> {
+            let d = *self.delay.lock().unwrap();
+            std::thread::sleep(d);
             self.gets.lock().unwrap().push(url.to_string());
             self.docs
                 .lock()
@@ -1015,6 +1076,31 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_jwks_refetch_blocks_nobody_else() {
+        let a = es256("a");
+        let f = idp(&[&a]);
+        let v = Arc::new(verifier(f.clone(), json!({})));
+        let now = now_s();
+        assert!(v.verify(&sign(&a, Some("a"), &good(now))).is_ok());
+        // the set is due for a refresh and the IdP now takes 1 s to answer
+        v.jwks.age(Duration::from_secs(7200));
+        *f.delay.lock().unwrap() = Duration::from_millis(1000);
+        let t = sign(&a, Some("a"), &good(now));
+        let (v1, t1) = (v.clone(), t.clone());
+        let slow = std::thread::spawn(move || v1.verify(&t1));
+        std::thread::sleep(Duration::from_millis(100));
+        // meanwhile: the cached key answers at once (no wait on the fetch)
+        let t0 = Instant::now();
+        assert!(v.verify(&t).is_ok());
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(slow.join().unwrap().is_ok());
+    }
+
+    #[test]
     fn discovery_must_match_the_issuer_and_use_https() {
         let e = es256("e1");
         let f = idp(&[&e]);
@@ -1072,6 +1158,7 @@ mod tests {
         .unwrap();
         let p = json!({
             "email": "o'brien@example.com",
+            "email_verified": true,
             "realm_access": {"roles": ["b", "a", "b", ""]},
             "https://example.com/tenant": "acme'; SET VARIABLE __claim_user = 'admin",
             "lvl": 3,
@@ -1107,7 +1194,9 @@ mod tests {
         assert_eq!(m.claims(&json!({"sub": "x"})), Err(AuthError::NoUser));
         let many: Vec<String> = (0..300).map(|i| i.to_string()).collect();
         assert_eq!(
-            m.claims(&json!({"email": "a", "realm_access": {"roles": many}})),
+            m.claims(
+                &json!({"email": "a", "email_verified": true, "realm_access": {"roles": many}})
+            ),
             Err(AuthError::Malformed)
         );
         // configured names must be identifiers (no `__claim_x; DROP`)

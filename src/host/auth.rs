@@ -89,6 +89,8 @@ pub struct Identity {
     pub scope: Scope,
     /// An embed link was just exchanged: the page session for the page.
     pub page_session: Option<String>,
+    /// The API key id or session id (public; for the audit log).
+    pub ref_id: Option<String>,
 }
 
 /// Why a request was refused (`401`; the reason goes to the logs only).
@@ -200,6 +202,18 @@ pub struct JwtAuth {
     pub map: jwt::ClaimMap,
     /// Also read the token from this cookie.
     pub cookie: Option<String>,
+    /// Accept OIDC ID tokens as bearer tokens (`accept_id_tokens`; off: an
+    /// ID token is a login receipt for a client, not an API credential).
+    pub accept_id_tokens: bool,
+}
+
+/// Does a verified payload look like an OIDC ID token (`nonce`, `at_hash`,
+/// `c_hash`, or Cognito's `token_use: "id"`)?
+fn is_id_token(p: &Value) -> bool {
+    ["nonce", "at_hash", "c_hash"]
+        .iter()
+        .any(|k| p.get(*k).is_some())
+        || p.get("token_use").and_then(Value::as_str) == Some("id")
 }
 
 /// Refuse a configuration in which one secret plays two roles (#114): the
@@ -247,7 +261,12 @@ pub struct Auth {
     pub embed: Option<embed::Embed>,
     pub keys: Option<apikey::ApiKeys>,
     pub audit: Option<Arc<AuditLog>>,
+    /// When each credential's last successful use was audited (sampling).
+    audited_ok: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
+
+/// A credential's successful uses are audited at most this often.
+pub const AUDIT_OK_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl std::fmt::Debug for Auth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -326,6 +345,7 @@ impl Auth {
                                 | "claims"
                                 | "cookie"
                                 | "ca_file"
+                                | "accept_id_tokens"
                         ) {
                             return Err(format!("auth (jwt): unknown key '{k}' (issuer, audience, jwks_url, jwks_ttl_s, algorithms, leeway_s, max_age_s, user_claim, groups_claim, claims, cookie, ca_file)"));
                         }
@@ -364,6 +384,12 @@ impl Auth {
                         verifier: jwt::verifier_from_json(o, audiences, fetch)?,
                         map: jwt::ClaimMap::from_json(o, "sub")?,
                         cookie,
+                        accept_id_tokens: match o.get("accept_id_tokens") {
+                            None => false,
+                            Some(v) => v
+                                .as_bool()
+                                .ok_or("auth.accept_id_tokens must be a boolean")?,
+                        },
                     });
                 }
                 "oidc" => {
@@ -391,6 +417,12 @@ impl Auth {
                             .into(),
                     )
                 }
+            }
+        }
+        // The OIDC client's ID tokens must not double as API bearer tokens.
+        if let (Some(j), Some(o)) = (&a.jwt, &a.oidc) {
+            if !j.accept_id_tokens && j.verifier.audiences.iter().any(|x| x == o.client_id()) {
+                return Err("auth (jwt): audience is the oidc client_id — ID tokens of the login would be accepted as API tokens; use the API's own audience (or set accept_id_tokens)".into());
             }
         }
         Ok(a)
@@ -611,6 +643,24 @@ impl Auth {
     /// counts). A refusal is audited.
     pub fn authenticate(&self, r: &Req) -> Result<Identity, Denied> {
         let res = self.credential(r);
+        if let Ok(id) = &res {
+            // Logins and embed exchanges are audited where they happen; each
+            // other credential's use once per AUDIT_OK_EVERY.
+            if id.page_session.is_none() && self.sample_ok(id) {
+                let api = id.method == "api_key";
+                self.audit(Event {
+                    event: "auth",
+                    outcome: "ok",
+                    method: Some(id.method),
+                    user: Some(&id.claims.user),
+                    key_id: id.ref_id.as_deref().filter(|_| api),
+                    sid: id.ref_id.as_deref().filter(|_| !api),
+                    peer: r.peer,
+                    path: Some(r.path()),
+                    ..Default::default()
+                });
+            }
+        }
         if let Err(d) = &res {
             // "no credential" on a page view is the normal start of a login.
             if d.reason != "no_credentials" && !d.audited {
@@ -667,6 +717,7 @@ impl Auth {
                     method: "embed",
                     scope,
                     page_session: Some(page),
+                    ref_id: Some(sess.sid.clone()),
                 });
             }
         }
@@ -681,6 +732,7 @@ impl Auth {
                         method: "proxy",
                         scope: Scope::default(),
                         page_session: None,
+                        ref_id: None,
                     })
                     .map_err(|e| deny("proxy")(e.reason()));
             }
@@ -705,6 +757,7 @@ impl Auth {
                             method: "api_key",
                             scope,
                             page_session: None,
+                            ref_id: id,
                         }),
                         Err(reason) => {
                             // The key id (public) names the key; never the key.
@@ -732,9 +785,17 @@ impl Auth {
                 return self.jwt_identity(j, token);
             }
         }
-        // 4. An embedded page's session.
+        // 4. An embedded page's session: the header, or (a page of `serve
+        // --dashboards`, which has no script) `?embed_session=` on GET /d/.
         if let Some(e) = &self.embed {
-            let s = r.all(SESSION_HEADER);
+            let mut s: Vec<String> = r
+                .all(SESSION_HEADER)
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            if s.is_empty() && r.method == "GET" && path.starts_with("/d/") {
+                s = r.query_all("embed_session");
+            }
             if !s.is_empty() {
                 let [s] = s.as_slice() else {
                     return Err(deny("embed")("malformed_token"));
@@ -748,6 +809,7 @@ impl Auth {
                     method: "embed",
                     scope: sess.scope,
                     page_session: None,
+                    ref_id: Some(sess.sid),
                 });
             }
         }
@@ -766,6 +828,7 @@ impl Auth {
                     method: "oidc",
                     scope: Scope::default(),
                     page_session: None,
+                    ref_id: Some(sess.sid),
                 });
             }
         }
@@ -788,6 +851,29 @@ impl Auth {
         })
     }
 
+    /// Is this credential's success due for the audit log?
+    fn sample_ok(&self, id: &Identity) -> bool {
+        if self.audit.is_none() {
+            return false;
+        }
+        let key = format!("{:?}", (id.method, &id.claims.user, &id.ref_id));
+        let now = std::time::Instant::now();
+        let mut m = self.audited_ok.lock().unwrap_or_else(|p| p.into_inner());
+        if m.len() >= 10_000 {
+            m.retain(|_, t| now.duration_since(*t) < AUDIT_OK_EVERY);
+            if m.len() >= 10_000 {
+                m.clear();
+            }
+        }
+        match m.get(&key) {
+            Some(t) if now.duration_since(*t) < AUDIT_OK_EVERY => false,
+            _ => {
+                m.insert(key, now);
+                true
+            }
+        }
+    }
+
     fn jwt_identity(&self, j: &JwtAuth, token: &str) -> Result<Identity, Denied> {
         let d = |reason| Denied {
             reason,
@@ -795,12 +881,16 @@ impl Auth {
             audited: false,
         };
         let payload = j.verifier.verify(token).map_err(d)?;
+        if !j.accept_id_tokens && is_id_token(&payload) {
+            return Err(d("id_token"));
+        }
         let claims = j.map.claims(&payload).map_err(|e| d(e.reason()))?;
         Ok(Identity {
             claims,
             method: "jwt",
             scope: Scope::default(),
             page_session: None,
+            ref_id: None,
         })
     }
 

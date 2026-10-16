@@ -96,6 +96,7 @@ impl Oidc {
                     | "session_secret"
                     | "session_secret_env"
                     | "post_logout_url"
+                    | "revocation_file"
                     | "ca_file"
             ) {
                 return Err(format!("auth (oidc): unknown key '{k}'"));
@@ -168,6 +169,14 @@ impl Oidc {
             }
         };
         let session_secret = secret(o, "session_secret", env, false)?;
+        let mut sessions = Sessions::new(session_secret.as_deref(), "login", session_ttl);
+        if let Some(f) = o.get("revocation_file") {
+            let f = f
+                .as_str()
+                .filter(|f| !f.trim().is_empty())
+                .ok_or("auth.revocation_file must be a file path")?;
+            sessions = sessions.with_revocation_file(f.into())?;
+        }
         Ok(Oidc {
             verifier: verifier_from_json(o, vec![client_id.clone()], fetch)?,
             map: ClaimMap::from_json(o, "email")?,
@@ -176,7 +185,7 @@ impl Oidc {
             redirect_url,
             scopes,
             session_ttl,
-            sessions: Sessions::new(session_secret.as_deref(), "login", session_ttl),
+            sessions,
             post_logout_url,
         })
     }
@@ -295,6 +304,10 @@ impl Oidc {
         Ok((token, sess, next))
     }
 
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
     /// After a logout: the configured page, or our own.
     pub fn after_logout(&self) -> String {
         self.post_logout_url
@@ -383,7 +396,7 @@ mod tests {
 
     fn id_token(k: &TestKey, nonce: &str, extra: Value) -> String {
         let now = now_s();
-        let mut p = json!({"iss": ISS, "aud": "dash", "sub": "u1", "email": "alice@example.com",
+        let mut p = json!({"iss": ISS, "aud": "dash", "sub": "u1", "email": "alice@example.com", "email_verified": true,
             "groups": ["sales"], "nonce": nonce, "iat": now, "exp": now + 300});
         for (a, b) in extra.as_object().unwrap() {
             p[a] = b.clone();
@@ -490,6 +503,17 @@ mod tests {
             o.callback(Some("c"), Some(&state), Some(&cookie)).err(),
             Some("bad_signature")
         );
+        // #115: an unverified (or unstated) e-mail is not an identity
+        for ev in [json!(false), json!(null)] {
+            f.set(
+                &format!("{ISS}/token"),
+                json!({"id_token": id_token(&k, &nonce, json!({"email_verified": ev}))}),
+            );
+            assert_eq!(
+                o.callback(Some("c"), Some(&state), Some(&cookie)).err(),
+                Some("email_unverified")
+            );
+        }
         f.set(&format!("{ISS}/token"), json!({"access_token": "x"}));
         assert_eq!(
             o.callback(Some("c"), Some(&state), Some(&cookie)).err(),

@@ -458,6 +458,8 @@ pub enum AuthError {
     /// A claim configured `required` is absent or empty.
     MissingClaim,
     Malformed,
+    /// The user claim is an e-mail address the IdP has not verified (#115).
+    Unverified,
 }
 
 impl AuthError {
@@ -468,6 +470,7 @@ impl AuthError {
             AuthError::NoUser => "no_user",
             AuthError::MissingClaim => "missing_claim",
             AuthError::Malformed => "malformed_identity",
+            AuthError::Unverified => "email_unverified",
         }
     }
 }

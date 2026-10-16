@@ -40,7 +40,7 @@ PIDS+=($!)
 
 OPTS=$(tr -d '\n' <<J
 {"auth":[
- {"mode":"oidc","issuer":"$ISS","client_id":"dash","client_secret_env":"OIDC_SECRET","redirect_url":"http://localhost:$PORT/auth/callback","groups_claim":"groups","ca_file":"$WORK/ca.pem","session_secret_env":"SESSION_SECRET"},
+ {"mode":"oidc","issuer":"$ISS","client_id":"dash","client_secret_env":"OIDC_SECRET","redirect_url":"http://localhost:$PORT/auth/callback","groups_claim":"groups","ca_file":"$WORK/ca.pem","session_secret_env":"SESSION_SECRET","revocation_file":"$WORK/revoked.jsonl"},
  {"mode":"jwt","issuer":"$ISS","audience":"dash-api","groups_claim":"groups","ca_file":"$WORK/ca.pem"},
  {"mode":"embed","secret_env":"EMBED_SECRET","claims":["tenant"]},
  {"mode":"api_keys","file":"$WORK/keys.json"}],

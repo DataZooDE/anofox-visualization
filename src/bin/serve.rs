@@ -381,11 +381,13 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    // same-origin: a page URL can carry an embed page session.
     let resp = Response::from_data(body.into())
         .with_status_code(status)
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
-        .with_header(header("Cache-Control", "no-store"));
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Referrer-Policy", "same-origin"));
     let _ = req.respond(resp);
 }
 
@@ -900,11 +902,14 @@ fn route_serve(
         resolved.retain(|(n, _)| !s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n)));
     }
     params.clone_from(&resolved);
-    // This server renders plain pages (no script): an embed link stays in
-    // the page's own links and form, and is checked on every request.
-    let embed_link = (ident.as_ref().is_some_and(|i| i.page_session.is_some()))
-        .then(|| sv::parse_query(&url).get("embed").cloned())
-        .flatten();
+    // This server renders plain pages (no script): an embed link is
+    // exchanged once, and the page session rides along in the page's form
+    // (`embed_session`), so a `one_time` link is not needed again.
+    let embed_link = match ident.as_ref() {
+        Some(i) if i.page_session.is_some() => i.page_session.clone(),
+        Some(i) if i.method == "embed" => sv::parse_query(&url).get("embed_session").cloned(),
+        _ => None,
+    };
     let key = cache_key(&dash.id, &resolved, ident.as_ref(), embed_link.as_deref());
     if let Some(html) = st.cache.get(&key, Instant::now()) {
         respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
@@ -1022,7 +1027,7 @@ fn render_dashboard_page(
             esc(&dash.id),
             embed_link
                 .map(|l| format!(
-                    "<input type=\"hidden\" name=\"embed\" value=\"{}\">",
+                    "<input type=\"hidden\" name=\"embed_session\" value=\"{}\">",
                     esc(l)
                 ))
                 .unwrap_or_default()
@@ -1292,6 +1297,7 @@ mod tests {
                 vars,
             },
             page_session: None,
+            ref_id: None,
         };
         let (alice, bob) = (id("alice", vec![]), id("bob", vec![]));
         assert_ne!(

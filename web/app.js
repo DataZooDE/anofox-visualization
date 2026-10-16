@@ -1438,6 +1438,13 @@ async function boot() {
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
+  // An embed link was exchanged for this page's session: drop the link from
+  // the address (history, copies of the URL). A reload needs a fresh link.
+  if (served?.session && params.has("embed")) {
+    const u = new URL(location.href);
+    u.searchParams.delete("embed");
+    history.replaceState(history.state, "", u);
+  }
   // Deep-link: activate the tab named in ?tab= on first render (loadDash resets
   // this only when switching dashboards, so it survives the initial run()).
   const tabParam = getTabParam();

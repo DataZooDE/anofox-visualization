@@ -72,6 +72,18 @@ const b = await chromium.launch();
   await ctx.close();
 }
 
+// ---- 1b. An unverified e-mail is not an identity (#115) -------------------
+{
+  const ctx = await b.newContext({ ignoreHTTPSErrors: true });
+  const p = await ctx.newPage();
+  await p.goto(`${BASE}/d/rls`);
+  const [resp] = await Promise.all([p.waitForResponse((r) => r.url().includes("/auth/callback")), p.click("#u-mallory")]);
+  assert.equal(resp.status(), 401);
+  assert.ok(!(await ctx.cookies(BASE)).some((c) => c.name === "__Host-anofox_session" && c.value));
+  ok("an IdP account with alice's unverified e-mail can't sign in as alice (401, no session)");
+  await ctx.close();
+}
+
 // ---- 2. Embed link -------------------------------------------------------
 const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "acme" }, vars: { channel: "web" }, exp: now() + 120, jti: "e2e-1" });
 {
@@ -91,6 +103,8 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   assert.equal(lab, "Signed in as acme-viewer | tenant acme | channel web");
   assert.ok(sent.length > 0 && sent.every((s) => s === "session"), JSON.stringify(sent));
   assert.equal((await ctx.cookies()).length, 0, "no cookies for an embed");
+  const loc = await f.evaluate(() => location.search);
+  assert.ok(!loc.includes("embed=") && loc.includes("v.channel=app"), loc);
   const nav = await f.evaluate(() => window.__served.nav.map((n) => n.id));
   assert.deepEqual(nav, ["rls"]);
   await p.screenshot({ path: E + "embed-iframe.png" });
@@ -106,7 +120,9 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   assert.equal(r.status(), 200); assert.match(await r.text(), /channel web/);
   r = await api.get(`${BASE}/d/other`, { headers: { "X-Anofox-Session": session } });
   assert.equal(r.status(), 403);
-  ok("page session: /api/panel for another dashboard → 403, vars.channel=app → still web, /d/other → 403");
+  r = await api.get(`${BASE}/healthz`, { headers: { "X-Anofox-Session": session } });
+  assert.deepEqual(await r.json(), { status: "ok" });
+  ok("page session: /api/panel for another dashboard → 403, vars.channel=app → still web, /d/other → 403, /healthz → status only; the link is gone from the iframe URL");
   r = await api.get(`${BASE}/d/other?embed=${link}`); assert.equal(r.status(), 401);
   const tampered = link.split(".").map((x, i) => (i === 1 ? b64u(JSON.stringify({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "globex" }, exp: now() + 120 })) : x)).join(".");
   r = await api.get(`${BASE}/d/rls?embed=${tampered}`); assert.equal(r.status(), 401);
@@ -135,7 +151,9 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   r = await panel(`Bearer ${key}`, "other", 0); assert.equal(r.status(), 403);
   r = await panel(`Bearer ${revoked}`); assert.equal(r.status(), 401);
   r = await panel(`Bearer ${key.slice(0, -1)}${key.endsWith("0") ? "1" : "0"}`); assert.equal(r.status(), 401);
-  ok("API key: rows of svc-etl (US), other dashboard → 403, revoked → 401, wrong secret → 401");
+  r = await api.get(`${BASE}/healthz`, { headers: { Authorization: `Bearer ${key}` } });
+  assert.deepEqual(await r.json(), { status: "ok" });
+  ok("API key: rows of svc-etl (US), other dashboard → 403, revoked → 401, wrong secret → 401, scoped key → /healthz status only");
   const { token, jwk } = await (await api.get(`${IDP}/mint?user=alice`)).json();
   r = await panel(`Bearer ${token}`); assert.equal(r.status(), 200);
   assert.deepEqual(JSON.parse(await r.text()).map((x) => Object.values(x)[0]), ["EU"]);
@@ -147,7 +165,12 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   // algorithm confusion: HS256 with the public JWK as the secret; alg none
   r = await panel(`Bearer ${hs256(payload, JSON.stringify(jwk), { alg: "HS256", kid: "k1" })}`); assert.equal(r.status(), 401);
   r = await panel(`Bearer ${b64u(JSON.stringify({ alg: "none", kid: "k1" }))}.${b64u(JSON.stringify(payload))}.`); assert.equal(r.status(), 401);
-  ok("JWT bearer: alice → EU; wrong aud, expired, HS256-with-public-key, alg none → 401");
+  r = await api.get(`${BASE}/healthz`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.ok("epoch" in (await r.json()));
+  // an ID token of the OIDC login is no API credential
+  const idt = (await (await api.get(`${IDP}/mint?user=alice&id_token=1`)).json()).token;
+  r = await panel(`Bearer ${idt}`); assert.equal(r.status(), 401);
+  ok("JWT bearer: alice → EU (and the full /healthz); wrong aud, expired, HS256-with-public-key, alg none, an ID token → 401");
 }
 
 await b.close();
@@ -162,9 +185,11 @@ assert.ok(has((e) => e.audit === "api_key_revoked" && e.user === "revoked-svc"))
 assert.ok(has((e) => e.audit === "start" && e.detail === "jwt,oidc,embed,api_keys"));
 assert.ok(has((e) => e.audit === "login" && e.outcome === "ok" && e.user === "alice@example.com" && e.method === "oidc"));
 assert.ok(has((e) => e.audit === "login" && e.outcome === "deny" && e.reason === "no_state"));
+assert.ok(has((e) => e.audit === "login" && e.outcome === "deny" && e.reason === "email_unverified"));
 assert.ok(has((e) => e.audit === "logout" && e.user === "alice@example.com"));
 assert.ok(has((e) => e.audit === "embed" && e.outcome === "ok" && e.user === "acme-viewer" && e.dashboard === "rls"));
-for (const reason of ["revoked", "unknown_key", "out_of_scope", "bad_signature", "expired", "link_ttl", "bad_vars", "bad_alg", "bad_audience"])
+for (const m of ["api_key", "jwt", "embed"]) assert.ok(has((e) => e.audit === "auth" && e.outcome === "ok" && e.method === m), "audited success " + m);
+for (const reason of ["id_token", "revoked", "unknown_key", "out_of_scope", "bad_signature", "expired", "link_ttl", "bad_vars", "bad_alg", "bad_audience"])
   assert.ok(has((e) => e.audit === "auth" && e.outcome === "deny" && e.reason === reason), "audit reason " + reason);
 const key = fs.readFileSync(E + "apikey.txt", "utf8").trim();
 for (const secret of [key.slice(17), EMBED_SECRET, process.env.OIDC_SECRET, process.env.SESSION_SECRET, link.split(".")[2]])

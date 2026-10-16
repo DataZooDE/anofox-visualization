@@ -1580,7 +1580,10 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     let scope = ident.as_ref().map(|i| &i.scope);
     match (req.method(), path) {
         (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
-            if st.opts.auth.is_some() && claims.is_none() {
+            // Without a login — or with a credential scoped to some
+            // dashboards (an embed page, an API key) — only the status.
+            let full = ident.as_ref().is_some_and(|i| i.scope.dashboards.is_none());
+            if st.opts.auth.is_some() && !full {
                 respond(req, 200, "application/json", &b"{\"status\":\"ok\"}"[..]);
                 return 200;
             }
@@ -1716,6 +1719,20 @@ fn limits_json(st: &Locked) -> serde_json::Value {
     })
 }
 
+/// Every variable of `vars` named in `path_vars` must hold a plain file or
+/// folder name.
+fn check_path_values(path_vars: &[String], vars: &[(String, String)]) -> Result<(), (u16, String)> {
+    for (name, lit) in vars {
+        if path_vars.iter().any(|v| v.eq_ignore_ascii_case(name)) && !valid_path_value(lit) {
+            return Err((
+                400,
+                format!("variable '{name}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.'"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `X-Anofox-Supersede: <viewer>/<panel>/<kind>` — a newer request with the
 /// same value cancels the older one (`409`). The viewer id is 128 random bits
 /// (32 hex digits) chosen by the page, so one viewer can't cancel another's.
@@ -1777,7 +1794,7 @@ fn locked_panel(
     let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
-    for (name, lit) in &r.vars {
+    for name in r.vars.iter().map(|(n, _)| n) {
         // (`__claim_*` and `anofox_data` are refused when the request is
         // parsed.) The policy's own names are reserved, too.
         if st.opts.policy.is_some()
@@ -1787,19 +1804,8 @@ fn locked_panel(
         {
             return Err((400, format!("variable '{name}' is set by the server")));
         }
-        if st
-            .opts
-            .path_vars
-            .iter()
-            .any(|v| v.eq_ignore_ascii_case(name))
-            && !valid_path_value(lit)
-        {
-            return Err((
-                400,
-                format!("variable '{name}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.'"),
-            ));
-        }
     }
+    check_path_values(&st.opts.path_vars, &r.vars)?;
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
@@ -1821,6 +1827,9 @@ fn locked_panel(
             return Err((403, "forbidden: not in this credential's scope".into()));
         }
         s.lock_vars(&mut r.vars);
+        // A locked variable that names a path obeys the same rule as a
+        // viewer's (checked above for those).
+        check_path_values(&st.opts.path_vars, &s.vars)?;
     }
     info.vars = r.vars.clone();
     // Under a policy, the statements rewritten for this snapshot.
@@ -2539,6 +2548,20 @@ mod tests {
             r#"{{"auth":{{"mode":"embed","secret":"{esec}"}},"audit":"/nonexistent-dir/a.jsonl"}}"#
         )))
         .is_err());
+    }
+
+    #[test]
+    fn locked_path_vars_are_checked_too() {
+        // An embed link locking a path variable gets the viewer's rule.
+        let pv = vec!["run".to_string()];
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![("RUN".into(), "'../../etc'".into())],
+        };
+        let mut vars = vec![("run".to_string(), "'run_a'".to_string())];
+        assert!(check_path_values(&pv, &vars).is_ok());
+        scope.lock_vars(&mut vars);
+        assert_eq!(check_path_values(&pv, &scope.vars).unwrap_err().0, 400);
     }
 
     #[test]

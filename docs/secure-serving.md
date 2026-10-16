@@ -607,10 +607,11 @@ the same value; their keys are derived per use).
 | `leeway_s` | `60` | Clock skew for `exp`, `nbf`, `iat` (at most 300) |
 | `max_age_s` | — | Refuse tokens issued longer ago (requires `iat`) |
 | `jwks_ttl_s` | `3600` | Key-set cache lifetime (60–86400) |
-| `user_claim` | `sub` | Token field → `__claim_user` |
+| `user_claim` | `sub` | Token field → `__claim_user`. If it is `email`, the token must also carry `email_verified: true` (`deny: email_unverified`): an address the IdP did not verify is no identity (nOAuth) |
 | `groups_claim` | off | Token field (list or string) → `__claim_groups`; `{"field": …, "required": true}` makes it mandatory |
 | `claims` | — | `{name: "field"}` → `__claim_<name>`; dotted paths (`realm_access.roles`) and namespaced fields (`https://example.com/tenant`) work |
 | `cookie` | — | Also read the token from this cookie |
+| `accept_id_tokens` | `false` | Accept OIDC ID tokens (a `nonce`, `at_hash`, `c_hash` or `token_use: "id"` claim) as bearer tokens. Off: an ID token is a login receipt for one client, not an API credential (`deny: id_token`). With `oidc` configured too, an `audience` equal to its `client_id` fails the start unless this is set |
 | `ca_file` | Mozilla roots | PEM roots for an internal IdP (replaces the public roots) |
 
 How a token is checked: compact JWS only; the header's `alg` must be one of
@@ -644,10 +645,11 @@ The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
 | `client_secret_env` / `client_secret` | — | A confidential client's secret (sent with HTTP Basic); omit for a public client (PKCE only) |
 | `redirect_url` | (required) | `https://<this server>/auth/callback` — register it at the IdP. `http://` only for `127.0.0.1` / `localhost` |
 | `scopes` | `["openid", "email", "profile"]` | Must include `openid` |
-| `user_claim` | `email` | as for `jwt` (also `groups_claim`, `claims`) |
+| `user_claim` | `email` | as for `jwt` (also `groups_claim`, `claims`); `email` requires `email_verified: true` in the ID token, else the login fails (`email_unverified`) |
 | `session_ttl_s` | `28800` (8 h) | Session lifetime, 60 s … 7 days |
 | `session_secret_env` | random per start | ≥ 32 characters; sign sessions with it so they survive a restart and work on every replica (#22). Without it, a restart signs everyone out |
 | `post_logout_url` | `/auth/logged-out` | Where `POST /auth/logout` sends the browser |
+| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink): they survive a restart, and replicas sharing the file see each other's within 2 s |
 
 1. `GET /auth/login?next=/d/sales` creates a random `state`, `nonce` and PKCE
    verifier, keeps them in a signed `HttpOnly; Secure; SameSite=Lax` cookie
@@ -667,9 +669,12 @@ The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
    stay stateless.
 4. `POST /auth/logout` (same-origin only; `GET` shows a button, so a link on
    another site can't sign anyone out) revokes the session id and clears the
-   cookie. A revocation is held in memory by the replica that handled it;
-   other replicas accept the session until it expires — keep `session_ttl_s`
-   short where that matters.
+   cookie. Without `revocation_file`, a revocation is held in memory by the
+   replica that handled it: a restart forgets it and other replicas accept
+   the session until it expires. With it, logouts are durable and shared by
+   the replicas that use the same file. Keep `session_ttl_s` short either
+   way: a session token is valid until it expires everywhere it isn't
+   revoked.
 
 Cookies are `Secure`: serve over HTTPS (TLS at the reverse proxy); browsers
 also accept them on `http://localhost`.
@@ -706,7 +711,8 @@ exchanged for a **page session** scoped to that one dashboard:
 
 - The page gets the session in its config and sends it as `X-Anofox-Session`
   on each `/api/panel` request — no third-party cookie, so it works in a
-  cross-site iframe in every browser. The page is `Cache-Control: no-store`
+  cross-site iframe in every browser. The page then removes the link from its
+  address (`history.replaceState`); a reload needs a fresh link. The page is `Cache-Control: no-store`
   and `Referrer-Policy: same-origin` (the link is in its URL: never sent to
   another site).
 - **Scope can't be widened from the URL.** The session reads only its
@@ -718,8 +724,13 @@ exchanged for a **page session** scoped to that one dashboard:
 - The UI's code files (`.js`, `.css`, `.wasm`, fonts) are served without a
   credential when `embed` is configured — they are the open-source viewer, no
   data. Pages, `/api/panel` and data files still need one.
-- `serve --dashboards` (no script) keeps the link in the page's form and
-  checks it on every request; there the link's `exp` is the session's.
+- `serve --dashboards` (no script) exchanges the link once and keeps the page
+  session in the page's form (`?embed_session=`, accepted on `GET /d/…`
+  only), so `one_time` links work there too.
+- `/healthz` answers a scoped credential (an embed page, an API key limited
+  to dashboards) with `{"status":"ok"}` only, like a request without login.
+- A locked variable listed in `path_vars` must be a plain file or folder name,
+  like a viewer's.
 
 **Replay.** Whoever has a link can use it until it expires, and a page
 session until it expires: mint links per page view, keep `max_link_ttl_s` at
@@ -777,10 +788,13 @@ reopened per line for rename-based rotation, one `write` per line).
 {"ts":"2026-10-17T09:15:00.000Z","audit":"api_key_revoked","outcome":"ok","key_id":"3f9c0a1b2c3d","user":"svc-etl","detail":"/etc/anofox/keys.json"}
 ```
 
-Events: `start`, `login`, `logout`, `embed` (a link exchanged), `auth` (any
-refused credential, with its `reason`: `expired`, `not_yet_valid`,
+Events: `start`, `login`, `logout`, `embed` (a link exchanged), `auth` with
+`outcome: "ok"` (each bearer token, API key or session the first time it is
+used, then at most every 10 minutes per credential), `auth` with
+`outcome: "deny"` (any refused credential, with its `reason`: `expired`, `not_yet_valid`,
 `bad_signature`, `bad_alg`, `bad_issuer`, `bad_audience`, `unknown_kid`,
 `missing_claim`, `malformed_token`, `revoked`, `unknown_key`, `out_of_scope`,
+`email_unverified`, `id_token`, `session_ttl`,
 `link_ttl`, `replayed`, `bad_state`, `bad_nonce`, …), `api_key_created`,
 `api_key_revoked`, `api_keys_reloaded`. Never logged: tokens, keys, cookies,
 authorization codes, secrets. The request log gains `"auth"`: the method that
@@ -813,7 +827,9 @@ signed the request in.
 | Unknown `kid`s to make the server hammer the IdP; a key set that can't be refreshed | Refetch at most every 30 s; HTTPS only, no redirects, 10 s / 1 MiB caps; a set stale for 24 h is dropped (fail closed) |
 | A token supplies `__claim_*` names, SQL or control characters | Variable names come only from the configuration; values are length- and control-character-checked and bound as typed literals |
 | OIDC login CSRF / fixation, code interception, ID-token replay, open redirect after login | `state` (constant-time) and PKCE S256 in a signed `HttpOnly` cookie; `nonce` in the ID token; `azp` with several audiences; the state cookie is cleared on use; `next` must be a local path |
-| A stolen or forged session cookie | Server-signed (HS256), `HttpOnly; Secure; SameSite=Lax; __Host-`; server-side expiry; logout revokes the id (per replica, documented); two session cookies → `401` |
+| A stolen or forged session cookie | Server-signed (HS256), `HttpOnly; Secure; SameSite=Lax; __Host-`; server-side expiry; logout revokes the id (durable and shared with `revocation_file`, else per replica); two session cookies → `401` |
+| Someone claims a victim's e-mail at the IdP without verifying it (nOAuth, #115) | An `email` identity needs `email_verified: true` |
+| A client's OIDC ID token replayed as an API bearer token | Refused unless `accept_id_tokens`; a `jwt` audience equal to the OIDC `client_id` fails the start |
 | A tampered or expired embed link; a link for one dashboard used on another; `?v.*` or a panel request overriding the link's variables | HMAC check in constant time; `exp` required and ≤ `max_link_ttl_s`; the link must name the dashboard; the page session is server-signed and scoped; locked variables replace the viewer's and are set after them (unit-tested order) |
 | A replayed embed link | Short `max_link_ttl_s`; `one_time` with `jti` (per process); documented: a link is a bearer credential until it expires |
 | The host application mints server sessions (#114) | The embed link `secret` must differ from every other configured secret — both session secrets and the proxy's — or the start fails; a session claiming a longer life (`exp - iat`) than its method's `session_ttl_s` is refused |

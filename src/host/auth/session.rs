@@ -93,6 +93,7 @@ pub struct Sessions {
     /// The longest session this key issues: a token claiming a longer life
     /// (`exp - iat`) is refused, whoever signed it.
     max_ttl: u64,
+    revocations: Option<Revocations>,
     revoked: Mutex<HashMap<String, u64>>,
 }
 
@@ -124,6 +125,7 @@ impl Sessions {
             dec: DecodingKey::from_secret(key.as_ref()),
             persistent,
             max_ttl,
+            revocations: None,
             revoked: Mutex::new(HashMap::new()),
         }
     }
@@ -245,14 +247,98 @@ impl Sessions {
     /// Revoke `sid` until `exp` (logout).
     pub fn revoke(&self, sid: &str, exp: u64) {
         let now = super::jwt::now_s();
-        let mut r = self.revoked.lock().unwrap_or_else(|p| p.into_inner());
-        r.retain(|_, e| *e >= now);
-        r.insert(sid.to_string(), exp);
+        {
+            let mut r = self.revoked.lock().unwrap_or_else(|p| p.into_inner());
+            r.retain(|_, e| *e >= now);
+            r.insert(sid.to_string(), exp);
+        }
+        if let Some(f) = &self.revocations {
+            f.append(sid, exp);
+        }
     }
 
     fn is_revoked(&self, sid: &str) -> bool {
+        if let Some(f) = &self.revocations {
+            f.reload(&self.revoked);
+        }
         let r = self.revoked.lock().unwrap_or_else(|p| p.into_inner());
         r.contains_key(sid)
+    }
+
+    /// Keep revocations in `path` (JSON lines, `0600`, no symlinks): a logout
+    /// survives a restart, and replicas sharing the file see each other's
+    /// within [`Revocations::RELOAD_EVERY`].
+    pub fn with_revocation_file(mut self, path: std::path::PathBuf) -> Result<Sessions, String> {
+        crate::host::access::open_log(&path)
+            .map_err(|e| format!("auth.revocation_file: cannot open {}: {e}", path.display()))?;
+        let f = Revocations {
+            path,
+            stamp: Mutex::new((None, None)),
+        };
+        f.reload(&self.revoked);
+        self.revocations = Some(f);
+        Ok(self)
+    }
+}
+
+/// The file stamp read last, and when the file was last checked.
+type ReloadState = (
+    Option<(std::time::SystemTime, u64)>,
+    Option<std::time::Instant>,
+);
+
+/// A revocation file ([`Sessions::with_revocation_file`]).
+pub struct Revocations {
+    path: std::path::PathBuf,
+    /// (file stamp read last, when it was last checked)
+    stamp: Mutex<ReloadState>,
+}
+
+impl Revocations {
+    pub const RELOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+    fn append(&self, sid: &str, exp: u64) {
+        use std::io::Write;
+        let line = format!("{}\n", json!({"sid": sid, "exp": exp}));
+        let r = crate::host::access::open_log(&self.path)
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+        if let Err(e) = r {
+            eprintln!(
+                "[anofox-serve] revocation file {}: {e}",
+                self.path.display()
+            );
+        }
+    }
+
+    /// Merge the file's unexpired revocations into `into` when it changed.
+    fn reload(&self, into: &Mutex<HashMap<String, u64>>) {
+        let mut st = self.stamp.lock().unwrap_or_else(|p| p.into_inner());
+        if st.1.is_some_and(|t| t.elapsed() < Self::RELOAD_EVERY) {
+            return;
+        }
+        st.1 = Some(std::time::Instant::now());
+        let stamp = std::fs::metadata(&self.path)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())));
+        if stamp.is_none() || stamp == st.0 {
+            return;
+        }
+        st.0 = stamp;
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let now = super::jwt::now_s();
+        let mut r = into.lock().unwrap_or_else(|p| p.into_inner());
+        for l in text.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(l) else {
+                continue;
+            };
+            if let (Some(sid), Some(exp)) = (v["sid"].as_str(), v["exp"].as_u64()) {
+                if exp >= now {
+                    r.insert(sid.to_string(), exp);
+                }
+            }
+        }
     }
 }
 
@@ -340,6 +426,39 @@ mod tests {
             json!({"sid": "y"}),
         );
         assert_eq!(s.verify("login", &long), Err("session_ttl"));
+    }
+
+    #[test]
+    fn logout_survives_a_restart_with_a_revocation_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-rev-{}",
+            crate::host::serving::random_token()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("revoked.jsonl");
+        let secret = Some("0123456789abcdef0123456789abcdef");
+        let a = Sessions::new(secret, "login", 3600)
+            .with_revocation_file(file.clone())
+            .unwrap();
+        let (t, sess) = a.issue("login", 60, &claims(), &Scope::default());
+        a.revoke(&sess.sid, sess.exp);
+        // a restarted server (or another replica on the same file)
+        let b = Sessions::new(secret, "login", 3600)
+            .with_revocation_file(file.clone())
+            .unwrap();
+        assert_eq!(b.verify("login", &t), Err("revoked"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let link = dir.join("link.jsonl");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(Sessions::new(secret, "login", 60)
+                .with_revocation_file(link)
+                .is_err());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
