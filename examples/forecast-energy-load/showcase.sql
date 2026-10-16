@@ -1,0 +1,1 @@
+../../web/examples/forecast-energy-load.sql
