@@ -29,6 +29,8 @@ use std::sync::OnceLock;
 
 // Live-session HTTP servers (native only).
 #[cfg(not(target_arch = "wasm32"))]
+mod panel_cache;
+#[cfg(not(target_arch = "wasm32"))]
 mod serve;
 
 // Rust's std links a few libc file-I/O imports (`pread`/`pwrite`) whose

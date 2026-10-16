@@ -1066,6 +1066,14 @@ let conn = null;
 let servedMode = false;
 const servedVars = {};
 let servedIndex = null; // planned statement SQL -> plan index
+// Superseding: a request with a `kind` aborts this page's previous request of
+// the same panel + kind (a ::PAGED table's page / scroll block), and names
+// itself in X-Anofox-Supersede so the server interrupts the old query too.
+// The viewer id is 128 random bits, so nobody can cancel another viewer's.
+const servedViewer = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const servedAborts = new Map(); // "panel/kind" -> AbortController
+let servedTables = 0; // per-table-instance suffix for the kinds
+const isAbort = (e) => e && e.name === "AbortError";
 
 // Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
@@ -1087,7 +1095,7 @@ function sqlLiteralToJson(lit) {
   return t !== "" && Number.isFinite(n) ? n : t;
 }
 
-async function servedRequest(sql, page) {
+async function servedRequest(sql, page, kind) {
   if (!servedIndex) {
     servedIndex = new Map();
     JSON.parse(plan(window.__served.sql)).forEach((st, i) => {
@@ -1101,13 +1109,22 @@ async function servedRequest(sql, page) {
     const { base, ...rest } = page;
     body.page = rest;
   }
-  const r = await fetch("/api/panel", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return (await r.text()) || "[]";
+  const headers = { "Content-Type": "application/json" };
+  const slot = kind && `${idx}/${kind}`;
+  const ac = slot && new AbortController();
+  if (slot) {
+    servedAborts.get(slot)?.abort();
+    servedAborts.set(slot, ac);
+    headers["X-Anofox-Supersede"] = `${servedViewer}/${slot}`;
+  }
+  try {
+    const r = await fetch("/api/panel", { method: "POST", headers, body: JSON.stringify(body), signal: ac?.signal });
+    if (r.status === 409) throw new DOMException("superseded", "AbortError");
+    if (!r.ok) throw new Error(await r.text());
+    return (await r.text()) || "[]";
+  } finally {
+    if (slot && servedAborts.get(slot) === ac) servedAborts.delete(slot);
+  }
 }
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 
@@ -1245,8 +1262,9 @@ async function ensureDataFiles(sql) {
 // Run one SQL statement and return its rows as a JSON string ([{c0,…}, …]).
 // `page` (served mode only) describes a ::PAGED request structurally —
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
-// builds the paging SQL itself.
-async function runSql(sql, page) {
+// builds the paging SQL itself. `kind` (served mode only): a newer request of
+// the same panel + kind supersedes this one (it then rejects with an AbortError).
+async function runSql(sql, page, kind) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
@@ -1262,7 +1280,7 @@ async function runSql(sql, page) {
       return "[]";
     }
     // … and send the statement's plan index + the variable values.
-    return servedRequest(sql, page);
+    return servedRequest(sql, page, kind);
   }
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
@@ -3454,7 +3472,10 @@ async function runOnce(fresh = true) {
           }
           return out;
         };
-        const pageReq = async (extra, withFilters = true) => {
+        // A newer load (page, sort, search…) supersedes the running one; so does
+        // a newer Scroll-view block.
+        const inst = ++servedTables;
+        const pageReq = async (extra, withFilters = true, kind) => {
           const page = { ...extra };
           if (withFilters) {
             const q = (dpFilterText[idx] || "").trim();
@@ -3462,7 +3483,7 @@ async function runOnce(fresh = true) {
             const fl = colFilters();
             if (fl.length) page.filters = fl;
           }
-          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }));
+          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst));
           const sql = page_sql(base, JSON.stringify(page));
           if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
           return JSON.parse(await runSql(sql));
@@ -3480,19 +3501,20 @@ async function runOnce(fresh = true) {
           const scroll = st.view === "scroll";
           let rows = [];
           try {
-            rows = await pageReq({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() });
+            rows = await pageReq({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() }, true, "load");
             if (!stats) {
               // the column names come from a page; a search with no hits still
               // keeps the last known columns
               const cols = rows.length ? Object.keys(rows[0]).filter((_, k) => k !== titleIdx) : st.cols || [];
               st.cols = cols;
-              stats = cols.length ? (await pageReq({ stats: cols.slice(0, 64) }))[0] || { n: 0 } : (await pageReq({ count: true }))[0];
+              stats = cols.length ? (await pageReq({ stats: cols.slice(0, 64) }, true, "load"))[0] || { n: 0 } : (await pageReq({ count: true }, true, "load"))[0];
               stats._cols = cols.slice(0, 64);
             }
             const filtering = (dpFilterText[idx] || "").trim() || colFilters().length;
             if (unfiltered == null || !filtering)
-              unfiltered = filtering ? Number((await pageReq({ count: true }, false))[0].n) : Number(stats.n);
+              unfiltered = filtering ? Number((await pageReq({ count: true }, false, "load"))[0].n) : Number(stats.n);
           } catch (e) {
+            if (isAbort(e)) return; // a newer load renders
             holder.innerHTML = "";
             if (isOptionalMissing(s, e)) holder.appendChild(mkNotAvailable(s));
             else holder.appendChild(mkErrorBody(e, base));
@@ -3553,7 +3575,7 @@ async function runOnce(fresh = true) {
             distinct: (col) => pageReq({ distinct: col }).then((rs) => rs.map((r) => r.v)),
             // the Stats strip's histograms / top values, once per filter state
             profile: () => (stats._prof ||= pageReq({ profile: stats._cols })),
-            fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }),
+            fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }, true, "rows"),
           };
           holder.appendChild(renderTable(rows, sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
           const lost = !document.activeElement || document.activeElement === document.body;

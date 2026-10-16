@@ -14,7 +14,10 @@
 //!   filter as a prepared-statement parameter. Queries run on a private
 //!   read-only snapshot with external access, extension loading and config
 //!   changes disabled, one fresh connection per request (no variable leakage
-//!   between viewers), under a row cap and a query timeout.
+//!   between viewers), under a row cap and a query timeout. Results are cached
+//!   per server (the snapshot never changes), identical concurrent requests run
+//!   once, and a request superseded by the same viewer's newer one is
+//!   interrupted ([`crate::panel_cache`]).
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
 //! Each server's state is owned by the server (no process-wide "last load
@@ -22,6 +25,7 @@
 //! nothing is registered until the snapshot is built and the port is bound.
 
 use crate::db::{json_rows, Conn, Database};
+use crate::panel_cache::{PanelCache, Served, SUPERSEDED};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
     AuthoringGuard, RequestMeta,
@@ -144,6 +148,32 @@ fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
         .with_header(header("Cache-Control", "no-store"));
+    let _ = req.respond(resp);
+}
+
+/// A cached panel result as a response body (no copy of the JSON).
+struct SharedBody(Arc<String>);
+
+impl AsRef<[u8]> for SharedBody {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+fn respond_panel(req: Request, body: Arc<String>, etag: &str) {
+    let len = body.len();
+    let resp = Response::new(
+        200.into(),
+        vec![
+            header("Content-Type", "application/json"),
+            header("X-Content-Type-Options", "nosniff"),
+            header("Cache-Control", "no-store"),
+            header("ETag", etag),
+        ],
+        std::io::Cursor::new(SharedBody(body)),
+        Some(len),
+        None,
+    );
     let _ = req.respond(resp);
 }
 
@@ -357,6 +387,8 @@ pub struct LockedOptions {
     /// Extra `Host` names accepted besides the loopback names (e.g. the public
     /// name a reverse proxy forwards); `"*"` disables the Host check.
     pub hosts: Vec<String>,
+    /// Panel result cache size in bytes (`cache_mb`; 0 = off).
+    pub cache_bytes: usize,
 }
 
 impl Default for LockedOptions {
@@ -370,6 +402,7 @@ impl Default for LockedOptions {
             load: Vec::new(),
             theme: None,
             hosts: Vec::new(),
+            cache_bytes: 64 << 20,
         }
     }
 }
@@ -394,6 +427,10 @@ impl LockedOptions {
                 "timeout_ms" => o.timeout = Duration::from_millis(num()?),
                 "max_body_bytes" => o.max_body = num()?.min(64 << 20) as usize,
                 "threads" => o.threads = num()?.min(64) as usize,
+                "cache_mb" => {
+                    let mb = val.as_u64().ok_or("options.cache_mb must be a non-negative integer")?;
+                    o.cache_bytes = (mb.min(1 << 16) as usize) << 20;
+                }
                 "attach" => o.attach = val.as_bool().ok_or("options.attach must be a boolean")?,
                 "load" => {
                     let arr = val.as_array().ok_or("options.load must be a list of extension names")?;
@@ -422,7 +459,7 @@ impl LockedOptions {
                         o.hosts.push(h.to_string());
                     }
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, attach, load, theme, hosts)")),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts)")),
             }
         }
         Ok(o)
@@ -487,6 +524,10 @@ struct Locked {
     dashboards: Vec<Dash>,
     snap: Snapshot,
     opts: LockedOptions,
+    /// Panel results of this server's snapshot (a new snapshot = a new cache).
+    cache: PanelCache,
+    /// Random per snapshot; qualifies the ETags.
+    epoch: String,
 }
 
 /// `anofox_serve_dashboards(dir, port[, options])`.
@@ -537,6 +578,8 @@ pub fn start_locked(
         port,
         dashboards,
         snap,
+        cache: PanelCache::new(opts.cache_bytes),
+        epoch: sv::random_token()[..8].to_string(),
         opts,
     });
     let stop = Arc::new(AtomicBool::new(false));
@@ -788,10 +831,13 @@ fn handle_locked(st: &Locked, mut req: Request) {
                 Ok(b) => b,
                 Err((code, e)) => return text(req, code, &e),
             };
-            match locked_panel(st, &body) {
-                Ok(json) => respond(req, 200, "application/json", json.into_bytes()),
+            let supersede = req_header(&req, SUPERSEDE_HEADER).map(str::to_string);
+            match locked_panel(st, &body, supersede.as_deref()) {
+                Ok((json, etag)) => respond_panel(req, json, &etag),
                 Err((code, e)) => {
-                    eprintln!("[anofox-serve] {code}: {e}");
+                    if code != SUPERSEDED.0 {
+                        eprintln!("[anofox-serve] {code}: {e}");
+                    }
                     text(req, code, &e)
                 }
             }
@@ -819,12 +865,48 @@ fn handle_locked(st: &Locked, mut req: Request) {
     }
 }
 
-/// Run one panel of one dashboard for a viewer. Fresh connection per request
-/// (variables and temp objects never leak between viewers), variables set as
-/// typed literals, the dashboard's preceding setup statements re-run (only
-/// TEMP objects can be created — the snapshot is read-only), and the panel
-/// query executed as a single prepared statement under the row cap + timeout.
-fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
+/// `X-Anofox-Supersede: <viewer>/<panel>/<kind>` — a newer request with the
+/// same value cancels the older one (`409`). The viewer id is 128 random bits
+/// (32 hex digits) chosen by the page, so one viewer can't cancel another's.
+const SUPERSEDE_HEADER: &str = "X-Anofox-Supersede";
+
+fn valid_supersede(v: &str) -> bool {
+    let Some((viewer, rest)) = v.split_once('/') else {
+        return false;
+    };
+    viewer.len() == 32
+        && viewer.bytes().all(|b| b.is_ascii_hexdigit())
+        && (1..=64).contains(&rest.len())
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:/-".contains(&b))
+}
+
+/// The cache key of a panel request: everything its result depends on
+/// besides the (immutable) snapshot and dashboards — the parsed request, with
+/// the variables in a canonical order. Debug formatting quotes and escapes
+/// every string, so distinct requests never collide.
+fn panel_key(r: &sv::PanelRequest) -> String {
+    let mut vars: Vec<&(String, String)> = r.vars.iter().collect();
+    vars.sort();
+    format!("{:?}", (&r.dashboard, r.panel, vars, &r.page))
+}
+
+fn etag(epoch: &str, key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    format!("\"{epoch}-{:016x}\"", h.finish())
+}
+
+/// Serve one panel of one dashboard for a viewer — from the cache, by joining
+/// an identical running request, or by running it (`run_panel`). Returns the
+/// JSON rows and their ETag.
+fn locked_panel(
+    st: &Locked,
+    body: &str,
+    supersede: Option<&str>,
+) -> Result<(Arc<String>, String), (u16, String)> {
     let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     let dash = st
         .dashboards
@@ -836,9 +918,58 @@ fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
         .get(r.panel)
         .ok_or((404, "no such panel".to_string()))?;
     if *is_setup {
-        return Ok("[]".into()); // setup runs server-side, per request (below)
+        // setup runs server-side, per request (run_panel)
+        return Ok((Arc::new("[]".into()), etag(&st.epoch, "setup")));
     }
+    let ticket = match supersede {
+        None => None,
+        // Namespaced by dashboard: a viewer id is per page.
+        Some(v) if valid_supersede(v) => Some(format!("{}/{v}", r.dashboard)),
+        Some(_) => {
+            return Err((
+                400,
+                format!("{SUPERSEDE_HEADER} must be <32 hex digits>/<panel>/<kind>"),
+            ))
+        }
+    };
+    let key = panel_key(&r);
+    let t0 = std::time::Instant::now();
+    let (out, how) = st.cache.run(&key, ticket, |abort| {
+        run_panel(st, dash, panel_sql, &r, abort)
+    });
+    if how == Served::Executed {
+        let cancelled = matches!(&out, Err((code, _)) if *code == SUPERSEDED.0);
+        eprintln!(
+            "[anofox-serve] ran {}#{} in {} ms{}",
+            r.dashboard,
+            r.panel,
+            t0.elapsed().as_millis(),
+            if cancelled { " (superseded)" } else { "" }
+        );
+    }
+    out.map(|json| (json, etag(&st.epoch, &key)))
+}
+
+/// Run one panel of one dashboard. Fresh connection per request (variables
+/// and temp objects never leak between viewers), variables set as typed
+/// literals, the dashboard's preceding setup statements re-run (only TEMP
+/// objects can be created — the snapshot is read-only), and the panel query
+/// executed as a single prepared statement under the row cap + timeout. The
+/// query is interrupted when every request waiting for it has been superseded.
+fn run_panel(
+    st: &Locked,
+    dash: &Dash,
+    panel_sql: &str,
+    r: &sv::PanelRequest,
+    abort: &crate::panel_cache::Abort,
+) -> Result<String, (u16, String)> {
+    let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
     let conn = st.snap.db.connect().map_err(|e| (500, e))?;
+    // Declared after `conn`, so dropped before it: no interrupt after that.
+    let intr = conn.interrupter();
+    let Some(_registered) = abort.register(move || intr.interrupt()) else {
+        return Err(cancelled());
+    };
     conn.with_deadline(st.opts.timeout, |c| {
         c.exec(&format!("USE {}", quote_ident(&st.snap.default_db)))?;
         for (name, lit) in &r.vars {
@@ -856,6 +987,10 @@ fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
                 }
             }
         }
+        // (An interrupt between two statements may not reach the next one.)
+        if abort.abandoned() {
+            return Err(SUPERSEDED.1.to_string());
+        }
         match &r.page {
             Some(p) => {
                 let (q, params) = sv::page_sql(panel_sql, p);
@@ -865,7 +1000,15 @@ fn locked_panel(st: &Locked, body: &str) -> Result<String, (u16, String)> {
             None => json_rows(c, panel_sql, &[], st.opts.max_rows),
         }
     })
-    .map_err(|e| (if e.contains("row limit") { 413 } else { 400 }, e))
+    .map_err(|e| {
+        if abort.abandoned() {
+            cancelled()
+        } else if e.contains("row limit") {
+            (413, e)
+        } else {
+            (400, e)
+        }
+    })
 }
 
 /// index.html with `window.__served = {id,title,sql,nav,locked}` injected
@@ -943,6 +1086,49 @@ mod tests {
             r##"{"theme":{"extends":"light","palette":["#123456"]}}"##
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn cache_options_and_keys() {
+        assert_eq!(LockedOptions::parse(None).unwrap().cache_bytes, 64 << 20);
+        let o = LockedOptions::parse(Some(r#"{"cache_mb":0}"#)).unwrap();
+        assert_eq!(o.cache_bytes, 0);
+        assert!(LockedOptions::parse(Some(r#"{"cache_mb":-1}"#)).is_err());
+        // The variables' order doesn't matter; their values, the panel, the
+        // dashboard and the page do.
+        let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap());
+        let k = key(r#"{"dashboard":"d","panel":1,"vars":{"a":1,"b":"x"}}"#);
+        assert_eq!(
+            k,
+            key(r#"{"dashboard":"d","panel":1,"vars":{"b":"x","a":1}}"#)
+        );
+        for other in [
+            r#"{"dashboard":"d","panel":1,"vars":{"a":1,"b":"y"}}"#,
+            r#"{"dashboard":"d","panel":1,"vars":{"a":"1","b":"x"}}"#,
+            r#"{"dashboard":"d","panel":2,"vars":{"a":1,"b":"x"}}"#,
+            r#"{"dashboard":"e","panel":1,"vars":{"a":1,"b":"x"}}"#,
+            r#"{"dashboard":"d","panel":1,"vars":{"a":1,"b":"x"},"page":{"limit":10}}"#,
+        ] {
+            assert_ne!(k, key(other), "{other}");
+        }
+        assert_ne!(
+            key(r#"{"dashboard":"d","panel":1,"page":{"limit":10,"offset":10}}"#),
+            key(r#"{"dashboard":"d","panel":1,"page":{"limit":10,"offset":20}}"#)
+        );
+        assert!(etag("e1", &k).starts_with("\"e1-"));
+        assert_ne!(etag("e1", &k), etag("e2", &k));
+    }
+
+    #[test]
+    fn supersede_header() {
+        let id = "0123456789abcdef0123456789ABCDEF";
+        assert!(valid_supersede(&format!("{id}/3/load7")));
+        assert!(valid_supersede(&format!("{id}/12/rows:1")));
+        assert!(!valid_supersede("short/3/load"));
+        assert!(!valid_supersede(&format!("{id}/")));
+        assert!(!valid_supersede(&format!("{id}/3/a b")));
+        assert!(!valid_supersede(&format!("{id}/{}", "x".repeat(65))));
+        assert!(!valid_supersede(&format!("{}z/3/load", &id[1..])));
     }
 
     #[test]
