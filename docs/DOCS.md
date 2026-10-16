@@ -1868,7 +1868,10 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 `anofox_data` is set by the server; a `path_vars` value must be a plain name
 (`[A-Za-z0-9_.-]`, no leading `.`), so `../` never reaches DuckDB, which refuses
-any path outside the folder anyway. New runs are readable immediately.
+any path outside the folder anyway. New runs are readable immediately. With
+`data` set, every statement must be a query (or `SET VARIABLE` / `CREATE TEMP
+TABLE|VIEW … AS <query>`); mount the folder read-only for a hard guarantee
+([`secure-serving.md`](secure-serving.md)).
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`

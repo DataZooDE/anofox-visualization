@@ -78,7 +78,7 @@ SELECT anofox_serve_stop(8095);      -- stop + delete the snapshot
 | `attach` | `true` | snapshot every attached DuckDB database; `false` = only the current one |
 | `load` | `[]` | extensions to load in the snapshot instance (`["spatial"]`) |
 | `refresh_s` | — | rebuild the snapshot every *n* seconds and swap it in atomically (new epoch, empty result cache); `/healthz` shows `epoch` + `snapshot_age_s` |
-| `data` | — | a folder the panels may read in place (DuckDB `allowed_directories`; nothing else on disk); panels get its path as `getvariable('anofox_data')`; dashboards that write files (`COPY`, `ATTACH`, …) are refused |
+| `data` | — | a folder the panels may read in place (DuckDB `allowed_directories`; nothing else on disk); panels get its path as `getvariable('anofox_data')`; every statement must then be a query, `SET VARIABLE x = <expr>` or `CREATE TEMP TABLE\|VIEW x AS <query>` (checked with DuckDB's parser, needs the json extension); not `/`, system dirs, or a folder containing `$HOME` / the temp dir; mount it read-only for a hard guarantee |
 | `path_vars` | `[]` | variables used as path segments under `data` (`getvariable('run')`): values must be plain names `[A-Za-z0-9_.-]`, no leading `.`, else `400` |
 | `theme` | — | default theme for dashboards without their own `::THEME`: a name (`"dark"`, `"acme+dark"`) or a theme JSON object; validated and frozen at start |
 
