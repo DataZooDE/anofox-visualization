@@ -413,6 +413,33 @@ mod tests {
         Ok(s.to_string())
     }
 
+    /// Block until `cond` holds (polled; fails after 10 s). The tests order
+    /// their threads by the cache's own state, never by sleeping.
+    fn until(what: &str, cond: impl Fn() -> bool) {
+        let t0 = Instant::now();
+        while !cond() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A flight has been created (it is joinable from now on).
+    fn executing(c: &PanelCache, n: u64) {
+        until("executor started", || c.stats().executed >= n);
+    }
+
+    /// `n` requests have joined a running flight.
+    fn joined(c: &PanelCache, n: u64) {
+        until("waiter joined", || c.stats().shared >= n);
+    }
+
+    /// Some running flight has registered its interrupter.
+    fn registered(c: &PanelCache) {
+        until("interrupter registered", || {
+            c.lock().flights.values().any(|f| f.interrupt.is_some())
+        });
+    }
+
     #[test]
     fn hit_and_miss() {
         let c = PanelCache::new(1 << 20);
@@ -495,19 +522,20 @@ mod tests {
         let c = Arc::new(PanelCache::new(1 << 20));
         let c2 = c.clone();
         let t = std::thread::spawn(move || {
-            c2.run("e", None, |_| {
-                std::thread::sleep(Duration::from_millis(200));
+            let c3 = c2.clone();
+            c2.run("e", None, move |_| {
+                joined(&c3, 1);
                 Err((400, "boom".into()))
             })
         });
-        std::thread::sleep(Duration::from_millis(50));
+        executing(&c, 1);
         let (out, how) = c.run("e", None, |_| ok("not run"));
         assert_eq!(how, Served::Shared);
         assert_eq!(out.unwrap_err().1, "boom");
         assert_eq!(t.join().unwrap().0.unwrap_err().1, "boom");
     }
 
-    /// An executor that "runs" until interrupted (or 5 s).
+    /// An executor that "runs" until interrupted (or 10 s).
     fn interruptible(
         stop: Arc<AtomicBool>,
     ) -> impl FnOnce(&Abort) -> Result<String, (u16, String)> {
@@ -516,15 +544,8 @@ mod tests {
             let Some(_reg) = abort.register(move || s.store(true, Ordering::SeqCst)) else {
                 return Err((499, "not started".into()));
             };
-            let t0 = Instant::now();
-            while !stop.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if stop.load(Ordering::SeqCst) {
-                Err((400, "INTERRUPT".into()))
-            } else {
-                ok("finished")
-            }
+            until("interrupt", || stop.load(Ordering::SeqCst));
+            Err((400, "INTERRUPT".into()))
         }
     }
 
@@ -533,17 +554,15 @@ mod tests {
         let c = Arc::new(PanelCache::new(1 << 20));
         let stop = Arc::new(AtomicBool::new(false));
         let (c2, s2) = (c.clone(), stop.clone());
-        let t0 = Instant::now();
         let old = std::thread::spawn(move || {
             c2.run("page 1", Some("viewer/3/load".into()), interruptible(s2))
                 .0
         });
-        std::thread::sleep(Duration::from_millis(50));
+        registered(&c);
         let (out, _) = c.run("page 2", Some("viewer/3/load".into()), |_| ok("page 2"));
         assert_eq!(out.unwrap().as_str(), "page 2");
         assert_eq!(old.join().unwrap().unwrap_err().0, 409);
         assert!(stop.load(Ordering::SeqCst), "the old query was interrupted");
-        assert!(t0.elapsed() < Duration::from_secs(2));
         let g = c.lock();
         assert!(g.tickets.is_empty() && g.keys.is_empty() && g.flights.is_empty());
         assert!(!g.entries.contains_key("page 1"));
@@ -552,20 +571,23 @@ mod tests {
     #[test]
     fn an_identical_newer_request_takes_the_query_over() {
         let c = Arc::new(PanelCache::new(1 << 20));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (c2, s2) = (c.clone(), stop.clone());
+        let c2 = c.clone();
         let old = std::thread::spawn(move || {
-            c2.run("page 2", Some("viewer/3/load".into()), move |_: &Abort| {
-                std::thread::sleep(Duration::from_millis(200));
-                if s2.load(Ordering::SeqCst) {
-                    Err((400, "INTERRUPT".into()))
-                } else {
+            let c3 = c2.clone();
+            c2.run(
+                "page 2",
+                Some("viewer/3/load".into()),
+                move |abort: &Abort| {
+                    // Finish only once the newer request has joined (and so
+                    // cancelled this one): it must not have been interrupted.
+                    joined(&c3, 1);
+                    assert!(!abort.abandoned());
                     ok("page 2")
-                }
-            })
+                },
+            )
             .0
         });
-        std::thread::sleep(Duration::from_millis(50));
+        executing(&c, 1);
         let (out, how) = c.run("page 2", Some("viewer/3/load".into()), |_| ok("restarted"));
         assert_eq!((out.unwrap().as_str(), how), ("page 2", Served::Shared));
         assert_eq!(old.join().unwrap().unwrap_err().0, 409);
@@ -583,9 +605,7 @@ mod tests {
                 let interrupted = Arc::new(AtomicBool::new(false));
                 let i2 = interrupted.clone();
                 let _reg = abort.register(move || i2.store(true, Ordering::SeqCst));
-                while !ga.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                until("gate", || ga.load(Ordering::SeqCst));
                 if interrupted.load(Ordering::SeqCst) {
                     Err((400, "INTERRUPT".into()))
                 } else {
@@ -594,12 +614,12 @@ mod tests {
             })
             .0
         });
-        std::thread::sleep(Duration::from_millis(50));
+        registered(&c);
         let cb = c.clone();
         let b = std::thread::spawn(move || {
             cb.run("same", Some("B/1/load".into()), |_| ok("not run")).0
         });
-        std::thread::sleep(Duration::from_millis(50));
+        joined(&c, 1);
         let (next, _) = c.run("other", Some("A/1/load".into()), |_| ok("next"));
         assert_eq!(next.unwrap().as_str(), "next");
         gate.store(true, Ordering::SeqCst);
@@ -615,7 +635,7 @@ mod tests {
         let (c2, s2) = (c.clone(), stop.clone());
         let a =
             std::thread::spawn(move || c2.run("x", Some("A/1/load".into()), interruptible(s2)).0);
-        std::thread::sleep(Duration::from_millis(50));
+        registered(&c);
         assert_eq!(
             c.run("y", Some("B/1/load".into()), |_| ok("y"))
                 .0
@@ -635,16 +655,18 @@ mod tests {
         let c = Arc::new(PanelCache::new(1 << 20));
         let c2 = c.clone();
         let t = std::thread::spawn(move || {
-            c2.run("p", None, |_| {
-                std::thread::sleep(Duration::from_millis(100));
+            let c3 = c2.clone();
+            c2.run("p", None, move |_| {
+                joined(&c3, 1);
                 panic!("executor bug")
             })
             .0
         });
-        std::thread::sleep(Duration::from_millis(30));
+        executing(&c, 1);
         let (out, how) = c.run("p", None, |_| ok("not run"));
         assert_eq!(how, Served::Shared);
         assert_eq!(out.unwrap_err().0, 500);
         assert_eq!(t.join().unwrap().unwrap_err().0, 500);
+        assert!(c.lock().flights.is_empty());
     }
 }
