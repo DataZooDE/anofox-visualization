@@ -20,7 +20,7 @@
 -- Reserve fund. Natively, run from web/:  dashboard --check ../examples/optimize-showcase/showcase.sql
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_optimize · stored results'::BRAND;
+SELECT 'anofox_optimize'::BRAND;
 SELECT 'One Friday at a distribution centre: six decisions, optimised in SQL'::DASHBOARD_TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -54,9 +54,7 @@ CREATE OR REPLACE MACRO os_hold() AS
     greatest(coalesce(TRY_CAST(getvariable('holdings') AS INTEGER), 10), ceil(1 / os_pcap())::INTEGER);
 CREATE OR REPLACE MACRO os_shift() AS 480;  -- paint-line minutes in an 8-hour shift
 
--- ── Header: provenance, planning inputs, KPIs ────────────────────────────────
-SELECT 12::COL;
-SELECT ('**Stored results.** Computed natively with anofox_optimize `' || (SELECT extension_version FROM os_provenance) || '` on DuckDB ' || (SELECT duckdb_version FROM os_provenance) || ' by `examples/optimize-showcase/compute.sql`; its DuckDB-Wasm build does not load yet, so nothing is re-solved in your browser — the inputs below pick among stored parameter sweeps.')::MARKDOWN;
+-- ── Header: planning inputs, KPIs ────────────────────────────────────────────
 
 SELECT 'Planning inputs'::GROUP;
 SELECT container_size ::DROPDOWN, 'Container size (units)'::LABEL FROM (VALUES (1, '1000'), (2, '800'), (3, '1250'), (4, '1500')) t(k, container_size) ORDER BY k;

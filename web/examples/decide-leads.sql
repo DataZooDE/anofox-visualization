@@ -20,7 +20,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/decide-leads/showcase.sql
 
 -- ── Header ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_decide · stored results'::BRAND;
+SELECT 'anofox_decide'::BRAND;
 SELECT 'Who should sales call first this week?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_decide answers ───────────────────────────────────
@@ -55,9 +55,7 @@ FROM s;
 CREATE OR REPLACE MACRO ld_now() AS TABLE FROM ld_leads(getvariable('model'));
 
 SELECT 12::COL;
-SELECT ('**Asked by** the head of sales development, every Monday. **The decision:** which inbound messages go to the sales team, in which order the reps call them, and what to open the call with. Today a coordinator sorts the shared inbox by hand and the reps call the sales enquiries first come, first served. '
-        || '**Stored results:** the answers were computed natively with **anofox_decide** `' || (SELECT extension_version FROM ld_provenance)
-        || '` and two local models (ONNX Runtime, not available in the browser); routing, scores and the call list are computed live, in SQL, from those stored answers and the CRM outcomes of 300 messages.')::MARKDOWN;
+SELECT ('**Asked by** the head of sales development, every Monday. **The decision:** which inbound messages go to the sales team, in which order the reps call them, and what to open the call with. Today a coordinator sorts the shared inbox by hand and the reps call the sales enquiries first come, first served.')::MARKDOWN;
 
 SELECT 'Routing and call list'::GROUP;
 SELECT model ::DROPDOWN, 'Decision model'::LABEL FROM (SELECT DISTINCT model FROM ld_scored) ORDER BY model DESC;

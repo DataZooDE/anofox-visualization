@@ -18,7 +18,7 @@
 -- Tabs: Overview · Schema & completeness · Volume & prices · Go / no-go.
 -- Natively, run from web/:  dashboard --check ../examples/tabular-feed/showcase.sql
 
-SELECT 'anofox_tabular · stored results'::BRAND;
+SELECT 'anofox_tabular'::BRAND;
 SELECT 'Is today''s supplier feed safe to load?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_tabular results ──────────────────────────────────
@@ -61,12 +61,9 @@ SELECT delivery_date,
             WHEN count(*) FILTER (WHERE verdict = 'warn') > 0 THEN 'GO with warnings' ELSE 'GO' END AS decision
 FROM fm_eval GROUP BY delivery_date;
 
--- ── Header: the question, provenance, inputs, KPIs ───────────────────────────
+-- ── Header: the question, inputs, KPIs ───────────────────────────────────────
 SELECT 12::COL;
-SELECT ('**Who asks:** the data engineer on duty at 07:00, before Nordwind''s nightly price and stock file is loaded into the shop''s product catalogue. A bad load puts wrong prices and stock on the website within the hour; holding it back means yesterday''s prices for another day. '
-        || '**Stored results:** computed natively with anofox_tabular `' || (SELECT extension_version FROM fm_provenance)
-        || '` on DuckDB ' || (SELECT duckdb_version FROM fm_provenance)
-        || '; your browser only re-slices them (the extension has no DuckDB-Wasm build).')::MARKDOWN;
+SELECT ('**Who asks:** the data engineer on duty at 07:00, before Nordwind''s nightly price and stock file is loaded into the shop''s product catalogue. A bad load puts wrong prices and stock on the website within the hour; holding it back means yesterday''s prices for another day.')::MARKDOWN;
 
 SELECT 'Inputs'::GROUP;
 SELECT strftime(delivery_date, '%Y-%m-%d') AS delivery ::DROPDOWN, 'Delivery to judge' ::LABEL

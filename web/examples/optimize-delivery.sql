@@ -16,7 +16,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/optimize-delivery/showcase.sql
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_optimize · stored results'::BRAND;
+SELECT 'anofox_optimize'::BRAND;
 SELECT 'Which van serves which stop tomorrow, so every customer gets its delivery on time?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_optimize plans (CSV) ─────────────────────────────
@@ -42,9 +42,7 @@ CREATE OR REPLACE MACRO dr_cost(km, driver_h, vans) AS round(km * dr_eur_km() + 
 -- ── Header: the question, who asks it, inputs, KPIs ──────────────────────────
 SELECT 12::COL;
 SELECT ('**The dispatcher** of a food wholesaler plans tomorrow''s deliveries at 15:00: 40 bakeries, cafés, restaurants, shops and a canteen, each with a deadline (bakeries before they open at 07:30, restaurants before lunch prep) and 1–3 roll cages; a van takes ' || dr_cap() || ' cages and leaves at 06:00. Today each driver has a fixed district and drives the order list. '
-        || 'The optimised plans assign stops by a capacity-balanced sweep around the depot and order each van with `opt_sequence_best_of` (shortest route) or `opt_schedule_exact` (least lateness against the deadlines). '
-        || '**Stored results:** computed natively with anofox_optimize `' || (SELECT extension_version FROM dr_provenance) || '` on DuckDB ' || (SELECT duckdb_version FROM dr_provenance)
-        || ' (`examples/optimize-delivery/compute.sql`); the inputs pick among stored plans, nothing is re-solved in your browser.')::MARKDOWN;
+        || 'The optimised plans assign stops by a capacity-balanced sweep around the depot and order each van with `opt_sequence_best_of` (shortest route) or `opt_schedule_exact` (least lateness against the deadlines).')::MARKDOWN;
 
 SELECT 'Planning inputs'::GROUP;
 SELECT plan ::DROPDOWN, 'Plan (vs. today''s districts)'::LABEL FROM (VALUES (1, 'deadline-aware'), (2, 'shortest route')) t(k, plan) ORDER BY k;
