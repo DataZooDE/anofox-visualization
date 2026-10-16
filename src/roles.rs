@@ -68,6 +68,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LABEL", &[], R::Label, "encoding", true,
       "section heading when alone; chart title / per-mark or per-feature label otherwise"),
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
+    e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
+      "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
@@ -118,6 +120,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "value as an arc toward ::RANGE 'min,max' (zones: ::COLORS, ::LABELS)"),
     e("RADAR", &["SPIDER"], R::Value(Kind::Radar), "chart", true,
       "radar / spider chart — axes from XAXIS, one polygon per CATEGORY"),
+    e("WATERFALL", &["BRIDGE"], R::Value(Kind::Waterfall), "chart", true,
+      "bridge from a start total through signed steps (NULL / ::CATEGORY 'total' rows = totals)"),
+    e("BULLET", &["BULLETCHART"], R::Value(Kind::Bullet), "chart", true,
+      "measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100'"),
+    e("FUNNEL", &["FUNNELCHART"], R::Value(Kind::Funnel), "chart", true,
+      "ordered XAXIS stages, widths by value, conversion % from the previous stage"),
     e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure"),
     e("DENSITY", &["KDE"], R::Value(Kind::Density), "chart", true,
       "kernel density curve (one per CATEGORY)"),
@@ -140,8 +148,9 @@ pub static REGISTRY: &[RoleSpec] = &[
       "grey WKT backdrop layer under a ::MAP"),
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
-      "horizontal reference line per distinct value"),
-    e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
+      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick"),
+    e("XLINE", &[], R::VLine, "annotation", true,
+      "vertical reference line at an x (a number, date or timestamp)"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,
@@ -150,6 +159,18 @@ pub static REGISTRY: &[RoleSpec] = &[
       "upper edge of a shaded band"),
     e("MARKAREA", &["MARK_AREA", "SHADE"], R::MarkArea, "annotation", true,
       "shade the x-region [min, max] of this column"),
+    e("XLINE_LABEL", &["EVENT_LABEL"], R::VLineLabel, "annotation", true,
+      "label of the ::XLINE on the same row, at the top of the line (events from data)"),
+    e("REFLINE_LABEL", &["YLINE_LABEL", "TARGET_LABEL"], R::RefLineLabel, "annotation", true,
+      "label of the ::REFLINE on the same row, above its right end"),
+    e("XBAND_FROM", &["SHADE_FROM"], R::XBandFrom, "annotation", true,
+      "start of a shaded x-range, one per row (a number, date or timestamp)"),
+    e("XBAND_TO", &["SHADE_TO"], R::XBandTo, "annotation", true,
+      "end of the shaded x-range started by ::XBAND_FROM on the same row"),
+    e("XBAND_LABEL", &["SHADE_LABEL"], R::XBandLabel, "annotation", true,
+      "label of the shaded x-range on the same row"),
+    e("ANNOTATE", &["ANNOTATION"], R::Annotate, "annotation", true,
+      "a text callout at the row's (x, y); NULL rows draw nothing"),
     e("DATALABELS", &["DATALABEL", "VALUELABELS", "SHOWLABELS"], R::DataLabels, "annotation", true,
       "draw the value on each mark or heatmap cell (value = font size)"),
     e("ABLINE", &["AB_LINE"], R::AbLine, "annotation", true,
@@ -174,7 +195,9 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
-    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100)"),
+    e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
+      "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
+    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
       "gauge zone colours, comma-separated hex"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
@@ -192,11 +215,17 @@ pub static REGISTRY: &[RoleSpec] = &[
       "comparison value → trend arrow + % on a KPI (up = good)"),
     e("DELTA_LOWER_GOOD", &["COMPARE_LOWER_GOOD", "DELTA_INVERSE"], R::DeltaLowerGood, "kpi", true,
       "comparison value where lower is better (churn, cost): a rise is drawn red"),
+    e("DELTA_FORMAT", &["DELTAFORMAT"], R::DeltaFormat, "kpi", true,
+      "how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both'"),
+    e("DELTA_LABEL", &["DELTALABEL", "COMPARE_LABEL"], R::DeltaLabel, "kpi", true,
+      "what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label')"),
     e("TEXT_SMALL", &[], R::Text(TextSize::Small), "kpi", true, "small text card"),
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
     e("MARKDOWN", &["MD", "TEXTBOX", "RICHTEXT"], R::Markdown, "kpi", true,
-      "a Markdown box (browser)"),
+      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row"),
+    e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
+      "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     // ── tables ─────────────────────────────────────────────────────────────
     e("TABLE", &["GRID"], R::Table, "table", true,
       "the whole result as a table (one marker per panel)"),
@@ -209,6 +238,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "heatmap-colour a table column's cells, high = green (scores, accuracy)"),
     e("COLORSCALE_DIVERGING", &["DIVERGING", "HEAT_DIVERGING"], R::ColorScale(Scale::Diverging), "table", true,
       "colour a table column's cells around zero: negative red, positive green (deltas)"),
+    e("LINK", &["DRILLTHROUGH", "DRILL_THROUGH", "HREF"], R::Link, "table", true,
+      "drill-through on a chart click / a table link cell: '#Tab', '?v.x={value}', '/d/<id>?v.x={value}' or an https: URL ({value}, {column} placeholders)"),
     e("BADGE", &["STATUS", "PILL"], R::Badge, "table", true, "render a table column as status pills"),
     e("PLAIN", &["NOBAR"], R::Plain, "table", true, "a plain table column (no in-cell bar)"),
     e("DOWNLOAD_CSV", &[], R::Download(DownloadFmt::Csv), "table", false, "CSV export button"),
@@ -229,6 +260,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "free-text input (value = default)"),
     e("DATERANGE", &["DATE_RANGE"], R::Input(InputKind::DateRange), "input", false,
       "two date columns → from/to variables"),
+    e("PERIOD", &["PERIOD_PICKER", "DATE_PERIOD"], R::Input(InputKind::Period), "input", false,
+      "date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label"),
+    e("BUTTONS", &["BUTTON_GROUP", "SEGMENTED"], R::Input(InputKind::Buttons), "input", false,
+      "segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher)"),
+    e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
+      "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
@@ -246,6 +283,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2'"),
     e("SUBTOTAL", &["SUBTOTALS", "GROUP_TOTAL"], R::TableOpt(TableOpt::Subtotal), "layout", false,
       "next table: a subtotal row after each group of a column — 'region' (not for ::PAGED)"),
+    e("SELECT_AS", &["SELECTAS", "SELECTION"], R::SelectAs, "layout", false,
+      "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
+    e("EMPTY", &["EMPTY_MESSAGE", "NODATA"], R::Empty, "layout", false,
+      "next panel's message when its result is empty: 'No orders in range — widen the dates'"),
+    e("DRILL", &["DRILLDOWN", "DRILL_DOWN"], R::Drill, "layout", false,
+      "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
@@ -267,6 +310,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "brand / organisation name shown above the dashboard title"),
     e("LOGO", &[], R::Logo, "chrome", false, "header logo image URL (relative, https: or data:image/)"),
     e("FAVICON", &[], R::Favicon, "chrome", false, "browser-tab icon URL"),
+    e("ASOF", &["AS_OF", "FRESHNESS", "DATA_AS_OF"], R::AsOf, "chrome", false,
+      "data freshness: a 'Data as of 14:02 (2 h ago)' chip in the header; a 'stale=24h' column turns it amber"),
 ];
 
 /// Role tokens that are **also DuckDB type names** (`x::DATE` is a real cast).
@@ -319,7 +364,13 @@ impl Role {
 /// True when any role in a planned panel is a non-rendering directive — static
 /// renderers (CLI, `serve`, headless SVG) and the linter skip such statements.
 pub fn is_directive_panel(roles: &[(usize, Role)]) -> bool {
-    roles.iter().any(|(_, r)| !r.renders())
+    roles.iter().any(|(_, r)| !r.renders()) || is_table_thresholds(roles)
+}
+
+/// A lone `::THRESHOLDS` statement: the next table's per-column rules (a
+/// directive), not a panel. Beside other roles it modifies that panel.
+pub fn is_table_thresholds(roles: &[(usize, Role)]) -> bool {
+    matches!(roles, [(_, Role::Thresholds)])
 }
 
 /// Canonical tokens by category (aliases exist but prefer these).
@@ -402,6 +453,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
+                | Role::SelectAs | Role::Drill | Role::Empty
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -424,6 +476,7 @@ pub fn is_chrome_directive(r: Role) -> bool {
             | Role::Brand
             | Role::Logo
             | Role::Favicon
+            | Role::AsOf
     )
 }
 
@@ -437,6 +490,7 @@ pub fn is_table_format(r: Role) -> bool {
             | Role::Badge
             | Role::Value(Kind::Sparkline)
             | Role::Plain
+            | Role::Link
     )
 }
 
@@ -515,6 +569,8 @@ mod tests {
             "TAB",
             "SUBTAB",
             "PLACEHOLDER",
+            "SELECT_AS",
+            "DRILL",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -578,6 +634,9 @@ mod tests {
             K::Candlestick,
             K::Radar,
             K::Bubble,
+            K::Waterfall,
+            K::Bullet,
+            K::Funnel,
         ];
         let mut v: Vec<Role> = kinds.into_iter().map(Role::Value).collect();
         v.extend(
@@ -588,6 +647,9 @@ mod tests {
                 I::Text,
                 I::Multiselect,
                 I::DateRange,
+                I::Period,
+                I::Buttons,
+                I::Toggle,
             ]
             .map(Role::Input),
         );
@@ -615,6 +677,8 @@ mod tests {
             Role::PagedTable,
             Role::Delta,
             Role::DeltaLowerGood,
+            Role::DeltaFormat,
+            Role::DeltaLabel,
             Role::RefLine,
             Role::VLine,
             Role::BandLower,
@@ -644,6 +708,13 @@ mod tests {
             Role::XFormat,
             Role::DataLabels,
             Role::MarkArea,
+            Role::VLineLabel,
+            Role::RefLineLabel,
+            Role::XBandFrom,
+            Role::XBandTo,
+            Role::XBandLabel,
+            Role::Annotate,
+            Role::Thresholds,
             Role::Markdown,
             Role::Open,
             Role::High,
@@ -670,7 +741,14 @@ mod tests {
             Role::Brand,
             Role::Logo,
             Role::Favicon,
+            Role::AsOf,
+            Role::Info,
+            Role::Callout,
             Role::Section,
+            Role::SelectAs,
+            Role::Drill,
+            Role::Link,
+            Role::Empty,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -694,6 +772,8 @@ mod tests {
                 | Role::Metric(_)
                 | Role::Delta
                 | Role::DeltaLowerGood
+                | Role::DeltaFormat
+                | Role::DeltaLabel
                 | Role::RefLine
                 | Role::VLine
                 | Role::BandLower
@@ -723,6 +803,13 @@ mod tests {
                 | Role::XFormat
                 | Role::DataLabels
                 | Role::MarkArea
+                | Role::VLineLabel
+                | Role::RefLineLabel
+                | Role::XBandFrom
+                | Role::XBandTo
+                | Role::XBandLabel
+                | Role::Annotate
+                | Role::Thresholds
                 | Role::Markdown
                 | Role::Open
                 | Role::High
@@ -749,7 +836,14 @@ mod tests {
                 | Role::Brand
                 | Role::Logo
                 | Role::Favicon
-                | Role::Section => {}
+                | Role::AsOf
+                | Role::Info
+                | Role::Callout
+                | Role::Section
+                | Role::SelectAs
+                | Role::Drill
+                | Role::Link
+                | Role::Empty => {}
             }
         }
         v

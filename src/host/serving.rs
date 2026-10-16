@@ -929,6 +929,26 @@ mod tests {
         );
     }
 
+    /// A `::PERIOD`'s eight variables (as the browser captures them from its
+    /// `SET VARIABLE`s) are accepted and bound as literals, NULLs included.
+    #[test]
+    fn panel_request_with_period_vars() {
+        let res = crate::period::resolve_json("default=mtd; compare=none; today=2026-03-31", "{}");
+        let vars: serde_json::Map<String, serde_json::Value> = res["vars"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (format!("p_{k}"), v.clone()))
+            .collect();
+        assert_eq!(vars.len(), crate::period::SUFFIXES.len());
+        let body = serde_json::json!({"dashboard": "sales", "panel": 4, "vars": vars});
+        let r = parse_panel_request(&body.to_string()).unwrap();
+        assert!(r.vars.contains(&("p_from".into(), "'2026-03-01'".into())));
+        assert!(r.vars.contains(&("p_prev_from".into(), "NULL".into())));
+        assert!(r.vars.contains(&("p_label".into(), "'Mar 2026'".into())));
+        assert!(r.vars.contains(&("p_grain".into(), "'day'".into())));
+    }
+
     #[test]
     fn page_column_filters_stats_distinct() {
         let page = |j: &str| parse_page(&serde_json::from_str(j).unwrap());

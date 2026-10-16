@@ -26,15 +26,21 @@ pub mod contract;
 pub mod dashboard;
 mod downsample;
 pub mod format;
+pub mod freshness;
 pub mod host;
+pub mod inputs;
+pub mod kpi;
 pub mod lint;
 pub mod macros;
 pub mod page;
+pub mod period;
 pub mod roles;
 mod smooth;
 pub mod sql;
 pub mod table;
 pub mod theme;
+pub mod thresholds;
+mod variance;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -95,6 +101,14 @@ pub enum Kind {
     /// chart measure (`y::SCATTER, pop::BUBBLE`) it is that chart's size.
     /// Resolved before rendering (never reaches a geom).
     Bubble,
+    /// A bridge from a start total to an end total through signed steps
+    /// (`::WATERFALL`).
+    Waterfall,
+    /// A measure against a `::GOAL` over `::RANGE` bands, one row per
+    /// category (`::BULLET`).
+    Bullet,
+    /// Ordered conversion stages, widths by value (`::FUNNEL`).
+    Funnel,
 }
 
 impl Kind {
@@ -115,6 +129,9 @@ impl Kind {
                 | Kind::Candlestick
                 | Kind::Radar
                 | Kind::Sparkline
+                | Kind::Waterfall
+                | Kind::Bullet
+                | Kind::Funnel
         )
     }
 }
@@ -144,6 +161,12 @@ pub enum InputKind {
     Text,
     Multiselect,
     DateRange,
+    /// `::PERIOD`: date presets + grain + comparison ([`period`]).
+    Period,
+    /// A segmented button group (`::BUTTONS`): one of a few options.
+    Buttons,
+    /// A boolean switch (`::TOGGLE`): `TRUE` / `FALSE`.
+    Toggle,
 }
 
 /// How a KPI value is formatted.
@@ -228,7 +251,14 @@ pub enum Role {
     /// A comparison value where lower is better (`::DELTA_LOWER_GOOD`: churn,
     /// cost, errors) — the same arrow, a rise drawn in the negative colour.
     DeltaLowerGood,
-    /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`).
+    /// How a KPI's change reads (`::DELTA_FORMAT`): `'pct'` (default),
+    /// `'abs'` (the absolute change in the KPI's own format) or `'both'`.
+    DeltaFormat,
+    /// What a KPI's change compares against (`::DELTA_LABEL`), e.g.
+    /// `'vs last month'` — shown after the change.
+    DeltaLabel,
+    /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`);
+    /// in a KPI statement (`::GOAL`/`::TARGET`) the KPI's goal → a progress bar.
     RefLine,
     /// A vertical reference line at an x-position (`::XLINE`).
     VLine,
@@ -293,9 +323,32 @@ pub enum Role {
     /// Shade a vertical x-region behind the data (`::MARKAREA`): the band spans
     /// [min, max] of this column's (non-null) x-values.
     MarkArea,
+    /// The label of the `::XLINE` on the same row (`::XLINE_LABEL`), drawn at
+    /// the top of the line — an event ("Launch", "Outage") from data rows.
+    VLineLabel,
+    /// The label of the `::REFLINE` on the same row (`::REFLINE_LABEL`), drawn
+    /// above the line's right end.
+    RefLineLabel,
+    /// Start of a labelled shaded x-range, one per row (`::XBAND_FROM`).
+    XBandFrom,
+    /// End of a labelled shaded x-range (`::XBAND_TO`), see [`Role::XBandFrom`].
+    XBandTo,
+    /// The label of the shaded range on the same row (`::XBAND_LABEL`).
+    XBandLabel,
+    /// A text callout at the row's (x, y) (`::ANNOTATE`); NULL rows draw nothing.
+    Annotate,
+    /// Threshold rules (`::THRESHOLDS '<0:bad; <0.05:warn; good'`): the status
+    /// colours a KPI value, a gauge's zones and a chart's threshold lines; a
+    /// lone `::THRESHOLDS` statement is the next table's per-column rules.
+    Thresholds,
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
+    Info,
+    /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
+    /// `'warning'` or `'success'` (the value).
+    Callout,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).
@@ -355,8 +408,28 @@ pub enum Role {
     Logo,
     /// Page favicon URL (`::FAVICON`).
     Favicon,
+    /// The data's freshness (`::ASOF`): a "Data as of …" chip in the header,
+    /// amber once older than an optional `'stale=24h'` column.
+    AsOf,
     /// A section heading that always starts a new row (`::SECTION`).
     Section,
+    /// Interaction: `::SELECT_AS` names the *next* chart's selection — a click
+    /// sets `getvariable('<name>')` instead of the shared `selected` (value
+    /// `'name'` or `'name multi'`), a brush on a continuous x sets
+    /// `<name>_from` / `<name>_to`.
+    SelectAs,
+    /// Layout: `::EMPTY` — the *next* panel's message when its query returns
+    /// no rows (default: "No data for this selection").
+    Empty,
+    /// Interaction: `::DRILL` makes the *next* chart a drill-down over a level
+    /// path (`'region > country > city'`, `'geo: …'` names the variables) —
+    /// `<prefix>_level` / `_depth` / `_path` plus one variable per level, and a
+    /// breadcrumb back.
+    Drill,
+    /// A drill-through target (`::LINK`): a template — `#Tab`, `?v.x=…`,
+    /// `/d/<id>?v.x=…` or an `https:` URL — with `{value}` / `{column}`
+    /// placeholders, followed on a chart click or from a table's link cell.
+    Link,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1343,6 +1416,16 @@ fn render_inner(
         .and_then(|c| c.values.first())
         .map(value_str);
 
+    // A KPI / text card (value, change, sparkline, goal) — the same tile as
+    // the headless dashboard; at most its natural height.
+    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
+        let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
+        return Ok(Panel::Own {
+            width,
+            height: h,
+            body: k.body(width as f64, h as f64, o),
+        });
+    }
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
     if cols.iter().any(|c| c.role == Role::Geometry) {
         if map_geometry(cols).is_none() {
@@ -1398,6 +1481,15 @@ fn render_inner(
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, width, height),
+        Kind::Waterfall => {
+            return variance::render_waterfall(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Bullet => {
+            return variance::render_bullet(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Funnel => {
+            return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
         _ => {}
     }
     render_cartesian(o, kind, value, cols, title, width, height)
@@ -1417,6 +1509,14 @@ fn role_str(cols: &[Column], role: Role) -> Option<String> {
             _ => None,
         })
     })
+}
+
+/// The panel's `::THRESHOLDS` rules: `None` without the role, an error for a
+/// malformed rule set.
+fn thresholds_of(cols: &[Column]) -> Result<Option<thresholds::Rules>, String> {
+    role_str(cols, Role::Thresholds)
+        .map(|s| thresholds::Rules::parse(&s))
+        .transpose()
 }
 
 /// A format spec (`::YFORMAT` / `::XFORMAT`) as written: a leading space is
@@ -2181,7 +2281,10 @@ fn cartesian(
         | Kind::Calendar
         | Kind::Candlestick
         | Kind::Radar
-        | Kind::Sparkline => {
+        | Kind::Sparkline
+        | Kind::Waterfall
+        | Kind::Bullet
+        | Kind::Funnel => {
             unreachable!("handled above")
         }
     };
@@ -2366,6 +2469,25 @@ fn cartesian(
             )
         }
         .layer_data(frame);
+    }
+    plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
+    // Threshold lines (`::THRESHOLDS`): one at each bound where the status
+    // changes, in the colour of the worse side.
+    if let Some(rules) = thresholds_of(cols)? {
+        for (y, st) in rules.boundaries() {
+            plot = plot
+                .geom_hline_aes_with(
+                    GeomHline {
+                        yintercept: 0.0,
+                        color: st.color(&o.theme),
+                        width: 1.1,
+                        linetype: Linetype::Dashed,
+                        alpha: 0.9,
+                    },
+                    Aes::new().yintercept("ty"),
+                )
+                .layer_data(vec![("ty".to_string(), vec![Value::Float(y)])]);
+        }
     }
     // Cook's-distance contours (`::COOKS_CONTOUR p`) on residuals vs leverage.
     if let Some(p) = role_num(cols, Role::CooksContour).filter(|p| *p >= 1.0) {
@@ -3386,6 +3508,249 @@ pub(crate) fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     (f(r), f(g), f(b))
 }
 
+/// Annotations driven by data rows (#31): a label on the `::XLINE` /
+/// `::REFLINE` of the same row (`::XLINE_LABEL`, `::REFLINE_LABEL`), labelled
+/// shaded x-ranges (`::XBAND_FROM` + `::XBAND_TO` [+ `::XBAND_LABEL`]) and
+/// text callouts at a row's (x, y) (`::ANNOTATE`). Events usually come from a
+/// `LEFT JOIN events ON events.day = t.day`, so only the event rows carry
+/// values; NULL / empty cells draw nothing. Ink and shading come from the
+/// theme (`muted` wash, chart label colour), so dark mode follows.
+fn data_annotations(
+    mut plot: GGPlot,
+    o: &RenderOptions,
+    kind: Kind,
+    cols: &[Column],
+    data: &[(String, Vec<Value>)],
+    x_discrete: bool,
+) -> GGPlot {
+    const MAX_NOTES: usize = 64;
+    let text_at = |c: Option<&Column>, i: usize| -> Option<String> {
+        c.and_then(|c| c.values.get(i))
+            .filter(|v| **v != Value::Na)
+            .map(|v| value_str(v).trim().to_string())
+            .filter(|t| !t.is_empty())
+    };
+    let finite = |v: &Value| v.as_f64().is_some_and(f64::is_finite);
+    let num = |v: Vec<f64>| v.into_iter().map(Value::Float).collect::<Vec<_>>();
+    let text = |v: Vec<String>| v.into_iter().map(Value::Str).collect::<Vec<_>>();
+    let ink = o.theme.chart_label();
+    let top = annotation_top(kind, cols, data);
+    // Text anchored at its bottom-left, just right of an x position, in the
+    // headroom above the data (the y scale's expansion).
+    let top_labels = |plot: GGPlot, xs: Vec<Value>, labels: Vec<String>| -> GGPlot {
+        let Some(y) = top.filter(|_| !xs.is_empty()) else {
+            return plot;
+        };
+        let k = xs.len();
+        plot.geom_text_with(GeomText {
+            size: 9.5,
+            color: ink,
+            hjust: 0.0,
+            vjust: 0.0,
+            check_overlap: true,
+            ..Default::default()
+        })
+        .layer_data(vec![
+            ("x".to_string(), xs),
+            ("y".to_string(), num(vec![y; k])),
+            ("label".to_string(), text(labels)),
+        ])
+        .layer_aes(Aes::new().x("x").y("y").label("label"))
+    };
+
+    // Labelled shaded ranges, one per distinct (from, to, label) row.
+    if let (false, Some(from), Some(to)) = (
+        x_discrete,
+        find_role(cols, Role::XBandFrom),
+        find_role(cols, Role::XBandTo),
+    ) {
+        let lab = find_role(cols, Role::XBandLabel);
+        let mut seen = std::collections::HashSet::new();
+        let (mut x0, mut x1, mut lx, mut ls) = (vec![], vec![], vec![], vec![]);
+        for (i, (a, b)) in from.values.iter().zip(&to.values).enumerate() {
+            if !finite(a) || !finite(b) || x0.len() >= MAX_NOTES {
+                continue;
+            }
+            let (a, b) = if a.as_f64() <= b.as_f64() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let label = text_at(lab, i);
+            if !seen.insert((value_str(a), value_str(b), label.clone())) {
+                continue;
+            }
+            x0.push(a.clone());
+            x1.push(b.clone());
+            if let Some(l) = label {
+                lx.push(a.clone());
+                ls.push(format!("\u{a0}{l}"));
+            }
+        }
+        if !x0.is_empty() {
+            let k = x0.len();
+            let shade = o.theme.colors.muted;
+            plot = plot
+                .geom_rect_with(GeomRect {
+                    fill: shade,
+                    color: shade,
+                    alpha: 0.13,
+                    line_width: 0.0,
+                })
+                .layer_data(vec![
+                    ("bx0".to_string(), x0),
+                    ("bx1".to_string(), x1),
+                    ("by0".to_string(), num(vec![f64::NEG_INFINITY; k])),
+                    ("by1".to_string(), num(vec![f64::INFINITY; k])),
+                ])
+                .layer_aes(Aes::new().xmin("bx0").xmax("bx1").ymin("by0").ymax("by1"));
+            plot = top_labels(plot, lx, ls);
+        }
+    }
+
+    // Event labels at the top of their ::XLINE.
+    if let (false, Some(line), Some(lab)) = (
+        x_discrete,
+        find_role(cols, Role::VLine),
+        find_role(cols, Role::VLineLabel),
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let (mut xs, mut ls) = (vec![], vec![]);
+        for (i, v) in line.values.iter().enumerate() {
+            let Some(l) = text_at(Some(lab), i).filter(|_| finite(v)) else {
+                continue;
+            };
+            if xs.len() < MAX_NOTES && seen.insert((value_str(v), l.clone())) {
+                xs.push(v.clone());
+                ls.push(format!("\u{a0}{l}"));
+            }
+        }
+        plot = top_labels(plot, xs, ls);
+    }
+
+    // Reference-line labels above the line's right end.
+    if let (Some(line), Some(lab)) = (
+        find_role(cols, Role::RefLine),
+        find_role(cols, Role::RefLineLabel),
+    ) {
+        let xcol = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
+        let right = xcol.and_then(|xs| {
+            if x_discrete {
+                xs.iter().rev().find(|v| **v != Value::Na).cloned()
+            } else {
+                xs.iter()
+                    .filter(|v| finite(v))
+                    .max_by(|a, b| a.as_f64().partial_cmp(&b.as_f64()).unwrap())
+                    .cloned()
+            }
+        });
+        let mut seen = std::collections::HashSet::new();
+        let (mut ys, mut ls) = (vec![], vec![]);
+        for (i, v) in line.values.iter().enumerate() {
+            let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
+                continue;
+            };
+            if let Some(l) = text_at(Some(lab), i) {
+                if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
+                    ys.push(y);
+                    ls.push(l);
+                }
+            }
+        }
+        if let (Some(rx), false) = (right, ys.is_empty()) {
+            let k = ys.len();
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 9.5,
+                    color: ink,
+                    hjust: 1.0,
+                    vjust: -0.25,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".to_string(), vec![rx; k]),
+                    ("y".to_string(), num(ys)),
+                    ("label".to_string(), text(ls)),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("label"));
+        }
+    }
+
+    // Point callouts: the annotated mark gets a ring and a repelled label.
+    if let Some(note) = find_role(cols, Role::Annotate) {
+        let xs = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
+        let ys = data.iter().find(|(k, _)| k == "y").map(|(_, v)| v);
+        if let (Some(xs), Some(ys)) = (xs, ys) {
+            let idx: Vec<usize> = (0..xs.len().min(ys.len()))
+                .filter(|&i| xs[i] != Value::Na && finite(&ys[i]))
+                .filter(|&i| text_at(Some(note), i).is_some())
+                .take(MAX_NOTES)
+                .collect();
+            if !idx.is_empty() {
+                let mut frame = subset(data, &idx);
+                frame.retain(|(n, _)| matches!(n.as_str(), "x" | "y" | "facet"));
+                frame.push((
+                    "txt".to_string(),
+                    text(idx.iter().filter_map(|&i| text_at(Some(note), i)).collect()),
+                ));
+                plot = plot
+                    .geom_point_with(GeomPoint {
+                        color: ink,
+                        size: 3.2,
+                        ..Default::default()
+                    })
+                    .layer_data(frame.clone())
+                    .layer_aes(Aes::new().x("x").y("y"))
+                    .geom_text_repel_with(GeomTextRepel {
+                        size: 10.0,
+                        color: ink,
+                        fontface: FontFace::Bold,
+                        repel: RepelParams {
+                            segment_color: Some(o.theme.chart_text()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .layer_data(frame)
+                    .layer_aes(Aes::new().x("x").y("y").label("txt"));
+            }
+        }
+    }
+    plot
+}
+
+/// The top of a chart's data in y units — where event / range labels sit
+/// (above it, in the scale's headroom). Stacked marks stack per x.
+fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) -> Option<f64> {
+    let col = |n: &str| data.iter().find(|(k, _)| k == n).map(|(_, v)| v);
+    let max = |it: &mut dyn Iterator<Item = f64>| it.filter(|f| f.is_finite()).reduce(f64::max);
+    match kind {
+        Kind::BarStackedPercent => return Some(1.0),
+        Kind::BarStacked | Kind::AreaStacked => {
+            let (x, y) = (col("x")?, col("y")?);
+            let mut sums: std::collections::HashMap<String, f64> = Default::default();
+            for (xv, yv) in x.iter().zip(y) {
+                if let Some(f) = yv.as_f64().filter(|f| f.is_finite() && *f > 0.0) {
+                    *sums.entry(value_str(xv)).or_default() += f;
+                }
+            }
+            return max(&mut sums.into_values());
+        }
+        _ => {}
+    }
+    let ycols = data
+        .iter()
+        .filter(|(k, _)| {
+            k == "y" || k == "ihi" || (k.starts_with('y') && k[1..].parse::<u32>().is_ok())
+        })
+        .flat_map(|(_, v)| v.iter());
+    let extra = cols
+        .iter()
+        .filter(|c| matches!(c.role, Role::RefLine | Role::BandUpper))
+        .flat_map(|c| c.values.iter());
+    max(&mut ycols.chain(extra).filter_map(Value::as_f64))
+}
+
 /// Distinct finite numeric values from a column, in first-seen order — used to
 /// draw one reference line per value.
 fn distinct_nums(vals: &[Value]) -> Vec<f64> {
@@ -3480,7 +3845,17 @@ fn render_gauge(
                 .collect()
         })
         .unwrap_or_default();
-    let n_zones = if zone_cols.is_empty() {
+    // `::THRESHOLDS` zones (status colours over the range) replace the equal
+    // `::COLORS` zones; the zone holding the value is drawn at full strength.
+    let rules = thresholds_of(cols)?;
+    let status_zones = rules
+        .as_ref()
+        .map(|r| r.zones(min, max))
+        .unwrap_or_default();
+    let value_status = rules.as_ref().and_then(|r| r.status(val));
+    let n_zones = if !status_zones.is_empty() {
+        0 // ::LABELS name equal zones only
+    } else if zone_cols.is_empty() {
         zone_labels.len()
     } else {
         zone_cols.len()
@@ -3494,7 +3869,16 @@ fn render_gauge(
 
     // Bands: the zones, or a light track + a brand progress band.
     let (mut x0, mut x1, mut fill, mut pairs) = (vec![], vec![], vec![], vec![]);
-    if zone_cols.is_empty() {
+    if !status_zones.is_empty() {
+        for (i, (a, b, st)) in status_zones.iter().enumerate() {
+            x0.push(*a);
+            x1.push(*b);
+            fill.push(format!("z{i}"));
+            let on = (*a..=*b).contains(&shown);
+            let c = st.color(&o.theme);
+            pairs.push((format!("z{i}"), if on { c } else { wash(o, c, 0.6) }));
+        }
+    } else if zone_cols.is_empty() {
         x0.extend([min, min]);
         x1.extend([max, shown]);
         fill.extend(["track".to_string(), "value".to_string()]);
@@ -3532,7 +3916,7 @@ fn render_gauge(
                 .fill("fill"),
         );
     // Zone boundaries: thin white separators across the band (label-only zones).
-    if zone_cols.is_empty() && n_zones > 1 {
+    if zone_cols.is_empty() && status_zones.is_empty() && n_zones > 1 {
         let xs: Vec<f64> = (1..n_zones)
             .map(|i| at(i as f64 / n_zones as f64))
             .collect();
@@ -3619,7 +4003,7 @@ fn render_gauge(
         x: at(0.5),
         y: 0.0,
         size: big,
-        color: o.theme.colors.ink,
+        color: value_status.map_or(o.theme.colors.ink, |st| st.color(&o.theme)),
     });
     let caption = GeomText {
         size: 11.0,

@@ -14,6 +14,9 @@ import init, {
   page_sql,
   table_profile,
   human_header,
+  period_resolve,
+  kpi_parts,
+  threshold_rules,
 } from "./pkg/anofox_visualization.js";
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
@@ -73,7 +76,7 @@ SELECT 12::COL;
 SELECT 'The point of this example: **you don''t need a data source.** Every panel is a formula over DuckDB''s **range()** (a row-number generator), so the entire dashboard is computed on the fly — no table, file, or database. Handy for **synthetic demos, parametric what-ifs, and teaching**. It still exercises the full chart vocabulary from math alone: a **line with a ± confidence band** (::BAND_LOWER / ::BAND_UPPER), a **gauge**, a **scatter**, a **histogram**, and a **heatmap surface**, plus a KPI strip. Hover any chart for the toolbox.'::MARKDOWN, 'What this shows'::TITLE;
 
 SELECT 'Signal stats'::GROUP;
-SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL FROM range(0,120) t(i);
+SELECT round(avg(sin(i/6.0)*40+50),1)::METRIC, 'Mean'::LABEL, '<40:bad; <55:warn; good'::THRESHOLDS FROM range(0,120) t(i);
 SELECT round(max(sin(i/6.0)*40+50),1)::METRIC, 'Peak'::LABEL FROM range(0,120) t(i);
 SELECT round(stddev(sin(i/6.0)*40+50),1)::METRIC, 'Std dev'::LABEL FROM range(0,120) t(i);
 SELECT 1::ENDGROUP;
@@ -160,7 +163,7 @@ SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bars & columns'::TAB;
 SELECT 12::COL;
-SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, waterfall/bullet/funnel, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week × channel (stacked, € axis)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
 SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
@@ -174,6 +177,16 @@ SELECT 6::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART,
 SELECT 12::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
        (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
        'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
+-- annotations from data: events and ranges joined onto the days they mark
+SELECT 12::COL; SELECT c.d::XAXIS, c.value::LINECHART, e.d::XLINE, e.what::XLINE_LABEL,
+       b.f::XBAND_FROM, b.t::XBAND_TO, b.what::XBAND_LABEL,
+       CASE WHEN c.d = arg_max(c.d, c.value) OVER () THEN 'Busiest week' END::ANNOTATE,
+       40::REFLINE, 'Target'::REFLINE_LABEL,
+       'Events, a shaded range and a callout from SQL rows (::XLINE_LABEL, ::XBAND_*, ::ANNOTATE)'::TITLE
+FROM (SELECT date_trunc('week', d)::DATE AS d, round(avg(value), 1) AS value FROM cal GROUP BY 1) c
+LEFT JOIN (VALUES (DATE '2024-02-05', 'Launch'), (DATE '2024-09-16', 'Price change')) e(d, what) ON e.d = c.d
+LEFT JOIN (VALUES (DATE '2024-06-10', DATE '2024-07-01', 'Summer promo')) b(f, t, what) ON b.f = c.d
+ORDER BY c.d;
 
 SELECT 'Scatter & trends'::TAB;
 SELECT 6::COL; SELECT day::XAXIS, y::SMOOTH, 'Scatter + LOESS trend (::SMOOTH)'::TITLE FROM ts ORDER BY day;
@@ -193,8 +206,23 @@ SELECT 'Pie, gauge & radar'::TAB;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(revenue)::DONUTCHART, 'Donut'::TITLE FROM sales GROUP BY ALL;
 SELECT 6::COL; SELECT sum(n) FILTER (WHERE week='W4')::GAUGE, '0,120'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Gauge'::TITLE FROM sales;
+-- ::THRESHOLDS: one rule set gives a gauge its status zones and a chart its threshold lines
+SELECT 6::COL; SELECT 72::GAUGE, '0,100'::RANGE, '<50:bad; <80:warn; good'::THRESHOLDS, 'Gauge zones from ::THRESHOLDS — 72 is a warning'::TITLE;
+SELECT 6::COL; SELECT day::XAXIS, y::LINECHART, '<35:bad; <70:warn; good'::THRESHOLDS, 'Threshold lines from the same kind of rules'::TITLE FROM ts ORDER BY day;
 -- Radar (::RADAR): axes from x, one polygon per ::CATEGORY series.
 SELECT 6::COL; SELECT metric::XAXIS, score::RADAR, model::CATEGORY, 'Radar — model comparison'::TITLE FROM radar;
+
+SELECT 'Waterfall, bullet & funnel'::TAB;
+-- Waterfall (::WATERFALL): the first row is the start total, the others signed steps;
+-- a NULL value (or ::CATEGORY 'total') is a subtotal, and the bridge closes with an End total.
+SELECT 12::COL; SELECT step::XAXIS, eur::WATERFALL, '€'::YFORMAT, 'Volume beat budget; price and FX gave half of it back'::TITLE
+FROM (VALUES (1, 'Budget', 480), (2, 'Volume', 95), (3, 'Price', -38), (4, 'Mix', 22), (5, 'FX', -17)) t(i, step, eur) ORDER BY i;
+-- Bullet (::BULLET): the measure per row against its ::GOAL tick over ::RANGE bands.
+SELECT 6::COL; SELECT region::XAXIS, attained::BULLET, goal::GOAL, '60,85,110'::RANGE, '%'::YFORMAT, 'Two regions short of target'::TITLE
+FROM (VALUES (1, 'North', 92, 90), (2, 'South', 71, 85), (3, 'East', 104, 95), (4, 'West', 66, 80)) t(i, region, attained, goal) ORDER BY i;
+-- Funnel (::FUNNEL): ordered stages, widths by value, conversion from the previous stage.
+SELECT 6::COL; SELECT stage::XAXIS, n::FUNNEL, 'A quarter of sign-ups never start a trial'::TITLE
+FROM (VALUES (1, 'Visits', 48000), (2, 'Sign-ups', 6200), (3, 'Trials', 4650), (4, 'Paid', 1180)) t(i, stage, n) ORDER BY i;
 
 SELECT 'Heatmap, calendar & candlestick'::TAB;
 -- Heatmap (::HEATMAP): x × y tiles; rows keep the SQL order (first on top),
@@ -374,7 +402,8 @@ SELECT 'Fully **in-browser forecasting**: DuckDB-Wasm loads a Parquet and runs t
 
 -- The chart, prominent: history (lx_m) + 12-month SeasonalES forecast (lx_fc,
 -- shaded 95% interval) + BOTH methods' backtest predictions over the 12-month
--- holdout (lx_bt), for the selected item (defaults to the largest by forecast).
+-- holdout (lx_bt), for the selected item (defaults to the largest by forecast;
+-- a click on the chart itself selects a series name, not an item, and is ignored).
 SELECT 12::COL;
 SELECT ds       ::XAXIS,
        'Actual' ::CATEGORY,
@@ -382,18 +411,18 @@ SELECT ds       ::XAXIS,
        y        ::BAND_LOWER,
        y        ::BAND_UPPER,
        'History + 12-month SeasonalES forecast (shaded = 95% interval) + backtest'::TITLE
-FROM lx_m WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+FROM lx_m WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'Forecast', y, y, y, '' FROM lx_m
-  WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
+  WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1)) AND ds=(SELECT max(ds) FROM lx_m)
 UNION ALL
-SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+SELECT ds, 'Forecast', yhat, lo, hi, '' FROM lx_fc WHERE series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'SeasonalES (backtest)', predicted, predicted, predicted, '' FROM lx_bt
-  WHERE method='SeasonalES' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+  WHERE method='SeasonalES' AND series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 UNION ALL
 SELECT ds, 'SeasonalNaive (backtest)', predicted, predicted, predicted, '' FROM lx_bt
-  WHERE method='SeasonalNaive' AND series=COALESCE(NULLIF(getvariable('selected'),''),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
+  WHERE method='SeasonalNaive' AND series=COALESCE((SELECT item FROM lx_summary WHERE item = getvariable('selected')),(SELECT item FROM lx_summary ORDER BY fc_total DESC LIMIT 1))
 ORDER BY 1;
 
 -- Two tabs share the chart above: a per-series Summary and the Backtest
@@ -592,7 +621,7 @@ SELECT 'Filters & inputs — controls, date range & cross-filter'::LABEL;
 
 SELECT 'Inputs'::TAB;
 SELECT 12::COL;
-SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, two multiselects (the 80-option one is **searchable**), a slider (::NUMBER), free text, and a date. Each control''s output **column name becomes a DuckDB variable** — the charts read it with **getvariable(''name'')**, so changing a control re-runs their queries live. (Date range and cross-filter are on the next tabs.)'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, two multiselects (the 80-option one is **searchable**), a slider (::NUMBER), free text, and a date. Each control''s output **column name becomes a DuckDB variable** — the charts read it with **getvariable(''name'')**, so changing a control re-runs their queries live. **The address bar follows**: every changed control lands in the URL as \`?v.<name>=<value>\` (and Share copies it), so a reload or a link restores this exact view. (Date range and cross-filter are on the next tabs.)'::MARKDOWN, 'What this shows'::TITLE;
 
 -- the output COLUMN NAME becomes the DuckDB variable (getvariable('name'))
 SELECT 'Filters'::GROUP;
@@ -616,6 +645,8 @@ WHERE region = getvariable('region')
   AND (getvariable('selected') = '' OR channel = getvariable('selected'));
 
 SELECT 8::COL;
+-- ::EMPTY: what this panel says when the filters leave no rows (try min_n 60).
+SELECT 'No sessions match — lower the minimum or clear the text filter'::EMPTY;
 SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (all filters applied)'::TITLE
 FROM events
 WHERE region = getvariable('region')
@@ -632,6 +663,35 @@ WHERE list_contains(getvariable('code'), code);
 SELECT 8::COL;
 SELECT sum(v)::METRIC, 'Value across selected categories'::LABEL FROM cats
 WHERE list_contains(getvariable('code'), code);
+
+-- An optional input: one dashboard serves many runs, and not every run writes
+-- this file. \`-- @requires\` turns its absence into "Not available".
+SELECT 12::COL;
+-- @requires data/events/anomalies.parquet
+SELECT day::XAXIS, score::LINECHART, 'Anomaly score (optional output)'::TITLE
+FROM 'data/events/anomalies.parquet';
+
+SELECT 'Switch the view'::TAB;
+SELECT 12::COL;
+SELECT 'Compact inputs for a few choices: **::BUTTONS** is a segmented button group (one option pressed; the arrow keys move between them) and **::TOGGLE** an on/off switch whose variable is a BOOLEAN. Together they make a **metric / dimension switcher**: the chart picks its measure with **CASE getvariable(''metric'') WHEN …** and its grouping column with **COLUMNS(getvariable(''dim''))**. Like every input they land in the URL (\`?v.metric=Peak%20day\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 'View'::GROUP;
+SELECT m AS metric::BUTTONS, 'Measure'::LABEL FROM (VALUES (1, 'Sessions'), (2, 'Peak day'), (3, 'Active days')) t(o, m) ORDER BY o;
+SELECT d AS dim::BUTTONS, 'Split by'::LABEL FROM (VALUES (1, 'channel'), (2, 'region')) t(o, d) ORDER BY o;
+SELECT false AS launches_only::TOGGLE, 'Launch days only'::LABEL;
+SELECT 1::ENDGROUP;
+
+SELECT 12::COL;
+SELECT COLUMNS(getvariable('dim'))::XAXIS,
+       CASE getvariable('metric')
+         WHEN 'Sessions' THEN sum(n)
+         WHEN 'Peak day' THEN max(n)
+         ELSE count(DISTINCT day)
+       END::BARCHART,
+       (getvariable('metric') || ' by ' || getvariable('dim'))::TITLE
+FROM events
+WHERE NOT getvariable('launches_only') OR note = 'launch'
+GROUP BY ALL ORDER BY 2 DESC;
 
 SELECT 'Date range'::TAB;
 SELECT 12::COL;
@@ -668,6 +728,86 @@ SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & market)'::TITLE 
 WHERE (len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku))
   AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'))
 GROUP BY month ORDER BY month;`,
+      "Selections & drill": `-- A small sales cube: region > country > city, three channels, 26 weeks.
+CREATE OR REPLACE TABLE geo AS SELECT * FROM (VALUES
+  ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
+  ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
+  ('APAC','Japan','Tokyo'),('APAC','Japan','Osaka'),('APAC','Australia','Sydney')
+) t(region, country, city);
+CREATE OR REPLACE TABLE orders AS
+SELECT DATE '2024-01-01' + (7 * w)::INT AS week, g.region, g.country, g.city, c.channel,
+       (abs(hash(g.city || c.channel || w)) % 60 + 20 + 2 * w) AS revenue
+FROM geo g, (VALUES ('web'),('app'),('store')) c(channel), range(26) r(w);
+
+SELECT 'Selections & drill — named selections, brushing, drill-down and drill-through'::LABEL;
+
+SELECT 'Named selections'::TAB;
+SELECT 12::COL;
+SELECT 'Each chart below writes **its own variable** with **::SELECT_AS** instead of the shared getvariable(''selected''), so the selections compose. **Regions** is \`''regions multi''\`: click a bar to pick one, **shift/ctrl-click** to add more — getvariable(''regions'') is a list. **Channel** is single: getvariable(''channel'') is one value. On the **weekly line**, open the toolbox **▧ brush** and drag across a few weeks: the brushed range lands in getvariable(''week_from'') / getvariable(''week_to''). Each selection shows as a chip (× clears it); **Esc** or a click on empty space clears them all, and the address bar keeps them (\`?v.regions=EU&v.week_from=…\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 4::COL; SELECT 'regions multi'::SELECT_AS;
+SELECT region::XAXIS, sum(revenue)::BARCHART, 'Regions (click, shift-click)'::TITLE FROM orders
+WHERE channel = coalesce(nullif(getvariable('channel'), ''), channel)
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
+GROUP BY region ORDER BY 2 DESC;
+SELECT 4::COL; SELECT 'channel'::SELECT_AS;
+SELECT channel::XAXIS, sum(revenue)::BARCHART, ''::FLIP, 'Channel (click)'::TITLE FROM orders
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
+GROUP BY channel ORDER BY 2;
+SELECT 4::COL;
+SELECT sum(revenue)::MONEY, 'Revenue in selection'::LABEL FROM orders
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
+  AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week);
+
+SELECT 12::COL; SELECT 'week'::SELECT_AS;
+SELECT week::XAXIS, sum(revenue)::LINECHART, 'Weekly revenue (▧ brush a range)'::TITLE FROM orders
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
+  AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
+GROUP BY week ORDER BY week;
+
+SELECT 'Drill-down'::TAB;
+SELECT 12::COL;
+SELECT '**::DRILL** turns one chart into a drill-down: \`''region > country > city''\` shows regions first — **click a bar** to see that region''s countries, click again for its cities. The **breadcrumb** above the chart goes back (All › EU › Germany). The chart reads getvariable(''drill_level'') to pick its x column, and every level above sets a variable named after it (getvariable(''region''), getvariable(''country''); empty until drilled), so the trend on the right follows the drill too. The path is in the URL (\`?v.drill_path=EU\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 7::COL; SELECT 'region > country > city'::DRILL;
+SELECT CASE getvariable('drill_level') WHEN 'region' THEN region WHEN 'country' THEN country ELSE city END AS place ::XAXIS,
+       sum(revenue)::BARCHART, ('Revenue by ' || getvariable('drill_level'))::TITLE
+FROM orders
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY 1 ORDER BY 2 DESC;
+SELECT 5::COL;
+SELECT week::XAXIS, sum(revenue)::AREACHART,
+       ('Weekly revenue — ' || coalesce(nullif(getvariable('country'), ''), nullif(getvariable('region'), ''), 'all regions'))::TITLE
+FROM orders
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY week ORDER BY week;
+
+SELECT 'Drill-through'::TAB;
+SELECT 12::COL;
+SELECT 'A **::LINK** column is a drill-through target. Its value is a template — \`{value}\` is the clicked bar (or the table row''s first column), \`{column}\` any column of a table row. \`#Tab?v.x={value}\` opens a tab with variables set (an input only accepts one of its own options), \`/d/<id>?v.x={value}\` opens another served dashboard pre-filtered, an https: URL opens in a new browser tab. **Click a city bar or a table link** to open its detail page; **click a country** for its Wikipedia article.'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 6::COL;
+SELECT city::XAXIS, sum(revenue)::BARCHART, '#City detail?v.pick_city={value}'::LINK, 'Cities — click for the detail page'::TITLE
+FROM orders GROUP BY city ORDER BY 2 DESC;
+SELECT 6::COL;
+SELECT country::XAXIS, sum(revenue)::BARCHART, 'https://en.wikipedia.org/wiki/{value}'::LINK, 'Countries — click opens Wikipedia'::TITLE
+FROM orders GROUP BY country ORDER BY 2 DESC;
+SELECT 12::COL;
+SELECT city::TABLE, country, region, sum(revenue) AS revenue ::MONEY,
+       '#City detail?v.pick_city={city}' AS detail ::LINK
+FROM orders GROUP BY ALL ORDER BY revenue DESC;
+
+SELECT 'City detail'::TAB;
+SELECT 'City'::GROUP;
+SELECT DISTINCT city AS pick_city ::DROPDOWN FROM geo ORDER BY 1;
+SELECT 1::ENDGROUP;
+SELECT 4::COL;
+SELECT sum(revenue)::MONEY, ('Revenue — ' || getvariable('pick_city'))::LABEL FROM orders WHERE city = getvariable('pick_city');
+SELECT 8::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, ('Weekly revenue by channel — ' || getvariable('pick_city'))::TITLE
+FROM orders WHERE city = getvariable('pick_city') GROUP BY ALL ORDER BY week, channel;`,
     },
   },
 
@@ -692,7 +832,7 @@ SELECT 'Tables — rich per-column formatting & scalable paging'::LABEL;
 -- Rich formatting: each column picks its own presentation role.
 SELECT 'Formatted'::TAB;
 SELECT 12::COL;
-SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL**.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL** and marks each margin good / warn / bad with **::THRESHOLDS**.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
@@ -723,8 +863,9 @@ ORDER BY revenue DESC;
 SELECT 12::COL;
 SELECT 'region'::SUBTOTAL;
 SELECT 'Margin %: mean'::TOTALS;
+SELECT 'Margin %: <14:bad; <18:warn; good'::THRESHOLDS;
 SELECT region::TABLE, store, revenue::MONEY, orders, margin AS "Margin %",
-       'Stores by region — a subtotal per region (sort any column: it sorts within the regions)'::TITLE
+       'Stores by region — a subtotal per region, margins by status (sort any column: it sorts within the regions)'::TITLE
 FROM (VALUES ('North', 'Hamburg', 1.92e6, 18400, 19.1), ('North', 'Bremen', 1.21e6, 11900, 17.4),
              ('North', 'Kiel', 0.68e6, 7100, 16.0), ('South', 'Munich', 2.05e6, 19800, 13.9),
              ('South', 'Stuttgart', 1.37e6, 13300, 11.2), ('East', 'Berlin', 3.10e6, 29400, 22.3),
@@ -818,6 +959,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // scripts/gen-showcase-data.sh) because their extension can't run in
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
+  { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
   { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
   { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
@@ -1101,6 +1243,8 @@ async function ensureDataFiles(sql) {
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
 // builds the paging SQL itself.
 async function runSql(sql, page) {
+  const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
+  if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
   if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
   if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
@@ -1256,8 +1400,7 @@ async function boot() {
   if (tabParam) dpTab = tabParam;
   // Persistent cross-dashboard nav (served mode, 2+ dashboards).
   renderServedNav(served);
-  // Loading spinner + opt-in chart zoom (off by default; ?zoom=1 enables).
-  installSpinner();
+  // Opt-in chart zoom (off by default; ?zoom=1 enables).
   if (params.get("zoom") === "1") document.body.classList.add("dp-zoom");
   // Start on the dashboard (View); ✎ Edit — or ?mode=edit — opens the editor.
   setMode(params.get("mode") === "edit" ? "edit" : "view");
@@ -1630,6 +1773,11 @@ function loadDash(name, sql) {
   dpFilter = "";
   dpSelected = null;
   dpXf = {};
+  dpUrlSeed = {};
+  dpVarDefault = {};
+  dpPeriodUrl = {};
+  dpRange = {};
+  dpDrill = {};
   dpPage = {};
   dpSort = {};
   dpPaged = {};
@@ -1920,9 +2068,9 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
-let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -1959,10 +2107,13 @@ const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
 const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
-const directive = (s) => DIRECTIVES.find((d) => role(s, d));
+// A lone ::THRESHOLDS statement is the next table's rules (beside other roles
+// it colours that KPI / gauge / chart).
+const directive = (s) =>
+  DIRECTIVES.find((d) => role(s, d)) || (s.roles.length === 1 && s.roles[0][1] === "THRESHOLDS" ? "THRESHOLDS" : undefined);
 // Dashboard chrome directives (::THEME, ::LOCALE, ::DASHBOARD_TITLE, ::BRAND,
 // ::LOGO, ::FAVICON) — collected in the pre-pass, before any panel renders.
-let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON"];
+let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON", "ASOF"];
 const chromeRole = (s) => CHROME.find((d) => role(s, d));
 
 // ---- theme (src/theme.rs is the source of truth; plan T1/T4/T12) ----
@@ -2057,10 +2208,78 @@ function axToken(name, fallback = "") {
   return v || fallback;
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
+// ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
+let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+// A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
+// ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
+function asofParse(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const m = String(v)
+    .trim()
+    .match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(:\d{2}(?:\.\d+)?)?)?\s*(Z|UTC|[+-]\d{2}(?::?\d{2})?)?$/);
+  if (!m) return null;
+  let off = m[4] || "Z";
+  if (off === "UTC") off = "Z";
+  else if (/^[+-]\d{2}$/.test(off)) off += ":00";
+  else if (/^[+-]\d{4}$/.test(off)) off = off.slice(0, 3) + ":" + off.slice(3);
+  const t = Date.parse(`${m[1]}T${m[2] || "00:00"}${m[3] || ""}${off}`);
+  return Number.isNaN(t) ? null : t;
+}
+// 'stale=24h' / '90m' / '2d' / '1w' → seconds (0 = never stale).
+function asofStale(v) {
+  const m = String(v ?? "").match(/^\s*(?:stale\s*=?\s*)?(\d+)\s*([smhdw])\s*$/i);
+  return m ? Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2].toLowerCase()] : 0;
+}
+function asofRelative(sec) {
+  sec = Math.max(0, sec);
+  if (sec < 60) return "just now";
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+  if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
+  return `${Math.floor(sec / 86400)} d ago`;
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const d = new Date(a.at);
+  const now = Date.now();
+  const age = (now - a.at) / 1000;
+  const loc = dashLocale() || undefined;
+  let t;
+  try {
+    t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() !== new Date(now).toDateString()) t = d.toLocaleDateString(loc) + " " + t;
+  } catch (_) {
+    t = d.toISOString().slice(0, 16).replace("T", " ");
+  }
+  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
+  el.title = d.toString();
+  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+}
+let asofTimer = null;
+function mkAsof() {
+  if (!dpAsof || dpAsof.at == null) return null;
+  const c = document.createElement("div");
+  c.className = "dp-asof";
+  c.setAttribute("role", "status");
+  paintAsof(c, dpAsof);
+  // keep the relative time current while the dashboard is open
+  asofTimer ||= setInterval(() => {
+    document.querySelectorAll(".dash .dp-asof").forEach((el) => dpAsof && dpAsof.at != null && paintAsof(el, dpAsof));
+  }, 60000);
+  return c;
+}
 function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
-  if (!b.title && !b.name && !b.logo) return null;
+  const chip = mkAsof();
+  if (!b.title && !b.name && !b.logo) {
+    if (!chip) return null;
+    const h = document.createElement("div");
+    h.className = "dp-head";
+    h.appendChild(chip);
+    return h;
+  }
   const h = document.createElement("div"); // not <header>: the builder styles that
   h.className = "dp-head";
   const logo = b.logo && safeUrl(b.logo, { image: true });
@@ -2086,9 +2305,12 @@ function dashHeader() {
     txt.appendChild(t);
   }
   h.appendChild(txt);
+  if (chip) h.appendChild(chip);
   return h;
 }
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
+let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
+let dpVarLast = {}; // … and at the end of the last completed run
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
@@ -2140,16 +2362,601 @@ function setTabParam(name) {
   } catch (e) {}
 }
 
-// A full-view loading spinner shown while queries are in flight (body.loading is
-// toggled by run(), including a series-change re-run). Injected once.
-function installSpinner() {
-  if (document.getElementById("dp-spinner")) return;
-  // (its CSS — and the range-slider / column-filter styles — live in
-  // web/theme-base.css on theme tokens)
-  const o = document.createElement("div");
-  o.id = "dp-spinner";
-  o.innerHTML = '<div class="dp-spin"></div>';
-  document.body.appendChild(o);
+// Viewer state in the URL: `?v.<name>=<value>` seeds a variable on load — an
+// input's value (checked against the input's own options / type first), the
+// shared `selected`, or a named selection. A list repeats the key
+// (`?v.channel=app&v.channel=web`; `?v.channel=` is an empty list). After every
+// run the URL is rewritten (history.replaceState) with the inputs that differ
+// from their defaults and the live selections, so a reload or a copied link
+// restores the view. Only variable VALUES travel — never SQL — so a locked
+// server binds them as typed literals like any other input.
+const URL_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+let dpUrlSeed = readUrlSeed(); // variable -> [values] from ?v.* (consumed by the first run)
+let dpVarDefault = {}; // input variable -> its default (JSON text): only changes go into the URL
+let dpPeriodUrl = {}; // ::PERIOD column -> {prefix, def} (def = its resolved default) for the URL
+let dpSeedRerun = false; // a seeded table selection changed shape: re-run once after this run
+let dpSeeded = new Set(); // named selections seeded from the URL whose shape a table still fixes
+function readUrlSeed(search = location.search) {
+  const seed = {};
+  try {
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("v.")) continue;
+      const name = k.slice(2);
+      if (!URL_VAR_RE.test(name) || String(v).length > 1000) continue;
+      if (!seed[name] && Object.keys(seed).length >= 64) continue;
+      (seed[name] ||= []).length < 200 && seed[name].push(String(v));
+    }
+  } catch (_) {}
+  return seed;
+}
+function isIsoDate(v) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(v + "T00:00:00Z");
+  return !isNaN(d) && d.toISOString().slice(0, 10) === v;
+}
+// A seeded input value if it passes the input's own validation, else undefined
+// (the input keeps its default).
+function validSeed(kind, vals, options) {
+  const one = vals.length === 1 ? vals[0] : undefined;
+  switch (kind) {
+    case "DROPDOWN":
+    case "BUTTONS":
+      return options && options.includes(one) ? one : undefined;
+    case "TOGGLE":
+      return one !== undefined && /^(true|false|t|f|1|0|yes|no|on|off)$/i.test(one) ? toggleValue(one) : undefined;
+    case "MULTISELECT": {
+      const want = vals.filter((v) => v !== "");
+      const ok = want.filter((v) => options && options.includes(v));
+      return ok.length === want.length || ok.length ? [...new Set(ok)] : undefined;
+    }
+    case "NUMBER": {
+      const n = Number(one);
+      return one !== undefined && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(one) && Math.abs(n) < 1e15 ? one : undefined;
+    }
+    case "DATE":
+    case "DATERANGE":
+      return one !== undefined && isIsoDate(one) ? one : undefined;
+    default: // TEXT
+      return one !== undefined && one.length <= 500 ? one : undefined;
+  }
+}
+// A ::PERIOD's URL seed -> the control's state, or undefined. `v.p=30d` (a
+// preset) or `v.p=2026-01-01..2026-03-31` (a custom range), plus optional
+// `v.p_grain=week` and `v.p_compare=prev|yoy|none`. `resolve(state)` is
+// period_resolve for this input's spec: the range must resolve without a new
+// error, grain and comparison must be offered; an invalid part is dropped.
+function validPeriodSeed(seed, prefix, resolve) {
+  const one = (k) => (seed[k] && seed[k].length === 1 ? seed[k][0] : undefined);
+  const base = resolve({});
+  const nerr = (base.errors || []).length;
+  const fits = (st) => {
+    const r = resolve(st);
+    return !!r.vars && (r.errors || []).length === nerr;
+  };
+  const st = {};
+  const range = one(prefix);
+  if (range !== undefined) {
+    const m = range.match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+    const part = m
+      ? isIsoDate(m[1]) && isIsoDate(m[2])
+        ? { preset: "custom", from: m[1], to: m[2] }
+        : null
+      : /^[a-z0-9_]{1,20}$/i.test(range) && range !== "custom"
+        ? { preset: range }
+        : null;
+    if (part && fits(part)) Object.assign(st, part);
+  }
+  const grain = one(prefix + "_grain");
+  if (grain !== undefined && (base.grains || []).includes(grain)) st.grain = grain;
+  const cmp = one(prefix + "_compare");
+  if (cmp !== undefined && (base.compares || []).some((c) => c.id === cmp)) st.compare = cmp;
+  return Object.keys(st).length && fits(st) ? st : undefined;
+}
+// A ::PERIOD state as URL parameters (the inverse of validPeriodSeed): only what
+// differs from the input's default; an explicit grain always (it stops the
+// automatic one).
+function periodUrlParams(prefix, st, def) {
+  const out = [];
+  if (!st || typeof st !== "object") return out;
+  if (st.preset === "custom" && st.from && st.to) out.push([prefix, `${st.from}..${st.to}`]);
+  else if (st.preset && st.preset !== def.preset) out.push([prefix, st.preset]);
+  if (st.grain) out.push([prefix + "_grain", st.grain]);
+  if (st.compare && st.compare !== def.compare) out.push([prefix + "_compare", st.compare]);
+  return out;
+}
+// A ::TOGGLE value as "true" / "false" (its default may be a BOOLEAN, a number
+// or text such as 'on'); unknown text is "false".
+function toggleValue(v) {
+  return /^(true|t|1|yes|on)$/i.test(String(v ?? "").trim()) ? "true" : "false";
+}
+// Record an input's default and apply its URL seed (first run only, while the
+// variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
+function seedInputFromUrl(kind, names, rows) {
+  for (const name of names) {
+    const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+    const options = listed ? rows.map((r) => String(r[name])) : null;
+    dpVarDefault[name] = JSON.stringify(
+      kind === "MULTISELECT"
+        ? options
+        : listed
+          ? options[0]
+          : kind === "TOGGLE"
+            ? toggleValue(rows[0][name])
+            : String(rows[0][name] ?? "")
+    );
+    const vals = dpUrlSeed[name];
+    if (!vals) continue;
+    delete dpUrlSeed[name];
+    const v = dpVars[name] === undefined ? validSeed(kind, vals, options) : undefined;
+    if (v !== undefined) dpVars[name] = v;
+  }
+}
+// Seeds left after the input pre-pass are selections: `selected` (the shared
+// click filter) or a named one (one value = text, several = a list; a table's
+// ::ROWSELECT mode fixes the shape when it renders). Returns true if any applied.
+function applySelectionSeeds() {
+  let any = false;
+  for (const [name, vals] of Object.entries(dpUrlSeed)) {
+    delete dpUrlSeed[name];
+    if (vals.some((v) => v.length > 500)) continue;
+    if (name === "selected") {
+      dpFilter = vals[0] || "";
+      dpSelected = dpFilter || null;
+    } else {
+      dpXf[name] = vals.length > 1 ? vals : vals[0];
+      dpSeeded.add(name);
+    }
+    any = true;
+  }
+  return any;
+}
+// A seeded named selection whose table turned out to be 'multi' (or 'single')
+// takes that shape; the dashboard re-runs once with it.
+function coerceSeededSelection(name, mode) {
+  if (!dpSeeded.delete(name)) return;
+  const v = dpXf[name];
+  if (mode === "multi" && typeof v === "string") dpXf[name] = v ? [v] : [];
+  else if (mode === "single" && Array.isArray(v)) dpXf[name] = v[0] ?? "";
+  else return;
+  dpSeedRerun = true;
+}
+// The cross-filter variables — the generic `selected` (last click) plus any
+// NAMED cross-filters (each table emits getvariable('<its first column>') so two
+// tables give two independent live selections). Unset named vars read as NULL,
+// so targets guard with COALESCE(getvariable('name'),'').
+async function setSelectionVars() {
+  try {
+    await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
+    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+    for (const [k, v] of Object.entries(dpXf)) {
+      if (URL_VAR_RE.test(k)) {
+        // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
+        const lit = Array.isArray(v) ? (v.length ? `[${v.map(q).join(", ")}]` : "[]::VARCHAR[]") : q(v);
+        await runSql(`SET VARIABLE ${k} = ${lit}`);
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+// The viewer state as `v.*` query parameters (inputs that differ from their
+// default, the live selections), merged into the current URL.
+function urlStateParams() {
+  const out = [];
+  const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
+  for (const [k, def] of Object.entries(dpVarDefault)) {
+    if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+  }
+  for (const [col, p] of Object.entries(dpPeriodUrl)) {
+    for (const [k, v] of periodUrlParams(p.prefix, dpVars[col], p.def)) out.push(["v." + k, v]);
+  }
+  if (dpFilter) add("selected", dpFilter);
+  for (const [k, v] of Object.entries(dpXf)) {
+    if (k in dpVarDefault || v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    add(k, v);
+  }
+  for (const [k, r] of Object.entries(dpRange)) {
+    if (r) add(k + "_from", r.from), add(k + "_to", r.to);
+  }
+  for (const [p, path] of Object.entries(dpDrill)) if (path.length) add(p + "_path", path);
+  return out;
+}
+function syncUrlState() {
+  try {
+    const u = new URL(location.href);
+    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.")) u.searchParams.delete(k);
+    for (const [k, v] of urlStateParams()) u.searchParams.append(k, v);
+    if (u.href !== location.href) history.replaceState(null, "", u);
+  } catch (_) {}
+}
+
+// ---- chart interactions: named selections (::SELECT_AS) ----
+// `'region'::SELECT_AS` before a chart: a click sets getvariable('region') (''
+// = nothing) instead of the shared `selected`; `'region multi'` keeps a list
+// (VARCHAR[], [] = nothing) — a click selects one value, shift/ctrl-click adds
+// or removes one. A brush (toolbox ▧) on a continuous / date x sets
+// `region_from` / `region_to` (NULL = no range); on a discrete x in multi mode
+// it selects the brushed values. Esc or a click on empty space clears.
+let dpIa = {}; // statement index -> {select: {name, mode}} (this run's interaction directives)
+let dpRange = {}; // named selection -> {from, to} brushed x range (numbers or ISO dates)
+function parseSelectAs(v) {
+  const m = String(v ?? "")
+    .trim()
+    .match(/^([A-Za-z_][A-Za-z0-9_]{0,59})(?:\s*[\s:,]\s*(single|multi))?$/i);
+  return m ? { name: m[1], mode: (m[2] || "single").toLowerCase() } : null;
+}
+// Evaluate the interaction directives before any panel queries, so their
+// variables exist (and URL seeds apply) when the panels run.
+async function prepInteractions(stmts) {
+  dpIa = {};
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
+    const d = s.setup ? null : directive(s);
+    if (d !== "SELECT_AS" && d !== "DRILL") continue;
+    try {
+      const rows = JSON.parse(await runSql(s.sql));
+      if (d === "DRILL") {
+        const drill = parseDrill(rows[0] ? Object.values(rows[0])[0] : "");
+        if (!drill) continue;
+        dpIa[i] = { drill };
+        seedDrill(drill);
+        continue;
+      }
+      const sel = parseSelectAs(rows[0] ? Object.values(rows[0])[0] : "");
+      if (!sel) continue;
+      dpIa[i] = { select: sel };
+      seedNamedSelection(sel);
+      const cur = dpXf[sel.name];
+      if (sel.mode === "multi" && !Array.isArray(cur)) dpXf[sel.name] = cur ? [cur] : [];
+      if (sel.mode === "single" && typeof cur !== "string") dpXf[sel.name] = Array.isArray(cur) ? cur[0] ?? "" : "";
+      dpRange[sel.name] ||= null;
+    } catch (_) {}
+  }
+}
+function seedNamedSelection(sel) {
+  const take = (k) => {
+    const v = dpUrlSeed[k];
+    delete dpUrlSeed[k];
+    return v && v.every((x) => x.length <= 500) ? v : null;
+  };
+  const v = take(sel.name);
+  if (v) dpXf[sel.name] = sel.mode === "multi" ? v.filter((x) => x !== "") : v[0];
+  const f = take(sel.name + "_from");
+  const t = take(sel.name + "_to");
+  const typed = (x) => (x && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(x[0]) && Number.isFinite(+x[0]) ? +x[0] : x && isIsoDate(x[0].slice(0, 10)) ? x[0] : null);
+  if (typed(f) !== null && typed(t) !== null) dpRange[sel.name] = { from: typed(f), to: typed(t) };
+}
+// ---- drill-down (::DRILL) and drill-through (::LINK) ----
+// `'region > country > city'::DRILL` before a chart: the chart shows one level
+// at a time. Its variables (prefix `drill`, or `geo` for 'geo: region > …'):
+//   <p>_level  the level on screen ('country')   <p>_depth  0-based depth
+//   <p>_path   the values drilled through, VARCHAR[] (['EU'])
+//   region, country, city — the value chosen at each level above, else ''.
+// A click on a mark goes one level deeper; the breadcrumb above the chart goes
+// back. On the last level a click falls through to ::LINK / ::SELECT_AS /
+// `selected`. The path is part of the URL state (?v.drill_path=EU).
+let dpDrill = {}; // drill prefix -> path (array of values)
+function parseDrill(v) {
+  const m = String(v ?? "").match(/^\s*(?:([A-Za-z_][A-Za-z0-9_]{0,59})\s*:)?([^:]*)$/);
+  if (!m) return null;
+  const levels = m[2].split(">").map((x) => x.trim());
+  if (levels.length < 2 || !levels.every((l) => /^[A-Za-z_][A-Za-z0-9_]{0,59}$/.test(l))) return null;
+  return { prefix: m[1] || "drill", levels };
+}
+function seedDrill(drill) {
+  const k = drill.prefix + "_path";
+  const seed = dpUrlSeed[k];
+  delete dpUrlSeed[k];
+  if (seed && seed.every((x) => x.length <= 500)) dpDrill[drill.prefix] = seed.filter((x) => x !== "");
+  // never deeper than the last level (the levels may have changed)
+  dpDrill[drill.prefix] = (dpDrill[drill.prefix] || []).slice(0, drill.levels.length - 1);
+}
+// The drill variables of this run's ::DRILL charts.
+async function setDrillVars() {
+  const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+  for (const ia of Object.values(dpIa)) {
+    if (!ia.drill) continue;
+    const { prefix, levels } = ia.drill;
+    const path = dpDrill[prefix] || [];
+    try {
+      await runSql(`SET VARIABLE ${prefix}_level = ${q(levels[path.length])}`);
+      await runSql(`SET VARIABLE ${prefix}_depth = ${path.length}`);
+      await runSql(`SET VARIABLE ${prefix}_path = ${path.length ? `[${path.map(q).join(", ")}]` : "[]::VARCHAR[]"}`);
+      for (let j = 0; j < levels.length; j++) await runSql(`SET VARIABLE ${levels[j]} = ${q(j < path.length ? path[j] : "")}`);
+    } catch (_) {}
+  }
+}
+// The breadcrumb above a ::DRILL chart: All › EU › Germany · city. Each crumb
+// but the last goes back to that depth.
+function drillCrumbs(drill) {
+  const path = dpDrill[drill.prefix] || [];
+  const nav = document.createElement("nav");
+  nav.className = "dp-crumbs";
+  nav.setAttribute("aria-label", "Drill path");
+  const crumb = (text, depth) => {
+    if (depth === path.length) {
+      const cur = document.createElement("span");
+      cur.className = "dp-crumb-cur";
+      cur.setAttribute("aria-current", "location");
+      cur.textContent = text;
+      return cur;
+    }
+    const b = document.createElement("button");
+    b.className = "dp-crumb";
+    b.textContent = text;
+    b.title = depth ? `Back to ${text}` : "Back to the top level";
+    b.onclick = (e) => {
+      e.stopPropagation();
+      dpDrill[drill.prefix] = path.slice(0, depth);
+      run(false);
+    };
+    return b;
+  };
+  nav.appendChild(crumb("All", 0));
+  path.forEach((v, j) => {
+    const sep = document.createElement("span");
+    sep.className = "dp-crumb-sep";
+    sep.textContent = "›";
+    nav.append(sep, crumb(v, j + 1));
+  });
+  const lvl = document.createElement("span");
+  lvl.className = "dp-crumb-level";
+  const last = path.length >= drill.levels.length - 1;
+  lvl.textContent = last ? `by ${drill.levels[path.length]}` : `by ${drill.levels[path.length]} — click to drill into ${drill.levels[path.length + 1]}`;
+  nav.appendChild(lvl);
+  return nav;
+}
+// A click on a ::DRILL chart's mark: one level deeper. False on the last level
+// (the click then does what it would without ::DRILL).
+function drillInto(drill, key) {
+  const path = dpDrill[drill.prefix] || [];
+  if (path.length >= drill.levels.length - 1 || key === "") return false;
+  dpDrill[drill.prefix] = [...path, key];
+  run(false);
+  return true;
+}
+// Fill a ::LINK template: {value} = the clicked key, {x} / {series} on a chart,
+// any {column} of a table row, the drill levels — each URL-encoded.
+function fillLink(tpl, vars) {
+  return String(tpl ?? "").replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, k) =>
+    encodeURIComponent(vars[k] == null ? "" : String(vars[k]))
+  );
+}
+// Follow a filled ::LINK: '#Tab' (optionally '#Tab?v.x=…') opens a tab of this
+// dashboard, '?v.x=…' sets variables here (seeded like URL parameters — inputs
+// are validated), a path ('/d/<id>?v.x=…') navigates, an http(s) URL opens in
+// a new tab. Other schemes are refused (safeUrl).
+function followLink(url) {
+  const u = String(url ?? "").trim();
+  if (u.startsWith("#") || u.startsWith("?")) {
+    const qi = u.indexOf("?");
+    const tab = u.startsWith("#") ? decodeURIComponent(qi < 0 ? u.slice(1) : u.slice(1, qi)) : null;
+    const qs = qi < 0 ? "" : u.slice(qi);
+    const seed = readUrlSeed(qs);
+    for (const k of Object.keys(seed)) if (k in dpVarDefault) delete dpVars[k]; // re-seeded (validated) by the run
+    for (const [col, p] of Object.entries(dpPeriodUrl)) {
+      if ([p.prefix, p.prefix + "_grain", p.prefix + "_compare"].some((k) => k in seed)) delete dpVars[col];
+    }
+    Object.assign(dpUrlSeed, seed);
+    const t = tab || new URLSearchParams(qs).get("tab");
+    if (t) {
+      dpTab = t;
+      setTabParam(t);
+    }
+    run(false);
+    return;
+  }
+  const safe = safeUrl(u);
+  if (!safe) return status("link blocked: only #tab, ?v.…, paths and http(s) URLs are followed");
+  if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
+  else location.href = safe;
+}
+// A chart mark's ::LINK: the template of the row the mark was drawn from
+// (matched on x and series), filled with the mark's values and the drill path.
+function chartLink(link, el, key, series) {
+  let rows = [];
+  try {
+    rows = JSON.parse(link.rows);
+  } catch (_) {}
+  const col = (name) => link.roles.find((r) => r[1] === name);
+  const xr = col("XAXIS");
+  const cr = col("CATEGORY");
+  const x = el.getAttribute("data-x") || "";
+  const ds = el.getAttribute("data-series");
+  const str = (v) => (v == null ? "" : String(v).replace(/^"|"$/g, ""));
+  const row =
+    rows.find((r) => (!xr || str(r["c" + xr[0]]) === x) && (!cr || ds == null || str(r["c" + cr[0]]) === ds)) ||
+    rows.find((r) => (xr && str(r["c" + xr[0]]) === key) || (cr && str(r["c" + cr[0]]) === key)) ||
+    rows[0] ||
+    {};
+  const vars = { value: key, x: xr ? str(row["c" + xr[0]]) : x, series };
+  for (const ia of Object.values(dpIa)) {
+    if (ia.drill) (dpDrill[ia.drill.prefix] || []).forEach((v, j) => (vars[ia.drill.levels[j]] = v));
+  }
+  return fillLink(str(row["c" + link.idx]), vars);
+}
+// A table's ::LINK cell: a link built from the row ({value} = its first column).
+function linkCell(tpl, row, key) {
+  const vars = { value: key };
+  for (const [k, v] of Object.entries(row)) vars[k] = v == null ? "" : String(v).replace(/^"|"$/g, "");
+  const url = fillLink(tpl, vars);
+  const a = document.createElement("a");
+  a.className = "dp-link";
+  const tab = url.startsWith("#") ? decodeURIComponent(url.slice(1).split("?")[0]) : "";
+  const external = /^https?:/i.test(url) && !url.startsWith(location.origin + "/");
+  a.textContent = tab ? `${tab} →` : external ? "Open ↗" : "Open →";
+  a.href = url.startsWith("#") || url.startsWith("?") ? "#" : safeUrl(url) || "#";
+  a.title = url;
+  if (external) {
+    a.target = "_blank";
+    a.rel = "noopener";
+  }
+  a.onclick = (e) => {
+    e.stopPropagation(); // not a row selection
+    if (e.ctrlKey || e.metaKey || e.shiftKey || external) return; // the browser opens it
+    e.preventDefault();
+    followLink(url);
+  };
+  return a;
+}
+
+// The brushed ranges as variables: <name>_from / <name>_to (NULL when unset).
+async function setRangeVars() {
+  for (const [name, r] of Object.entries(dpRange)) {
+    const lit = (v) => (v == null ? "NULL" : typeof v === "number" ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
+    try {
+      await runSql(`SET VARIABLE ${name}_from = ${lit(r && r.from)}`);
+      await runSql(`SET VARIABLE ${name}_to = ${lit(r && r.to)}`);
+    } catch (_) {}
+  }
+}
+// A click on a mark of a ::SELECT_AS chart. `add` (shift/ctrl/⌘) toggles one
+// value in a multi selection; a plain click selects just that value (again: clear).
+function clickNamedSelection(sel, key, add) {
+  const cur = dpXf[sel.name];
+  if (sel.mode !== "multi") dpXf[sel.name] = cur === key ? "" : key;
+  else {
+    const set = new Set(Array.isArray(cur) ? cur : []);
+    if (add) set.has(key) ? set.delete(key) : set.add(key);
+    else if (set.size === 1 && set.has(key)) set.clear();
+    else {
+      set.clear();
+      set.add(key);
+    }
+    dpXf[sel.name] = [...set];
+  }
+  run(false);
+}
+// The shape of a chart's x from its marks' data-x: "num", "date" or null (discrete).
+function xKindOf(xs) {
+  if (!xs.length) return null;
+  if (xs.every((x) => x !== "" && Number.isFinite(Number(x)))) return "num";
+  if (xs.every((x) => /^\d{4}-\d{2}-\d{2}/.test(x))) return "date";
+  return null;
+}
+const xVal = (x, kind) => (kind === "num" ? Number(x) : x);
+// Clear every click / brush selection (Esc, a click on empty space). Returns
+// true if there was anything to clear.
+function clearSelections() {
+  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
+  const anyRange = Object.values(dpRange).some((r) => r);
+  if (!dpFilter && dpSelected === null && !anyNamed && !anyRange) return false;
+  dpFilter = "";
+  dpSelected = null;
+  for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
+  for (const k in dpRange) dpRange[k] = null;
+  return true;
+}
+// After a render: dim the marks outside each named selection / brushed range
+// and show what is selected (with a ✕ to clear) above the chart.
+function decorateSelections() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const drill = panel._ia && panel._ia.drill;
+    if (drill) {
+      panel.querySelector(".dp-crumbs")?.remove();
+      const head = panel.querySelector(".panel-title");
+      const nav = drillCrumbs(drill);
+      head ? head.after(nav) : panel.prepend(nav);
+    }
+    if (panel._ia && panel._ia.link) panel.classList.add("dp-linked");
+    const sel = panel._ia && panel._ia.select;
+    if (!sel) return;
+    panel.classList.add("dp-selectable");
+    const cur = dpXf[sel.name];
+    const keys = new Set(Array.isArray(cur) ? cur : cur ? [cur] : []);
+    const r = dpRange[sel.name];
+    const kind = r ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
+    if (keys.size || (r && kind)) {
+      filterMarks(panel, (el) => {
+        if (keys.size && !keys.has(el.getAttribute("data-series"))) return false;
+        if (!r || !kind) return true;
+        const x = xVal(el.getAttribute("data-x") || "", kind);
+        return x >= r.from && x <= r.to;
+      });
+    }
+    // The brushed range stays visible as a translucent band over the marks it kept.
+    const holder = panel.querySelector(".panel-svg");
+    holder?.querySelector(".dp-range-band")?.remove();
+    if (r && kind && holder) {
+      const hr = holder.getBoundingClientRect();
+      const xs = [...marksOf(panel)]
+        .filter((el) => {
+          const x = xVal(el.getAttribute("data-x") || "", kind);
+          return x >= r.from && x <= r.to;
+        })
+        .map((el) => el.getBoundingClientRect())
+        .flatMap((b) => [b.left, b.right]);
+      if (xs.length && hr.width) {
+        const band = document.createElement("div");
+        band.className = "dp-range-band";
+        band.style.left = Math.min(...xs) - hr.left - 4 + "px";
+        band.style.width = Math.max(...xs) - Math.min(...xs) + 8 + "px";
+        holder.appendChild(band);
+      }
+    }
+    panel.querySelector(".dp-ia-bar")?.remove();
+    const parts = [];
+    if (keys.size) parts.push([`${sel.name}: ${[...keys].join(", ")}`, () => (dpXf[sel.name] = Array.isArray(cur) ? [] : "")]);
+    if (r) parts.push([`${sel.name}: ${r.from} – ${r.to}`, () => (dpRange[sel.name] = null)]);
+    if (!parts.length) return;
+    const bar = document.createElement("div");
+    bar.className = "dp-ia-bar";
+    for (const [text, clear] of parts) {
+      const chip = document.createElement("span");
+      chip.className = "tbl-chip";
+      chip.title = text;
+      chip.append(text);
+      const x = document.createElement("button");
+      x.textContent = "×";
+      x.title = "Clear this selection";
+      x.setAttribute("aria-label", "Clear " + text);
+      x.onclick = (e) => {
+        e.stopPropagation();
+        clear();
+        run(false);
+      };
+      chip.appendChild(x);
+      bar.appendChild(chip);
+    }
+    const anchor = panel.querySelector(".dp-crumbs") || panel.querySelector(".panel-title");
+    anchor ? anchor.after(bar) : panel.prepend(bar);
+  });
+}
+
+// Per-panel loading state (no full-page veil): while a run is in flight the
+// panels on screen whose query reads a variable that changed (all of them on a
+// fresh run) get a placeholder shimmer + aria-busy; the rest stay untouched.
+// The first run, with nothing on screen yet, draws skeleton cards instead.
+const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
+function markPending(grid, stmts, fresh) {
+  const changed = new Set(
+    [...new Set([...Object.keys(dpVarNow), ...Object.keys(dpVarLast)])].filter((k) => dpVarNow[k] !== dpVarLast[k])
+  );
+  for (const fig of document.querySelectorAll(".dash .panel[data-stmt]")) {
+    const s = stmts[+fig.dataset.stmt];
+    if (s && (fresh || varsOf(s.sql).some((v) => changed.has(v)))) {
+      fig.classList.add("dp-pending");
+      fig.setAttribute("aria-busy", "true");
+    }
+  }
+  if (grid.querySelector(".panel")) return;
+  // First run: one skeleton card per visible panel (up to 12), KPI tiles short.
+  const skel = [];
+  for (const s of stmts) {
+    if (skel.length >= 12) break;
+    if (s.setup || directive(s) || isInput(s) || chromeRole(s) || isHeading(s) || role(s, "SECTION")) continue;
+    const el = document.createElement("div");
+    const kpi = !!metricRole(s) && !role(s, "TABLE");
+    el.className = "panel dp-skel" + (kpi ? " dp-skel-kpi" : "");
+    el.setAttribute("aria-hidden", "true");
+    el.style.gridColumn = `span ${kpi ? 3 : Math.max(1, Math.round(12 / dpCols))}`;
+    el.innerHTML = "<i></i><i></i><i></i>";
+    skel.push(el);
+  }
+  if (skel.length) {
+    grid.replaceChildren(...skel);
+    grid.setAttribute("aria-busy", "true");
+  }
 }
 
 // Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
@@ -2220,24 +3027,12 @@ async function runOnce(fresh = true) {
     grid.replaceChildren();
     return showError(grid, String(e));
   }
+  markPending(grid, stmts, fresh);
 
-  // Cross-filter values — the generic `selected` (last click) plus any NAMED
-  // cross-filters (each table emits getvariable('<its first column>') so two
-  // tables give two independent live selections). Unset named vars read as NULL,
-  // so targets guard with COALESCE(getvariable('name'),'').
-  try {
-    await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
-    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
-    for (const [k, v] of Object.entries(dpXf)) {
-      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-        // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
-        const lit = Array.isArray(v) ? (v.length ? `[${v.map(q).join(", ")}]` : "[]::VARCHAR[]") : q(v);
-        await runSql(`SET VARIABLE ${k} = ${lit}`);
-      }
-    }
-  } catch (e) {
-    /* ignore */
-  }
+  await prepInteractions(stmts);
+  await setSelectionVars();
+  await setRangeVars();
+  await setDrillVars();
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
   // caching options for the render pass by statement index. Chrome directives
@@ -2248,6 +3043,7 @@ async function runOnce(fresh = true) {
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
   dpTheme.chrome = {};
+  dpAsof = null;
   const CHROME_KEY = { LOCALE: "locale", DASHBOARD_TITLE: "title", BRAND: "brand", LOGO: "logo", FAVICON: "favicon" };
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
@@ -2260,7 +3056,11 @@ async function runOnce(fresh = true) {
         if (v != null && typeof v === "object") v = JSON.stringify(v);
         v = v == null ? "" : String(v);
         if (cr === "THEME") dpTheme.spec = v;
-        else dpTheme.chrome[CHROME_KEY[cr]] = v;
+        else if (cr === "ASOF") {
+          // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
+          const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
+          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+        } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }
       if (s.setup) {
@@ -2281,10 +3081,32 @@ async function runOnce(fresh = true) {
             : lr
               ? String(rows[0]["c" + lr[0]] ?? "")
               : "";
+        if (kind === "PERIOD") {
+          // ::PERIOD: the spec string's column (its alias = the variable
+          // prefix); the viewer's choice lives in dpVars[col] as an object.
+          const keys = Object.keys(rows[0]);
+          const col = keys[s.roles.find((r) => r[1] === "PERIOD")[0]] ?? keys[0];
+          const spec = String(rows[0][col] ?? "");
+          const def = periodResolve(spec, col, {});
+          const prefix = def.prefix || col;
+          dpPeriodUrl[col] = { prefix, def };
+          if (dpVars[col] === undefined) {
+            const seeded = validPeriodSeed(dpUrlSeed, prefix, (st) => periodResolve(spec, col, st));
+            if (seeded) dpVars[col] = seeded;
+          }
+          for (const k of [prefix, prefix + "_grain", prefix + "_compare"]) delete dpUrlSeed[k];
+          const st = dpVars[col];
+          const res = periodResolve(spec, col, st && typeof st === "object" && !Array.isArray(st) ? st : {});
+          if (!res.vars) throw new Error("::PERIOD: " + (res.errors || []).join("; "));
+          dd[i] = { kind, varname: col, res, caption };
+          for (const q of periodSets(res.prefix, res.vars)) await runSql(q);
+          continue;
+        }
         if (kind === "DATERANGE") {
           const keys = Object.keys(rows[0]);
           const fk = keys[0];
           const tk = keys[1] || keys[0];
+          seedInputFromUrl(kind, [fk, tk], rows);
           if (dpVars[fk] === undefined) dpVars[fk] = String(rows[0][fk] ?? "");
           if (dpVars[tk] === undefined) dpVars[tk] = String(rows[0][tk] ?? "");
           dd[i] = { kind, varnames: [fk, tk], caption };
@@ -2293,8 +3115,9 @@ async function runOnce(fresh = true) {
           continue;
         }
         const varname = Object.keys(rows[0])[0];
+        seedInputFromUrl(kind, [varname], rows);
         let lit;
-        if (kind === "DROPDOWN") {
+        if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const options = rows.map((r) => String(r[varname]));
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
           // Optional ::HINT column → a hint shown next to each option.
@@ -2302,6 +3125,11 @@ async function runOnce(fresh = true) {
           const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
           dd[i] = { kind, varname, options, hints, caption };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
+        } else if (kind === "TOGGLE") {
+          // A BOOLEAN variable; the query's value is the default.
+          if (dpVars[varname] === undefined) dpVars[varname] = toggleValue(rows[0][varname]);
+          dd[i] = { kind, varname, caption };
+          lit = dpVars[varname] === "true" ? "TRUE" : "FALSE";
         } else if (kind === "MULTISELECT") {
           const options = rows.map((r) => String(r[varname]));
           if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
@@ -2318,9 +3146,14 @@ async function runOnce(fresh = true) {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      showError(newGrid, `${s.sql}\n\n${e}`);
+      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${s.requires.join(", ")}`);
+      else newGrid.appendChild(mkErrorCard(e, s.sql, true));
     }
   }
+
+  // URL seeds no input claimed are selections (`v.selected`, named ones).
+  if (applySelectionSeeds()) await setSelectionVars();
+  markPending(grid, stmts, fresh); // now the changed variables are known
 
   // The theme (and its light/dark variant) for this run: CSS tokens on the
   // page, the wasm render context for every panel.
@@ -2344,6 +3177,8 @@ async function runOnce(fresh = true) {
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
   let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
+  let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
+  let nextEmpty = ""; // ::EMPTY → the next panel's message for an empty result
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -2419,7 +3254,11 @@ async function runOnce(fresh = true) {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
           .toLowerCase();
-      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
+      } else if (d === "EMPTY") {
+        nextEmpty = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
+      } else if (d === "SELECT_AS" || d === "DRILL") {
+        Object.assign(nextIa, dpIa[i] || {});
+      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
@@ -2506,6 +3345,8 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else if (s.contract) {
@@ -2525,7 +3366,7 @@ async function runOnce(fresh = true) {
         };
         if (!rows.length) {
           const fig = mk(title);
-          fig.appendChild(mkNoData());
+          fig.appendChild(mkNoData(nextEmpty));
           container.appendChild(fig);
           panels++;
         }
@@ -2556,6 +3397,8 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
       } else if (role(s, "PAGED")) {
         // A SQL-driven table: only one page of rows (Scroll view: one block at
         // a time) is fetched, plus one statistics row (count, sums, means, ranges)
@@ -2576,6 +3419,7 @@ async function runOnce(fresh = true) {
         const idx = i;
         const rowSelect = nextRowSelect;
         const tableOpts = nextTableOpts;
+        const emptyMsg = nextEmpty;
         const titleHolder = document.createElement("div");
         const holder = document.createElement("div");
         fig.append(titleHolder, holder);
@@ -2646,11 +3490,17 @@ async function runOnce(fresh = true) {
               unfiltered = filtering ? Number((await pageReq({ count: true }, false))[0].n) : Number(stats.n);
           } catch (e) {
             holder.innerHTML = "";
-            showError(holder, String(e));
+            if (isOptionalMissing(s, e)) holder.appendChild(mkNotAvailable(s));
+            else holder.appendChild(mkErrorBody(e, base));
+            fig.classList.add(isOptionalMissing(s, e) ? "dp-na" : "dp-errcard");
             return;
           }
           titleHolder.innerHTML = "";
           holder.innerHTML = "";
+          if (emptyMsg && !unfiltered) {
+            holder.appendChild(mkNoData(emptyMsg));
+            return;
+          }
           let sk = -1;
           let caption = "";
           if (titleIdx >= 0 && rows.length) {
@@ -2726,13 +3576,17 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
         const boxH = nextHeight;
+        const made = []; // this statement's panels (an ::INFO decorates the first)
         const mkPanel = () => {
           const fig = document.createElement("figure");
           fig.className = "panel";
+          made.push(fig);
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           if (boxH) fig.style.minHeight = boxH + "px";
           return fig;
@@ -2784,9 +3638,17 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
           const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
+          // ::CALLOUT 'note' | 'warning' | 'success': a tinted box with an icon.
+          const cr = s.roles.find((r) => r[1] === "CALLOUT");
+          if (cr) {
+            const kind = calloutKind(r0["c" + cr[0]]);
+            fig.classList.add("dp-callout", "dp-callout-" + kind);
+            fig.setAttribute("role", "note"); // static text: never an assertive alert
+            fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+          }
           const body = document.createElement("div");
           body.className = "md-body";
-          body.innerHTML = renderMarkdown(mdr ? r0["c" + mdr[0]] : firstCell());
+          body.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : firstCell(), r0, mdValue);
           fig.appendChild(body);
           container.appendChild(fig);
           panels++;
@@ -2801,9 +3663,18 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         } else if (role(s, "TABLE")) {
-          const rows = JSON.parse(rowsJson);
+          let rows = JSON.parse(rowsJson);
           const fig = mkPanel();
-          const tr = s.roles.find((r) => r[1] === "TITLE");
+          // An ::INFO column is the ⓘ text, not a cell: drop it (by key).
+          let troles = s.roles;
+          const infoR = troles.find((r) => r[1] === "INFO");
+          if (infoR && rows.length) {
+            const k = Object.keys(rows[0])[infoR[0]];
+            const shift = (ri) => (ri[0] > infoR[0] ? [ri[0] - 1, ri[1]] : ri);
+            rows = rows.map(({ [k]: _, ...rest }) => rest);
+            troles = troles.filter((r) => r !== infoR).map(shift);
+          }
+          const tr = troles.find((r) => r[1] === "TITLE");
           let skip = -1;
           let caption = "";
           if (tr && rows.length) {
@@ -2815,45 +3686,81 @@ async function runOnce(fresh = true) {
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
           const fmtByIdx = {};
-          for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
-          fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+          for (const [idx, r] of troles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
+          if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
+          else fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
-          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost, errors)
+          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost,
+          // errors). ::DELTA_FORMAT / ::DELTA_LABEL shape the change line;
+          // ::SPARKLINE (a list) draws a trend, ::GOAL/::TARGET a progress bar.
+          // The texts come from Rust (wasm kpi_parts = the headless tile).
           const dr = s.roles.find((r) => r[1] === "DELTA" || r[1] === "DELTA_LOWER_GOOD");
+          const cell = (tok) => {
+            const r = s.roles.find((x) => x[1] === tok);
+            return r ? r0["c" + r[0]] : null;
+          };
           const fig = mkPanel();
           fig.classList.add("metric");
+          let parts = {};
+          try {
+            parts = JSON.parse(
+              kpi_parts(
+                JSON.stringify({
+                  value: r0["c" + mr[0]],
+                  prev: dr ? r0["c" + dr[0]] : null,
+                  goal: cell("REFLINE"),
+                  fmt: mr[1],
+                  delta_format: String(cell("DELTA_FORMAT") ?? ""),
+                  lower_good: !!dr && dr[1] === "DELTA_LOWER_GOOD",
+                  locale: dashLocale() || "",
+                }),
+              ),
+            );
+          } catch (_) {}
           let deltaHtml = "";
-          if (dr) {
-            const cur = parseFloat(r0["c" + mr[0]]);
-            const prev = parseFloat(r0["c" + dr[0]]);
-            if (!isNaN(cur) && !isNaN(prev) && prev !== 0) {
-              const pct = ((cur - prev) / Math.abs(prev)) * 100;
-              const up = pct >= 0;
-              const good = dr[1] === "DELTA_LOWER_GOOD" ? !up : up;
-              deltaHtml =
-                `<div class="metric-delta ${good ? "good" : "bad"}" title="${good ? "better" : "worse"} than the comparison">${up ? "▲" : "▼"} ` +
-                `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
-            }
+          const d = parts.delta;
+          if (d) {
+            const lab = cell("DELTA_LABEL");
+            deltaHtml =
+              `<div class="metric-delta ${d.good ? "good" : "bad"}" title="${d.good ? "better" : "worse"} than the comparison">` +
+              `<span class="metric-delta-chg">${d.arrow} ${escapeHtml(d.text)}</span>` +
+              (lab != null && String(lab).trim() ? `<span class="metric-delta-label">${escapeHtml(lab)}</span>` : "") +
+              `</div>`;
           }
+          const g = parts.goal;
+          const goalHtml = g
+            ? `<div class="metric-goal${g.reached ? " reached" : ""}"><div class="metric-goal-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(g.frac * 100)}" aria-label="${escapeHtml(g.text)}">` +
+              `<span style="width:${Math.max(0, Math.min(1, g.frac)) * 100}%"></span></div><div class="metric-goal-text">${escapeHtml(g.text)}</div></div>`
+            : "";
+          // ::THRESHOLDS: the value takes its status colour (good / warn / bad)
+          const thr = s.roles.find((r) => r[1] === "THRESHOLDS");
+          const st = thr && thresholdRule((parseThresholds(r0["c" + thr[0]])[0] || {}).rules, r0["c" + mr[0]]);
+          const stAttr = st ? ` th-${st.status}" title="${escapeHtml(`${st.status}: ${st.text}`)}` : "";
           fig.innerHTML =
-            `<div class="metric-value">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
+            `<div class="metric-value${stAttr}">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
             deltaHtml +
-            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>`;
+            `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>` +
+            kpiSpark(cell("SPARKLINE")) +
+            goalHtml;
           container.appendChild(fig);
           panels++;
         } else {
           const fig = mkPanel();
+          // Interactions (::SELECT_AS / ::DRILL before it, a ::LINK column) —
+          // set before the no-data check so a drilled-empty chart keeps its breadcrumb.
+          const lr = s.roles.find((r) => r[1] === "LINK");
+          fig._ia = lr ? { ...nextIa, link: { idx: lr[0], rows: rowsJson, roles: s.roles } } : nextIa;
           const t = titleOf(s, rowsJson);
           if (t) fig.appendChild(mkTitle(t));
           // A selection that filters everything out renders a clean note, not a
           // broken/empty chart box.
           if (!JSON.parse(rowsJson).length) {
-            fig.appendChild(mkNoData());
+            fig.appendChild(mkNoData(nextEmpty));
           } else {
             const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
             const isMap = s.roles.some((r) => r[1] === "MAP");
@@ -2882,13 +3789,32 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         }
+        const ir = s.roles.find((r) => r[1] === "INFO");
+        if (ir && made.length) addInfo(made[0], cellAt(rowsJson, ir[0]));
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
       }
     } catch (e) {
-      showError(container, `${s.sql}\n\n${e}`);
+      // A failing panel becomes a card in its own grid slot — the others keep
+      // rendering. An optional input (`-- @requires`) that is missing reads
+      // "Not available" instead.
+      const card = isOptionalMissing(s, e) ? mkNotAvailable(s) : mkErrorCard(e, s.sql);
+      if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
+      container.appendChild(card);
+      nextSpan = 0;
+      nextHeight = 0;
+      nextRowSelect = "";
+      nextTableOpts = {};
+      nextIa = {};
+      nextEmpty = "";
+    } finally {
+      // Tag this statement's panels (markPending finds them on the next run).
+      for (const root of [newGrid, tabWrap])
+        root?.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
     }
   }
   // If the remembered tab no longer exists, fall back to the first.
@@ -2912,6 +3838,20 @@ async function runOnce(fresh = true) {
   const dash = document.querySelector(".dash");
   dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
   if (tabBar) dash.append(tabBar, tabWrap);
+  // Accessibility: swap every chart for its data table (state survives runs).
+  if (!dash.querySelector(".dp-a11y-bar")) {
+    const bar = document.createElement("div");
+    bar.className = "dp-a11y-bar";
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "dp-astable-btn";
+    b.textContent = "▦ Charts as tables";
+    b.title = "Show every chart as its data table";
+    b.setAttribute("aria-pressed", String(dpAsTables));
+    b.onclick = toggleAsTables;
+    bar.appendChild(b);
+    dash.prepend(bar);
+  }
   // A "Powered by DataZoo GmbH" credit at the foot of every dashboard.
   dash.querySelector(".dp-credit")?.remove();
   const credit = document.createElement("div");
@@ -2925,8 +3865,15 @@ async function runOnce(fresh = true) {
   dash.append(credit);
   attachHover();
   addExportButtons();
+  syncUrlState();
+  if (dpSeedRerun) {
+    dpSeedRerun = false;
+    runQueued = runQueued ?? false;
+  }
   if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
+  grid.removeAttribute("aria-busy");
+  dpVarLast = { ...dpVarNow };
   document.body.classList.remove("loading");
 }
 
@@ -2981,7 +3928,126 @@ function installMsAutoClose() {
   });
 }
 
+// ::PERIOD — every date computation is Rust (wasm period_resolve, src/period.rs);
+// JS keeps only the viewer's choice and binds the resolved variables.
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function periodResolve(spec, column, state) {
+  try {
+    return JSON.parse(period_resolve(spec, JSON.stringify({ ...state, column, today: localToday() })));
+  } catch (e) {
+    return { ok: false, errors: [String(e)] };
+  }
+}
+// The SET VARIABLE statements for a resolved period (unquoted names — the
+// served mode captures them by that shape; NULL without a comparison).
+function periodSets(prefix, vars) {
+  return Object.entries(vars).map(
+    ([k, v]) => `SET VARIABLE ${prefix}_${k} = ${v == null ? "NULL" : `'${String(v).replace(/'/g, "''")}'`}`
+  );
+}
+function makePeriodControl(meta, bar) {
+  const res = meta.res;
+  const key = meta.varname;
+  const commit = (patch) => {
+    const cur = dpVars[key] && typeof dpVars[key] === "object" ? dpVars[key] : {};
+    dpVars[key] = { ...cur, ...patch };
+    run(false);
+  };
+  const cont = document.createElement("div");
+  cont.className = "control dp-period";
+  cont.setAttribute("role", "group");
+  const capText = meta.caption || "Period";
+  cont.setAttribute("aria-label", capText);
+  const cap = document.createElement("span");
+  cap.textContent = capText + ":";
+  cont.appendChild(cap);
+
+  const sel = document.createElement("select");
+  sel.className = "dp-period-preset";
+  sel.setAttribute("aria-label", "Date range");
+  for (const p of res.presets) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label;
+    if (p.id === res.preset) o.selected = true;
+    sel.appendChild(o);
+  }
+  // Switching to "Custom range" starts from the range on screen.
+  sel.onchange = () => commit(sel.value === "custom" ? { preset: "custom", from: res.from, to: res.to } : { preset: sel.value });
+  cont.appendChild(sel);
+
+  if (res.preset === "custom") {
+    const mk = (k, label) => {
+      const inp = document.createElement("input");
+      inp.type = "date";
+      inp.value = res[k] || "";
+      inp.setAttribute("aria-label", label);
+      inp.onchange = () => {
+        if (inp.value) commit({ preset: "custom", from: res.from, to: res.to, [k]: inp.value });
+      };
+      return inp;
+    };
+    const arrow = document.createElement("span");
+    arrow.textContent = "→";
+    arrow.className = "daterange-arrow";
+    cont.append(mk("from", "From"), arrow, mk("to", "To"));
+  }
+
+  // The grain switch (grains=none in the spec hides it).
+  if (res.grains && res.grains.length) {
+    const seg = document.createElement("div");
+    seg.className = "dp-seg";
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "Time grain");
+    for (const g of res.grains) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = g[0].toUpperCase() + g.slice(1);
+      b.setAttribute("aria-pressed", String(g === res.grain));
+      if (g === res.grain && res.grain_auto) b.title = "Picked for this range — click to keep it";
+      b.onclick = () => commit({ grain: g });
+      seg.appendChild(b);
+    }
+    cont.appendChild(seg);
+  }
+
+  const cmp = document.createElement("select");
+  cmp.className = "dp-period-compare";
+  cmp.setAttribute("aria-label", "Compare with");
+  for (const c of res.compares) {
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = c.label;
+    if (c.id === res.compare) o.selected = true;
+    cmp.appendChild(o);
+  }
+  cmp.onchange = () => commit({ compare: cmp.value });
+  cont.appendChild(cmp);
+
+  const txt = document.createElement("span");
+  txt.className = "dp-period-range";
+  txt.setAttribute("aria-live", "polite");
+  const b = document.createElement("b");
+  b.textContent = res.vars.label;
+  txt.appendChild(b);
+  if (res.vars.prev_label) txt.appendChild(document.createTextNode(" " + res.vars.prev_label));
+  cont.appendChild(txt);
+
+  if (!res.ok && res.errors && res.errors.length) {
+    const e = document.createElement("span");
+    e.className = "dp-period-err";
+    e.textContent = "⚠ " + res.errors[0];
+    e.title = res.errors.join("\n");
+    cont.appendChild(e);
+  }
+  return finalizeControl(cont, bar);
+}
+
 function makeControl(meta, bar) {
+  if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
   wrap.className = "control";
   wrap.textContent = (meta.caption || meta.varname || "date") + ":";
@@ -3004,9 +4070,31 @@ function makeControl(meta, bar) {
     wrap.appendChild(mk(meta.varnames[1]));
     return finalizeControl(wrap, bar);
   }
+  if (meta.kind === "BUTTONS") return finalizeControl(mkButtons(meta), bar);
+  if (meta.kind === "TOGGLE") {
+    // A native checkbox with the switch role: Space toggles it, screen readers
+    // announce on/off; the caption is its label.
+    wrap.textContent = "";
+    wrap.classList.add("dp-toggle");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.setAttribute("role", "switch");
+    cb.checked = dpVars[meta.varname] === "true";
+    refocus("toggle:" + meta.varname, cb);
+    cb.onchange = () => {
+      if (document.activeElement === cb) dpRefocus = "toggle:" + meta.varname;
+      dpVars[meta.varname] = cb.checked ? "true" : "false";
+      run(false);
+    };
+    const cap = document.createElement("span");
+    cap.textContent = meta.caption || meta.varname;
+    wrap.append(cb, cap);
+    return finalizeControl(wrap, bar);
+  }
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
+    input.setAttribute("aria-label", meta.caption || meta.varname);
     meta.options.forEach((o, k) => {
       const opt = document.createElement("option");
       opt.value = o;
@@ -3143,6 +4231,62 @@ function makeControl(meta, bar) {
   return finalizeControl(wrap, bar);
 }
 
+// The control to focus again after the re-run a keyboard change triggers
+// (re-running rebuilds the controls): "<kind>:<variable>".
+let dpRefocus = null;
+function refocus(key, el) {
+  if (dpRefocus !== key) return;
+  dpRefocus = null;
+  // The new controls are attached once the whole run has rendered.
+  let tries = 0;
+  const go = () => (el.isConnected ? el.focus() : ++tries < 120 && requestAnimationFrame(go));
+  requestAnimationFrame(go);
+}
+// A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys
+// move between the options (roving tabindex), like a native radio group.
+function mkButtons(meta) {
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || meta.varname || "") + ":";
+  cap.id = "dp-seg-" + meta.varname;
+  const seg = document.createElement("div");
+  seg.className = "dp-seg";
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-labelledby", cap.id);
+  const btns = meta.options.map((o, k) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = o;
+    b.setAttribute("role", "radio");
+    const on = o === dpVars[meta.varname];
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+    if (on) refocus("seg:" + meta.varname, b);
+    const hint = meta.hints && meta.hints[k];
+    if (hint) b.title = hint;
+    b.onclick = () => {
+      if (dpVars[meta.varname] === o) return;
+      if (document.activeElement === b) dpRefocus = "seg:" + meta.varname;
+      dpVars[meta.varname] = o;
+      run(false);
+    };
+    return b;
+  });
+  seg.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const at = btns.indexOf(document.activeElement);
+    const nb = btns[(at + step + btns.length) % btns.length];
+    dpRefocus = "seg:" + meta.varname;
+    nb.click();
+  });
+  seg.append(...btns);
+  cont.append(cap, seg);
+  return cont;
+}
+
 // A contract panel's payload cell (`c{idx}`) as JSON text: DuckDB-Wasm returns
 // the JSON column as a string, a native backend may return it nested.
 function contractCell(row, idx, empty) {
@@ -3184,6 +4328,130 @@ function titleOf(s, rowsJson) {
   return v == null ? null : String(v).replace(/^"|"$/g, "");
 }
 
+// {{col}} / {{col:fmt}} in a ::MARKDOWN text → the statement's own row,
+// formatted like a KPI. The Markdown is rendered (and sanitised) with inert
+// private-use tokens in their place; each token in text then becomes the
+// HTML-escaped value, a token inside a tag (a link URL, an attribute) is
+// dropped — a value can never become markup or a URL. Unknown columns stay
+// as written. `fmt(value, spec)` formats one value.
+function markdownWithValues(src, row, fmt) {
+  const vals = [];
+  const keys = Object.keys(row || {});
+  const md = String(src ?? "").replace(/\{\{\s*([A-Za-z_][\w ]*?)\s*(?::\s*([A-Za-z_]+)\s*)?\}\}/g, (m, name, spec) => {
+    const key = keys.find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) return m;
+    vals.push(String(fmt(row[key], (spec || "").toLowerCase())));
+    return `\uE000${vals.length - 1}\uE001`;
+  });
+  const html = renderMarkdown(md);
+  if (!vals.length) return html;
+  const tok = /\uE000(\d+)\uE001/g;
+  return html.replace(/<[^>]*>|[^<]+/g, (part) =>
+    part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => escapeHtml(vals[+k] ?? ""))
+  );
+}
+// One {{col:fmt}} value: money / percent / compact / metric (numbers, as the
+// KPI roles), date, text; no spec = a number or ISO date in the dashboard
+// locale (like a table cell), other text as is.
+const MD_FMT = { money: "MONEY", currency: "MONEY", usd: "MONEY", eur: "MONEY", dollar: "MONEY", percent: "PERCENT", pct: "PERCENT", compact: "COMPACT", metric: "METRIC", number: "METRIC", num: "METRIC" };
+function mdValue(v, spec) {
+  if (v == null) return "–";
+  if (MD_FMT[spec]) return fmtNum(v, MD_FMT[spec]);
+  if (spec === "text") return String(v);
+  const loc = dashLocale();
+  if (spec === "date") {
+    // DuckDB-Wasm may hand a DATE / TIMESTAMP over as epoch ms
+    const iso = typeof v === "number" ? new Date(v).toISOString().slice(0, 10) : String(v).slice(0, 10);
+    return loc ? format_date_locale(iso, loc) : iso;
+  }
+  if (typeof v === "number" || /^-?\d+(\.\d+)?$/.test(String(v))) return fmtNum(v, "METRIC");
+  return loc ? format_date_locale(String(v), loc) : String(v);
+}
+// ::CALLOUT value → 'note' | 'warning' | 'success' (src/lint.rs CALLOUT_KINDS).
+function calloutKind(v) {
+  const k = String(v ?? "").trim().toLowerCase();
+  if (k === "warning" || k === "caution" || k === "danger") return "warning";
+  if (k === "success" || k === "tip") return "success";
+  return "note";
+}
+// One cell of a result (by output position) as text.
+function cellAt(rowsJson, idx) {
+  let r0;
+  try {
+    r0 = JSON.parse(rowsJson)[0];
+  } catch (_) {
+    return "";
+  }
+  const v = r0 ? (r0["c" + idx] ?? Object.values(r0)[idx]) : null;
+  return v == null ? "" : String(v).replace(/^"|"$/g, "");
+}
+// ::INFO: an ⓘ button on the panel's title bar (top-right corner without one)
+// that shows the definition on hover, keyboard focus or click; Esc closes it.
+// The tooltip is placed on <body> while open, so a tile's clipping or
+// stacking never hides it.
+let dpInfoSeq = 0;
+function addInfo(fig, text) {
+  if (!text.trim()) return;
+  const id = "dp-info-" + ++dpInfoSeq;
+  const wrap = document.createElement("span");
+  wrap.className = "dp-info";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-info-btn";
+  btn.textContent = "ⓘ";
+  btn.setAttribute("aria-label", "About this panel");
+  btn.setAttribute("aria-describedby", id);
+  btn.setAttribute("aria-expanded", "false");
+  const pop = document.createElement("div");
+  pop.className = "dp-info-pop";
+  pop.id = id;
+  pop.setAttribute("role", "tooltip");
+  pop.textContent = text;
+  pop.hidden = true;
+  wrap.append(btn, pop);
+  let pinned = false;
+  const show = (on) => {
+    btn.setAttribute("aria-expanded", on ? "true" : "false");
+    wrap.classList.toggle("open", on);
+    if (!on) {
+      pop.hidden = true;
+      if (pop.parentNode !== wrap) wrap.appendChild(pop); // keep it in the panel (aria, export)
+      return;
+    }
+    document.body.appendChild(pop);
+    pop.hidden = false;
+    const r = btn.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    const left = Math.max(8, Math.min(r.left - 6, innerWidth - w - 8));
+    const below = r.bottom + 6 + pop.offsetHeight < innerHeight;
+    pop.style.left = left + scrollX + "px";
+    pop.style.top = (below ? r.bottom + 6 : r.top - 6 - pop.offsetHeight) + scrollY + "px";
+  };
+  btn.onmouseenter = () => show(true);
+  btn.onmouseleave = () => pinned || show(false);
+  btn.onfocus = () => show(true);
+  btn.onblur = () => {
+    pinned = false;
+    show(false);
+  };
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    pinned = !pinned;
+    show(pinned);
+  };
+  btn.onkeydown = (e) => {
+    if (e.key !== "Escape") return;
+    pinned = false;
+    show(false);
+  };
+  const title = fig.querySelector(".panel-title");
+  if (title) title.appendChild(wrap);
+  else {
+    wrap.classList.add("corner");
+    fig.appendChild(wrap);
+  }
+}
+
 function mkTitle(text) {
   const c = document.createElement("figcaption");
   c.className = "panel-title";
@@ -3191,12 +4459,99 @@ function mkTitle(text) {
   return c;
 }
 
-function mkNoData() {
+// An empty result: the author's ::EMPTY message, else a generic note.
+function mkNoData(msg) {
   const d = document.createElement("div");
   d.className = "nodata";
-  d.textContent = "No data for this selection";
+  d.setAttribute("role", "status");
+  d.textContent = msg || "No data for this selection";
   return d;
 }
+
+// A failed query: a short message, the details (error + SQL) behind a toggle.
+// Stack frames / DuckDB stack traces are dropped — the viewer gets the cause.
+function shortError(msg) {
+  const line = errorDetail(msg)
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^LINE \d+:|^\^/.test(l));
+  const t = (line || "Unknown error").replace(/^(Uncaught )?Error:\s*/, "");
+  return t.length > 160 ? t.slice(0, 157) + "…" : t;
+}
+function errorDetail(msg) {
+  return String(msg)
+    .split(/\n\s*Stack Trace:/i)[0]
+    .split("\n")
+    .filter((l) => !/^\s+at\s/.test(l))
+    .join("\n")
+    .trim();
+}
+function mkErrorBody(e, sql) {
+  const box = document.createElement("div");
+  box.className = "dp-err";
+  const head = document.createElement("div");
+  head.className = "dp-err-head";
+  head.textContent = "Couldn't load this panel";
+  const msg = document.createElement("div");
+  msg.className = "dp-err-msg";
+  msg.textContent = shortError(e);
+  const det = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = "Details";
+  const pre = document.createElement("pre");
+  pre.textContent = errorDetail(e) + (sql ? "\n\n" + sql : "");
+  det.append(sum, pre);
+  box.append(head, msg, det);
+  return box;
+}
+function mkErrorCard(e, sql, wide = false) {
+  const fig = document.createElement("figure");
+  fig.className = "panel dp-errcard";
+  if (wide) fig.style.gridColumn = "1/-1";
+  fig.appendChild(mkErrorBody(e, sql));
+  return fig;
+}
+
+// An optional input (`-- @requires <path>` above the statement) whose file /
+// table is missing: the query failed with a missing-input error.
+const isOptionalMissing = (s, e) => !!(s && s.requires && s.requires.length) && isMissingInputError(String(e));
+function isMissingInputError(msg) {
+  return /no files found|cannot open file|no such file|does not exist|http 404|couldn't fetch/i.test(String(msg));
+}
+function mkNotAvailable(s) {
+  const fig = document.createElement("figure");
+  fig.className = "panel dp-na";
+  const d = document.createElement("div");
+  d.className = "nodata";
+  d.setAttribute("role", "status");
+  const b = document.createElement("strong");
+  b.textContent = "Not available";
+  const why = document.createElement("span");
+  why.textContent = "This run has no " + s.requires.map((p) => p.split("/").pop()).join(", ");
+  d.append(b, why);
+  fig.appendChild(d);
+  return fig;
+}
+
+// ::THRESHOLDS rules, parsed by the wasm `threshold_rules` (src/thresholds.rs):
+// [{column, rules: [{lo, hi, status, text}]}] — [] for a malformed spec
+// (`dashboard --check` reports it).
+function parseThresholds(spec) {
+  try {
+    const j = JSON.parse(threshold_rules(String(spec ?? "")));
+    return j.ok ? j.groups : [];
+  } catch (_) {
+    return [];
+  }
+}
+// The first rule a number meets (its status: good / warn / bad / neutral), or null.
+function thresholdRule(rules, v) {
+  const n = typeof v === "number" ? v : cleanNum(v);
+  if (n == null || !isFinite(n)) return null;
+  const ok = (b, below) => !b || (below ? (b[1] ? n <= b[0] : n < b[0]) : b[1] ? n >= b[0] : n > b[0]);
+  return (rules || []).find((r) => ok(r.lo, false) && ok(r.hi, true)) || null;
+}
+const STATUS_ICON = { good: "●", warn: "▲", bad: "◆", neutral: "○" };
 
 const cleanNum = (v) => {
   if (v == null) return null;
@@ -3419,6 +4774,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       const a = unquote(v).toLowerCase();
       return op === "=" ? a === w.toLowerCase() : op === "!=" || op === "<>" ? a !== w.toLowerCase() : false;
     });
+  // ::THRESHOLDS 'Margin %: <10:bad; <15:warn; good | …': each named column's
+  // cells take their status tint and shape (● good, ▲ warn, ◆ bad — never colour alone)
+  const thresholds = {};
+  for (const g of opts.thresholds ? parseThresholds(opts.thresholds) : []) {
+    const c = g.column != null && colNamed(g.column);
+    if (c) thresholds[c] = g.rules;
+  }
   // ::HIGHLIGHT 'Revenue: top 3, Margin: bottom 2' ('top 3' alone: the first numeric column)
   const hlSpec = {};
   for (const part of String(opts.highlight || "").split(",")) {
@@ -4310,7 +5672,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // ── cells ──
   const tb = t.createTBody();
   const nil = () => `<span class="nil">—</span>`;
-  function fillCell(td, v, c) {
+  function fillCell(td, v, c, row) {
     const i = info[c];
     const f = i.f;
     if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
@@ -4326,6 +5688,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     }
     if (f === "BADGE") {
       td.innerHTML = badgeHtml(unq(v));
+      return;
+    }
+    if (f === "LINK") {
+      td.replaceChildren(linkCell(unquote(v), row || {}, row && k0 != null ? unquote(row[k0]) : ""));
       return;
     }
     if (i.bool) {
@@ -4393,6 +5759,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         .sort((a, b) => (sp.top ? b - a : a - b));
   };
   function decorate(td, v, c) {
+    const th = thresholds[c] && thresholdRule(thresholds[c], v);
+    if (th) {
+      td.classList.add("th", `th-${th.status}`);
+      td.title = `${th.status}: ${th.text}`;
+      td.insertAdjacentHTML("afterbegin", `<span class="th-i" aria-label="${th.status}">${STATUS_ICON[th.status] || ""}</span>`);
+    }
     const fl = flags[c] && flagOf(c, v);
     if (fl) {
       td.classList.add("flag");
@@ -4413,6 +5785,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // and getvariable('<first column>') (click again / the background clears);
   // with 'multi' each click toggles the row in the list getvariable('<first column>').
   const k0 = cols[0];
+  if (k0 != null) coerceSeededSelection(k0, selMode);
   function renderRow(tr, r, repeat = false) {
     const vc = visCols();
     const selectable = selMode !== "none" && k0 != null && !info[k0].numeric;
@@ -4450,7 +5823,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     if (selectable) tr.setAttribute("aria-selected", String(tr.classList.contains("row-sel")));
     vc.forEach((c, ix) => {
       const td = tr.insertCell();
-      fillCell(td, r[c], c);
+      fillCell(td, r[c], c, r);
       decorate(td, r[c], c);
       if (repeat && c === subCol) td.classList.add("grp-rep"); // ::SUBTOTAL: the group's value once
       if (ix === 0 && selectable && selMode === "multi") {
@@ -4781,6 +6154,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     infoEl.textContent = `${from.toLocaleString(loc)}–${to.toLocaleString(loc)} of ${total.toLocaleString(loc)}`;
     const sizeSel = document.createElement("select");
     sizeSel.className = "page-size";
+    sizeSel.setAttribute("aria-label", "Rows per page");
     for (const nn of [10, 20, 50, 100]) {
       const o = document.createElement("option");
       o.value = String(nn);
@@ -4968,6 +6342,40 @@ function cellSpark(v) {
     `<polygon points="${area}" fill="var(--ax-spark)" fill-opacity="0.1"/>` +
     `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
     `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
+  );
+}
+
+// A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
+// value, stretched to the tile's width (non-scaling strokes), the last point
+// marked. "" without ≥ 2 numbers.
+function kpiSpark(v) {
+  let arr = Array.isArray(v) ? v : null;
+  if (!arr && typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) arr = p;
+    } catch (_) {}
+  }
+  const nums = (arr || []).filter((x) => x != null && x !== "").map(Number).filter((x) => isFinite(x));
+  if (nums.length < 2) return "";
+  const w = 200;
+  const h = 36;
+  const pad = 3;
+  const mn = Math.min(...nums);
+  const mx = Math.max(...nums);
+  const rng = mx - mn || 1;
+  const xs = (i) => (i * w) / (nums.length - 1);
+  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
+  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
+  const lx = xs(nums.length - 1).toFixed(1);
+  const ly = ys(nums[nums.length - 1]).toFixed(1);
+  const f = (n) => fmtNum(n, "COMPACT");
+  const tip = `${f(nums[0])} → ${f(nums[nums.length - 1])} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
+  return (
+    `<svg class="metric-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(tip)}"><title>${escapeHtml(tip)}</title>` +
+    `<polygon points="0,${h} ${pts} ${w},${h}" fill="var(--ax-spark)" fill-opacity="0.12"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
+    `<path d="M${lx} ${ly}h0" stroke="var(--ax-spark-dot)" stroke-width="5.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`
   );
 }
 
@@ -5461,9 +6869,14 @@ function shareLink(e) {
   const encoded = encodeSql($("sql").value);
   const editable = e && e.shiftKey;
   const base = location.origin + location.pathname;
-  const url = editable
-    ? base + "#sql=" + encoded
-    : base + "?embed=1#sql=" + encoded;
+  // The view travels too: the open tab and the viewer state (?v.* inputs and
+  // selections), so the recipient lands on exactly this view.
+  const q = new URLSearchParams(editable ? "" : "embed=1");
+  const tab = new URLSearchParams(location.search).get("tab");
+  if (tab) q.set("tab", tab);
+  for (const [k, v] of urlStateParams()) q.append(k, v);
+  const qs = q.toString();
+  const url = base + (qs ? "?" + qs : "") + "#sql=" + encoded;
   navigator.clipboard.writeText(url).then(
     () => status(editable ? "editable link copied ✓" : "view-only link copied ✓"),
     () => {
@@ -5739,7 +7152,9 @@ function attachHover() {
     el.classList.add("dp-hit");
     el.style.cursor = "pointer";
     el.addEventListener("mouseenter", () => {
-      if (el.closest(".has-axis-pointer")) return; // the panel-level crosshair shows the tooltip
+      // The panel-level crosshair shows the tooltip — except for a mark focused
+      // from the keyboard (a11y), which has no pointer to drive the crosshair.
+      if (el.closest(".has-axis-pointer") && document.activeElement !== el) return;
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
       tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
       tip.classList.add("show");
@@ -5755,6 +7170,13 @@ function attachHover() {
     });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      const ia = el.closest(".panel")?._ia;
+      // The mark's own value — its x (a drill level is the x), else its series.
+      const dx = el.getAttribute("data-x");
+      const key = dx ? String(xTickLabel(el, dx)) : series;
+      if (ia && ia.drill && drillInto(ia.drill, key)) return;
+      if (ia && ia.link) return followLink(chartLink(ia.link, el, key, series));
+      if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.
       dpFilter = dpFilter === series ? "" : series;
@@ -5763,10 +7185,240 @@ function attachHover() {
     });
   });
   apply();
+  decorateSelections();
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
+  attachChartA11y();
 }
+
+// ---- accessible charts (#37) ----
+// Every chart SVG gets a one-sentence screen-reader summary (aria-label +
+// <desc>). A chart with marks is one Tab stop: arrow keys walk its marks
+// (←/→ along a series, ↑/↓ across series, Home/End), Enter/Space clicks the
+// focused mark (select / drill / link), Esc returns to the chart. The focused
+// mark shows its tooltip. "Charts as tables" swaps every chart for its data.
+let dpAsTables = (() => {
+  try {
+    return new URLSearchParams(location.search).get("tables") === "1" || localStorage.getItem("dp-as-tables") === "1";
+  } catch (_) {
+    return false;
+  }
+})();
+let dpA11yFocus = null; // {stmt, series, x} — the mark to refocus after a re-run
+
+const CHART_KINDS = [
+  [/^BARCHART|^BAR_/, "Bar chart"],
+  [/^LINECHART|^STEP|^SPARKLINE/, "Line chart"],
+  [/^AREACHART/, "Area chart"],
+  [/^SCATTER|^BUBBLE|^JITTER|^SMOOTH/, "Scatter plot"],
+  [/^PIE/, "Pie chart"],
+  [/^DONUT/, "Donut chart"],
+  [/^GAUGE/, "Gauge"],
+  [/^RADAR/, "Radar chart"],
+  [/^HISTOGRAM/, "Histogram"],
+  [/^DENSITY/, "Density plot"],
+  [/^BOXPLOT/, "Box plot"],
+  [/^VIOLIN/, "Violin plot"],
+  [/^QQ/, "Q-Q plot"],
+  [/^HEATMAP/, "Heatmap"],
+  [/^CALENDAR/, "Calendar heatmap"],
+  [/^CANDLESTICK/, "Candlestick chart"],
+  [/^MAP/, "Map"],
+];
+function chartKind(roles) {
+  for (const r of roles || []) for (const [re, name] of CHART_KINDS) if (re.test(r[1])) return name;
+  return "Chart";
+}
+
+// One sentence: kind, title, series, x range, value range and extremes.
+// items = [{series, x, value}] (value a number or null).
+function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString()) {
+  let out = kind + (title ? `: ${title}` : "");
+  if (!items.length) return out + ".";
+  const series = [...new Set(items.map((m) => m.series).filter((v) => v !== "" && v != null))];
+  const xs = [...new Set(items.map((m) => m.x).filter((v) => v !== "" && v != null))];
+  const parts = [];
+  const multi = series.length > 1 && !series.every((v, i) => v === xs[i]);
+  if (multi)
+    parts.push(
+      `${series.length} series (${series.slice(0, 4).join(", ")}${series.length > 4 ? `, and ${series.length - 4} more` : ""})`
+    );
+  if (xs.length > 1) parts.push(`${xs.length} points from ${xs[0]} to ${xs[xs.length - 1]}`);
+  const vals = items.filter((m) => m.value != null && Number.isFinite(m.value));
+  if (vals.length) {
+    const hi = vals.reduce((a, b) => (b.value > a.value ? b : a));
+    const lo = vals.reduce((a, b) => (b.value < a.value ? b : a));
+    const at = (m) => {
+      const w = [multi ? m.series : "", m.x || (!multi ? m.series : "")].filter(Boolean);
+      return w.length ? ` (${w.join(", ")})` : "";
+    };
+    if (hi === lo) parts.push(`value ${fmt(hi.value)}${at(hi)}`);
+    else parts.push(`highest ${fmt(hi.value)}${at(hi)}, lowest ${fmt(lo.value)}${at(lo)}`);
+  }
+  return out + (parts.length ? "; " + parts.join("; ") : "") + ".";
+}
+
+function chartMarks(svg) {
+  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip"));
+}
+
+function attachChartA11y() {
+  for (const fig of document.querySelectorAll(".dash .panel")) {
+    const svg = fig.querySelector(".panel-svg > svg");
+    if (!svg || svg.dataset.a11y) continue;
+    svg.dataset.a11y = "1";
+    const marks = chartMarks(svg);
+    const title = fig.querySelector(".panel-title")?.textContent?.trim() || "";
+    const items = marks.map((el) => {
+      const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
+      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: markValue(el) };
+    });
+    const summary = chartSummary(chartKind(fig._dp && fig._dp.roles), title, items, (v) => fmtTipValue(String(v)));
+    svg.setAttribute("aria-label", summary);
+    svg.setAttribute("aria-roledescription", "chart");
+    svg.querySelector(":scope > desc")?.remove();
+    const desc = document.createElementNS("http://www.w3.org/2000/svg", "desc");
+    desc.textContent = summary;
+    svg.prepend(desc);
+    if (!marks.length) {
+      svg.setAttribute("role", "img");
+      continue;
+    }
+    svg.setAttribute("role", "group");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("aria-description", "Arrow keys move between data points, Enter selects, Escape leaves.");
+    marks.forEach((el) => {
+      el.setAttribute("tabindex", "-1");
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", el.getAttribute("data-tip"));
+      el.addEventListener("focus", () => {
+        el.dispatchEvent(new MouseEvent("mouseenter"));
+        const r = el.getBoundingClientRect();
+        const tip = $("dp-tip");
+        if (tip) {
+          tip.style.left = r.right + 8 + "px";
+          tip.style.top = r.top + 8 + "px";
+        }
+      });
+      el.addEventListener("blur", () => {
+        el.dispatchEvent(new MouseEvent("mouseleave"));
+        if (el.closest(".has-axis-pointer")) $("dp-tip")?.classList.remove("show"); // shown by the focus
+      });
+    });
+    svg.addEventListener("keydown", (e) => chartKey(e, svg, fig));
+  }
+  if (dpA11yFocus) {
+    const f = dpA11yFocus;
+    dpA11yFocus = null;
+    const svg = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"] .panel-svg > svg`);
+    const marks = svg ? chartMarks(svg) : [];
+    (marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0] || svg)?.focus();
+  }
+  applyAsTables();
+  requestAnimationFrame(keyboardScrollers);
+}
+
+// A table that scrolls but holds nothing focusable (no row selection, links or
+// buttons) becomes a Tab stop itself, so the keyboard can scroll it (WCAG
+// scrollable-region-focusable).
+function keyboardScrollers() {
+  for (const el of document.querySelectorAll(".dash .tbl-scroll")) {
+    const scrolls = el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1;
+    const focusable = el.querySelector("a[href], button, input, select, [tabindex]:not([tabindex='-1'])");
+    if (scrolls && !focusable) {
+      el.tabIndex = 0;
+      el.setAttribute("role", "region");
+      const t = el.closest(".panel")?.querySelector(".panel-title")?.textContent?.trim();
+      el.setAttribute("aria-label", t ? `${t} (scrollable table)` : "Scrollable table");
+    } else if (el.getAttribute("role") === "region") {
+      el.removeAttribute("tabindex");
+      el.removeAttribute("role");
+      el.removeAttribute("aria-label");
+    }
+  }
+}
+
+// Marks of a chart in reading order: series by first appearance, each sorted by x.
+function markGrid(svg) {
+  const by = new Map();
+  for (const el of chartMarks(svg)) {
+    const k = el.getAttribute("data-series") || "";
+    (by.get(k) || by.set(k, []).get(k)).push(el);
+  }
+  const cx = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.left + r.width / 2;
+  };
+  return [...by.values()].map((els) => els.map((el) => [cx(el), el]).sort((a, b) => a[0] - b[0]).map((p) => p[1]));
+}
+
+function chartKey(e, svg, fig) {
+  const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "Escape"];
+  if (!keys.includes(e.key)) return;
+  const grid = markGrid(svg);
+  if (!grid.length) return;
+  const cur = e.target;
+  if (cur === svg) {
+    if (e.key === "Escape") return;
+    e.preventDefault();
+    (e.key === "End" ? grid[grid.length - 1].at(-1) : grid[0][0]).focus();
+    return;
+  }
+  let si = grid.findIndex((g) => g.includes(cur));
+  if (si < 0) return;
+  let mi = grid[si].indexOf(cur);
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === "Escape") return svg.focus();
+  if (e.key === "Enter" || e.key === " ") {
+    dpA11yFocus = { stmt: fig.dataset.stmt, series: cur.getAttribute("data-series"), x: cur.getAttribute("data-x") || "" };
+    cur.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }));
+    return;
+  }
+  if (e.key === "ArrowRight") mi = Math.min(grid[si].length - 1, mi + 1);
+  else if (e.key === "ArrowLeft") mi = Math.max(0, mi - 1);
+  else if (e.key === "Home") mi = 0;
+  else if (e.key === "End") mi = grid[si].length - 1;
+  else {
+    // ↑/↓: the neighbouring series, at the mark nearest in x
+    const x = cur.getBoundingClientRect().left;
+    si = Math.max(0, Math.min(grid.length - 1, si + (e.key === "ArrowDown" ? 1 : -1)));
+    const near = grid[si].map((el, k) => [Math.abs(el.getBoundingClientRect().left - x), k]).sort((a, b) => a[0] - b[0]);
+    mi = near[0][1];
+  }
+  grid[si][mi].focus();
+}
+
+// "Charts as tables": every chart panel shows its data table instead.
+function applyAsTables() {
+  document.body.classList.toggle("dp-as-tables", dpAsTables);
+  $("dp-tip")?.classList.remove("show"); // a focused mark may just have been hidden
+  const btn = document.querySelector(".dp-astable-btn");
+  if (btn) btn.setAttribute("aria-pressed", String(dpAsTables));
+  for (const fig of document.querySelectorAll(".dash .panel")) {
+    const holder = fig.querySelector(".panel-svg");
+    if (!holder || !fig._dp) continue;
+    let view = fig.querySelector(".dp-astable-view");
+    if (dpAsTables && !view) {
+      view = document.createElement("div");
+      view.className = "dp-astable-view";
+      const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+      view.innerHTML = dataTableHtml(fig._dp, 200, title);
+      holder.after(view);
+    }
+    holder.hidden = dpAsTables;
+    if (view) view.hidden = !dpAsTables;
+  }
+}
+function toggleAsTables() {
+  dpAsTables = !dpAsTables;
+  try {
+    localStorage.setItem("dp-as-tables", dpAsTables ? "1" : "0");
+  } catch (_) {}
+  applyAsTables();
+}
+
 
 // One tooltip row: colour swatch + series + value (+ the full tooltip text
 // when it carries more, e.g. box-plot stats or OHLC). A single-series bar's
@@ -5787,6 +7439,7 @@ function attachToolbox() {
     const svg = panel.querySelector("svg");
     if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
     if (panel.querySelector(".dp-table")) return; // a table's sparklines are not a chart
+    if (panel.classList.contains("metric")) return; // nor is a KPI tile's trend line
     panel.dataset.toolboxWired = "1";
     const bar = document.createElement("div");
     bar.className = "dp-toolbox";
@@ -5867,14 +7520,24 @@ function toggleMagicType(panel) {
 }
 
 // A modal listing the panel's rows as a table (ECharts toolbox "data view").
-function showDataView(panel) {
-  const dp = panel._dp;
-  if (!dp) return;
+// A panel's data (fig._dp: rows + roles) as an HTML table, data columns only.
+// Rows JSON as DuckDB writes it: a DOUBLE can be a bare Infinity / NaN (an
+// ROC curve's first threshold), which JSON.parse rejects — read them as text.
+function parseRowsLenient(json) {
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    const fixed = json.replace(/([:,\[]\s*)(-?Infinity|NaN)(?=\s*[,}\]])/g, '$1"$2"');
+    if (fixed === json) throw e;
+    return JSON.parse(fixed);
+  }
+}
+function dataTableHtml(dp, limit, caption) {
   let rows;
   try {
-    rows = JSON.parse(dp.rows);
+    rows = typeof dp.rows === "string" ? parseRowsLenient(dp.rows) : dp.rows;
   } catch (_) {
-    return;
+    return "";
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
@@ -5893,20 +7556,28 @@ function showDataView(panel) {
     return k;
   };
   const esc = (v) => escapeHtml(v == null ? "" : String(v));
-  const head = keys.map((k) => `<th>${esc(nameFor(k))}</th>`).join("");
+  const head = keys.map((k) => `<th scope="col">${esc(nameFor(k))}</th>`).join("");
   const body = rows
-    .slice(0, 500)
+    .slice(0, limit)
     .map((r) => `<tr>${keys.map((k) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
     .join("");
+  return (
+    `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}"` : ""}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (rows.length > limit ? `<div class="dp-modal-note">Showing ${limit} of ${rows.length} rows</div>` : "")
+  );
+}
+
+function showDataView(panel) {
+  const dp = panel._dp;
+  if (!dp) return;
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
   const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Data";
   const back = document.createElement("div");
   back.className = "dp-modal-back";
   back.innerHTML =
     `<div class="dp-modal"><div class="dp-modal-head"><b>${esc(title)}</b>` +
     `<button class="dp-modal-x" title="Close">✕</button></div>` +
-    `<div class="dp-modal-body"><table class="dp-dv"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
-    (rows.length > 500 ? `<div class="dp-modal-note">Showing 500 of ${rows.length} rows</div>` : "") +
-    `</div></div>`;
+    `<div class="dp-modal-body">${dataTableHtml(dp, 500, title)}</div></div>`;
   const close = () => back.remove();
   back.addEventListener("click", (e) => {
     if (e.target === back || e.target.classList.contains("dp-modal-x")) close();
@@ -5957,6 +7628,11 @@ function toggleBrush(panel) {
   ov.appendChild(rect);
   holder.appendChild(ov);
   panel._brush = ov;
+  // On a ::SELECT_AS chart with a continuous / date x the brush is an x band.
+  const sel = panel._ia && panel._ia.select;
+  const xKind = sel ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
+  const xBand = !!xKind;
+  ov.addEventListener("click", (e) => e.stopPropagation()); // a drag is not a click on empty space
   let start = null;
   const rel = (e) => {
     const r = ov.getBoundingClientRect();
@@ -5975,9 +7651,9 @@ function toggleBrush(panel) {
     if (!start) return;
     const p = rel(e);
     const x = Math.min(start.x, p.x),
-      y = Math.min(start.y, p.y),
+      y = xBand ? 0 : Math.min(start.y, p.y),
       w = Math.abs(p.x - start.x),
-      h = Math.abs(p.y - start.y);
+      h = xBand ? ov.clientHeight : Math.abs(p.y - start.y);
     Object.assign(rect.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" });
   });
   ov.addEventListener("mouseup", (e) => {
@@ -5996,12 +7672,25 @@ function toggleBrush(panel) {
       return;
     }
     const ovr = ov.getBoundingClientRect();
-    filterMarks(panel, (el) => {
+    const inBox = (el) => {
       const b = el.getBoundingClientRect();
       const cx = b.left + b.width / 2 - ovr.left,
         cy = b.top + b.height / 2 - ovr.top;
-      return cx >= box.x0 && cx <= box.x1 && cy >= box.y0 && cy <= box.y1;
-    });
+      return cx >= box.x0 && cx <= box.x1 && (xBand || (cy >= box.y0 && cy <= box.y1));
+    };
+    filterMarks(panel, inBox);
+    // A ::SELECT_AS chart turns the brush into variables: the brushed x range
+    // (<name>_from / <name>_to) on a continuous / date x, the brushed values on a
+    // discrete x in multi mode.
+    if (!sel) return;
+    const hit = [...marksOf(panel)].filter(inBox);
+    if (xKind) {
+      const xs = hit.map((el) => xVal(el.getAttribute("data-x") || "", xKind)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      dpRange[sel.name] = xs.length ? { from: xs[0], to: xs[xs.length - 1] } : null;
+    } else if (sel.mode === "multi") {
+      dpXf[sel.name] = [...new Set(hit.map((el) => el.getAttribute("data-series")))];
+    } else return;
+    run(false);
   });
 }
 
@@ -6216,9 +7905,10 @@ function attachAxisPointer() {
     // highlight every point sharing the nearest x (two far-apart dots at once).
     // Skip it — the per-point (<title>) hover shows the individual point instead.
     const roles = (panel._dp && panel._dp.roles) || [];
-    // Radar is polar and jitter/scatter has no shared-x series — a vertical
-    // x-crosshair is wrong for both; their per-point (<title>) hover takes over.
-    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK)$/.test(r[1]))) return;
+    // Radar is polar, bullet/funnel are horizontal and jitter/scatter has no
+    // shared-x series — a vertical x-crosshair is wrong for all of them; their
+    // per-point (<title>) hover takes over.
+    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART)$/.test(r[1]))) return;
     const scatterOnly =
       roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
       !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
@@ -6470,13 +8160,16 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
 
 // Click empty dashboard space to clear all cross-filters / selections.
 document.querySelector(".dash").addEventListener("click", () => {
-  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
-  if (dpFilter || dpSelected !== null || anyNamed) {
-    dpFilter = "";
-    dpSelected = null;
-    for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
-    run(false);
-  }
+  if (clearSelections()) run(false);
+});
+// Esc does the same (unless a dialog, menu or text field has the key).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  const el = document.activeElement;
+  const tag = ((el && el.tagName) || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tag) || document.querySelector(".dp-modal-back")) return;
+  document.querySelectorAll(".dash .panel").forEach((p) => p._brush && toggleBrush(p)); // close an open brush
+  if (clearSelections()) run(false);
 });
 
 boot().catch((e) => status("boot failed: " + e));

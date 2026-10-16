@@ -11,6 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
+use crate::inputs::{input_defaults, input_index, input_kind};
 use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
 use serde_json::{Map, Value};
 
@@ -18,6 +19,8 @@ use serde_json::{Map, Value};
 pub enum Severity {
     Error,
     Warning,
+    /// Informational (an optional `-- @requires` input that is missing).
+    Note,
 }
 
 impl Severity {
@@ -25,6 +28,7 @@ impl Severity {
         match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Note => "note",
         }
     }
 }
@@ -38,7 +42,12 @@ pub struct Diagnostic {
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
     /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
-    /// | `chrome/bad-url`. Design advisories
+    /// | `chrome/bad-url` | `period/bad-spec` (a `::PERIOD` spec with an
+    /// unknown key / preset / grain / compare or a bad date) |
+    /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
+    /// `kpi/sparkline-not-list` (warning) | `optional/missing` (a note: a
+    /// `-- @requires` input is missing, so the panel shows "Not available").
+    /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -83,7 +92,34 @@ where
     let mut diags = Vec::new();
     let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
-                             // Cross-panel design counters (only used when opts.design).
+                             // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
+                             // so two different directives writing one variable are reported.
+    let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
+        std::collections::HashMap::new();
+    let mut claim = |diags: &mut Vec<Diagnostic>, names: &[String], stmt, kind, sql: &str| {
+        for n in names {
+            match owners.get(n) {
+                Some(&(other, k)) if other != stmt && (k != kind || kind == "::DRILL") => diags
+                    .push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "interaction/name-clash",
+                        message: format!(
+                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — \
+                             each overwrites the other; rename one"
+                        ),
+                        sql: sql.to_string(),
+                    }),
+                Some(_) => {}
+                None => {
+                    owners.insert(n.clone(), (stmt, kind));
+                }
+            }
+        }
+    };
+    // A ::EMPTY message is waiting for the next panel (its 0 rows are expected).
+    let mut empty_msg = false;
+    // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
     let mut group_depth = 0i32;
@@ -116,6 +152,26 @@ where
             }
         }
 
+        // An optional input that is missing: the statement is skipped (setup
+        // never reaches the prelude) and its panel reads "Not available".
+        if let Some(path) = p.requires.iter().find(|f| input_missing(&mut run_query, f)) {
+            diags.push(Diagnostic {
+                severity: Severity::Note,
+                stmt,
+                code: "optional/missing",
+                message: format!(
+                    "optional input `{path}` is missing — {} (`-- @requires`)",
+                    if p.setup {
+                        "this statement is skipped"
+                    } else {
+                        "this panel shows \"Not available\""
+                    }
+                ),
+                sql: short.clone(),
+            });
+            continue;
+        }
+
         // Setup statements: a query-shaped one that still carries ::ROLE casts
         // is a panel that lost its roles (the #1 silent failure) — flag it, and
         // don't run it (the casts would just raise a confusing type error).
@@ -135,13 +191,7 @@ where
                     sql: short.clone(),
                 });
             } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                });
+                diags.push(sql_error(stmt, &p.requires, &e, &short));
             } else {
                 // Genuine setup succeeded — keep it in scope for later panels.
                 prelude.push_str(&p.sql);
@@ -156,18 +206,62 @@ where
         if let Some(kind) = input_kind(&p.roles) {
             match run_query(&format!("{prelude}{};", p.sql)) {
                 Ok(rows) => {
+                    let names: Vec<String> = rows
+                        .first()
+                        .map(|r| {
+                            let n = if kind == InputKind::DateRange { 2 } else { 1 };
+                            let at = input_index(&p.roles).min(r.len().saturating_sub(1));
+                            let cols: Vec<String> = r.keys().skip(at).take(n).cloned().collect();
+                            if kind == InputKind::Period {
+                                let prefix = crate::period::var_prefix(
+                                    cols.first().map(String::as_str).unwrap_or(""),
+                                );
+                                crate::period::SUFFIXES
+                                    .iter()
+                                    .map(|sfx| format!("{prefix}_{sfx}"))
+                                    .collect()
+                            } else {
+                                cols
+                            }
+                        })
+                        .unwrap_or_default();
+                    claim(&mut diags, &names, stmt, "input", &short);
+                    if kind == InputKind::Period {
+                        let spec = rows
+                            .first()
+                            .and_then(|r| r.values().nth(input_index(&p.roles)))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        for e in crate::period::parse_spec(spec).1 {
+                            diags.push(Diagnostic {
+                                severity: Severity::Error,
+                                stmt,
+                                code: "period/bad-spec",
+                                message: format!(
+                                    "::PERIOD spec: {e} — the control falls back to its defaults"
+                                ),
+                                sql: short.clone(),
+                            });
+                        }
+                    }
+                    if kind == InputKind::Buttons && rows.len() > 7 {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "input/many-buttons",
+                            message: format!(
+                                "::BUTTONS has {} options — a button group reads well up to ~7; use ::DROPDOWN",
+                                rows.len()
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
                     }
                 }
-                Err(e) => diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                }),
+                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
             }
             continue;
         }
@@ -176,13 +270,7 @@ where
         let rows = match run_query(&format!("{prelude}{};", p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                });
+                diags.push(sql_error(stmt, &p.requires, &e, &short));
                 continue;
             }
         };
@@ -234,6 +322,27 @@ where
                     ),
                     Severity::Error,
                 ),
+                Role::AsOf => {
+                    if crate::freshness::parse_timestamp(&v).is_none() {
+                        bad(
+                            "asof/unparseable",
+                            format!("::ASOF value `{v}` is not a date or timestamp — the freshness chip is hidden"),
+                            Severity::Warning,
+                        );
+                    }
+                    let opt = rows.first().and_then(|row| {
+                        row.values().skip(1).find_map(|c| {
+                            c.as_str().filter(|c| crate::freshness::is_stale_option(c))
+                        })
+                    });
+                    if let Some(o) = opt.filter(|o| crate::freshness::parse_stale(o).is_none()) {
+                        bad(
+                            "asof/bad-stale",
+                            format!("`{o}` is not a stale threshold — write 'stale=24h' (s, m, h, d or w)"),
+                            Severity::Warning,
+                        );
+                    }
+                }
                 Role::Logo | Role::Favicon if !crate::theme::safe_url(&v) => bad(
                     "chrome/bad-url",
                     format!("`{v}` is not an allowed image URL (relative, https: or data:image/)"),
@@ -242,6 +351,217 @@ where
                 _ => {}
             }
             continue;
+        }
+
+        // ::CALLOUT styles a ::MARKDOWN box: an unknown kind falls back to 'note',
+        // a callout without Markdown text shows nothing.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::Callout) {
+            let kind = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !CALLOUT_KINDS.contains(&kind.as_str()) {
+                warn(
+                    "callout/unknown",
+                    format!(
+                        "::CALLOUT `{kind}` — use 'note', 'warning' or 'success' (drawn as a note)"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "callout/no-text",
+                    "::CALLOUT needs a ::MARKDOWN column in the same SELECT (the callout's text)"
+                        .into(),
+                );
+            }
+        }
+
+        // {{col}} / {{col:fmt}} placeholders in a ::MARKDOWN text must name a
+        // column of the same SELECT and a known format.
+        if let (Some((i, _)), Some(row)) = (
+            p.roles.iter().find(|(_, r)| *r == Role::Markdown),
+            rows.first(),
+        ) {
+            let md = row.values().nth(*i).and_then(Value::as_str).unwrap_or("");
+            for (name, spec) in md_placeholders(md) {
+                let mut warn = |code: &'static str, message: String| {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code,
+                        message,
+                        sql: short.clone(),
+                    })
+                };
+                if !row.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
+                    warn(
+                        "markdown/unknown-placeholder",
+                        format!("{{{{{name}}}}} names no column of this SELECT — add `… AS {name}` (it is shown as written)"),
+                    );
+                }
+                if let Some(sp) =
+                    spec.filter(|sp| !MD_FORMATS.contains(&sp.to_ascii_lowercase().as_str()))
+                {
+                    warn(
+                        "markdown/unknown-format",
+                        format!("{{{{{name}:{sp}}}}}: unknown format — use money, percent, compact, metric, date or text"),
+                    );
+                }
+            }
+        }
+
+        // Interaction directives: prime their variables the way the browser does
+        // ("nothing selected"), so panels filtering by a selection are checked
+        // with data; a malformed value is reported.
+        if let Some((_, r)) = p
+            .roles
+            .iter()
+            .find(|(_, r)| matches!(r, Role::SelectAs | Role::Drill))
+        {
+            let v = first_text(&rows);
+            let sets = if *r == Role::Drill {
+                drill_prelude(&v)
+            } else {
+                select_as_prelude(&v)
+            };
+            if let Ok(sets) = &sets {
+                // the variable names the directive sets (`SET VARIABLE <name> = …`)
+                let names: Vec<String> = sets
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("SET VARIABLE "))
+                    .filter_map(|l| l.split(' ').next())
+                    .map(str::to_string)
+                    .collect();
+                let kind = if *r == Role::Drill {
+                    "::DRILL"
+                } else {
+                    "::SELECT_AS"
+                };
+                claim(&mut diags, &names, stmt, kind, &short);
+            }
+            match sets {
+                Ok(sets) => prelude.push_str(&sets),
+                Err(message) => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "interaction/bad-value",
+                    message,
+                    sql: short.clone(),
+                }),
+            }
+            continue;
+        }
+
+        // A ::LINK target must be a tab, a query, a path or an http(s) URL.
+        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Link) {
+            let cell = rows.first().and_then(|row| {
+                row.get(&format!("c{idx}"))
+                    .or_else(|| row.values().nth(*idx))
+                    .and_then(|v| v.as_str())
+            });
+            if let Some(t) = cell.filter(|t| !link_target_ok(t)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "link/bad-url",
+                    message: format!(
+                        "::LINK `{}` is not followed — use '#Tab', '?v.x={{value}}', \
+                         '/d/<id>?v.x={{value}}' or an http(s) URL",
+                        one_line(t)
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
+
+        // Annotation roles that need a partner on the same row (#31).
+        let has = |r: Role| p.roles.iter().any(|(_, x)| *x == r);
+        for (part, needs) in [
+            (Role::VLineLabel, Role::VLine),
+            (Role::RefLineLabel, Role::RefLine),
+            (Role::XBandFrom, Role::XBandTo),
+            (Role::XBandTo, Role::XBandFrom),
+            (Role::XBandLabel, Role::XBandFrom),
+        ] {
+            if has(part) && !has(needs) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "annotation/unpaired",
+                    message: format!(
+                        "::{} draws nothing without a ::{} column in the same SELECT",
+                        part.token(),
+                        needs.token()
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
+
+        // ::THRESHOLDS rules must parse; a table directive names its columns.
+        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Thresholds) {
+            let cell = rows.first().and_then(|row| {
+                row.get(&format!("c{idx}"))
+                    .or_else(|| row.values().nth(*idx))
+                    .and_then(|v| v.as_str())
+            });
+            let mut warn = |severity, code, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if let Some(spec) = cell {
+                if roles::is_table_thresholds(&p.roles) {
+                    match crate::thresholds::parse_table(spec) {
+                        Err(e) => warn(Severity::Error, "thresholds/bad-rule", e),
+                        Ok(g) if g.iter().any(|(c, _)| c.is_none()) => warn(
+                            Severity::Warning,
+                            "thresholds/no-column",
+                            "a lone ::THRESHOLDS colours the next table's cells by column — \
+                             name them: 'Margin %: <10:bad; good | accuracy: <0.85:bad'"
+                                .into(),
+                        ),
+                        Ok(_) => {}
+                    }
+                } else if let Err(e) = crate::thresholds::Rules::parse(spec) {
+                    warn(Severity::Error, "thresholds/bad-rule", e);
+                }
+            }
+        }
+        if p.roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+            && cast_tokens(raws.get(i).map_or("", String::as_str))
+                .iter()
+                .any(|t| roles::lookup(t).is_some_and(|s| s.role == Role::Thresholds))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "thresholds/in-table",
+                message:
+                    "::THRESHOLDS inside a ::TABLE is shown as a column — put it in its own \
+                          statement before the table: SELECT 'Margin %: <10:bad; good'::THRESHOLDS;"
+                        .into(),
+                sql: short.clone(),
+            });
         }
 
         // ---- design: cross-panel layout counters. Run for every planned panel,
@@ -296,6 +616,7 @@ where
 
         // Layout directives don't render a chart — nothing to check.
         if roles::is_directive_panel(&p.roles) {
+            empty_msg |= p.roles.iter().any(|(_, r)| *r == Role::Empty);
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -307,6 +628,10 @@ where
             continue;
         }
 
+        let expect_empty = std::mem::take(&mut empty_msg);
+        if rows.is_empty() && expect_empty {
+            continue; // the author wrote a message for this case (::EMPTY)
+        }
         if rows.is_empty() {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
@@ -341,6 +666,41 @@ where
                 message: one_line(w),
                 sql: short.clone(),
             })),
+        }
+
+        // A KPI's change line and trend line.
+        if is_kpi(&p.roles) {
+            diags.extend(kpi_checks(&p.roles, &rows).into_iter().map(
+                |(severity, code, message)| Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                },
+            ));
+        }
+
+        // Waterfall / bullet / funnel rows are named by their ::XAXIS (step,
+        // category, stage); without it the panel only shows a note.
+        if let Some(k @ (Kind::Waterfall | Kind::Bullet | Kind::Funnel)) = chart_kind(&p.roles) {
+            if role_index(&p.roles, Role::X).is_none() {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "chart/needs-xaxis",
+                    message: format!(
+                        "::{} needs an ::XAXIS column naming each {}.",
+                        Role::Value(k).token(),
+                        match k {
+                            Kind::Waterfall => "step",
+                            Kind::Bullet => "row",
+                            _ => "stage",
+                        }
+                    ),
+                    sql: short.clone(),
+                });
+            }
         }
 
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
@@ -474,15 +834,21 @@ where
     diags
 }
 
-/// A one-line summary: `N error(s), M warning(s)`; empty script-clean message.
+/// A one-line summary: `N error(s), M warning(s)` (`, K note(s)`); empty script-clean message.
 pub fn summary(diags: &[Diagnostic]) -> String {
     let e = diags
         .iter()
         .filter(|d| d.severity == Severity::Error)
         .count();
-    let w = diags.len() - e;
+    let n = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Note)
+        .count();
+    let w = diags.len() - e - n;
     if diags.is_empty() {
         "clean — every panel plans, runs, and renders".into()
+    } else if n > 0 {
+        format!("{e} error(s), {w} warning(s), {n} note(s)")
     } else {
         format!("{e} error(s), {w} warning(s)")
     }
@@ -585,79 +951,124 @@ fn unknown_casts(sql: &str) -> Vec<String> {
     out
 }
 
-fn input_kind(roles: &[(usize, Role)]) -> Option<InputKind> {
-    roles.iter().find_map(|(_, r)| match r {
-        Role::Input(k) => Some(*k),
-        _ => None,
-    })
-}
+/// `{{col:fmt}}` formats the browser knows (`web/app.js` `MD_FMT` + date / text).
+const MD_FORMATS: &[&str] = &[
+    "money", "currency", "usd", "eur", "dollar", "percent", "pct", "compact", "metric", "number",
+    "num", "date", "text",
+];
 
-/// Output position of a panel's input column.
-fn input_index(roles: &[(usize, Role)]) -> usize {
-    roles
-        .iter()
-        .find(|(_, r)| matches!(r, Role::Input(_)))
-        .map(|(i, _)| *i)
-        .unwrap_or(0)
-}
-
-/// Quote a DuckDB identifier (`"a""b"`).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// `SET VARIABLE` statement(s) that give an input its default value — the first
-/// option for a single input, all options for a multiselect, both ends for a
-/// date range — so downstream `getvariable()` panels have something to read.
-/// `idx` is the input column's output position (rows keep SELECT column order,
-/// via serde_json's `preserve_order`); the variable name is quoted.
-fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> Vec<String> {
-    let Some(first) = rows.first() else {
-        return Vec::new();
-    };
-    let keys: Vec<&String> = first.keys().collect();
-    let Some(k) = keys.get(idx).or(keys.first()).copied() else {
-        return Vec::new();
-    };
-    match kind {
-        InputKind::DateRange => keys
-            .iter()
-            .skip(idx.min(keys.len().saturating_sub(1)))
-            .take(2)
-            .filter_map(|k| {
-                first
-                    .get(*k)
-                    .map(|v| format!("SET VARIABLE {} = {}", quote_ident(k), lit(v)))
-            })
-            .collect(),
-        InputKind::Multiselect => {
-            let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
-            vec![format!(
-                "SET VARIABLE {} = [{}]",
-                quote_ident(k),
-                vals.join(", ")
-            )]
+/// The `{{name}}` / `{{name:fmt}}` placeholders of a Markdown text.
+fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = md;
+    while let Some(a) = rest.find("{{") {
+        let Some(b) = rest[a + 2..].find("}}") else {
+            break;
+        };
+        let inner = &rest[a + 2..a + 2 + b];
+        rest = &rest[a + 2 + b + 2..];
+        let (name, spec) = match inner.split_once(':') {
+            Some((n, f)) => (n.trim(), Some(f.trim().to_string())),
+            None => (inner.trim(), None),
+        };
+        let ident = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ' ');
+        if ident {
+            out.push((name.to_string(), spec));
         }
-        _ => vec![format!(
-            "SET VARIABLE {} = {}",
-            quote_ident(k),
-            first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
-        )],
     }
+    out
 }
 
-fn lit(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => {
-            if *b {
-                "TRUE".into()
-            } else {
-                "FALSE".into()
-            }
+/// `::CALLOUT` kinds the browser draws (`info` = note, `tip` = success,
+/// `caution` / `danger` = warning).
+const CALLOUT_KINDS: &[&str] = &[
+    "note", "info", "warning", "caution", "danger", "success", "tip",
+];
+
+/// The first cell of a result as text (`""` when there is none).
+fn first_text(rows: &[Map<String, Value>]) -> String {
+    rows.first()
+        .and_then(|row| row.values().next())
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            v => v.to_string(),
+        })
+        .unwrap_or_default()
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut c = s.chars();
+    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && s.len() <= 60
+}
+
+/// `'name'` / `'name multi'` of a `::SELECT_AS` → the browser's initial
+/// variables: the selection (`''`, or `[]` in multi mode) and an unset brushed
+/// range (`<name>_from` / `<name>_to` = NULL).
+fn select_as_prelude(v: &str) -> Result<String, String> {
+    let mut parts = v
+        .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
+        .filter(|p| !p.is_empty());
+    let name = parts.next().unwrap_or("");
+    let mode = parts.next().unwrap_or("single").to_ascii_lowercase();
+    if !is_ident(name) || !matches!(mode.as_str(), "single" | "multi") || parts.next().is_some() {
+        return Err(format!(
+            "::SELECT_AS `{v}` — expected a variable name, optionally followed by \
+             'single' or 'multi' (e.g. 'region' or 'region multi'); the chart keeps \
+             the shared `selected` click"
+        ));
+    }
+    let sel = if mode == "multi" {
+        "[]::VARCHAR[]"
+    } else {
+        "''"
+    };
+    Ok(format!(
+        "SET VARIABLE {n} = {sel};\nSET VARIABLE {n}_from = NULL;\nSET VARIABLE {n}_to = NULL;\n",
+        n = name
+    ))
+}
+
+/// `'[prefix:] a > b > c'` of a `::DRILL` → the browser's initial variables:
+/// the top level, depth 0, an empty path and every level variable `''`.
+fn drill_prelude(v: &str) -> Result<String, String> {
+    let (prefix, path) = match v.split_once(':') {
+        Some((p, rest)) => (p.trim(), rest),
+        None => ("drill", v),
+    };
+    let levels: Vec<&str> = path.split('>').map(str::trim).collect();
+    if !is_ident(prefix) || levels.len() < 2 || !levels.iter().all(|l| is_ident(l)) {
+        return Err(format!(
+            "::DRILL `{v}` — expected two or more column names joined by '>' \
+             (e.g. 'region > country > city', optionally 'geo: region > …'); \
+             the chart does not drill"
+        ));
+    }
+    let mut out = format!(
+        "SET VARIABLE {prefix}_level = '{}';\nSET VARIABLE {prefix}_depth = 0;\n\
+         SET VARIABLE {prefix}_path = []::VARCHAR[];\n",
+        levels[0]
+    );
+    for l in &levels {
+        out.push_str(&format!("SET VARIABLE {l} = '';\n"));
+    }
+    Ok(out)
+}
+
+/// A `::LINK` template the browser follows: `#tab`, `?query`, a path, or an
+/// http(s) / mailto URL — never another scheme.
+fn link_target_ok(t: &str) -> bool {
+    let low = t.trim().to_ascii_lowercase();
+    match low.find(':') {
+        Some(i) if !low[..i].contains(['/', '?', '#', '{']) => {
+            ["http", "https", "mailto"].contains(&&low[..i])
         }
-        _ => "NULL".into(),
+        _ => !low.is_empty(),
     }
 }
 
@@ -675,6 +1086,62 @@ fn one_line(s: &str) -> String {
 /// A KPI tile — a big-number card (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`).
 fn is_kpi(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| matches!(r, Role::Metric(_)))
+}
+
+/// A KPI statement's `::DELTA_FORMAT` / `::DELTA_LABEL` / `::SPARKLINE`
+/// columns: `kpi/bad-delta-format` (an unknown format — 'pct' is used),
+/// `kpi/no-delta` (a format or label but no `::DELTA`), `kpi/sparkline-not-list`
+/// (the trend column is not a `list()`).
+fn kpi_checks(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let cell = |want: &dyn Fn(Role) -> bool| {
+        roles
+            .iter()
+            .find(|(_, r)| want(*r))
+            .map(|(i, _)| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+    };
+    if let Some(Some(Value::String(f))) = cell(&|r| r == Role::DeltaFormat) {
+        if crate::kpi::DeltaFormat::parse(f).is_none() {
+            out.push((
+                Severity::Error,
+                "kpi/bad-delta-format",
+                format!(
+                    "::DELTA_FORMAT `{f}` is not one of {} — the change is shown as a %",
+                    crate::kpi::DeltaFormat::NAMES.join(", ")
+                ),
+            ));
+        }
+    }
+    let has = |want: &dyn Fn(Role) -> bool| roles.iter().any(|(_, r)| want(*r));
+    if has(&|r| matches!(r, Role::DeltaFormat | Role::DeltaLabel))
+        && !has(&|r| matches!(r, Role::Delta | Role::DeltaLowerGood))
+    {
+        out.push((
+            Severity::Warning,
+            "kpi/no-delta",
+            "::DELTA_FORMAT / ::DELTA_LABEL without a ::DELTA comparison column — nothing              to format or label"
+                .into(),
+        ));
+    }
+    if let Some(Some(v)) = cell(&|r| r == Role::Value(Kind::Sparkline)) {
+        let list = match v {
+            Value::Array(_) => true,
+            Value::String(s) => serde_json::from_str::<Vec<Value>>(s).is_ok(),
+            _ => false,
+        };
+        if !list && !v.is_null() {
+            out.push((
+                Severity::Warning,
+                "kpi/sparkline-not-list",
+                "a KPI's ::SPARKLINE must be a list of numbers — e.g.                  list(v ORDER BY d)::SPARKLINE"
+                    .into(),
+            ));
+        }
+    }
+    out
 }
 
 /// The panel's chart kind, if it's a chart (`count()::BARCHART` → `Kind::Bar`).
@@ -710,6 +1177,9 @@ fn is_big_chart(k: Kind) -> bool {
             | Kind::Density
             | Kind::Heatmap
             | Kind::Radar
+            | Kind::Waterfall
+            | Kind::Bullet
+            | Kind::Funnel
     )
 }
 
@@ -800,6 +1270,55 @@ fn flush_kpi_run(diags: &mut Vec<Diagnostic>, run: &mut usize, start_stmt: usize
     *run = 0;
 }
 
+/// A failed statement: an error, or — for a `-- @requires` statement whose
+/// input is missing — a note (the panel reads "Not available").
+fn sql_error(stmt: usize, requires: &[String], e: &str, short: &str) -> Diagnostic {
+    let optional = !requires.is_empty() && sql::is_missing_input_error(e);
+    Diagnostic {
+        severity: if optional {
+            Severity::Note
+        } else {
+            Severity::Error
+        },
+        stmt,
+        code: if optional {
+            "optional/missing"
+        } else {
+            "sql-error"
+        },
+        message: if optional {
+            format!(
+                "optional input missing — the panel shows \"Not available\": {}",
+                one_line(e)
+            )
+        } else {
+            one_line(e)
+        },
+        sql: short.to_string(),
+    }
+}
+
+/// Is a `-- @requires` path missing? Asks DuckDB (`glob`, so patterns work);
+/// an error (e.g. a remote URL glob cannot list) counts as present — the
+/// statement then runs and a missing-file error is still a note.
+fn input_missing<F>(run_query: &mut F, path: &str) -> bool
+where
+    F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
+{
+    let q = format!(
+        "SELECT count(*) AS n FROM glob('{}')",
+        path.replace('\'', "''")
+    );
+    match run_query(&q) {
+        Ok(rows) => rows
+            .first()
+            .and_then(|r| r.get("n"))
+            .map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()) == Some(0))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod design_tests {
     use super::*;
@@ -817,6 +1336,234 @@ mod design_tests {
 
     fn has(diags: &[Diagnostic], code: &str) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn optional_inputs_are_notes_and_empty_messages_silence_empty_panels() {
+        // A missing `-- @requires` file: a note, the statement is skipped.
+        let d = check(
+            "-- @requires data/run/opt.parquet\nSELECT a ::XAXIS, b ::BARCHART FROM 'data/run/opt.parquet';",
+            |q| {
+                assert!(q.contains("glob("), "the panel itself must not run: {q}");
+                Ok(vec![json!({ "n": 0 }).as_object().unwrap().clone()])
+            },
+        );
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(
+            (d[0].code, d[0].severity),
+            ("optional/missing", Severity::Note)
+        );
+        // Present per glob but the query still can't find it → a note too.
+        let d = check(
+            "-- @requires t\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+            |q| {
+                if q.contains("glob(") {
+                    Ok(vec![json!({ "n": 1 }).as_object().unwrap().clone()])
+                } else {
+                    Err("Catalog Error: Table with name t does not exist!".into())
+                }
+            },
+        );
+        assert_eq!(
+            (d[0].code, d[0].severity),
+            ("optional/missing", Severity::Note)
+        );
+        // Without @requires the same failure is an error.
+        let d = check("SELECT a ::XAXIS, b ::BARCHART FROM t;", |_| {
+            Err("Catalog Error: Table with name t does not exist!".into())
+        });
+        assert_eq!((d[0].code, d[0].severity), ("sql-error", Severity::Error));
+        // ::EMPTY before a panel: 0 rows are expected, no empty-panel warning.
+        let d = lint_one(
+            "SELECT 'Nothing yet'::EMPTY;\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+            vec![],
+        );
+        assert!(!has(&d, "empty-panel"), "{d:?}");
+        let d = lint_one("SELECT a ::XAXIS, b ::BARCHART FROM t;", vec![]);
+        assert!(has(&d, "empty-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn threshold_rules_are_checked() {
+        let kpi = |spec: &str| rows(1, |_| json!({ "c0": 0.12, "c1": spec }));
+        let d = lint_one(
+            "SELECT 0.12::PERCENT, '<0:purple'::THRESHOLDS;",
+            kpi("<0:purple"),
+        );
+        assert!(has(&d, "thresholds/bad-rule"), "{d:?}");
+        let ok = lint_one(
+            "SELECT 0.12::PERCENT, '<0:bad; good'::THRESHOLDS;",
+            kpi("<0:bad; good"),
+        );
+        assert!(!has(&ok, "thresholds/bad-rule"), "{ok:?}");
+        let lone = rows(1, |_| json!({ "c0": "<0:bad; good" }));
+        let d = lint_one("SELECT '<0:bad; good'::THRESHOLDS;", lone);
+        assert!(has(&d, "thresholds/no-column"), "{d:?}");
+        let d = lint_one(
+            "SELECT region::TABLE, m, '<0:bad'::THRESHOLDS FROM t;",
+            rows(2, |i| json!({ "region": "N", "m": i, "x": "<0:bad" })),
+        );
+        assert!(has(&d, "thresholds/in-table"), "{d:?}");
+    }
+
+    #[test]
+    fn an_unpaired_annotation_role_warns() {
+        let data = rows(3, |i| json!({ "c0": i, "c1": i, "c2": "Launch", "c3": 1 }));
+        let d = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, 'Launch'::XLINE_LABEL, 'T'::TITLE FROM t;",
+            data.clone(),
+        );
+        assert!(has(&d, "annotation/unpaired"), "{d:?}");
+        let ok = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, 'Launch'::XLINE_LABEL, 1::XLINE FROM t;",
+            data,
+        );
+        assert!(!has(&ok, "annotation/unpaired"), "{ok:?}");
+    }
+
+    #[test]
+    fn select_as_primes_its_variables() {
+        let mut seen = Vec::new();
+        let d = check(
+            "SELECT 'week multi'::SELECT_AS;\nSELECT 1::METRIC FROM t WHERE list_contains(getvariable('week'), x);",
+            |q| {
+                seen.push(q.to_string());
+                Ok(vec![json!({ "c0": "week multi" }).as_object().unwrap().clone()])
+            },
+        );
+        assert!(!has(&d, "interaction/bad-value"), "{d:?}");
+        let last = seen.last().unwrap();
+        assert!(
+            last.contains("SET VARIABLE week = []::VARCHAR[];"),
+            "{last}"
+        );
+        assert!(last.contains("SET VARIABLE week_from = NULL;"), "{last}");
+        assert_eq!(
+            select_as_prelude("region").unwrap(),
+            "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
+        );
+        for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
+            assert!(select_as_prelude(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn drill_primes_its_variables_and_links_are_checked() {
+        assert_eq!(
+            drill_prelude("geo: region > country").unwrap(),
+            "SET VARIABLE geo_level = 'region';\nSET VARIABLE geo_depth = 0;\n\
+             SET VARIABLE geo_path = []::VARCHAR[];\nSET VARIABLE region = '';\n\
+             SET VARIABLE country = '';\n"
+        );
+        assert!(drill_prelude("region > country > city")
+            .unwrap()
+            .starts_with("SET VARIABLE drill_level = 'region';"));
+        for bad in ["region", "a > ", "a > b c", "x y: a > b", "a > b; DROP"] {
+            assert!(drill_prelude(bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "#Detail",
+            "#Detail?v.r={value}",
+            "?v.r={value}",
+            "/d/sales?v.r={value}",
+            "https://x.y/{value}",
+            "detail.html",
+        ] {
+            assert!(link_target_ok(ok), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            " JavaScript:x",
+            "data:text/html,x",
+            "",
+        ] {
+            assert!(!link_target_ok(bad), "{bad}");
+        }
+        let d = lint_one(
+            "SELECT r::XAXIS, n::BARCHART, 'javascript:alert(1)'::LINK, 't'::TITLE FROM t;",
+            vec![
+                json!({ "c0": "a", "c1": 1.0, "c2": "javascript:alert(1)", "c3": "t" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "link/bad-url"), "{d:?}");
+    }
+
+    #[test]
+    fn a_selection_named_like_a_drill_level_clashes() {
+        let d = check(
+            "SELECT 'region multi'::SELECT_AS;\nSELECT 'region > country'::DRILL;",
+            |q| {
+                let v = if q.trim_end().ends_with("::DRILL;") || q.contains("> country' AS") {
+                    "region > country"
+                } else {
+                    "region multi"
+                };
+                Ok(vec![json!({ "c0": v }).as_object().unwrap().clone()])
+            },
+        );
+        assert!(has(&d, "interaction/name-clash"), "{d:?}");
+        let ok = check(
+            "SELECT 'week'::SELECT_AS;\nSELECT 'week'::SELECT_AS;",
+            |_| Ok(vec![json!({ "c0": "week" }).as_object().unwrap().clone()]),
+        );
+        assert!(!has(&ok, "interaction/name-clash"), "{ok:?}");
+    }
+
+    #[test]
+    fn select_as_with_a_bad_value_warns() {
+        let d = lint_one(
+            "SELECT 'not a name'::SELECT_AS;",
+            vec![json!({ "c0": "not a name" }).as_object().unwrap().clone()],
+        );
+        assert!(has(&d, "interaction/bad-value"), "{d:?}");
+    }
+
+    #[test]
+    fn kpi_delta_format_and_sparkline_checks() {
+        let d = lint_one(
+            "SELECT 5::METRIC, 4::DELTA, 'percentage'::DELTA_FORMAT",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": 4.0, "c2": "percentage"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "kpi/bad-delta-format"), "{d:?}");
+        let d = lint_one(
+            "SELECT 5::METRIC, 'vs last month'::DELTA_LABEL, 7::SPARKLINE",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": "vs last month", "c2": 7.0})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "kpi/no-delta"), "{d:?}");
+        assert!(has(&d, "kpi/sparkline-not-list"), "{d:?}");
+        let d = lint_one(
+            "SELECT 5::METRIC, 4::DELTA, 'both'::DELTA_FORMAT, list(x)::SPARKLINE",
+            vec![
+                serde_json::json!({"c0": 5.0, "c1": 4.0, "c2": "both", "c3": [1, 2]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{d:?}");
+    }
+
+    #[test]
+    fn variance_charts_need_an_xaxis() {
+        let data = rows(3, |i| json!({ "c0": i as f64 }));
+        let d = lint_one("SELECT v::WATERFALL, 'Bridge'::TITLE FROM t;", data);
+        assert!(has(&d, "chart/needs-xaxis"), "{d:?}");
+        let data = rows(3, |i| json!({ "c0": format!("s{i}"), "c1": i as f64 }));
+        let d = lint_one("SELECT s::XAXIS, v::FUNNEL, 'Funnel'::TITLE FROM t;", data);
+        assert!(!has(&d, "chart/needs-xaxis"), "{d:?}");
     }
 
     #[test]
@@ -1011,6 +1758,86 @@ mod design_tests {
         // Multiselect: all options as a list.
         let d = input_defaults(InputKind::Multiselect, 0, &opts);
         assert_eq!(d, vec!["SET VARIABLE \"zone\" = ['EU', 'US']".to_string()]);
+        // Buttons: the first option, like a dropdown.
+        let d = input_defaults(InputKind::Buttons, 0, &opts);
+        assert_eq!(d, vec!["SET VARIABLE \"zone\" = 'EU'".to_string()]);
+        // Toggle: always a BOOLEAN, whatever the default was written as.
+        for (v, want) in [
+            (json!(true), "TRUE"),
+            (json!("on"), "TRUE"),
+            (json!(0), "FALSE"),
+            (json!("false"), "FALSE"),
+        ] {
+            let r = rows(1, |_| json!({ "net": v.clone() }));
+            let d = input_defaults(InputKind::Toggle, 0, &r);
+            assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
+        }
+    }
+
+    #[test]
+    fn markdown_placeholders_are_checked() {
+        let data = |_q: &str| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "Grew {{growth:pct}} to {{revenue:eur}}; {{nope}} {{growth:fancy}}", "growth": 12.5, "revenue": 1.0 }),
+            ))
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 12.5 AS growth, 1.0 AS revenue;",
+            data,
+        );
+        let msgs: Vec<_> = d.iter().map(|x| (x.code, x.message.clone())).collect();
+        let unknown: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-placeholder")
+            .collect();
+        assert_eq!(unknown.len(), 1, "{msgs:?}");
+        assert!(unknown[0].1.contains("{{nope}}"), "{msgs:?}");
+        let fmt: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-format")
+            .collect();
+        assert_eq!(fmt.len(), 1, "{msgs:?}");
+        assert_eq!(
+            md_placeholders("a {{ x : money }} {{ 1bad }} {{y}}"),
+            vec![("x".into(), Some("money".into())), ("y".into(), None)]
+        );
+    }
+
+    #[test]
+    fn callout_kind_and_text_are_checked() {
+        let one = |c1: &str| {
+            let c1 = c1.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": c1.clone() }),
+                ))
+            }
+        };
+        let d = check("SELECT 'x'::MARKDOWN, 'warning'::CALLOUT;", one("warning"));
+        assert!(!d.iter().any(|x| x.code.starts_with("callout/")), "{d:?}");
+        let d = check("SELECT 'x'::MARKDOWN, 'alarm'::CALLOUT;", one("alarm"));
+        assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
+        let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
+        assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    #[test]
+    fn asof_value_and_stale_option_are_checked() {
+        let d = check("SELECT 'yesterday'::ASOF, 'stale=soon';", |_q| {
+            Ok(rows(1, |_| json!({ "c0": "yesterday", "o": "stale=soon" })))
+        });
+        let codes: Vec<_> = d.iter().map(|x| x.code).collect();
+        assert!(codes.contains(&"asof/unparseable"), "{d:?}");
+        assert!(codes.contains(&"asof/bad-stale"), "{d:?}");
+        let d = check("SELECT max(t)::ASOF, 'stale=24h' FROM x;", |_q| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "2026-10-16 09:24:16.87+02", "o": "stale=24h" }),
+            ))
+        });
+        assert!(!d.iter().any(|x| x.code.starts_with("asof/")), "{d:?}");
     }
 
     #[test]

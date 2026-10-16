@@ -26,6 +26,19 @@ pub const HOVER_SCRIPT: &str = r#"(function(){
   document.addEventListener('click',function(){if(selected!==null){selected=null;apply();}});
 })();"#;
 
+/// Keeps a `::ASOF` chip current: re-reads `data-asof` against the viewer's
+/// clock and writes the time in the viewer's zone and the page language
+/// (same wording as `web/app.js`'s chip); amber past `data-stale` seconds.
+pub const ASOF_SCRIPT: &str = r#"(function(){
+  var c=document.querySelector('.dp-asof[data-asof]'); if(!c) return;
+  var at=+c.getAttribute('data-asof'), st=+c.getAttribute('data-stale')||0, lang=document.documentElement.lang||undefined;
+  function rel(s){s=Math.max(0,s);return s<60?'just now':s<3600?Math.floor(s/60)+' min ago':s<172800?Math.floor(s/3600)+' h ago':Math.floor(s/86400)+' d ago';}
+  function tick(){var d=new Date(at),now=Date.now(),age=(now-at)/1000,t;
+    try{t=d.toLocaleTimeString(lang,{hour:'2-digit',minute:'2-digit'});if(d.toDateString()!==new Date(now).toDateString())t=d.toLocaleDateString(lang)+' '+t;}catch(e){t=d.toISOString().slice(0,16).replace('T',' ');}
+    c.textContent='Data as of '+t+' ('+rel(age)+')'; c.title=d.toString(); c.classList.toggle('stale',st>0&&age>st);}
+  tick(); setInterval(tick,60000);
+})();"#;
+
 /// What goes on a static page.
 pub struct StaticPage<'a> {
     pub theme: &'a ResolvedTheme,
@@ -45,22 +58,23 @@ pub struct StaticPage<'a> {
 pub fn render(p: &StaticPage) -> String {
     let t = p.theme;
     let title = theme::page_title(t, p.fallback_title);
-    let header = theme::header_html(t);
     // Without an author title the page still names itself.
-    let header = if header.is_empty() {
+    let b = &t.brand;
+    let header = if b.title.is_none() && b.name.is_none() && b.logo.is_none() {
         format!(
-            "<div class=\"dp-head\"><div class=\"dp-head-text\"><h1 class=\"dp-title\">{}</h1></div></div>",
-            esc(p.fallback_title)
+            "<div class=\"dp-head\"><div class=\"dp-head-text\"><h1 class=\"dp-title\">{}</h1></div>{}</div>",
+            esc(p.fallback_title),
+            theme::asof_html(t)
         )
     } else {
-        header
+        theme::header_html(t)
     };
     format!(
         "<!doctype html><html lang=\"{lang}\" data-theme=\"{name}\" data-variant=\"{variant}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}</style></head>\
 <body class=\"dp-static\"><div class=\"grid\">{header}{sub}{controls}{panels}{credit}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}</script></body></html>",
+<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
         variant = t.variant.as_str(),
