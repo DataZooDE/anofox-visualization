@@ -39,6 +39,8 @@ await page.waitForFunction(
   { timeout: 120000 }
 );
 await page.waitForTimeout(500);
+// No run in flight (a re-run replaces every panel when it lands).
+const idle = () => page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
 
 // Every chart has a one-sentence summary (decorative overlays such as the
 // ::STORY connector are aria-hidden and skipped).
@@ -104,12 +106,20 @@ else {
   const tip = await page.evaluate(() => document.getElementById("dp-tip")?.classList.contains("show"));
   if (!tip) fail("the focused mark shows no tooltip");
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1500);
+  await idle();
   const back = await page.evaluate(() => !!document.activeElement?.closest?.(".panel-svg"));
   if (!back) fail("focus lost after Enter (re-run)");
   await page.keyboard.press("Escape");
   const out = await page.evaluate(() => document.activeElement?.matches?.(".panel-svg > svg"));
   if (!out) fail("Esc did not return to the chart");
+  // Focus moved on while the re-run is in flight (Enter, then at once Esc back
+  // to the chart): the redrawn chart gets it, not the mark Enter was on.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Escape");
+  await idle();
+  const kept = await page.evaluate(() => document.activeElement?.matches?.(".panel-svg > svg") && document.activeElement.isConnected);
+  if (!kept) fail("a re-run took the focus off the chart");
 }
 
 // The toolbox line/bar switch redraws a chart in place: after each switch it
@@ -155,6 +165,7 @@ else {
       if (s.pos !== before) fail(`switch ${n}: story step not kept (${s.pos} vs ${before})`);
     }
   }
+  await idle();
   await page.evaluate((i) => document.querySelectorAll(".dash .panel")[i].querySelector(".panel-svg > svg").focus(), swapIdx);
   await page.keyboard.press("ArrowRight");
   const mark = await page.evaluate(() => document.activeElement.getAttribute("aria-label"));

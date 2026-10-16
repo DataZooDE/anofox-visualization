@@ -4124,6 +4124,12 @@ async function runOnce(fresh = true) {
       const svg = p.querySelector('.panel-svg > svg[data-transition="tween"]');
       if (svg) tweens[p.dataset.stmt] = dpAnim.geom(svg);
     });
+  // A chart (or one of its marks) holding the keyboard focus hands it to its
+  // replacement — however the run started (a click, an input, ::REFRESH).
+  const ae = document.activeElement;
+  const afig = ae?.closest?.(".dash .panel[data-stmt]");
+  if (afig && ae.closest(".panel-svg > svg"))
+    dpA11yFocus = ae.matches(".dp-hit") ? markKey(afig, ae) : { stmt: afig.dataset.stmt, chart: true };
   // Atomic swap: replace the visible content in one synchronous step (no flash).
   grid.replaceChildren(...newGrid.childNodes);
   const dash = document.querySelector(".dash");
@@ -7859,7 +7865,7 @@ let dpAsTables = (() => {
     return false;
   }
 })();
-let dpA11yFocus = null; // {stmt, series, x} — the mark to refocus after a re-run
+let dpA11yFocus = null; // {stmt, series, x} — the mark ({stmt, chart}: the chart) to refocus after a re-run
 
 const CHART_KINDS = [
   [/^BARCHART|^BAR_/, "Bar chart"],
@@ -7986,8 +7992,8 @@ function attachChartA11y() {
       true
     );
   }
-  // After a re-run that replaced the chart, focus the same mark, else the
-  // chart, else (the chart came back empty) the panel's title or the panel.
+  // After a re-run that replaced the chart, focus the same mark (or the chart
+  // itself, if that had the focus), else the chart, else (the chart came back empty) the panel's title or the panel.
   // While the old chart still holds the focus the run is yet to come.
   if (dpA11yFocus) {
     const f = dpA11yFocus;
@@ -7997,7 +8003,7 @@ function attachChartA11y() {
     if (fig && lost) {
       const svg = fig.querySelector(".panel-svg > svg");
       const marks = svg ? chartMarks(svg) : [];
-      let to = marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0];
+      let to = f.chart ? svg : marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0];
       if (!to) {
         to = svg || fig.querySelector(".panel-title") || fig;
         if (!to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
