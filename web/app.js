@@ -1516,6 +1516,74 @@ async function boot() {
   run();
 }
 
+// Resizable sidebar (issue #59): the handle on its right edge is a focusable
+// separator — drag it, or ←/→ (Shift: bigger steps), Home/End for the bounds,
+// double-click (or Enter) resets. The width is per viewer (localStorage) and only applies
+// above the phone breakpoint (index.html pins 238px there).
+const SIDE_W = { def: 238, min: 180, max: 480, step: 16, key: "dp_side_w" };
+function clampSideW(w) {
+  const n = Math.round(Number(w));
+  return Number.isFinite(n) && n > 0 ? Math.max(SIDE_W.min, Math.min(SIDE_W.max, n)) : SIDE_W.def;
+}
+function initSideResizer() {
+  const h = $("side-resizer");
+  if (!h) return;
+  let w = SIDE_W.def;
+  try {
+    w = clampSideW(localStorage.getItem(SIDE_W.key) || SIDE_W.def);
+  } catch (_) {
+    /* storage blocked: default width */
+  }
+  const apply = (nw, save) => {
+    w = clampSideW(nw);
+    document.documentElement.style.setProperty("--side-w", w + "px");
+    h.setAttribute("aria-valuenow", w);
+    h.setAttribute("aria-valuetext", `${w} pixels`);
+    if (!save) return;
+    try {
+      localStorage.setItem(SIDE_W.key, w);
+    } catch (_) {
+      /* storage blocked: width lasts for this page only */
+    }
+    // Charts scale with their panel; let anything sized to the window re-measure.
+    window.dispatchEvent(new Event("resize"));
+  };
+  apply(w, false);
+  h.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    h.setPointerCapture(e.pointerId);
+    h.classList.add("dragging");
+    const startX = e.clientX,
+      startW = w;
+    const move = (ev) => apply(startW + ev.clientX - startX, false);
+    const up = () => {
+      h.classList.remove("dragging");
+      h.removeEventListener("pointermove", move);
+      h.removeEventListener("pointerup", up);
+      h.removeEventListener("pointercancel", up);
+      apply(w, true);
+    };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up);
+    h.addEventListener("pointercancel", up);
+  });
+  h.addEventListener("dblclick", () => apply(SIDE_W.def, true));
+  h.addEventListener("keydown", (e) => {
+    const big = e.shiftKey ? 4 : 1;
+    const to = {
+      ArrowLeft: w - SIDE_W.step * big,
+      ArrowRight: w + SIDE_W.step * big,
+      Home: SIDE_W.min,
+      End: SIDE_W.max,
+      Enter: SIDE_W.def,
+    }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    apply(to, true);
+  });
+}
+
 // ---------- app shell: sidebar, dashboards, modes, data exploration ----------
 const DASH_KEY = "dp_dashboards";
 let curDash = null;
@@ -8316,4 +8384,6 @@ document.addEventListener("keydown", (e) => {
   if (clearSelections()) run(false);
 });
 
+// Before boot, so a remembered sidebar width applies without a jump.
+initSideResizer();
 boot().catch((e) => status("boot failed: " + e));

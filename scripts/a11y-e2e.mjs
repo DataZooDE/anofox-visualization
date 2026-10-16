@@ -176,6 +176,72 @@ console.log("as tables:", JSON.stringify(swapped));
 if (svgs.length && (!swapped.charts || swapped.tables !== swapped.charts || !swapped.hidden)) fail("charts not swapped for tables");
 await page.click(".dp-astable-btn");
 
+// Resizable sidebar (issue #59), in the builder (not embed): a focusable
+// separator with its bounds; ←/→ step, the width survives a reload,
+// double-click resets, charts follow, and phone widths keep the fixed sidebar.
+{
+  const bp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
+  bp.on("pageerror", (e) => errs.push(String(e)));
+  await bp.goto(`${base}?dashboard=${encodeURIComponent(dash)}`);
+  await bp.waitForSelector(".dash .panel-svg > svg", { timeout: 120000 });
+  // Two frames first: under reduced motion every property has a .01ms
+  // transition, so the new width lands on the next frame.
+  const side = () =>
+    bp.evaluate(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+      const h = document.getElementById("side-resizer");
+      const svg = document.querySelector(".dash .panel-svg > svg");
+      return {
+        w: Math.round(document.getElementById("sidebar").getBoundingClientRect().width),
+        now: +h.getAttribute("aria-valuenow"),
+        role: h.getAttribute("role"),
+        min: +h.getAttribute("aria-valuemin"),
+        max: +h.getAttribute("aria-valuemax"),
+        tab: h.tabIndex,
+        chart: Math.round(svg.getBoundingClientRect().width),
+      };
+    });
+  const s0 = await side();
+  if (s0.role !== "separator" || s0.tab !== 0 || s0.min !== 180 || s0.max !== 480 || s0.w !== 238 || s0.now !== 238) fail(`sidebar handle: ${JSON.stringify(s0)}`);
+  await bp.focus("#side-resizer");
+  await bp.keyboard.press("ArrowRight");
+  await bp.keyboard.press("ArrowRight");
+  const s1 = await side();
+  if (s1.w !== s0.now + 32 || s1.now !== s1.w) fail(`sidebar ←/→: ${JSON.stringify(s1)}`);
+  await bp.keyboard.press("End");
+  if ((await side()).now !== 480) fail("sidebar End: not at the max");
+  await bp.keyboard.press("Home");
+  await bp.keyboard.press("ArrowLeft");
+  if ((await side()).w !== 180) fail("sidebar: below the min");
+  // Pointer drag to the right; charts get narrower with their panel.
+  const hb = await bp.locator("#side-resizer").boundingBox();
+  await bp.mouse.move(hb.x + hb.width / 2, hb.y + 200);
+  await bp.mouse.down();
+  await bp.mouse.move(hb.x + hb.width / 2 + 200, hb.y + 200, { steps: 5 });
+  await bp.mouse.up();
+  await bp.waitForTimeout(200);
+  const s2 = await side();
+  if (s2.w !== 380) fail(`sidebar drag: ${JSON.stringify(s2)}`);
+  if (!(s2.chart < s0.chart)) fail(`charts did not re-layout: ${s0.chart} -> ${s2.chart}`);
+  await bp.reload();
+  await bp.waitForSelector(".dash .panel-svg > svg", { timeout: 120000 });
+  if ((await side()).w !== 380) fail("sidebar width not remembered across a reload");
+  await bp.dblclick("#side-resizer");
+  const s3 = await side();
+  if (s3.w !== 238) fail(`sidebar double-click reset: ${JSON.stringify(s3)}`);
+  // Phone width: the stored width is ignored and the handle is gone.
+  await bp.focus("#side-resizer");
+  await bp.keyboard.press("End");
+  await bp.setViewportSize({ width: 390, height: 844 });
+  const phone = await bp.evaluate(() => ({
+    w: Math.round(document.getElementById("sidebar").getBoundingClientRect().width),
+    handle: getComputedStyle(document.getElementById("side-resizer")).display,
+  }));
+  if (phone.w !== 238 || phone.handle !== "none") fail(`sidebar on a phone: ${JSON.stringify(phone)}`);
+  console.log("sidebar:", s0.w, "→", s1.w, "→ drag", s2.w, "→ reset", s3.w, "· chart", s0.chart, "→", s2.chart, "· phone", JSON.stringify(phone));
+  await bp.close();
+}
+
 if (axe && existsSync(axe)) {
   await page.addScriptTag({ path: axe });
   const res = await page.evaluate(async () =>
