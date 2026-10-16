@@ -24,9 +24,14 @@ impl Listener {
 
     pub(crate) fn accept(&self) -> std::io::Result<(Connection, Option<SocketAddr>)> {
         match self {
-            Self::Tcp(l) => l
-                .accept()
-                .map(|(conn, addr)| (Connection::from(conn), Some(addr))),
+            Self::Tcp(l) => l.accept().map(|(conn, addr)| {
+                // Responses are written in pieces (head, then body), so with
+                // Nagle's algorithm on, the last piece waits for the client's
+                // delayed ACK: ~40 ms per response (more on Windows clients).
+                // Best effort; a socket without it still works.
+                let _ = conn.set_nodelay(true);
+                (Connection::from(conn), Some(addr))
+            }),
             #[cfg(unix)]
             Self::Unix(l) => l.accept().map(|(conn, _)| (Connection::from(conn), None)),
         }
@@ -189,6 +194,25 @@ impl std::fmt::Display for ListenAddr {
             Self::IP(s) => s.fmt(f),
             #[cfg(unix)]
             Self::Unix(s) => std::fmt::Debug::fmt(s, f),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Connection, Listener};
+    use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn accepted_tcp_connections_have_nodelay() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = Listener::from(listener);
+        let _client = TcpStream::connect(addr).unwrap();
+        match listener.accept().unwrap().0 {
+            Connection::Tcp(s) => assert!(s.nodelay().unwrap()),
+            #[cfg(unix)]
+            Connection::Unix(_) => unreachable!(),
         }
     }
 }

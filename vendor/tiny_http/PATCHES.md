@@ -48,7 +48,14 @@ Drop this folder once upstream ships these fixes.
 5. **peer_addr panic** (`src/client.rs`), from tiny_http_dh 0.12.1. A failed
    `peer_addr()` on a fresh connection closes it instead of panicking the pool
    thread.
-6. **Manifest** (`Cargo.toml`). The TLS features (`ssl`, `ssl-openssl`,
+6. **TCP_NODELAY** (`src/connection.rs`, anofox-visualization #86). Accepted
+   TCP sockets get `set_nodelay(true)`. A response is written in pieces (head,
+   then body), so with Nagle's algorithm the last piece waited for the
+   client's delayed ACK: ~40 ms on every response larger than a segment, even
+   a cached one (up to 200 ms with Windows clients). A 4 KB cached panel over
+   keep-alive: p50 41.0 ms → 0.4 ms. Test:
+   `connection::tests::accepted_tcp_connections_have_nodelay`.
+7. **Manifest** (`Cargo.toml`). The TLS features (`ssl`, `ssl-openssl`,
    `ssl-rustls`) and their optional dependencies are removed: we serve plain
    HTTP, and keeping them would lock rustls 0.20 / ring 0.16 into
    `Cargo.lock`. The dev-dependencies, `tests/`, `examples/` and `benches/`
