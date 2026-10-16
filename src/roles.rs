@@ -262,6 +262,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next table: a subtotal row after each group of a column — 'region' (not for ::PAGED)"),
     e("SELECT_AS", &["SELECTAS", "SELECTION"], R::SelectAs, "layout", false,
       "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
+    e("EMPTY", &["EMPTY_MESSAGE", "NODATA"], R::Empty, "layout", false,
+      "next panel's message when its result is empty: 'No orders in range — widen the dates'"),
     e("DRILL", &["DRILLDOWN", "DRILL_DOWN"], R::Drill, "layout", false,
       "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
@@ -420,7 +422,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
-                | Role::SelectAs | Role::Drill
+                | Role::SelectAs | Role::Drill | Role::Empty
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -702,6 +704,7 @@ mod tests {
             Role::SelectAs,
             Role::Drill,
             Role::Link,
+            Role::Empty,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -785,7 +788,8 @@ mod tests {
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill
-                | Role::Link => {}
+                | Role::Link
+                | Role::Empty => {}
             }
         }
         v

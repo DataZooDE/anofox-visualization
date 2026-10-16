@@ -93,11 +93,28 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-range input{position:absolute;top:2px;left:0;width:100%;height:14px;margin:0;pointer-events:none;-webkit-appearance:none;appearance:none;background:transparent}
 .dp-range input::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:13px;height:13px;border-radius:50%;background:var(--ax-slider-thumb);border:2px solid var(--ax-slider-thumb-edge);box-shadow:var(--ax-slider-thumb-ring);cursor:pointer}
 .dp-range input::-moz-range-thumb{pointer-events:auto;width:13px;height:13px;border:2px solid var(--ax-slider-thumb-edge);border-radius:50%;background:var(--ax-slider-thumb);cursor:pointer}
-/* loading veil */
-#dp-spinner{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:var(--ax-veil);z-index:9999;pointer-events:none}
-body.loading #dp-spinner{display:flex}
-.dp-spin{width:44px;height:44px;border:4px solid var(--ax-spinner-track);border-top-color:var(--ax-spinner-head);border-radius:50%;animation:dpspin .8s linear infinite}
-@keyframes dpspin{to{transform:rotate(360deg)}}
+/* per-panel loading: a panel re-querying gets a veil + shimmer (after a short
+   delay, so a fast cross-filter never flickers); the first run shows skeletons */
+.panel.dp-pending::after{content:"";position:absolute;inset:0;z-index:3;border-radius:inherit;pointer-events:none;opacity:0;background:linear-gradient(100deg,transparent 35%,color-mix(in srgb,var(--ax-card) 55%,transparent) 50%,transparent 65%) 0 0/250% 100%,var(--ax-veil);animation:dp-veil-in .2s .15s forwards,dp-shimmer 1.3s linear infinite}
+.dp-skel{min-height:220px;display:flex;flex-direction:column;gap:.8rem}
+.dp-skel.dp-skel-kpi{min-height:96px}
+.dp-skel i{display:block;height:.8rem;width:40%;border-radius:6px;background:var(--ax-spinner-track);animation:dp-pulse 1.4s ease-in-out infinite}
+.dp-skel i:nth-child(2){width:70%;animation-delay:.15s}
+.dp-skel i:nth-child(3){flex:1;width:100%;animation-delay:.3s}
+.dp-skel-kpi i:nth-child(3){flex:0 0 1.6rem;width:55%}
+@keyframes dp-veil-in{to{opacity:1}}
+@keyframes dp-shimmer{from{background-position:100% 0,0 0}to{background-position:-150% 0,0 0}}
+@keyframes dp-pulse{50%{opacity:.45}}
+/* per-panel error card and "Not available" (optional input missing) */
+.dp-err-head{font-weight:700;color:var(--ax-err-ink);margin-bottom:.25rem}
+.dp-err-head::before{content:"⚠ "}
+.dp-err-msg{color:var(--ax-ink);font-size:.85rem;line-height:1.45;overflow-wrap:anywhere}
+.dp-err details{margin-top:.5rem;font-size:.78rem;color:var(--ax-muted)}
+.dp-err summary{cursor:pointer;width:max-content}
+.dp-err pre{margin:.4rem 0 0;max-height:14rem;overflow:auto;padding:.6rem .7rem;border-radius:var(--ax-radius-sm);background:var(--ax-err-bg);border:1px solid var(--ax-err-border);color:var(--ax-err-ink);font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap}
+.panel.dp-errcard{border-color:var(--ax-err-border)}
+.dp-na .nodata{display:flex;flex-direction:column;gap:.3rem;padding:2rem 0}
+.dp-na .nodata strong{color:var(--ax-ink);font-size:.95rem}
 
 /* ---- boxes (::GROUP) and KPI strips ---- */
 .group{grid-column:1/-1;margin:0;position:relative;overflow:visible;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.1rem 1.2rem 1.1rem 1.35rem;box-shadow:var(--ax-shadow)}
@@ -121,7 +138,7 @@ body.loading #dp-spinner{display:flex}
 @keyframes dp-line-draw{to{stroke-dashoffset:0}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
 .panel.dp-in svg polyline.dp-draw{animation:dp-line-draw .8s cubic-bezier(.22,.61,.36,1) both}
-@media (prefers-reduced-motion: reduce){.panel.dp-in,.panel.dp-in svg polyline.dp-draw{animation:none}}
+@media (prefers-reduced-motion: reduce){.panel.dp-in,.panel.dp-in svg polyline.dp-draw,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
 .group-body .panel .panel-title{border-bottom:0;padding-bottom:.2rem}
@@ -419,4 +436,21 @@ body.dp-static .controls select{margin-left:.3rem}
 .dp-table th,.dp-table tfoot td{position:static}
 .dp-table tr{break-inside:avoid}
 .dp-table .tot-agg{padding:0;cursor:default}
+}
+
+/* ---- accessible charts (#37) ---- */
+.dp-a11y-bar{display:flex;justify-content:flex-end;margin:-.35rem 0 .45rem}
+.dp-astable-btn{font:500 .74rem/1.2 var(--ax-font-body);color:var(--ax-muted);background:transparent;border:1px solid var(--ax-line);border-radius:999px;padding:.28rem .75rem;cursor:pointer}
+.dp-astable-btn:hover{color:var(--ax-ink);border-color:var(--ax-input-border-hover)}
+.dp-astable-btn[aria-pressed="true"]{color:var(--ax-accent);border-color:var(--ax-accent)}
+.dp-astable-btn:focus-visible{outline:2px solid var(--ax-accent);outline-offset:2px}
+.panel svg[tabindex]:focus{outline:none}
+.panel svg[tabindex]:focus-visible{outline:2px solid var(--ax-accent);outline-offset:4px;border-radius:6px}
+.panel svg .dp-hit:focus{outline:none}
+.panel svg .dp-hit:focus-visible{stroke:var(--ax-ink);stroke-width:2.5px;filter:drop-shadow(0 0 3px var(--ax-accent));opacity:1 !important}
+.dp-astable-view{max-height:420px;overflow:auto}
+@media print{.dp-a11y-bar{display:none}}
+/* reduced motion: no animation or transition anywhere on the dashboard */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
 }

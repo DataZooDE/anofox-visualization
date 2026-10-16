@@ -137,6 +137,7 @@ terminal.
 | `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
 | `::SUBTOTAL` | `::SUBTOTALS`, `::GROUP_TOTAL` | layout | next table: a subtotal row after each group of a column — 'region' (not for ::PAGED) |
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
+| `::EMPTY` | `::EMPTY_MESSAGE`, `::NODATA` | layout | next panel's message when its result is empty: 'No orders in range — widen the dates' |
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
@@ -773,6 +774,32 @@ SELECT anofox_plot_terms(t, theme := 'colorblind') FROM coefs t;
 `dashboard --theme-css <T> [--dark]` prints a theme's CSS tokens (to style your
 own page around exported SVGs).
 
+### Accessibility
+
+Charts are usable without a mouse and without sight of the screen:
+
+- **Keyboard.** Each chart with data marks is one Tab stop (a visible focus
+  ring). Arrow keys walk the marks — ←/→ along a series, ↑/↓ to the
+  neighbouring series, Home/End — and the focused mark shows its tooltip.
+  Enter (or Space) acts like a click: cross-filter, `::SELECT_AS`, `::DRILL`,
+  `::LINK`; after the re-run the focus returns to the same mark. Esc goes back
+  to the chart, Tab moves on.
+- **Screen readers.** Every chart SVG carries a generated one-sentence summary
+  (`aria-label` and `<desc>`): kind, title, series, the x range and the
+  extremes — *"Bar chart: Sessions by channel; 3 series (api, app, web);
+  4 points from W1 to W4; highest 48 (app, W4), lowest 9 (api, W3)."* Each
+  mark is labelled with its tooltip text.
+- **Charts as tables.** The *▦ Charts as tables* switch at the top right of
+  every dashboard (also in embed and served views; `?tables=1` turns it on, the
+  choice is remembered) swaps every chart for its data table.
+- **Reduced motion.** With the system's *reduce motion* setting there are no
+  entrance animations, line draw-ins, shimmers or transitions.
+- Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
+  `high-contrast` themes cover colour.
+
+`scripts/a11y-e2e.mjs` checks this in a real browser (Tab into a chart, arrows,
+Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`).
+
 ### Export & share
 
 - Every chart/table panel has a hover **⤓** button — charts download as **PNG**,
@@ -815,6 +842,48 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Loading, empty, error and "not available" panels
+
+Every panel carries its own state — there is no full-page spinner:
+
+- **Loading.** While a dashboard re-runs, only the panels whose query reads a
+  variable that changed (`getvariable('…')`, e.g. the input or selection you just
+  touched) get a soft shimmer and `aria-busy`; everything else stays as it is.
+  The first load shows skeleton cards. With *reduce motion* the shimmer is a
+  still veil.
+- **Empty.** A panel whose query returns no rows says *No data for this
+  selection* — or your own words with **`::EMPTY`** before it (like `::SPAN`, it
+  applies to the next panel):
+
+  ```sql
+  SELECT 'No orders in range — widen the dates'::EMPTY;
+  SELECT day::XAXIS, sum(amount)::BARCHART FROM orders
+  WHERE day BETWEEN getvariable('from_day') AND getvariable('to_day') GROUP BY ALL;
+  ```
+
+  `dashboard --check` does not warn `empty-panel` for a panel with an `::EMPTY`.
+- **Error.** A failing query becomes an error card in that panel's slot: a short
+  cause (*Binder Error: Referenced column "revnue" not found…*) with the full
+  message and the SQL behind *Details*. The other panels keep rendering.
+- **Not available.** One dashboard often serves many runs or projects whose
+  outputs are optional. Name the optional file in a `-- @requires <path>`
+  comment line directly above the statement (several: comma-separated):
+
+  ```sql
+  -- @requires data/run/anomalies.parquet
+  SELECT day::XAXIS, score::LINECHART, 'Anomaly score'::TITLE
+  FROM 'data/run/anomalies.parquet';
+  ```
+
+  When the statement fails because an input is missing (*No files found*,
+  *does not exist*, a 404), the panel reads **Not available** instead of an
+  error; a `-- @requires` setup statement is skipped. Any other error is still an
+  error card. This works the same in the browser, `serve`, the locked server
+  (`serve --dashboards`, `anofox_serve_dashboards`) and the extension.
+  `dashboard --check` checks the paths with DuckDB's `glob()` and reports a
+  missing one as a **note** (`optional/missing`), not an error — `--strict`
+  still passes.
 
 ### Interactivity
 

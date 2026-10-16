@@ -19,6 +19,8 @@ use serde_json::{Map, Value};
 pub enum Severity {
     Error,
     Warning,
+    /// Informational (an optional `-- @requires` input that is missing).
+    Note,
 }
 
 impl Severity {
@@ -26,6 +28,7 @@ impl Severity {
         match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Note => "note",
         }
     }
 }
@@ -42,7 +45,9 @@ pub struct Diagnostic {
     /// | `chrome/bad-url` | `period/bad-spec` (a `::PERIOD` spec with an
     /// unknown key / preset / grain / compare or a bad date) |
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
-    /// `kpi/sparkline-not-list` (warning). Design advisories
+    /// `kpi/sparkline-not-list` (warning) | `optional/missing` (a note: a
+    /// `-- @requires` input is missing, so the panel shows "Not available").
+    /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -112,6 +117,8 @@ where
             }
         }
     };
+    // A ::EMPTY message is waiting for the next panel (its 0 rows are expected).
+    let mut empty_msg = false;
     // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
@@ -145,6 +152,26 @@ where
             }
         }
 
+        // An optional input that is missing: the statement is skipped (setup
+        // never reaches the prelude) and its panel reads "Not available".
+        if let Some(path) = p.requires.iter().find(|f| input_missing(&mut run_query, f)) {
+            diags.push(Diagnostic {
+                severity: Severity::Note,
+                stmt,
+                code: "optional/missing",
+                message: format!(
+                    "optional input `{path}` is missing — {} (`-- @requires`)",
+                    if p.setup {
+                        "this statement is skipped"
+                    } else {
+                        "this panel shows \"Not available\""
+                    }
+                ),
+                sql: short.clone(),
+            });
+            continue;
+        }
+
         // Setup statements: a query-shaped one that still carries ::ROLE casts
         // is a panel that lost its roles (the #1 silent failure) — flag it, and
         // don't run it (the casts would just raise a confusing type error).
@@ -164,13 +191,7 @@ where
                     sql: short.clone(),
                 });
             } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                });
+                diags.push(sql_error(stmt, &p.requires, &e, &short));
             } else {
                 // Genuine setup succeeded — keep it in scope for later panels.
                 prelude.push_str(&p.sql);
@@ -228,13 +249,7 @@ where
                         prelude.push_str(";\n");
                     }
                 }
-                Err(e) => diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                }),
+                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
             }
             continue;
         }
@@ -243,13 +258,7 @@ where
         let rows = match run_query(&format!("{prelude}{};", p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "sql-error",
-                    message: one_line(&e),
-                    sql: short.clone(),
-                });
+                diags.push(sql_error(stmt, &p.requires, &e, &short));
                 continue;
             }
         };
@@ -427,6 +436,7 @@ where
 
         // Layout directives don't render a chart — nothing to check.
         if roles::is_directive_panel(&p.roles) {
+            empty_msg |= p.roles.iter().any(|(_, r)| *r == Role::Empty);
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -438,6 +448,10 @@ where
             continue;
         }
 
+        let expect_empty = std::mem::take(&mut empty_msg);
+        if rows.is_empty() && expect_empty {
+            continue; // the author wrote a message for this case (::EMPTY)
+        }
         if rows.is_empty() {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
@@ -640,15 +654,21 @@ where
     diags
 }
 
-/// A one-line summary: `N error(s), M warning(s)`; empty script-clean message.
+/// A one-line summary: `N error(s), M warning(s)` (`, K note(s)`); empty script-clean message.
 pub fn summary(diags: &[Diagnostic]) -> String {
     let e = diags
         .iter()
         .filter(|d| d.severity == Severity::Error)
         .count();
-    let w = diags.len() - e;
+    let n = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Note)
+        .count();
+    let w = diags.len() - e - n;
     if diags.is_empty() {
         "clean — every panel plans, runs, and renders".into()
+    } else if n > 0 {
+        format!("{e} error(s), {w} warning(s), {n} note(s)")
     } else {
         format!("{e} error(s), {w} warning(s)")
     }
@@ -1033,6 +1053,55 @@ fn flush_kpi_run(diags: &mut Vec<Diagnostic>, run: &mut usize, start_stmt: usize
     *run = 0;
 }
 
+/// A failed statement: an error, or — for a `-- @requires` statement whose
+/// input is missing — a note (the panel reads "Not available").
+fn sql_error(stmt: usize, requires: &[String], e: &str, short: &str) -> Diagnostic {
+    let optional = !requires.is_empty() && sql::is_missing_input_error(e);
+    Diagnostic {
+        severity: if optional {
+            Severity::Note
+        } else {
+            Severity::Error
+        },
+        stmt,
+        code: if optional {
+            "optional/missing"
+        } else {
+            "sql-error"
+        },
+        message: if optional {
+            format!(
+                "optional input missing — the panel shows \"Not available\": {}",
+                one_line(e)
+            )
+        } else {
+            one_line(e)
+        },
+        sql: short.to_string(),
+    }
+}
+
+/// Is a `-- @requires` path missing? Asks DuckDB (`glob`, so patterns work);
+/// an error (e.g. a remote URL glob cannot list) counts as present — the
+/// statement then runs and a missing-file error is still a note.
+fn input_missing<F>(run_query: &mut F, path: &str) -> bool
+where
+    F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
+{
+    let q = format!(
+        "SELECT count(*) AS n FROM glob('{}')",
+        path.replace('\'', "''")
+    );
+    match run_query(&q) {
+        Ok(rows) => rows
+            .first()
+            .and_then(|r| r.get("n"))
+            .map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()) == Some(0))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod design_tests {
     use super::*;
@@ -1050,6 +1119,51 @@ mod design_tests {
 
     fn has(diags: &[Diagnostic], code: &str) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn optional_inputs_are_notes_and_empty_messages_silence_empty_panels() {
+        // A missing `-- @requires` file: a note, the statement is skipped.
+        let d = check(
+            "-- @requires data/run/opt.parquet\nSELECT a ::XAXIS, b ::BARCHART FROM 'data/run/opt.parquet';",
+            |q| {
+                assert!(q.contains("glob("), "the panel itself must not run: {q}");
+                Ok(vec![json!({ "n": 0 }).as_object().unwrap().clone()])
+            },
+        );
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(
+            (d[0].code, d[0].severity),
+            ("optional/missing", Severity::Note)
+        );
+        // Present per glob but the query still can't find it → a note too.
+        let d = check(
+            "-- @requires t\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+            |q| {
+                if q.contains("glob(") {
+                    Ok(vec![json!({ "n": 1 }).as_object().unwrap().clone()])
+                } else {
+                    Err("Catalog Error: Table with name t does not exist!".into())
+                }
+            },
+        );
+        assert_eq!(
+            (d[0].code, d[0].severity),
+            ("optional/missing", Severity::Note)
+        );
+        // Without @requires the same failure is an error.
+        let d = check("SELECT a ::XAXIS, b ::BARCHART FROM t;", |_| {
+            Err("Catalog Error: Table with name t does not exist!".into())
+        });
+        assert_eq!((d[0].code, d[0].severity), ("sql-error", Severity::Error));
+        // ::EMPTY before a panel: 0 rows are expected, no empty-panel warning.
+        let d = lint_one(
+            "SELECT 'Nothing yet'::EMPTY;\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+            vec![],
+        );
+        assert!(!has(&d, "empty-panel"), "{d:?}");
+        let d = lint_one("SELECT a ::XAXIS, b ::BARCHART FROM t;", vec![]);
+        assert!(has(&d, "empty-panel"), "{d:?}");
     }
 
     #[test]
