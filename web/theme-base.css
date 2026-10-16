@@ -105,6 +105,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 /* per-panel loading: a panel re-querying gets a veil + shimmer (after a short
    delay, so a fast cross-filter never flickers); the first run shows skeletons */
 .panel.dp-pending::after{content:"";position:absolute;inset:0;z-index:3;border-radius:inherit;pointer-events:none;opacity:0;background:linear-gradient(100deg,transparent 35%,color-mix(in srgb,var(--ax-card) 55%,transparent) 50%,transparent 65%) 0 0/250% 100%,var(--ax-veil);animation:dp-veil-in .2s .15s forwards,dp-shimmer 1.3s linear infinite}
+/* a drill-through opens its tab at once: the veil shows without the delay */
+.dp-switching .panel.dp-pending::after{animation-delay:0s,0s}
 .dp-skel{min-height:220px;display:flex;flex-direction:column;gap:.8rem}
 .dp-skel.dp-skel-kpi{min-height:96px}
 .dp-skel i{display:block;height:.8rem;width:40%;border-radius:6px;background:var(--ax-spinner-track);animation:dp-pulse 1.4s ease-in-out infinite}
@@ -436,13 +438,17 @@ svg[data-kind="heatmap"] text{pointer-events:none}
 .panel-svg{position:relative}
 .dp-brush-ov{position:absolute;inset:0;cursor:crosshair;z-index:4}
 .dp-range-band{position:absolute;top:0;bottom:0;background:var(--ax-brush-fill);border-left:1px dashed var(--ax-brush-border);border-right:1px dashed var(--ax-brush-border);pointer-events:none;z-index:0}
-.dp-crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem;font-size:.78rem;font-weight:600;color:var(--ax-muted);margin:-.25rem 0 .5rem}
+/* one line at every depth (the hint truncates), so a drill never moves the chart */
+.dp-crumbs{display:flex;flex-wrap:nowrap;align-items:center;gap:.3rem;font-size:.78rem;line-height:1.5;font-weight:600;color:var(--ax-muted);margin:calc(-.25rem - 3px) -3px calc(.5rem - 3px);padding:3px;white-space:nowrap;min-width:0;overflow:hidden}
+.dp-crumbs>*{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dp-crumbs>.dp-crumb-sep{flex:none}
 .dp-crumb{font:inherit;color:var(--ax-accent);background:transparent;border:0;border-radius:var(--ax-radius-sm);padding:.1rem .3rem;cursor:pointer;box-shadow:none;transform:none}
 .dp-crumb:hover{background:var(--ax-tab-hover-bg);transform:none;box-shadow:none;filter:none}
 .dp-crumb:focus-visible{outline:2px solid var(--ax-focus-ring);outline-offset:1px}
-.dp-crumb-cur{color:var(--ax-ink);padding:.1rem .3rem}
+.dp-crumb-cur{color:var(--ax-ink);padding:.1rem .3rem;border-radius:var(--ax-radius-sm)}
+.dp-crumb-cur:focus-visible{outline:2px solid var(--ax-focus-ring);outline-offset:1px}
 .dp-crumb-sep{opacity:.6}
-.dp-crumb-level{font-weight:500;margin-left:.35rem}
+.dp-crumb-level{font-weight:500;margin-left:.35rem;flex:1 1 0}
 .dp-link{color:var(--ax-accent);font-weight:600;text-decoration:none;white-space:nowrap}
 .dp-link:hover{text-decoration:underline}
 .dp-ia-bar{display:flex;flex-wrap:wrap;gap:.35rem;margin:-.25rem 0 .45rem}
@@ -505,3 +511,6 @@ body.dp-static .controls select{margin-left:.3rem}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
 }
+/* a drill-through to another served dashboard (/d/<id>) cross-fades instead
+   of flashing white, where the browser has cross-document view transitions */
+@media (prefers-reduced-motion: no-preference){@view-transition{navigation:auto}}

@@ -2932,17 +2932,20 @@ async function setDrillVars() {
   }
 }
 // The breadcrumb above a ::DRILL chart: All › EU › Germany · city. Each crumb
-// but the last goes back to that depth.
+// but the last goes back to that depth; the focus then moves to the new last
+// crumb (the clicked one is gone) and the chart zooms out to the value left.
 function drillCrumbs(drill) {
   const path = dpDrill[drill.prefix] || [];
   const nav = document.createElement("nav");
   nav.className = "dp-crumbs";
+  nav.dataset.drill = drill.prefix;
   nav.setAttribute("aria-label", "Drill path");
   const crumb = (text, depth) => {
     if (depth === path.length) {
       const cur = document.createElement("span");
       cur.className = "dp-crumb-cur";
       cur.setAttribute("aria-current", "location");
+      cur.tabIndex = -1; // a focus target after going back
       cur.textContent = text;
       return cur;
     }
@@ -2953,6 +2956,8 @@ function drillCrumbs(drill) {
     b.onclick = (e) => {
       e.stopPropagation();
       dpDrill[drill.prefix] = path.slice(0, depth);
+      const focus = () => document.querySelector(`.dash .dp-crumbs[data-drill="${drill.prefix}"] .dp-crumb-cur`)?.focus({ preventScroll: true });
+      dpMotion = { drill: drill.prefix, key: path[depth], down: false, focus };
       run(false);
     };
     return b;
@@ -2977,6 +2982,8 @@ function drillInto(drill, key) {
   const path = dpDrill[drill.prefix] || [];
   if (path.length >= drill.levels.length - 1 || key === "") return false;
   dpDrill[drill.prefix] = [...path, key];
+  const focus = () => document.querySelector(`.dash .dp-crumbs[data-drill="${drill.prefix}"] .dp-crumb-cur`)?.focus({ preventScroll: true });
+  dpMotion = { drill: drill.prefix, key, down: true, focus };
   run(false);
   return true;
 }
@@ -3004,10 +3011,13 @@ function followLink(url) {
     }
     Object.assign(dpUrlSeed, seed);
     const t = tab || new URLSearchParams(qs).get("tab");
+    dpMotion = { link: true };
     if (t) {
       dpTab = t;
       setTabParam(t);
+      openTabNow(t);
     }
+    dpLinkFrom = null;
     run(false);
     return;
   }
@@ -3016,6 +3026,63 @@ function followLink(url) {
   if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
   else location.href = safe;
 }
+// Drill-through to a tab: show it at once — its panels as they are, under the
+// loading veil (no delay: they may still show the previous value) — and fade
+// it in; the run then updates it in place. The focus goes to the tab's first
+// panel title (announced; else its tab button), and Esc there goes back to
+// the link's origin (dpLinkBack).
+let dpLinkFrom = null; // the element a ::LINK was followed from: {stmt, series, x} (a mark) or {stmt, link} (a table link)
+let dpLinkBack = null; // {from, to, origin}: the tab switch a drill-through made
+const activePane = () => [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].find((p) => p.style.display !== "none");
+function openTabNow(name) {
+  const origin = dpLinkFrom;
+  dpLinkFrom = null;
+  const btn = [...document.querySelectorAll(".dash > .tabbar > .tab-btn")].find((b) => b.textContent === name);
+  if (!btn) return;
+  const focus = () => {
+    const pane = activePane();
+    const t = pane?.querySelector(".panel-title") || pane?.querySelector(".group-title");
+    if (!t) return document.querySelector(".dash > .tabbar > .tab-btn.active")?.focus({ preventScroll: true });
+    if (!t.hasAttribute("tabindex")) t.tabIndex = -1;
+    t.focus({ preventScroll: true });
+  };
+  dpMotion.focus = focus;
+  if (btn.classList.contains("active")) return;
+  const from = document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent;
+  dpA11yFocus = null; // the focus leaves the chart: it is not handed back after the run
+  btn.click();
+  dpLinkBack = from ? { from, to: name, origin } : null;
+  const pane = activePane();
+  if (pane) {
+    pane.classList.add("dp-switching");
+    if (!dpAnim.still() && pane.animate) pane.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
+  }
+  focus();
+}
+// Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
+// a control): back to the tab it came from, focus on the mark or link followed.
+document.addEventListener("keydown", (e) => {
+  const b = dpLinkBack;
+  if (e.key !== "Escape" || !b || e.defaultPrevented) return;
+  const ae = document.activeElement;
+  const cur = document.querySelector(".dash > .tabbar > .tab-btn.active");
+  if (!cur || cur.textContent !== b.to) return (dpLinkBack = null);
+  if (ae && ae !== document.body && (!activePane()?.contains(ae) || ae.closest(".panel-svg, input, select, textarea, details"))) return;
+  const btn = [...document.querySelectorAll(".dash > .tabbar > .tab-btn")].find((x) => x.textContent === b.from);
+  if (!btn) return;
+  e.preventDefault();
+  dpLinkBack = null;
+  btn.click();
+  const o = b.origin;
+  const fig = o && document.querySelector(`.dash .panel[data-stmt="${o.stmt}"]`);
+  let to = null;
+  if (fig && o.link != null) to = fig.querySelectorAll(".dp-link")[o.link];
+  else if (fig) {
+    const svg = fig.querySelector(".panel-svg > svg");
+    to = (svg && chartMarks(svg).find((m) => m.getAttribute("data-series") === o.series && (m.getAttribute("data-x") || "") === o.x)) || svg;
+  }
+  (to || btn).focus({ preventScroll: true });
+});
 // A chart mark's ::LINK: the template of the row the mark was drawn from
 // (matched on x and series), filled with the mark's values and the drill path.
 function chartLink(link, el, key, series) {
@@ -3060,6 +3127,8 @@ function linkCell(tpl, row, key) {
     e.stopPropagation(); // not a row selection
     if (e.ctrlKey || e.metaKey || e.shiftKey || external) return; // the browser opens it
     e.preventDefault();
+    const fig = a.closest(".panel[data-stmt]");
+    dpLinkFrom = fig ? { stmt: fig.dataset.stmt, link: [...fig.querySelectorAll(".dp-link")].indexOf(a) } : null;
     followLink(url);
   };
   return a;
@@ -3118,10 +3187,13 @@ function decorateSelections() {
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     const drill = panel._ia && panel._ia.drill;
     if (drill) {
-      panel.querySelector(".dp-crumbs")?.remove();
-      const head = panel.querySelector(".panel-title");
+      const was = panel.querySelector(".dp-crumbs");
       const nav = drillCrumbs(drill);
-      head ? head.after(nav) : panel.prepend(nav);
+      if (!was || was.outerHTML !== nav.outerHTML) {
+        was?.remove();
+        const head = panel.querySelector(".panel-title");
+        head ? head.after(nav) : panel.prepend(nav);
+      }
     }
     if (panel._ia && panel._ia.link) panel.classList.add("dp-linked");
     const sel = panel._ia && panel._ia.select;
@@ -3188,10 +3260,67 @@ function decorateSelections() {
   });
 }
 
+// The parts of a dashboard a re-run may swap one by one: panels and controls
+// (outermost; a control's value lives in its DOM, so it is always replaced).
+const SLOTS = ".panel[data-stmt], .control, .controls";
+function slotsOf(roots) {
+  const out = [];
+  for (const r of roots) if (r) for (const el of r.querySelectorAll(SLOTS)) if (!el.parentElement.closest(SLOTS)) out.push(el);
+  return out;
+}
+// A dashboard's layout without its slots and its open tab: two runs with the
+// same shape differ only in panel content.
+// (Serialised with the slots and the tab state taken out for a moment — no
+// copy of the charts.)
+function shapeOf(roots) {
+  const slots = slotsOf(roots);
+  const holes = slots.map((el) => {
+    const i = document.createElement("i");
+    el.replaceWith(i);
+    return i;
+  });
+  const tabs = roots.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
+  const attr = (el) => (el.matches(".tab-btn") ? "class" : "style");
+  const was = tabs.map((el) => el.getAttribute(attr(el)));
+  tabs.forEach((el) => (el.matches(".tab-btn") ? el.classList.remove("active") : el.style.removeProperty("display")));
+  const html = roots.map((r) => (r ? r.outerHTML : "")).join("");
+  tabs.forEach((el, k) => (was[k] == null ? el.removeAttribute(attr(el)) : el.setAttribute(attr(el), was[k])));
+  holes.forEach((i, k) => i.replaceWith(slots[k]));
+  return html;
+}
+// Patch the dashboard on screen (`roots`) to the new one: keep each panel
+// whose output is unchanged, replace the others (pairs in `swaps`), and open
+// the new run's tabs. False (nothing touched) when the slots do not line up.
+function patchSlots(roots, newRoots, swaps) {
+  const a = slotsOf(roots);
+  const b = slotsOf(newRoots);
+  if (a.length !== b.length) return false;
+  const tabState = (rs) => rs.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
+  const ta = tabState(roots);
+  const tb = tabState(newRoots);
+  if (ta.length !== tb.length) return false;
+  ta.forEach((el, k) => {
+    if (el.matches(".tab-btn")) el.classList.toggle("active", tb[k].classList.contains("active"));
+    else el.style.display = tb[k].style.display;
+  });
+  a.forEach((o, k) => {
+    const n = b[k];
+    if (o.matches(".panel") && n.matches(".panel") && !n._async && o._sig === n._sig) {
+      o.classList.remove("dp-pending");
+      o.removeAttribute("aria-busy");
+      return;
+    }
+    swaps.push([o, n]);
+    o.replaceWith(n);
+  });
+  return true;
+}
+
 // Per-panel loading state (no full-page veil): while a run is in flight the
 // panels on screen whose query reads a variable that changed (all of them on a
 // fresh run) get a placeholder shimmer + aria-busy; the rest stay untouched.
-// The first run, with nothing on screen yet, draws skeleton cards instead.
+// The first run, with nothing on screen yet, draws skeleton cards instead (a
+// tabbed dashboard's panels live in .tabwrap, outside the grid).
 const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
 function markPending(grid, stmts, fresh) {
   const changed = new Set(
@@ -3204,7 +3333,7 @@ function markPending(grid, stmts, fresh) {
       fig.setAttribute("aria-busy", "true");
     }
   }
-  if (grid.querySelector(".panel")) return;
+  if (document.querySelector(".dash .panel")) return;
   // First run: one skeleton card per visible panel (up to 12), KPI tiles short.
   const skel = [];
   for (const s of stmts) {
@@ -3256,6 +3385,10 @@ let dpPrimary = null; // optional brand colour (hex, no #) for chart primary
 // run with the latest state (a full run wins over a cross-filter re-run), so two
 // half-built dashboards can never race to replace each other.
 let runActive = null; // the run in progress (a promise)
+// A drill or drill-through click: {drill: prefix, key, down} or {link: true},
+// plus `focus` — where the focus goes if the run takes it away. The next run
+// animates its replaced charts from their old marks.
+let dpMotion = null;
 let runQueued = null; // null, or the `fresh` flag of the queued follow-up run
 function run(fresh = true) {
   if (runActive) {
@@ -3278,6 +3411,8 @@ function run(fresh = true) {
 }
 async function runOnce(fresh = true) {
   const grid = $("grid");
+  const motion = dpMotion; // what started this run (a drill, a drill-through)
+  dpMotion = null;
   document.body.classList.add("loading");
   status("running…");
   // Double-buffer: build the whole dashboard off-screen, then swap it in at the
@@ -3679,6 +3814,7 @@ async function runOnce(fresh = true) {
         const span = Math.min(12, nextSpan || defaultSpan);
         const fig = document.createElement("figure");
         fig.className = "panel";
+        fig._async = true; // its rows load after the swap: a re-run never keeps it
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
         const fmtByIdx = {};
         for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
@@ -4114,15 +4250,11 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
-  // A re-run keeps each chart's ::STORY step (a full run starts at the
-  // overview) and remembers its 'tween'::TRANSITION charts' marks.
-  const tweens = {};
+  // A re-run keeps each chart's ::STORY step (a full run starts at the overview).
   if (fresh) dpStorySteps = {};
   else
     document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => {
       if (p._story) dpStorySteps[p.dataset.stmt] = p._story.step();
-      const svg = p.querySelector('.panel-svg > svg[data-transition="tween"]');
-      if (svg) tweens[p.dataset.stmt] = dpAnim.geom(svg);
     });
   // A chart (or one of its marks) holding the keyboard focus hands it to its
   // replacement — however the run started (a click, an input, ::REFRESH).
@@ -4130,11 +4262,35 @@ async function runOnce(fresh = true) {
   const afig = ae?.closest?.(".dash .panel[data-stmt]");
   if (afig && ae.closest(".panel-svg > svg"))
     dpA11yFocus = ae.matches(".dp-hit") ? markKey(afig, ae) : { stmt: afig.dataset.stmt, chart: true };
-  // Atomic swap: replace the visible content in one synchronous step (no flash).
-  grid.replaceChildren(...newGrid.childNodes);
+  // Swap in the new dashboard in one synchronous step (no flash). A re-run of
+  // the same layout patches it in place: a panel whose output is unchanged
+  // keeps its DOM (scroll, focus, hover state), only the changed ones and the
+  // controls are replaced. Anything else replaces the whole content.
   const dash = document.querySelector(".dash");
-  dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
-  if (tabBar) dash.append(tabBar, tabWrap);
+  const newRoots = [newGrid, tabBar, tabWrap];
+  for (const p of slotsOf(newRoots)) if (p.matches(".panel")) p._sig = p.outerHTML;
+  const shape = shapeOf(newRoots);
+  const swaps = []; // [old, new] panels this run replaced
+  const oldRoots = [grid, dash.querySelector(":scope > .tabbar"), dash.querySelector(":scope > .tabwrap")];
+  if (fresh || dash._shape !== shape || !patchSlots(oldRoots, newRoots, swaps)) {
+    const old = new Map();
+    for (const p of document.querySelectorAll(".dash .panel[data-stmt]")) if (!old.has(p.dataset.stmt)) old.set(p.dataset.stmt, p);
+    grid.replaceChildren(...newGrid.childNodes);
+    dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
+    if (tabBar) dash.append(tabBar, tabWrap);
+    if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
+  }
+  dash._shape = shape;
+  // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and
+  // every chart on a drill / drill-through (the drilled one zooms).
+  const tweens = [];
+  for (const [o, n] of swaps) {
+    const svg = n.querySelector(".panel-svg > svg");
+    const was = o.querySelector(".panel-svg > svg");
+    if (!svg || !was || (!motion && svg.getAttribute("data-transition") !== "tween")) continue;
+    const drill = motion && motion.drill && n._ia && n._ia.drill && n._ia.drill.prefix === motion.drill ? motion : null;
+    tweens.push([svg, dpAnim.geom(was), drill]);
+  }
   // Accessibility: swap every chart for its data table (state survives runs).
   if (!dash.querySelector(".dp-a11y-bar")) {
     const bar = document.createElement("div");
@@ -4161,10 +4317,11 @@ async function runOnce(fresh = true) {
   credit.append("Powered by ", creditLink);
   dash.append(credit);
   wireCharts();
-  for (const [stmt, old] of Object.entries(tweens)) {
-    const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
-    if (svg) dpAnim.tween(svg, old);
-  }
+  for (const [svg, old, drill] of tweens) drill ? dpAnim.zoom(svg, old, drill.key, drill.down) : dpAnim.tween(svg, old);
+  // A drill / drill-through hands the focus on (a crumb, the opened tab) when
+  // the run removed the element that had it.
+  if (motion && motion.focus && (!document.activeElement || document.activeElement === document.body)) motion.focus();
+  dash.querySelectorAll(".dp-switching").forEach((e) => e.classList.remove("dp-switching"));
   addExportButtons();
   syncUrlState();
   if (dpSeedRerun) {
@@ -7762,10 +7919,12 @@ function attachHover() {
   // keyed by a different dimension (e.g. a line filtered to one channel, keyed
   // by week) has no matching mark, so it stays fully visible instead of every
   // point dimming away.
-  const markSet = new Set(marks);
   const apply = () => {
+    // Every wired mark: a panel a re-run kept was wired before.
+    const all = [...document.querySelectorAll(".panel svg .dp-hit")];
+    const markSet = new Set(all);
     const bySvg = new Map();
-    for (const el of marks) {
+    for (const el of all) {
       const svg = rootSvg(el);
       (bySvg.get(svg) || bySvg.set(svg, []).get(svg)).push(el);
     }
@@ -7835,7 +7994,10 @@ function attachHover() {
       const dx = el.getAttribute("data-x");
       const key = dx ? String(xTickLabel(el, dx)) : series;
       if (ia && ia.drill && drillInto(ia.drill, key)) return;
-      if (ia && ia.link) return followLink(chartLink(ia.link, el, key, series));
+      if (ia && ia.link) {
+        dpLinkFrom = markKey(el.closest(".panel"), el);
+        return followLink(chartLink(ia.link, el, key, series));
+      }
       if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.

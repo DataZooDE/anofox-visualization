@@ -534,6 +534,11 @@ export function animKit(win) {
       if (a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, from: a, b, to });
     }
     for (const o of old.marks.values()) ghost(o.clone); // leaves
+    play(jobs, dur);
+  }
+  // Move each job's mark from its `from` geometry to `to` (attribute values)
+  // over `dur` ms, ease-out; the last frame sets the exact end state.
+  function play(jobs, dur) {
     if (!jobs.length) return;
     const set = (k) => {
       for (const j of jobs) {
@@ -557,6 +562,76 @@ export function animKit(win) {
     win.requestAnimationFrame(frame);
   }
 
+  // ---- drill (::DRILL): a bar chart zooms between its levels ---------------
+  // Down: the clicked bar (data-x = `key`) splits into the next level's bars,
+  // which spread out to their places while the other bars fade. Up: the
+  // children gather into the bar of the value they belonged to (`key`) and
+  // the level's other bars fade in. Bars run along x, or along y when flipped.
+  // Anything but plain bars (or a missing key) tweens instead.
+  function zoom(svg, old, key, down, dur = 380) {
+    if (!svg || !old || still()) return;
+    const fresh = [...keyed(svg).values()];
+    const was = old.many ? [] : [...old.marks.values()];
+    const rect = (el) => el.tagName.toLowerCase() === "rect";
+    const box = (el) => GEOM.rect.map((a) => Number(el.getAttribute(a)));
+    const ok = (b) => b.every(Number.isFinite);
+    if (!fresh.length || !was.length || !fresh.every(rect) || !was.every((o) => rect(o.clone))) return tween(svg, old, dur);
+    // Flipped bars share their left edge: the category axis is y.
+    const lefts = new Set(was.map((o) => o.attrs[0]));
+    const flip = was.length > 1 && lefts.size === 1;
+    const along = flip ? 1 : 0;
+    const order = (els, b) => els.slice().sort((p, q) => b(p)[along] - b(q)[along]);
+    // `n` equal slices of box `b` along the category axis.
+    const slices = (b, n) =>
+      Array.from({ length: n }, (_, i) => (flip ? [b[0], b[1] + (i * b[3]) / n, b[2], b[3] / n] : [b[0] + (i * b[2]) / n, b[1], b[2] / n, b[3]]));
+    // The old bars stay under the new ones while they go.
+    const ghostOf = (clone) => {
+      clone.classList.add("dp-ghost");
+      clone.removeAttribute("tabindex");
+      fresh[0].before(clone);
+      return clone;
+    };
+    const fadeOut = (el, d) => {
+      const a = can(el) && el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: d, easing: EASE, fill: "forwards" });
+      if (a && a.finished) a.finished.then(() => el.remove(), () => el.remove());
+      else el.remove();
+    };
+    const jobs = [];
+    const job = (el, from, to) => jobs.push({ el, names: GEOM.rect, from, b: to, to: to.map((v) => v.toFixed(2)) });
+    if (down) {
+      const src = was.find((o) => o.clone.getAttribute("data-x") === key);
+      const s = src && box(src.clone);
+      if (!s || !ok(s)) return tween(svg, old, dur);
+      // The new level's bars start as slices of the clicked bar.
+      const kids = order(fresh, box);
+      const from = slices(s, kids.length);
+      kids.forEach((el, i) => job(el, from[i], box(el)));
+      // (the slices cover the clicked bar exactly: it can go at once)
+      for (const o of was) if (o !== src) fadeOut(ghostOf(o.clone), dur / 3);
+    } else {
+      const dst = fresh.find((el) => el.getAttribute("data-x") === key);
+      if (!dst) return tween(svg, old, dur);
+      // The bar we came back to grows out of the children's span ...
+      const bs = was.map((o) => box(o.clone)).filter(ok);
+      if (!bs.length) return tween(svg, old, dur);
+      const x0 = Math.min(...bs.map((b) => b[0])), y0 = Math.min(...bs.map((b) => b[1]));
+      const x1 = Math.max(...bs.map((b) => b[0] + b[2])), y1 = Math.max(...bs.map((b) => b[1] + b[3]));
+      const span = [x0, y0, x1 - x0, y1 - y0];
+      const d = box(dst);
+      job(dst, span, d);
+      // ... while the children gather into it and fade.
+      const kids = order(was.map((o) => o.clone), box);
+      const into = slices(d, kids.length);
+      kids.forEach((c, i) => {
+        const g = ghostOf(c);
+        job(g, box(g), into[i]);
+        fadeOut(g, dur);
+      });
+      for (const el of fresh) if (el !== dst && can(el)) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: dur, delay: dur / 3, easing: EASE, fill: "backwards" });
+    }
+    play(jobs, dur);
+  }
+
   // A copy of the dashboard for the static export must not freeze motion
   // state: drop running clips (WAAPI itself is never serialised), story
   // controls and overlays, and every dimmed mark — the snapshot script
@@ -570,5 +645,5 @@ export function animKit(win) {
     root.querySelectorAll(".panel svg [style*='opacity']").forEach((e) => (e.style.opacity = ""));
   }
 
-  return { enter, strip, emph, story, geom, tween, marksOf, plotOf, xPx, still };
+  return { enter, strip, emph, story, geom, tween, zoom, marksOf, plotOf, xPx, still };
 }
