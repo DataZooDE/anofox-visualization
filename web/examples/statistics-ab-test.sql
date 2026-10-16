@@ -382,12 +382,12 @@ SELECT 'The decision checklist (guardrail details: Guardrails tab)'::TITLE,
        check_ AS "Check" ::TABLE, observed AS "Observed", rule AS "Rule", result AS "Result" ::BADGE
 FROM ab_verdict,
      LATERAL (VALUES
-        (1, 'Split is 50/50 (no sample-ratio mismatch)', 'p = ' || printf('%.2f', srm_p), 'chi-square p at least 0.001',
+        (1, 'Split is 50/50 (no sample-ratio mismatch)', 'p = ' || printf('%.2f', srm_p), 'chi-square p ≥ 0.001',
             CASE WHEN srm_p >= 0.001 THEN 'pass' ELSE 'fail' END),
         (2, 'Conversion lift is real', printf('%+.2f pp (%+.2f to %+.2f)', 100 * conv.estimate, 100 * conv.conf_low, 100 * conv.conf_high),
             '95% CI above 0', CASE WHEN conv.conf_low > 0 THEN 'pass' WHEN conv.conf_high < 0 THEN 'fail' ELSE 'watch' END),
         (3, 'Test was big enough for the lift it was sized for', round(100 * ab_power(p_a, ab_mde(), least(n_a, n_b)))::INTEGER || ' % power',
-            'at least 80 % power', CASE WHEN ab_power(p_a, ab_mde(), least(n_a, n_b)) >= 0.8 THEN 'pass' ELSE 'watch' END),
+            '≥ 80 % power', CASE WHEN ab_power(p_a, ab_mde(), least(n_a, n_b)) >= 0.8 THEN 'pass' ELSE 'watch' END),
         (5, 'Guardrails hold', (5 - n_fail - n_watch) || ' pass, ' || n_watch || ' watch, ' || n_fail || ' fail',
             'none fails', CASE WHEN n_fail > 0 THEN 'fail' WHEN n_watch > 0 THEN 'watch' ELSE 'pass' END)
      ) t(k, check_, observed, rule, result)

@@ -344,7 +344,7 @@ SELECT 'Risk bands by contract — a few high-risk monthly accounts hold most of
        contract AS "Contract" ::TABLE, band AS "Risk band", count(*) AS "Customers",
        round(sum(p_now), 1) AS "Expected churners", round(sum(p_now * mrr)) AS "MRR at risk",
        round(100 * sum(p_now * mrr) / sum(sum(p_now * mrr)) OVER (), 1) AS "Share of MRR at risk (%)" ::COLORSCALE
-FROM (SELECT *, CASE WHEN p_now >= 0.2 THEN '1 high (20%+)' WHEN p_now >= 0.1 THEN '2 elevated (10–20%)'
+FROM (SELECT *, CASE WHEN p_now >= 0.2 THEN '1 high (≥ 20%)' WHEN p_now >= 0.1 THEN '2 elevated (10–20%)'
                      WHEN p_now >= 0.05 THEN '3 watch (5–10%)' ELSE '4 low (< 5%)' END AS band
       FROM ch_risk WHERE NOT churned)
 GROUP BY contract, band ORDER BY contract DESC, band;
