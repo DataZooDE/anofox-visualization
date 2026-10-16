@@ -12,6 +12,8 @@
 //!   `src/bin/serve.rs` and the extension's `anofox_serve*` functions.
 
 pub mod access;
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod policy;
 pub mod serving;
 

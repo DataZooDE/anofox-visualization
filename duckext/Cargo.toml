@@ -14,7 +14,8 @@ name = "anofox_visualization_ext"
 crate-type = ["cdylib"]
 
 [dependencies]
-anofox-visualization = { path = ".." }
+# `auth`: the locked server's built-in login (JWT/OIDC, embed links, API keys).
+anofox-visualization = { path = "..", features = ["auth"] }
 # Same version as the core crate (both must resolve to one ggplot-rs).
 ggplot-rs = { version = "0.19", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
