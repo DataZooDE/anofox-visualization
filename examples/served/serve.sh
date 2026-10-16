@@ -125,7 +125,10 @@ start() {
     # A fresh secret per start, only in the two processes' environments.
     ANOFOX_PROXY_SECRET="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
     export ANOFOX_PROXY_SECRET
+    # "policy": "none": the per-user dashboard filters on the claims itself
+    # (a login without an access policy must say so, or the server won't start).
     opts="$opts, \"hosts\": [\"127.0.0.1:$((port + 1))\", \"localhost:$((port + 1))\"],
+      \"policy\": \"none\",
       \"auth\": {\"mode\": \"proxy\", \"shared_secret_env\": \"ANOFOX_PROXY_SECRET\",
                  \"trusted_proxies\": [\"127.0.0.1\"], \"header_groups\": \"X-Forwarded-Groups\"},
       \"log\": $(j "$RUN/requests.jsonl")"

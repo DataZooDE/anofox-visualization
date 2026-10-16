@@ -282,7 +282,8 @@ Consumers pick a dashboard id and whitelisted params
   cache (`--cache`) is kept per viewer; it holds at most 1,024 pages / 64 MiB
   (oldest first out) and drops expired pages. A non-loopback `--bind` without
   `--auth` prints a `WARNING`. A request target with a control character is
-  `400`.
+  `400`. The render server has no access policies (only the locked server
+  does), so with `--auth` every panel has to filter on the claims itself.
 
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
