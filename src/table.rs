@@ -340,19 +340,22 @@ fn rate_like(name: &str) -> bool {
     .any(|w| n.contains(w))
 }
 
-/// `(^|[_\s-])(id|no|nr|nummer|number|code|key)$|^#|^id[_\s]` (case-insensitive)
+/// `(^|[_\s-])(id|no|nr|nummer|number|code|key|zip|plz|postcode|postal)$|^#|^id[_\s]`
+/// (case-insensitive): ids, codes and postcodes read as labels
 fn id_like(name: &str) -> bool {
     let n = name.to_lowercase();
     if n.starts_with('#') || n.starts_with("id_") || n.starts_with("id ") {
         return true;
     }
-    ["id", "no", "nr", "nummer", "number", "code", "key"]
-        .iter()
-        .any(|w| {
-            n.strip_suffix(w).is_some_and(|rest| {
-                rest.is_empty() || rest.ends_with(['_', '-']) || rest.ends_with(char::is_whitespace)
-            })
+    [
+        "id", "no", "nr", "nummer", "number", "code", "key", "zip", "plz", "postcode", "postal",
+    ]
+    .iter()
+    .any(|w| {
+        n.strip_suffix(w).is_some_and(|rest| {
+            rest.is_empty() || rest.ends_with(['_', '-']) || rest.ends_with(char::is_whitespace)
         })
+    })
 }
 
 fn year_named(name: &str) -> bool {
@@ -705,5 +708,8 @@ mod tests {
         assert_eq!(col_decimals(&[1.0, 2.5, 3.25]), 2);
         assert_eq!(col_decimals(&[0.0405, 0.1]), 4);
         assert!(id_like("store_id") && id_like("#") && id_like("id_x") && !id_like("paid"));
+        assert!(
+            id_like("zip") && id_like("PLZ") && id_like("customer_postcode") && !id_like("zipper")
+        );
     }
 }

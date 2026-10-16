@@ -830,6 +830,8 @@ const FILE_SAMPLES = [
     name: "Stored results: CRM data quality",
     url: "examples/tabular-showcase.sql",
   },
+  { group: TABULAR_GROUP, name: "Stored results: is today's supplier feed safe to load?", url: "examples/tabular-feed.sql" },
+  { group: TABULAR_GROUP, name: "Stored results: duplicate customers — which to merge?", url: "examples/tabular-dedup.sql" },
   {
     group: OPTIMIZE_GROUP,
     name: "Stored results: distribution centre",
