@@ -36,9 +36,6 @@ CREATE OR REPLACE MACRO dc_miss() AS getvariable('missed_refund_min')::DOUBLE;
 CREATE OR REPLACE MACRO dc_false() AS getvariable('false_alarm_min')::DOUBLE;
 CREATE OR REPLACE MACRO dc_in(lg, tm) AS
     list_contains(getvariable('language'), lg) AND getvariable('team') IN ('All teams', tm);
--- A click on a team bar narrows the routing table; clicks on anything else don't.
-CREATE OR REPLACE MACRO dc_team_click(tm) AS
-    coalesce(getvariable('selected'), '') NOT IN ('billing', 'defect', 'other') OR getvariable('selected') = tm;
 CREATE OR REPLACE MACRO dc_verdict(p, y, t) AS
     CASE WHEN p >= t AND y THEN 'ok: caught' WHEN p < t AND NOT y THEN 'ok: no refund'
          WHEN y THEN 'failed: missed refund' ELSE 'review: false alarm' END;
@@ -50,7 +47,7 @@ SELECT 30 AS missed_refund_min ::NUMBER, 'Cost of a missed refund (min)'::LABEL;
 SELECT 5 AS false_alarm_min ::NUMBER, 'Cost of a false alarm (min)'::LABEL;
 SELECT 90 AS autoroute_at_pct ::NUMBER, 'Auto-route at confidence ≥ (%)'::LABEL;
 SELECT DISTINCT language ::MULTISELECT, 'Languages'::LABEL FROM dc_scored ORDER BY language;
-SELECT team ::DROPDOWN, 'Labelled team'::LABEL FROM (SELECT 0 AS k, 'All teams' AS team UNION ALL SELECT DISTINCT 1, team FROM dc_scored) ORDER BY k, team;
+SELECT team ::BUTTONS, 'Labelled team'::LABEL FROM (SELECT 0 AS k, 'All teams' AS team UNION ALL SELECT DISTINCT 1, team FROM dc_scored) ORDER BY k, team;
 SELECT 1::ENDGROUP;
 
 SELECT 'At these rules'::GROUP;
@@ -64,7 +61,8 @@ SELECT (100 * count(*) FILTER (WHERE p_refund >= dc_t() AND refund) / nullif(cou
 FROM dc_scored WHERE dc_in(language, team);
 SELECT round(100 * (dc_miss() * count(*) FILTER (WHERE p_refund < dc_t() AND refund)
                   + dc_false() * count(*) FILTER (WHERE p_refund >= dc_t() AND NOT refund)) / count(*))::METRIC,
-       'agent minutes lost per 100 tickets'::LABEL
+       'agent minutes lost per 100 tickets'::LABEL,
+       'Every missed refund costs the minutes set in "Cost of a missed refund", every false alarm those in "Cost of a false alarm"; the sum per 100 tickets.'::INFO
 FROM dc_scored WHERE dc_in(language, team);
 SELECT (100 * count(*) FILTER (WHERE p_team >= dc_gate()) / count(*))::PERCENT, 'tickets routed automatically'::LABEL
 FROM dc_scored WHERE dc_in(language, team);
@@ -86,7 +84,7 @@ c AS (SELECT g.th, 100 * (dc_miss() * count(*) FILTER (WHERE s.p_refund < g.th A
                         + dc_false() * count(*) FILTER (WHERE s.p_refund >= g.th AND NOT s.refund)) / count(*) AS cost
       FROM g, s GROUP BY g.th),
 o AS (SELECT arg_min(th, cost) AS best, min(cost) AS best_cost FROM c)
-SELECT c.th ::XAXIS, round(c.cost, 1) ::LINECHART,
+SELECT c.th ::XAXIS, round(c.cost, 1) ::LINECHART, 'tween'::TRANSITION,
        CASE WHEN c.th < 0.5 THEN o.best ELSE dc_t() END ::XLINE,
        ('Agent minutes lost per 100 tickets by threshold — cheapest at ' || o.best || ' (' || round(o.best_cost)::INTEGER
         || ' min), yours at ' || dc_t() || ' (dashed lines)') ::TITLE
@@ -150,6 +148,7 @@ FROM dc_scored WHERE dc_in(language, team) ORDER BY refund, language;
 
 SELECT 5::COL;
 SELECT 'Quality per language (lower Brier and calibration error are better)'::TITLE,
+       'Accuracy at your threshold. Brier: the mean squared gap between P(refund) and the label (0 = perfect, 0.25 = a coin toss). Calibration error: how far the mean P(refund) is from the share of refunds, averaged over five probability bins, weighted by their tickets.'::INFO,
        language AS "Language" ::TABLE, count(*) AS "Tickets" ::PLAIN,
        round(100 * avg(((p_refund >= dc_t()) = refund)::INTEGER), 1) AS "Accuracy" ::PERCENT,
        round(avg(power(p_refund - refund::INTEGER, 2)), 3) AS "Brier" ::COLORSCALE,
@@ -166,10 +165,11 @@ GROUP BY language ORDER BY language;
 SELECT 'Routing'::TAB;
 
 SELECT 12::COL;
-SELECT 'A `choice` question picks one of the teams written in the query. Defect tickets route well; "other" tickets are pulled to billing, and raising the confidence gate doesn''t help — better option descriptions would. Click a team bar to list its routing mistakes.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'A `choice` question picks one of the teams written in the query. Defect tickets route well; "other" tickets are pulled to billing, and raising the confidence gate doesn''t help — better option descriptions would. Click a team bar to list only its routing mistakes.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 4::COL;
 SELECT 320::HEIGHT;
+SELECT 'clicked_team'::SELECT_AS;
 SELECT team ::XAXIS, round(100 * avg((team_pred = team)::INTEGER), 1) ::BARCHART, 'percent'::YFORMAT,
        'Right team, by labelled team — "other" is the weak spot'::TITLE
 FROM dc_scored WHERE dc_in(language, team) GROUP BY ALL ORDER BY 2 DESC;
@@ -192,11 +192,11 @@ FROM (SELECT g / 100.0 AS gate, m.metric,
 WHERE value IS NOT NULL ORDER BY gate, metric;
 
 SELECT 12::COL;
-SELECT 'Routing mistakes'::TITLE,
+SELECT ('Routing mistakes' || CASE WHEN coalesce(getvariable('clicked_team'), '') <> '' THEN ' — labelled ' || getvariable('clicked_team') ELSE '' END)::TITLE,
        CASE WHEN p_team >= dc_gate() THEN 'failed: auto-routed wrong' ELSE 'review: held for a human' END AS "Outcome" ::BADGE,
        '#' || ticket_id AS "Ticket" ::TABLE, language AS "Language", team AS "Labelled team", team_pred AS "Model's team",
        round(100 * p_team, 1) AS "Confidence" ::PERCENT, text AS "Ticket text"
-FROM dc_scored WHERE dc_in(language, team) AND team_pred <> team AND dc_team_click(team)
+FROM dc_scored WHERE dc_in(language, team) AND team_pred <> team AND coalesce(getvariable('clicked_team'), '') IN ('', team)
 ORDER BY p_team DESC;
 
 -- ── 4 · Frustration ──────────────────────────────────────────────────────────
