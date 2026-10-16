@@ -77,6 +77,12 @@ terminal.
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
+| `::XLINE_LABEL` | `::EVENT_LABEL` | annotation | label of the ::XLINE on the same row, at the top of the line (events from data) |
+| `::REFLINE_LABEL` | `::YLINE_LABEL`, `::TARGET_LABEL` | annotation | label of the ::REFLINE on the same row, above its right end |
+| `::XBAND_FROM` | `::SHADE_FROM` | annotation | start of a shaded x-range, one per row (a number, date or timestamp) |
+| `::XBAND_TO` | `::SHADE_TO` | annotation | end of the shaded x-range started by ::XBAND_FROM on the same row |
+| `::XBAND_LABEL` | `::SHADE_LABEL` | annotation | label of the shaded x-range on the same row |
+| `::ANNOTATE` | `::ANNOTATION` | annotation | a text callout at the row's (x, y); NULL rows draw nothing |
 | `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark or heatmap cell (value = font size) |
 | `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
@@ -222,6 +228,41 @@ can map a mark's numeric `data-x` back to its level.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).
+
+### Annotations from data (events, ranges, callouts)
+
+Label what explains a chart — a launch, an outage, a record — with rows from
+SQL. Each annotation role is read **per row**, so the usual source is an events
+table joined onto the series by its date; rows without an event carry NULL and
+draw nothing:
+
+```sql
+SELECT s.day::XAXIS, s.revenue::LINECHART,
+       e.day::XLINE,  e.note::XLINE_LABEL,                    -- labelled event lines
+       o.start_day::XBAND_FROM, o.end_day::XBAND_TO, o.what::XBAND_LABEL,  -- shaded ranges
+       CASE WHEN s.revenue = max(s.revenue) OVER () THEN 'Record day' END::ANNOTATE,
+       150::REFLINE, 'Target'::REFLINE_LABEL,
+       'Revenue — the launch lifted it, the outage cost a week'::TITLE
+FROM sales s
+LEFT JOIN events  e ON e.day = s.day
+LEFT JOIN outages o ON o.start_day = s.day
+ORDER BY s.day;
+```
+
+| Role | Draws |
+|------|-------|
+| `::XLINE` + `::XLINE_LABEL` | a dashed event line with its label at the top, one per row |
+| `::XBAND_FROM` + `::XBAND_TO` (+ `::XBAND_LABEL`) | a shaded x-range per row, labelled at its start |
+| `::REFLINE` + `::REFLINE_LABEL` | the reference line's label above its right end |
+| `::ANNOTATE` | a text callout at the row's (x, y), with a ring on the mark |
+
+`::XLINE`, `::MARKAREA` and `::XBAND_FROM`/`::XBAND_TO` take numbers, dates
+or timestamps — on a date axis a date is placed like the x data. Labels and
+shading use the theme's chart text and muted colours, so they follow dark mode;
+labels that would overlap are skipped. Up to 64 annotations of each kind are
+drawn. The same roles render in the browser and headless (`dashboard --svg`).
+`dashboard --check` warns (`annotation/unpaired`) about a label or range end
+without its partner.
 
 ### Plotting model output (contract macros)
 

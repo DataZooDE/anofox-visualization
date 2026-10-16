@@ -271,14 +271,14 @@ pub(crate) fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
 /// - An X axis whose values are all ISO dates/timestamps becomes a continuous
 ///   datetime scale, so ggplot-rs picks sensible (e.g. yearly) breaks instead
 ///   of drawing one overlapping label per value.
-/// - An x *position* (`::XLINE`, `::MARKAREA`) is not cast to DOUBLE in SQL (a
+/// - An x *position* (`::XLINE`, `::MARKAREA`, `::XBAND_FROM`/`_TO`) is not cast to DOUBLE in SQL (a
 ///   DATE has no such cast), so it arrives as a number, a numeric string
 ///   (BIGINT/DECIMAL) or an ISO date — all become the x data's units (a date
 ///   becomes epoch seconds, like a date x axis).
 pub(crate) fn coerce_for_role(role: Role, vals: Vec<Value>) -> Vec<Value> {
     match role {
         Role::X => maybe_decimal(maybe_datetime(vals)),
-        Role::VLine | Role::MarkArea => maybe_datetime(vals)
+        Role::VLine | Role::MarkArea | Role::XBandFrom | Role::XBandTo => maybe_datetime(vals)
             .into_iter()
             .map(|v| match v {
                 Value::Str(s) => s

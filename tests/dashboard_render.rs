@@ -131,3 +131,47 @@ fn a_date_xline_draws_on_a_date_axis() {
     let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
     assert!(svg.contains("stroke-dasharray"), "no XLINE drawn");
 }
+
+// #31: annotations from data rows — an event label on its ::XLINE, a labelled
+// shaded range, a ::REFLINE label and a point callout, all from one result.
+#[test]
+fn annotations_from_data_rows() {
+    let script = "SELECT d::XAXIS, v::LINECHART, e::XLINE, n::XLINE_LABEL, \
+                  bf::XBAND_FROM, bt::XBAND_TO, bl::XBAND_LABEL, a::ANNOTATE, \
+                  4::REFLINE, 'Target'::REFLINE_LABEL FROM t;";
+    let days = [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04",
+        "2026-02-05",
+    ];
+    // five rows, one value at row i (an event joined onto its day)
+    let at = |i: usize, v: &str| -> Vec<Value> {
+        (0..5)
+            .map(|k| {
+                if k == i {
+                    Value::Str(v.into())
+                } else {
+                    Value::Na
+                }
+            })
+            .collect()
+    };
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&days)),
+        ("c1".into(), f(&[1.0, 3.0, 2.0, 5.0, 4.0])),
+        ("c2".into(), at(1, "2026-02-02")),
+        ("c3".into(), at(1, "Launch")),
+        ("c4".into(), at(2, "2026-02-03")),
+        ("c5".into(), at(2, "2026-02-04")),
+        ("c6".into(), at(2, "Outage")),
+        ("c7".into(), at(3, "Record day")),
+        ("c8".into(), f(&[4.0; 5])),
+        ("c9".into(), s(&["Target"; 5])),
+    ]);
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    for label in ["Launch", "Outage", "Target", "Record day"] {
+        assert!(svg.contains(label), "{label} missing");
+    }
+}

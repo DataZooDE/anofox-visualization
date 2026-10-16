@@ -151,6 +151,18 @@ pub static REGISTRY: &[RoleSpec] = &[
       "upper edge of a shaded band"),
     e("MARKAREA", &["MARK_AREA", "SHADE"], R::MarkArea, "annotation", true,
       "shade the x-region [min, max] of this column"),
+    e("XLINE_LABEL", &["EVENT_LABEL"], R::VLineLabel, "annotation", true,
+      "label of the ::XLINE on the same row, at the top of the line (events from data)"),
+    e("REFLINE_LABEL", &["YLINE_LABEL", "TARGET_LABEL"], R::RefLineLabel, "annotation", true,
+      "label of the ::REFLINE on the same row, above its right end"),
+    e("XBAND_FROM", &["SHADE_FROM"], R::XBandFrom, "annotation", true,
+      "start of a shaded x-range, one per row (a number, date or timestamp)"),
+    e("XBAND_TO", &["SHADE_TO"], R::XBandTo, "annotation", true,
+      "end of the shaded x-range started by ::XBAND_FROM on the same row"),
+    e("XBAND_LABEL", &["SHADE_LABEL"], R::XBandLabel, "annotation", true,
+      "label of the shaded x-range on the same row"),
+    e("ANNOTATE", &["ANNOTATION"], R::Annotate, "annotation", true,
+      "a text callout at the row's (x, y); NULL rows draw nothing"),
     e("DATALABELS", &["DATALABEL", "VALUELABELS", "SHOWLABELS"], R::DataLabels, "annotation", true,
       "draw the value on each mark or heatmap cell (value = font size)"),
     e("ABLINE", &["AB_LINE"], R::AbLine, "annotation", true,
@@ -655,6 +667,12 @@ mod tests {
             Role::XFormat,
             Role::DataLabels,
             Role::MarkArea,
+            Role::VLineLabel,
+            Role::RefLineLabel,
+            Role::XBandFrom,
+            Role::XBandTo,
+            Role::XBandLabel,
+            Role::Annotate,
             Role::Markdown,
             Role::Open,
             Role::High,
@@ -737,6 +755,12 @@ mod tests {
                 | Role::XFormat
                 | Role::DataLabels
                 | Role::MarkArea
+                | Role::VLineLabel
+                | Role::RefLineLabel
+                | Role::XBandFrom
+                | Role::XBandTo
+                | Role::XBandLabel
+                | Role::Annotate
                 | Role::Markdown
                 | Role::Open
                 | Role::High

@@ -293,6 +293,20 @@ pub enum Role {
     /// Shade a vertical x-region behind the data (`::MARKAREA`): the band spans
     /// [min, max] of this column's (non-null) x-values.
     MarkArea,
+    /// The label of the `::XLINE` on the same row (`::XLINE_LABEL`), drawn at
+    /// the top of the line — an event ("Launch", "Outage") from data rows.
+    VLineLabel,
+    /// The label of the `::REFLINE` on the same row (`::REFLINE_LABEL`), drawn
+    /// above the line's right end.
+    RefLineLabel,
+    /// Start of a labelled shaded x-range, one per row (`::XBAND_FROM`).
+    XBandFrom,
+    /// End of a labelled shaded x-range (`::XBAND_TO`), see [`Role::XBandFrom`].
+    XBandTo,
+    /// The label of the shaded range on the same row (`::XBAND_LABEL`).
+    XBandLabel,
+    /// A text callout at the row's (x, y) (`::ANNOTATE`); NULL rows draw nothing.
+    Annotate,
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
@@ -2381,6 +2395,7 @@ fn cartesian(
         }
         .layer_data(frame);
     }
+    plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
     // Cook's-distance contours (`::COOKS_CONTOUR p`) on residuals vs leverage.
     if let Some(p) = role_num(cols, Role::CooksContour).filter(|p| *p >= 1.0) {
         plot = plot.stat_cooks_contour(p.min(1e6) as usize, &[0.5, 1.0]);
@@ -3398,6 +3413,249 @@ pub(crate) fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
 pub(crate) fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 + (255.0 - c as f64) * t).round() as u8;
     (f(r), f(g), f(b))
+}
+
+/// Annotations driven by data rows (#31): a label on the `::XLINE` /
+/// `::REFLINE` of the same row (`::XLINE_LABEL`, `::REFLINE_LABEL`), labelled
+/// shaded x-ranges (`::XBAND_FROM` + `::XBAND_TO` [+ `::XBAND_LABEL`]) and
+/// text callouts at a row's (x, y) (`::ANNOTATE`). Events usually come from a
+/// `LEFT JOIN events ON events.day = t.day`, so only the event rows carry
+/// values; NULL / empty cells draw nothing. Ink and shading come from the
+/// theme (`muted` wash, chart label colour), so dark mode follows.
+fn data_annotations(
+    mut plot: GGPlot,
+    o: &RenderOptions,
+    kind: Kind,
+    cols: &[Column],
+    data: &[(String, Vec<Value>)],
+    x_discrete: bool,
+) -> GGPlot {
+    const MAX_NOTES: usize = 64;
+    let text_at = |c: Option<&Column>, i: usize| -> Option<String> {
+        c.and_then(|c| c.values.get(i))
+            .filter(|v| **v != Value::Na)
+            .map(|v| value_str(v).trim().to_string())
+            .filter(|t| !t.is_empty())
+    };
+    let finite = |v: &Value| v.as_f64().is_some_and(f64::is_finite);
+    let num = |v: Vec<f64>| v.into_iter().map(Value::Float).collect::<Vec<_>>();
+    let text = |v: Vec<String>| v.into_iter().map(Value::Str).collect::<Vec<_>>();
+    let ink = o.theme.chart_label();
+    let top = annotation_top(kind, cols, data);
+    // Text anchored at its bottom-left, just right of an x position, in the
+    // headroom above the data (the y scale's expansion).
+    let top_labels = |plot: GGPlot, xs: Vec<Value>, labels: Vec<String>| -> GGPlot {
+        let Some(y) = top.filter(|_| !xs.is_empty()) else {
+            return plot;
+        };
+        let k = xs.len();
+        plot.geom_text_with(GeomText {
+            size: 9.5,
+            color: ink,
+            hjust: 0.0,
+            vjust: 0.0,
+            check_overlap: true,
+            ..Default::default()
+        })
+        .layer_data(vec![
+            ("x".to_string(), xs),
+            ("y".to_string(), num(vec![y; k])),
+            ("label".to_string(), text(labels)),
+        ])
+        .layer_aes(Aes::new().x("x").y("y").label("label"))
+    };
+
+    // Labelled shaded ranges, one per distinct (from, to, label) row.
+    if let (false, Some(from), Some(to)) = (
+        x_discrete,
+        find_role(cols, Role::XBandFrom),
+        find_role(cols, Role::XBandTo),
+    ) {
+        let lab = find_role(cols, Role::XBandLabel);
+        let mut seen = std::collections::HashSet::new();
+        let (mut x0, mut x1, mut lx, mut ls) = (vec![], vec![], vec![], vec![]);
+        for (i, (a, b)) in from.values.iter().zip(&to.values).enumerate() {
+            if !finite(a) || !finite(b) || x0.len() >= MAX_NOTES {
+                continue;
+            }
+            let (a, b) = if a.as_f64() <= b.as_f64() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let label = text_at(lab, i);
+            if !seen.insert((value_str(a), value_str(b), label.clone())) {
+                continue;
+            }
+            x0.push(a.clone());
+            x1.push(b.clone());
+            if let Some(l) = label {
+                lx.push(a.clone());
+                ls.push(format!("\u{a0}{l}"));
+            }
+        }
+        if !x0.is_empty() {
+            let k = x0.len();
+            let shade = o.theme.colors.muted;
+            plot = plot
+                .geom_rect_with(GeomRect {
+                    fill: shade,
+                    color: shade,
+                    alpha: 0.13,
+                    line_width: 0.0,
+                })
+                .layer_data(vec![
+                    ("bx0".to_string(), x0),
+                    ("bx1".to_string(), x1),
+                    ("by0".to_string(), num(vec![f64::NEG_INFINITY; k])),
+                    ("by1".to_string(), num(vec![f64::INFINITY; k])),
+                ])
+                .layer_aes(Aes::new().xmin("bx0").xmax("bx1").ymin("by0").ymax("by1"));
+            plot = top_labels(plot, lx, ls);
+        }
+    }
+
+    // Event labels at the top of their ::XLINE.
+    if let (false, Some(line), Some(lab)) = (
+        x_discrete,
+        find_role(cols, Role::VLine),
+        find_role(cols, Role::VLineLabel),
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let (mut xs, mut ls) = (vec![], vec![]);
+        for (i, v) in line.values.iter().enumerate() {
+            let Some(l) = text_at(Some(lab), i).filter(|_| finite(v)) else {
+                continue;
+            };
+            if xs.len() < MAX_NOTES && seen.insert((value_str(v), l.clone())) {
+                xs.push(v.clone());
+                ls.push(format!("\u{a0}{l}"));
+            }
+        }
+        plot = top_labels(plot, xs, ls);
+    }
+
+    // Reference-line labels above the line's right end.
+    if let (Some(line), Some(lab)) = (
+        find_role(cols, Role::RefLine),
+        find_role(cols, Role::RefLineLabel),
+    ) {
+        let xcol = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
+        let right = xcol.and_then(|xs| {
+            if x_discrete {
+                xs.iter().rev().find(|v| **v != Value::Na).cloned()
+            } else {
+                xs.iter()
+                    .filter(|v| finite(v))
+                    .max_by(|a, b| a.as_f64().partial_cmp(&b.as_f64()).unwrap())
+                    .cloned()
+            }
+        });
+        let mut seen = std::collections::HashSet::new();
+        let (mut ys, mut ls) = (vec![], vec![]);
+        for (i, v) in line.values.iter().enumerate() {
+            let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
+                continue;
+            };
+            if let Some(l) = text_at(Some(lab), i) {
+                if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
+                    ys.push(y);
+                    ls.push(l);
+                }
+            }
+        }
+        if let (Some(rx), false) = (right, ys.is_empty()) {
+            let k = ys.len();
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 9.5,
+                    color: ink,
+                    hjust: 1.0,
+                    vjust: -0.25,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".to_string(), vec![rx; k]),
+                    ("y".to_string(), num(ys)),
+                    ("label".to_string(), text(ls)),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("label"));
+        }
+    }
+
+    // Point callouts: the annotated mark gets a ring and a repelled label.
+    if let Some(note) = find_role(cols, Role::Annotate) {
+        let xs = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
+        let ys = data.iter().find(|(k, _)| k == "y").map(|(_, v)| v);
+        if let (Some(xs), Some(ys)) = (xs, ys) {
+            let idx: Vec<usize> = (0..xs.len().min(ys.len()))
+                .filter(|&i| xs[i] != Value::Na && finite(&ys[i]))
+                .filter(|&i| text_at(Some(note), i).is_some())
+                .take(MAX_NOTES)
+                .collect();
+            if !idx.is_empty() {
+                let mut frame = subset(data, &idx);
+                frame.retain(|(n, _)| matches!(n.as_str(), "x" | "y" | "facet"));
+                frame.push((
+                    "txt".to_string(),
+                    text(idx.iter().filter_map(|&i| text_at(Some(note), i)).collect()),
+                ));
+                plot = plot
+                    .geom_point_with(GeomPoint {
+                        color: ink,
+                        size: 3.2,
+                        ..Default::default()
+                    })
+                    .layer_data(frame.clone())
+                    .layer_aes(Aes::new().x("x").y("y"))
+                    .geom_text_repel_with(GeomTextRepel {
+                        size: 10.0,
+                        color: ink,
+                        fontface: FontFace::Bold,
+                        repel: RepelParams {
+                            segment_color: Some(o.theme.chart_text()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .layer_data(frame)
+                    .layer_aes(Aes::new().x("x").y("y").label("txt"));
+            }
+        }
+    }
+    plot
+}
+
+/// The top of a chart's data in y units — where event / range labels sit
+/// (above it, in the scale's headroom). Stacked marks stack per x.
+fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) -> Option<f64> {
+    let col = |n: &str| data.iter().find(|(k, _)| k == n).map(|(_, v)| v);
+    let max = |it: &mut dyn Iterator<Item = f64>| it.filter(|f| f.is_finite()).reduce(f64::max);
+    match kind {
+        Kind::BarStackedPercent => return Some(1.0),
+        Kind::BarStacked | Kind::AreaStacked => {
+            let (x, y) = (col("x")?, col("y")?);
+            let mut sums: std::collections::HashMap<String, f64> = Default::default();
+            for (xv, yv) in x.iter().zip(y) {
+                if let Some(f) = yv.as_f64().filter(|f| f.is_finite() && *f > 0.0) {
+                    *sums.entry(value_str(xv)).or_default() += f;
+                }
+            }
+            return max(&mut sums.into_values());
+        }
+        _ => {}
+    }
+    let ycols = data
+        .iter()
+        .filter(|(k, _)| {
+            k == "y" || k == "ihi" || (k.starts_with('y') && k[1..].parse::<u32>().is_ok())
+        })
+        .flat_map(|(_, v)| v.iter());
+    let extra = cols
+        .iter()
+        .filter(|c| matches!(c.role, Role::RefLine | Role::BandUpper))
+        .flat_map(|c| c.values.iter());
+    max(&mut ycols.chain(extra).filter_map(Value::as_f64))
 }
 
 /// Distinct finite numeric values from a column, in first-seen order — used to

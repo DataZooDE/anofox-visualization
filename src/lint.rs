@@ -342,6 +342,30 @@ where
             }
         }
 
+        // Annotation roles that need a partner on the same row (#31).
+        let has = |r: Role| p.roles.iter().any(|(_, x)| *x == r);
+        for (part, needs) in [
+            (Role::VLineLabel, Role::VLine),
+            (Role::RefLineLabel, Role::RefLine),
+            (Role::XBandFrom, Role::XBandTo),
+            (Role::XBandTo, Role::XBandFrom),
+            (Role::XBandLabel, Role::XBandFrom),
+        ] {
+            if has(part) && !has(needs) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "annotation/unpaired",
+                    message: format!(
+                        "::{} draws nothing without a ::{} column in the same SELECT",
+                        part.token(),
+                        needs.token()
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -999,6 +1023,21 @@ mod design_tests {
 
     fn has(diags: &[Diagnostic], code: &str) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn an_unpaired_annotation_role_warns() {
+        let data = rows(3, |i| json!({ "c0": i, "c1": i, "c2": "Launch", "c3": 1 }));
+        let d = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, 'Launch'::XLINE_LABEL, 'T'::TITLE FROM t;",
+            data.clone(),
+        );
+        assert!(has(&d, "annotation/unpaired"), "{d:?}");
+        let ok = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, 'Launch'::XLINE_LABEL, 1::XLINE FROM t;",
+            data,
+        );
+        assert!(!has(&ok, "annotation/unpaired"), "{ok:?}");
     }
 
     #[test]

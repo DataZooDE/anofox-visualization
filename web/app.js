@@ -174,6 +174,16 @@ SELECT 6::COL; SELECT week::XAXIS, sum(n)::BARCHART, sum(revenue)/50::LINECHART,
 SELECT 12::COL; SELECT day::XAXIS, y::LINECHART, CASE WHEN day>=17 THEN day END::MARKAREA,
        (CASE WHEN day%3=0 THEN 45 WHEN day%3=1 THEN 65 ELSE 85 END)::REFLINE,
        'Shaded region + reference lines (::MARKAREA/::REFLINE)'::TITLE FROM ts ORDER BY day;
+-- annotations from data: events and ranges joined onto the days they mark
+SELECT 12::COL; SELECT c.d::XAXIS, c.value::LINECHART, e.d::XLINE, e.what::XLINE_LABEL,
+       b.f::XBAND_FROM, b.t::XBAND_TO, b.what::XBAND_LABEL,
+       CASE WHEN c.d = arg_max(c.d, c.value) OVER () THEN 'Busiest week' END::ANNOTATE,
+       40::REFLINE, 'Target'::REFLINE_LABEL,
+       'Events, a shaded range and a callout from SQL rows (::XLINE_LABEL, ::XBAND_*, ::ANNOTATE)'::TITLE
+FROM (SELECT date_trunc('week', d)::DATE AS d, round(avg(value), 1) AS value FROM cal GROUP BY 1) c
+LEFT JOIN (VALUES (DATE '2024-02-05', 'Launch'), (DATE '2024-09-16', 'Price change')) e(d, what) ON e.d = c.d
+LEFT JOIN (VALUES (DATE '2024-06-10', DATE '2024-07-01', 'Summer promo')) b(f, t, what) ON b.f = c.d
+ORDER BY c.d;
 
 SELECT 'Scatter & trends'::TAB;
 SELECT 6::COL; SELECT day::XAXIS, y::SMOOTH, 'Scatter + LOESS trend (::SMOOTH)'::TITLE FROM ts ORDER BY day;
