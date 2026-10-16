@@ -102,7 +102,7 @@ terminal.
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
-| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser) |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
@@ -521,6 +521,31 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
 - `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
   tooltips.
+
+### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)
+
+A `::MARKDOWN` text can carry numbers from **its own row**, formatted in the
+dashboard locale exactly like the KPIs — no string concatenation that loses the
+locale (`1234.5` instead of `1.235 €`):
+
+```sql
+SELECT 'Revenue grew **{{growth:pct}}** to **{{revenue:money}}** (data until {{day:date}}).'::MARKDOWN,
+       100 * (sum(rev) FILTER (WHERE yr = 2026) / sum(rev) FILTER (WHERE yr = 2025) - 1) AS growth,
+       sum(rev) FILTER (WHERE yr = 2026) AS revenue,
+       max(day) AS day
+FROM sales;
+```
+
+`{{name}}` names a column of the same `SELECT` (case-insensitive; the other
+columns of a `::MARKDOWN` statement keep their names), `:fmt` picks the format:
+`money` (`currency`, `eur`, `usd`), `percent` (`pct`; the value is in percent
+points, like `::PERCENT`), `compact`, `metric` (`number`), `date`, `text`. No
+format: a number or an ISO date in the locale, other text as is. Values are
+inserted as **text** — HTML-escaped, never Markdown or markup, and a placeholder
+inside a link URL is dropped — after the Markdown is rendered and sanitised (the
+sanitiser is unchanged). An unknown name stays as written; `--check` warns
+(`markdown/unknown-placeholder`, `markdown/unknown-format`). The *A German branch
+report* sample opens with such a summary.
 
 ### Definitions and callouts (`::INFO`, `::CALLOUT`)
 

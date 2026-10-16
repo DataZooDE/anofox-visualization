@@ -347,6 +347,40 @@ where
             }
         }
 
+        // {{col}} / {{col:fmt}} placeholders in a ::MARKDOWN text must name a
+        // column of the same SELECT and a known format.
+        if let (Some((i, _)), Some(row)) = (
+            p.roles.iter().find(|(_, r)| *r == Role::Markdown),
+            rows.first(),
+        ) {
+            let md = row.values().nth(*i).and_then(Value::as_str).unwrap_or("");
+            for (name, spec) in md_placeholders(md) {
+                let mut warn = |code: &'static str, message: String| {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code,
+                        message,
+                        sql: short.clone(),
+                    })
+                };
+                if !row.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
+                    warn(
+                        "markdown/unknown-placeholder",
+                        format!("{{{{{name}}}}} names no column of this SELECT — add `… AS {name}` (it is shown as written)"),
+                    );
+                }
+                if let Some(sp) =
+                    spec.filter(|sp| !MD_FORMATS.contains(&sp.to_ascii_lowercase().as_str()))
+                {
+                    warn(
+                        "markdown/unknown-format",
+                        format!("{{{{{name}:{sp}}}}}: unknown format — use money, percent, compact, metric, date or text"),
+                    );
+                }
+            }
+        }
+
         // Interaction directives: prime their variables the way the browser does
         // ("nothing selected"), so panels filtering by a selection are checked
         // with data; a malformed value is reported.
@@ -821,6 +855,37 @@ fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> V
             first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
         )],
     }
+}
+
+/// `{{col:fmt}}` formats the browser knows (`web/app.js` `MD_FMT` + date / text).
+const MD_FORMATS: &[&str] = &[
+    "money", "currency", "usd", "eur", "dollar", "percent", "pct", "compact", "metric", "number",
+    "num", "date", "text",
+];
+
+/// The `{{name}}` / `{{name:fmt}}` placeholders of a Markdown text.
+fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = md;
+    while let Some(a) = rest.find("{{") {
+        let Some(b) = rest[a + 2..].find("}}") else {
+            break;
+        };
+        let inner = &rest[a + 2..a + 2 + b];
+        rest = &rest[a + 2 + b + 2..];
+        let (name, spec) = match inner.split_once(':') {
+            Some((n, f)) => (n.trim(), Some(f.trim().to_string())),
+            None => (inner.trim(), None),
+        };
+        let ident = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ' ');
+        if ident {
+            out.push((name.to_string(), spec));
+        }
+    }
+    out
 }
 
 /// `::CALLOUT` kinds the browser draws (`info` = note, `tip` = success,
@@ -1406,6 +1471,36 @@ mod design_tests {
             let d = input_defaults(InputKind::Toggle, 0, &r);
             assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
         }
+    }
+
+    #[test]
+    fn markdown_placeholders_are_checked() {
+        let data = |_q: &str| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "Grew {{growth:pct}} to {{revenue:eur}}; {{nope}} {{growth:fancy}}", "growth": 12.5, "revenue": 1.0 }),
+            ))
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 12.5 AS growth, 1.0 AS revenue;",
+            data,
+        );
+        let msgs: Vec<_> = d.iter().map(|x| (x.code, x.message.clone())).collect();
+        let unknown: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-placeholder")
+            .collect();
+        assert_eq!(unknown.len(), 1, "{msgs:?}");
+        assert!(unknown[0].1.contains("{{nope}}"), "{msgs:?}");
+        let fmt: Vec<_> = msgs
+            .iter()
+            .filter(|(c, _)| *c == "markdown/unknown-format")
+            .collect();
+        assert_eq!(fmt.len(), 1, "{msgs:?}");
+        assert_eq!(
+            md_placeholders("a {{ x : money }} {{ 1bad }} {{y}}"),
+            vec![("x".into(), Some("money".into())), ("y".into(), None)]
+        );
     }
 
     #[test]

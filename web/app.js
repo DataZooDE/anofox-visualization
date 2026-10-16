@@ -3489,7 +3489,7 @@ async function runOnce(fresh = true) {
           }
           const body = document.createElement("div");
           body.className = "md-body";
-          body.innerHTML = renderMarkdown(mdr ? r0["c" + mdr[0]] : firstCell());
+          body.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : firstCell(), r0, mdValue);
           fig.appendChild(body);
           container.appendChild(fig);
           panels++;
@@ -3985,6 +3985,45 @@ function titleOf(s, rowsJson) {
   return v == null ? null : String(v).replace(/^"|"$/g, "");
 }
 
+// {{col}} / {{col:fmt}} in a ::MARKDOWN text → the statement's own row,
+// formatted like a KPI. The Markdown is rendered (and sanitised) with inert
+// private-use tokens in their place; each token in text then becomes the
+// HTML-escaped value, a token inside a tag (a link URL, an attribute) is
+// dropped — a value can never become markup or a URL. Unknown columns stay
+// as written. `fmt(value, spec)` formats one value.
+function markdownWithValues(src, row, fmt) {
+  const vals = [];
+  const keys = Object.keys(row || {});
+  const md = String(src ?? "").replace(/\{\{\s*([A-Za-z_][\w ]*?)\s*(?::\s*([A-Za-z_]+)\s*)?\}\}/g, (m, name, spec) => {
+    const key = keys.find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) return m;
+    vals.push(String(fmt(row[key], (spec || "").toLowerCase())));
+    return `\uE000${vals.length - 1}\uE001`;
+  });
+  const html = renderMarkdown(md);
+  if (!vals.length) return html;
+  const tok = /\uE000(\d+)\uE001/g;
+  return html.replace(/<[^>]*>|[^<]+/g, (part) =>
+    part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => escapeHtml(vals[+k] ?? ""))
+  );
+}
+// One {{col:fmt}} value: money / percent / compact / metric (numbers, as the
+// KPI roles), date, text; no spec = a number or ISO date in the dashboard
+// locale (like a table cell), other text as is.
+const MD_FMT = { money: "MONEY", currency: "MONEY", usd: "MONEY", eur: "MONEY", dollar: "MONEY", percent: "PERCENT", pct: "PERCENT", compact: "COMPACT", metric: "METRIC", number: "METRIC", num: "METRIC" };
+function mdValue(v, spec) {
+  if (v == null) return "–";
+  if (MD_FMT[spec]) return fmtNum(v, MD_FMT[spec]);
+  if (spec === "text") return String(v);
+  const loc = dashLocale();
+  if (spec === "date") {
+    // DuckDB-Wasm may hand a DATE / TIMESTAMP over as epoch ms
+    const iso = typeof v === "number" ? new Date(v).toISOString().slice(0, 10) : String(v).slice(0, 10);
+    return loc ? format_date_locale(iso, loc) : iso;
+  }
+  if (typeof v === "number" || /^-?\d+(\.\d+)?$/.test(String(v))) return fmtNum(v, "METRIC");
+  return loc ? format_date_locale(String(v), loc) : String(v);
+}
 // ::CALLOUT value → 'note' | 'warning' | 'success' (src/lint.rs CALLOUT_KINDS).
 function calloutKind(v) {
   const k = String(v ?? "").trim().toLowerCase();

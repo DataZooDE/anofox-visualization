@@ -75,6 +75,17 @@ SELECT 1::ENDGROUP;
 -- ── 1 · Überblick ────────────────────────────────────────────────────────────
 SELECT 'Überblick'::TAB;
 
+-- Werte im Fließtext: {{spalte:format}} füllt die Zeile derselben Abfrage ein,
+-- formatiert wie die KPIs (Gebietsschema de-DE).
+SELECT 12::COL;
+SELECT '**Januar bis September:** Die Filialen setzten **{{umsatz:money}}** um, **{{wachstum:pct}}** mehr als im Vorjahreszeitraum. Ein Kassenbon brachte im Schnitt {{bon:metric}} €; die Daten reichen bis zum {{stand:date}}.'::MARKDOWN,
+       'So lief das Jahr'::TITLE,
+       sum(umsatz) FILTER (WHERE nl_akt(tag)) AS umsatz,
+       100 * (sum(umsatz) FILTER (WHERE nl_akt(tag)) / sum(umsatz) FILTER (WHERE nl_vj(tag)) - 1) AS wachstum,
+       sum(umsatz) FILTER (WHERE nl_akt(tag)) / sum(umsatz / bon) FILTER (WHERE nl_akt(tag)) AS bon,
+       max(tag)::VARCHAR AS stand
+FROM nl_umsatz WHERE nl_in(region, warengruppe);
+
 SELECT 8::COL;
 SELECT 340::HEIGHT;
 SELECT make_date(2026, month(tag), 1) ::XAXIS, CASE WHEN year(tag) = 2026 THEN '2026' ELSE 'Vorjahr 2025' END ::CATEGORY,

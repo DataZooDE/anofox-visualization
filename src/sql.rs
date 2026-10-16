@@ -534,6 +534,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         );
     }
 
+    let markdown = unambiguous.contains(&Role::Markdown);
     let mut roles = Vec::new();
     let mut names = Vec::new();
     let mut items = Vec::new();
@@ -585,6 +586,13 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         }
         if lex::is_star_item(item) {
             items.push(item.to_string()); // `*`, `t.*`, COLUMNS(…) expand in place
+        } else if markdown && {
+            let (core, alias) = trailing_alias(item);
+            alias.is_some() || lex::simple_ident(core).is_some()
+        } {
+            // A ::MARKDOWN statement's other columns keep their names: the
+            // text's {{name}} placeholders read them.
+            items.push(item.to_string());
         } else {
             items.push(format!("{} AS c{i}", trailing_alias(item).0));
         }
