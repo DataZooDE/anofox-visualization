@@ -3646,19 +3646,13 @@ async function runOnce(fresh = true) {
           holder.className = "panel-svg";
           const rw = Math.max(300, span * 100);
           const data = contractCell(r, s.contract.rows, "[]");
-          holder.innerHTML = render_contract(
-            s.contract.macro,
-            data,
-            contractCell(r, s.contract.args, "{}"),
-            rw,
-            ph,
-            renderCtx()
-          );
+          const args = contractCell(r, s.contract.args, "{}");
+          holder.innerHTML = render_contract(s.contract.macro, data, args, rw, ph, renderCtx());
           const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
           if (warn) console.warn(`${s.contract.macro}: ${warn}`);
           fig.appendChild(holder);
           // Data view (toolbox) lists the rows the plot was drawn from.
-          fig._dp = { rows: data, roles: [], ph, isMap: false, contract: true };
+          fig._dp = { rows: data, roles: [], rw, ph, isMap: false, contract: { macro: s.contract.macro, args } };
           container.appendChild(fig);
           panels++;
         }
@@ -4160,6 +4154,7 @@ async function runOnce(fresh = true) {
   creditLink.textContent = "DataZoo GmbH";
   credit.append("Powered by ", creditLink);
   dash.append(credit);
+  fitCharts(true);
   wireCharts();
   for (const [stmt, old] of Object.entries(tweens)) {
     const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
@@ -4215,6 +4210,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     holder._trackBox.innerHTML = svgs.slice(1).join("");
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
   } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
   markAnim(holder, roles);
 }
 
@@ -4222,7 +4218,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
 function addTrack(holder, track) {
   (holder._tracks = holder._tracks || []).push(track);
   const dp = holder.closest(".panel")?._dp;
-  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, dp.rw, dp.ph);
+  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, fitWidth(holder, dp.rw), dp.ph);
 }
 
 // A track's name (its ::TRACK value), for summaries and table captions.
@@ -4252,6 +4248,50 @@ function toggleTrackShade(el) {
   r.style.pointerEvents = "none";
   main.appendChild(r);
 }
+
+// The width a chart is drawn at. Desktop: its render width (span × 100), so
+// charts of any span line up at a given ::HEIGHT. Phone layout (panels stacked
+// full width, the theme's max-width:760px rule) and touch screens (a phone held
+// sideways, a tablet): the width it is shown at, so its text keeps its size
+// instead of shrinking with the SVG.
+const FIT_TO_PANEL = "(max-width: 760px), (hover: none)";
+function fitWidth(holder, rw) {
+  const w = Math.round(holder.clientWidth);
+  return w > 0 && matchMedia(FIT_TO_PANEL).matches ? Math.max(240, w) : rw;
+}
+
+// Redraw every chart whose fitted width changed (after a run, and debounced on
+// resize / orientation change / a tab coming into view), and fold the toolbox
+// of narrow panels and touch screens behind its "⋯" button. True when a chart
+// was redrawn: follow with wireCharts(). `watch` (after a run) re-points the
+// resize observer at the fresh charts.
+let dpFitObs = null,
+  dpFitTimer = 0;
+function fitCharts(watch = false) {
+  const touch = matchMedia("(hover: none)").matches;
+  let changed = false;
+  if (watch) dpFitObs?.disconnect();
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    if (panel.clientWidth) panel.classList.toggle("dp-narrow", touch || panel.clientWidth < 480);
+    const dp = panel._dp;
+    const holder = panel.querySelector(":scope > .panel-svg");
+    if (!dp || !holder) return;
+    if (watch) dpFitObs?.observe(holder);
+    const svg = holder.querySelector(":scope > svg");
+    const w = fitWidth(holder, dp.rw);
+    // hidden (a tab not shown, charts as tables): fitted once it shows
+    if (!svg || !holder.clientWidth || Math.abs(w - svg.viewBox.baseVal.width) < 2) return;
+    if (dp.contract) holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
+    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
+    changed = true;
+  });
+  return changed;
+}
+if (typeof ResizeObserver !== "undefined")
+  dpFitObs = new ResizeObserver(() => {
+    clearTimeout(dpFitTimer);
+    dpFitTimer = setTimeout(() => fitCharts() && wireCharts(), 150);
+  });
 
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
 // (attachHover), then the ::STORY steppers.
@@ -7506,9 +7546,10 @@ async function downloadHtml() {
   }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
   await typesetMath(document.querySelector(".dash"));
-  // A snapshot has no live tables: drop their search / filter / pager controls.
+  // A snapshot has no live tables or chart tools: drop their search / filter /
+  // pager controls and the panel toolboxes.
   const snap = document.querySelector(".dash").cloneNode(true);
-  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
   snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
@@ -7599,8 +7640,7 @@ function showError(grid, msg) {
 // seeded from the geometry bounds, padded to the panel's aspect so the first
 // zoom step doesn't jump.
 function attachMapZoom(holder, rowsJson, roles, ph) {
-  const W = 460,
-    aspect = W / ph;
+  const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
   let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
   let raf = 0;
 
@@ -7612,6 +7652,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
       b = [];
     }
     if (b.length !== 4) return { x0: -180, x1: 180, y0: -90, y1: 90 };
+    const aspect = W() / ph;
     let [x0, x1, y0, y1] = b;
     const w = x1 - x0,
       h = y1 - y0;
@@ -7634,7 +7675,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      renderChart(holder, rowsJson, roles, W(), ph, zoom);
       wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
@@ -8230,11 +8271,29 @@ function attachToolbox() {
       b.textContent = glyph;
       b.addEventListener("click", (e) => {
         e.stopPropagation();
+        openTools(bar, false);
         fn();
       });
       bar.appendChild(b);
       return b;
     };
+    // Narrow panels and touch screens (.dp-narrow, set by fitCharts) fold the
+    // tools behind this one button, so they never cover the title.
+    const more = document.createElement("button");
+    more.className = "dp-tool dp-tool-more";
+    more.title = "Chart tools";
+    more.textContent = "⋯";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openTools(bar, !bar.classList.contains("dp-open"));
+    });
+    bar.appendChild(more);
+    bar.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !bar.classList.contains("dp-open")) return;
+      openTools(bar, false);
+      more.focus();
+    });
     const dp = panel._dp;
     // magicType: swap a line chart to bars and back (only for line/bar charts).
     if (dp && !dp.isMap && magicSwap(dp.roles)) {
@@ -8267,6 +8326,17 @@ function attachToolbox() {
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
     panel.appendChild(bar);
   });
+  if (!dpToolsAutoClose) {
+    dpToolsAutoClose = true;
+    document.addEventListener("click", () => document.querySelectorAll(".dp-toolbox.dp-open").forEach((b) => openTools(b, false)));
+  }
+}
+
+// Open / close a folded toolbox's menu.
+let dpToolsAutoClose = false;
+function openTools(bar, open) {
+  bar.classList.toggle("dp-open", open);
+  bar.querySelector(".dp-tool-more")?.setAttribute("aria-expanded", String(open));
 }
 
 // Return the swapped chart-type role string (LINE↔BAR family), or null if the
@@ -8296,7 +8366,7 @@ function toggleMagicType(panel) {
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
   dp.drawn = use; // the roles on screen (the summary names the chart kind shown)
-  renderChart(holder, dp.rows, use, dp.rw, dp.ph);
+  renderChart(holder, dp.rows, use, fitWidth(holder, dp.rw), dp.ph);
   wireCharts();
 }
 
@@ -8824,7 +8894,6 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
   const full = svgDomain(svg0);
   if (!full) return; // not a continuous x/y chart → no zoom
-  const W = svg0.viewBox.baseVal.width || 460; // the width the chart was drawn at
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -8833,6 +8902,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
+      const W = holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the chart is drawn at
       renderChart(holder, rowsJson, roles, W, ph, zoom);
       wireCharts();
       syncSlider();
