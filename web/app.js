@@ -18,6 +18,9 @@ import init, {
   kpi_parts,
   threshold_rules,
 } from "./pkg/anofox_visualization.js";
+import { animKit } from "./anim.js";
+
+const dpAnim = animKit(window); // chart motion (web/anim.js)
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -960,6 +963,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
   { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
+  { group: "Interactivity", name: "How will demand develop after today?", url: "examples/motion-demand.sql" },
   { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
   { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
@@ -3776,6 +3780,7 @@ async function runOnce(fresh = true) {
             const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
             if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
+            markAnim(holder, s.roles);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
             fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
@@ -3833,6 +3838,16 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
+  // A re-run keeps each chart's ::STORY step (a full run starts at the
+  // overview) and remembers its 'tween'::TRANSITION charts' marks.
+  const tweens = {};
+  if (fresh) dpStorySteps = {};
+  else
+    document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => {
+      if (p._story) dpStorySteps[p.dataset.stmt] = p._story.step();
+      const svg = p.querySelector('.panel-svg > svg[data-transition="tween"]');
+      if (svg) tweens[p.dataset.stmt] = dpAnim.geom(svg);
+    });
   // Atomic swap: replace the visible content in one synchronous step (no flash).
   grid.replaceChildren(...newGrid.childNodes);
   const dash = document.querySelector(".dash");
@@ -3864,6 +3879,11 @@ async function runOnce(fresh = true) {
   credit.append("Powered by ", creditLink);
   dash.append(credit);
   attachHover();
+  mountStories();
+  for (const [stmt, old] of Object.entries(tweens)) {
+    const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
+    if (svg) dpAnim.tween(svg, old);
+  }
   addExportButtons();
   syncUrlState();
   if (dpSeedRerun) {
@@ -3877,31 +3897,46 @@ async function runOnce(fresh = true) {
   document.body.classList.remove("loading");
 }
 
-// Entrance animation on a fresh render: panels fade+rise in and line series
-// "draw" left-to-right (stroke-dashoffset). Skipped for cross-filter re-runs so
-// interactions feel instant, and honours prefers-reduced-motion via CSS.
+// Entrance animation on a fresh render: panels fade+rise in and each chart
+// plays its ::ANIMATE mode (web/anim.js — only data marks move, never grid
+// lines). Skipped for cross-filter re-runs so interactions feel instant;
+// prefers-reduced-motion shows the final state at once.
 function animateIn() {
-  // Reduced motion: no draw-in at all (the CSS drops the animation, which would
-  // otherwise leave every line at its hidden start dash offset).
-  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (still) return;
+  if (dpAnim.still()) return;
   document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const svg = panel.querySelector(".panel-svg > svg");
+    if (svg && svg.getAttribute("data-anim") === "none") return; // ::ANIMATE 'none' opts out entirely
     panel.classList.remove("dp-in");
     void panel.offsetWidth; // reflow so the animation restarts
     panel.classList.add("dp-in");
-    panel.querySelectorAll("svg polyline").forEach((pl) => {
-      let len;
-      try {
-        len = pl.getTotalLength();
-      } catch (_) {
-        return;
-      }
-      if (!len || !isFinite(len)) return;
-      pl.style.strokeDasharray = len;
-      pl.style.strokeDashoffset = len;
-      pl.classList.add("dp-draw");
-    });
+    if (svg) dpAnim.enter(svg, svg.getAttribute("data-anim"));
   });
+}
+
+// ::STORY steppers (web/anim.js) under every chart that has steps.
+let dpStorySteps = {}; // statement index → the step to restore after a re-run
+function mountStories() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const svg = panel.querySelector(".panel-svg > svg[data-story]");
+    if (svg) panel._story = dpAnim.story(panel, svg, dpStorySteps[panel.dataset.stmt] || 0);
+  });
+}
+
+// The entrance a chart plays, on its root <svg> as `data-anim` (the static
+// export replays it from there): its ::ANIMATE, else by chart kind — lines
+// draw, bars grow, points pop; other kinds only fade in with their panel.
+function markAnim(holder, roles) {
+  const svg = holder.querySelector(":scope > svg");
+  if (!svg) return;
+  let mode = svg.getAttribute("data-animate") || "auto";
+  if (mode === "auto") {
+    const kinds = roles.map((r) => r[1]);
+    if (kinds.some((k) => /^(LINECHART|LINECHART_PERCENT|STEP|SMOOTH|AREACHART|AREACHART_STACKED|DENSITY)$/.test(k)))
+      mode = "draw";
+    else if (kinds.some((k) => /^(BARCHART.*|HISTOGRAM|WATERFALL|SCATTER|BUBBLE|JITTER|QQ)$/.test(k))) mode = "grow";
+    else mode = "fade";
+  }
+  svg.setAttribute("data-anim", mode);
 }
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
@@ -6910,6 +6945,7 @@ async function downloadHtml() {
   // A snapshot has no live tables: drop their search / filter / pager controls.
   const snap = document.querySelector(".dash").cloneNode(true);
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  dpAnim.strip(snap); // never a mid-animation frame
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
@@ -6920,8 +6956,18 @@ async function downloadHtml() {
     (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
     `<style>${tokens}\n${base}\nbody{margin:0}</style></head><body class="embed">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
-    `<script>${SNAPSHOT_JS}<\/script></body></html>`;
+    `<script>${SNAPSHOT_JS}<\/script><script>${snapshotMotion()}<\/script></body></html>`;
   download(new Blob([html], { type: "text/html" }), "dashboard.html");
+}
+
+// The export's chart motion: web/anim.js's kit (its own source, so there is
+// one implementation) replaying each chart's entrance and rebuilding its
+// ::STORY stepper at the overview.
+function snapshotMotion() {
+  return `(function(){var K=(${animKit})(window);
+  document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
+  document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){K.story(s.closest('.panel'),s);});
+})();`;
 }
 
 // Self-contained hover + tab switching for the exported snapshot.
@@ -7118,25 +7164,25 @@ function attachHover() {
     ...document.querySelectorAll(".panel svg rect,.panel svg circle,.panel svg polygon,.panel svg polyline"),
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
 
+  // Dim non-selected marks (the shared emphasis state's "select" layer), but
+  // only inside a chart that actually contains the selected series. A chart
+  // keyed by a different dimension (e.g. a line filtered to one channel, keyed
+  // by week) has no matching mark, so it stays fully visible instead of every
+  // point dimming away.
+  const markSet = new Set(marks);
   const apply = () => {
-    if (!dpSelected) {
-      for (const el of marks) el.style.opacity = "";
-      return;
-    }
-    // Dim non-selected marks, but only inside a panel that actually contains the
-    // selected series. A panel keyed by a different dimension (e.g. a line
-    // filtered to one channel, keyed by week) has no matching mark, so it stays
-    // fully visible instead of every point dimming away.
-    const byPanel = new Map();
+    const bySvg = new Map();
     for (const el of marks) {
-      const fig = el.closest(".panel") || document.body;
-      (byPanel.get(fig) || byPanel.set(fig, []).get(fig)).push(el);
+      const svg = rootSvg(el);
+      (bySvg.get(svg) || bySvg.set(svg, []).get(svg)).push(el);
     }
-    for (const els of byPanel.values()) {
-      const hasSel = els.some((el) => el.getAttribute("data-series") === dpSelected);
-      for (const el of els) {
-        el.style.opacity = !hasSel || el.getAttribute("data-series") === dpSelected ? "" : "0.15";
-      }
+    for (const [svg, els] of bySvg) {
+      const hasSel = !!dpSelected && els.some((el) => el.getAttribute("data-series") === dpSelected);
+      dpAnim.emph(
+        svg,
+        "select",
+        hasSel ? (el) => (markSet.has(el) && el.getAttribute("data-series") !== dpSelected ? 0.15 : null) : null
+      );
     }
   };
 
@@ -7601,11 +7647,20 @@ function marksOf(panel) {
   return panel.querySelectorAll("svg .dp-hit");
 }
 
-// Dim every data mark that fails `keep(el)`; pass null to clear the emphasis.
+// Dim every data mark that fails `keep(el)`; pass null to clear the emphasis
+// (the shared emphasis state's "filter" layer: brush, value filter, named
+// selections).
 function filterMarks(panel, keep) {
-  marksOf(panel).forEach((el) => {
-    el.style.opacity = keep && !keep(el) ? "0.12" : "";
-  });
+  const hits = new Set(marksOf(panel));
+  const svgs = new Set([...hits].map(rootSvg));
+  for (const svg of svgs) dpAnim.emph(svg, "filter", keep ? (el) => (hits.has(el) && !keep(el) ? 0.12 : null) : null);
+}
+
+// The panel-level <svg> a mark belongs to (the root of nested plot svgs).
+function rootSvg(el) {
+  let s = el.ownerSVGElement || el;
+  while (s.ownerSVGElement) s = s.ownerSVGElement;
+  return s;
 }
 
 // ECharts-style brush: toggle a drag-to-select overlay; marks inside the box
@@ -7860,11 +7915,16 @@ function attachLegendToggle() {
     // ECharts-style focus: hovering a legend entry emphasises that series and
     // fades the others (visible ones only; hidden/toggled-off series stay off).
     const emphasize = (only) => {
-      svg.querySelectorAll("[data-series]").forEach((el) => {
-        const s = el.getAttribute("data-series");
-        if (hidden.has(s)) return;
-        el.style.opacity = only && s !== only ? "0.15" : "";
-      });
+      dpAnim.emph(
+        svg,
+        "legend",
+        only
+          ? (el) => {
+              const s = el.getAttribute("data-series");
+              return s != null && !hidden.has(s) && s !== only ? 0.15 : null;
+            }
+          : null
+      );
       entries.forEach((e) => {
         if (hidden.has(e.s)) return;
         e.text.style.fontWeight = only === e.s ? "700" : "";

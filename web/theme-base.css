@@ -144,10 +144,26 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel{position:relative;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.15rem 1.25rem;box-shadow:var(--ax-shadow)}
 .panel svg{width:100%;height:auto;display:block}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
-@keyframes dp-line-draw{to{stroke-dashoffset:0}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
-.panel.dp-in svg polyline.dp-draw{animation:dp-line-draw .8s cubic-bezier(.22,.61,.36,1) both}
-@media (prefers-reduced-motion: reduce){.panel.dp-in,.panel.dp-in svg polyline.dp-draw,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
+/* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10) */
+@keyframes dp-flow{to{stroke-dashoffset:-20}}
+.panel svg .dp-flow{animation:dp-flow 1.2s linear infinite}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow{animation:none}}
+/* ::STORY: step controls under the chart, the caption + connector over it */
+.dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
+.dp-story-btn{font:inherit;font-size:.78rem;font-weight:600;line-height:1;padding:.38rem .62rem;border-radius:var(--ax-radius-sm);border:1px solid var(--ax-tool-border);background:var(--ax-btn2-bg);color:var(--ax-ink);cursor:pointer}
+.dp-story-btn:hover{border-color:var(--ax-tool-hover-border)}
+.dp-story-btn:focus-visible{outline:2px solid var(--ax-accent);outline-offset:2px}
+.dp-story-play[aria-pressed="true"]{color:var(--ax-accent);border-color:var(--ax-accent)}
+.dp-story-pos{font-size:.74rem;color:var(--ax-muted);margin-left:.2rem}
+.dp-story-cap{position:absolute;z-index:2;max-width:min(320px,60%);padding:.42rem .62rem;font-size:.8rem;line-height:1.35;color:var(--ax-tip-ink);background:var(--ax-tip-bg);border:1px solid var(--ax-callout-border);border-left:3px solid var(--ax-accent);border-radius:var(--ax-radius-sm);box-shadow:var(--ax-tip-shadow);pointer-events:none}
+.dp-story-link{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.dp-story-link path{fill:none;stroke:var(--ax-accent);stroke-width:1.5;stroke-dasharray:6 4}
+/* story steps fade (a re-run re-applies its dimming at once: no flash) */
+.panel svg.dp-emph-fade [data-series],.panel svg.dp-emph-fade [data-x]{transition:opacity .25s,filter .12s}
+@media print{.dp-story{display:none}}
+.panel svg .dp-ghost{pointer-events:none}
+@media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
 .group-body .panel .panel-title{border-bottom:0;padding-bottom:.2rem}

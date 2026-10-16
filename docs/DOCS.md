@@ -103,6 +103,11 @@ terminal.
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
+| `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
+| `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
+| `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
+| `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
+| `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
@@ -1246,6 +1251,98 @@ Only variable **values** travel, never SQL: on a locked server
 literals like any input change, so an embedding app or another dashboard can
 open a dashboard pre-filtered. Example:
 `?dashboard=Filters%20%26%20inputs&tab=Cross-filter&v.sku=SKU-A&v.market=EU`.
+
+### Motion: entrances, flow lines, stories and transitions
+
+Charts move only where the motion carries meaning, and only in the browser:
+`--svg`, PNG and PDF output stay static, and under the viewer's *reduce
+motion* setting every chart shows its final state at once. Motion runs on
+data marks only (lines, bands, points, bars) — never on grid lines or axes —
+and a finished animation leaves no state behind.
+
+**Entrance (`::ANIMATE`).** On a full run (load, *Run*) each panel fades in
+and its chart plays an entrance; cross-filter and input re-runs stay instant.
+
+| `::ANIMATE` | Entrance |
+|---|---|
+| `'auto'` (default) | by chart kind: lines and areas draw in left to right, bars grow from their baseline staggered by x, points pop in left to right; other charts only fade in with their panel |
+| `'draw'` | lines draw in; points, bars and bands are wiped in with them |
+| `'grow'` | bars grow staggered by x, points pop in, lines draw in |
+| `'reveal'` | the chart wipes in up to the panel's `::XLINE` (e.g. Today), pauses, then the rest — a forecast fan, its median, its points — grows forward from it |
+| `'none'` | no motion at all, not even the panel fade |
+
+```sql
+SELECT week ::XAXIS, series ::CATEGORY, demand ::LINECHART,
+       lo ::BAND_LOWER, hi ::BAND_UPPER,
+       DATE '2026-10-12' ::XLINE,          -- Today: a date works on a date axis
+       'reveal' ::ANIMATE
+FROM outlook;
+```
+
+Above about 500 marks the per-mark stagger becomes a single wipe. An
+`::XLINE` may be a number or, on a date axis, a `DATE` / `TIMESTAMP`; its
+tooltip shows the date. `--check` warns on an unknown mode
+(`animate/unknown`) and on `'reveal'` without an `::XLINE`
+(`animate/reveal-no-xline`, the chart then wipes in from the left). The
+static HTML export replays the entrances.
+
+**Flow lines (`::LINESTYLE`).** A per-row column keyed by the row's
+`::CATEGORY`: the series whose rows say `'flow'` is drawn with dashes that move
+along the line — the "predicted" look for a forecast or a connector;
+`'dashed'` gives still dashes, `'solid'` (or NULL) the default. Without a
+`::CATEGORY` it styles the chart's line. Static output (`--svg`, PNG, PDF) and
+*reduce motion* show plain dashes. `--check` warns on an unknown style
+(`linestyle/unknown`).
+
+```sql
+SELECT week ::XAXIS, series ::CATEGORY, demand ::LINECHART,
+       CASE WHEN series = 'Forecast' THEN 'flow' END ::LINESTYLE
+FROM outlook;
+```
+
+**Stories (`::STORY`).** A text column whose non-empty rows become story
+steps on the chart: *‹ / Play / ›* controls appear under it; each step lights
+up the marks at that row's x (or its series with `'series'::STORY_BY`), dims
+the rest and shows the caption with a connector to them. Step 0 is the
+overview. Several rows at the same x share the first caption.
+
+```sql
+SELECT week ::XAXIS, channel ::CATEGORY, demand ::BARCHART,
+       CASE week WHEN 'W43' THEN 'First forecast week: Store ahead of Online'
+                 WHEN 'W48' THEN 'Online dips — a quiet slot for the migration' END ::STORY
+FROM plan;
+```
+
+The controls are buttons (keyboard: Tab, Enter / Space) and the caption is an
+`aria-live="polite"` region, so screen readers hear each step. Under *reduce
+motion* steps switch instantly and there is no Play. A re-run (input change,
+cross-filter) keeps the current step. Dimming is one shared state: a story
+step, a click selection, a brush or named selection and legend focus each
+dim on their own, and clearing one keeps the others. The HTML export carries
+a working stepper, starting at the overview. `--check` warns on a
+`::STORY_BY` that is not `'x'` / `'series'` (`story/bad-by`).
+
+**Transitions (`::TRANSITION`).** By default a re-run (an input change, a
+cross-filter click) swaps the chart for its new render. With `'tween'`, the
+new chart (with its new axes) comes in and its marks move from where they
+were to their new values in 300 ms: bars and points by position and size,
+lines and bands point by point when the number of points is unchanged (else
+they cross-fade). Marks are matched by their x and series; new ones fade in,
+removed ones fade out. Above about 500 marks the chart cross-fades instead.
+`'none'` is the default. A tween only plays on re-runs (a full run plays the
+entrance), not under *reduce motion*, and not in the static export (which has
+no inputs). `--check` warns on an unknown value (`transition/unknown`).
+
+```sql
+SELECT week ::XAXIS, channel ::CATEGORY,
+       demand * md_factor(week, getvariable('scenario')) ::BARCHART,
+       'tween' ::TRANSITION
+FROM plan;
+```
+
+The builder example *How will demand develop after today?* (Interactivity)
+combines all four: a reveal from Today, a flowing forecast line, a story on
+the weekly bars and a scenario input whose changes tween both charts.
 
 ### Tables
 
