@@ -279,7 +279,9 @@ ORDER BY p.ds;
 SELECT 'Backtest'::TAB;
 
 SELECT 12::COL;
-SELECT 'Three rolling folds, each forecasting a full week (168 h) from the data before it. **SeasonalNaive** (repeat last week) is the benchmark; **MSTL** (daily + weekly seasonality) and **AutoTheta** must beat it to be used. The models'' own intervals cover nearly everything but are far wider than the load itself — no use for a capacity decision. The **conformal** interval is the (1 − α) quantile of each method''s own backtest errors: calibrated on folds 1–2, checked on fold 3.'::MARKDOWN,
+SELECT 'Three rolling folds, each forecasting a full week (168 h) from the data before it. **SeasonalNaive** (repeat last week) is the benchmark; **MSTL** (daily + weekly seasonality) and **AutoTheta** must beat it to be used. The models'' own intervals cover nearly everything but are far wider than the load itself — no use for a capacity decision. The **conformal** interval widens each forecast $\hat{y}_{t+h}$ by $q_{1-\alpha}$, the (1 − α) quantile of the method''s own absolute backtest errors — calibrated on folds 1–2, checked on fold 3:
+
+$$\hat{y}_{t+h} \pm q_{1-\alpha}, \qquad q_{1-\alpha} = Q_{1-\alpha}\big(\lvert y_s - \hat{y}_s \rvert\big)$$'::MARKDOWN,
        'How to read it'::TITLE;
 
 SELECT 6::COL;

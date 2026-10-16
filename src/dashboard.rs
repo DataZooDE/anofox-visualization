@@ -631,7 +631,7 @@ fn render_panel_svg(
             if !line.is_empty() {
                 svg.push_str(&format!(
                     "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
-                    esc(&line)
+                    markdown_line_svg(&line)
                 ));
             }
             y += MD_LINE;
@@ -944,51 +944,119 @@ fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Opti
         .map(value_str)
 }
 
+/// Marks a word of a formula in [`markdown_lines`] (drawn monospace).
+const MATH_WORD: char = '\u{E002}';
+/// A forced line break in [`markdown_lines`]' word list (around `$$…$$`).
+const MD_BREAK: &str = "\u{E003}";
+
 /// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
 /// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
-/// separated by an empty line.
+/// separated by an empty line. A `$…$` formula keeps its TeX source, each
+/// word marked with [`MATH_WORD`]; a `$$…$$` one gets lines of its own.
 fn markdown_lines(md: &str, w: f64) -> Vec<String> {
     let max = (((w - 28.0) / 6.6).floor() as usize).max(10);
     let mut out: Vec<String> = Vec::new();
     for para in md.split("\n\n") {
-        let mut plain = String::new();
-        let mut rest = para.trim();
-        // [text](url) → text
-        while let Some(a) = rest.find('[') {
-            let Some(b) = rest[a..].find("](").map(|b| a + b) else {
-                break;
-            };
-            let Some(c) = rest[b..].find(')').map(|c| b + c) else {
-                break;
-            };
-            plain.push_str(&rest[..a]);
-            plain.push_str(&rest[a + 1..b]);
-            rest = &rest[c + 1..];
+        let mut words: Vec<String> = Vec::new();
+        for seg in crate::math::spans(para.trim()) {
+            match seg {
+                crate::math::Seg::Text(t) => {
+                    let mut plain = String::new();
+                    let mut rest = t.as_str();
+                    // [text](url) → text
+                    while let Some(a) = rest.find('[') {
+                        let Some(b) = rest[a..].find("](").map(|b| a + b) else {
+                            break;
+                        };
+                        let Some(c) = rest[b..].find(')').map(|c| b + c) else {
+                            break;
+                        };
+                        plain.push_str(&rest[..a]);
+                        plain.push_str(&rest[a + 1..b]);
+                        rest = &rest[c + 1..];
+                    }
+                    plain.push_str(rest);
+                    let plain = plain.replace(['*', '`'], "").replace("__", "");
+                    words.extend(
+                        plain
+                            .split_whitespace()
+                            .filter(|w| !w.chars().all(|c| c == '#'))
+                            .map(str::to_string),
+                    );
+                }
+                crate::math::Seg::Math { tex, display } => {
+                    if display {
+                        words.push(MD_BREAK.into());
+                    }
+                    words.extend(tex.split_whitespace().map(|w| format!("{MATH_WORD}{w}")));
+                    if display {
+                        words.push(MD_BREAK.into());
+                    }
+                }
+            }
         }
-        plain.push_str(rest);
-        let plain = plain.replace(['*', '`'], "").replace("__", "");
-        let words: Vec<&str> = plain
-            .split_whitespace()
-            .filter(|w| !w.chars().all(|c| c == '#'))
-            .collect();
-        if words.is_empty() {
+        if words.iter().all(|w| w == MD_BREAK) {
             continue;
         }
         if !out.is_empty() {
             out.push(String::new());
         }
         let mut line = String::new();
+        let mut len = 0;
         for wd in words {
-            if !line.is_empty() && line.chars().count() + 1 + wd.chars().count() > max {
-                out.push(std::mem::take(&mut line));
+            let n = wd.chars().filter(|&c| c != MATH_WORD).count();
+            if wd == MD_BREAK || (!line.is_empty() && len + 1 + n > max) {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    len = 0;
+                }
+                if wd == MD_BREAK {
+                    continue;
+                }
             }
             if !line.is_empty() {
                 line.push(' ');
+                len += 1;
             }
-            line.push_str(wd);
+            line.push_str(&wd);
+            len += n;
         }
-        out.push(line);
+        if !line.is_empty() {
+            out.push(line);
+        }
     }
+    out
+}
+
+/// One [`markdown_lines`] line as SVG text content: formula words in a
+/// monospace `<tspan>`, the rest as is (escaped).
+fn markdown_line_svg(line: &str) -> String {
+    let mut out = String::new();
+    let mut math_run: Vec<&str> = Vec::new();
+    let flush = |run: &mut Vec<&str>, out: &mut String| {
+        if !run.is_empty() {
+            out.push_str(&format!(
+                "<tspan class=\"md-tex\" font-family=\"ui-monospace, Menlo, Consolas, monospace\" font-size=\"12\">{}</tspan>",
+                esc(&run.join(" "))
+            ));
+            run.clear();
+        }
+    };
+    for (k, wd) in line.split(' ').enumerate() {
+        if let Some(m) = wd.strip_prefix(MATH_WORD) {
+            if math_run.is_empty() && k > 0 {
+                out.push(' ');
+            }
+            math_run.push(m);
+        } else {
+            flush(&mut math_run, &mut out);
+            if k > 0 {
+                out.push(' ');
+            }
+            out.push_str(&esc(wd));
+        }
+    }
+    flush(&mut math_run, &mut out);
     out
 }
 
@@ -1005,5 +1073,23 @@ mod md_tests {
         assert!(l[2].starts_with("One bold and code with a"), "{l:?}");
         assert!(l.iter().all(|x| x.chars().count() <= 26), "{l:?}");
         assert!(l.join(" ").contains("link —"), "{l:?}");
+    }
+
+    #[test]
+    fn formulas_keep_their_tex_in_monospace() {
+        let l = super::markdown_lines(
+            "Smoothing $\\hat{y}_t = \\alpha y_t$ for $5 and $10:\n$$ \\sum_i x_i $$\nafter",
+            400.0,
+        );
+        assert_eq!(l.len(), 3, "{l:?}");
+        assert!(l[0].contains("$5 and $10"), "{l:?}");
+        assert!(l[1].contains("\\sum_i"), "{l:?}");
+        let svg = super::markdown_line_svg(&l[0]);
+        assert!(
+            svg.contains("Smoothing <tspan class=\"md-tex\"")
+                && svg.contains(">\\hat{y}_t = \\alpha y_t</tspan> for"),
+            "{svg}"
+        );
+        assert!(!svg.contains('\u{E002}'), "{svg}");
     }
 }

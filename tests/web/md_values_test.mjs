@@ -11,7 +11,7 @@ const grab = (name) => {
   return m[0];
 };
 const { markdownWithValues } = new Function(
-  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("renderMarkdown")}\n${grab("markdownWithValues")}\nreturn { markdownWithValues };`
+  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\n${grab("markdownWithValues")}\n${grab("texText")}\nreturn { markdownWithValues };`
 )();
 // a stub formatter: shows which spec was asked for
 const fmt = (v, spec) => (spec ? `${v}|${spec}` : String(v));

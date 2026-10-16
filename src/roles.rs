@@ -233,7 +233,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
     e("MARKDOWN", &["MD", "TEXTBOX", "RICHTEXT"], R::Markdown, "kpi", true,
-      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row"),
+      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas"),
     e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     // ── tables ─────────────────────────────────────────────────────────────

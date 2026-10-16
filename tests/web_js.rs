@@ -77,3 +77,8 @@ fn web_freshness_chip_matches_the_cli() {
 fn web_markdown_values_are_inert() {
     run_node("md_values_test.mjs");
 }
+
+#[test]
+fn web_markdown_math() {
+    run_node("math_test.mjs");
+}

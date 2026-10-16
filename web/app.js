@@ -3913,6 +3913,7 @@ async function runOnce(fresh = true) {
           const body = document.createElement("div");
           body.className = "md-body";
           body.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : firstCell(), r0, mdValue);
+          typesetMath(body);
           fig.appendChild(body);
           container.appendChild(fig);
           panels++;
@@ -4648,8 +4649,9 @@ function titleOf(s, rowsJson) {
 // {{col}} / {{col:fmt}} in a ::MARKDOWN text → the statement's own row,
 // formatted like a KPI. The Markdown is rendered (and sanitised) with inert
 // private-use tokens in their place; each token in text then becomes the
-// HTML-escaped value, a token inside a tag (a link URL, an attribute) is
-// dropped — a value can never become markup or a URL. Unknown columns stay
+// HTML-escaped value, one in a formula's TeX becomes TeX text, any other
+// token inside a tag (a link URL, an attribute) is dropped — a value can
+// never become markup, a TeX command or a URL. Unknown columns stay
 // as written. `fmt(value, spec)` formats one value.
 function markdownWithValues(src, row, fmt) {
   const vals = [];
@@ -4663,9 +4665,17 @@ function markdownWithValues(src, row, fmt) {
   const html = renderMarkdown(md);
   if (!vals.length) return html;
   const tok = /\uE000(\d+)\uE001/g;
+  // in a formula's TeX (data-tex): the value as \text{…}, TeX-escaped
+  const tex = (part) =>
+    part.replace(/( data-tex=")([^"]*)/, (m, a, t) => a + t.replace(tok, (_, k) => escapeHtml(texText(vals[+k] ?? ""))));
   return html.replace(/<[^>]*>|[^<]+/g, (part) =>
-    part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => escapeHtml(vals[+k] ?? ""))
+    part[0] === "<" ? tex(part).replace(tok, "") : part.replace(tok, (_, k) => escapeHtml(vals[+k] ?? ""))
   );
+}
+// A value as TeX text: \text{…} with TeX's special characters escaped.
+function texText(v) {
+  const sp = { "\\": "\\textbackslash{}", "^": "\\textasciicircum{}", "~": "\\textasciitilde{}" };
+  return `\\text{${String(v).replace(/[\\{}$%&#_^~]/g, (c) => sp[c] ?? "\\" + c)}}`;
 }
 // One {{col:fmt}} value: money / percent / compact / metric (numbers, as the
 // KPI roles), date, text; no spec = a number or ISO date in the dashboard
@@ -6793,12 +6803,142 @@ function setChromeSql(sql, roleName, value) {
   return lines.join("\n");
 }
 
+// Text → [{text} | {tex, display}]: `$…$` inline and `$$…$$` display
+// formulas, by the KaTeX auto-render / pandoc rules (src/math.rs `spans`, the
+// same rules headless): an opening `$` needs a non-space after it, a closing
+// one a non-space before it and no digit after it, so "$5 and $10" stays text;
+// an inline formula ends at its first unescaped `$`. `\$` is a literal
+// dollar; a `code` span is never math.
+function mathSpans(s) {
+  const out = [];
+  let text = "",
+    i = 0;
+  const flush = () => {
+    if (text) out.push({ text });
+    text = "";
+  };
+  // the closing $ of an inline formula opening at j0: the next unescaped $,
+  // if it may close — otherwise that $ is no formula
+  const close = (j0) => {
+    if (s.length - j0 < 3 || /[\s$]/.test(s[j0 + 1])) return -1;
+    let j = j0 + 2;
+    while (j < s.length && !(s[j] === "$" && s[j - 1] !== "\\")) j++;
+    return j < s.length && !/\s/.test(s[j - 1]) && !/[0-9$]/.test(s[j + 1] ?? "") ? j : -1;
+  };
+  while (i < s.length) {
+    if (s.startsWith("\\$", i)) {
+      text += "$";
+      i += 2;
+    } else if (s[i] === "`") {
+      const e = s.indexOf("`", i + 1);
+      const end = e < 0 ? i + 1 : e + 1;
+      text += s.slice(i, end);
+      i = end;
+    } else if (s.startsWith("$$", i)) {
+      const e = s.indexOf("$$", i + 2);
+      const tex = e < 0 ? "" : s.slice(i + 2, e).trim();
+      if (tex) {
+        flush();
+        out.push({ tex, display: true });
+        i = e + 2;
+      } else {
+        text += "$$";
+        i += 2;
+      }
+    } else if (s[i] === "$" && close(i) > 0) {
+      const e = close(i);
+      flush();
+      out.push({ tex: s.slice(i + 1, e), display: false });
+      i = e + 1;
+    } else text += s[i++];
+  }
+  flush();
+  return out;
+}
+
+// KaTeX, loaded from the CDN on the first formula only (pinned + SRI).
+const KATEX_CDN = "https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/";
+const KATEX_SRI = {
+  js: "sha384-QFFtAGzvvj+bfgCGxXJlNZZR1nXEZgvG8tDLCCY1F19xl20WlfTYgguB4VcNdxYk",
+  css: "sha384-3rdsX6e5mueWyoweR9NIVmtEsUkokpBT/0ALqKKIBMr9j4qhHkaIkAcGgsE6uVlp",
+};
+let katexLoad = null;
+function loadKatex() {
+  if (window.katex) return Promise.resolve(window.katex);
+  katexLoad ??= new Promise((ok, fail) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = KATEX_CDN + "katex.min.css";
+    css.integrity = KATEX_SRI.css;
+    css.crossOrigin = "anonymous";
+    const js = document.createElement("script");
+    js.src = KATEX_CDN + "katex.min.js";
+    js.integrity = KATEX_SRI.js;
+    js.crossOrigin = "anonymous";
+    js.onload = () => ok(window.katex);
+    js.onerror = () => {
+      katexLoad = null; // offline now: try again on the next render
+      fail(new Error("KaTeX did not load"));
+    };
+    document.head.append(css, js);
+  });
+  return katexLoad;
+}
+// Typeset the .md-math spans under `root` (renderMarkdown). KaTeX writes HTML
+// for the eye plus MathML for screen readers, in the text colour (so both
+// themes); `trust: false` turns \href, \htmlClass & co. into plain error text.
+// Without KaTeX (offline) or for a formula it rejects, the TeX source stays.
+async function typesetMath(root) {
+  const els = [...root.querySelectorAll(".md-math:not(.md-math-done)")];
+  if (!els.length) return;
+  let katex;
+  try {
+    katex = await loadKatex();
+  } catch (_) {
+    return;
+  }
+  for (const el of els) {
+    try {
+      el.innerHTML = katex.renderToString(el.dataset.tex, {
+        displayMode: el.classList.contains("md-math-display"),
+        output: "htmlAndMathml",
+        throwOnError: true,
+        trust: false,
+        strict: "ignore",
+        maxSize: 20,
+        maxExpand: 300,
+      });
+      el.classList.add("md-math-done");
+    } catch (e) {
+      el.classList.add("md-math-err");
+      el.title = e.message;
+    }
+  }
+}
+
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
 // fenced code, links, blockquotes, ordered/unordered lists, rules, paragraphs).
 // Raw HTML in the source is escaped, so it's safe to inject.
 function renderMarkdown(src) {
   const esc = escapeHtml;
-  const inline = (s) =>
+  // $…$ / $$…$$ formulas (mathSpans) pass the Markdown pass as inert tokens,
+  // then become a .md-math span showing their TeX source until typesetMath
+  // swaps in KaTeX; a token inside a tag (a link URL) is dropped.
+  const inline = (s) => {
+    const math = [];
+    const md = mathSpans(s)
+      .map((g) => (g.tex == null ? g.text : (math.push(g), `\uE002${math.length - 1}\uE003`)))
+      .join("");
+    const html = inlineMd(md);
+    if (!math.length) return html;
+    const tok = /\uE002(\d+)\uE003/g;
+    const span = (g) =>
+      `<span class="md-math${g.display ? " md-math-display" : ""}" data-tex="${esc(g.tex)}"><code class="md-tex">${esc(g.tex)}</code></span>`;
+    return html.replace(/<[^>]*>|[^<]+/g, (part) =>
+      part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => span(math[+k]))
+    );
+  };
+  const inlineMd = (s) =>
     esc(s)
       .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -7266,6 +7406,7 @@ async function downloadHtml() {
     base = sheet ? sheetText(sheet) : "";
   }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
+  await typesetMath(document.querySelector(".dash"));
   // A snapshot has no live tables: drop their search / filter / pager controls.
   const snap = document.querySelector(".dash").cloneNode(true);
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
@@ -7277,6 +7418,9 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  const math = snap.querySelector(".katex") ? await katexCssInline() : "";
+  // no KaTeX stylesheet to embed: the formulas' MathML alone (drawn natively)
+  if (!math) snap.querySelectorAll(".katex-html").forEach((el) => el.remove());
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
@@ -7285,10 +7429,31 @@ async function downloadHtml() {
   const html =
     `<!doctype html><html data-ax-variant="${dpTheme.variant}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
     (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
-    `<style>${tokens}\n${base}\nbody{margin:0}</style></head><body class="embed">` +
+    `<style>${tokens}\n${base}\nbody{margin:0}</style>` +
+    (math ? `<style>${math}</style>` : "") +
+    `</head><body class="embed">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
     `<script>${SNAPSHOT_JS}<\/script><script>${snapshotMotion()}<\/script></body></html>`;
   download(new Blob([html], { type: "text/html" }), "dashboard.html");
+}
+
+// KaTeX's stylesheet with its fonts inlined (woff2 data: URLs), so an
+// exported dashboard draws its formulas offline; "" when it can't be fetched.
+async function katexCssInline() {
+  try {
+    const css = await (await fetch(KATEX_CDN + "katex.min.css", { integrity: KATEX_SRI.css })).text();
+    const fonts = {};
+    for (const f of new Set(css.match(/fonts\/[\w-]+\.woff2/g))) {
+      const buf = new Uint8Array(await (await fetch(KATEX_CDN + f)).arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      fonts[f] = "data:font/woff2;base64," + btoa(bin);
+    }
+    // each @font-face keeps just its woff2
+    return css.replace(/src:url\((fonts\/[\w-]+\.woff2)\)[^;}]*/g, (_, f) => `src:url(${fonts[f]}) format("woff2")`);
+  } catch (_) {
+    return "";
+  }
 }
 
 // The export's chart motion: web/anim.js's kit (its own source, so there is

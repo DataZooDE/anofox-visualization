@@ -423,6 +423,20 @@ where
                     );
                 }
             }
+            // $…$ / $$…$$ formulas KaTeX can't typeset (drawn as red source)
+            for seg in crate::math::spans(md) {
+                if let crate::math::Seg::Math { tex, .. } = seg {
+                    if let Err(e) = crate::math::check(&tex) {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "markdown/bad-math",
+                            message: format!("formula `{}`: {e}", one_line(&tex)),
+                            sql: short.clone(),
+                        });
+                    }
+                }
+            }
         }
 
         // Interaction directives: prime their variables the way the browser does
@@ -1959,6 +1973,25 @@ mod design_tests {
             md_placeholders("a {{ x : money }} {{ 1bad }} {{y}}"),
             vec![("x".into(), Some("money".into())), ("y".into(), None)]
         );
+    }
+
+    #[test]
+    fn markdown_formulas_are_checked() {
+        let data = |_q: &str| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "Fine $\\hat{y}_t$, broken $\\frac{a}{b$ and $$\\foo x$$; $5 and $10 is money" }),
+            ))
+        };
+        let d = check("SELECT 'x'::MARKDOWN;", data);
+        let bad: Vec<_> = d
+            .iter()
+            .filter(|x| x.code == "markdown/bad-math")
+            .map(|x| x.message.clone())
+            .collect();
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        assert!(bad[0].contains("never closed"), "{bad:?}");
+        assert!(bad[1].contains("\\foo"), "{bad:?}");
     }
 
     #[test]
