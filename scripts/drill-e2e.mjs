@@ -264,6 +264,31 @@ if (axe && existsSync(axe)) {
   if (bad.length) fail(`axe: ${bad.map((v) => v.id).join(", ")}`);
 }
 
+// A focused chart keeps the focus across a re-run on both swap paths: kept
+// (a click on the last level only cross-filters `selected`, which the chart
+// does not read: its DOM stays) and replaced (a drill redraws it).
+const focusKept = async (label) => {
+  const r = await page.evaluate(() => {
+    const ae = document.activeElement;
+    return { onChart: !!ae?.matches?.(".panel-svg > svg") && ae.isConnected && !!ae.closest(".panel")?.querySelector(".dp-crumbs"), same: ae === window.__focusSvg };
+  });
+  if (!r.onChart) fail(`${label}: the focused chart lost the focus`);
+  return r;
+};
+await page.evaluate(() => {
+  const svg = document.querySelector(".dash .dp-crumbs").closest(".panel").querySelector(".panel-svg > svg");
+  window.__focusSvg = svg;
+  svg.focus();
+  svg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+});
+await settled();
+await page.waitForTimeout(300);
+const kept = await focusKept("kept panel");
+if (!kept.same) fail("kept panel: a re-run that does not change the chart rebuilt it");
+await page.evaluate(() => document.activeElement.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }))); // clear
+await settled();
+await page.waitForTimeout(300);
+
 // (b) back up with the breadcrumb ("All").
 const all = await page.$eval(".dash .dp-crumbs .dp-crumb", (b) => {
   const r = b.getBoundingClientRect();
@@ -273,6 +298,20 @@ await record();
 await page.mouse.click(all.x, all.y);
 const b = await stable("back-up");
 check("back-up", b);
+// Replaced: focus the chart, drill by a click that does not move the focus.
+await page.evaluate(() => {
+  const svg = document.querySelector(".dash .dp-crumbs").closest(".panel").querySelector(".panel-svg > svg");
+  window.__focusSvg = svg;
+  svg.focus();
+  svg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+});
+await settled();
+await page.waitForTimeout(300);
+const repl = await focusKept("replaced panel");
+if (repl.same) fail("replaced panel: the drill did not redraw the chart");
+await page.$eval(".dash .dp-crumbs .dp-crumb", (x) => x.click()); // back to the top
+await settled();
+await page.waitForTimeout(300);
 const path0 = await page.evaluate(() => new URL(location.href).searchParams.get("v.drill_path"));
 if (path0) fail(`back-up: the URL still has v.drill_path=${path0}`);
 
