@@ -1163,3 +1163,33 @@ fn yformat_leading_space_is_a_suffix() {
     assert!(s.contains("12 kg"), "suffix in the tooltip value: {s}");
     assert!(!s.contains(">kg"), "no unit before the number: {s}");
 }
+
+// One model's coefficients: above the null value in the brand blue, below it
+// in the theme's red (the sign at a glance); several models keep series colours.
+#[test]
+fn contract_terms_colour_by_sign() {
+    let th = anofox_visualization::theme::default_light();
+    let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02X}{g:02X}{b:02X}");
+    let (blue, red) = (slot(0), hex(th.colors.negative));
+    let s = spec(
+        "terms",
+        r#"[{"term":"up","estimate":0.5,"conf_low":0.2,"conf_high":0.8},
+            {"term":"down","estimate":-0.4,"conf_low":-0.7,"conf_high":-0.1}]"#,
+        "{}",
+    )
+    .unwrap();
+    let circles: Vec<&str> = s.split("<circle ").skip(1).collect();
+    assert!(
+        circles.iter().any(|c| c.contains(&blue)),
+        "a blue point: {s}"
+    );
+    assert!(circles.iter().any(|c| c.contains(&red)), "a red point: {s}");
+    // odds ratios: below 1 is red
+    let s = spec(
+        "terms",
+        r#"[{"term":"or","estimate":0.8,"conf_low":0.7,"conf_high":0.9}]"#,
+        r#"{"reference":1}"#,
+    )
+    .unwrap();
+    assert!(s.split("<circle ").skip(1).any(|c| c.contains(&red)), "{s}");
+}

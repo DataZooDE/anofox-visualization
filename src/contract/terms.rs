@@ -246,12 +246,26 @@ fn forest_panel(
     }
     let mut plot = GGPlot::new(data).aes(aes);
     plot = look::vline(plot, null);
+    // One model: the sign reads at a glance — above the null value in the
+    // theme's blue (brand), below it in its red (negative). Several models keep
+    // their series colours.
+    let below = |r: &Coef| !several && r.est.is_some_and(|e| e < null);
+    let paint = |neg: bool| {
+        if neg {
+            o.theme.colors.negative
+        } else {
+            o.brand()
+        }
+    };
+    let groups = [(false, false), (false, true), (true, false), (true, true)];
     // Significant intervals opaque, those containing the null value faded.
-    for faded in [false, true] {
+    for (faded, neg) in groups {
         let with_ci: Vec<&&Coef> = keep
             .iter()
             .copied()
-            .filter(|r| r.lo.is_some() && r.hi.is_some() && crosses(r, null) == faded)
+            .filter(|r| {
+                r.lo.is_some() && r.hi.is_some() && crosses(r, null) == faded && below(r) == neg
+            })
             .collect();
         if with_ci.is_empty() {
             continue;
@@ -286,7 +300,7 @@ fn forest_panel(
         }
         plot = plot
             .geom_errorbarh_with(GeomErrorbarh {
-                color: o.brand(),
+                color: paint(neg),
                 width: 1.5,
                 cap_height: 0.0,
                 alpha: if faded { FADED } else { 1.0 },
@@ -294,11 +308,11 @@ fn forest_panel(
             .layer_data(frame)
             .layer_aes(a);
     }
-    for faded in [false, true] {
+    for (faded, neg) in groups {
         let set: Vec<&&Coef> = keep
             .iter()
             .copied()
-            .filter(|r| crosses(r, null) == faded)
+            .filter(|r| crosses(r, null) == faded && below(r) == neg)
             .collect();
         if set.is_empty() {
             continue;
@@ -306,7 +320,7 @@ fn forest_panel(
         plot = plot
             .geom_point_with(GeomPoint {
                 size: 3.2,
-                color: o.brand(),
+                color: paint(neg),
                 alpha: if faded { FADED } else { 1.0 },
             })
             .layer_data(points(&set));
