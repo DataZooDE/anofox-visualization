@@ -1380,7 +1380,6 @@ async function boot() {
   renderSidebar();
   $("side-new").onclick = () => loadDash("", "");
   $("save").onclick = saveDash;
-  $("side-toggle").onclick = () => document.body.classList.toggle("side-collapsed");
   $("mode-edit").onclick = () => setMode("edit");
   $("mode-view").onclick = () => setMode("view");
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
@@ -1546,6 +1545,62 @@ function clampSideW(w) {
   const n = Math.round(Number(w));
   return Number.isFinite(n) && n > 0 ? Math.max(SIDE_W.min, Math.min(SIDE_W.max, n)) : SIDE_W.def;
 }
+// Phones (index.html's max-width:820px shell): the sidebar is an off-canvas
+// drawer behind ☰, closed by default. While it is open the rest of the page
+// is inert and Tab stays inside it; Esc, the scrim or picking an entry closes
+// it. Wider screens: ☰ collapses / restores the sidebar in place.
+const SIDE_DRAWER = "(max-width: 820px)";
+function initSideDrawer() {
+  const side = $("sidebar"),
+    btn = $("side-toggle");
+  const rest = [document.querySelector("header"), document.querySelector(".main")];
+  const isOpen = () => document.body.classList.contains("side-open");
+  const open = (on, refocus = true) => {
+    document.body.classList.toggle("side-open", on);
+    btn.setAttribute("aria-expanded", String(on));
+    rest.forEach((el) => el && (el.inert = on));
+    if (on) side.querySelector("button")?.focus();
+    else if (refocus) btn.focus();
+  };
+  const drawer = matchMedia(SIDE_DRAWER);
+  const sync = () => {
+    if (isOpen()) open(false, false);
+    btn.setAttribute("aria-expanded", String(drawer.matches ? false : !document.body.classList.contains("side-collapsed")));
+  };
+  drawer.addEventListener("change", sync);
+  sync();
+  btn.onclick = () => {
+    if (drawer.matches) open(!isOpen());
+    else {
+      document.body.classList.toggle("side-collapsed");
+      sync();
+    }
+  };
+  $("side-scrim").onclick = () => open(false);
+  side.addEventListener("click", (e) => {
+    if (isOpen() && e.target.closest(".side-item, #side-new, #side-explore") && !e.target.closest(".s-del")) open(false, false);
+  });
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!isOpen()) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        open(false);
+      } else if (e.key === "Tab") {
+        const f = [...side.querySelectorAll("button, a[href], [tabindex='0']")].filter((el) => el.offsetParent);
+        if (!f.length) return;
+        const [first, last] = [f[0], f[f.length - 1]];
+        if (!side.contains(document.activeElement) || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        }
+      }
+    },
+    true
+  );
+}
+
 function initSideResizer() {
   const h = $("side-resizer");
   if (!h) return;
@@ -8291,6 +8346,7 @@ function attachToolbox() {
     bar.appendChild(more);
     bar.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || !bar.classList.contains("dp-open")) return;
+      e.preventDefault(); // the menu has the key, not the selection reset
       openTools(bar, false);
       more.focus();
     });
@@ -9076,4 +9132,5 @@ document.addEventListener("keydown", (e) => {
 
 // Before boot, so a remembered sidebar width applies without a jump.
 initSideResizer();
+initSideDrawer();
 boot().catch((e) => status("boot failed: " + e));

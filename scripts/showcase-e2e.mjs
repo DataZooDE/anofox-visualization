@@ -12,10 +12,13 @@
 //                if a panel (card or chart SVG) still has a white background
 // --sql f.sql    load a dashboard from a file instead of a built-in example
 //                (passed in the #sql hash, like a Share link)
-// --width 390   view at that viewport width (default 1440) and fail if a
-//                chart's toolbox covers its title or its largest text is drawn
-//                below 8 px (ggplot-rs draws axis and legend text at 8.8 px;
-//                less means the chart was rendered wider than it is shown)
+// --width 390   view the builder at that viewport width (default 1440, where
+//                the sidebar is collapsed) and fail if the page scrolls
+//                sideways, the sidebar squeezes the dashboard (it must be a
+//                closed drawer), a chart's toolbox covers its title, or a
+//                chart's largest text is drawn below 8 px (ggplot-rs draws
+//                axis and legend text at 8.8 px; less means the chart was
+//                rendered wider than it is shown)
 // Every run also fails when the "Powered by DataZoo GmbH" credit is missing.
 import { createRequire } from "module";
 import { mkdirSync, readFileSync } from "fs";
@@ -68,10 +71,18 @@ try {
 }
 console.log(`loaded in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${await page.textContent("#status")}`);
 await page.click("#mode-view").catch(() => {});
-await page.evaluate(() => document.body.classList.add("side-collapsed"));
-if (width) await page.waitForTimeout(400); // charts re-fit to the new panel width
-const slug = (s) => s.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
 const problems = [];
+if (width) {
+  await page.waitForTimeout(400); // charts re-fit to the view mode's panel width
+  const shell = await page.evaluate(() => ({
+    scroll: document.documentElement.scrollWidth,
+    dash: document.querySelector(".dash").getBoundingClientRect().width,
+    view: innerWidth,
+  }));
+  if (shell.scroll > shell.view + 1) problems.push(`builder: the page scrolls sideways (${shell.scroll} px wide)`);
+  if (shell.dash < shell.view * 0.9) problems.push(`builder: the dashboard gets ${Math.round(shell.dash)} of ${shell.view} px`);
+} else await page.evaluate(() => document.body.classList.add("side-collapsed"));
+const slug = (s) => s.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
 const tabs = await page.$$eval(".tabbar > .tab-btn", (bs) => bs.map((b) => b.textContent));
 const shoot = async (name) => {
   // errors: error boxes, error SVGs (red text) and "ships with the next release" notes
