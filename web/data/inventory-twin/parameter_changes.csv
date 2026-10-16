@@ -1,0 +1,122 @@
+sku,period,ds,parameter,before_num,after_num,before_json,after_json,reason,origin,mode,status,proposal_id
+SKU-001,90,2024-03-31,supplier.lead_time_mean,5.0,5.167,5.0,5.167,6 receipts: mean lead time 5.17 d (was 5.00),calibration,guarded_auto,applied,SKU-001:90:calibration:0
+SKU-001,90,2024-03-31,supplier.lead_time_std_dev,1.5,1.329,1.5,1.329,6 receipts: lead-time spread 1.33 d (was 1.50),calibration,guarded_auto,applied,SKU-001:90:calibration:1
+SKU-001,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.873,1.0,0.873,last 30 periods: forecast errors 0.87 x the modelled spread,calibration,guarded_auto,applied,SKU-001:90:calibration:2
+SKU-001,120,2024-04-30,supplier.lead_time_mean,5.167,5.25,5.167,5.25,8 receipts: mean lead time 5.25 d (was 5.17),calibration,guarded_auto,applied,SKU-001:120:calibration:0
+SKU-001,120,2024-04-30,supplier.lead_time_std_dev,1.329,1.165,1.329,1.165,8 receipts: lead-time spread 1.16 d (was 1.33),calibration,guarded_auto,applied,SKU-001:120:calibration:1
+SKU-001,120,2024-04-30,demand_calibration.sigma_multiplier,0.873,0.946,0.873,0.946,last 30 periods: forecast errors 0.95 x the modelled spread,calibration,guarded_auto,applied,SKU-001:120:calibration:2
+SKU-001,150,2024-05-30,demand_calibration.sigma_multiplier,0.946,1.215,0.946,1.215,last 30 periods: forecast errors 1.22 x the modelled spread,calibration,guarded_auto,applied,SKU-001:150:calibration:0
+SKU-001,150,2024-05-30,demand_calibration.bias,0.0,-0.043,0.0,-0.043,last 30 periods: demand -4 % against the forecast,calibration,guarded_auto,applied,SKU-001:150:calibration:1
+SKU-002,90,2024-03-31,supplier.lead_time_mean,5.0,4.857,5.0,4.857,7 receipts: mean lead time 4.86 d (was 5.00),calibration,guarded_auto,applied,SKU-002:90:calibration:0
+SKU-002,90,2024-03-31,supplier.lead_time_std_dev,1.5,1.069,1.5,1.069,7 receipts: lead-time spread 1.07 d (was 1.50); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-002:90:calibration:1
+SKU-002,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.893,1.0,0.893,last 30 periods: forecast errors 0.89 x the modelled spread,calibration,guarded_auto,applied,SKU-002:90:calibration:2
+SKU-002,90,2024-03-31,demand_calibration.bias,0.0,0.023,0.0,0.023,last 30 periods: demand +2 % against the forecast,calibration,guarded_auto,applied,SKU-002:90:calibration:3
+SKU-002,120,2024-04-30,supplier.lead_time_std_dev,1.5,1.246,1.5,1.246,9 receipts: lead-time spread 1.25 d (was 1.50),calibration,guarded_auto,applied,SKU-002:120:calibration:0
+SKU-002,120,2024-04-30,demand_calibration.sigma_multiplier,0.893,1.118,0.893,1.118,last 30 periods: forecast errors 1.12 x the modelled spread,calibration,guarded_auto,applied,SKU-002:120:calibration:1
+SKU-002,120,2024-04-30,demand_calibration.bias,0.023,-0.051,0.023,-0.051,last 30 periods: demand -5 % against the forecast,calibration,guarded_auto,applied,SKU-002:120:calibration:2
+SKU-002,150,2024-05-30,supplier.lead_time_mean,4.857,5.625,4.857,5.625,11 receipts: mean lead time 5.62 d (was 4.86),calibration,guarded_auto,applied,SKU-002:150:calibration:0
+SKU-002,150,2024-05-30,supplier.lead_time_std_dev,1.246,1.685,1.246,1.685,11 receipts: lead-time spread 1.69 d (was 1.25); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-002:150:calibration:1
+SKU-002,150,2024-05-30,demand_calibration.sigma_multiplier,1.118,0.992,1.118,0.992,last 30 periods: forecast errors 0.99 x the modelled spread,calibration,guarded_auto,applied,SKU-002:150:calibration:2
+SKU-002,150,2024-05-30,demand_calibration.bias,-0.051,0.018,-0.051,0.018,last 30 periods: demand +2 % against the forecast,calibration,guarded_auto,applied,SKU-002:150:calibration:3
+SKU-003,90,2024-03-31,supplier.lead_time_mean,10.0,11.0,10.0,11.0,6 receipts: mean lead time 11.00 d (was 10.00),calibration,guarded_auto,applied,SKU-003:90:calibration:0
+SKU-003,90,2024-03-31,supplier.lead_time_std_dev,3.0,2.53,3.0,2.53,6 receipts: lead-time spread 2.53 d (was 3.00),calibration,guarded_auto,applied,SKU-003:90:calibration:1
+SKU-003,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,1.034,1.0,1.034,last 30 periods: forecast errors 1.03 x the modelled spread,calibration,guarded_auto,applied,SKU-003:90:calibration:2
+SKU-003,90,2024-03-31,demand_calibration.bias,0.0,-0.048,0.0,-0.048,last 30 periods: demand -5 % against the forecast,calibration,guarded_auto,applied,SKU-003:90:calibration:3
+SKU-003,120,2024-04-30,supplier.lead_time_mean,11.0,11.286,11.0,11.286,7 receipts: mean lead time 11.29 d (was 11.00),calibration,guarded_auto,applied,SKU-003:120:calibration:0
+SKU-003,120,2024-04-30,supplier.lead_time_std_dev,2.53,2.43,2.53,2.43,7 receipts: lead-time spread 2.43 d (was 2.53),calibration,guarded_auto,applied,SKU-003:120:calibration:1
+SKU-003,120,2024-04-30,demand_calibration.sigma_multiplier,1.034,0.888,1.034,0.888,last 30 periods: forecast errors 0.89 x the modelled spread,calibration,guarded_auto,applied,SKU-003:120:calibration:2
+SKU-003,120,2024-04-30,demand_calibration.bias,-0.048,0.01,-0.048,0.01,last 30 periods: demand +1 % against the forecast,calibration,guarded_auto,applied,SKU-003:120:calibration:3
+SKU-003,136,2024-05-16,supplier.lead_time_mean,11.286,11.125,11.286,11.125,8 receipts: mean lead time 11.12 d (was 11.29),calibration,guarded_auto,applied,SKU-003:136:calibration:0
+SKU-003,136,2024-05-16,supplier.lead_time_std_dev,2.43,2.295,2.43,2.295,8 receipts: lead-time spread 2.30 d (was 2.43),calibration,guarded_auto,applied,SKU-003:136:calibration:1
+SKU-003,136,2024-05-16,demand_calibration.sigma_multiplier,0.888,0.944,0.888,0.944,last 8 periods: forecast errors 0.94 x the modelled spread,calibration,guarded_auto,applied,SKU-003:136:calibration:2
+SKU-003,136,2024-05-16,demand_calibration.bias,0.01,0.239,0.01,0.239,last 8 periods: demand +24 % against the forecast; change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-003:136:calibration:3
+SKU-003,150,2024-05-30,supplier.lead_time_mean,11.125,10.875,11.125,10.875,9 receipts: mean lead time 10.88 d (was 11.12),calibration,guarded_auto,applied,SKU-003:150:calibration:0
+SKU-003,150,2024-05-30,supplier.lead_time_std_dev,2.295,2.031,2.295,2.031,9 receipts: lead-time spread 2.03 d (was 2.30),calibration,guarded_auto,applied,SKU-003:150:calibration:1
+SKU-003,150,2024-05-30,demand_calibration.sigma_multiplier,0.944,1.076,0.944,1.076,last 30 periods: forecast errors 1.08 x the modelled spread,calibration,guarded_auto,applied,SKU-003:150:calibration:2
+SKU-003,150,2024-05-30,demand_calibration.bias,0.01,0.169,0.01,0.169,last 30 periods: demand +17 % against the forecast,calibration,guarded_auto,applied,SKU-003:150:calibration:3
+SKU-004,90,2024-03-31,supplier.lead_time_mean,5.0,4.667,5.0,4.667,6 receipts: mean lead time 4.67 d (was 5.00),calibration,guarded_auto,applied,SKU-004:90:calibration:0
+SKU-004,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.766,1.0,0.766,last 30 periods: forecast errors 0.77 x the modelled spread,calibration,guarded_auto,applied,SKU-004:90:calibration:1
+SKU-004,120,2024-04-30,supplier.lead_time_std_dev,1.5,1.302,1.5,1.302,8 receipts: lead-time spread 1.30 d (was 1.50),calibration,guarded_auto,applied,SKU-004:120:calibration:0
+SKU-004,120,2024-04-30,demand_calibration.sigma_multiplier,0.766,1.076,0.766,1.076,last 30 periods: forecast errors 1.08 x the modelled spread,calibration,guarded_auto,applied,SKU-004:120:calibration:1
+SKU-004,120,2024-04-30,demand_calibration.bias,0.0,-0.022,0.0,-0.022,last 30 periods: demand -2 % against the forecast,calibration,guarded_auto,applied,SKU-004:120:calibration:2
+SKU-004,135,2024-05-15,demand_calibration.sigma_multiplier,1.076,1.751,1.076,1.751,last 8 periods: forecast errors 1.75 x the modelled spread; change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-004:135:calibration:0
+SKU-004,135,2024-05-15,demand_calibration.bias,-0.022,0.323,-0.022,0.323,last 8 periods: demand +32 % against the forecast; change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-004:135:calibration:1
+SKU-004,139,2024-05-19,demand_calibration.bias,-0.022,0.323,-0.022,0.323,approved by the planner,approval,guarded_auto,approved,SKU-004:135:calibration:1
+SKU-004,150,2024-05-30,supplier.lead_time_mean,4.667,5.625,4.667,5.625,9 receipts: mean lead time 5.62 d (was 4.67),calibration,guarded_auto,applied,SKU-004:150:calibration:0
+SKU-004,150,2024-05-30,supplier.lead_time_std_dev,1.302,2.875,1.302,2.875,9 receipts: lead-time spread 2.88 d (was 1.30); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-004:150:calibration:1
+SKU-004,150,2024-05-30,demand_calibration.sigma_multiplier,1.076,1.33,1.076,1.33,last 30 periods: forecast errors 1.33 x the modelled spread,calibration,guarded_auto,applied,SKU-004:150:calibration:2
+SKU-012,90,2024-03-31,supplier.lead_time_mean,10.0,10.667,10.0,10.667,6 receipts: mean lead time 10.67 d (was 10.00),calibration,guarded_auto,applied,SKU-012:90:calibration:0
+SKU-012,90,2024-03-31,supplier.lead_time_std_dev,3.0,2.338,3.0,2.338,6 receipts: lead-time spread 2.34 d (was 3.00),calibration,guarded_auto,applied,SKU-012:90:calibration:1
+SKU-012,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.931,1.0,0.931,last 30 periods: forecast errors 0.93 x the modelled spread,calibration,guarded_auto,applied,SKU-012:90:calibration:2
+SKU-012,120,2024-04-30,supplier.lead_time_mean,10.667,10.875,10.667,10.875,8 receipts: mean lead time 10.88 d (was 10.67),calibration,guarded_auto,applied,SKU-012:120:calibration:0
+SKU-012,120,2024-04-30,supplier.lead_time_std_dev,2.338,2.031,2.338,2.031,8 receipts: lead-time spread 2.03 d (was 2.34),calibration,guarded_auto,applied,SKU-012:120:calibration:1
+SKU-012,120,2024-04-30,demand_calibration.sigma_multiplier,0.931,0.66,0.931,0.66,last 30 periods: forecast errors 0.66 x the modelled spread,calibration,guarded_auto,applied,SKU-012:120:calibration:2
+SKU-012,120,2024-04-30,demand_calibration.bias,0.0,-0.053,0.0,-0.053,last 30 periods: demand -5 % against the forecast,calibration,guarded_auto,applied,SKU-012:120:calibration:3
+SKU-012,150,2024-05-30,supplier.lead_time_mean,10.875,10.125,10.875,10.125,11 receipts: mean lead time 10.12 d (was 10.88),calibration,guarded_auto,applied,SKU-012:150:calibration:0
+SKU-012,150,2024-05-30,supplier.lead_time_std_dev,2.031,1.458,2.031,1.458,11 receipts: lead-time spread 1.46 d (was 2.03); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-012:150:calibration:1
+SKU-012,150,2024-05-30,demand_calibration.sigma_multiplier,0.66,0.784,0.66,0.784,last 30 periods: forecast errors 0.78 x the modelled spread,calibration,guarded_auto,applied,SKU-012:150:calibration:2
+SKU-012,150,2024-05-30,demand_calibration.bias,-0.053,0.038,-0.053,0.038,last 30 periods: demand +4 % against the forecast,calibration,guarded_auto,applied,SKU-012:150:calibration:3
+SKU-013,90,2024-03-31,supplier.lead_time_std_dev,1.5,1.0,1.5,1.0,7 receipts: lead-time spread 1.00 d (was 1.50); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-013:90:calibration:0
+SKU-013,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,1.097,1.0,1.097,last 30 periods: forecast errors 1.10 x the modelled spread,calibration,guarded_auto,applied,SKU-013:90:calibration:1
+SKU-013,90,2024-03-31,demand_calibration.bias,0.0,-0.065,0.0,-0.065,last 30 periods: demand -6 % against the forecast,calibration,guarded_auto,applied,SKU-013:90:calibration:2
+SKU-013,120,2024-04-30,supplier.lead_time_mean,5.0,5.25,5.0,5.25,9 receipts: mean lead time 5.25 d (was 5.00),calibration,guarded_auto,applied,SKU-013:120:calibration:0
+SKU-013,120,2024-04-30,supplier.lead_time_std_dev,1.5,1.165,1.5,1.165,9 receipts: lead-time spread 1.16 d (was 1.50),calibration,guarded_auto,applied,SKU-013:120:calibration:1
+SKU-013,120,2024-04-30,demand_calibration.sigma_multiplier,1.097,0.954,1.097,0.954,last 30 periods: forecast errors 0.95 x the modelled spread,calibration,guarded_auto,applied,SKU-013:120:calibration:2
+SKU-013,120,2024-04-30,demand_calibration.bias,-0.065,-0.018,-0.065,-0.018,last 30 periods: demand -2 % against the forecast,calibration,guarded_auto,applied,SKU-013:120:calibration:3
+SKU-013,150,2024-05-30,supplier.lead_time_mean,5.25,5.625,5.25,5.625,13 receipts: mean lead time 5.62 d (was 5.25),calibration,guarded_auto,applied,SKU-013:150:calibration:0
+SKU-013,150,2024-05-30,supplier.lead_time_std_dev,1.165,1.302,1.165,1.302,13 receipts: lead-time spread 1.30 d (was 1.16),calibration,guarded_auto,applied,SKU-013:150:calibration:1
+SKU-013,150,2024-05-30,demand_calibration.sigma_multiplier,0.954,0.921,0.954,0.921,last 30 periods: forecast errors 0.92 x the modelled spread,calibration,guarded_auto,applied,SKU-013:150:calibration:2
+SKU-013,150,2024-05-30,demand_calibration.bias,-0.018,0.077,-0.018,0.077,last 30 periods: demand +8 % against the forecast,calibration,guarded_auto,applied,SKU-013:150:calibration:3
+SKU-019,90,2024-03-31,supplier.lead_time_std_dev,1.5,0.816,1.5,0.816,7 receipts: lead-time spread 0.82 d (was 1.50); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-019:90:calibration:0
+SKU-019,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.95,1.0,0.95,last 30 periods: forecast errors 0.95 x the modelled spread,calibration,guarded_auto,applied,SKU-019:90:calibration:1
+SKU-019,90,2024-03-31,demand_calibration.bias,0.0,0.06,0.0,0.06,last 30 periods: demand +6 % against the forecast,calibration,guarded_auto,applied,SKU-019:90:calibration:2
+SKU-019,120,2024-04-30,supplier.lead_time_mean,5.0,4.75,5.0,4.75,10 receipts: mean lead time 4.75 d (was 5.00),calibration,guarded_auto,applied,SKU-019:120:calibration:0
+SKU-019,120,2024-04-30,supplier.lead_time_std_dev,1.5,0.886,1.5,0.886,10 receipts: lead-time spread 0.89 d (was 1.50); change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-019:120:calibration:1
+SKU-019,120,2024-04-30,demand_calibration.sigma_multiplier,0.95,0.637,0.95,0.637,last 30 periods: forecast errors 0.64 x the modelled spread,calibration,guarded_auto,applied,SKU-019:120:calibration:2
+SKU-019,120,2024-04-30,demand_calibration.bias,0.06,-0.033,0.06,-0.033,last 30 periods: demand -3 % against the forecast,calibration,guarded_auto,applied,SKU-019:120:calibration:3
+SKU-019,150,2024-05-30,supplier.lead_time_mean,4.75,4.875,4.75,4.875,13 receipts: mean lead time 4.88 d (was 4.75),calibration,guarded_auto,applied,SKU-019:150:calibration:0
+SKU-019,150,2024-05-30,supplier.lead_time_std_dev,1.5,1.126,1.5,1.126,13 receipts: lead-time spread 1.13 d (was 1.50),calibration,guarded_auto,applied,SKU-019:150:calibration:1
+SKU-019,150,2024-05-30,demand_calibration.sigma_multiplier,0.637,0.684,0.637,0.684,last 30 periods: forecast errors 0.68 x the modelled spread,calibration,guarded_auto,applied,SKU-019:150:calibration:2
+SKU-019,150,2024-05-30,demand_calibration.bias,-0.033,-0.126,-0.033,-0.126,last 30 periods: demand -13 % against the forecast,calibration,guarded_auto,applied,SKU-019:150:calibration:3
+SKU-021,90,2024-03-31,supplier.lead_time_mean,10.0,9.667,10.0,9.667,6 receipts: mean lead time 9.67 d (was 10.00),calibration,guarded_auto,applied,SKU-021:90:calibration:0
+SKU-021,90,2024-03-31,supplier.lead_time_std_dev,3.0,2.503,3.0,2.503,6 receipts: lead-time spread 2.50 d (was 3.00),calibration,guarded_auto,applied,SKU-021:90:calibration:1
+SKU-021,90,2024-03-31,demand_calibration.sigma_multiplier,1.0,0.934,1.0,0.934,last 30 periods: forecast errors 0.93 x the modelled spread,calibration,guarded_auto,applied,SKU-021:90:calibration:2
+SKU-021,90,2024-03-31,demand_calibration.bias,0.0,0.061,0.0,0.061,last 30 periods: demand +6 % against the forecast,calibration,guarded_auto,applied,SKU-021:90:calibration:3
+SKU-021,120,2024-04-30,supplier.lead_time_mean,9.667,10.5,9.667,10.5,8 receipts: mean lead time 10.50 d (was 9.67),calibration,guarded_auto,applied,SKU-021:120:calibration:0
+SKU-021,120,2024-04-30,supplier.lead_time_std_dev,2.503,2.619,2.503,2.619,8 receipts: lead-time spread 2.62 d (was 2.50),calibration,guarded_auto,applied,SKU-021:120:calibration:1
+SKU-021,120,2024-04-30,demand_calibration.sigma_multiplier,0.934,0.579,0.934,0.579,last 30 periods: forecast errors 0.58 x the modelled spread; change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-021:120:calibration:2
+SKU-021,120,2024-04-30,demand_calibration.bias,0.061,-0.184,0.061,-0.184,last 30 periods: demand -18 % against the forecast; change exceeds the guarded_auto limit,calibration,guarded_auto,escalated,SKU-021:120:calibration:3
+SKU-021,150,2024-05-30,supplier.lead_time_std_dev,2.619,2.39,2.619,2.39,10 receipts: lead-time spread 2.39 d (was 2.62),calibration,guarded_auto,applied,SKU-021:150:calibration:0
+SKU-021,150,2024-05-30,demand_calibration.sigma_multiplier,0.934,1.006,0.934,1.006,last 30 periods: forecast errors 1.01 x the modelled spread,calibration,guarded_auto,applied,SKU-021:150:calibration:1
+SKU-021,150,2024-05-30,demand_calibration.bias,0.061,0.136,0.061,0.136,last 30 periods: demand +14 % against the forecast,calibration,guarded_auto,applied,SKU-021:150:calibration:2
+SKU-028,90,2024-03-31,demand_calibration.bias,0.0,-0.333,0.0,-0.333,last 30 periods: demand -33 % against the forecast,calibration,propose_only,proposed,SKU-028:90:calibration:0
+SKU-028,120,2024-04-30,supplier.lead_time_mean,5.0,5.25,5.0,5.25,8 receipts: mean lead time 5.25 d (was 5.00),calibration,propose_only,proposed,SKU-028:120:calibration:0
+SKU-028,120,2024-04-30,demand_calibration.bias,0.0,0.667,0.0,0.667,last 30 periods: demand +67 % against the forecast,calibration,propose_only,proposed,SKU-028:120:calibration:1
+SKU-028,150,2024-05-30,supplier.lead_time_mean,5.0,5.625,5.0,5.625,9 receipts: mean lead time 5.62 d (was 5.00),calibration,propose_only,proposed,SKU-028:150:calibration:0
+SKU-028,150,2024-05-30,supplier.lead_time_std_dev,1.5,1.188,1.5,1.188,9 receipts: lead-time spread 1.19 d (was 1.50),calibration,propose_only,proposed,SKU-028:150:calibration:1
+SKU-028,150,2024-05-30,demand_calibration.bias,0.0,-0.152,0.0,-0.152,last 30 periods: demand -15 % against the forecast,calibration,propose_only,proposed,SKU-028:150:calibration:2
+SKU-033,90,2024-03-31,supplier.lead_time_mean,10.0,9.667,10.0,9.667,6 receipts: mean lead time 9.67 d (was 10.00),calibration,propose_only,proposed,SKU-033:90:calibration:0
+SKU-033,90,2024-03-31,supplier.lead_time_std_dev,3.0,3.141,3.0,3.141,6 receipts: lead-time spread 3.14 d (was 3.00),calibration,propose_only,proposed,SKU-033:90:calibration:1
+SKU-033,90,2024-03-31,demand_calibration.bias,0.0,0.667,0.0,0.667,last 30 periods: demand +67 % against the forecast,calibration,propose_only,proposed,SKU-033:90:calibration:2
+SKU-033,120,2024-04-30,supplier.lead_time_mean,10.0,8.375,10.0,8.375,8 receipts: mean lead time 8.38 d (was 10.00),calibration,propose_only,proposed,SKU-033:120:calibration:0
+SKU-033,120,2024-04-30,supplier.lead_time_std_dev,3.0,3.815,3.0,3.815,8 receipts: lead-time spread 3.81 d (was 3.00),calibration,propose_only,proposed,SKU-033:120:calibration:1
+SKU-033,120,2024-04-30,demand_calibration.bias,0.0,0.385,0.0,0.385,last 30 periods: demand +38 % against the forecast,calibration,propose_only,proposed,SKU-033:120:calibration:2
+SKU-033,150,2024-05-30,supplier.lead_time_mean,10.0,8.5,10.0,8.5,9 receipts: mean lead time 8.50 d (was 10.00),calibration,propose_only,proposed,SKU-033:150:calibration:0
+SKU-033,150,2024-05-30,supplier.lead_time_std_dev,3.0,3.964,3.0,3.964,9 receipts: lead-time spread 3.96 d (was 3.00),calibration,propose_only,proposed,SKU-033:150:calibration:1
+SKU-033,150,2024-05-30,demand_calibration.bias,0.0,1.308,0.0,1.308,last 30 periods: demand +131 % against the forecast,calibration,propose_only,proposed,SKU-033:150:calibration:2
+SKU-037,90,2024-03-31,supplier.lead_time_mean,5.0,5.667,5.0,5.667,6 receipts: mean lead time 5.67 d (was 5.00),calibration,propose_only,proposed,SKU-037:90:calibration:0
+SKU-037,90,2024-03-31,supplier.lead_time_std_dev,1.5,1.633,1.5,1.633,6 receipts: lead-time spread 1.63 d (was 1.50),calibration,propose_only,proposed,SKU-037:90:calibration:1
+SKU-037,90,2024-03-31,demand_calibration.bias,0.0,-0.352,0.0,-0.352,last 30 periods: demand -35 % against the forecast,calibration,propose_only,proposed,SKU-037:90:calibration:2
+SKU-037,120,2024-04-30,supplier.lead_time_mean,5.0,5.143,5.0,5.143,7 receipts: mean lead time 5.14 d (was 5.00),calibration,propose_only,proposed,SKU-037:120:calibration:0
+SKU-037,120,2024-04-30,supplier.lead_time_std_dev,1.5,2.035,1.5,2.035,7 receipts: lead-time spread 2.04 d (was 1.50),calibration,propose_only,proposed,SKU-037:120:calibration:1
+SKU-037,120,2024-04-30,demand_calibration.bias,0.0,0.111,0.0,0.111,last 30 periods: demand +11 % against the forecast,calibration,propose_only,proposed,SKU-037:120:calibration:2
+SKU-037,150,2024-05-30,supplier.lead_time_mean,5.0,5.5,5.0,5.5,8 receipts: mean lead time 5.50 d (was 5.00),calibration,propose_only,proposed,SKU-037:150:calibration:0
+SKU-037,150,2024-05-30,supplier.lead_time_std_dev,1.5,2.138,1.5,2.138,8 receipts: lead-time spread 2.14 d (was 1.50),calibration,propose_only,proposed,SKU-037:150:calibration:1
+SKU-045,90,2024-03-31,supplier.lead_time_mean,10.0,9.833,10.0,9.833,6 receipts: mean lead time 9.83 d (was 10.00),calibration,propose_only,proposed,SKU-045:90:calibration:0
+SKU-045,90,2024-03-31,supplier.lead_time_std_dev,3.0,2.639,3.0,2.639,6 receipts: lead-time spread 2.64 d (was 3.00),calibration,propose_only,proposed,SKU-045:90:calibration:1
+SKU-045,90,2024-03-31,demand_calibration.bias,0.0,-0.606,0.0,-0.606,last 30 periods: demand -61 % against the forecast,calibration,propose_only,proposed,SKU-045:90:calibration:2
+SKU-045,120,2024-04-30,supplier.lead_time_mean,10.0,9.833,10.0,9.833,6 receipts: mean lead time 9.83 d (was 10.00),calibration,propose_only,proposed,SKU-045:120:calibration:0
+SKU-045,120,2024-04-30,supplier.lead_time_std_dev,3.0,2.639,3.0,2.639,6 receipts: lead-time spread 2.64 d (was 3.00),calibration,propose_only,proposed,SKU-045:120:calibration:1
+SKU-045,120,2024-04-30,demand_calibration.bias,0.0,-0.63,0.0,-0.63,last 30 periods: demand -63 % against the forecast,calibration,propose_only,proposed,SKU-045:120:calibration:2
+SKU-045,150,2024-05-30,supplier.lead_time_mean,10.0,10.429,10.0,10.429,7 receipts: mean lead time 10.43 d (was 10.00),calibration,propose_only,proposed,SKU-045:150:calibration:0
+SKU-045,150,2024-05-30,supplier.lead_time_std_dev,3.0,2.878,3.0,2.878,7 receipts: lead-time spread 2.88 d (was 3.00),calibration,propose_only,proposed,SKU-045:150:calibration:1

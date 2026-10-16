@@ -1,0 +1,2 @@
+source,crate_version,git_sha,schema_version,export_version,seed,generator
+synthetic,,,,draft (inventory-rs#22 #23 #26 #28),42,examples/inventory-twin/synthetic.py
