@@ -97,6 +97,60 @@ pub fn render_panel_checked(
     })
 }
 
+/// Render a chart and the `::TRACK`s under it, lined up on one x axis
+/// ([`crate::track::render_stack`]). `stack_json` =
+/// `{"chart": {"rows", "roles"}, "tracks": [{"rows", "roles", "height"}, …]}`
+/// — `rows` a panel query's `-json` text and `roles` its planned roles, as for
+/// [`render_panel`]; a track `height` of 0 is its natural height. Returns a
+/// JSON array of SVGs `[chart, track 1, …]`; on an error, the error SVG for
+/// the chart and nothing for the tracks.
+#[wasm_bindgen]
+pub fn render_stack(
+    stack_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+    zoom_json: &str,
+) -> String {
+    let svgs = render_stack_checked(stack_json, width, height, primary, zoom_json)
+        .unwrap_or_else(|e| vec![error_svg(&e.to_string(), width)]);
+    serde_json::to_string(&svgs).unwrap_or_else(|_| "[]".into())
+}
+
+/// The `Result` form of [`render_stack`] (native callers / tests).
+pub fn render_stack_checked(
+    stack_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+    zoom_json: &str,
+) -> Result<Vec<String>, RenderError> {
+    guard(|| {
+        let bad = |e: String| RenderError::BadSpec(e);
+        let v: serde_json::Value =
+            serde_json::from_str(stack_json).map_err(|e| bad(format!("stack JSON: {e}")))?;
+        let part = |p: &serde_json::Value| -> Result<Vec<crate::Column>, RenderError> {
+            let rows = sql::parse_rows_json(p["rows"].as_str().unwrap_or("[]")).map_err(bad)?;
+            let entries = parse_role_entries(&p["roles"]).map_err(bad)?;
+            Ok(columns_from_entries(&rows, &entries))
+        };
+        let chart = part(&v["chart"])?;
+        let tracks = v["tracks"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|t| {
+                let h = t["height"].as_u64().unwrap_or(0).min(2000) as u32;
+                Ok((part(t)?, h))
+            })
+            .collect::<Result<Vec<_>, RenderError>>()?;
+        let mut opts = RenderOptions::from_primary_arg(primary).map_err(bad)?;
+        opts.zoom = parse_zoom(zoom_json);
+        crate::track::render_stack(&chart, &tracks, width, height, &opts)
+    })
+}
+
 /// Render a contract plot call to SVG: `macro_name` = the planned
 /// `contract.macro` (`anofox_plot_terms`, …), `rows_json` = the rows as a JSON
 /// array (or JSON text of one — the `to_json(list(alias))` cell as DuckDB-Wasm

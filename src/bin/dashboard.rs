@@ -12,7 +12,7 @@ use anofox_visualization::inputs;
 use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::theme::{self, DashboardChrome, Variant};
 use anofox_visualization::{
-    dashboard, error_pre, page, render_with, roles, sql, RenderOptions, Role,
+    dashboard, error_pre, page, render_with, roles, sql, track, RenderOptions, Role,
 };
 use std::process::Command;
 use std::sync::Arc;
@@ -165,7 +165,8 @@ fn cmd_render(args: &[String]) {
     // Phase 2: render.
     let mut panels = String::new();
     let mut n = 0;
-    for (p, rows) in queried {
+    let mut queried = queried.into_iter().peekable();
+    while let Some((p, rows)) = queried.next() {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -198,8 +199,19 @@ fn cmd_render(args: &[String]) {
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &p.roles);
-        let svg = render_with(&cols, 460, 300, &opts)
-            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+        // ::TRACKs right after a chart sit under it, in its figure.
+        let mut tracks = Vec::new();
+        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+            if let Ok(r) = r {
+                tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
+            }
+        }
+        let svg = if tracks.is_empty() {
+            render_with(&cols, 460, 300, &opts)
+        } else {
+            track::render_stack(&cols, &tracks, 460, 300, &opts).map(|svgs| svgs.concat())
+        }
+        .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }

@@ -78,9 +78,9 @@ terminal.
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
 | `::XLINE` |  | annotation | vertical reference line at an x (a number, date or timestamp) |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
-| `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
-| `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
-| `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
+| `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line; several ::BAND_LOWER / ::BAND_UPPER pairs = a nested fan |
+| `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band (pairs with the ::BAND_LOWER in the same position) |
+| `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade each run of this column's x-values: CASE WHEN flag THEN day END shades every spell |
 | `::XLINE_LABEL` | `::EVENT_LABEL` | annotation | label of the ::XLINE on the same row, at the top of the line (events from data) |
 | `::REFLINE_LABEL` | `::YLINE_LABEL`, `::TARGET_LABEL` | annotation | label of the ::REFLINE on the same row, above its right end |
 | `::XBAND_FROM` | `::SHADE_FROM` | annotation | start of a shaded x-range, one per row (a number, date or timestamp) |
@@ -160,6 +160,7 @@ terminal.
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
+| `::TRACK` | `::STRIP_BELOW`, `::LANE` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
 | `::HEADER_IMAGE` | `::HEADERIMAGE` | chrome | banner image URL |
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
@@ -417,6 +418,76 @@ labels that would overlap are skipped. Up to 64 annotations of each kind are
 drawn. The same roles render in the browser and headless (`dashboard --svg`).
 `dashboard --check` warns (`annotation/unpaired`) about a label or range end
 without its partner.
+
+### Fans, shaded regions and strips under a chart
+
+**A nested quantile fan.** Give a line several `::BAND_LOWER` / `::BAND_UPPER`
+pairs — they pair up in column order (the first lower with the first upper, …).
+The bands are drawn widest first, each at a low opacity, so where they overlap
+the shade deepens: the 95 % band is the lightest, the 50 % band the darkest. A
+band covers only the rows that carry both edges (a forecast's, not its
+history's). Quantiles stored long — one row per period and level, as a
+simulation writes them — become one column pair per level with `FILTER`:
+
+```sql
+WITH fan AS (
+  SELECT day, any_value(yhat) AS yhat,
+         max(lower) FILTER (WHERE level = 0.95) AS lo95, max(upper) FILTER (WHERE level = 0.95) AS hi95,
+         max(lower) FILTER (WHERE level = 0.8)  AS lo80, max(upper) FILTER (WHERE level = 0.8)  AS hi80,
+         max(lower) FILTER (WHERE level = 0.5)  AS lo50, max(upper) FILTER (WHERE level = 0.5)  AS hi50
+  FROM projection GROUP BY day)
+SELECT day::XAXIS, yhat::LINECHART,
+       lo95::BAND_LOWER, hi95::BAND_UPPER, lo80::BAND_LOWER, hi80::BAND_UPPER,
+       lo50::BAND_LOWER, hi50::BAND_UPPER,
+       'Projected stock (95 / 80 / 50 %)'::TITLE
+FROM fan ORDER BY day;
+```
+
+**Several shaded regions.** A `::MARKAREA` column shades every *run* of its
+values: x-values with no unmarked x of the chart in between form one region,
+from the first to the last; a run of a single value spans ± half the x step, so
+one flagged day shows. `CASE WHEN on_hand = 0 THEN day END::MARKAREA` shades
+each stockout spell, and several `::MARKAREA` columns shade several kinds of
+event. For labelled ranges from an events table, use `::XBAND_FROM` /
+`::XBAND_TO` (above).
+
+**Strips under a chart (`::TRACK`).** A statement with a `'Name'::TRACK`
+column, right after a chart, is drawn *under* that chart in the same panel, on
+exactly its x axis — same plot area, same x window, also when the chart is
+zoomed — so features (promotions, alarms, price) read against it. The strip
+takes the chart's numeric or date `::XAXIS`, and draws:
+
+| Strip | SQL | Draws |
+|---|---|---|
+| ticks | `day::XAXIS, 'Promotions'::TRACK [, name::LABEL]` | a tick per row, the `::LABEL` as its tooltip |
+| lanes | `… , detector::YAXIS, tier::CATEGORY` | one lane per `::YAXIS` value (the strip's name without it), coloured by `::CATEGORY` (`'#d64545'` levels are drawn in that colour) |
+| one-row heatmap | `day::XAXIS, n::HEATMAP, 'Alarms'::TRACK [, lane::YAXIS]` | a tile per row, one x step of the chart wide, coloured by the value (or by a `::CATEGORY`) |
+| sparkline | `day::XAXIS, price::LINECHART, 'Price'::TRACK` | a small line / `::STEP` / `::AREACHART` / `::BARCHART` / `::SCATTER` |
+
+```sql
+SELECT day::XAXIS, on_hand::LINECHART, 'On-hand stock'::TITLE FROM stock ORDER BY day;
+SELECT day::XAXIS, 'Promotions'::TRACK, promotion::LABEL FROM promos;
+SELECT day::XAXIS, detector::YAXIS,
+       CASE tier WHEN 'alarm' THEN '#d64545' ELSE '#e8a23b' END::CATEGORY,
+       1::HEATMAP, tier || ': ' || reason::LABEL, 'Alarms'::TRACK
+FROM alarms;
+SELECT 56::HEIGHT;                                  -- a ::HEIGHT may sit before a strip
+SELECT day::XAXIS, price::STEP, 'Price'::TRACK FROM stock;
+```
+
+A strip is as tall as its lanes (20 px each) or 60 px for a sparkline; a
+`::HEIGHT` right before it sets its height. The strip's name (or its lanes'
+names) stands where the chart's y labels are; a strip has no x axis of its own
+and no legend — its tooltips say what each mark is. In the browser the
+crosshair runs down through the strips, a strip mark shows its own tooltip, and
+**clicking a strip mark shades its x span on the chart above** (click again to
+clear) — "did the alarm come before the stockout?". Each strip has its own
+screen-reader summary and keyboard navigation; "Charts as tables" lists its
+rows under the chart's; the PNG / full-size views include the strips. The
+headless `dashboard --svg` and HTML outputs stack them the same way.
+`dashboard --check` warns (`track/no-chart`) about a `::TRACK` that does not
+directly follow a chart with a numeric or date x axis — it is then drawn as a
+panel of its own. See the **"When could we run out of stock?"** sample.
 
 ### Thresholds (good / warn / bad)
 
@@ -1132,6 +1203,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
+| `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
 ```sql
 SELECT 'Filters'::GROUP;                 -- two dropdowns together in one box

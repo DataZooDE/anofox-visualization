@@ -21,7 +21,7 @@ use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
 use anofox_visualization::theme::DashboardChrome;
-use anofox_visualization::{page, render_with, sql, RenderOptions, Role};
+use anofox_visualization::{page, render_with, sql, track, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -691,7 +691,8 @@ fn render_dashboard_page(
 
     // Phase 2: render.
     let mut panels = String::new();
-    for (panel, rows) in queried {
+    let mut queried = queried.into_iter().peekable();
+    while let Some((panel, rows)) = queried.next() {
         if let Some(cp) = &panel.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
                 let svg =
@@ -711,8 +712,18 @@ fn render_dashboard_page(
             continue;
         }
         let cols = sql::columns_from_rows(&rows, &panel.roles);
+        // ::TRACKs right after a chart sit under it, in its figure.
+        let mut tracks = Vec::new();
+        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+            tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
+        }
         let svg = anofox_visualization::host::catch_panic(|| {
-            render_with(&cols, 460, 300, &opts).map_err(|e| e.to_string())
+            if tracks.is_empty() {
+                render_with(&cols, 460, 300, &opts)
+            } else {
+                track::render_stack(&cols, &tracks, 460, 300, &opts).map(|svgs| svgs.concat())
+            }
+            .map_err(|e| e.to_string())
         })
         .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));

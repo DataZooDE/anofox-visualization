@@ -41,6 +41,7 @@ pub mod sql;
 pub mod table;
 pub mod theme;
 pub mod thresholds;
+pub mod track;
 mod variance;
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -330,6 +331,10 @@ pub enum Role {
     /// The label of the `::REFLINE` on the same row (`::REFLINE_LABEL`), drawn
     /// above the line's right end.
     RefLineLabel,
+    /// A thin panel under the previous chart that shares its x axis
+    /// (`::TRACK`; the value names it): ticks, `::HEATMAP` tiles per lane or a
+    /// small line / bar, see [`track`].
+    Track,
     /// Start of a labelled shaded x-range, one per row (`::XBAND_FROM`).
     XBandFrom,
     /// End of a labelled shaded x-range (`::XBAND_TO`), see [`Role::XBandFrom`].
@@ -619,6 +624,9 @@ pub struct RenderOptions {
     pub theme: std::sync::Arc<theme::ResolvedTheme>,
     /// Number/date locale of axis and legend labels (default en-US).
     pub locale: format::Locale,
+    /// Line the plot area and x window up with other panels (a chart and
+    /// its `::TRACK`s, see [`track::render_stack`]); `None` = the panel's own.
+    pub align: Option<track::Align>,
 }
 
 impl Default for RenderOptions {
@@ -630,6 +638,7 @@ impl Default for RenderOptions {
             max_line_points: DEFAULT_MAX_LINE_POINTS,
             theme: theme::default_light(),
             locale: format::Locale::EN_US,
+            align: None,
         }
     }
 }
@@ -807,6 +816,93 @@ fn band_series_color(
     let i = levels.iter().position(|l| *l == level)?;
     let c = parse_hex(&level).unwrap_or_else(|| dz_color(o, i));
     Some((c.r, c.g, c.b))
+}
+
+/// The shaded x-ranges of a `::MARKAREA` column: one per run of marked
+/// x-values, i.e. marked values with no unmarked x of the chart (`xs`) in
+/// between — `CASE WHEN alarm THEN day END` shades every alarm spell. A run
+/// spans [first, last]; a run of one value spans ± half the chart's x step,
+/// so a single flagged period shows. Dates stay dates.
+fn mark_regions(col: &Column, xs: &[Value]) -> Vec<(Value, Value)> {
+    let sorted = |vals: &mut dyn Iterator<Item = &Value>| {
+        let mut v: Vec<f64> = vals
+            .filter_map(Value::as_f64)
+            .filter(|f| f.is_finite())
+            .collect();
+        v.sort_by(f64::total_cmp);
+        v.dedup();
+        v
+    };
+    let marked = sorted(&mut col.values.iter());
+    if marked.is_empty() {
+        return Vec::new();
+    }
+    let all = sorted(&mut xs.iter().chain(&col.values));
+    let mut steps: Vec<f64> = all.windows(2).map(|w| w[1] - w[0]).collect();
+    steps.sort_by(f64::total_cmp);
+    let half = steps.get(steps.len() / 2).copied().unwrap_or(0.0) / 2.0;
+    let date = col.values.iter().any(|v| matches!(v, Value::DateTime(_)));
+    let val = |f: f64| {
+        if date {
+            Value::DateTime(f.round() as i64)
+        } else {
+            Value::Float(f)
+        }
+    };
+    let mut out = Vec::new();
+    let mut run: Option<(f64, f64)> = None;
+    for &x in &all {
+        if marked.binary_search_by(|m| m.total_cmp(&x)).is_ok() {
+            run = Some(run.map_or((x, x), |(a, _)| (a, x)));
+        } else if let Some(r) = run.take() {
+            out.push(r);
+        }
+    }
+    out.extend(run);
+    out.into_iter()
+        .map(|(a, b)| {
+            if a == b {
+                (val(a - half), val(b + half))
+            } else {
+                (val(a), val(b))
+            }
+        })
+        .collect()
+}
+
+/// The `::BAND_LOWER` / `::BAND_UPPER` pairs of a panel, matched in column
+/// order (the first lower with the first upper, …): one band, or the bands of
+/// a nested quantile fan. An unpaired edge draws nothing (the linter says so).
+fn band_pairs(cols: &[Column]) -> Vec<(&Column, &Column)> {
+    let of = |r: Role| cols.iter().filter(move |c| c.role == r);
+    of(Role::BandLower).zip(of(Role::BandUpper)).collect()
+}
+
+/// The data column of the `k`-th band edge (`bandlo`, `bandlo2`, …).
+fn band_key(edge: &str, k: usize) -> String {
+    if k == 0 {
+        edge.to_string()
+    } else {
+        format!("{edge}{}", k + 1)
+    }
+}
+
+/// Band indices widest first (by mean width over the rows that carry both
+/// edges), so a fan's inner bands are drawn on top of its outer ones.
+fn fan_order(bands: &[(&Column, &Column)]) -> Vec<usize> {
+    let width = |(lo, hi): &(&Column, &Column)| {
+        let w: Vec<f64> = lo
+            .values
+            .iter()
+            .zip(&hi.values)
+            .filter_map(|(a, b)| Some(b.as_f64()? - a.as_f64()?))
+            .filter(|w| w.is_finite())
+            .collect();
+        w.iter().sum::<f64>() / w.len().max(1) as f64
+    };
+    let mut order: Vec<usize> = (0..bands.len()).collect();
+    order.sort_by(|&a, &b| width(&bands[b]).total_cmp(&width(&bands[a])));
+    order
 }
 
 /// Turn a caught panic payload into a message.
@@ -1220,13 +1316,31 @@ fn render_placed(
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
         let cols = downsample::prepare(cols, o);
-        let (svg, warnings) = render_inner(&cols, w, h, o)
-            .map(|p| p.localized(o, &cols))
-            .and_then(|p| p.finish(place))
-            .map_err(RenderError::Render)?;
+        let draw = |fit: Option<track::Fit>| {
+            render_inner(&cols, w, h, o)
+                .map(|p| p.localized(o, &cols))
+                .map(|p| match fit {
+                    Some(f) => p.fitted(f),
+                    None => p,
+                })
+                .and_then(|p| p.finish(place))
+        };
+        // Aligned with other panels: draw, measure, draw again fitted.
+        let (svg, warnings) = match &o.align {
+            Some(a) => {
+                let first = track::Fit::first(o, a);
+                let (svg, _) = draw(Some(first.clone())).map_err(RenderError::Render)?;
+                draw(Some(first.correct(a, &svg, h as f64)))
+            }
+            None => draw(None),
+        }
+        .map_err(RenderError::Render)?;
         let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
         let svg = with_line_styles(with_rule_marks(with_xline_dates(svg, &cols)), &cols);
-        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        if find_role(&cols, Role::Track).is_some() {
+            svg = track::lane_tips(svg);
+        }
         Ok((svg, warnings))
     })
 }
@@ -1692,6 +1806,10 @@ fn render_inner(
         .and_then(|c| c.values.first())
         .map(value_str);
 
+    // A thin panel under a chart, sharing its x axis.
+    if find_role(cols, Role::Track).is_some() {
+        return track::render(o, cols, width, height);
+    }
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
     if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
@@ -2164,12 +2282,13 @@ fn cartesian(
         Kind::BarPercent | Kind::BarStackedPercent | Kind::LinePercent
     );
 
-    // Optional confidence band around a line (`::BAND_LOWER`/`::BAND_UPPER`).
-    let band_lo = find_role(cols, Role::BandLower);
-    let band_hi = find_role(cols, Role::BandUpper);
-    if let (Some(lo), Some(hi)) = (band_lo, band_hi) {
-        data.push(("bandlo".to_string(), lo.values.clone()));
-        data.push(("bandhi".to_string(), hi.values.clone()));
+    // Optional confidence bands around a line (`::BAND_LOWER`/`::BAND_UPPER`
+    // pairs, matched in column order): one band, or a nested quantile fan.
+    let bands = band_pairs(cols);
+    let band_lo = bands.first().map(|b| b.0);
+    for (k, (lo, hi)) in bands.iter().enumerate() {
+        data.push((band_key("bandlo", k), lo.values.clone()));
+        data.push((band_key("bandhi", k), hi.values.clone()));
     }
     // Censoring marks on a step curve (`::CENSOR`).
     let censor = kind == Kind::Step
@@ -2315,10 +2434,9 @@ fn cartesian(
     // for that layer (a `Value::Na` y would be drawn at the bottom edge) — e.g.
     // a forecast's history rows have no yhat but do have y.
     for (name, vals) in data.iter_mut() {
-        let measure = matches!(
-            name.as_str(),
-            "y" | "ilo" | "ihi" | "jlo" | "jhi" | "bandlo" | "bandhi"
-        ) || (name.starts_with('y') && name[1..].chars().all(|c| c.is_ascii_digit()));
+        let measure = matches!(name.as_str(), "y" | "ilo" | "ihi" | "jlo" | "jhi")
+            || name.starts_with("band")
+            || (name.starts_with('y') && name[1..].chars().all(|c| c.is_ascii_digit()));
         if measure {
             for v in vals.iter_mut().filter(|v| **v == Value::Na) {
                 *v = Value::Float(f64::NAN);
@@ -2327,33 +2445,42 @@ fn cartesian(
     }
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
-    // Shaded x-region (`::MARKAREA`): a light band behind the data spanning
-    // [min, max] of the mark column's x-values, the full panel height
-    // (ymin/ymax = ∓Inf reach the panel edges and don't train the y scale).
-    if let Some(ma) = find_role(cols, Role::MarkArea) {
-        let xs = ma.values.iter().filter(|v| v.as_f64().is_some());
-        let by_x = |a: &&Value, b: &&Value| {
-            a.as_f64()
-                .partial_cmp(&b.as_f64())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        };
-        if let (Some(x0), Some(x1)) = (xs.clone().min_by(by_x), xs.max_by(by_x)) {
-            let frame = vec![
-                ("mx0".to_string(), vec![x0.clone()]),
-                ("mx1".to_string(), vec![x1.clone()]),
-                ("my0".to_string(), vec![Value::Float(f64::NEG_INFINITY)]),
-                ("my1".to_string(), vec![Value::Float(f64::INFINITY)]),
-            ];
-            plot = plot
-                .geom_rect_with(GeomRect {
-                    fill: (148, 160, 178),
-                    color: (148, 160, 178),
-                    alpha: 0.14,
-                    line_width: 0.0,
-                })
-                .layer_data(frame)
-                .layer_aes(Aes::new().xmin("mx0").xmax("mx1").ymin("my0").ymax("my1"));
-        }
+    // Shaded x-regions (`::MARKAREA`, one or more columns): a light band behind
+    // the data per run of marked x-values (see `mark_regions`), the full panel
+    // height (ymin/ymax = ∓Inf reach the panel edges and don't train the y
+    // scale).
+    let regions: Vec<(Value, Value)> = cols
+        .iter()
+        .filter(|c| c.role == Role::MarkArea)
+        .flat_map(|c| mark_regions(c, &x.values))
+        .collect();
+    if !regions.is_empty() {
+        let (x0, x1): (Vec<Value>, Vec<Value>) = regions.into_iter().unzip();
+        let n = x0.len();
+        let frame = vec![
+            ("mx0".to_string(), x0),
+            ("mx1".to_string(), x1),
+            ("my0".to_string(), vec![Value::Float(f64::NEG_INFINITY); n]),
+            ("my1".to_string(), vec![Value::Float(f64::INFINITY); n]),
+        ];
+        plot = plot
+            .geom_rect_with(GeomRect {
+                fill: (148, 160, 178),
+                color: (148, 160, 178),
+                alpha: 0.14,
+                line_width: 0.0,
+            })
+            .layer_data(frame)
+            // (x as well: the layer is drawn first, and its x column is
+            // what makes a date axis a date scale)
+            .layer_aes(
+                Aes::new()
+                    .x("mx0")
+                    .xmin("mx0")
+                    .xmax("mx1")
+                    .ymin("my0")
+                    .ymax("my1"),
+            );
     }
 
     // A ::BAND (prediction interval) matches the forecast at half opacity, so it
@@ -2366,12 +2493,12 @@ fn cartesian(
     // The band is drawn first so the line sits on top of it; one band per
     // series. A step chart (Kaplan–Meier) gets a step ribbon in each series'
     // colour.
-    let step_band = kind == Kind::Step && band_lo.is_some() && band_hi.is_some();
+    let step_band = kind == Kind::Step && !bands.is_empty();
     // Several series each with their own band (e.g. coefficient paths of two
     // models): each band takes its series' colour. A forecast's band, carried
     // by one series only, keeps the single band colour.
     let multi_band = match (category, band_lo) {
-        (Some(cat), Some(lo)) if band_hi.is_some() => {
+        (Some(cat), Some(lo)) => {
             let mut with_band = std::collections::HashSet::new();
             for (c, b) in cat.values.iter().zip(&lo.values) {
                 if b.as_f64().is_some_and(f64::is_finite) {
@@ -2382,29 +2509,50 @@ fn cartesian(
         }
         _ => false,
     };
-    if step_band {
-        let mut aes = Aes::new().x("x").ymin("bandlo").ymax("bandhi");
-        if category.is_some() {
-            aes = aes.fill("cat");
+    // A nested fan (several pairs, e.g. 95 / 80 / 50 %) is drawn widest first,
+    // each band at a low opacity: where they overlap the shade deepens, so the
+    // inner quantiles read darkest.
+    let fan_alpha = |one: f64| match bands.len() {
+        0 | 1 => one,
+        n => (0.4 / n as f64).clamp(0.1, 0.2),
+    };
+    for k in fan_order(&bands) {
+        let (lo, hi) = (band_key("bandlo", k), band_key("bandhi", k));
+        // Only the rows that carry the band (a forecast's, not its history's):
+        // the rest would just be dropped as non-finite, with a warning.
+        let (los, his) = (col_of(&data, &lo), col_of(&data, &hi));
+        let finite = |v: &Value| v.as_f64().is_some_and(f64::is_finite);
+        let rows: Vec<usize> = (0..n_rows)
+            .filter(|&i| los.get(i).is_some_and(finite) && his.get(i).is_some_and(finite))
+            .collect();
+        if rows.is_empty() {
+            continue;
         }
-        plot = plot
-            .geom_stepribbon_with(GeomStepribbon {
-                fill: band_color,
-                alpha: 0.2,
-                direction: StepDirection::Hv,
-            })
-            .layer_aes(aes);
-    } else if band_lo.is_some() && band_hi.is_some() {
-        let mut aes = Aes::new().x("x").ymin("bandlo").ymax("bandhi");
-        if multi_band {
-            aes = aes.fill("cat");
+        let mut aes = Aes::new().x("x").ymin(&lo).ymax(&hi);
+        if step_band {
+            if category.is_some() {
+                aes = aes.fill("cat");
+            }
+            plot = plot
+                .geom_stepribbon_with(GeomStepribbon {
+                    fill: band_color,
+                    alpha: fan_alpha(0.2),
+                    direction: StepDirection::Hv,
+                })
+                .layer_data(subset(&data, &rows))
+                .layer_aes(aes);
+        } else {
+            if multi_band {
+                aes = aes.fill("cat");
+            }
+            plot = plot
+                .geom_ribbon_with(GeomRibbon {
+                    fill: band_color,
+                    alpha: fan_alpha(if multi_band { 0.18 } else { 0.25 }),
+                })
+                .layer_data(subset(&data, &rows))
+                .layer_aes(aes);
         }
-        plot = plot
-            .geom_ribbon_with(GeomRibbon {
-                fill: band_color,
-                alpha: if multi_band { 0.18 } else { 0.25 },
-            })
-            .layer_aes(aes);
     }
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
     // don't get swamped by the dots.
