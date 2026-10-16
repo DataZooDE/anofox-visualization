@@ -59,15 +59,17 @@ cd web && ../target/release/dashboard --check --strict examples/optimize-deliver
 
 ## Inputs and tabs
 
-Inputs: plan (deadline-aware / shortest route, compared with today), vans on
-the road (4–6), the van to drill into, and the cost per km, per driver hour and
+Inputs: plan (deadline-aware / shortest route, compared with today) and vans
+on the road (4–6) as buttons, the van to drill into, and the cost per km, per driver hour and
 per van day — the cost inputs re-price the stored plans.
 
 1. **Map** — today's districts next to the selected plan (`::MAP` of WKT lines
    and points in km).
 2. **Vans** — cages per van against capacity, hours on the road, van-by-van
-   table.
+   table; a click on a van's bar opens its stop list.
 3. **Stop list** — the driver's list for one van: arrival, deadline, slack.
 4. **Van count** — late stops, daily cost and kilometres for every plan × van
-   count.
-5. **Decision** — the cheapest stored plan that serves every stop on time.
+   count (the cost bars move to their new values as the cost inputs change).
+5. **Decision** — the cheapest stored plan that serves every stop on time, and
+   a bridge of where it saves per day against today's districts (kilometres,
+   driver hours, van day rates).
