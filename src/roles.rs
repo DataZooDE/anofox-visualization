@@ -147,7 +147,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
       "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick"),
-    e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
+    e("XLINE", &[], R::VLine, "annotation", true,
+      "vertical reference line at an x (a number, date or timestamp)"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,
@@ -156,6 +157,18 @@ pub static REGISTRY: &[RoleSpec] = &[
       "upper edge of a shaded band"),
     e("MARKAREA", &["MARK_AREA", "SHADE"], R::MarkArea, "annotation", true,
       "shade the x-region [min, max] of this column"),
+    e("XLINE_LABEL", &["EVENT_LABEL"], R::VLineLabel, "annotation", true,
+      "label of the ::XLINE on the same row, at the top of the line (events from data)"),
+    e("REFLINE_LABEL", &["YLINE_LABEL", "TARGET_LABEL"], R::RefLineLabel, "annotation", true,
+      "label of the ::REFLINE on the same row, above its right end"),
+    e("XBAND_FROM", &["SHADE_FROM"], R::XBandFrom, "annotation", true,
+      "start of a shaded x-range, one per row (a number, date or timestamp)"),
+    e("XBAND_TO", &["SHADE_TO"], R::XBandTo, "annotation", true,
+      "end of the shaded x-range started by ::XBAND_FROM on the same row"),
+    e("XBAND_LABEL", &["SHADE_LABEL"], R::XBandLabel, "annotation", true,
+      "label of the shaded x-range on the same row"),
+    e("ANNOTATE", &["ANNOTATION"], R::Annotate, "annotation", true,
+      "a text callout at the row's (x, y); NULL rows draw nothing"),
     e("DATALABELS", &["DATALABEL", "VALUELABELS", "SHOWLABELS"], R::DataLabels, "annotation", true,
       "draw the value on each mark or heatmap cell (value = font size)"),
     e("ABLINE", &["AB_LINE"], R::AbLine, "annotation", true,
@@ -180,6 +193,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
+    e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
+      "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
       "gauge zone colours, comma-separated hex"),
@@ -339,7 +354,13 @@ impl Role {
 /// True when any role in a planned panel is a non-rendering directive — static
 /// renderers (CLI, `serve`, headless SVG) and the linter skip such statements.
 pub fn is_directive_panel(roles: &[(usize, Role)]) -> bool {
-    roles.iter().any(|(_, r)| !r.renders())
+    roles.iter().any(|(_, r)| !r.renders()) || is_table_thresholds(roles)
+}
+
+/// A lone `::THRESHOLDS` statement: the next table's per-column rules (a
+/// directive), not a panel. Beside other roles it modifies that panel.
+pub fn is_table_thresholds(roles: &[(usize, Role)]) -> bool {
+    matches!(roles, [(_, Role::Thresholds)])
 }
 
 /// Canonical tokens by category (aliases exist but prefer these).
@@ -674,6 +695,13 @@ mod tests {
             Role::XFormat,
             Role::DataLabels,
             Role::MarkArea,
+            Role::VLineLabel,
+            Role::RefLineLabel,
+            Role::XBandFrom,
+            Role::XBandTo,
+            Role::XBandLabel,
+            Role::Annotate,
+            Role::Thresholds,
             Role::Markdown,
             Role::Open,
             Role::High,
@@ -759,6 +787,13 @@ mod tests {
                 | Role::XFormat
                 | Role::DataLabels
                 | Role::MarkArea
+                | Role::VLineLabel
+                | Role::RefLineLabel
+                | Role::XBandFrom
+                | Role::XBandTo
+                | Role::XBandLabel
+                | Role::Annotate
+                | Role::Thresholds
                 | Role::Markdown
                 | Role::Open
                 | Role::High

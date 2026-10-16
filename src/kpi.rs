@@ -199,6 +199,8 @@ pub struct Kpi {
     pub goal: Option<Goal>,
     /// A `::TEXT_*` card (no number).
     pub text_card: bool,
+    /// `::THRESHOLDS` status of the value — colours the number.
+    pub status: Option<crate::thresholds::Status>,
 }
 
 impl Kpi {
@@ -238,6 +240,7 @@ impl Kpi {
                 spark: Vec::new(),
                 goal: None,
                 text_card: true,
+                status: None,
             });
         };
         let cur = num(main.values.first());
@@ -259,6 +262,10 @@ impl Kpi {
         let goal = cur
             .zip(num(first(&|r| r == Role::RefLine)))
             .and_then(|(c, g)| goal(c, g, fmt, l));
+        let status = text(&|r| r == Role::Thresholds)
+            .and_then(|spec| crate::thresholds::Rules::parse(&spec).ok())
+            .zip(cur)
+            .and_then(|(rules, n)| rules.status(n));
         Some(Kpi {
             value: cur.map_or_else(|| "–".into(), |n| format_number_l(n, fmt, l)),
             caption,
@@ -267,6 +274,7 @@ impl Kpi {
             spark,
             goal,
             text_card: false,
+            status,
         })
     }
 
@@ -318,8 +326,10 @@ impl Kpi {
             };
         let mut s = String::new();
         // the theme's KPI number colour (`chrome.kpi_value`; a gradient → its accent)
+        // (a `::THRESHOLDS` status wins)
         let value_fill = match t.chrome.kpi_value.as_str() {
             _ if self.text_card => c.heading,
+            _ if self.status.is_some() => self.status.map_or(c.ink, |st| st.color(t)),
             "accent" | "gradient" => c.accent,
             _ => c.ink,
         };
@@ -637,6 +647,7 @@ mod tests {
             spark: vec![1.0, 2.0, 1.5],
             goal: goal(5.0, 4.0, MetricFmt::Plain, &en()),
             text_card: false,
+            status: None,
         };
         let s = k.body(300.0, k.height(), &o);
         let c = &o.theme.colors;

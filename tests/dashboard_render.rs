@@ -216,3 +216,121 @@ fn headless_kpi_tile_has_delta_sparkline_and_goal() {
     assert_eq!(heights[0], heights[1], "same row, same height");
     assert!(heights[0] % 1000.0 < 320.0, "{heights:?}");
 }
+
+// A provider answering every query with the same canned columns.
+struct Fixed(Vec<(String, Vec<Value>)>);
+impl DataProvider for Fixed {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+// #44: a DATE ::XLINE (the DuckDB CLI's JSON writes it as "2026-03-15") on a
+// date axis draws its dashed line instead of failing a DOUBLE cast.
+#[test]
+fn a_date_xline_draws_on_a_date_axis() {
+    let script = "SELECT d::XAXIS, v::LINECHART, DATE '2026-02-03'::XLINE FROM t;";
+    let days = [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04",
+        "2026-02-05",
+    ];
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&days)),
+        ("c1".into(), f(&[1.0, 3.0, 2.0, 5.0, 4.0])),
+        ("c2".into(), s(&["2026-02-03"; 5])),
+    ]);
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains("stroke-dasharray"), "no XLINE drawn");
+}
+
+// #31: annotations from data rows — an event label on its ::XLINE, a labelled
+// shaded range, a ::REFLINE label and a point callout, all from one result.
+#[test]
+fn annotations_from_data_rows() {
+    let script = "SELECT d::XAXIS, v::LINECHART, e::XLINE, n::XLINE_LABEL, \
+                  bf::XBAND_FROM, bt::XBAND_TO, bl::XBAND_LABEL, a::ANNOTATE, \
+                  4::REFLINE, 'Target'::REFLINE_LABEL FROM t;";
+    let days = [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04",
+        "2026-02-05",
+    ];
+    // five rows, one value at row i (an event joined onto its day)
+    let at = |i: usize, v: &str| -> Vec<Value> {
+        (0..5)
+            .map(|k| {
+                if k == i {
+                    Value::Str(v.into())
+                } else {
+                    Value::Na
+                }
+            })
+            .collect()
+    };
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&days)),
+        ("c1".into(), f(&[1.0, 3.0, 2.0, 5.0, 4.0])),
+        ("c2".into(), at(1, "2026-02-02")),
+        ("c3".into(), at(1, "Launch")),
+        ("c4".into(), at(2, "2026-02-03")),
+        ("c5".into(), at(2, "2026-02-04")),
+        ("c6".into(), at(2, "Outage")),
+        ("c7".into(), at(3, "Record day")),
+        ("c8".into(), f(&[4.0; 5])),
+        ("c9".into(), s(&["Target"; 5])),
+    ]);
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    for label in ["Launch", "Outage", "Target", "Record day"] {
+        assert!(svg.contains(label), "{label} missing");
+    }
+}
+
+// #30: ::THRESHOLDS colours a KPI value, a gauge's zones and a chart's
+// threshold lines in the theme's status colours (light: warning #b45309,
+// negative #dc2626).
+#[test]
+fn thresholds_colour_kpis_gauges_and_charts() {
+    let render = |script: &str, cols: Vec<(String, Vec<Value>)>| {
+        render_dashboard_svg(script, &mut Fixed(cols), &DashboardOptions::default()).unwrap()
+    };
+    let rules = "<0:bad; <5:warn; good";
+    let kpi = render(
+        "SELECT 3.1::PERCENT, '<0:bad; <5:warn; good'::THRESHOLDS;",
+        vec![("c0".into(), f(&[3.1])), ("c1".into(), s(&[rules]))],
+    );
+    assert!(
+        kpi.contains("fill=\"#b45309\""),
+        "KPI value not in the warning colour"
+    );
+    let gauge = render(
+        "SELECT 72::GAUGE, '<50:bad; <80:warn; good'::THRESHOLDS;",
+        vec![
+            ("c0".into(), f(&[72.0])),
+            ("c1".into(), s(&["<50:bad; <80:warn; good"])),
+        ],
+    );
+    assert!(
+        gauge.to_lowercase().contains("b45309"),
+        "gauge has no warning zone"
+    );
+    let chart = render(
+        "SELECT x::XAXIS, y::LINECHART, '<50:bad; good'::THRESHOLDS FROM t;",
+        vec![
+            ("c0".into(), f(&[1.0, 2.0, 3.0])),
+            ("c1".into(), f(&[40.0, 60.0, 55.0])),
+            ("c2".into(), s(&["<50:bad; good"; 3])),
+        ],
+    );
+    assert!(
+        chart.to_lowercase().contains("dc2626"),
+        "no threshold line at 50"
+    );
+}

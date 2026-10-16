@@ -91,13 +91,10 @@ fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)])
         .iter()
         .filter_map(|(i, role)| {
             column_at(result, *i).map(|(name, vals)| {
-                // An ISO-date x axis becomes a datetime scale, as in the
-                // browser (`sql::columns_from_rows`).
-                let vals = if *role == Role::X {
-                    sql::maybe_decimal(sql::maybe_datetime(vals.clone()))
-                } else {
-                    vals.clone()
-                };
+                // An ISO-date x axis becomes a datetime scale and a date
+                // ::XLINE an x position, as in the browser
+                // (`sql::columns_from_rows`).
+                let vals = sql::coerce_for_role(*role, vals.clone());
                 Column::new(name.clone(), *role, vals)
             })
         })

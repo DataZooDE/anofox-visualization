@@ -75,11 +75,17 @@ terminal.
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
-| `::XLINE` |  | annotation | vertical reference line at an x |
+| `::XLINE` |  | annotation | vertical reference line at an x (a number, date or timestamp) |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
+| `::XLINE_LABEL` | `::EVENT_LABEL` | annotation | label of the ::XLINE on the same row, at the top of the line (events from data) |
+| `::REFLINE_LABEL` | `::YLINE_LABEL`, `::TARGET_LABEL` | annotation | label of the ::REFLINE on the same row, above its right end |
+| `::XBAND_FROM` | `::SHADE_FROM` | annotation | start of a shaded x-range, one per row (a number, date or timestamp) |
+| `::XBAND_TO` | `::SHADE_TO` | annotation | end of the shaded x-range started by ::XBAND_FROM on the same row |
+| `::XBAND_LABEL` | `::SHADE_LABEL` | annotation | label of the shaded x-range on the same row |
+| `::ANNOTATE` | `::ANNOTATION` | annotation | a text callout at the row's (x, y); NULL rows draw nothing |
 | `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark or heatmap cell (value = font size) |
 | `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
@@ -92,6 +98,7 @@ terminal.
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
+| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
@@ -327,6 +334,80 @@ can map a mark's numeric `data-x` back to its level.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).
+
+### Annotations from data (events, ranges, callouts)
+
+Label what explains a chart — a launch, an outage, a record — with rows from
+SQL. Each annotation role is read **per row**, so the usual source is an events
+table joined onto the series by its date; rows without an event carry NULL and
+draw nothing:
+
+```sql
+SELECT s.day::XAXIS, s.revenue::LINECHART,
+       e.day::XLINE,  e.note::XLINE_LABEL,                    -- labelled event lines
+       o.start_day::XBAND_FROM, o.end_day::XBAND_TO, o.what::XBAND_LABEL,  -- shaded ranges
+       CASE WHEN s.revenue = max(s.revenue) OVER () THEN 'Record day' END::ANNOTATE,
+       150::REFLINE, 'Target'::REFLINE_LABEL,
+       'Revenue — the launch lifted it, the outage cost a week'::TITLE
+FROM sales s
+LEFT JOIN events  e ON e.day = s.day
+LEFT JOIN outages o ON o.start_day = s.day
+ORDER BY s.day;
+```
+
+| Role | Draws |
+|------|-------|
+| `::XLINE` + `::XLINE_LABEL` | a dashed event line with its label at the top, one per row |
+| `::XBAND_FROM` + `::XBAND_TO` (+ `::XBAND_LABEL`) | a shaded x-range per row, labelled at its start |
+| `::REFLINE` + `::REFLINE_LABEL` | the reference line's label above its right end |
+| `::ANNOTATE` | a text callout at the row's (x, y), with a ring on the mark |
+
+`::XLINE`, `::MARKAREA` and `::XBAND_FROM`/`::XBAND_TO` take numbers, dates
+or timestamps — on a date axis a date is placed like the x data. Labels and
+shading use the theme's chart text and muted colours, so they follow dark mode;
+labels that would overlap are skipped. Up to 64 annotations of each kind are
+drawn. The same roles render in the browser and headless (`dashboard --svg`).
+`dashboard --check` warns (`annotation/unpaired`) about a label or range end
+without its partner.
+
+### Thresholds (good / warn / bad)
+
+One rule set gives a value a status, and the status colours it the same way
+everywhere — in the theme's `positive` / `warning` / `negative` colours, so dark
+mode and the colour-blind theme follow:
+
+```sql
+SELECT margin::PERCENT, 'Margin'::LABEL, '<0:bad; <5:warn; good'::THRESHOLDS FROM kpis;       -- KPI value colour
+SELECT 72::GAUGE, '0,100'::RANGE, '<50:bad; <80:warn; good'::THRESHOLDS, 'Service level'::TITLE;  -- gauge zones
+SELECT day::XAXIS, sl::LINECHART, '<50:bad; <80:warn; good'::THRESHOLDS, 'Service level by day'::TITLE FROM t;  -- threshold lines
+
+SELECT 'Margin %: <10:bad; <15:warn; good | accuracy: <0.85:bad; good'::THRESHOLDS;  -- the next table's cells
+SELECT region::TABLE, margin AS "Margin %", accuracy FROM regions;
+```
+
+- **Rules** are `condition:status`, separated by `;`, checked in order — the
+  first match wins. Conditions: `<x`, `<=x`, `>x`, `>=x`, `=x`, `a..b`
+  (inclusive), `else` (or a bare status) for the rest. Numbers take `%` (÷100)
+  and `k` / `M` / `B`. Statuses: `good` (`ok`, `positive`), `warn` (`warning`),
+  `bad` (`critical`, `negative`), `neutral`. Use the value's own units (a
+  `::PERCENT` KPI of `12.5` means 12.5 %).
+- **KPI**: the value takes its status colour (`th-good` / `th-warn` / `th-bad`
+  on `.metric-value`; a tooltip names the rule).
+- **Gauge**: the rules become zones over `::RANGE`; the zone holding the value
+  is drawn at full strength, the value in its colour. They replace `::COLORS`.
+- **Chart**: a dashed line at each bound where the status changes, in the
+  colour of the worse side.
+- **Table**: a lone `::THRESHOLDS` statement before the table names columns
+  (`'column: rules | column: rules'`, raw or readable header names); each
+  cell gets its status tint and a shape — ● good, ▲ warn, ◆ bad — so colour is
+  never the only signal.
+- The rule set is SQL like any value, so it can come from data:
+  `'<' || target * 0.9 || ':bad; <' || target || ':warn; good'`.
+- KPI, gauge and chart thresholds render headless too (`dashboard --svg`); table
+  thresholds are browser-only, like `::FLAG`. `dashboard --check` reports
+  `thresholds/bad-rule`, `thresholds/no-column` (a table rule set without a
+  column) and `thresholds/in-table` (`::THRESHOLDS` inside the `::TABLE`
+  statement, where it would be shown as a column).
 
 ### Plotting model output (contract macros)
 
