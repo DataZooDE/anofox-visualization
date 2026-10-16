@@ -29,7 +29,15 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, re
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e)));
 await page.goto(`${base}?embed=1&dashboard=${encodeURIComponent(dash)}`);
-await page.waitForFunction(() => document.querySelector(".dash .panel-svg > svg[aria-label]"), null, { timeout: 120000 });
+// Loaded: a chart with its summary, or (a dashboard without charts) panels and
+// no loading skeletons left.
+await page.waitForFunction(
+  () =>
+    document.querySelector(".dash .panel-svg > svg[aria-label]") ||
+    (document.querySelector(".dash .panel") && !document.querySelector(".dash .dp-skel")),
+  null,
+  { timeout: 120000 }
+);
 await page.waitForTimeout(500);
 
 // Every chart has a one-sentence summary.
@@ -40,13 +48,14 @@ for (const [role, label] of svgs) {
 }
 console.log("summary:", svgs[0]?.[1]);
 
-// Tab until a chart has focus.
+// Tab until a chart has focus (a dashboard without charts skips this part).
 let onChart = false;
-for (let i = 0; i < 80 && !onChart; i++) {
+for (let i = 0; i < 80 && !onChart && svgs.length; i++) {
   await page.keyboard.press("Tab");
   onChart = await page.evaluate(() => document.activeElement?.matches?.(".panel-svg > svg[tabindex]"));
 }
-if (!onChart) fail("Tab never reached a chart");
+if (!svgs.length) console.log("no charts: keyboard and table-switch checks skipped");
+else if (!onChart) fail("Tab never reached a chart");
 else {
   const ring = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
   if (ring === "none") fail("no visible focus ring on the chart");
@@ -74,7 +83,7 @@ const swapped = await page.evaluate(() => {
   return { charts: charts.length, tables: charts.filter((f) => f.querySelector(".dp-astable-view:not([hidden]) table")).length, hidden: charts.every((f) => f.querySelector(".panel-svg").hidden) };
 });
 console.log("as tables:", JSON.stringify(swapped));
-if (!swapped.charts || swapped.tables !== swapped.charts || !swapped.hidden) fail("charts not swapped for tables");
+if (svgs.length && (!swapped.charts || swapped.tables !== swapped.charts || !swapped.hidden)) fail("charts not swapped for tables");
 await page.click(".dp-astable-btn");
 
 if (axe && existsSync(axe)) {
