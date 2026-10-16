@@ -105,11 +105,32 @@ else {
   if (!a || !b) fail("arrow keys did not focus a mark");
   const tip = await page.evaluate(() => document.getElementById("dp-tip")?.classList.contains("show"));
   if (!tip) fail("the focused mark shows no tooltip");
+  // A mark whose ::LINK opens another tab (drill-through) hands the focus to
+  // that tab's first panel title; Esc there returns to the mark. Any other
+  // Enter re-runs in place and the focus stays on the chart.
+  const tab0 = await page.evaluate(() => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent || "");
+  const linked = await page.evaluate(() => !!document.activeElement.closest(".panel.dp-linked"));
   await page.keyboard.press("Enter");
   await idle();
-  const back = await page.evaluate(() => !!document.activeElement?.closest?.(".panel-svg"));
-  if (!back) fail("focus lost after Enter (re-run)");
-  await page.keyboard.press("Escape");
+  const tab1 = await page.evaluate(() => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent || "");
+  if (linked && tab1 !== tab0) {
+    const at = await page.evaluate(() => {
+      const ae = document.activeElement;
+      const pane = [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].find((p) => p.style.display !== "none");
+      return { inPane: !!pane?.contains(ae), title: ae.matches(".panel-title, .group-title"), text: ae.textContent.slice(0, 50) };
+    });
+    console.log(`drill-through ${tab0} → ${tab1}: focus on "${at.text}"`);
+    if (!at.inPane || !at.title) fail(`drill-through: focus not on the target tab's title (${at.text})`);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
+    const ret = await page.evaluate(() => ({ tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent, label: document.activeElement.getAttribute("aria-label") }));
+    if (ret.tab !== tab0 || ret.label !== b) fail(`Esc did not return to the linked mark (tab ${ret.tab}, focus ${ret.label})`);
+    await page.keyboard.press("Escape"); // the mark → its chart
+  } else {
+    const back = await page.evaluate(() => !!document.activeElement?.closest?.(".panel-svg"));
+    if (!back) fail("focus lost after Enter (re-run)");
+    await page.keyboard.press("Escape");
+  }
   const out = await page.evaluate(() => document.activeElement?.matches?.(".panel-svg > svg"));
   if (!out) fail("Esc did not return to the chart");
   // Focus moved on while the re-run is in flight (Enter, then at once Esc back
@@ -118,7 +139,11 @@ else {
   await page.keyboard.press("Enter");
   await page.keyboard.press("Escape");
   await idle();
-  const kept = await page.evaluate(() => document.activeElement?.matches?.(".panel-svg > svg") && document.activeElement.isConnected);
+  // (on a linked chart Enter left for another tab and Esc came back to the mark)
+  const kept = await page.evaluate((linked) => {
+    const ae = document.activeElement;
+    return (linked ? !!ae?.closest?.(".panel-svg") : ae?.matches?.(".panel-svg > svg")) && ae.isConnected;
+  }, linked && tab1 !== tab0);
   if (!kept) fail("a re-run took the focus off the chart");
 }
 
