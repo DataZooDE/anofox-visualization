@@ -1,7 +1,8 @@
 -- How will demand develop after today? A weekly demand outlook whose charts
 -- move with the story they tell:
 --   * the outlook chart wipes in up to "Today", pauses, then the forecast fan
---     grows forward from it ('reveal'::ANIMATE + a DATE ::XLINE);
+--     grows forward from it ('reveal'::ANIMATE + a DATE ::XLINE), and the
+--     forecast line is drawn with moving dashes ('flow'::LINESTYLE);
 --   * the weekly bars grow in week by week (the default 'auto' entrance).
 -- Motion is browser only — PNG/PDF/--svg output is static — and under
 -- "reduce motion" every chart shows its final state at once.
@@ -31,12 +32,13 @@ SELECT week ::XAXIS,
        demand - CASE WHEN future THEN 9.0 * (i - 40) ELSE 0 END ::BAND_LOWER,
        demand + CASE WHEN future THEN 11.0 * (i - 40) ELSE 0 END ::BAND_UPPER,
        DATE '2026-10-12' ::XLINE,
+       CASE WHEN future THEN 'flow' END ::LINESTYLE,
        'reveal' ::ANIMATE,
        'Weekly demand — observed up to Today, forecast with 80 % interval' ::TITLE
 FROM md_total
 UNION ALL
 -- the forecast starts where the history ends, so the two lines join at Today
-SELECT week, 'Forecast', demand, demand, demand, DATE '2026-10-12', 'reveal', ''
+SELECT week, 'Forecast', demand, demand, demand, DATE '2026-10-12', 'flow', 'reveal', ''
 FROM md_total WHERE i = 40
 ORDER BY 1, 2;
 

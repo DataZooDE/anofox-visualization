@@ -145,6 +145,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg{width:100%;height:auto;display:block}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
+/* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10) */
+@keyframes dp-flow{to{stroke-dashoffset:-20}}
+.panel svg .dp-flow{animation:dp-flow 1.2s linear infinite}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow{animation:none}}
 @media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}

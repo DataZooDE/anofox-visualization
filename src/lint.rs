@@ -46,7 +46,7 @@ pub struct Diagnostic {
     /// unknown key / preset / grain / compare or a bad date) |
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
-    /// `animate/reveal-no-xline` (warnings) | `optional/missing` (a note: a
+    /// `animate/reveal-no-xline` | `linestyle/unknown` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -1016,7 +1016,7 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 }
 
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
-/// `'reveal'` with no `::XLINE` to start from.
+/// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1028,6 +1028,21 @@ fn motion_diags(
         let Some(v) = texts.first().map(|t| t.to_ascii_lowercase()) else {
             continue;
         };
+        if *r == Role::LineStyle {
+            if let Some(bad) = texts
+                .iter()
+                .map(|t| t.to_ascii_lowercase())
+                .find(|t| !crate::LINE_STYLES.contains(&t.as_str()))
+            {
+                out.push((
+                    "linestyle/unknown",
+                    format!(
+                        "::LINESTYLE `{bad}` is not a style ({}) — that series stays solid",
+                        crate::LINE_STYLES.join(", ")
+                    ),
+                ));
+            }
+        }
         if *r == Role::Animate {
             if !crate::ANIMATE_MODES.contains(&v.as_str()) {
                 out.push((
@@ -1786,7 +1801,7 @@ mod design_tests {
             check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
                 .into_iter()
                 .map(|d| d.code)
-                .filter(|c| c.starts_with("animate/"))
+                .filter(|c| c.starts_with("animate/") || c.starts_with("linestyle/"))
                 .collect()
         };
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "wobble" });
@@ -1804,6 +1819,14 @@ mod design_tests {
                 row
             ),
             vec!["animate/reveal-no-xline"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "flowing" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::LINECHART, 'flowing'::LINESTYLE FROM t;",
+                row
+            ),
+            vec!["linestyle/unknown"]
         );
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());

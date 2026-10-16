@@ -104,6 +104,7 @@ terminal.
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
+| `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
@@ -1281,6 +1282,20 @@ tooltip shows the date. `--check` warns on an unknown mode
 (`animate/unknown`) and on `'reveal'` without an `::XLINE`
 (`animate/reveal-no-xline`, the chart then wipes in from the left). The
 static HTML export replays the entrances.
+
+**Flow lines (`::LINESTYLE`).** A per-row column keyed by the row's
+`::CATEGORY`: the series whose rows say `'flow'` is drawn with dashes that move
+along the line — the "predicted" look for a forecast or a connector;
+`'dashed'` gives still dashes, `'solid'` (or NULL) the default. Without a
+`::CATEGORY` it styles the chart's line. Static output (`--svg`, PNG, PDF) and
+*reduce motion* show plain dashes. `--check` warns on an unknown style
+(`linestyle/unknown`).
+
+```sql
+SELECT week ::XAXIS, series ::CATEGORY, demand ::LINECHART,
+       CASE WHEN series = 'Forecast' THEN 'flow' END ::LINESTYLE
+FROM outlook;
+```
 
 ### Tables
 

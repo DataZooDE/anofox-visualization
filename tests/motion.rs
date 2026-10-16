@@ -83,3 +83,59 @@ fn numeric_xline_still_draws() {
         "the text-typed XLINE '2' is drawn"
     );
 }
+
+#[test]
+fn flow_dashes_the_series_that_asks_for_it() {
+    let svg = line(vec![Column::new(
+        "ls",
+        Role::LineStyle,
+        vec![
+            Value::Na,
+            Value::Na,
+            Value::Str("flow".into()),
+            Value::Str("flow".into()),
+        ],
+    )]);
+    let tags: Vec<&str> = svg
+        .split("<polyline ")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap()])
+        .collect();
+    let fc: Vec<_> = tags
+        .iter()
+        .filter(|t| t.contains(r#"data-series="Forecast""#))
+        .collect();
+    let ob: Vec<_> = tags
+        .iter()
+        .filter(|t| t.contains(r#"data-series="Observed""#))
+        .collect();
+    assert!(!fc.is_empty() && !ob.is_empty());
+    assert!(
+        fc.iter()
+            .all(|t| t.contains(r#"class="dp-flow""#) && t.contains(r#"stroke-dasharray="6 4""#)),
+        "{fc:?}"
+    );
+    assert!(
+        ob.iter()
+            .all(|t| !t.contains("dp-flow") && !t.contains("stroke-dasharray")),
+        "{ob:?}"
+    );
+    // grid lines are untouched
+    assert_eq!(svg.matches("dp-flow").count(), fc.len());
+}
+
+#[test]
+fn dashed_without_a_category_styles_the_one_line() {
+    let cols = vec![
+        Column::new("x", Role::X, nums(&[1.0, 2.0, 3.0, 4.0])),
+        Column::new("v", Role::Value(Kind::Line), nums(&[1.0, 4.0, 2.0, 3.0])),
+        Column::new("ls", Role::LineStyle, strs(&["dashed"; 4])),
+    ];
+    let svg = render(&cols, 400, 300).unwrap();
+    assert_eq!(
+        svg.matches(r#"stroke-dasharray="6 4""#).count(),
+        1,
+        "one data line dashed"
+    );
+    assert!(!svg.contains("dp-flow"));
+}
