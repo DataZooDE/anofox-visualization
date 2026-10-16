@@ -899,6 +899,9 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 Edit the SQL, press **Run**, hover the marks. Load your own data with DuckDB’s
 readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
 
+The app opens in **View** (the dashboard); **✎ Edit** — or `?mode=edit` in the
+URL — shows the SQL editor.
+
 **Examples in the sidebar** (open one directly with `?dashboard=<name>`):
 
 - **Examples** — the core feature tour: *Start here*, *Charts*,

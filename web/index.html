@@ -201,7 +201,7 @@ header .actions select{padding:.42rem .5rem}
 @media(max-width:820px){.workspace{grid-template-columns:1fr}.editor{border-right:0;border-bottom:1px solid var(--ui-line)}.editor textarea{min-height:220px}}
 </style>
 </head>
-<body>
+<body class="mode-view">
 <div id="loadbar"></div>
 <header>
   <h1>anofox-visualization</h1>
@@ -254,8 +254,8 @@ header .actions select{padding:.42rem .5rem}
       <button id="save" class="btn2" title="save to this browser">Save</button>
       <span class="tb-spacer"></span>
       <div class="mode-toggle">
-        <button id="mode-edit" class="seg active">✎ Edit</button>
-        <button id="mode-view" class="seg">▦ View</button>
+        <button id="mode-edit" class="seg">✎ Edit</button>
+        <button id="mode-view" class="seg active">▦ View</button>
       </div>
     </div>
     <div class="workspace">

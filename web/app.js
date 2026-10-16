@@ -1231,6 +1231,7 @@ async function boot() {
   //                   ::THEME follows the viewer switches; JSON is never read
   //                   from the URL)
   //   ?dashboard=Name load a saved/example dashboard by name
+  //   ?mode=edit      open with the SQL editor (default: the dashboard view)
   //   #sql=<base64>   inline SQL (from Share)
   const params = new URLSearchParams(location.search);
   const primary = params.get("primary");
@@ -1258,6 +1259,8 @@ async function boot() {
   // Loading spinner + opt-in chart zoom (off by default; ?zoom=1 enables).
   installSpinner();
   if (params.get("zoom") === "1") document.body.classList.add("dp-zoom");
+  // Start on the dashboard (View); ✎ Edit — or ?mode=edit — opens the editor.
+  setMode(params.get("mode") === "edit" ? "edit" : "view");
   const servedSql = served && typeof served.sql === "string" ? served.sql : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
