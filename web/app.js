@@ -592,7 +592,7 @@ SELECT 'Filters & inputs — controls, date range & cross-filter'::LABEL;
 
 SELECT 'Inputs'::TAB;
 SELECT 12::COL;
-SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, two multiselects (the 80-option one is **searchable**), a slider (::NUMBER), free text, and a date. Each control''s output **column name becomes a DuckDB variable** — the charts read it with **getvariable(''name'')**, so changing a control re-runs their queries live. (Date range and cross-filter are on the next tabs.)'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Interactive **controls** driven entirely from SQL: a dropdown, two multiselects (the 80-option one is **searchable**), a slider (::NUMBER), free text, and a date. Each control''s output **column name becomes a DuckDB variable** — the charts read it with **getvariable(''name'')**, so changing a control re-runs their queries live. **The address bar follows**: every changed control lands in the URL as \`?v.<name>=<value>\` (and Share copies it), so a reload or a link restores this exact view. (Date range and cross-filter are on the next tabs.)'::MARKDOWN, 'What this shows'::TITLE;
 
 -- the output COLUMN NAME becomes the DuckDB variable (getvariable('name'))
 SELECT 'Filters'::GROUP;
@@ -1630,6 +1630,8 @@ function loadDash(name, sql) {
   dpFilter = "";
   dpSelected = null;
   dpXf = {};
+  dpUrlSeed = {};
+  dpVarDefault = {};
   dpPage = {};
   dpSort = {};
   dpPaged = {};
@@ -2140,6 +2142,147 @@ function setTabParam(name) {
   } catch (e) {}
 }
 
+// Viewer state in the URL: `?v.<name>=<value>` seeds a variable on load — an
+// input's value (checked against the input's own options / type first), the
+// shared `selected`, or a named selection. A list repeats the key
+// (`?v.channel=app&v.channel=web`; `?v.channel=` is an empty list). After every
+// run the URL is rewritten (history.replaceState) with the inputs that differ
+// from their defaults and the live selections, so a reload or a copied link
+// restores the view. Only variable VALUES travel — never SQL — so a locked
+// server binds them as typed literals like any other input.
+const URL_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+let dpUrlSeed = readUrlSeed(); // variable -> [values] from ?v.* (consumed by the first run)
+let dpVarDefault = {}; // input variable -> its default (JSON text): only changes go into the URL
+let dpSeedRerun = false; // a seeded table selection changed shape: re-run once after this run
+let dpSeeded = new Set(); // named selections seeded from the URL whose shape a table still fixes
+function readUrlSeed(search = location.search) {
+  const seed = {};
+  try {
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("v.")) continue;
+      const name = k.slice(2);
+      if (!URL_VAR_RE.test(name) || String(v).length > 1000) continue;
+      if (!seed[name] && Object.keys(seed).length >= 64) continue;
+      (seed[name] ||= []).length < 200 && seed[name].push(String(v));
+    }
+  } catch (_) {}
+  return seed;
+}
+function isIsoDate(v) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(v + "T00:00:00Z");
+  return !isNaN(d) && d.toISOString().slice(0, 10) === v;
+}
+// A seeded input value if it passes the input's own validation, else undefined
+// (the input keeps its default).
+function validSeed(kind, vals, options) {
+  const one = vals.length === 1 ? vals[0] : undefined;
+  switch (kind) {
+    case "DROPDOWN":
+      return options && options.includes(one) ? one : undefined;
+    case "MULTISELECT": {
+      const want = vals.filter((v) => v !== "");
+      const ok = want.filter((v) => options && options.includes(v));
+      return ok.length === want.length || ok.length ? [...new Set(ok)] : undefined;
+    }
+    case "NUMBER": {
+      const n = Number(one);
+      return one !== undefined && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(one) && Math.abs(n) < 1e15 ? one : undefined;
+    }
+    case "DATE":
+    case "DATERANGE":
+      return one !== undefined && isIsoDate(one) ? one : undefined;
+    default: // TEXT
+      return one !== undefined && one.length <= 500 ? one : undefined;
+  }
+}
+// Record an input's default and apply its URL seed (first run only, while the
+// variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
+function seedInputFromUrl(kind, names, rows) {
+  for (const name of names) {
+    const options = kind === "DROPDOWN" || kind === "MULTISELECT" ? rows.map((r) => String(r[name])) : null;
+    dpVarDefault[name] = JSON.stringify(
+      kind === "DROPDOWN" ? options[0] : kind === "MULTISELECT" ? options : String(rows[0][name] ?? "")
+    );
+    const vals = dpUrlSeed[name];
+    if (!vals) continue;
+    delete dpUrlSeed[name];
+    const v = dpVars[name] === undefined ? validSeed(kind, vals, options) : undefined;
+    if (v !== undefined) dpVars[name] = v;
+  }
+}
+// Seeds left after the input pre-pass are selections: `selected` (the shared
+// click filter) or a named one (one value = text, several = a list; a table's
+// ::ROWSELECT mode fixes the shape when it renders). Returns true if any applied.
+function applySelectionSeeds() {
+  let any = false;
+  for (const [name, vals] of Object.entries(dpUrlSeed)) {
+    delete dpUrlSeed[name];
+    if (vals.some((v) => v.length > 500)) continue;
+    if (name === "selected") {
+      dpFilter = vals[0] || "";
+      dpSelected = dpFilter || null;
+    } else {
+      dpXf[name] = vals.length > 1 ? vals : vals[0];
+      dpSeeded.add(name);
+    }
+    any = true;
+  }
+  return any;
+}
+// A seeded named selection whose table turned out to be 'multi' (or 'single')
+// takes that shape; the dashboard re-runs once with it.
+function coerceSeededSelection(name, mode) {
+  if (!dpSeeded.delete(name)) return;
+  const v = dpXf[name];
+  if (mode === "multi" && typeof v === "string") dpXf[name] = v ? [v] : [];
+  else if (mode === "single" && Array.isArray(v)) dpXf[name] = v[0] ?? "";
+  else return;
+  dpSeedRerun = true;
+}
+// The cross-filter variables — the generic `selected` (last click) plus any
+// NAMED cross-filters (each table emits getvariable('<its first column>') so two
+// tables give two independent live selections). Unset named vars read as NULL,
+// so targets guard with COALESCE(getvariable('name'),'').
+async function setSelectionVars() {
+  try {
+    await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
+    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+    for (const [k, v] of Object.entries(dpXf)) {
+      if (URL_VAR_RE.test(k)) {
+        // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
+        const lit = Array.isArray(v) ? (v.length ? `[${v.map(q).join(", ")}]` : "[]::VARCHAR[]") : q(v);
+        await runSql(`SET VARIABLE ${k} = ${lit}`);
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+// The viewer state as `v.*` query parameters (inputs that differ from their
+// default, the live selections), merged into the current URL.
+function urlStateParams() {
+  const out = [];
+  const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
+  for (const [k, def] of Object.entries(dpVarDefault)) {
+    if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+  }
+  if (dpFilter) add("selected", dpFilter);
+  for (const [k, v] of Object.entries(dpXf)) {
+    if (k in dpVarDefault || v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    add(k, v);
+  }
+  return out;
+}
+function syncUrlState() {
+  try {
+    const u = new URL(location.href);
+    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.")) u.searchParams.delete(k);
+    for (const [k, v] of urlStateParams()) u.searchParams.append(k, v);
+    if (u.href !== location.href) history.replaceState(null, "", u);
+  } catch (_) {}
+}
+
 // A full-view loading spinner shown while queries are in flight (body.loading is
 // toggled by run(), including a series-change re-run). Injected once.
 function installSpinner() {
@@ -2221,23 +2364,7 @@ async function runOnce(fresh = true) {
     return showError(grid, String(e));
   }
 
-  // Cross-filter values — the generic `selected` (last click) plus any NAMED
-  // cross-filters (each table emits getvariable('<its first column>') so two
-  // tables give two independent live selections). Unset named vars read as NULL,
-  // so targets guard with COALESCE(getvariable('name'),'').
-  try {
-    await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
-    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
-    for (const [k, v] of Object.entries(dpXf)) {
-      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-        // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
-        const lit = Array.isArray(v) ? (v.length ? `[${v.map(q).join(", ")}]` : "[]::VARCHAR[]") : q(v);
-        await runSql(`SET VARIABLE ${k} = ${lit}`);
-      }
-    }
-  } catch (e) {
-    /* ignore */
-  }
+  await setSelectionVars();
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
   // caching options for the render pass by statement index. Chrome directives
@@ -2285,6 +2412,7 @@ async function runOnce(fresh = true) {
           const keys = Object.keys(rows[0]);
           const fk = keys[0];
           const tk = keys[1] || keys[0];
+          seedInputFromUrl(kind, [fk, tk], rows);
           if (dpVars[fk] === undefined) dpVars[fk] = String(rows[0][fk] ?? "");
           if (dpVars[tk] === undefined) dpVars[tk] = String(rows[0][tk] ?? "");
           dd[i] = { kind, varnames: [fk, tk], caption };
@@ -2293,6 +2421,7 @@ async function runOnce(fresh = true) {
           continue;
         }
         const varname = Object.keys(rows[0])[0];
+        seedInputFromUrl(kind, [varname], rows);
         let lit;
         if (kind === "DROPDOWN") {
           const options = rows.map((r) => String(r[varname]));
@@ -2321,6 +2450,9 @@ async function runOnce(fresh = true) {
       showError(newGrid, `${s.sql}\n\n${e}`);
     }
   }
+
+  // URL seeds no input claimed are selections (`v.selected`, named ones).
+  if (applySelectionSeeds()) await setSelectionVars();
 
   // The theme (and its light/dark variant) for this run: CSS tokens on the
   // page, the wasm render context for every panel.
@@ -2925,6 +3057,11 @@ async function runOnce(fresh = true) {
   dash.append(credit);
   attachHover();
   addExportButtons();
+  syncUrlState();
+  if (dpSeedRerun) {
+    dpSeedRerun = false;
+    runQueued = runQueued ?? false;
+  }
   if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
   document.body.classList.remove("loading");
@@ -4413,6 +4550,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // and getvariable('<first column>') (click again / the background clears);
   // with 'multi' each click toggles the row in the list getvariable('<first column>').
   const k0 = cols[0];
+  if (k0 != null) coerceSeededSelection(k0, selMode);
   function renderRow(tr, r, repeat = false) {
     const vc = visCols();
     const selectable = selMode !== "none" && k0 != null && !info[k0].numeric;
@@ -5461,9 +5599,14 @@ function shareLink(e) {
   const encoded = encodeSql($("sql").value);
   const editable = e && e.shiftKey;
   const base = location.origin + location.pathname;
-  const url = editable
-    ? base + "#sql=" + encoded
-    : base + "?embed=1#sql=" + encoded;
+  // The view travels too: the open tab and the viewer state (?v.* inputs and
+  // selections), so the recipient lands on exactly this view.
+  const q = new URLSearchParams(editable ? "" : "embed=1");
+  const tab = new URLSearchParams(location.search).get("tab");
+  if (tab) q.set("tab", tab);
+  for (const [k, v] of urlStateParams()) q.append(k, v);
+  const qs = q.toString();
+  const url = base + (qs ? "?" + qs : "") + "#sql=" + encoded;
   navigator.clipboard.writeText(url).then(
     () => status(editable ? "editable link copied ✓" : "view-only link copied ✓"),
     () => {

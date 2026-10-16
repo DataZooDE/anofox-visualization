@@ -622,7 +622,8 @@ own page around exported SVGs).
 - Every chart/table panel has a hover **⤓** button — charts download as **PNG**,
   tables as **CSV**.
 - **Share** copies a link with the whole dashboard SQL encoded in the URL hash
-  (no server) — open it to reproduce the dashboard.
+  (no server) plus the open tab and the viewer state (`?v.*`, see *Viewer
+  state in the URL*) — open it to reproduce exactly that view.
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
   file (interactive hover + tabs, no server).
 
@@ -696,6 +697,31 @@ SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku;
 SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
 WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
 ```
+
+#### Viewer state in the URL
+
+The URL carries the view: `?tab=<name>` opens a tab and `?v.<name>=<value>`
+seeds a variable — an input's value, the shared `selected`, or a named
+selection. After every change the address bar is rewritten (no reload) with the
+inputs that differ from their defaults and the live selections, so a reload, a
+bookmark or **Share** restores the same view.
+
+| Parameter | Seeds |
+|---|---|
+| `?v.region=EU` | a `::DROPDOWN` — only if `EU` is one of its options |
+| `?v.channel=app&v.channel=web` | a `::MULTISELECT` (repeat the key; `?v.channel=` = none) — unknown values are dropped |
+| `?v.min_n=20` | a `::NUMBER` — a finite number |
+| `?v.since=2024-02-01` | a `::DATE` / either end of a `::DATERANGE` — a real calendar date |
+| `?v.note=promo` | a `::TEXT` (≤ 500 characters) |
+| `?v.selected=web` | the shared click cross-filter |
+| `?v.sku=SKU-A&v.sku=SKU-C` | a named selection (a `::ROWSELECT` table's first column, a chart's `::SELECT_AS`) |
+
+A value that fails its input's check is ignored (the input keeps its default).
+Only variable **values** travel, never SQL: on a locked server
+(`anofox_serve_dashboards`, `/d/<id>?v.region=EU`) they are bound as typed
+literals like any input change, so an embedding app or another dashboard can
+open a dashboard pre-filtered. Example:
+`?dashboard=Filters%20%26%20inputs&tab=Cross-filter&v.sku=SKU-A&v.market=EU`.
 
 ### Tables
 

@@ -78,6 +78,7 @@ A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue
 
 - The **output column name of an input is a DuckDB variable**: `SELECT region AS region ::DROPDOWN FROM t GROUP BY 1 ORDER BY 1;` → `getvariable('region')`. A `::MULTISELECT` is a list: `list_contains(getvariable('channel'), channel)`; "nothing selected = all": `(len(getvariable('channel')) = 0 OR list_contains(getvariable('channel'), channel))`.
 - An input's caption is its variable name unless a `::LABEL` column gives one: `SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;`.
+- **The URL is the view**: `?tab=<name>` opens a tab, `?v.<name>=<value>` seeds a variable (an input — only a valid option / number / date —, `selected`, or a named selection; repeat the key for a list: `?v.channel=app&v.channel=web`). The address bar follows every change and **Share** includes it, so a link restores the exact view; use it to link one dashboard to another pre-filtered.
 - **Cross-filter**: a click on a chart mark sets `getvariable('selected')`. **Table rows are clickable only when the table opts in** (`'none'` is the default) with a `::ROWSELECT` directive before it: `SELECT 'single'::ROWSELECT;` (a click sets `getvariable('selected')` and `getvariable('<first column>')`) or `SELECT 'multi'::ROWSELECT;` (rows get check marks; `getvariable('<first column>')` is a list — guard with `len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku)`). Without it rows are not selectable. Panels opt in: `WHERE COALESCE(getvariable('selected'), '') IN ('', channel)` (`''` = nothing clicked; the browser starts with `''`, `--check` and `serve` with the variable unset, so keep the `COALESCE`). Sources (comparison charts) should not filter themselves; targets do. Put the key column first in a table.
 - Inputs, tabs, downloads and cross-filter work in the browser builder and `serve`; the static `dashboard file.sql` render skips them.
 
@@ -335,6 +336,6 @@ These silently break a panel (it renders wrong or vanishes):
 | Static HTML | `dashboard file.sql [out.html]` (inputs, tabs and directives are skipped) |
 | Browser builder | the live demo or `web/` (DuckDB-Wasm, no server): paste the script, **Run**; **Share** puts the SQL in the URL, **⤓ HTML** saves a standalone file |
 | Live DuckDB, authoring | `SELECT anofox_serve(8080);` (from-source build) or the `serve <db>` binary |
-| To consumers, locked | `SELECT anofox_serve_dashboards('<dir>', 8095);` — each `.sql` file of the folder is a page `/d/<name>` with a shared nav bar; `::TAB` pages deep-link via `?tab=<name>` |
+| To consumers, locked | `SELECT anofox_serve_dashboards('<dir>', 8095);` — each `.sql` file of the folder is a page `/d/<name>` with a shared nav bar; `::TAB` pages deep-link via `?tab=<name>`; `?v.<variable>=<value>` pre-sets an input or a selection (validated against the input's options) |
 
 Trust model, options and limits: the serving skill.
