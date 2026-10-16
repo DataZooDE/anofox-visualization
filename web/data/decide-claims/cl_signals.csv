@@ -1,0 +1,9 @@
+signal,source,w_hit,w_miss,platt
+large_loss,rule,1.0993242858501997,-0.043806859219491345,
+late_report,rule,1.1481144500196314,-0.25482304992335547,
+new_policy,rule,1.4993693264890244,-0.6401667548320991,
+no_evidence,description,,,"platt:0.840368124,-4.1528851"
+pressure,description,,,"platt:0.751659503,-0.245674623"
+recent,description,,,"platt:0.659225426,-1.115614"
+repeat_claimant,rule,1.2601396374231904,-0.5986670239253462,
+suspicious,description,,,"platt:0.221130173,-1.58237618"
