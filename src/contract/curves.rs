@@ -99,6 +99,15 @@ fn diagonal(plot: GGPlot) -> GGPlot {
     })
 }
 
+/// An AUC with 2 decimals, more when that would round a near-perfect one up
+/// to 1.00 (0.9952 → "0.995", not "1.00").
+fn auc_text(a: f64) -> String {
+    (2..=4)
+        .map(|d| format!("{a:.d$}"))
+        .find(|t| a >= 1.0 || !t.starts_with("1."))
+        .unwrap_or_else(|| format!("{a:.4}"))
+}
+
 pub(super) fn roc(
     t: &Table,
     options: &Row,
@@ -128,10 +137,11 @@ pub(super) fn roc(
                         .collect();
                     auc(&pts)
                 });
+            let a = auc_text(a);
             if k.is_empty() {
-                format!("AUC {a:.2}")
+                format!("AUC {a}")
             } else {
-                format!("{k} · AUC {a:.2}")
+                format!("{k} · AUC {a}")
             }
         })
         .collect();

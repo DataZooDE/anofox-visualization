@@ -2,8 +2,9 @@
 //! (`docs/plans/integration-contract.md`): `terms`, `prediction`, `curve`,
 //! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
 //! `test` (`tests`: a comparison forest; `compare`: groups with significance
-//! brackets), partial-residual plots (`partial`) and an `auto` dispatch on the
-//! column signature.
+//! brackets), partial-residual plots (`partial`), point-in-time `events`
+//! (alarms, parameter changes) and an `auto` dispatch on the column
+//! signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -18,6 +19,7 @@ use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
 mod curves;
+mod events;
 mod look;
 mod names;
 mod stats;
@@ -40,6 +42,7 @@ pub const PLOTS: &[&str] = &[
     "tests",
     "compare",
     "partial",
+    "events",
     "auto",
 ];
 
@@ -150,6 +153,7 @@ pub(crate) fn render(
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
+        "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -491,6 +495,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "summary"
     } else if has("partial_residual") || has("x_residual") && has("y_residual") {
         "partial"
+    } else if (has("kind") || has("severity")) && (has("ds") || has("period")) {
+        "events"
     } else if has("p_value") || has("test_id") || has("statistic") && has("method") {
         "tests"
     } else {
@@ -502,8 +508,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
             "anofox_plot (anofox contract v{CONTRACT_VERSION}): the columns ({}) match no \
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
-             test (p_value / statistic, method) or partial residuals (term, x, \
-             partial_residual){}",
+             test (p_value / statistic, method), partial residuals (term, x, \
+             partial_residual) or events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -519,6 +525,7 @@ const SCHEMAS: &[(&str, &[&str])] = &[
     ("diagnostics", &["fitted", "residual"]),
     ("partial", &["term", "x", "partial_residual"]),
     ("tests", &["p_value"]),
+    ("events", &["ds", "kind"]),
 ];
 
 /// For an undetected table: the schema whose required columns are nearest —
@@ -1265,6 +1272,148 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("got a list"), "{e}");
+    }
+
+    /// Write `svg` under `$ANOFOX_DUMP/<name>.svg` for a visual check.
+    fn dump(name: &str, svg: &str) {
+        if let Ok(d) = std::env::var("ANOFOX_DUMP") {
+            let _ = std::fs::write(format!("{d}/{name}.svg"), svg);
+        }
+    }
+
+    #[test]
+    fn producer_outputs_plot() {
+        // statsforecast's wide forecast: a line per model, a nested fan.
+        let sf: String = format!(
+            "[{}]",
+            (1..=12)
+                .map(|h| {
+                    let a = 10.0 + h as f64 * 0.5;
+                    let e = 11.0 + h as f64 * 0.3;
+                    let w = 0.4 * (h as f64).sqrt();
+                    format!(
+                        r#"{{"unique_id":"A","ds":"2024-01-{h:02}","AutoARIMA":{a},"AutoARIMA-lo-80":{},"AutoARIMA-hi-80":{},"AutoARIMA-lo-95":{},"AutoARIMA-hi-95":{},"AutoETS":{e},"AutoETS-lo-95":{},"AutoETS-hi-95":{}}}"#,
+                        a - w,
+                        a + w,
+                        a - 2.0 * w,
+                        a + 2.0 * w,
+                        e - 2.0 * w,
+                        e + 2.0 * w
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let svg = go("auto", &sf, "{}").unwrap();
+        dump("statsforecast", &svg);
+        assert!(
+            svg.contains("AutoARIMA") && svg.contains("AutoETS"),
+            "models"
+        );
+        assert!(
+            svg.contains("bands (AutoARIMA): 80 %, 95 % intervals"),
+            "nested fan"
+        );
+        // level 95 and 0.95 are one level; conf_level 95 reads "95% CI".
+        let one = r#"[{"x":1,"yhat":1,"yhat_lower":0,"yhat_upper":2,"level":95},
+            {"x":1,"yhat":1,"yhat_lower":0,"yhat_upper":2,"level":0.95},
+            {"x":2,"yhat":2,"yhat_lower":1,"yhat_upper":3,"level":95}]"#;
+        assert!(!go("prediction", one, "{}").unwrap().contains("bands:"));
+        let terms = r#"[{"term":"a","estimate":1,"conf_low":0.5,"conf_high":1.5,"conf_level":95}]"#;
+        assert!(go("terms", terms, "{}").unwrap().contains("95% CI"));
+        // pingouin's CI95% LIST.
+        let pg = r#"[{"A":"a","B":"b","diff":1.0,"estimate":1.0,"p-unc":0.04,"CI95%":[0.2,1.8]}]"#;
+        assert!(go("tests", pg, "{}")
+            .unwrap()
+            .contains("difference (95% CI)"));
+        // The new metric directions mark the best model.
+        let glance = r#"[{"model_id":"a","metric":"mape","value":0.12},{"model_id":"b","metric":"mape","value":0.09},
+            {"model_id":"a","metric":"f1","value":0.7},{"model_id":"b","metric":"f1","value":0.8}]"#;
+        let svg = go("summary", glance, "{}").unwrap();
+        dump("summary_mape_f1", &svg);
+        assert!(svg.contains("MAPE") && svg.contains("F1"));
+        assert_eq!(super::stats::direction_of("MAPE"), 1.0);
+        assert_eq!(super::stats::direction_of("smape"), 1.0);
+        assert_eq!(super::stats::direction_of("brier"), 1.0);
+        assert_eq!(super::stats::direction_of("log_loss"), 1.0);
+        assert_eq!(super::stats::direction_of("auc"), -1.0);
+        assert_eq!(super::stats::direction_of("accuracy"), -1.0);
+        assert_eq!(super::stats::direction_of("f1"), -1.0);
+        // A near-perfect AUC keeps its digits.
+        let roc = r#"[{"curve_type":"roc","x":0,"y":0,"auc":0.9952},{"curve_type":"roc","x":0.01,"y":0.99,"auc":0.9952},
+            {"curve_type":"roc","x":1,"y":1,"auc":0.9952}]"#;
+        let svg = go("curve", roc, "{}").unwrap();
+        assert!(
+            svg.contains("AUC 0.995") && !svg.contains("AUC 1.00"),
+            "{svg}"
+        );
+    }
+
+    const ALARMS: &str = r#"[
+        {"period":4,"kind":"stockout","label":"on hand 0","severity":"alarm","value":0,"threshold":5,"series":"SKU-1"},
+        {"period":9,"kind":"drift","label":"CUSUM","severity":"warning","value":4.2,"threshold":4,"series":"SKU-1"},
+        {"period":12,"kind":"recalibrated","label":"lead time 3 → 4","series":"SKU-2"}]"#;
+
+    #[test]
+    fn events_overlay_and_timeline() {
+        // An integer-period prediction (no ds) with a nested fan and events.
+        let p: String = format!(
+            "[{}]",
+            (1..=16)
+                .flat_map(|i| {
+                    let y = if i <= 8 { format!("{}", 20 - i) } else { "null".into() };
+                    [(0.8, 2.0), (0.95, 3.5)].map(|(l, w)| {
+                        format!(
+                            r#"{{"period":{i},"y":{y},"yhat":{},"yhat_lower":{},"yhat_upper":{},"level":{l}}}"#,
+                            20 - i,
+                            20.0 - i as f64 - w,
+                            20.0 - i as f64 + w
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let opts = format!(r#"{{"events":{ALARMS}}}"#);
+        let svg = go("prediction", &p, &opts).unwrap();
+        dump("prediction_events", &svg);
+        assert!(svg.contains(">period</text>"), "x axis is the period");
+        assert!(svg.contains("bands: 80 %, 95 % intervals"));
+        assert!(
+            svg.contains("events: 1 alarm (red), 1 warning (amber), 1 event (grey)"),
+            "{svg}"
+        );
+        assert!(svg.contains("alarm · stockout · SKU-1: on hand 0 0 (threshold 5)"));
+        // The events as JSON text (a subquery argument) work the same.
+        let text = serde_json::json!({ "events": ALARMS }).to_string();
+        assert!(go("prediction", &p, &text)
+            .unwrap()
+            .contains("events: 1 alarm"));
+        // A date event on a period axis is refused.
+        let e = go(
+            "prediction",
+            &p,
+            r#"{"events":[{"ds":"2024-01-01","kind":"x"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("is a date but the prediction's x (`period`) is not"),
+            "{e}"
+        );
+        // On their own: a timeline, one lane per series; anofox_plot finds it.
+        assert_eq!(detect(&rows(ALARMS)).unwrap(), "events");
+        let svg = go("auto", ALARMS, "{}").unwrap();
+        dump("events", &svg);
+        assert!(svg.contains(">SKU-1</text>") && svg.contains(">SKU-2</text>"));
+        assert!(
+            svg.contains("alarm") && svg.contains("warning"),
+            "severity legend"
+        );
+        let e = go("events", r#"[{"kind":"x"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs an event time"), "{e}");
     }
 
     #[test]

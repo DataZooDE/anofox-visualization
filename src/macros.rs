@@ -159,12 +159,16 @@ c(term, estimate, conf_low, conf_high)",
     MacroSpec {
         name: "anofox_plot_prediction",
         params: &["tbl"],
-        named: &[("x", "NULL"), ("y", "NULL"), ("facet", "NULL"), ("band", "NULL"), ("kind", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
-        body: contract_body!("prediction", "'x', x, 'y', y, 'facet', facet, 'band', band, 'kind', kind, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        named: &[("x", "NULL"), ("y", "NULL"), ("facet", "NULL"), ("band", "NULL"), ("kind", "NULL"), ("events", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("prediction", "'x', x, 'y', y, 'facet', facet, 'band', band, 'kind', kind, 'events', events, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Fit / forecast plot of a `prediction` table: observed y as points, the yhat line and the \
-yhat_lower..yhat_upper band over x (or ds), split boundaries as labelled vertical lines (train/test/future; derived from is_training or a \
+yhat_lower..yhat_upper band over x (or ds, or an integer period), a nested fan when there are several `level`s, \
+split boundaries as labelled vertical lines (train/test/future; derived from is_training or a \
 missing y), or by model_id/model_name when there are several models. x := / y := name other columns (e.g. \
-x := 'x1' for a *_fit_predict_by output); several `id` series become panels (facet := overrides).",
+x := 'x1' for a *_fit_predict_by output); several `id` series become panels (facet := overrides). \
+events := (SELECT list(e) FROM alarms e) draws an `events` table (ds | period, kind, label, severity) as \
+vertical lines coloured by severity. statsforecast's wide <model>-lo-<L> / -hi-<L> columns are read as one \
+row per model and level.",
         example: "SELECT anofox_plot_prediction(p) FROM (VALUES (1, 1.0, 1.1, 0.9, 1.3), (2, 2.0, 1.9, 1.6, 2.2), \
 (3, NULL, 3.1, 2.6, 3.6)) p(x, y, yhat, yhat_lower, yhat_upper)",
         tags: &[("anofox.consumes", "prediction"), CONTRACT_TAG],
@@ -265,17 +269,30 @@ term's coefficient).",
         tags: &[("anofox.consumes", "partial_residuals"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_events",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
+        body: contract_body!("events", "'x', x, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Timeline of an `events` table (alarms, parameter changes, calibration proposals): a dot per \
+event at its ds (or integer period) in one lane per series (else per kind), coloured by severity (alarm red, \
+warning amber), with kind, label, value and threshold on hover. To draw the events over a forecast, pass them \
+to anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e)).",
+        example: "SELECT anofox_plot_events(e) FROM (VALUES (3, 'stockout', 'alarm', 'on hand 0'), \
+(7, 'drift', 'warning', 'CUSUM 4.2')) e(period, kind, severity, label)",
+        tags: &[("anofox.consumes", "events"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot",
         params: &["tbl"],
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
         body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
-metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests. Use the \
-specific anofox_plot_* macro for options.",
+metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests, \
+kind|severity + ds|period -> events. Use the specific anofox_plot_* macro for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
-            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals"),
+            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,events"),
             CONTRACT_TAG,
         ],
     },
