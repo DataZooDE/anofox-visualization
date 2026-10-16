@@ -1,5 +1,8 @@
 //! The `::PAGED` request SQL (rows, count, column filters, stats, profile, distinct) runs
-//! on a real DuckDB and returns what it should. Skips without a `duckdb` CLI.
+//! on a real DuckDB and returns what it should. Skips without a `duckdb` CLI
+//! (fails without one on CI, see `common::skip_without`).
+mod common;
+
 use anofox_visualization::host::serving::{page_sql_inline, parse_page};
 use std::process::Command;
 
@@ -30,7 +33,7 @@ fn run(page: &str) -> Option<serde_json::Value> {
 #[test]
 fn paged_requests_run_on_duckdb() {
     let Some(rows) = run(r#"{"limit":5,"offset":10,"sort":"amount","desc":true}"#) else {
-        eprintln!("skipped: no duckdb CLI");
+        common::skip_without("duckdb", "paged_requests_run_on_duckdb");
         return;
     };
     assert_eq!(rows.as_array().unwrap().len(), 5);
@@ -115,7 +118,7 @@ fn stats_ignore_text_that_reads_as_infinity() {
         duck(&page_sql_inline(base, &p))
     };
     let Some(out) = page(r#"{"stats":["h","k"]}"#) else {
-        eprintln!("skipped: no duckdb CLI");
+        common::skip_without("duckdb", "stats_ignore_text_that_reads_as_infinity");
         return;
     };
     let s: serde_json::Value = serde_json::from_str(&out).expect("stats are valid JSON");

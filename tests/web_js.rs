@@ -1,16 +1,15 @@
 //! Runs the browser regression tests under Node: `tests/web/sanitize_test.mjs`
 //! (escapeHtml / safeUrl / renderMarkdown from `web/app.js`) and
 //! `tests/web/svg_attrs_test.mjs` (the readers of ggplot-rs SVG metadata).
-//! Skipped (with a note) when `node` is not installed.
+//! Skipped (with a note) when `node` is not installed — except on CI, where
+//! that fails (`common::skip_without`).
+mod common;
 
 fn run_node(file: &str) {
     let script = format!("{}/tests/web/{file}", env!("CARGO_MANIFEST_DIR"));
     let out = match std::process::Command::new("node").arg(&script).output() {
         Ok(o) => o,
-        Err(_) => {
-            eprintln!("node not found — skipping {file}");
-            return;
-        }
+        Err(_) => return common::skip_without("node", file),
     };
     assert!(
         out.status.success(),
