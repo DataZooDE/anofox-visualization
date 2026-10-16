@@ -90,6 +90,19 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
                 ));
             }
             if rows.iter().any(|r| !r.is_object()) {
+                // A plot macro got a column instead of the row: the alias is
+                // also a column name (statsmodels' `t`), which hides the row.
+                if let Some(serde_json::Value::String(p)) = obj.get("plot") {
+                    let f = match p.as_str() {
+                        "auto" => "anofox_plot".to_string(),
+                        p => format!("anofox_plot_{p}"),
+                    };
+                    return Err(format!(
+                        "{f}: the argument is a column, not the row — pass the table alias \
+                         (SELECT {f}(r) FROM tbl AS r) and pick an alias that is not also a \
+                         column name"
+                    ));
+                }
                 return Err("anofox_render: every entry of 'rows' must be a JSON object".into());
             }
         }
@@ -181,6 +194,15 @@ mod tests {
         assert!(render_spec_checked(&OK.replace("320", "100000"), &l).is_err());
         assert!(render_spec_checked(&OK.replace("320", "-1"), &l).is_err());
         assert!(render_spec_bytes_checked(b"\xff\xfe", &l).is_err());
+    }
+
+    #[test]
+    fn column_instead_of_row() {
+        let l = RenderLimits::default();
+        let e = render_spec_checked(r#"{"plot":"terms","rows":[1.5,2.0]}"#, &l).unwrap_err();
+        assert!(e.contains("anofox_plot_terms(r) FROM tbl AS r"), "{e}");
+        let e = render_spec_checked(r#"{"plot":"auto","rows":[1.5]}"#, &l).unwrap_err();
+        assert!(e.starts_with("anofox_plot: "), "{e}");
     }
 
     #[test]

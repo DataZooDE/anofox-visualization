@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anofox-viz"
+version = "0.1.0"
+description = "Shape statsmodels / scikit-learn / scipy results into the anofox contract and plot them with the anofox_visualization DuckDB extension"
+readme = "README.md"
+license = "BUSL-1.1"
+requires-python = ">=3.9"
+dependencies = ["duckdb>=1.2", "numpy", "pandas"]
+
+[project.optional-dependencies]
+statsmodels = ["statsmodels"]
+sklearn = ["scikit-learn"]
+scipy = ["scipy"]
+test = ["pytest", "statsmodels", "scikit-learn", "scipy", "pyarrow", "polars"]
+
+[project.urls]
+Homepage = "https://github.com/DataZooDE/anofox-visualization"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
