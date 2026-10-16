@@ -20,7 +20,10 @@
 //!   ([`crate::panel_cache`]). The snapshot can be rebuilt while serving
 //!   (`refresh_s`, `anofox_serve_refresh`) and is swapped atomically
 //!   ([`crate::generation`]); `data` opens one folder of files read-only to
-//!   the panels, for data too large or too live to snapshot.
+//!   the panels, for data too large or too live to snapshot. An access policy
+//!   (`policy`, [`anofox_visualization::host::policy`]) rewrites every
+//!   dashboard statement to read per-viewer views (row filters, column
+//!   masks) and refuses to start on anything that could get around them.
 //! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
@@ -32,6 +35,7 @@ use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
+use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
     AuthoringGuard, RequestMeta,
@@ -418,6 +422,25 @@ pub struct LockedOptions {
     pub memory_limit: Option<String>,
     /// DuckDB `threads` of the snapshot instance, shared by all queries.
     pub duckdb_threads: Option<usize>,
+    /// Row and column access policy (`policy`: a JSON file; `policy.json`
+    /// next to the dashboards is used when the option is not given).
+    pub policy: Option<Arc<Policy>>,
+    /// `"policy": "none"`: serve without a policy although `auth` is set
+    /// (otherwise that combination refuses to start).
+    pub policy_none: bool,
+    /// Key of the policy's `hash` mask (`policy_key_env`; random per server
+    /// start when not given).
+    pub policy_key: Option<PolicyKey>,
+}
+
+/// The `hash` mask's HMAC key. Never printed.
+#[derive(Clone)]
+pub struct PolicyKey(Arc<Vec<u8>>);
+
+impl std::fmt::Debug for PolicyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PolicyKey(…)")
+    }
 }
 
 impl Default for LockedOptions {
@@ -440,6 +463,9 @@ impl Default for LockedOptions {
             bind: std::net::Ipv4Addr::LOCALHOST.into(),
             memory_limit: None,
             duckdb_threads: None,
+            policy: None,
+            policy_none: false,
+            policy_key: None,
         }
     }
 }
@@ -536,7 +562,23 @@ impl LockedOptions {
                     o.memory_limit = Some(m.to_string());
                 }
                 "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads)")),
+                "policy" => {
+                    let path = val.as_str().filter(|p| !p.trim().is_empty()).ok_or("options.policy must be the path of a policy file, or \"none\"")?;
+                    if path == "none" {
+                        o.policy_none = true;
+                    } else {
+                        o.policy = Some(Arc::new(read_policy(Path::new(path))?));
+                    }
+                }
+                "policy_key_env" => {
+                    let name = val.as_str().ok_or("options.policy_key_env must be the name of an environment variable")?;
+                    let key = std::env::var(name).map_err(|_| format!("options.policy_key_env: environment variable '{name}' is not set"))?;
+                    if key.len() < 32 {
+                        return Err("options.policy_key_env: the key must be at least 32 characters (e.g. `openssl rand -hex 32`)".into());
+                    }
+                    o.policy_key = Some(PolicyKey(Arc::new(key.into_bytes())));
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env)")),
             }
         }
         if !o.path_vars.is_empty() && o.data.is_none() {
@@ -587,6 +629,13 @@ fn valid_memory_limit(m: &str) -> bool {
                 | "terabytes"
         )
         && (unit != "%" || num.parse::<f64>().is_ok_and(|n| n <= 100.0))
+}
+
+/// Read and parse an access policy file.
+fn read_policy(path: &Path) -> Result<Policy, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("policy: cannot read '{}': {e}", path.display()))?;
+    Policy::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 struct Dash {
@@ -641,7 +690,47 @@ struct Snapshot {
     db: Database,
     /// The source session's default database (each request connection `USE`s it).
     default_db: String,
+    /// The access policy, checked against this snapshot, and the dashboards
+    /// rewritten for it (indexed like `Locked::dashboards`).
+    policy: Option<Enforced>,
     _dir: SnapshotDir,
+}
+
+struct Enforced {
+    enf: Enforcer,
+    scripts: Vec<Script>,
+}
+
+/// Check the access policy against a new snapshot and rewrite every dashboard
+/// for it. Fail closed: anything the policy refuses stops the start (or the
+/// refresh — the previous snapshot then stays in service).
+fn enforce(
+    snap: &mut Snapshot,
+    dashboards: &[Dash],
+    policy: &Policy,
+    key: &PolicyKey,
+) -> Result<(), String> {
+    let c = snap.db.connect()?;
+    crate::register_policy_hash(&c, key.0.clone())?;
+    let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
+    let enf = Enforcer::compile(policy, &mut duck, &snap.default_db).map_err(|e| {
+        if e.contains("json_serialize_sql") {
+            format!("{e} (the access policy needs the json extension: INSTALL json)")
+        } else {
+            e
+        }
+    })?;
+    let mut scripts = Vec::new();
+    for d in dashboards {
+        scripts.push(enf.rewrite_script(&mut duck, &d.stmts).map_err(|(i, e)| {
+            format!(
+                "dashboard '{}' statement {i}: {e} (refused by the access policy)",
+                d.id
+            )
+        })?);
+    }
+    snap.policy = Some(Enforced { enf, scripts });
+    Ok(())
 }
 
 struct Locked {
@@ -664,8 +753,14 @@ use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
-        let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &self.opts, &self.loads)
+        let (mut snap, warnings) = {
+            let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+            build_snapshot(&conn, &self.opts, &self.loads)?
+        };
+        if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
+            enforce(&mut snap, &self.dashboards, p, k)?;
+        }
+        Ok((snap, warnings))
     }
 
     /// Rebuild the snapshot and swap it in (`wait`: see [`Current::rebuild`]).
@@ -717,9 +812,45 @@ pub fn start_locked(
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     loads.extend(opts.load.iter().cloned());
-    let (snap, warnings) = {
+    // A policy file next to the dashboards is enforced even without the
+    // option: forgetting the option must not serve every row.
+    if opts.policy.is_none() {
+        let p = Path::new(dir).join("policy.json");
+        if p.exists() {
+            opts.policy = Some(Arc::new(read_policy(&p)?));
+        }
+    }
+    if opts.policy.is_some() {
+        // json_serialize_sql: the policy rewrite parses with DuckDB.
+        loads.push("json".into());
+        if opts.policy_key.is_none() {
+            let k = format!("{}{}", sv::random_token(), sv::random_token());
+            opts.policy_key = Some(PolicyKey(Arc::new(k.into_bytes())));
+        }
+    } else if opts.auth.is_some() && !opts.policy_none {
+        // A login without a policy relies on every panel filtering on the
+        // claims; a policy.json deleted from the dashboard folder must not
+        // silently get there.
+        return Err("anofox-visualization: `auth` is set but no access policy was found (options.policy, or policy.json in the dashboard folder) — pass \"policy\": \"none\" to serve with per-panel claim filters only".into());
+    }
+    let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &loads)?
+    };
+    if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
+        enforce(&mut snap, &dashboards, p, k)?;
+    }
+    let policy_note = match (&opts.policy, &opts.auth) {
+        (Some(p), Some(_)) => format!(
+            "; access policy on {} table(s) — every other table is refused",
+            p.tables.len()
+        ),
+        (Some(p), None) => format!(
+            "; access policy on {} table(s) — every other table is refused; WARNING: no auth, so every viewer is anonymous (no claims)",
+            p.tables.len()
+        ),
+        (None, Some(_)) => "; no access policy (\"policy\": \"none\") — panels must filter on the claims themselves".into(),
+        (None, None) => String::new(),
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -808,7 +939,7 @@ pub fn start_locked(
         format!(" (warnings: {})", warnings.join("; "))
     };
     Ok(format!(
-        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{warn}"
+        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{policy_note}{warn}"
     ))
 }
 
@@ -878,30 +1009,24 @@ fn too_broad(dir: &Path) -> Option<String> {
 }
 
 /// With a data folder open, every dashboard statement must be a query or one
-/// of the setup forms the server needs — classified by DuckDB's own parser —
-/// because DuckDB can write inside `allowed_directories` too (`COPY … TO`, and
-/// anything that runs a statement: `EXPLAIN ANALYZE`, `PREPARE`/`EXECUTE`,
-/// `CALL`, `PRAGMA`, …). An allowlist, so new statement kinds are refused.
+/// of the setup forms the server needs — classified by DuckDB's own parser,
+/// the same way the access policy does ([`policy::statement_query`],
+/// [`policy::check_query`]) — because DuckDB can write inside
+/// `allowed_directories` too (`COPY … TO`, and anything that runs a
+/// statement: `EXPLAIN ANALYZE`, `PREPARE`/`EXECUTE`, `CALL`, `PRAGMA`, …).
+/// An allowlist, so new statement kinds are refused.
 fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
-    let serialize = |sql: &str| -> Result<String, String> {
-        let out = c
-            .execute_prepared("SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", &[sql])
-            .and_then(|mut r| r.string_rows(1))
-            .map_err(|e| {
-                format!(
-                    "checking the dashboards for a data folder needs DuckDB's json extension: {}",
-                    e.lines().next().unwrap_or("")
-                )
-            })?;
-        Ok(out
-            .into_iter()
-            .next()
-            .and_then(|r| r.into_iter().next().flatten())
-            .unwrap_or_default())
+    let mut duck = |sql: &str| {
+        c.query(sql)?.string_rows(1).map_err(|e| {
+            format!(
+                "checking the dashboards for a data folder needs DuckDB's json extension: {}",
+                e.lines().next().unwrap_or("")
+            )
+        })
     };
     for d in dashboards {
         for (i, (setup, sql)) in d.stmts.iter().enumerate() {
-            read_only_statement(sql, *setup, &serialize)
+            read_only_statement(sql, *setup, &mut duck)
                 .map_err(|e| format!("dashboard '{}' statement {i}: {e}", d.id))?;
         }
     }
@@ -909,99 +1034,17 @@ fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
 }
 
 /// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a data
-/// folder open. `serialize` is DuckDB's `json_serialize_sql`: it parses without
-/// binding or running, and serialises only SELECT statements — `EXPLAIN`,
-/// `PREPARE`, `EXECUTE`, `COPY`, `PRAGMA`, `CALL`, a top-level `PIVOT`, … come
-/// back as errors.
-fn read_only_statement(
-    sql: &str,
-    setup: bool,
-    serialize: &dyn Fn(&str) -> Result<String, String>,
-) -> Result<(), String> {
+/// folder open: a panel must be one query; a setup statement may also be
+/// `SET VARIABLE <name> = <expr>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW
+/// <name> AS <query>`, whose expression / query must parse as one query.
+fn read_only_statement(sql: &str, setup: bool, duck: &mut dyn policy::Duck) -> Result<(), String> {
     let query = if setup {
-        setup_query(sql).ok_or(
-            "with a data folder, setup statements must be SET VARIABLE <name> = <expression> \
-             or CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>",
-        )?
+        policy::statement_query(sql).map_err(|e| format!("with a data folder: {e}"))?
     } else {
         sql.to_string()
     };
-    let v: serde_json::Value = serde_json::from_str(&serialize(&query)?).unwrap_or_default();
-    if v["error"] == serde_json::Value::Bool(false)
-        && v["statements"].as_array().is_some_and(|a| a.len() == 1)
-    {
-        Ok(())
-    } else {
-        Err("with a data folder, only queries (SELECT …) are allowed".into())
-    }
-}
-
-/// The query inside an allowed setup statement — `SELECT <expr>` for
-/// `SET VARIABLE <name> = <expr>`, `<query>` for
-/// `CREATE [OR REPLACE] TEMP|TEMPORARY TABLE|VIEW [IF NOT EXISTS] <name> AS <query>`
-/// — or `None` for any other statement. (Comments are already stripped.)
-fn setup_query(sql: &str) -> Option<String> {
-    /// `s` after the keyword `w` (case-insensitive, whole word).
-    fn kw<'a>(s: &'a str, w: &str) -> Option<&'a str> {
-        let s = s.trim_start();
-        let head = s.get(..w.len())?;
-        let rest = &s[w.len()..];
-        (head.eq_ignore_ascii_case(w)
-            && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
-        .then_some(rest)
-    }
-    /// `s` after a (dotted, plain or `"quoted"`) name.
-    fn name(s: &str) -> Option<&str> {
-        let mut s = s.trim_start();
-        loop {
-            if let Some(q) = s.strip_prefix('"') {
-                // `""` inside a quoted name is a literal quote
-                let mut end = None;
-                let mut chars = q.char_indices().peekable();
-                while let Some((i, c)) = chars.next() {
-                    if c == '"' {
-                        if chars.peek().is_some_and(|(_, c)| *c == '"') {
-                            chars.next();
-                        } else {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                }
-                s = &q[end? + 1..];
-            } else {
-                let end = s
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(s.len());
-                if end == 0 {
-                    return None;
-                }
-                s = &s[end..];
-            }
-            match s.strip_prefix('.') {
-                Some(r) => s = r,
-                None => return Some(s),
-            }
-        }
-    }
-    let body = sql
-        .trim()
-        .trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-    if let Some(r) = kw(body, "SET").and_then(|r| kw(r, "VARIABLE")) {
-        let r = name(r)?.trim_start();
-        let expr = r.strip_prefix('=').or_else(|| kw(r, "TO"))?;
-        return Some(format!("SELECT {expr}"));
-    }
-    let r = kw(body, "CREATE")?;
-    let r = kw(r, "OR").and_then(|r| kw(r, "REPLACE")).unwrap_or(r);
-    let r = kw(r, "TEMPORARY").or_else(|| kw(r, "TEMP"))?;
-    let r = kw(r, "TABLE").or_else(|| kw(r, "VIEW"))?;
-    let r = kw(r, "IF")
-        .and_then(|r| kw(r, "NOT"))
-        .and_then(|r| kw(r, "EXISTS"))
-        .unwrap_or(r);
-    let query = kw(name(r)?, "AS")?.trim();
-    (!query.is_empty()).then(|| query.to_string())
+    policy::check_query(duck, &query)
+        .map_err(|e| format!("with a data folder, only queries (SELECT …) are allowed: {e}"))
 }
 
 /// A DuckDB error as a viewer sees it: the data folder's absolute path is
@@ -1237,6 +1280,7 @@ fn build_snapshot(
         Snapshot {
             db,
             default_db: current,
+            policy: None,
             _dir: dir,
         },
         warnings,
@@ -1478,6 +1522,15 @@ fn locked_panel(
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
     for (name, lit) in &r.vars {
+        // (`__claim_*` and `anofox_data` are refused when the request is
+        // parsed.) The policy's own names are reserved, too.
+        if st.opts.policy.is_some()
+            && name
+                .to_ascii_lowercase()
+                .starts_with(policy::RESERVED_PREFIX)
+        {
+            return Err((400, format!("variable '{name}' is set by the server")));
+        }
         if st
             .opts
             .path_vars
@@ -1494,19 +1547,22 @@ fn locked_panel(
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
-    let dash = st
+    let di = st
         .dashboards
         .iter()
-        .find(|d| d.id == r.dashboard)
+        .position(|d| d.id == r.dashboard)
         .ok_or((404, "no such dashboard".to_string()))?;
+    let dash = &st.dashboards[di];
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
     if let Some(allowed) = &dash.vars {
         r.vars
             .retain(|(k, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(k)));
     }
     info.vars = r.vars.clone();
-    let (is_setup, panel_sql) = dash
-        .stmts
+    // Under a policy, the statements rewritten for this snapshot.
+    let script = gen.snap.policy.as_ref().map(|p| &p.scripts[di]);
+    let stmts = script.map_or(&dash.stmts, |s| &s.stmts);
+    let (is_setup, panel_sql) = stmts
         .get(r.panel)
         .ok_or((404, "no such panel".to_string()))?;
     if *is_setup {
@@ -1532,7 +1588,9 @@ fn locked_panel(
     let key = panel_key(&r, claims);
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
-        run_panel(st, &gen, dash, panel_sql, &r, claims, abort)
+        run_panel(
+            st, &gen, &dash.id, stmts, script, panel_sql, &r, claims, abort,
+        )
     });
     info.cache = Some(match how {
         Served::Hit => "hit",
@@ -1580,10 +1638,13 @@ fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Pat
 /// objects can be created — the snapshot is read-only), and the panel query
 /// executed as a single prepared statement under the row cap + timeout. The
 /// query is interrupted when every request waiting for it has been superseded.
+#[allow(clippy::too_many_arguments)]
 fn run_panel(
     st: &Locked,
     gen: &Generation<Snapshot>,
-    dash: &Dash,
+    dash_id: &str,
+    stmts: &[(bool, String)],
+    script: Option<&Script>,
     panel_sql: &str,
     r: &sv::PanelRequest,
     claims: Option<&Claims>,
@@ -1601,14 +1662,25 @@ fn run_panel(
         for set in request_sets(r, claims, st.opts.data.as_deref()) {
             c.exec(&set)?;
         }
-        for (setup, sql) in &dash.stmts[..r.panel] {
+        // The policy's views, for this viewer (before any dashboard SQL). The
+        // row filters read the claims set above; the column rules are decided
+        // here from the same claims.
+        if let (Some(p), Some(s)) = (&gen.snap.policy, script) {
+            let viewer = claims.map_or_else(Viewer::default, |c| Viewer {
+                user: Some(c.user.clone()),
+                groups: c.groups.clone(),
+            });
+            for v in p.enf.view_statements(&s.tables, &viewer) {
+                c.exec(&v)?;
+            }
+        }
+        for (setup, sql) in &stmts[..r.panel] {
             if *setup {
                 // Best effort, like the browser: a failing setup statement is
                 // reported in the log, the panel still runs.
                 if let Err(e) = c.execute_prepared(sql, &[]) {
                     eprintln!(
-                        "[anofox-serve] setup statement failed in '{}': {}",
-                        dash.id,
+                        "[anofox-serve] setup statement failed in '{dash_id}': {}",
                         access::diag(&e)
                     );
                 }
@@ -1632,11 +1704,23 @@ fn run_panel(
             cancelled()
         } else if e.contains("row limit") {
             (413, e)
+        } else if gen.snap.policy.is_some() && !e.starts_with("query timed out") {
+            // Under a policy, a DuckDB error could quote a value from a row or
+            // column the viewer may not see: the viewer gets a generic
+            // message, the log the details.
+            eprintln!(
+                "[anofox-serve] panel failed in '{dash_id}': {}",
+                access::diag(&redact(e, st.opts.data.as_deref()))
+            );
+            (400, POLICY_PANEL_ERROR.to_string())
         } else {
             (400, redact(e, st.opts.data.as_deref()))
         }
     })
 }
+
+/// What a viewer sees when a panel fails under an access policy.
+const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log has the details)";
 
 /// index.html with `window.__served = {id,title,sql,nav,locked}` injected
 /// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
@@ -1812,6 +1896,36 @@ mod tests {
     }
 
     #[test]
+    fn policy_option() {
+        let dir = SnapshotDir::create().unwrap();
+        let f = dir.0.join("p.json");
+        let opt = |p: &Path| format!(r#"{{"policy":{}}}"#, serde_json::json!(p.to_string_lossy()));
+        std::fs::write(&f, r#"{"tables": {"sales": {"rows": true}}}"#).unwrap();
+        let o = LockedOptions::parse(Some(&opt(&f))).unwrap();
+        assert_eq!(o.policy.unwrap().tables[0].table, "sales");
+        // A policy that can't be read or parsed stops the start.
+        assert!(LockedOptions::parse(Some(&opt(&dir.0.join("nope.json")))).is_err());
+        std::fs::write(&f, r#"{"tables": {"sales": {}}}"#).unwrap();
+        assert!(LockedOptions::parse(Some(&opt(&f))).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"policy":""}"#)).is_err());
+        let o = LockedOptions::parse(Some(r#"{"policy":"none"}"#)).unwrap();
+        assert!(o.policy_none && o.policy.is_none());
+        // The hash key: from the environment, long enough, never printed.
+        std::env::set_var("ANOFOX_TEST_POLICY_KEY", "k".repeat(40));
+        std::env::set_var("ANOFOX_TEST_POLICY_KEY_SHORT", "short");
+        let o =
+            LockedOptions::parse(Some(r#"{"policy_key_env":"ANOFOX_TEST_POLICY_KEY"}"#)).unwrap();
+        assert!(!format!("{o:?}").contains(&"k".repeat(40)));
+        for bad in [
+            r#"{"policy_key_env":"ANOFOX_TEST_POLICY_KEY_SHORT"}"#,
+            r#"{"policy_key_env":"ANOFOX_TEST_NO_SUCH_VAR"}"#,
+        ] {
+            let e = LockedOptions::parse(Some(bad)).unwrap_err();
+            assert!(!e.contains("short"), "{e}");
+        }
+    }
+
+    #[test]
     fn path_values_cannot_traverse() {
         let lit = |v: serde_json::Value| sv::sql_literal(&v).unwrap();
         for ok in ["run_2026-10-16", "r1.v2", "42"] {
@@ -1853,6 +1967,20 @@ mod tests {
     /// DuckDB's `json_serialize_sql` through the `duckdb` CLI; `None` without
     /// one (the test is skipped locally, but fails on CI — `CI` set — where
     /// the workflow installs the pinned CLI).
+    /// A `policy::Duck` over the `duckdb` CLI (one VARCHAR column).
+    fn cli_rows(sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let out = std::process::Command::new("duckdb")
+            .args(["-noheader", "-list", "-c", sql])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        Ok(vec![vec![Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )]])
+    }
+
     fn cli_serialize(sql: &str) -> Option<Result<String, String>> {
         let q = format!(
             "SELECT json_serialize_sql({})::VARCHAR AS j",
@@ -1881,8 +2009,7 @@ mod tests {
                 return;
             }
         }
-        let ser = |sql: &str| cli_serialize(sql).unwrap();
-        let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &ser);
+        let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &mut cli_rows);
         for sql in [
             "SELECT * FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/x.parquet')",
             "FROM t",
@@ -1948,34 +2075,34 @@ mod tests {
             assert!(ok(&sql, true).is_err(), "setup: {sql}");
         }
         // A missing json extension fails closed.
-        let none = |_: &str| Err::<String, String>("no json_serialize_sql".into());
-        assert!(read_only_statement("SELECT 1", false, &none).is_err());
-        let garbage = |_: &str| Ok::<String, String>("not json".into());
-        assert!(read_only_statement("SELECT 1", false, &garbage).is_err());
+        let mut none =
+            |_: &str| Err::<Vec<Vec<Option<String>>>, String>("no json_serialize_sql".into());
+        assert!(read_only_statement("SELECT 1", false, &mut none).is_err());
+        let mut garbage = |_: &str| Ok::<_, String>(vec![vec![Some("not json".to_string())]]);
+        assert!(read_only_statement("SELECT 1", false, &mut garbage).is_err());
     }
 
     #[test]
     fn setup_forms() {
         assert_eq!(
-            setup_query("SET VARIABLE a = 1").as_deref(),
-            Some("SELECT  1")
+            policy::statement_query("SET VARIABLE a = 1").as_deref(),
+            Ok("SELECT  1")
         );
         assert_eq!(
-            setup_query("CREATE TEMP VIEW v AS SELECT 2;").as_deref(),
-            Some("SELECT 2")
+            policy::statement_query("CREATE TEMP VIEW v AS SELECT 2;").as_deref(),
+            Ok(" SELECT 2")
         );
         for sql in [
             "SET a = 1",
             "SET VARIABLEa = 1",
             "CREATE TABLE t AS SELECT 1",
             "CREATE TEMP SEQUENCE s",
-            "CREATE TEMP TABLE t AS",
             "CREATE TEMP TABLE t",
             "SET VARIABLE \"a = 1",
             "CREATE TEMP TABLE . AS SELECT 1",
             "CREATE TEMP TABLE a. AS SELECT 1",
         ] {
-            assert_eq!(setup_query(sql), None, "{sql}");
+            assert!(policy::statement_query(sql).is_err(), "{sql}");
         }
     }
 

@@ -52,6 +52,9 @@ pub struct Diagnostic {
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
+    /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
+    /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
+    /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -925,6 +928,84 @@ where
         }
     }
 
+    diags
+}
+
+/// Access-policy lint (issue #49), for `dashboard --check --policy`: the
+/// statements the policy refuses (the locked server would not start), and the
+/// ones that use a column some viewers can't see — `policy/denied-column`
+/// (the statement fails for them; an error when nobody may see it) and
+/// `policy/masked-column` (they get NULL, `****` or a hash).
+pub fn check_policy(
+    script: &str,
+    enf: &crate::host::policy::Enforcer,
+    duck: &mut dyn crate::host::policy::Duck,
+) -> Vec<Diagnostic> {
+    use crate::host::policy::Mask;
+    let plan = sql::plan(script);
+    let stmts: Vec<(bool, String)> = plan.iter().map(|p| (p.setup, p.sql.clone())).collect();
+    let mut diags = Vec::new();
+    for (i, r) in enf.rewrite_each(duck, &stmts).into_iter().enumerate() {
+        let stmt = i + 1;
+        let short = one_line(stmts[i].1.trim());
+        let uses = match r {
+            Err(e) => {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "policy/refused",
+                    message: format!("the access policy refuses this statement: {e}"),
+                    sql: short,
+                });
+                continue;
+            }
+            Ok((_, tables, cols)) => (tables, cols),
+        };
+        for (t, c) in enf.restricted_columns(&uses) {
+            let who = c.audience();
+            let (severity, code, message) = match c.otherwise {
+                Mask::Deny if c.groups.is_empty() && c.users.is_empty() => (
+                    Severity::Error,
+                    "policy/denied-column",
+                    format!(
+                        "uses `{}` of `{}`, which the access policy denies to every viewer: this statement always fails",
+                        c.column,
+                        t.name()
+                    ),
+                ),
+                Mask::Deny => (
+                    Severity::Warning,
+                    "policy/denied-column",
+                    format!(
+                        "uses `{}` of `{}`, which only {who} may see: this statement fails for every other viewer",
+                        c.column,
+                        t.name()
+                    ),
+                ),
+                m => (
+                    Severity::Note,
+                    "policy/masked-column",
+                    format!(
+                        "uses `{}` of `{}`: viewers other than {who} see {}",
+                        c.column,
+                        t.name(),
+                        match m {
+                            Mask::Null => "NULL",
+                            Mask::Mask => "'****'",
+                            _ => "a hash",
+                        }
+                    ),
+                ),
+            };
+            diags.push(Diagnostic {
+                severity,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            });
+        }
+    }
     diags
 }
 

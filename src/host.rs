@@ -12,6 +12,7 @@
 //!   `src/bin/serve.rs` and the extension's `anofox_serve*` functions.
 
 pub mod access;
+pub mod policy;
 pub mod serving;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};

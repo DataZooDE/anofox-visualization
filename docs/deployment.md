@@ -196,6 +196,11 @@ claims reach the SQL as `__claim_*` variables. See
 [Login via an auth proxy](secure-serving.md#login-via-an-auth-proxy-access-control-p1)
 for the options and tested proxy recipes. Things that matter for deployment:
 
+- With `auth`, the server needs an access policy (`"policy": "/etc/anofox/policy.json"`,
+  kept outside the dashboard folder; see
+  [Row and column policies](secure-serving.md#row-and-column-policies-access-control-p2)),
+  or `"policy": "none"` when the panels filter on the claims themselves —
+  otherwise it refuses to start.
 - `/healthz` stays reachable without a login (it then answers only
   `{"status":"ok"}`), so health checks need no secret.
 - With `"bind": "0.0.0.0"`, set `trusted_proxies` to the proxy's address or

@@ -73,11 +73,6 @@ in Chromium when Playwright is on `NODE_PATH`).
 
 ## Log in through an auth proxy
 
-> **TODO: waiting for #78.** Login (`options.auth`) is in pull request #78,
-> which has not been merged yet. Until it is, `serve.sh start --auth` stops
-> with `options: unknown key 'auth'`. Nothing in this example falls back to
-> serving without a login. The steps below were run against the #78 branch.
-
 ```sh
 examples/served/serve.sh start --auth
 ```
@@ -91,7 +86,11 @@ Open <http://127.0.0.1:8911/> and pick a person. This starts:
   client sent, and sets its own, plus the shared secret.
 - The server with `auth` set: it believes those headers only when the request
   carries the secret, and only from `127.0.0.1`. It sets `__claim_user` and
-  `__claim_groups` on every request; a viewer can't set them.
+  `__claim_groups` on every request; a viewer can't set them. The options
+  also say `"policy": "none"`: this dashboard filters on the claims itself,
+  and a server with a login refuses to start without an access policy unless
+  told so (an [access policy](../../docs/secure-serving.md#row-and-column-policies-access-control-p2)
+  would filter every panel for you).
 - A third dashboard, **How are my stores doing?**, which filters on the
   claims: Alice sees the North, Bob the Midlands and the South, and Carol
   (group `admins`) every store. Log in as Alice in one browser and as Bob in a

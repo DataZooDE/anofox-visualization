@@ -1,0 +1,922 @@
+# Every function of DuckDB 1.5.6 (+ json), classified for the access policy
+# (#49, #105). Under a policy a dashboard may call an `allow` function only:
+# `scalar` = scalar, aggregate, window and macro functions; `table` = table
+# functions and table macros. `deny` = it reads the catalog, statistics,
+# settings, files or a SQL text of its own, outside the policy's views (or
+# stalls a worker). File readers are allowed per policy (`table_functions`),
+# extension functions per policy (`functions`). tests/policy_duckdb.rs fails
+# when the pinned DuckDB has a function that is not listed: classify it here.
+#
+# kind verdict name  # reason
+#
+# Built in to the parser (not in duckdb_functions()):
+scalar allow unnest
+scalar allow unlist
+#
+scalar allow !__postfix
+scalar allow !~~
+scalar allow !~~*
+scalar allow %
+scalar allow &
+scalar allow &&
+scalar allow *
+scalar allow **
+scalar allow +
+scalar allow -
+scalar allow ->>
+scalar allow /
+scalar allow //
+scalar allow <->
+scalar allow <<
+scalar allow <=>
+scalar allow <@
+scalar allow >>
+scalar allow @
+scalar allow @>
+scalar allow ^
+scalar allow ^@
+scalar deny __internal_compress_integral_ubigint  # internal
+scalar deny __internal_compress_integral_uinteger  # internal
+scalar deny __internal_compress_integral_usmallint  # internal
+scalar deny __internal_compress_integral_utinyint  # internal
+scalar deny __internal_compress_string_hugeint  # internal
+scalar deny __internal_compress_string_ubigint  # internal
+scalar deny __internal_compress_string_uhugeint  # internal
+scalar deny __internal_compress_string_uinteger  # internal
+scalar deny __internal_compress_string_usmallint  # internal
+scalar deny __internal_compress_string_utinyint  # internal
+scalar deny __internal_decompress_integral_bigint  # internal
+scalar deny __internal_decompress_integral_hugeint  # internal
+scalar deny __internal_decompress_integral_integer  # internal
+scalar deny __internal_decompress_integral_smallint  # internal
+scalar deny __internal_decompress_integral_ubigint  # internal
+scalar deny __internal_decompress_integral_uhugeint  # internal
+scalar deny __internal_decompress_integral_uinteger  # internal
+scalar deny __internal_decompress_integral_usmallint  # internal
+scalar deny __internal_decompress_string  # internal
+scalar allow abs
+scalar allow acos
+scalar allow acosh
+scalar allow add
+scalar allow age
+scalar allow aggregate
+scalar allow ago
+scalar allow alias
+scalar allow any_value
+scalar allow apply
+scalar allow approx_count_distinct
+scalar allow approx_quantile
+scalar allow approx_top_k
+scalar allow arbitrary
+scalar allow arg_max
+scalar allow arg_max_null
+scalar allow arg_max_nulls_last
+scalar allow arg_min
+scalar allow arg_min_null
+scalar allow arg_min_nulls_last
+scalar allow argmax
+scalar allow argmin
+scalar allow array_agg
+scalar allow array_aggr
+scalar allow array_aggregate
+scalar allow array_append
+scalar allow array_apply
+scalar allow array_cat
+scalar allow array_concat
+scalar allow array_contains
+scalar allow array_cosine_distance
+scalar allow array_cosine_similarity
+scalar allow array_cross_product
+scalar allow array_distance
+scalar allow array_distinct
+scalar allow array_dot_product
+scalar allow array_extract
+scalar allow array_filter
+scalar allow array_grade_up
+scalar allow array_has
+scalar allow array_has_all
+scalar allow array_has_any
+scalar allow array_indexof
+scalar allow array_inner_product
+scalar allow array_intersect
+scalar allow array_length
+scalar allow array_negative_dot_product
+scalar allow array_negative_inner_product
+scalar allow array_pop_back
+scalar allow array_pop_front
+scalar allow array_position
+scalar allow array_prepend
+scalar allow array_push_back
+scalar allow array_push_front
+scalar allow array_reduce
+scalar allow array_resize
+scalar allow array_reverse
+scalar allow array_reverse_sort
+scalar allow array_select
+scalar allow array_slice
+scalar allow array_sort
+scalar allow array_to_json
+scalar allow array_to_string
+scalar allow array_to_string_comma_default
+scalar allow array_transform
+scalar allow array_unique
+scalar allow array_value
+scalar allow array_where
+scalar allow array_zip
+scalar allow ascii
+scalar allow asin
+scalar allow asinh
+scalar allow atan
+scalar allow atan2
+scalar allow atanh
+scalar allow avg
+scalar allow bar
+scalar allow base64
+scalar allow bin
+scalar allow bit_and
+scalar allow bit_count
+scalar allow bit_length
+scalar allow bit_or
+scalar allow bit_position
+scalar allow bit_xor
+scalar allow bitstring
+scalar allow bitstring_agg
+scalar allow bool_and
+scalar allow bool_or
+scalar allow can_cast_implicitly
+scalar allow cardinality
+scalar allow cast_to_type
+scalar allow cbrt
+scalar allow ceil
+scalar allow ceiling
+scalar allow century
+scalar allow char_length
+scalar allow character_length
+scalar allow chr
+scalar deny col_description  # catalog
+scalar allow combine
+scalar allow concat
+scalar allow concat_ws
+scalar allow constant_or_null
+scalar allow contains
+scalar allow corr
+scalar allow cos
+scalar allow cosh
+scalar allow cot
+scalar allow count
+scalar allow count_if
+scalar allow count_star
+scalar allow countif
+scalar allow covar_pop
+scalar allow covar_samp
+scalar allow create_sort_key
+scalar allow cume_dist
+scalar allow current_catalog
+scalar allow current_connection_id
+scalar allow current_database
+scalar allow current_date
+scalar allow current_localtime
+scalar allow current_localtimestamp
+scalar deny current_query  # the running SQL text
+scalar deny current_query_id  # session state
+scalar allow current_role
+scalar allow current_schema
+scalar deny current_schemas  # catalog
+scalar deny current_setting  # settings (paths)
+scalar allow current_transaction_id
+scalar allow current_user
+scalar deny currval  # sequences (catalog)
+scalar allow damerau_levenshtein
+scalar allow date_add
+scalar allow date_diff
+scalar allow date_part
+scalar allow date_sub
+scalar allow date_trunc
+scalar allow datediff
+scalar allow datepart
+scalar allow datesub
+scalar allow datetrunc
+scalar allow day
+scalar allow dayname
+scalar allow dayofmonth
+scalar allow dayofweek
+scalar allow dayofyear
+scalar allow days_in_month
+scalar allow decade
+scalar allow decode
+scalar allow degrees
+scalar allow dense_rank
+scalar allow divide
+scalar allow editdist3
+scalar allow element_at
+scalar allow encode
+scalar allow ends_with
+scalar allow entropy
+scalar allow enum_code
+scalar allow enum_first
+scalar allow enum_last
+scalar allow enum_range
+scalar allow enum_range_boundary
+scalar allow epoch
+scalar allow epoch_ms
+scalar allow epoch_ns
+scalar allow epoch_us
+scalar allow equi_width_bins
+scalar allow era
+scalar allow error
+scalar allow even
+scalar allow exp
+scalar allow factorial
+scalar allow favg
+scalar allow fdiv
+scalar allow fill
+scalar allow filter
+scalar allow finalize
+scalar allow first
+scalar allow first_value
+scalar allow flatten
+scalar allow floor
+scalar allow fmod
+scalar allow format
+scalar allow formatReadableDecimalSize
+scalar allow formatReadableSize
+scalar allow format_bytes
+scalar deny format_pg_type  # catalog
+scalar deny format_type  # catalog (duckdb_types)
+scalar allow from_base64
+scalar allow from_binary
+scalar allow from_hex
+scalar allow from_json
+scalar allow from_json_strict
+scalar allow fsum
+scalar allow gamma
+scalar allow gcd
+scalar allow gen_random_uuid
+scalar allow generate_series
+scalar allow generate_subscripts
+scalar allow geomean
+scalar allow geometric_mean
+scalar allow get_bit
+scalar deny get_block_size  # storage (pragma_database_size)
+scalar allow get_current_time
+scalar allow get_current_timestamp
+scalar allow get_type
+scalar deny getenv  # environment
+scalar allow getvariable
+scalar allow grade_up
+scalar allow greatest
+scalar allow greatest_common_divisor
+scalar allow group_concat
+scalar allow hamming
+scalar deny has_any_column_privilege  # catalog
+scalar deny has_column_privilege  # catalog
+scalar deny has_database_privilege  # catalog
+scalar deny has_foreign_data_wrapper_privilege  # catalog
+scalar deny has_function_privilege  # catalog
+scalar deny has_language_privilege  # catalog
+scalar deny has_schema_privilege  # catalog
+scalar deny has_sequence_privilege  # catalog
+scalar deny has_server_privilege  # catalog
+scalar deny has_table_privilege  # catalog
+scalar deny has_tablespace_privilege  # catalog
+scalar allow hash
+scalar allow hex
+scalar allow histogram
+scalar allow histogram_exact
+scalar allow hour
+scalar allow icu_collate_af
+scalar allow icu_collate_am
+scalar allow icu_collate_ar
+scalar allow icu_collate_ar_sa
+scalar allow icu_collate_as
+scalar allow icu_collate_az
+scalar allow icu_collate_be
+scalar allow icu_collate_bg
+scalar allow icu_collate_bn
+scalar allow icu_collate_bo
+scalar allow icu_collate_br
+scalar allow icu_collate_bs
+scalar allow icu_collate_ca
+scalar allow icu_collate_ceb
+scalar allow icu_collate_chr
+scalar allow icu_collate_cs
+scalar allow icu_collate_cy
+scalar allow icu_collate_da
+scalar allow icu_collate_de
+scalar allow icu_collate_de_at
+scalar allow icu_collate_dsb
+scalar allow icu_collate_dz
+scalar allow icu_collate_ee
+scalar allow icu_collate_el
+scalar allow icu_collate_en
+scalar allow icu_collate_en_us
+scalar allow icu_collate_eo
+scalar allow icu_collate_es
+scalar allow icu_collate_et
+scalar allow icu_collate_fa
+scalar allow icu_collate_fa_af
+scalar allow icu_collate_ff
+scalar allow icu_collate_fi
+scalar allow icu_collate_fil
+scalar allow icu_collate_fo
+scalar allow icu_collate_fr
+scalar allow icu_collate_fr_ca
+scalar allow icu_collate_ga
+scalar allow icu_collate_gl
+scalar allow icu_collate_gu
+scalar allow icu_collate_ha
+scalar allow icu_collate_haw
+scalar allow icu_collate_he
+scalar allow icu_collate_he_il
+scalar allow icu_collate_hi
+scalar allow icu_collate_hr
+scalar allow icu_collate_hsb
+scalar allow icu_collate_hu
+scalar allow icu_collate_hy
+scalar allow icu_collate_id
+scalar allow icu_collate_id_id
+scalar allow icu_collate_ig
+scalar allow icu_collate_is
+scalar allow icu_collate_it
+scalar allow icu_collate_ja
+scalar allow icu_collate_ka
+scalar allow icu_collate_kk
+scalar allow icu_collate_kl
+scalar allow icu_collate_km
+scalar allow icu_collate_kn
+scalar allow icu_collate_ko
+scalar allow icu_collate_kok
+scalar allow icu_collate_ku
+scalar allow icu_collate_ky
+scalar allow icu_collate_lb
+scalar allow icu_collate_lkt
+scalar allow icu_collate_ln
+scalar allow icu_collate_lo
+scalar allow icu_collate_lt
+scalar allow icu_collate_lv
+scalar allow icu_collate_mk
+scalar allow icu_collate_ml
+scalar allow icu_collate_mn
+scalar allow icu_collate_mr
+scalar allow icu_collate_ms
+scalar allow icu_collate_mt
+scalar allow icu_collate_my
+scalar allow icu_collate_nb
+scalar allow icu_collate_nb_no
+scalar allow icu_collate_ne
+scalar allow icu_collate_nl
+scalar allow icu_collate_nn
+scalar allow icu_collate_noaccent
+scalar allow icu_collate_om
+scalar allow icu_collate_or
+scalar allow icu_collate_pa
+scalar allow icu_collate_pa_in
+scalar allow icu_collate_pl
+scalar allow icu_collate_ps
+scalar allow icu_collate_pt
+scalar allow icu_collate_ro
+scalar allow icu_collate_ru
+scalar allow icu_collate_sa
+scalar allow icu_collate_se
+scalar allow icu_collate_si
+scalar allow icu_collate_sk
+scalar allow icu_collate_sl
+scalar allow icu_collate_smn
+scalar allow icu_collate_sq
+scalar allow icu_collate_sr
+scalar allow icu_collate_sr_ba
+scalar allow icu_collate_sr_me
+scalar allow icu_collate_sr_rs
+scalar allow icu_collate_sv
+scalar allow icu_collate_sw
+scalar allow icu_collate_ta
+scalar allow icu_collate_te
+scalar allow icu_collate_th
+scalar allow icu_collate_tk
+scalar allow icu_collate_to
+scalar allow icu_collate_tr
+scalar allow icu_collate_ug
+scalar allow icu_collate_uk
+scalar allow icu_collate_ur
+scalar allow icu_collate_uz
+scalar allow icu_collate_vi
+scalar allow icu_collate_wae
+scalar allow icu_collate_wo
+scalar allow icu_collate_xh
+scalar allow icu_collate_yi
+scalar allow icu_collate_yo
+scalar allow icu_collate_yue
+scalar allow icu_collate_yue_cn
+scalar allow icu_collate_zh
+scalar allow icu_collate_zh_cn
+scalar allow icu_collate_zh_hk
+scalar allow icu_collate_zh_mo
+scalar allow icu_collate_zh_sg
+scalar allow icu_collate_zh_tw
+scalar allow icu_collate_zu
+scalar allow icu_sort_key
+scalar allow ilike_escape
+scalar deny in_search_path  # catalog
+scalar deny inet_client_addr  # connection state
+scalar deny inet_client_port  # connection state
+scalar deny inet_server_addr  # connection state
+scalar deny inet_server_port  # connection state
+scalar allow instr
+scalar allow is_histogram_other_bin
+scalar allow isfinite
+scalar allow isinf
+scalar allow isnan
+scalar allow isodow
+scalar allow isoyear
+scalar allow jaccard
+scalar allow jaro_similarity
+scalar allow jaro_winkler_similarity
+scalar allow json
+scalar allow json_array
+scalar allow json_array_length
+scalar allow json_contains
+scalar deny json_deserialize_sql  # SQL text
+scalar allow json_exists
+scalar allow json_extract
+scalar allow json_extract_path
+scalar allow json_extract_path_text
+scalar allow json_extract_string
+scalar allow json_group_array
+scalar allow json_group_object
+scalar allow json_group_structure
+scalar allow json_keys
+scalar allow json_merge_patch
+scalar allow json_object
+scalar allow json_pretty
+scalar allow json_quote
+scalar deny json_serialize_plan  # binds and optimizes any SQL text against the raw tables (statistics, view SQL)
+scalar deny json_serialize_sql  # SQL text
+scalar allow json_structure
+scalar allow json_transform
+scalar allow json_transform_strict
+scalar allow json_type
+scalar allow json_valid
+scalar allow json_value
+scalar allow julian
+scalar allow kahan_sum
+scalar allow kurtosis
+scalar allow kurtosis_pop
+scalar allow lag
+scalar allow last
+scalar allow last_day
+scalar allow last_value
+scalar allow lcase
+scalar allow lcm
+scalar allow lead
+scalar allow least
+scalar allow least_common_multiple
+scalar allow left
+scalar allow left_grapheme
+scalar allow len
+scalar allow length
+scalar allow length_grapheme
+scalar allow levenshtein
+scalar allow lgamma
+scalar allow like_escape
+scalar allow list
+scalar allow list_aggr
+scalar allow list_aggregate
+scalar allow list_any_value
+scalar allow list_append
+scalar allow list_apply
+scalar allow list_approx_count_distinct
+scalar allow list_avg
+scalar allow list_bit_and
+scalar allow list_bit_or
+scalar allow list_bit_xor
+scalar allow list_bool_and
+scalar allow list_bool_or
+scalar allow list_cat
+scalar allow list_concat
+scalar allow list_contains
+scalar allow list_cosine_distance
+scalar allow list_cosine_similarity
+scalar allow list_count
+scalar allow list_distance
+scalar allow list_distinct
+scalar allow list_dot_product
+scalar allow list_element
+scalar allow list_entropy
+scalar allow list_extract
+scalar allow list_filter
+scalar allow list_first
+scalar allow list_grade_up
+scalar allow list_has
+scalar allow list_has_all
+scalar allow list_has_any
+scalar allow list_histogram
+scalar allow list_indexof
+scalar allow list_inner_product
+scalar allow list_intersect
+scalar allow list_kurtosis
+scalar allow list_kurtosis_pop
+scalar allow list_last
+scalar allow list_mad
+scalar allow list_max
+scalar allow list_median
+scalar allow list_min
+scalar allow list_mode
+scalar allow list_negative_dot_product
+scalar allow list_negative_inner_product
+scalar allow list_pack
+scalar allow list_position
+scalar allow list_prepend
+scalar allow list_product
+scalar allow list_reduce
+scalar allow list_resize
+scalar allow list_reverse
+scalar allow list_reverse_sort
+scalar allow list_select
+scalar allow list_sem
+scalar allow list_skewness
+scalar allow list_slice
+scalar allow list_sort
+scalar allow list_stddev_pop
+scalar allow list_stddev_samp
+scalar allow list_string_agg
+scalar allow list_sum
+scalar allow list_transform
+scalar allow list_unique
+scalar allow list_value
+scalar allow list_var_pop
+scalar allow list_var_samp
+scalar allow list_where
+scalar allow list_zip
+scalar allow listagg
+scalar allow ln
+scalar allow log
+scalar allow log10
+scalar allow log2
+scalar allow lower
+scalar allow lpad
+scalar allow ltrim
+scalar allow mad
+scalar allow make_date
+scalar allow make_time
+scalar allow make_timestamp
+scalar allow make_timestamp_ms
+scalar allow make_timestamp_ns
+scalar allow make_timestamptz
+scalar allow make_type
+scalar allow map
+scalar allow map_concat
+scalar allow map_contains
+scalar allow map_contains_entry
+scalar allow map_contains_value
+scalar allow map_entries
+scalar allow map_extract
+scalar allow map_extract_value
+scalar allow map_from_entries
+scalar allow map_keys
+scalar deny map_to_pg_oid  # catalog
+scalar allow map_values
+scalar allow max
+scalar allow max_by
+scalar allow md5
+scalar allow md5_number
+scalar allow md5_number_lower
+scalar allow md5_number_upper
+scalar allow mean
+scalar allow median
+scalar allow microsecond
+scalar allow millennium
+scalar allow millisecond
+scalar allow min
+scalar allow min_by
+scalar allow minute
+scalar allow mismatches
+scalar allow mod
+scalar allow mode
+scalar allow month
+scalar allow monthname
+scalar allow multiply
+scalar allow nanosecond
+scalar allow nextafter
+scalar deny nextval  # sequences (catalog)
+scalar allow nfc_normalize
+scalar allow normalized_interval
+scalar allow not_ilike_escape
+scalar allow not_like_escape
+scalar allow now
+scalar allow nth_value
+scalar allow ntile
+scalar allow nullif
+scalar deny obj_description  # catalog
+scalar allow octet_length
+scalar allow ord
+scalar allow parse_dirname
+scalar allow parse_dirpath
+scalar deny parse_duckdb_log_message  # log internals
+scalar allow parse_filename
+scalar allow parse_formatted_bytes
+scalar allow parse_path
+scalar allow percent_rank
+scalar deny pg_collation_is_visible  # catalog
+scalar deny pg_conf_load_time  # server state
+scalar deny pg_conversion_is_visible  # catalog
+scalar deny pg_function_is_visible  # catalog
+scalar deny pg_get_constraintdef  # catalog
+scalar deny pg_get_expr  # catalog
+scalar deny pg_get_viewdef  # catalog
+scalar deny pg_has_role  # catalog
+scalar deny pg_is_other_temp_schema  # catalog
+scalar deny pg_my_temp_schema  # catalog
+scalar deny pg_opclass_is_visible  # catalog
+scalar deny pg_operator_is_visible  # catalog
+scalar deny pg_opfamily_is_visible  # catalog
+scalar deny pg_postmaster_start_time  # server state
+scalar allow pg_size_pretty
+scalar deny pg_sleep  # stalls a worker
+scalar deny pg_table_is_visible  # catalog
+scalar deny pg_ts_config_is_visible  # catalog
+scalar deny pg_ts_dict_is_visible  # catalog
+scalar deny pg_ts_parser_is_visible  # catalog
+scalar deny pg_ts_template_is_visible  # catalog
+scalar deny pg_type_is_visible  # catalog
+scalar allow pg_typeof
+scalar allow pi
+scalar allow position
+scalar allow pow
+scalar allow power
+scalar allow prefix
+scalar allow printf
+scalar allow product
+scalar allow quantile
+scalar allow quantile_cont
+scalar allow quantile_disc
+scalar allow quarter
+scalar allow radians
+scalar allow random
+scalar allow range
+scalar allow rank
+scalar allow rank_dense
+scalar allow reduce
+scalar allow regexp_escape
+scalar allow regexp_extract
+scalar allow regexp_extract_all
+scalar allow regexp_full_match
+scalar allow regexp_matches
+scalar allow regexp_replace
+scalar allow regexp_split_to_array
+scalar allow regexp_split_to_table
+scalar allow regr_avgx
+scalar allow regr_avgy
+scalar allow regr_count
+scalar allow regr_intercept
+scalar allow regr_r2
+scalar allow regr_slope
+scalar allow regr_sxx
+scalar allow regr_sxy
+scalar allow regr_syy
+scalar allow remap_struct
+scalar allow repeat
+scalar allow replace
+scalar allow replace_type
+scalar allow reservoir_quantile
+scalar allow reverse
+scalar allow right
+scalar allow right_grapheme
+scalar allow round
+scalar allow round_even
+scalar allow roundbankers
+scalar allow row
+scalar allow row_number
+scalar allow row_to_json
+scalar allow rpad
+scalar allow rtrim
+scalar allow second
+scalar allow sem
+scalar allow session_user
+scalar allow set_bit
+scalar allow setseed
+scalar allow sha1
+scalar allow sha256
+scalar deny shobj_description  # catalog
+scalar allow sign
+scalar allow signbit
+scalar allow sin
+scalar allow sinh
+scalar allow skewness
+scalar deny sleep_ms  # stalls a worker
+scalar allow split
+scalar allow split_part
+scalar allow sqrt
+scalar allow st_asbinary
+scalar allow st_astext
+scalar allow st_aswkb
+scalar allow st_aswkt
+scalar allow st_crs
+scalar allow st_geomfromwkb
+scalar allow st_intersects_extent
+scalar allow st_setcrs
+scalar allow starts_with
+scalar deny stats  # base-table statistics, ignores the row filter
+scalar allow stddev
+scalar allow stddev_pop
+scalar allow stddev_samp
+scalar allow str_split
+scalar allow str_split_regex
+scalar allow strftime
+scalar allow string_agg
+scalar allow string_split
+scalar allow string_split_regex
+scalar allow string_to_array
+scalar allow strip_accents
+scalar allow strlen
+scalar allow strpos
+scalar allow strptime
+scalar allow struct_concat
+scalar allow struct_contains
+scalar allow struct_extract
+scalar allow struct_extract_at
+scalar allow struct_has
+scalar allow struct_indexof
+scalar allow struct_insert
+scalar allow struct_keys
+scalar allow struct_pack
+scalar allow struct_position
+scalar allow struct_update
+scalar allow struct_values
+scalar allow substr
+scalar allow substring
+scalar allow substring_grapheme
+scalar allow subtract
+scalar allow suffix
+scalar allow sum
+scalar allow sum_no_overflow
+scalar allow sumkahan
+scalar allow switch
+scalar allow tan
+scalar allow tanh
+scalar allow time_bucket
+scalar allow timetz_byte_comparable
+scalar allow timezone
+scalar allow timezone_hour
+scalar allow timezone_minute
+scalar allow to_base
+scalar allow to_base64
+scalar allow to_binary
+scalar allow to_centuries
+scalar allow to_days
+scalar allow to_decades
+scalar allow to_hex
+scalar allow to_hours
+scalar allow to_json
+scalar allow to_microseconds
+scalar allow to_millennia
+scalar allow to_milliseconds
+scalar allow to_minutes
+scalar allow to_months
+scalar allow to_quarters
+scalar allow to_seconds
+scalar allow to_timestamp
+scalar allow to_weeks
+scalar allow to_years
+scalar allow today
+scalar allow transaction_timestamp
+scalar allow translate
+scalar allow trim
+scalar allow trunc
+scalar allow try_strptime
+scalar allow txid_current
+scalar allow typeof
+scalar allow ucase
+scalar allow unbin
+scalar allow unhex
+scalar allow unicode
+scalar allow union_extract
+scalar allow union_tag
+scalar allow union_value
+scalar allow unpivot_list
+scalar allow upper
+scalar allow url_decode
+scalar allow url_encode
+scalar allow user
+scalar allow uuid
+scalar allow uuid_extract_timestamp
+scalar allow uuid_extract_version
+scalar allow uuidv4
+scalar allow uuidv7
+scalar allow var_pop
+scalar allow var_samp
+scalar allow variance
+scalar allow variant_bytes_to_variant
+scalar allow variant_extract
+scalar allow variant_normalize
+scalar allow variant_to_parquet_variant
+scalar allow variant_typeof
+scalar allow vector_type
+scalar allow version
+scalar allow wavg
+scalar allow week
+scalar allow weekday
+scalar allow weekofyear
+scalar allow weighted_avg
+scalar deny write_log  # writes the log
+scalar allow xor
+scalar allow year
+scalar allow yearweek
+scalar allow |
+scalar allow ||
+scalar allow ~
+scalar allow ~~
+scalar allow ~~*
+scalar allow ~~~
+table deny arrow_scan  # reads tables, files, the catalog or runs SQL
+table deny arrow_scan_dumb  # reads tables, files, the catalog or runs SQL
+table deny check_peg_parser  # reads tables, files, the catalog or runs SQL
+table deny checkpoint  # reads tables, files, the catalog or runs SQL
+table deny disable_logging  # reads tables, files, the catalog or runs SQL
+table deny disable_peg_parser  # reads tables, files, the catalog or runs SQL
+table deny disable_profiling  # reads tables, files, the catalog or runs SQL
+table deny duckdb_approx_database_count  # reads tables, files, the catalog or runs SQL
+table deny duckdb_columns  # reads tables, files, the catalog or runs SQL
+table deny duckdb_connection_count  # reads tables, files, the catalog or runs SQL
+table deny duckdb_constraints  # reads tables, files, the catalog or runs SQL
+table deny duckdb_coordinate_systems  # reads tables, files, the catalog or runs SQL
+table deny duckdb_databases  # reads tables, files, the catalog or runs SQL
+table deny duckdb_dependencies  # reads tables, files, the catalog or runs SQL
+table deny duckdb_extensions  # reads tables, files, the catalog or runs SQL
+table deny duckdb_external_file_cache  # reads tables, files, the catalog or runs SQL
+table deny duckdb_functions  # reads tables, files, the catalog or runs SQL
+table deny duckdb_indexes  # reads tables, files, the catalog or runs SQL
+table deny duckdb_keywords  # reads tables, files, the catalog or runs SQL
+table deny duckdb_log_contexts  # reads tables, files, the catalog or runs SQL
+table deny duckdb_logs  # reads tables, files, the catalog or runs SQL
+table deny duckdb_logs_parsed  # reads tables, files, the catalog or runs SQL
+table deny duckdb_memory  # reads tables, files, the catalog or runs SQL
+table deny duckdb_optimizers  # reads tables, files, the catalog or runs SQL
+table deny duckdb_prepared_statements  # reads tables, files, the catalog or runs SQL
+table deny duckdb_profiling_settings  # reads tables, files, the catalog or runs SQL
+table deny duckdb_schemas  # reads tables, files, the catalog or runs SQL
+table deny duckdb_secret_types  # reads tables, files, the catalog or runs SQL
+table deny duckdb_secrets  # reads tables, files, the catalog or runs SQL
+table deny duckdb_sequences  # reads tables, files, the catalog or runs SQL
+table deny duckdb_settings  # reads tables, files, the catalog or runs SQL
+table deny duckdb_table_sample  # reads tables, files, the catalog or runs SQL
+table deny duckdb_tables  # reads tables, files, the catalog or runs SQL
+table deny duckdb_temporary_files  # reads tables, files, the catalog or runs SQL
+table deny duckdb_types  # reads tables, files, the catalog or runs SQL
+table deny duckdb_variables  # reads tables, files, the catalog or runs SQL
+table deny duckdb_views  # reads tables, files, the catalog or runs SQL
+table deny enable_logging  # reads tables, files, the catalog or runs SQL
+table deny enable_peg_parser  # reads tables, files, the catalog or runs SQL
+table deny enable_profiling  # reads tables, files, the catalog or runs SQL
+table deny force_checkpoint  # reads tables, files, the catalog or runs SQL
+table allow generate_series
+table deny glob  # reads tables, files, the catalog or runs SQL
+table deny histogram  # reads tables, files, the catalog or runs SQL
+table deny histogram_values  # reads tables, files, the catalog or runs SQL
+table deny icu_calendar_names  # reads tables, files, the catalog or runs SQL
+table allow json_each
+table deny json_execute_serialized_sql  # reads tables, files, the catalog or runs SQL
+table allow json_tree
+table deny parquet_bloom_probe  # reads tables, files, the catalog or runs SQL
+table deny parquet_file_metadata  # reads tables, files, the catalog or runs SQL
+table deny parquet_full_metadata  # reads tables, files, the catalog or runs SQL
+table deny parquet_kv_metadata  # reads tables, files, the catalog or runs SQL
+table deny parquet_metadata  # reads tables, files, the catalog or runs SQL
+table deny parquet_scan  # reads tables, files, the catalog or runs SQL
+table deny parquet_schema  # reads tables, files, the catalog or runs SQL
+table deny pg_timezone_names  # reads tables, files, the catalog or runs SQL
+table deny pragma_collations  # reads tables, files, the catalog or runs SQL
+table deny pragma_database_size  # reads tables, files, the catalog or runs SQL
+table deny pragma_metadata_info  # reads tables, files, the catalog or runs SQL
+table deny pragma_platform  # reads tables, files, the catalog or runs SQL
+table deny pragma_show  # reads tables, files, the catalog or runs SQL
+table deny pragma_storage_info  # reads tables, files, the catalog or runs SQL
+table deny pragma_table_info  # reads tables, files, the catalog or runs SQL
+table deny pragma_user_agent  # reads tables, files, the catalog or runs SQL
+table deny pragma_version  # reads tables, files, the catalog or runs SQL
+table deny query  # reads tables, files, the catalog or runs SQL
+table deny query_table  # reads tables, files, the catalog or runs SQL
+table allow range
+table deny read_blob  # reads tables, files, the catalog or runs SQL
+table deny read_csv  # reads tables, files, the catalog or runs SQL
+table deny read_csv_auto  # reads tables, files, the catalog or runs SQL
+table deny read_duckdb  # reads tables, files, the catalog or runs SQL
+table deny read_json  # reads tables, files, the catalog or runs SQL
+table deny read_json_auto  # reads tables, files, the catalog or runs SQL
+table deny read_json_objects  # reads tables, files, the catalog or runs SQL
+table deny read_json_objects_auto  # reads tables, files, the catalog or runs SQL
+table deny read_ndjson  # reads tables, files, the catalog or runs SQL
+table deny read_ndjson_auto  # reads tables, files, the catalog or runs SQL
+table deny read_ndjson_objects  # reads tables, files, the catalog or runs SQL
+table deny read_parquet  # reads tables, files, the catalog or runs SQL
+table deny read_text  # reads tables, files, the catalog or runs SQL
+table allow repeat
+table deny repeat_row  # reads tables, files, the catalog or runs SQL
+table deny seq_scan  # reads tables, files, the catalog or runs SQL
+table deny sniff_csv  # reads tables, files, the catalog or runs SQL
+table deny sql_auto_complete  # reads tables, files, the catalog or runs SQL
+table deny summary  # reads tables, files, the catalog or runs SQL
+table deny test_all_types  # reads tables, files, the catalog or runs SQL
+table deny test_vector_types  # reads tables, files, the catalog or runs SQL
+table deny truncate_duckdb_logs  # reads tables, files, the catalog or runs SQL
+table allow unnest
+table deny which_secret  # reads tables, files, the catalog or runs SQL

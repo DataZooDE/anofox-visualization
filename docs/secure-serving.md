@@ -16,7 +16,7 @@ other two never accept SQL from the client at all.
 | What the client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
 | Database | the live read-write session / file | private read-only snapshot (refreshable), locked config; optionally one data folder | `duckdb -readonly`, locked config |
 | Bind | loopback only (enforced) | `bind` option (default `127.0.0.1`) | `--bind` (default `127.0.0.1`) |
-| Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; login via an auth proxy (`options.auth`) | login via an auth proxy (`--auth`) |
+| Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; login via an auth proxy (`options.auth`); row and column policies (`options.policy`) | login via an auth proxy (`--auth`); no policies |
 
 Available in the **from-source build** only (`duckext/`, see
 [`BUILD.md`](../BUILD.md)); the community extension is render-only.
@@ -167,9 +167,10 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   (`json_serialize_sql`, which parses without running and accepts only
   `SELECT` statements): panels must be queries (`SELECT`, `WITH`, `FROM`,
   `VALUES`, set operations; a `PIVOT` only as a subquery with its `IN (…)`
-  values listed), and setup statements must be `SET VARIABLE <name> =
+  values listed), and setup statements must be queries, `SET VARIABLE <name> =
   <expression>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>`
-  with a query that passes the same check. Everything else — `EXPLAIN`,
+  with a query that passes the same check (the same classifier the
+  [access policy](#row-and-column-policies-access-control-p2) uses). Everything else — `EXPLAIN`,
   `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
   the start. The check needs DuckDB's `json` extension (loaded into the
   snapshot automatically; without it the server refuses to start).
@@ -198,8 +199,9 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   `threads` (HTTP worker pool = concurrent requests, default 4), `cache_mb`
   (see below), `attach`, `load`, `hosts` (see below), `refresh_s`, `data`,
   `path_vars` (see above), `auth`, `log`, `log_vars` (see
-  [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)), and
-  for [deployment](deployment.md):
+  [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)),
+  `policy` (see [Row and column policies](#row-and-column-policies-access-control-p2)),
+  and for [deployment](deployment.md):
   - `bind` — listen address, default `127.0.0.1`. `"0.0.0.0"` (or `"::"`) is
     for containers and replicas behind a load balancer. A specific address is
     also accepted as a `Host`; other names still need `hosts`.
@@ -280,7 +282,8 @@ Consumers pick a dashboard id and whitelisted params
   cache (`--cache`) is kept per viewer; it holds at most 1,024 pages / 64 MiB
   (oldest first out) and drops expired pages. A non-loopback `--bind` without
   `--auth` prints a `WARNING`. A request target with a control character is
-  `400`.
+  `400`. The render server has no access policies (only the locked server
+  does), so with `--auth` every panel has to filter on the claims itself.
 
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
@@ -312,9 +315,16 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
     "header_groups": "X-Forwarded-Groups",
     "claims": {"tenant": {"header": "X-Forwarded-Tenant", "required": true}}
   },
+  "policy": "/etc/anofox/policy.json",
   "log": "/var/log/anofox/requests.jsonl"
 }');
 ```
+
+With `auth`, the server needs an access policy (`policy`, or `policy.json`
+in the dashboard folder — see
+[Row and column policies](#row-and-column-policies-access-control-p2)), or an
+explicit `"policy": "none"` to rely on claim filters in the panels as below;
+otherwise it refuses to start.
 
 | `auth` key | Default | Meaning |
 |---|---|---|
@@ -545,15 +555,195 @@ every refused request (static assets are not logged):
 | Many viewers fill the static server's `--cache` | Capped at 1,024 pages / 64 MiB, expired pages purged |
 | DNS rebinding, CSRF, SQL from the client | Unchanged: Host allowlist (`421`), same-origin `POST`s, no SQL endpoint |
 
-**Out of scope for P1** (see #49, #50): column masking and policies the server
-enforces regardless of the panel SQL (P1 relies on the dashboard author writing
-the claim filter into every panel); verifying JWTs/OIDC tokens itself; signed
-embed links; API keys.
+**Out of scope for P1** (see #50): verifying JWTs/OIDC tokens itself; signed
+embed links; API keys. On its own, P1 relies on the dashboard author writing
+the claim filter into every panel; [P2 policies](#row-and-column-policies-access-control-p2)
+enforce it regardless of the panel SQL.
 
 **What can never enforce access:** a static HTML export or the browser /
 DuckDB-Wasm demo (the data is in the client, whoever opens it can read all of
 it), and a MotherDuck token (it grants the whole database). Only the locked
 server (A) and the static render server (B) keep data on the server.
+
+## Row and column policies (access control P2)
+
+With P1 every panel has to filter on the claims itself, and one forgotten
+`WHERE` shows every row. A **policy** moves the rule out of the panels: the
+locked server (A) rewrites every dashboard statement so that it can only read
+tables through per-viewer views, and refuses to start when a statement could
+get around them.
+
+```json
+{
+  "tables": {
+    "sales": {
+      "rows": "region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user')) OR list_contains(getvariable('__claim_groups'), 'admins')"
+    },
+    "employees": {
+      "rows": "getvariable('__claim_tenant') = tenant",
+      "columns": {
+        "salary": {"allow_groups": ["hr"], "else": "null"},
+        "email":  {"allow_groups": ["hr", "support"], "else": "mask"},
+        "name":   {"allow_groups": ["hr"], "else": "hash"},
+        "ssn":    {"allow_users": ["payroll@example.com"], "else": "deny"}
+      }
+    },
+    "ref.regions": {"rows": true}
+  }
+}
+```
+
+Pass the path of the policy, or put it in `policy.json` next to the dashboards:
+`anofox_serve_dashboards('dashboards', 8095, '{"auth": {…}, "policy": "/etc/anofox/policy.json"}')`.
+A `policy.json` in the dashboard folder is enforced even without the option, so
+forgetting the option can't serve every row. **Keep the policy outside the
+dashboard folder** when the people who write dashboards should not decide who
+sees what: with `options.policy` a missing or broken file stops the start.
+With `auth` and no policy found (e.g. a `policy.json` deleted from the
+folder) the server refuses to start unless `"policy": "none"` says that the
+panels filter on the claims themselves. The start message says `access policy
+on N table(s)`; with a policy but no `auth` it warns that every viewer is
+anonymous (claims unset, so claim-based row filters return nothing).
+
+Under a policy, a viewer whose panel fails gets a generic message ("this
+panel could not be shown"); the DuckDB error, which might quote a value, goes
+to the server log only.
+
+### Policy file reference
+
+| Key | Meaning |
+|---|---|
+| `tables` | `{"<table>" or "<schema>.<table>": rule}` — tables and views of the snapshot's default database (the one the session `USE`s). **Every table a dashboard reads needs a rule**; any other table is refused. |
+| `tables.*.rows` | **Required.** A SQL condition over the table's columns that a row must meet, or `true` for every row. It may read the viewer only through `getvariable('__claim_…')` with a literal name (a viewer variable is refused). It may use other tables (e.g. an entitlement table): those are read directly, without their own policy, and the panels still can't read them unless they have a rule too. It must be one condition: text that ends the `WHERE` (`… ) UNION SELECT …`) is refused. |
+| `tables.*.columns` | `{"<column>": "deny" \| "null" \| "mask" \| "hash"}` for everyone, or `{"allow_groups": [...], "allow_users": [...], "else": "deny" \| "null" \| "mask" \| "hash"}` (default `else`: `null`). Viewers in an allowed group (`__claim_groups`) or with an allowed user name (`__claim_user`) see the value. Columns not listed are visible. |
+| `table_functions` | File readers the dashboards may call (`read_parquet`, `read_csv`, `read_json`, … `glob`). Off by default. Files have no row or column policy (DuckDB still confines them to `options.data`). Nothing else can be allowed. |
+| `functions` | Extra scalar / aggregate functions the dashboards may call — an extension's (`st_area`, …), after you reviewed that they only compute on their arguments. A function the reviewed list denies can't be added. |
+
+The `hash` mask's key is random per server start; set
+`"policy_key_env": "ANOFOX_POLICY_KEY"` (the name of an environment variable
+holding ≥ 32 characters, e.g. `openssl rand -hex 32`) in the server options
+to keep hashes stable across restarts.
+
+Unknown keys are errors. The policy is checked against the snapshot at start
+and at every refresh: a table or column it names that doesn't exist, a row
+filter that doesn't parse or bind, or a relation named `__anofox…` stops the
+start (a failing refresh keeps the previous snapshot in service,
+`refresh_failed: true` in `/healthz`).
+
+| Column rule | The viewer gets |
+|---|---|
+| `deny` | no column: it is not in the view (`SELECT *` leaves it out; a panel naming it fails for this viewer — lint below) |
+| `null` | `NULL` of the column's type: the panel keeps working |
+| `mask` | `'****'` (`NULL` stays `NULL`) |
+| `hash` | 16 hex digits of HMAC-SHA256(key, column ‖ value): equal values in one column stay equal, so grouping and `count(DISTINCT …)` work, but the value can't be looked up, and the same value hashes differently in another column. The server computes it in its own function (`__anofox_policy_hash`), so the key is never in SQL, plans, errors or logs. Random per server start unless `policy_key_env` is set |
+
+### How it is enforced
+
+1. **At start (and per refresh), once per statement.** DuckDB parses the
+   statement (`json_serialize_sql`). Every table reference becomes
+   `temp.main.__anofox_rls_<i>` (with the original name as alias, so `t.col`
+   still works); CTE names are renamed to `__anofox_cte_<n>`, so a name the
+   rewrite takes for a CTE can only ever bind to that CTE. DuckDB prints the
+   result (`json_deserialize_sql`), which is parsed **again and verified**: it
+   may reference only those views, the dashboard's own temp objects and the
+   renamed CTEs. The browser still shows the dashboard's original SQL; the
+   server runs only the rewritten one.
+2. **Per request**, on the request's private connection, after the claims are
+   set: `CREATE TEMP VIEW __anofox_rls_<i> AS SELECT * EXCLUDE (denied)
+   REPLACE (masked) FROM (SELECT * FROM <db>.<schema>.<table> WHERE <rows>)`.
+   The column decision uses the viewer's claims; the row filter reads them
+   from the session variables. A claim value is never spliced into SQL text.
+3. `::PAGED` requests (rows, count, stats, profile, distinct, filters) wrap
+   the rewritten panel, so they see only the viewer's rows and masked values.
+   The result cache and single-flight key include the claims (P1).
+
+**Fail closed.** A dashboard statement is refused, and the server does not
+start (the error names the dashboard and statement), when it:
+
+- reads a table or view without a rule, including `information_schema.*`,
+  `pg_catalog.*`, a file path (`FROM 'x.csv'`) and a view whose body reads
+  other tables;
+- names a database (`snap.main.sales`, `temp.main.__anofox_rls_0`);
+- calls a table function other than `range`, `generate_series`, `unnest` and
+  the policy's `table_functions` — so `query()`, `query_table()`,
+  `json_execute_serialized_sql()`, the `duckdb_*()` / `pragma_*()` catalog
+  functions, `sql_auto_complete()`, table macros and file readers;
+- calls a user macro (its body is not checked);
+- calls a function that is not on the **allowlist**
+  (`src/host/policy_functions.txt`: every function of the pinned DuckDB
+  1.5.6, classified `allow` or `deny`) or in the policy's `functions`. Denied:
+  the functions that read the catalog, statistics, settings or a SQL text of
+  their own, outside the views — `json_serialize_plan` (it binds and
+  optimizes any SQL string against the raw tables; its plans would leak min/max
+  statistics and the view definitions), `stats`, `json_serialize_sql`,
+  `current_setting`, `current_query`, `currval`, `nextval`, `getenv`, the
+  `pg_*` / `has_*_privilege` catalog macros, … A function the list doesn't know
+  (a newer DuckDB, a loaded extension) is refused; a test fails when the
+  pinned DuckDB has an unclassified function;
+- uses time travel (`AT (VERSION => …)`), `SHOW TABLES` or `DESCRIBE` /
+  `SUMMARIZE` of a table without a rule;
+- is not a query, `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>` or
+  `SET VARIABLE <name> = <expr>` (whose query / expression is rewritten too):
+  `CREATE MACRO`, `ATTACH`, `COPY`, `SET`, `PIVOT …` statements (use `FROM t
+  PIVOT (…)`), … are refused, as is a setup statement that sets a `__claim_*`
+  variable or creates an object named `__anofox…`.
+
+CTEs, subqueries (in `FROM`, `SELECT`, `WHERE`, `IN`, `EXISTS`), joins
+(lateral, positional, ASOF), set operations, recursive CTEs, `PIVOT` in `FROM`,
+`unnest` of a subquery, `DESCRIBE SELECT …` and the dashboard's own temp tables
+all work, and all read the viewer's views. A viewer request that sets a
+`__claim_*` or `__anofox…` variable is `400`.
+
+**Lint before serving.** `dashboard --check dash.sql --db snapshot.duckdb
+--policy policy.json` reports what the server would refuse
+(`policy/refused`), panels that use a column some viewers can't see
+(`policy/denied-column`: a warning, an error when nobody may see it — the
+panel then always fails) and masked columns (`policy/masked-column`, a note).
+It uses the server's classifier and function list; it runs the `duckdb` CLI
+on PATH to parse, and warns (`policy/duckdb-version`) when that is not the
+pinned 1.5.6. The server checks again at start and fails closed either way.
+
+`duckext/scripts/policy-key-e2e.sh <extension>` runs a locked server with a
+known `hash` key and checks that the key is on no reachable surface (panel
+results and errors, `::PAGED` profiles, the page, `/healthz`, stderr, the
+request log), that the served hash is the specified HMAC, and that SQL which
+could show it (`duckdb_views()`, `current_query()`, `json_serialize_plan`,
+`current_setting`) and `auth` without a policy refuse to start.
+
+### Threat model (P2)
+
+| Threat | Mitigation |
+|---|---|
+| A panel forgets the claim filter | The panel reads the policy's view, not the table |
+| A dashboard reads a table without a rule (directly, in a subquery, a CTE, a `UNION` arm, a lateral join, a `SET VARIABLE`, a temp table) | Every table reference in every statement is rewritten or refused; refused = no start |
+| A CTE named like a table (`WITH payroll AS (…)`), or a table named like a CTE | CTEs are renamed; a reference the rewrite takes for a CTE can only bind to that CTE, everything else goes through a view or is refused. A non-recursive CTE's own name inside its body is the table, as in DuckDB |
+| `snapshot.main.t`, `temp.main.__anofox_rls_0`, `information_schema`, `duckdb_tables()`, `pragma_table_info()` | Database-qualified names and catalog functions are refused |
+| String-built SQL: `query('SELECT … ' \|\| getvariable('x'))`, `query_table(…)`, `json_execute_serialized_sql(…)` | Refused (table functions outside the allowlist) |
+| A macro (or a built-in macro) whose body reads a table | Macros are refused; `CREATE MACRO` in setup is refused |
+| A view in the snapshot whose body reads a protected table | A view needs its own rule; the view's rule is what applies to it |
+| Setup overwrites the claims (`SET VARIABLE __claim_groups = ['admins']`) or the views | Refused at start; views are created after the claims and before any dashboard SQL, and their names are reserved |
+| A viewer sets `__claim_*` / `__anofox…` (`vars`, `?v.*`, `@param`) | `400` / ignored (P1) |
+| A row filter reads a viewer-settable variable | Refused at start: a row filter may read only `getvariable('__claim_…')` |
+| Row filter text that ends the `WHERE` clause | Refused: the filter must stay one condition |
+| A masked or denied column via `::PAGED` filter / sort / stats / distinct / profile | Paging wraps the rewritten panel; it sees `NULL` / `****` / a hash, a denied column doesn't exist |
+| Guessing a hashed value (dictionary attack on `md5(email)`) | HMAC-SHA256 with a server key and the column's name, computed in Rust: the key never appears in SQL, plans, errors or logs |
+| Probing tables, statistics or the views' SQL through `json_serialize_plan('…')`, `stats(col)`, `current_setting`, `current_query` (#105) | Functions are allowlisted: those are `deny`, and anything not classified is refused |
+| An error message quotes a value the viewer may not see | Under a policy viewers get a generic error; the details go to the log |
+| A dashboard author deletes `policy.json` from the dashboard folder | With `auth`, no policy refuses the start unless `"policy": "none"`; keep the policy outside the folder (`options.policy`: a missing file stops the start) |
+| One viewer's cached result served to another | Claims are part of the cache and single-flight key (P1) |
+| A refresh brings a renamed table or column | The policy is re-checked; the refresh fails and the previous snapshot stays |
+| A rewrite bug lets a table through | The rewritten SQL is parsed again and verified against an allowlist of names; a mismatch stops the start |
+
+**Limits.** Policies cover the locked server (A) only: the static render
+server `serve --dashboards` (B) has no policies (filter in the panels, P1
+style), and a static HTML export or the browser / DuckDB-Wasm demo can never
+enforce rows or columns (the data is in the client). Files in `options.data`
+read through allowed `table_functions` have no row or column policy. A rule
+on a view applies to the view's output; the tables it reads are protected only
+where panels read them directly. Column rules decide by user and group;
+other claims (`__claim_tenant`, …) can drive row filters only. `hash` is
+pseudonymisation, not encryption: a viewer who knows a value and sees it next
+to its hash elsewhere can match them.
 
 ## Deployment
 
