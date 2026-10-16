@@ -910,6 +910,7 @@ bookmark or **Share** restores the same view.
 | `?v.min_n=20` | a `::NUMBER` — a finite number |
 | `?v.since=2024-02-01` | a `::DATE` / either end of a `::DATERANGE` — a real calendar date |
 | `?v.note=promo` | a `::TEXT` (≤ 500 characters) |
+| `?v.p=ytd` · `?v.p=2026-01-01..2026-03-31` · `&v.p_grain=week&v.p_compare=yoy` | a `::PERIOD` named `p`: a preset it offers or a custom range, a grain its switch offers, `prev` / `yoy` / `none` — each part checked on its own |
 | `?v.selected=web` | the shared click cross-filter |
 | `?v.sku=SKU-A&v.sku=SKU-C` | a named selection (a `::ROWSELECT` table's first column, a chart's `::SELECT_AS`) |
 

@@ -1715,6 +1715,7 @@ function loadDash(name, sql) {
   dpXf = {};
   dpUrlSeed = {};
   dpVarDefault = {};
+  dpPeriodUrl = {};
   dpRange = {};
   dpDrill = {};
   dpPage = {};
@@ -2238,6 +2239,7 @@ function setTabParam(name) {
 const URL_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 let dpUrlSeed = readUrlSeed(); // variable -> [values] from ?v.* (consumed by the first run)
 let dpVarDefault = {}; // input variable -> its default (JSON text): only changes go into the URL
+let dpPeriodUrl = {}; // ::PERIOD column -> {prefix, def} (def = its resolved default) for the URL
 let dpSeedRerun = false; // a seeded table selection changed shape: re-run once after this run
 let dpSeeded = new Set(); // named selections seeded from the URL whose shape a table still fixes
 function readUrlSeed(search = location.search) {
@@ -2280,6 +2282,50 @@ function validSeed(kind, vals, options) {
     default: // TEXT
       return one !== undefined && one.length <= 500 ? one : undefined;
   }
+}
+// A ::PERIOD's URL seed -> the control's state, or undefined. `v.p=30d` (a
+// preset) or `v.p=2026-01-01..2026-03-31` (a custom range), plus optional
+// `v.p_grain=week` and `v.p_compare=prev|yoy|none`. `resolve(state)` is
+// period_resolve for this input's spec: the range must resolve without a new
+// error, grain and comparison must be offered; an invalid part is dropped.
+function validPeriodSeed(seed, prefix, resolve) {
+  const one = (k) => (seed[k] && seed[k].length === 1 ? seed[k][0] : undefined);
+  const base = resolve({});
+  const nerr = (base.errors || []).length;
+  const fits = (st) => {
+    const r = resolve(st);
+    return !!r.vars && (r.errors || []).length === nerr;
+  };
+  const st = {};
+  const range = one(prefix);
+  if (range !== undefined) {
+    const m = range.match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+    const part = m
+      ? isIsoDate(m[1]) && isIsoDate(m[2])
+        ? { preset: "custom", from: m[1], to: m[2] }
+        : null
+      : /^[a-z0-9_]{1,20}$/i.test(range) && range !== "custom"
+        ? { preset: range }
+        : null;
+    if (part && fits(part)) Object.assign(st, part);
+  }
+  const grain = one(prefix + "_grain");
+  if (grain !== undefined && (base.grains || []).includes(grain)) st.grain = grain;
+  const cmp = one(prefix + "_compare");
+  if (cmp !== undefined && (base.compares || []).some((c) => c.id === cmp)) st.compare = cmp;
+  return Object.keys(st).length && fits(st) ? st : undefined;
+}
+// A ::PERIOD state as URL parameters (the inverse of validPeriodSeed): only what
+// differs from the input's default; an explicit grain always (it stops the
+// automatic one).
+function periodUrlParams(prefix, st, def) {
+  const out = [];
+  if (!st || typeof st !== "object") return out;
+  if (st.preset === "custom" && st.from && st.to) out.push([prefix, `${st.from}..${st.to}`]);
+  else if (st.preset && st.preset !== def.preset) out.push([prefix, st.preset]);
+  if (st.grain) out.push([prefix + "_grain", st.grain]);
+  if (st.compare && st.compare !== def.compare) out.push([prefix + "_compare", st.compare]);
+  return out;
 }
 // Record an input's default and apply its URL seed (first run only, while the
 // variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
@@ -2351,6 +2397,9 @@ function urlStateParams() {
   const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
   for (const [k, def] of Object.entries(dpVarDefault)) {
     if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+  }
+  for (const [col, p] of Object.entries(dpPeriodUrl)) {
+    for (const [k, v] of periodUrlParams(p.prefix, dpVars[col], p.def)) out.push(["v." + k, v]);
   }
   if (dpFilter) add("selected", dpFilter);
   for (const [k, v] of Object.entries(dpXf)) {
@@ -2536,6 +2585,9 @@ function followLink(url) {
     const qs = qi < 0 ? "" : u.slice(qi);
     const seed = readUrlSeed(qs);
     for (const k of Object.keys(seed)) if (k in dpVarDefault) delete dpVars[k]; // re-seeded (validated) by the run
+    for (const [col, p] of Object.entries(dpPeriodUrl)) {
+      if ([p.prefix, p.prefix + "_grain", p.prefix + "_compare"].some((k) => k in seed)) delete dpVars[col];
+    }
     Object.assign(dpUrlSeed, seed);
     const t = tab || new URLSearchParams(qs).get("tab");
     if (t) {
@@ -2855,8 +2907,17 @@ async function runOnce(fresh = true) {
           // prefix); the viewer's choice lives in dpVars[col] as an object.
           const keys = Object.keys(rows[0]);
           const col = keys[s.roles.find((r) => r[1] === "PERIOD")[0]] ?? keys[0];
+          const spec = String(rows[0][col] ?? "");
+          const def = periodResolve(spec, col, {});
+          const prefix = def.prefix || col;
+          dpPeriodUrl[col] = { prefix, def };
+          if (dpVars[col] === undefined) {
+            const seeded = validPeriodSeed(dpUrlSeed, prefix, (st) => periodResolve(spec, col, st));
+            if (seeded) dpVars[col] = seeded;
+          }
+          for (const k of [prefix, prefix + "_grain", prefix + "_compare"]) delete dpUrlSeed[k];
           const st = dpVars[col];
-          const res = periodResolve(String(rows[0][col] ?? ""), col, st && typeof st === "object" && !Array.isArray(st) ? st : {});
+          const res = periodResolve(spec, col, st && typeof st === "object" && !Array.isArray(st) ? st : {});
           if (!res.vars) throw new Error("::PERIOD: " + (res.errors || []).join("; "));
           dd[i] = { kind, varname: col, res, caption };
           for (const q of periodSets(res.prefix, res.vars)) await runSql(q);

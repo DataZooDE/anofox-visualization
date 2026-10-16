@@ -27,6 +27,22 @@ const capture = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i;
 for (const q of periodSets("period", { from: "2026-09-01", prev_to: null, prev_label: "vs Aug 2 – 31, 2026" }))
   assert.ok(capture.test(q), q);
 
+
+// The URL state (#25): a ::PERIOD's choice as `v.<prefix>` (preset or
+// `from..to`) + `_grain` + `_compare`, only what differs from the default.
+const { periodUrlParams } = new Function(`${grab("periodUrlParams")}\nreturn { periodUrlParams };`)();
+const def = { preset: "30d", compare: "prev" };
+assert.deepEqual(periodUrlParams("p", undefined, def), []);
+assert.deepEqual(periodUrlParams("p", { preset: "30d", compare: "prev" }, def), []);
+assert.deepEqual(periodUrlParams("p", { preset: "ytd", grain: "month", compare: "yoy" }, def), [
+  ["p", "ytd"],
+  ["p_grain", "month"],
+  ["p_compare", "yoy"],
+]);
+assert.deepEqual(periodUrlParams("p", { preset: "custom", from: "2026-01-01", to: "2026-03-31" }, def), [
+  ["p", "2026-01-01..2026-03-31"],
+]);
+
 const pkg = new URL("../../web/pkg/", import.meta.url);
 if (!existsSync(new URL("anofox_visualization_bg.wasm", pkg))) {
   console.log("web/pkg not built — skipping the wasm part of period_test");
@@ -67,4 +83,24 @@ r = periodResolve("presets=fortnight", "p", {});
 assert.equal(r.ok, false);
 assert.ok(r.errors[0].includes("fortnight"));
 assert.ok(r.vars, "a bad spec still resolves on the defaults");
+
+// validPeriodSeed: each URL part is checked against the input's own spec via
+// period_resolve; an invalid part is dropped, the rest still applies.
+const { validPeriodSeed, readUrlSeed } = new Function(
+  `const URL_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;\n${grab("readUrlSeed")}\n${grab("isIsoDate")}\n${grab("validPeriodSeed")}\nreturn { validPeriodSeed, readUrlSeed };`
+)();
+const spec = "presets=7d,30d,ytd; default=30d; grains=week,month; today=2026-09-30";
+const res = (st) => periodResolve(spec, "p", st);
+const seed = (qs) => validPeriodSeed(readUrlSeed(qs), "p", res);
+assert.deepEqual(seed("?v.p=ytd&v.p_grain=month&v.p_compare=yoy"), { preset: "ytd", grain: "month", compare: "yoy" });
+assert.deepEqual(seed("?v.p=2026-01-01..2026-03-31"), { preset: "custom", from: "2026-01-01", to: "2026-03-31" });
+assert.equal(seed("?v.other=1"), undefined);
+for (const bad of ["qtd", "fortnight", "2026-02-30..2026-03-01", "2026-01-01..", "custom", "ytd'; DROP"])
+  assert.equal(seed("?v.p=" + encodeURIComponent(bad)), undefined, bad);
+assert.deepEqual(seed("?v.p=nope&v.p_grain=day&v.p_compare=none"), { compare: "none" }, "day is not offered");
+assert.equal(seed("?v.p=ytd&v.p=7d"), undefined, "one value only");
+// round trip: what periodUrlParams writes, validPeriodSeed reads back.
+const st = { preset: "custom", from: "2026-02-01", to: "2026-02-28", grain: "week", compare: "yoy" };
+const qs = "?" + new URLSearchParams(periodUrlParams("p", st, res({})).map(([k, v]) => ["v." + k, v]));
+assert.deepEqual(seed(qs), st);
 console.log("period_test ok");
