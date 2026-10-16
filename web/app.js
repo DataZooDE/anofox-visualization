@@ -1283,6 +1283,15 @@ async function ensureDataFiles(sql) {
 // builds the paging SQL itself. `kind` (served mode only): a newer request of
 // the same panel + kind supersedes this one (it then rejects with an AbortError).
 async function runSql(sql, page, kind) {
+  const t0 = performance.now();
+  try {
+    return await runSqlInner(sql, page, kind);
+  } finally {
+    // timing for the perf check (scripts/perf-e2e.mjs reads the "dp:sql" entries)
+    performance.measure("dp:sql", { start: t0, detail: String(sql).slice(0, 120) });
+  }
+}
+async function runSqlInner(sql, page, kind) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
@@ -3480,6 +3489,7 @@ function run(fresh = true) {
   return runActive;
 }
 async function runOnce(fresh = true) {
+  const tRun = performance.now();
   const grid = $("grid");
   const motion = dpMotion; // what started this run (a drill, a drill-through)
   dpMotion = null;
@@ -4349,6 +4359,7 @@ async function runOnce(fresh = true) {
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
   }
   dash._shape = shape;
+  performance.mark("dp:swap");
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and
   // every chart on a drill / drill-through (the drilled one zooms).
   const tweens = [];
@@ -4385,7 +4396,9 @@ async function runOnce(fresh = true) {
   credit.append("Powered by ", creditLink);
   dash.append(credit);
   fitCharts(true);
+  const tWire = performance.now();
   wireCharts();
+  performance.measure("dp:wire", { start: tWire });
   for (const [svg, old, drill] of tweens) drill ? dpAnim.zoom(svg, old, drill.key, drill.down) : dpAnim.tween(svg, old);
   // A drill / drill-through hands the focus on (a crumb, the opened tab) when
   // the run removed the element that had it.
@@ -4402,6 +4415,7 @@ async function runOnce(fresh = true) {
   grid.removeAttribute("aria-busy");
   dpVarLast = { ...dpVarNow };
   document.body.classList.remove("loading");
+  performance.measure("dp:run", { start: tRun, detail: fresh ? "fresh" : "rerun" });
 }
 
 // Entrance animation on a fresh render: panels fade+rise in and each chart
@@ -4426,6 +4440,7 @@ function animateIn() {
 // keep its plot area and x window. Follow with wireCharts() once the holder
 // is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
+  const t0 = performance.now();
   const tracks = holder._tracks || [];
   if (tracks.length) {
     let svgs = [];
@@ -4456,6 +4471,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     if (now) now._dpAskW = w; // fitCharts compares against the width it asked for
   }
   markAnim(holder, roles);
+  performance.measure("dp:render", { start: t0 });
 }
 
 // ::TRACK: add a strip under the chart in `holder` and redraw the stack.
