@@ -1,0 +1,22 @@
+delivery,column_name,column_type,null_rate,distinct_count,is_unique,min_val,max_val
+today,category,VARCHAR,0.0,8,false,Audio,Toys
+today,currency,VARCHAR,0.0,1,false,EUR,EUR
+today,delivery_date,DATE,0.0,1,false,2026-10-15,2026-10-15
+today,ean,VARCHAR,0.0824,1114,true,4000012384705,4000102226328
+today,price_valid_from,TIMESTAMP,0.0,1,false,2026-10-14 22:00:00,2026-10-14 22:00:00
+today,product_name,VARCHAR,0.0,1214,true,Audio item 10,Toys item 997
+today,promo_flag,BOOLEAN,0.0,2,false,false,true
+today,received_at,TIMESTAMP,0.0,1,false,2026-10-15 08:52:00,2026-10-15 08:52:00
+today,sku,VARCHAR,0.0,1214,true,NW-00001,NW-01230
+today,stock_level,INTEGER,0.0,143,false,0,155
+today,unit_price,DOUBLE,0.0,1111,false,9.08,8879.76
+yesterday,category,VARCHAR,0.0,8,false,Audio,Toys
+yesterday,currency,VARCHAR,0.0,1,false,EUR,EUR
+yesterday,delivery_date,DATE,0.0,1,false,2026-10-14,2026-10-14
+yesterday,ean,VARCHAR,0.0,1213,true,4000012384705,4000102305511
+yesterday,price_valid_from,TIMESTAMP,0.0,1,false,2026-10-13 22:00:00,2026-10-13 22:00:00
+yesterday,product_name,VARCHAR,0.0,1213,true,Audio item 10,Toys item 997
+yesterday,received_at,TIMESTAMP,0.0,1,false,2026-10-14 05:14:00,2026-10-14 05:14:00
+yesterday,sku,VARCHAR,0.0,1213,true,NW-00001,NW-01230
+yesterday,stock_qty,INTEGER,0.0,150,false,0,154
+yesterday,unit_price,DOUBLE,0.0,1106,false,9.08,162.48

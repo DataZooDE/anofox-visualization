@@ -1,0 +1,9 @@
+match_key,form,duplicates
+Email,as entered,210
+Email,normalised,531
+Name,as entered,1149
+Name,normalised,1540
+Phone,as entered,87
+Phone,normalised,609
+VAT ID,as entered,13
+VAT ID,normalised,142

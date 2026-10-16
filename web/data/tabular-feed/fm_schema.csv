@@ -1,0 +1,3 @@
+delivery,status,missing_columns,new_columns,message
+today,fail,[stock_qty],"stock_level, promo_flag",Table fm_today is missing 1 column(s)
+yesterday,pass,[],,Table fm_yesterday has all required columns
