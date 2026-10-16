@@ -7305,8 +7305,10 @@ function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString(
   return out + (parts.length ? "; " + parts.join("; ") : "") + ".";
 }
 
+// A chart's data marks — not its reference rules (`data-rule`: ::XLINE,
+// ::REFLINE, thresholds), which keep their tooltip but are no data point.
 function chartMarks(svg) {
-  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip"));
+  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip") && !el.hasAttribute("data-rule"));
 }
 
 function attachChartA11y() {
