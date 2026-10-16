@@ -12,16 +12,19 @@ description: >
   calibration, Kaplan-Meier, ACF / PACF, CV error with lambda.min /
   lambda.1se), anofox_plot_tests (post-hoc comparison forest),
   anofox_plot_compare (box / violin / points with significance brackets),
-  anofox_plot_partial (component + residual, added-variable) and
-  anofox_plot (auto), with every option (title, x_label, y_label, highlight,
-  lambda_min, lambda_1se, facet, reference, band, kind, base_rate, metrics,
+  anofox_plot_partial (component + residual, added-variable),
+  anofox_plot_events (alarm / parameter-change timeline; events := over a
+  forecast) and anofox_plot (auto), with every option (title, x_label,
+  y_label, highlight, lambda_min, lambda_1se, facet, reference, band, kind,
+  events, base_rate, metrics,
   baseline, label_top, alpha, value, label, factor, tests, hide_ns, width,
   height), anofox_contract_version(), the alias-the-row calling convention,
   GROUP BY for one plot per group, the producer to macro table, and using
   them in ::ROLE dashboards and the browser builder. Use when the user wants
   to plot a regression, coefficients, residual diagnostics, a forecast, a
   ROC curve, survival curves or test results, asks "how do I plot
-  ols_tidy_by / ts_forecast_by output", or a contract plot call errors.
+  ols_tidy_by / ts_forecast_by / statsforecast output", or a contract plot
+  call errors.
 version: 2026.10.15
 user-invocable: false
 ---
@@ -30,7 +33,7 @@ user-invocable: false
 
 **Extension:** `anofox_visualization` (CalVer 2026.10.15) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast` | **DuckDB:** v1.5.6
 
-anofox-statistics and anofox-forecast return plot-ready **long tables** with fixed columns (the anofox integration contract: `terms`, `summary`, `obs`, `prediction`, `curve`, `test`). One macro per schema renders such a table to SVG. The schemas and their producers are documented in the **anofox-statistics-plotting** skill of the anofox-statistics plugin; this skill is the consumer side.
+anofox-statistics and anofox-forecast return plot-ready **long tables** with fixed columns (the anofox integration contract: `terms`, `summary`, `obs`, `prediction`, `curve`, `test`, `events`). One macro per schema renders such a table to SVG. The schemas and their producers are documented in the **anofox-statistics-plotting** skill of the anofox-statistics plugin; this skill is the consumer side.
 
 ## Calling convention
 
@@ -53,12 +56,13 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_summary(s, …)` | **metric, value**, model_id \| model_name, id, conf_low, conf_high | `metrics := ['r_squared', 'aic', …]` (panels and their order; `n_observations`, `n_features`, `iterations` only when asked), `baseline := 'range'` (zoom to the values) \| `'zero'` |
 | `anofox_plot_obs(o, …)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | `kind := 'resid_fitted'` \| `'qq'` \| `'scale_location'` \| `'leverage'` \| `'cooks'`, `label_top := 3` (label the rows with the largest Cook's distance) |
 | `anofox_plot_diagnostics(o, …)` | as `obs` | `label_top := 3`; the plot.lm 2×2 in one SVG (`x_label` / `y_label` ignored) |
-| `anofox_plot_prediction(p, …)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id, focal | `x := '<col>'`, `y := '<col>'` (other columns as x / y), `facet := '<col>'` (default: panels by `id` when there are several), `band := '<model>'` (which model's band; default `ols` or the first), `kind := 'fit'` \| `'difference'` (each model minus the band model) |
+| `anofox_plot_prediction(p, …)` | **x \| ds \| period, yhat**, y, yhat_lower, yhat_upper, level, split \| is_training, model_id \| model_name, id, focal | `x := '<col>'`, `y := '<col>'` (other columns as x / y), `facet := '<col>'` (default: panels by `id` when there are several), `band := '<model>'` (which model's band; default `ols` or the first), `kind := 'fit'` \| `'difference'` (each model minus the band model), `events := (SELECT list(e) FROM alarms e)` (an `events` table as vertical lines coloured by severity). Several `level`s (one row per x and level) draw a nested fan; an integer `period` is the x when there is no `ds` |
+| `anofox_plot_events(e, …)` | **ds \| period, kind**, label, severity (`alarm` / `warning`), value, threshold, model_id, series | `x := '<col>'`; a timeline, one lane per series (else kind), dots coloured by severity, label / value / threshold on hover (default 640 × 260) |
 | `anofox_plot_curve(c, …)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, n_censor, n_risk, is_min, is_1se | `base_rate :=` (PR base-rate line). Geom by `curve_type`: `roc`, `pr`, `calibration`, `km`, `acf`, `pacf`, `lambda_cv`, `qq`, `pdp`, `lift`, `null_dist`, `lowess` (`lowess_by`). **One `curve_type` per call** |
 | `anofox_plot_tests(t, …)` | **p_value \| p_adj \| statistic**, test_id, group1, group2, estimate, conf_low, conf_high, method | `alpha := 0.05` (significance colour), `value := 'estimate'` \| `'statistic'` \| `'p'` (measure; default estimate, else statistic, else −log10 p), `label := 'p'` (default: p and stars) \| `'stars'`. A STRUCT / LIST column (`tukey_hsd_agg(y, g) AS r`) is expanded |
 | `anofox_plot_compare(r, …)` | the raw rows | **`value := '<numeric col>'`, `factor := '<group col>'`**, `tests :=` a LIST of test STRUCTs (`(SELECT list(t) FROM tukey_hsd_by(…) t WHERE …)`, `tukey_hsd_agg(y, g)`, a two-sample STRUCT such as `t_test_agg(y, g)`), `kind := 'box'` \| `'violin'` \| `'points'`, `hide_ns :=` (drop p > 0.05; default true above 3 groups), `label := 'stars'` (default) \| `'p'` \| a template (`'{p.signif}'`, `'p = {p.adj}'`) |
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
-| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id → tests. Only the common options |
+| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id → tests, kind \| severity + ds \| period → events. Only the common options |
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
 
@@ -88,6 +92,19 @@ FROM (VALUES ('b-a', 'a', 'b', 1.2, 0.4, 2.0, 0.003), ('c-a', 'a', 'c', 0.3, -0.
 SELECT anofox_contract_version();   -- '1'
 ```
 
+**Events and integer periods** (a digital twin's projection and alarms): `period` is the x when there is no `ds`, one row per level draws a nested fan, and `events :=` puts the alarms on it:
+
+```sql
+CREATE TABLE alarms AS SELECT * FROM (VALUES
+  (4, 'stockout', 'on hand 0', 'alarm', 0.0, 5.0, 'SKU-1'),
+  (9, 'drift', 'CUSUM', 'warning', 4.2, 4.0, 'SKU-1')) t(period, kind, label, severity, value, threshold, series);
+SELECT anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e), y_label := 'on hand')
+FROM (SELECT p AS period, CASE WHEN p <= 8 THEN 20.0 - p END AS y, 20.0 - p AS yhat,
+             20.0 - p - w AS yhat_lower, 20.0 - p + w AS yhat_upper, l AS level
+      FROM range(1, 17) r(p), (VALUES (0.8, 2.0), (0.95, 3.5)) v(l, w)) p;
+SELECT anofox_plot_events(e) FROM alarms e;   -- the timeline on its own
+```
+
 **Other producers' column names are read as contract columns**, so raw statsmodels / R / broom / pingouin tables plot without renaming. Names compare with case, `.`, spaces and symbols ignored (`Std. Error` = `std.error` = `std_error`, broom's `.fitted` = `fitted`), plus these spellings (the first present wins; a column the contract name already has, or one an option names, is left alone; `anofox_plot_compare` reads its rows as given):
 
 | Contract column | Also read from |
@@ -101,7 +118,14 @@ SELECT anofox_contract_version();   -- '1'
 | `fitted`, `residual`, `std_residual` | `fittedvalues`; `resid`, `residuals`; `std_resid`, `standard_resid` |
 | `leverage`, `cooks_d` | `hat`, `hat_diag`; `cooksd`, `cooks_distance`, `cook_d` |
 
-In a table with `yhat`, the interval columns (`lower` / `upper`, `mean_ci_*`, `ci_*`, `conf_*`, `[0.025` / `0.975]`) become `yhat_lower` / `yhat_upper`. A statsmodels coefficient frame still needs its index as `term`:
+In a table with `yhat`, the interval columns (`lower` / `upper`, `mean_ci_*`, `ci_*`, `conf_*`, `[0.025` / `0.975]`) become `yhat_lower` / `yhat_upper`. Also read without reshaping:
+
+- an interval in **one** column — a `[low, high]` LIST or two-field STRUCT named `conf_int`, `ci`, `confint` or `CI95%` (pingouin; the level in the name fills `conf_level`);
+- `level` / `conf_level` 95 = 0.95;
+- **statsforecast's wide forecast** (`unique_id, ds, AutoARIMA, AutoARIMA-lo-95, AutoARIMA-hi-95, …`, also mlforecast / neuralforecast): one row per model and level, so `anofox_plot_prediction(f)` draws a line per model and a nested fan. Without `level=` there are no `-lo-` columns: `UNPIVOT f ON COLUMNS(* EXCLUDE (unique_id, ds)) INTO NAME model_id VALUE yhat` first;
+- `unique_id` = `id` (panels).
+
+`anofox_plot_summary` marks the best model for metrics with a known direction: R², AUC, accuracy, F1, precision, recall (higher); RMSE, MSE, MAE, MAPE, sMAPE, MASE, CRPS, Brier score, log loss, AIC, BIC (lower). A statsmodels coefficient frame still needs its index as `term`:
 
 ```python
 tbl = res.summary2().tables[1].reset_index(names="term")   # Coef., Std.Err., t, P>|t|, [0.025, 0.975]
@@ -123,6 +147,8 @@ duckdb.sql("SELECT anofox_plot_terms(t) FROM tbl t")
 | `tukey_hsd_by`, `pairwise_t_test_by`, `dunn_test_by`, the `*_agg` tests | test | `anofox_plot_tests(t)`; raw values + brackets: `anofox_plot_compare(r, value :=, factor :=, tests :=)` |
 | `<model>_partial_residuals_by` | (not a contract schema) | `anofox_plot_partial(p, kind := …)` |
 | `ts_forecast_by` (anofox-forecast) | prediction (no `y`) | `anofox_plot_prediction(f)`; union the history to show actuals |
+| statsforecast `sf.forecast(…, level=[80, 95])` | prediction (wide, melted on read) | `anofox_plot_prediction(f)` — a line per model, nested fan |
+| twin alarms / parameter changes (inventory-rs) | events | `anofox_plot_events(e)`, or `anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))` |
 
 Discover the producers of the loaded extensions:
 

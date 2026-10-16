@@ -1298,8 +1298,17 @@ const METRIC_ORDER: &[&str] = &[
     "pseudo_r_squared",
     "auc",
     "accuracy",
+    "f1",
+    "precision",
+    "recall",
+    "brier",
+    "log_loss",
     "rmse",
+    "mse",
     "mae",
+    "mape",
+    "smape",
+    "mase",
     "residual_std_error",
     "sigma",
     "aic",
@@ -1326,12 +1335,28 @@ const HIGHER_BETTER: &[&str] = &[
     "adj_r_squared",
     "pseudo_r_squared",
     "auc",
+    "roc_auc",
     "accuracy",
+    "balanced_accuracy",
+    "f1",
+    "f1_score",
+    "precision",
+    "recall",
     "log_likelihood",
 ];
 const LOWER_BETTER: &[&str] = &[
     "rmse",
+    "mse",
     "mae",
+    "mape",
+    "smape",
+    "mase",
+    "rmsse",
+    "crps",
+    "brier",
+    "brier_score",
+    "log_loss",
+    "logloss",
     "residual_std_error",
     "sigma",
     "aic",
@@ -1339,6 +1364,24 @@ const LOWER_BETTER: &[&str] = &[
     "bic",
     "deviance",
 ];
+
+#[cfg(test)]
+pub(super) fn direction_of(m: &str) -> f64 {
+    direction(m)
+}
+
+/// Which way a metric improves: -1 higher is better, 1 lower is better, 0
+/// unknown (case ignored: `AUC`, `MAPE`).
+fn direction(m: &str) -> f64 {
+    let m = m.to_ascii_lowercase();
+    if HIGHER_BETTER.contains(&m.as_str()) {
+        -1.0
+    } else if LOWER_BETTER.contains(&m.as_str()) {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 fn metric_title(m: &str) -> String {
     match m {
@@ -1350,7 +1393,14 @@ fn metric_title(m: &str) -> String {
         "bic" => "BIC".into(),
         "auc" => "AUC".into(),
         "rmse" => "RMSE".into(),
+        "mse" => "MSE".into(),
         "mae" => "MAE".into(),
+        "mape" => "MAPE".into(),
+        "smape" => "sMAPE".into(),
+        "mase" => "MASE".into(),
+        "f1" => "F1".into(),
+        "brier" => "Brier score".into(),
+        "log_loss" => "log loss".into(),
         "residual_std_error" => "residual SE".into(),
         "log_likelihood" => "log-likelihood".into(),
         other => other.replace('_', " "),
@@ -1450,13 +1500,7 @@ pub(super) fn summary(
     // its direction is known), models without it last.
     let label_levels: Vec<String> = {
         let m0 = &wanted[0];
-        let dir = if HIGHER_BETTER.contains(&m0.as_str()) {
-            -1.0
-        } else if LOWER_BETTER.contains(&m0.as_str()) {
-            1.0
-        } else {
-            0.0
-        };
+        let dir = direction(m0);
         let score = |l: &String| -> Option<f64> {
             (0..t.rows.len())
                 .find(|&i| {
@@ -1490,11 +1534,11 @@ pub(super) fn summary(
                 .unwrap_or(0)
         };
         let vals: Vec<f64> = idx.iter().filter_map(|&i| fin(&value[i])).collect();
-        let best = if n > 1 && HIGHER_BETTER.contains(&m.as_str()) {
+        let best = if n > 1 && direction(m) < 0.0 {
             vals.iter()
                 .copied()
                 .fold(None, |b: Option<f64>, v| Some(b.map_or(v, |b| b.max(v))))
-        } else if n > 1 && LOWER_BETTER.contains(&m.as_str()) {
+        } else if n > 1 && direction(m) > 0.0 {
             vals.iter()
                 .copied()
                 .fold(None, |b: Option<f64>, v| Some(b.map_or(v, |b| b.min(v))))
@@ -1740,14 +1784,14 @@ pub(super) fn prediction(
     let labels = Labels::from(options);
     let x = opt_str(options, "x")
         .or_else(|| {
-            ["x", "ds", "date"]
+            ["x", "ds", "date", "period"]
                 .into_iter()
                 .find(|k| t.has(k))
                 .map(String::from)
         })
         .ok_or_else(|| {
             format!(
-                "needs an x position: a column `x` or `ds`, or x := '<column>' (got: {})",
+                "needs an x position: a column `x`, `ds` or `period`, or x := '<column>' (got: {})",
                 t.keys()
             )
         })?;
@@ -1850,6 +1894,7 @@ pub(super) fn prediction(
     };
     let nan = |v: &Value| fin(v).map_or(Value::Float(f64::NAN), Value::Float);
     let brand = o.brand();
+    let mut captions: Vec<String> = Vec::new();
     let ycol: Vec<Value>;
     let ylab: String;
     let mut plot;
@@ -1901,7 +1946,13 @@ pub(super) fn prediction(
         // The fit line: rows without a yhat (the history unioned in before a
         // forecast) are part of the schema, not lost data — leave them out of
         // the line layer instead of letting it report them as non-finite.
-        let fitted: Vec<usize> = (0..n).filter(|&i| fin(&yhat[i]).is_some()).collect();
+        // One point per (model, panel, x): a long table repeats yhat for
+        // each interval level.
+        let mut seen = std::collections::HashSet::new();
+        let fitted: Vec<usize> = (0..n)
+            .filter(|&i| fin(&yhat[i]).is_some())
+            .filter(|&i| seen.insert(format!("{:?}|{}|{:?}", models[i], fkey(i), xs[i])))
+            .collect();
         let fitted: Vec<usize> = if fitted.is_empty() {
             (0..n).collect()
         } else {
@@ -1923,6 +1974,16 @@ pub(super) fn prediction(
         plot = GGPlot::new(data).aes(aes);
         if t.has("yhat_lower") && t.has("yhat_upper") {
             let (lo, hi) = (t.num("yhat_lower")?, t.num("yhat_upper")?);
+            // Several `level`s: a nested fan, one ribbon per level (the
+            // overlaps darken towards the centre).
+            let lv = if t.has("level") {
+                t.num("level")?
+            } else {
+                vec![Value::Na; n]
+            };
+            let mut fan: Vec<f64> = lv.iter().filter_map(fin).collect();
+            fan.sort_by(f64::total_cmp);
+            fan.dedup();
             let keep: Vec<usize> = (0..n)
                 .filter(|&i| fin(&lo[i]).is_some() && fin(&hi[i]).is_some())
                 .filter(|&i| match &reference {
@@ -1939,17 +2000,40 @@ pub(super) fn prediction(
             if let Some(f) = &fac {
                 frame.push(("facet".into(), pick(f)));
             }
+            // The band in its model's line colour.
             let fill = match &reference {
-                Some(r) => look::model_color(r),
+                Some(r) => mlevels
+                    .iter()
+                    .position(|m| m == r)
+                    .map(|i| look::level_colors(&mlevels)[i])
+                    .unwrap_or_else(|| look::model_color(r)),
                 None => brand,
             };
-            // One ribbon per facet / split run: group by facet.
+            // One ribbon per facet / split run / level.
             let mut a = Aes::new().x("x").ymin("lo").ymax("hi");
-            if fac.is_some() {
+            if fan.len() > 1 {
+                frame.push((
+                    "band".into(),
+                    keep.iter()
+                        .map(|&i| s(format!("{}|{:?}", fkey(i), lv[i])))
+                        .collect(),
+                ));
+                a = a.group("band");
+                let pct: Vec<String> = fan
+                    .iter()
+                    .map(|l| format!("{} %", fmt_num(l * 100.0)))
+                    .collect();
+                let whose = reference
+                    .as_ref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default();
+                captions.push(format!("bands{whose}: {} intervals", pct.join(", ")));
+            } else if fac.is_some() {
                 a = a.group("facet");
             }
+            let alpha = if fan.len() > 1 { 0.12 } else { 0.16 };
             plot = plot
-                .geom_ribbon_with(GeomRibbon { fill, alpha: 0.16 })
+                .geom_ribbon_with(GeomRibbon { fill, alpha })
                 .layer_data(frame)
                 .layer_aes(a);
         }
@@ -2046,8 +2130,8 @@ pub(super) fn prediction(
                         alpha: 0.8,
                     })
                     .layer_data(frame)
-                    .layer_aes(Aes::new().x("x").y("yhat"))
-                    .caption(&format!("orange: {} rows", names.join(", ")));
+                    .layer_aes(Aes::new().x("x").y("yhat"));
+                captions.push(format!("orange: {} rows", names.join(", ")));
             }
         }
         if !marks.is_empty() {
@@ -2077,7 +2161,22 @@ pub(super) fn prediction(
             }
         }
     }
+    if let Some(ev) = options.get("events").filter(|v| !v.is_null()) {
+        let (p, note) = super::events::overlay(
+            plot,
+            ev,
+            &x,
+            is_date,
+            facet.as_deref().zip(fac.as_deref()),
+            o,
+        )?;
+        plot = p;
+        captions.extend(note);
+    }
     let mut plot = labels.apply(plot, &xdefault, &ylab);
+    if !captions.is_empty() {
+        plot = plot.caption(&captions.join(" · "));
+    }
     if fac.is_some() {
         plot = plot.facet_wrap_free("facet", Some(1), FacetScales::FreeY);
     }

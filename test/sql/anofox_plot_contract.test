@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -214,6 +214,93 @@ query I
 SELECT anofox_plot(p) LIKE '<svg%>component + residual</text>%>x2</text>%' FROM pres p;
 ----
 true
+
+# ── common Python / R outputs (#58) ──────────────────────────────────────────
+# An interval as one [low, high] LIST (pingouin's CI95%, statsmodels'
+# conf_int()): the bounds and the level in the name are read.
+query I
+SELECT anofox_plot_terms(c) LIKE '%estimate (95% CI)%>x1</text>%' FROM (VALUES ('x1', 0.5, [0.2, 0.8]), ('x2', -0.3, [-0.7, 0.1])) c(term, coef, "CI95%");
+----
+true
+
+# … or as a STRUCT.
+query I
+SELECT anofox_plot_terms(c) LIKE '%x2: -0.3 [-0.7, 0.1] · n.s.%' FROM (VALUES ('x1', 0.5, {'lower': 0.2, 'upper': 0.8}), ('x2', -0.3, {'lower': -0.7, 'upper': 0.1})) c(term, estimate, conf_int);
+----
+true
+
+# conf_level 95 reads as 0.95.
+query I
+SELECT anofox_plot_terms(c) LIKE '%estimate (95% CI)%' FROM (VALUES ('x1', 0.5, 0.2, 0.8, 95)) c(term, estimate, conf_low, conf_high, conf_level);
+----
+true
+
+# statsforecast's wide forecast: one line per model, a nested fan per level.
+query I
+SELECT anofox_plot_prediction(f) LIKE '%AutoARIMA%AutoETS%bands (AutoARIMA): 80 %, 95 % intervals%' FROM (
+  SELECT 'A' AS unique_id, DATE '2024-01-01' + h::INTEGER AS ds, 10.0 + h AS "AutoARIMA",
+         9.0 + h AS "AutoARIMA-lo-80", 11.0 + h AS "AutoARIMA-hi-80", 8.0 + h AS "AutoARIMA-lo-95", 12.0 + h AS "AutoARIMA-hi-95",
+         10.5 + h AS "AutoETS", 8.5 + h AS "AutoETS-lo-95", 12.5 + h AS "AutoETS-hi-95"
+  FROM range(1, 8) r(h)) f;
+----
+true
+
+# MAPE (lower) and F1 (higher) have a direction: the best model is marked.
+query I
+SELECT anofox_plot_summary(s) LIKE '%>F1  (Δ = 0.1)</text>%>MAPE  (Δ = 0.03)</text>%' FROM (VALUES
+  ('a', 'mape', 0.12), ('b', 'mape', 0.09), ('a', 'f1', 0.7), ('b', 'f1', 0.8)) s(model_id, metric, value);
+----
+true
+
+# A near-perfect AUC keeps three decimals.
+query I
+SELECT anofox_plot_curve(c) LIKE '%AUC 0.995%' FROM (VALUES ('roc', 0.0, 0.0, 0.9952), ('roc', 0.01, 0.99, 0.9952), ('roc', 1.0, 1.0, 0.9952)) c(curve_type, x, y, auc);
+----
+true
+
+# ── events and integer periods (#66) ─────────────────────────────────────────
+statement ok
+CREATE TABLE alarms AS SELECT * FROM (VALUES
+  (4, 'stockout', 'on hand 0', 'alarm', 0.0, 5.0, 'SKU-1'),
+  (9, 'drift', 'CUSUM', 'warning', 4.2, 4.0, 'SKU-1'),
+  (12, 'recalibrated', 'lead time 3 → 4', NULL, NULL, NULL, 'SKU-2')
+) t(period, kind, label, severity, value, threshold, series);
+
+statement ok
+CREATE TABLE proj AS SELECT p AS period, CASE WHEN p <= 8 THEN 20.0 - p END AS y, 20.0 - p AS yhat,
+  20.0 - p - w AS yhat_lower, 20.0 - p + w AS yhat_upper, l AS level
+FROM range(1, 17) r(p), (VALUES (80, 2.0), (95, 3.5)) v(l, w);
+
+# An integer period is the x when there is no ds; two levels nest; the events
+# are vertical lines coloured by severity, named under the plot.
+query I
+SELECT anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))
+  LIKE '<svg%>period</text>%bands: 80 %, 95 % intervals · events: 1 alarm (red), 1 warning (amber), 1 event (grey)%' FROM proj p;
+----
+true
+
+# The hover text of an event.
+query I
+SELECT anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))
+  LIKE '%alarm · stockout · SKU-1: on hand 0 0 (threshold 5)%' FROM proj p;
+----
+true
+
+statement error
+SELECT anofox_plot_prediction(p, events := [{'ds': DATE '2024-01-01', 'kind': 'x'}]) FROM proj p;
+----
+is a date but the prediction's x (`period`) is not
+
+# On their own: a timeline, one lane per series; anofox_plot detects the schema.
+query II
+SELECT anofox_plot_events(e) LIKE '<svg%>SKU-2</text>%>SKU-1</text>%', anofox_plot(e) LIKE '<svg%>SKU-1</text>%' FROM alarms e;
+----
+true	true
+
+statement error
+SELECT anofox_plot_events(e) FROM (VALUES ('x', 'alarm')) e(kind, severity);
+----
+needs an event time
 
 # ── contract version ─────────────────────────────────────────────────────────
 query I

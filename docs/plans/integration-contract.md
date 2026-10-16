@@ -29,10 +29,16 @@ Principles
 |---|---|---|---|
 | `terms` (tidy) | **model_id, term, estimate**, std_error, statistic, p_value, **conf_low, conf_high**, conf_level, index_name, index_value | statistics `tidy()`, path/CV/quantile/rolling fits, GLMM ranef, forecast model coefficients | coefficient forest, multi-model forest, regularisation path, quantile process, rolling coefficients, caterpillar |
 | `obs` (augment) | **model_id, row_id, y, fitted, residual**, resid_type, std_residual, stud_residual, leverage, cooks_d, weight, is_training, ds, n_params | statistics `<model>_augment_by` (new), forecast in-sample residuals | plot.lm 2×2, influence, Cook's index, binned residuals, residual-over-time, predicted-vs-actual |
-| `prediction` | **model_id, x \| ds, yhat**, y, yhat_lower, yhat_upper, level, split (`train`/`test`/`future`) | statistics `_fit_predict_by`, forecast `ts_forecast_by`, marginal-effect grids | fit + band, forecast fan, marginal effects, PDP |
+| `prediction` | **model_id, x \| ds \| period, yhat**, y, yhat_lower, yhat_upper, level, split (`train`/`test`/`future`) | statistics `_fit_predict_by`, forecast `ts_forecast_by`, marginal-effect grids, twin stock projections (inventory-rs) | fit + band, forecast fan (one row per level → nested fan), marginal effects, PDP |
 | `curve` | **curve_type, x, y**, model_id, series, y_low, y_high, threshold, weight, n_censor (km) | ROC/PR/calibration aggregates, lambda-CV, KM, ACF/PACF, QQ, null distribution | every line/step curve; macro picks geom + reference line from `curve_type` |
 | `summary` (glance) | **model_id, metric, value**, conf_low, conf_high | statistics `glance()`, forecast accuracy metrics | model comparison dots/bars |
 | `test` | **method, statistic, p_value**, test_id, group1, group2, p_adj, df1, df2, estimate, conf_low, conf_high, effect_size, effect_name, alternative, alpha | all `*_test_agg`, post-hoc pairwise, Diebold–Mariano | p-value brackets, effect-size forest, critical-region plot |
+| `events` | **ds \| period, kind**, label, severity (`warning`/`alarm`), value, threshold, model_id, series | twin alarms (inventory-rs `Alarm`: tier → severity, category/name → kind/label, stream → series), parameter changes, calibration proposals | event timeline (`anofox_plot_events`), event lines over a forecast (`anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))`) |
+
+`period` is an integer period index (a twin advancing by period); producers
+write `ds` instead when a calendar is configured. `level` is the interval's
+coverage as a fraction (0.8, 0.95); 80 / 95 read the same. A prediction
+with several levels has one row per (x, model, level), `yhat` repeated.
 
 `curve_type` vocabulary: `roc, pr, calibration, lambda_cv, km, acf, pacf, qq,
 null_dist, pdp, lift, lowess` (`lowess`: a smoothed y over x per group, e.g.
@@ -42,7 +48,13 @@ Producers write these names. The visualization side also reads common other
 spellings (statsmodels `coef` / `P>|t|` / `[0.025`, broom `.fitted`, R
 `Std. Error`, pingouin `p-unc`; table in `docs/DOCS.md`, *Other column
 names*), so outside tables plot without a reshaping step — this does not
-change contract version `1`.
+change contract version `1`. Nor do the readers for an interval held in one
+`[low, high]` column (`conf_int`, pingouin's `CI95%`), statsforecast's wide
+`<model>-lo-<L>` / `-hi-<L>` forecast, `level` 95 vs 0.95, the `period`
+x key and the `events` schema: all are additions (new optional columns, a
+new schema, more accepted spellings) and no column changed name, type or
+meaning, so the version stays `1`. A version bump is reserved for a renamed,
+re-typed or re-interpreted column.
 
 ## Model objects between extensions
 
