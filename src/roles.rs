@@ -91,7 +91,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("UPSTREAM", &["PARENTS"], R::Upstream, "encoding", true,
       "a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node"),
     e("EDGES", &[], R::Edges, "encoding", true,
-      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow'}) FROM e)"),
+      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),

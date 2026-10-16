@@ -100,6 +100,8 @@ pub struct Edge {
     pub fvalue: Option<String>,
     pub label: Option<String>,
     pub style: EdgeStyle,
+    /// The edge's health (`::EDGES` `status`): warn / bad colour the edge.
+    pub status: Option<Status>,
 }
 
 /// Something the author should know (`dashboard --check`: `diagram/*`).
@@ -116,6 +118,8 @@ pub struct Diagram {
     pub dir: Dir,
     /// The `::ANIMATE` mode, when it is one the browser plays.
     pub animate: Option<String>,
+    /// `'tween'::TRANSITION`: a re-run changes widths, colours and values in place.
+    pub tween: bool,
     /// Nodes / edges in the data before the [`MAX_NODES`] / [`MAX_EDGES`] cut.
     pub total_nodes: usize,
     pub total_edges: usize,
@@ -330,7 +334,16 @@ impl Diagram {
                                     }
                                     st
                                 });
-                            raw.push((from, to, value.filter(|v| v.is_finite()), label, style));
+                            // a health word (`ok`, `delayed`, `failed`, …) colours the edge
+                            let status = field(o, &["status"]).and_then(json_id).and_then(|w| badge_status(&w));
+                            raw.push(RawEdge {
+                                from,
+                                to,
+                                value: value.filter(|v| v.is_finite()),
+                                label,
+                                style,
+                                status,
+                            });
                         }
                         if missing > 0 {
                             problem(
@@ -375,7 +388,11 @@ impl Diagram {
         if let Some(up) = upstream {
             for (n, &row) in rows.iter().enumerate() {
                 for from in up.values.get(row).map(upstream_ids).unwrap_or_default() {
-                    raw.push((from, nodes[n].id.clone(), None, None, None));
+                    raw.push(RawEdge {
+                        from,
+                        to: nodes[n].id.clone(),
+                        ..RawEdge::default()
+                    });
                 }
             }
         }
@@ -384,7 +401,15 @@ impl Diagram {
         let mut styles: Vec<Option<EdgeStyle>> = Vec::new(); // as given in ::EDGES
         let mut unknown: Vec<String> = Vec::new();
         let mut total_edges = 0usize;
-        for (from, to, value, label, style) in raw {
+        for RawEdge {
+            from,
+            to,
+            value,
+            label,
+            style,
+            status,
+        } in raw
+        {
             let (Some(f), Some(t)) = (index(&from, &nodes), index(&to, &nodes)) else {
                 // an id beyond the node cut is no author error
                 for id in [&from, &to] {
@@ -402,6 +427,7 @@ impl Diagram {
                     let e = &mut edges[k];
                     e.value = e.value.or(value);
                     e.label = e.label.take().or(label);
+                    e.status = e.status.or(status);
                     styles[k] = styles[k].or(style);
                 }
                 None => {
@@ -414,6 +440,7 @@ impl Diagram {
                             fvalue: None,
                             label,
                             style: EdgeStyle::Solid,
+                            status,
                         });
                         styles.push(style);
                     }
@@ -444,11 +471,13 @@ impl Diagram {
         let animate = first_text(Role::Animate)
             .map(|a| a.to_ascii_lowercase())
             .filter(|a| crate::ANIMATE_MODES.contains(&a.as_str()));
+        let tween = first_text(Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween"));
         Some(Diagram {
             nodes,
             edges,
             dir,
             animate,
+            tween,
             total_nodes,
             total_edges,
             problems,
@@ -503,8 +532,24 @@ fn badge_status(text: &str) -> Option<Status> {
         "erledigt",
     ];
     const WARN: &[&str] = &[
-        "warn", "warning", "risk", "atrisk", "pending", "review", "amber", "medium", "hold",
-        "watch", "flat", "stable", "knapp", "prüfen", "offen",
+        "warn",
+        "warning",
+        "risk",
+        "atrisk",
+        "pending",
+        "review",
+        "amber",
+        "medium",
+        "hold",
+        "watch",
+        "flat",
+        "stable",
+        "knapp",
+        "prüfen",
+        "offen",
+        "delayed",
+        "slow",
+        "verzögert",
     ];
     const BAD: &[&str] = &[
         "bad",
@@ -657,14 +702,16 @@ fn box_of(n: &Node) -> Box_ {
 
 /// A DAG edge: `(u, v, edge index, reversed)`.
 type DagEdge = (usize, usize, usize, bool);
-/// An edge as read: `(from id, to id, value, label, style)`.
-type RawEdge = (
-    String,
-    String,
-    Option<f64>,
-    Option<String>,
-    Option<EdgeStyle>,
-);
+/// An edge as read, before its ids are resolved.
+#[derive(Default)]
+struct RawEdge {
+    from: String,
+    to: String,
+    value: Option<f64>,
+    label: Option<String>,
+    style: Option<EdgeStyle>,
+    status: Option<Status>,
+}
 
 /// DAG edges `(u, v, edge index, reversed)` — the cycle-free orientation:
 /// a DFS in row order reverses every edge that closes a cycle — and the
@@ -1453,7 +1500,18 @@ pub(crate) fn render(
     let muted = hex(t.colors.muted);
     let card = hex(t.colors.card);
     out.push_str("<g class=\"dp-edges\">");
+    // with values, an edge is as wide as what it carries (area-true: sqrt)
+    let vmax = d.edges.iter().filter_map(|e| e.value).fold(0.0, f64::max);
     for (k, e) in d.edges.iter().enumerate() {
+        let width = match e.value {
+            Some(v) if vmax > 0.0 => 1.4 + 5.6 * (v.max(0.0) / vmax).sqrt(),
+            _ => 1.6,
+        };
+        let width = match e.style {
+            EdgeStyle::Dots => width.clamp(3.0, 6.0),
+            _ => width,
+        };
+        let arrow = ARROW + width;
         let mut pts = p.edges[k].clone();
         if pts.len() < 2 {
             continue;
@@ -1462,19 +1520,26 @@ pub(crate) fn render(
         let (tx_, ty_) = pts[pts.len() - 1];
         let len = ((tx_ - fx).powi(2) + (ty_ - fy).powi(2)).sqrt().max(1e-6);
         let (ux, uy) = ((tx_ - fx) / len, (ty_ - fy) / len);
-        let base = (tx_ - ux * ARROW, ty_ - uy * ARROW);
+        let base = (tx_ - ux * arrow, ty_ - uy * arrow);
         let last = pts.len() - 1;
         pts[last] = base;
-        let colour = match e.style {
-            EdgeStyle::Flow | EdgeStyle::Dots => hex(t.color(0)),
+        // health first (warn / bad), else a flowing edge in the brand colour
+        let colour = match (e.status, e.style) {
+            (Some(st @ (Status::Bad | Status::Warn)), _) => hex(st.color(t)),
+            (_, EdgeStyle::Flow | EdgeStyle::Dots) => hex(t.color(0)),
             _ => muted.clone(),
         };
-        let (width, dash) = match e.style {
-            EdgeStyle::Solid => ("1.6", ""),
-            EdgeStyle::Dashed => ("1.6", " stroke-dasharray=\"6 4\""),
-            EdgeStyle::Flow => ("1.6", " stroke-dasharray=\"6 4\" class=\"dp-flow\""),
-            EdgeStyle::Dots => ("3", " stroke-dasharray=\"0 7\" class=\"dp-flow dp-dots\""),
+        let dash = match e.style {
+            EdgeStyle::Solid => "",
+            EdgeStyle::Dashed => " stroke-dasharray=\"6 4\"",
+            EdgeStyle::Flow => " stroke-dasharray=\"6 4\" class=\"dp-flow\"",
+            EdgeStyle::Dots => " stroke-dasharray=\"0 10\" class=\"dp-flow dp-dots\"",
         };
+        let width = f1(width);
+        let status = e
+            .status
+            .map(|s| format!(" data-status=\"{}\"", s.as_str()))
+            .unwrap_or_default();
         let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
         let name = format!("{} → {}", a.label, b.label);
         let tip = match (&e.label, &e.fvalue) {
@@ -1492,7 +1557,7 @@ pub(crate) fn render(
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{}><title>{}</title></polyline>",
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{status}{}><title>{}</title></polyline>",
             pts_attr(&pts),
             esc(&a.id),
             esc(&b.id),
@@ -1508,10 +1573,10 @@ pub(crate) fn render(
             "<polygon points=\"{},{} {},{} {},{}\" fill=\"{colour}\"{ends} aria-hidden=\"true\"/>",
             f1(tx_),
             f1(ty_),
-            f1(base.0 + px * 4.0),
-            f1(base.1 + py * 4.0),
-            f1(base.0 - px * 4.0),
-            f1(base.1 - py * 4.0)
+            f1(base.0 + px * (arrow * 0.55)),
+            f1(base.1 + py * (arrow * 0.55)),
+            f1(base.0 - px * (arrow * 0.55)),
+            f1(base.1 - py * (arrow * 0.55))
         ));
         if let Some(l) = &e.label {
             let (mx, my) = midpoint(&p.edges[k]);
@@ -1659,6 +1724,12 @@ pub(crate) fn render(
     if let Some(a) = &d.animate {
         out = with_root_attr(out, "data-animate", a);
     }
+    if d.tween {
+        out = with_root_attr(out, "data-transition", "tween");
+    }
+    // the width (px) at which the drawing shows at its own size: a narrow
+    // screen scrolls the panel sideways instead of shrinking the text
+    out = with_root_attr(out, "data-fit", &format!("{:.0}", w / s));
     with_root_attr(out, "data-diagram", d.dir.as_str())
 }
 
@@ -2058,13 +2129,56 @@ mod tests {
         ));
         assert!(root.contains(r#"data-story-by="x""#) && root.contains(r#"data-animate="auto""#));
         assert!(svg.contains(
-            r#"stroke-dasharray="0 7" class="dp-flow dp-dots" data-edge="ingest&gt;build""#
+            r#"stroke-dasharray="0 10" class="dp-flow dp-dots" data-edge="ingest&gt;build""#
         ));
         assert!(svg.contains(r#"<g data-of="build" pointer-events="none" aria-hidden="true">"#));
         assert!(svg.contains(r#"data-from="ingest" data-to="build" aria-hidden="true"/>"#));
         // no story, no animate: no motion attributes
         let plain = render_with(&pipeline(), 900, 320, &RenderOptions::default()).unwrap();
         assert!(!plain.contains("data-story") && !plain.contains("data-animate"));
+    }
+
+    /// Edges are as wide as what they carry (sqrt, 1.4–7 px) and take their
+    /// health colour; `'tween'::TRANSITION` and the fit width reach the root.
+    #[test]
+    fn edge_width_health_and_tween() {
+        let mut cols = pipeline();
+        cols.push(Column::new(
+            "c5",
+            Role::Edges,
+            vec![
+                s(
+                    r#"[{"from":"ingest","to":"build","value":10000,"status":"ok"},
+                      {"from":"build","to":"step","value":2500,"status":"delayed"},
+                      {"from":"step","to":"monitor","value":0,"status":"failed"}]"#,
+                ),
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+            ],
+        ));
+        cols.push(Column::new("c6", Role::Transition, vec![s("tween"); 7]));
+        let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        let t = &RenderOptions::default().theme;
+        let edge = |id: &str| {
+            let i = svg.find(&format!("data-edge=\"{id}\"")).unwrap();
+            let start = svg[..i].rfind("<polyline").unwrap();
+            svg[start..i].to_string()
+        };
+        assert!(edge("ingest&gt;build").contains(r#"stroke-width="7""#));
+        assert!(edge("build&gt;step").contains(r#"stroke-width="4.2""#));
+        assert!(edge("build&gt;step").contains(&format!("stroke=\"{}\"", hex(t.colors.warning))));
+        assert!(edge("step&gt;monitor").contains(r#"stroke-width="1.4""#));
+        assert!(edge("step&gt;monitor").contains(&format!("stroke=\"{}\"", hex(t.colors.negative))));
+        assert!(svg.contains(r#"data-status="bad""#));
+        // an edge without a value keeps the hairline
+        assert!(edge("monitor&gt;calibrate").contains(r#"stroke-width="1.6""#));
+        let root = &svg[..svg.find('>').unwrap()];
+        assert!(root.contains(r#"data-transition="tween""#) && root.contains(" data-fit=\""));
     }
 
     #[test]

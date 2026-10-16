@@ -45,7 +45,7 @@ terminal.
 | `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
 | `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
 | `::UPSTREAM` | `::PARENTS` | encoding | a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node |
-| `::EDGES` |  | encoding | a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow'}) FROM e) |
+| `::EDGES` |  | encoding | a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
 | `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars as % of each x's total (fractions ≤ 1 are drawn as given) |
@@ -962,8 +962,11 @@ FROM run_manifest ORDER BY seq;
   `bad` border. `::CATEGORY` gives nodes a palette accent.
 - **Edges.** `::UPSTREAM` (alias `::PARENTS`) holds the node(s) feeding the
   row's node: one id or a list. `::EDGES` (the first non-NULL cell) is a list
-  of structs `{from, to [, value, label, style]}` — `source` / `target` work
-  too; `style` is `'solid'`, `'dashed'`, `'flow'` (moving dashes in the
+  of structs `{from, to [, value, label, style, status]}` — `source` / `target`
+  work too. With values, an edge is **as wide as what it carries** (area-true,
+  1.4–7 px, the widest edge 7 px); `status` is a health word (`ok`, `delayed`,
+  `slow`, `failed`, `late`, … — the words of a table's badges) that colours the
+  edge amber or red. `style` is `'solid'`, `'dashed'`, `'flow'` (moving dashes in the
   browser) or `'flow-dots'` (dots travelling along the edge); static output
   keeps the dashes / dots. Both may be combined; the same `(from, to)` pair is
   one edge. `::LINESTYLE` on a row styles the edges **into** that row's node
@@ -973,7 +976,8 @@ FROM run_manifest ORDER BY seq;
   loop (`calibrate → build`) is drawn as an edge running back. The layout is a
   pure function of the rows (ties follow row order), so the browser,
   `dashboard --svg` and exports draw the same picture, scaled down to fit the
-  panel (`::HEIGHT` gives a large diagram room). At most 150 nodes and 300
+  panel (`::HEIGHT` gives a large diagram room). On a phone the panel keeps
+  the text readable and scrolls sideways instead. At most 150 nodes and 300
   edges are drawn (the first ones), with a note.
 - **Interaction.** A node is a mark like a bar: its tooltip shows its label,
   value and status, a click cross-filters (`getvariable('selected')` is the
@@ -985,7 +989,9 @@ FROM run_manifest ORDER BY seq;
   draws from its source (`'none'::ANIMATE` turns it off). A `::STORY` caption
   on a row makes a step that lights that node and **every edge touching it**
   (in and out) and dims the rest; Step / Play walk the steps in row order, as
-  on a chart. `::TRANSITION` does not apply (a re-run redraws the diagram).
+  on a chart. With `'tween'::TRANSITION`, a re-run that keeps the nodes in place
+  (a run picker, a cross-filter) changes edge widths and colours, node borders
+  and box contents in place instead of redrawing.
 - **Accessibility.** The summary reads *"Diagram: How data moves through the
   pipeline; 7 steps in 5 stages, from Ingest to Recommend orders; 8
   connections; 1 loop (Calibrate → Build twin); largest Ingest (10K)."*. The

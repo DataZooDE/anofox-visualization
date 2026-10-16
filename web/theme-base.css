@@ -145,12 +145,13 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 /* ---- cards ---- */
 .panel{position:relative;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.15rem 1.25rem;box-shadow:var(--ax-shadow)}
 .panel svg{width:100%;height:auto;display:block}
+@media (max-width:640px){.panel-svg:has(> svg[data-diagram]){overflow-x:auto;background:linear-gradient(90deg,var(--ax-card) 40%,transparent) left/32px 100% no-repeat local,linear-gradient(270deg,var(--ax-card) 40%,transparent) right/32px 100% no-repeat local,linear-gradient(90deg,var(--ax-line),transparent) left/10px 100% no-repeat scroll,linear-gradient(270deg,var(--ax-line),transparent) right/10px 100% no-repeat scroll}}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
 /* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10) */
 @keyframes dp-flow{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow{animation:dp-flow 1.2s linear infinite}
-@keyframes dp-dots{to{stroke-dashoffset:-14}}
+@keyframes dp-dots{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
 @media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg .dp-flow.dp-dots{animation:none}}
 /* ::STORY: step controls under the chart, the caption + connector over it */
