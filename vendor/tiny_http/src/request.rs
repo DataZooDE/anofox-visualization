@@ -106,6 +106,11 @@ pub enum RequestCreationError {
     /// The client sent an `Expect` header that was not recognized by tiny-http.
     ExpectationFailed,
 
+    /// The client sent a `Transfer-Encoding` header whose value tiny-http cannot
+    /// safely interpret (see CVE-2026-66752), or sent both `Transfer-Encoding`
+    /// and `Content-Length` headers.
+    InvalidTransferEncoding,
+
     /// Error while reading data from the socket during the creation of the `Request`.
     CreationIoError(IoError),
 }
@@ -146,10 +151,45 @@ where
         .find(|h: &&Header| h.field.equiv("Transfer-Encoding"))
         .map(|h| h.value.clone());
 
+    // Reject any Transfer-Encoding value we cannot safely interpret as
+    // "chunked" (see CVE-2026-66752). tiny-http only implements a decoder
+    // for the `chunked` transfer-coding, so the header must name exactly
+    // that coding and nothing else; anything else (an unknown coding,
+    // "identity", or a list such as "chunked, identity") is rejected
+    // rather than silently treated as chunked, which would let a
+    // front-end proxy that disagrees on framing lead to request smuggling.
+    if let Some(ref value) = transfer_encoding {
+        let is_chunked_only = {
+            let mut codings = value.as_str().split(',').map(str::trim);
+            matches!(codings.next(), Some(c) if c.eq_ignore_ascii_case("chunked"))
+                && codings.next().is_none()
+        };
+        if !is_chunked_only {
+            return Err(RequestCreationError::InvalidTransferEncoding);
+        }
+    }
+
+    // anofox-visualization: the checks above and below look at the first
+    // header of each name only, so a repeated Transfer-Encoding or
+    // Content-Length header (which a front-end may combine or pick
+    // differently) is the same framing ambiguity and is rejected too.
+    let count = |name: &'static str| headers.iter().filter(|h| h.field.equiv(name)).count();
+    if count("Transfer-Encoding") > 1 || count("Content-Length") > 1 {
+        return Err(RequestCreationError::InvalidTransferEncoding);
+    }
+
     // finding the content-length header
     let content_length = if transfer_encoding.is_some() {
-        // if transfer-encoding is specified, the Content-Length
-        // header must be ignored (RFC2616 #4.4)
+        // RFC 9112 #6.1: a message MUST NOT contain both Transfer-Encoding
+        // and Content-Length; receiving both is a strong signal of request
+        // smuggling, so it is treated as an error rather than silently
+        // preferring one header over the other (see CVE-2026-66752).
+        if headers
+            .iter()
+            .any(|h: &Header| h.field.equiv("Content-Length"))
+        {
+            return Err(RequestCreationError::InvalidTransferEncoding);
+        }
         None
     } else {
         headers
@@ -505,7 +545,8 @@ impl<T> ReadWrite for T where T: Read + Write {}
 
 #[cfg(test)]
 mod tests {
-    use super::Request;
+    use super::{new_request, Request, RequestCreationError};
+    use crate::{HTTPVersion, Header, Method};
 
     #[test]
     fn must_be_send() {
@@ -514,5 +555,75 @@ mod tests {
         fn bar(rq: &Request) {
             f(rq);
         }
+    }
+
+    fn build(headers: Vec<Header>, body: &'static str) -> Result<Request, RequestCreationError> {
+        new_request(
+            false,
+            Method::Post,
+            "/".to_string(),
+            HTTPVersion::from((1, 1)),
+            headers,
+            None,
+            body.as_bytes(),
+            std::io::sink(),
+        )
+    }
+
+    fn te_header(value: &str) -> Header {
+        Header::from_bytes(&b"Transfer-Encoding"[..], value.as_bytes()).unwrap()
+    }
+
+    fn cl_header(value: &str) -> Header {
+        Header::from_bytes(&b"Content-Length"[..], value.as_bytes()).unwrap()
+    }
+
+    // CVE-2026-66752: a bare "chunked" coding must still be accepted.
+    #[test]
+    fn transfer_encoding_chunked_is_accepted() {
+        let body = "5\r\nhello\r\n0\r\n\r\n";
+        assert!(build(vec![te_header("chunked")], body).is_ok());
+        assert!(build(vec![te_header("  Chunked  ")], body).is_ok());
+    }
+
+    // CVE-2026-66752: an unrecognized or non-chunked coding must not be
+    // silently treated as chunked.
+    #[test]
+    fn transfer_encoding_identity_is_rejected() {
+        let err = build(vec![te_header("identity")], "hello").unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+    }
+
+    // CVE-2026-66752: a coding list where "chunked" is not the (only) final
+    // coding must be rejected rather than decoded as chunked.
+    #[test]
+    fn transfer_encoding_coding_list_is_rejected() {
+        let body = "5\r\nhello\r\n0\r\n\r\n";
+        let err = build(vec![te_header("chunked, identity")], body).unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+
+        let err = build(vec![te_header("gzip, chunked")], body).unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+    }
+
+    // CVE-2026-66752 / RFC 9112 #6.1: a message with both Transfer-Encoding
+    // and Content-Length is a smuggling signal and must be rejected.
+    #[test]
+    fn transfer_encoding_with_content_length_is_rejected() {
+        let err = build(vec![te_header("chunked"), cl_header("5")], "hello").unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+    }
+
+    // anofox-visualization: repeated framing headers are rejected as well.
+    #[test]
+    fn repeated_framing_headers_are_rejected() {
+        let body = "5\r\nhello\r\n0\r\n\r\n";
+        let err = build(vec![te_header("chunked"), te_header("chunked")], body).unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+
+        let err = build(vec![cl_header("5"), cl_header("6")], "hello!").unwrap_err();
+        assert!(matches!(err, RequestCreationError::InvalidTransferEncoding));
+
+        assert!(build(vec![cl_header("5")], "hello").is_ok());
     }
 }
