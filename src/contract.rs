@@ -139,6 +139,7 @@ pub(crate) fn render(
             "qq" => ("theoretical quantile".into(), "sample quantile".into()),
             "pdp" => ("feature value".into(), "partial dependence".into()),
             "lift" => ("fraction targeted".into(), "lift".into()),
+            "lowess" => ("x".into(), "smoothed y".into()),
             "null_dist" => ("statistic".into(), "density".into()),
             _ => ("x".into(), "y".into()),
         },
@@ -599,7 +600,7 @@ fn curve_type(t: &Table) -> Result<String, String> {
 }
 
 /// `curve` types drawn by the role renderer: qq (points + identity +
-/// envelope), null_dist / pdp / lift (line ± band). roc, pr, calibration,
+/// envelope), null_dist / pdp / lift / lowess (line ± band). roc, pr, calibration,
 /// acf / pacf ([`curves`]), km and lambda_cv ([`stats`]) are drawn directly.
 fn curve(t: &Table) -> Result<Vec<Column>, String> {
     let ty = curve_type(t)?;
@@ -610,7 +611,7 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         .into_iter()
         .find(|k| t.distinct(k) > 1);
     match ty.as_str() {
-        "pdp" | "lift" | "null_dist" => {
+        "pdp" | "lift" | "null_dist" | "lowess" => {
             cols.push(col("y", Role::Value(Kind::Line), yv));
         }
         "qq" => {
@@ -622,7 +623,7 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         other => {
             return Err(format!(
                 "unknown curve_type '{other}' (roc, pr, calibration, lambda_cv, km, acf, \
-                 pacf, qq, null_dist, pdp, lift)"
+                 pacf, qq, null_dist, pdp, lift, lowess)"
             ))
         }
     }
