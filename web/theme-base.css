@@ -56,6 +56,16 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .control select[multiple] option:checked{background:linear-gradient(0deg,var(--ax-accent),var(--ax-accent));color:var(--ax-accent-ink)}
 .control select[multiple]:focus option:checked{background:linear-gradient(0deg,var(--ax-accent),var(--ax-accent))}
 .control .daterange-arrow{margin:0 .1rem;color:var(--ax-muted)}
+.dp-seg{display:inline-flex;border:1px solid var(--ax-line);border-radius:10px;background:var(--ax-input-bg);box-shadow:var(--ax-input-shadow);padding:2px;gap:2px}
+.dp-seg button{font:inherit;font-size:.82rem;font-weight:600;color:var(--ax-muted);background:transparent;border:0;border-radius:8px;padding:.4rem .75rem;cursor:pointer;transition:background .12s,color .12s;white-space:nowrap}
+.dp-seg button:hover{color:var(--ax-ink);background:var(--ax-tab-hover-bg)}
+.dp-seg button[aria-checked=true]{background:var(--ax-accent);color:var(--ax-accent-ink)}
+.dp-seg button:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+.control.dp-toggle{cursor:pointer;color:var(--ax-ink)}
+.control.dp-toggle input{appearance:none;-webkit-appearance:none;position:relative;width:2.3rem;min-width:0;height:1.3rem;padding:0;margin:0;border-radius:999px;border:1px solid var(--ax-line);background:var(--ax-slider-track);cursor:pointer;transition:background .15s,border-color .15s}
+.control.dp-toggle input::after{content:"";position:absolute;top:2px;left:2px;width:calc(1.3rem - 6px);height:calc(1.3rem - 6px);border-radius:50%;background:var(--ax-card);box-shadow:var(--ax-zoom-handle-shadow);transition:transform .15s}
+.control.dp-toggle input:checked{background:var(--ax-accent);border-color:var(--ax-accent)}
+.control.dp-toggle input:checked::after{transform:translateX(1rem)}
 /* Dropdown-style multiselect */
 .dp-ms{position:relative;display:inline-block}
 .dp-ms>summary{list-style:none;cursor:pointer;font:inherit;font-size:.85rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:10px;padding:.5rem 2rem .5rem .8rem;min-width:130px;box-shadow:var(--ax-input-shadow);transition:border-color .15s,box-shadow .15s;background-image:var(--ax-chevron);background-repeat:no-repeat;background-position:right .7rem center}

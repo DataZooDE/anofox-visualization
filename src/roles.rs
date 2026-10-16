@@ -231,6 +231,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "free-text input (value = default)"),
     e("DATERANGE", &["DATE_RANGE"], R::Input(InputKind::DateRange), "input", false,
       "two date columns → from/to variables"),
+    e("BUTTONS", &["BUTTON_GROUP", "SEGMENTED"], R::Input(InputKind::Buttons), "input", false,
+      "segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher)"),
+    e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
+      "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
@@ -598,6 +602,8 @@ mod tests {
                 I::Text,
                 I::Multiselect,
                 I::DateRange,
+                I::Buttons,
+                I::Toggle,
             ]
             .map(Role::Input),
         );

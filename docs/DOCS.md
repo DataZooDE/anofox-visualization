@@ -120,6 +120,8 @@ terminal.
 | `::DATE` | `::DATEPICKER` | input | date picker (value = default) |
 | `::TEXT` | `::SEARCH`, `::STRING` | input | free-text input (value = default) |
 | `::DATERANGE` | `::DATE_RANGE` | input | two date columns → from/to variables |
+| `::BUTTONS` | `::BUTTON_GROUP`, `::SEGMENTED` | input | segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher) |
+| `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
@@ -181,6 +183,44 @@ SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
 the static CLI runner skips them.
+
+#### Button groups, toggles and the metric / dimension switcher
+
+For a handful of choices, `::BUTTONS` draws a **segmented button group** instead
+of a dropdown (the first option is the default, a `::HINT` column becomes each
+button's tooltip, the arrow keys move between the buttons). `::TOGGLE` is an
+**on/off switch**: the query's value is the default and the variable is always a
+`BOOLEAN` (`TRUE`/`FALSE`; a default written as `'on'`, `1` or `'true'` counts as
+on). Both are seeded from and written to the URL (`?v.metric=Peak%20day`,
+`?v.launches_only=true`) and, on a locked server, travel as typed values like
+every other input.
+
+The two make a **switcher**: pick the shown measure with `CASE getvariable(…)`
+and the grouping column with `COLUMNS(getvariable(…))` — one chart, any view:
+
+```sql
+SELECT m AS metric::BUTTONS, 'Measure'::LABEL
+FROM (VALUES (1, 'Sessions'), (2, 'Peak day'), (3, 'Active days')) t(o, m) ORDER BY o;
+SELECT d AS dim::BUTTONS, 'Split by'::LABEL
+FROM (VALUES (1, 'channel'), (2, 'region')) t(o, d) ORDER BY o;
+SELECT false AS launches_only::TOGGLE, 'Launch days only'::LABEL;
+
+SELECT COLUMNS(getvariable('dim'))::XAXIS,
+       CASE getvariable('metric')
+         WHEN 'Sessions' THEN sum(n)
+         WHEN 'Peak day' THEN max(n)
+         ELSE count(DISTINCT day)
+       END::BARCHART,
+       (getvariable('metric') || ' by ' || getvariable('dim'))::TITLE
+FROM events
+WHERE NOT getvariable('launches_only') OR note = 'launch'
+GROUP BY ALL ORDER BY 2 DESC;
+```
+
+`COLUMNS(getvariable('dim'))` resolves the column by name at bind time, so the
+options must be real column names; the `CASE` branches must share a type (cast
+them, e.g. `sum(n)::DOUBLE`, if they differ). The *Filters & inputs* sample's
+**Switch the view** tab is this dashboard.
 
 ### Statistical graphics (intervals, facets, scales, reference lines)
 

@@ -11,8 +11,8 @@ const grab = (name) => {
   return m[0];
 };
 const re = src.match(/^const URL_VAR_RE = .*$/m)[0];
-const { readUrlSeed, validSeed } = new Function(
-  `${re}\n${grab("readUrlSeed")}\n${grab("isIsoDate")}\n${grab("validSeed")}\nreturn { readUrlSeed, validSeed };`
+const { readUrlSeed, validSeed, toggleValue } = new Function(
+  `${re}\n${grab("readUrlSeed")}\n${grab("isIsoDate")}\n${grab("toggleValue")}\n${grab("validSeed")}\nreturn { readUrlSeed, validSeed, toggleValue };`
 )();
 
 // Only v.<identifier> keys; lists repeat the key; other params are ignored.
@@ -37,4 +37,21 @@ for (const bad of ["2024-02-30", "2023-02-29", "24-01-01", "2024-01-01'"]) asser
 assert.equal(validSeed("DATERANGE", ["2024-01-31"]), "2024-01-31");
 assert.equal(validSeed("TEXT", ["promo"]), "promo");
 assert.equal(validSeed("TEXT", ["x".repeat(501)]), undefined);
+// ::BUTTONS validates like a dropdown; ::TOGGLE normalises to "true"/"false".
+assert.equal(validSeed("BUTTONS", ["US"], opts), "US");
+assert.equal(validSeed("BUTTONS", ["XX"], opts), undefined);
+assert.equal(validSeed("TOGGLE", ["true"]), "true");
+assert.equal(validSeed("TOGGLE", ["0"]), "false");
+assert.equal(validSeed("TOGGLE", ["ON"]), "true");
+for (const bad of ["maybe", "", "true;--"]) assert.equal(validSeed("TOGGLE", [bad]), undefined, bad);
+assert.equal(validSeed("TOGGLE", ["true", "false"]), undefined);
+assert.equal(toggleValue(true), "true");
+assert.equal(toggleValue(false), "false");
+assert.equal(toggleValue(null), "false");
+// Locked server: a toggle's SET VARIABLE literal travels as a JSON boolean (the
+// server binds it as a typed TRUE / FALSE), a button's as a string.
+const sqlLiteralToJson = new Function(`${grab("sqlLiteralToJson")}\nreturn sqlLiteralToJson;`)();
+assert.equal(sqlLiteralToJson("TRUE"), true);
+assert.equal(sqlLiteralToJson("FALSE"), false);
+assert.equal(sqlLiteralToJson("'Peak day'"), "Peak day");
 console.log("urlstate_test: ok");

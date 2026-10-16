@@ -190,6 +190,18 @@ where
                         })
                         .unwrap_or_default();
                     claim(&mut diags, &names, stmt, "input", &short);
+                    if kind == InputKind::Buttons && rows.len() > 7 {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "input/many-buttons",
+                            message: format!(
+                                "::BUTTONS has {} options — a button group reads well up to ~7; use ::DROPDOWN",
+                                rows.len()
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -736,11 +748,35 @@ fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> V
                 vals.join(", ")
             )]
         }
+        // A toggle is a BOOLEAN whatever its default was written as.
+        InputKind::Toggle => vec![format!(
+            "SET VARIABLE {} = {}",
+            quote_ident(k),
+            if first.get(k).is_some_and(truthy) {
+                "TRUE"
+            } else {
+                "FALSE"
+            }
+        )],
         _ => vec![format!(
             "SET VARIABLE {} = {}",
             quote_ident(k),
             first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
         )],
+    }
+}
+
+/// A `::TOGGLE` default as a boolean: `true`, a non-zero number, or the text
+/// `true` / `1` / `yes` / `on` (as the browser reads it).
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "true" | "t" | "1" | "yes" | "on"
+        ),
+        _ => false,
     }
 }
 
@@ -1293,6 +1329,20 @@ mod design_tests {
         // Multiselect: all options as a list.
         let d = input_defaults(InputKind::Multiselect, 0, &opts);
         assert_eq!(d, vec!["SET VARIABLE \"zone\" = ['EU', 'US']".to_string()]);
+        // Buttons: the first option, like a dropdown.
+        let d = input_defaults(InputKind::Buttons, 0, &opts);
+        assert_eq!(d, vec!["SET VARIABLE \"zone\" = 'EU'".to_string()]);
+        // Toggle: always a BOOLEAN, whatever the default was written as.
+        for (v, want) in [
+            (json!(true), "TRUE"),
+            (json!("on"), "TRUE"),
+            (json!(0), "FALSE"),
+            (json!("false"), "FALSE"),
+        ] {
+            let r = rows(1, |_| json!({ "net": v.clone() }));
+            let d = input_defaults(InputKind::Toggle, 0, &r);
+            assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
+        }
     }
 
     #[test]

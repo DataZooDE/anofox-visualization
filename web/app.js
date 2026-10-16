@@ -633,6 +633,28 @@ SELECT 8::COL;
 SELECT sum(v)::METRIC, 'Value across selected categories'::LABEL FROM cats
 WHERE list_contains(getvariable('code'), code);
 
+SELECT 'Switch the view'::TAB;
+SELECT 12::COL;
+SELECT 'Compact inputs for a few choices: **::BUTTONS** is a segmented button group (one option pressed; the arrow keys move between them) and **::TOGGLE** an on/off switch whose variable is a BOOLEAN. Together they make a **metric / dimension switcher**: the chart picks its measure with **CASE getvariable(''metric'') WHEN …** and its grouping column with **COLUMNS(getvariable(''dim''))**. Like every input they land in the URL (\`?v.metric=Peak%20day\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 'View'::GROUP;
+SELECT m AS metric::BUTTONS, 'Measure'::LABEL FROM (VALUES (1, 'Sessions'), (2, 'Peak day'), (3, 'Active days')) t(o, m) ORDER BY o;
+SELECT d AS dim::BUTTONS, 'Split by'::LABEL FROM (VALUES (1, 'channel'), (2, 'region')) t(o, d) ORDER BY o;
+SELECT false AS launches_only::TOGGLE, 'Launch days only'::LABEL;
+SELECT 1::ENDGROUP;
+
+SELECT 12::COL;
+SELECT COLUMNS(getvariable('dim'))::XAXIS,
+       CASE getvariable('metric')
+         WHEN 'Sessions' THEN sum(n)
+         WHEN 'Peak day' THEN max(n)
+         ELSE count(DISTINCT day)
+       END::BARCHART,
+       (getvariable('metric') || ' by ' || getvariable('dim'))::TITLE
+FROM events
+WHERE NOT getvariable('launches_only') OR note = 'launch'
+GROUP BY ALL ORDER BY 2 DESC;
+
 SELECT 'Date range'::TAB;
 SELECT 12::COL;
 SELECT 'A **::DATERANGE** control — two columns (from / to) become a pair of linked date pickers seeded from the data''s min/max. **Drag the dates** and the KPI and chart below recompute for the selected window via **getvariable(''from_day'')** / **getvariable(''to_day'')**.'::MARKDOWN, 'What this shows'::TITLE;
@@ -2004,7 +2026,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
-let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
@@ -2261,7 +2283,10 @@ function validSeed(kind, vals, options) {
   const one = vals.length === 1 ? vals[0] : undefined;
   switch (kind) {
     case "DROPDOWN":
+    case "BUTTONS":
       return options && options.includes(one) ? one : undefined;
+    case "TOGGLE":
+      return one !== undefined && /^(true|false|t|f|1|0|yes|no|on|off)$/i.test(one) ? toggleValue(one) : undefined;
     case "MULTISELECT": {
       const want = vals.filter((v) => v !== "");
       const ok = want.filter((v) => options && options.includes(v));
@@ -2278,13 +2303,25 @@ function validSeed(kind, vals, options) {
       return one !== undefined && one.length <= 500 ? one : undefined;
   }
 }
+// A ::TOGGLE value as "true" / "false" (its default may be a BOOLEAN, a number
+// or text such as 'on'); unknown text is "false".
+function toggleValue(v) {
+  return /^(true|t|1|yes|on)$/i.test(String(v ?? "").trim()) ? "true" : "false";
+}
 // Record an input's default and apply its URL seed (first run only, while the
 // variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
 function seedInputFromUrl(kind, names, rows) {
   for (const name of names) {
-    const options = kind === "DROPDOWN" || kind === "MULTISELECT" ? rows.map((r) => String(r[name])) : null;
+    const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+    const options = listed ? rows.map((r) => String(r[name])) : null;
     dpVarDefault[name] = JSON.stringify(
-      kind === "DROPDOWN" ? options[0] : kind === "MULTISELECT" ? options : String(rows[0][name] ?? "")
+      kind === "MULTISELECT"
+        ? options
+        : listed
+          ? options[0]
+          : kind === "TOGGLE"
+            ? toggleValue(rows[0][name])
+            : String(rows[0][name] ?? "")
     );
     const vals = dpUrlSeed[name];
     if (!vals) continue;
@@ -2862,7 +2899,7 @@ async function runOnce(fresh = true) {
         const varname = Object.keys(rows[0])[0];
         seedInputFromUrl(kind, [varname], rows);
         let lit;
-        if (kind === "DROPDOWN") {
+        if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const options = rows.map((r) => String(r[varname]));
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
           // Optional ::HINT column → a hint shown next to each option.
@@ -2870,6 +2907,11 @@ async function runOnce(fresh = true) {
           const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
           dd[i] = { kind, varname, options, hints, caption };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
+        } else if (kind === "TOGGLE") {
+          // A BOOLEAN variable; the query's value is the default.
+          if (dpVars[varname] === undefined) dpVars[varname] = toggleValue(rows[0][varname]);
+          dd[i] = { kind, varname, caption };
+          lit = dpVars[varname] === "true" ? "TRUE" : "FALSE";
         } else if (kind === "MULTISELECT") {
           const options = rows.map((r) => String(r[varname]));
           if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
@@ -3591,6 +3633,27 @@ function makeControl(meta, bar) {
     wrap.appendChild(mk(meta.varnames[1]));
     return finalizeControl(wrap, bar);
   }
+  if (meta.kind === "BUTTONS") return finalizeControl(mkButtons(meta), bar);
+  if (meta.kind === "TOGGLE") {
+    // A native checkbox with the switch role: Space toggles it, screen readers
+    // announce on/off; the caption is its label.
+    wrap.textContent = "";
+    wrap.classList.add("dp-toggle");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.setAttribute("role", "switch");
+    cb.checked = dpVars[meta.varname] === "true";
+    refocus("toggle:" + meta.varname, cb);
+    cb.onchange = () => {
+      if (document.activeElement === cb) dpRefocus = "toggle:" + meta.varname;
+      dpVars[meta.varname] = cb.checked ? "true" : "false";
+      run(false);
+    };
+    const cap = document.createElement("span");
+    cap.textContent = meta.caption || meta.varname;
+    wrap.append(cb, cap);
+    return finalizeControl(wrap, bar);
+  }
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
@@ -3728,6 +3791,62 @@ function makeControl(meta, bar) {
   }
   wrap.appendChild(input);
   return finalizeControl(wrap, bar);
+}
+
+// The control to focus again after the re-run a keyboard change triggers
+// (re-running rebuilds the controls): "<kind>:<variable>".
+let dpRefocus = null;
+function refocus(key, el) {
+  if (dpRefocus !== key) return;
+  dpRefocus = null;
+  // The new controls are attached once the whole run has rendered.
+  let tries = 0;
+  const go = () => (el.isConnected ? el.focus() : ++tries < 120 && requestAnimationFrame(go));
+  requestAnimationFrame(go);
+}
+// A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys
+// move between the options (roving tabindex), like a native radio group.
+function mkButtons(meta) {
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || meta.varname || "") + ":";
+  cap.id = "dp-seg-" + meta.varname;
+  const seg = document.createElement("div");
+  seg.className = "dp-seg";
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-labelledby", cap.id);
+  const btns = meta.options.map((o, k) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = o;
+    b.setAttribute("role", "radio");
+    const on = o === dpVars[meta.varname];
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+    if (on) refocus("seg:" + meta.varname, b);
+    const hint = meta.hints && meta.hints[k];
+    if (hint) b.title = hint;
+    b.onclick = () => {
+      if (dpVars[meta.varname] === o) return;
+      if (document.activeElement === b) dpRefocus = "seg:" + meta.varname;
+      dpVars[meta.varname] = o;
+      run(false);
+    };
+    return b;
+  });
+  seg.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const at = btns.indexOf(document.activeElement);
+    const nb = btns[(at + step + btns.length) % btns.length];
+    dpRefocus = "seg:" + meta.varname;
+    nb.click();
+  });
+  seg.append(...btns);
+  cont.append(cap, seg);
+  return cont;
 }
 
 // A contract panel's payload cell (`c{idx}`) as JSON text: DuckDB-Wasm returns

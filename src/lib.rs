@@ -144,6 +144,10 @@ pub enum InputKind {
     Text,
     Multiselect,
     DateRange,
+    /// A segmented button group (`::BUTTONS`): one of a few options.
+    Buttons,
+    /// A boolean switch (`::TOGGLE`): `TRUE` / `FALSE`.
+    Toggle,
 }
 
 /// How a KPI value is formatted.
