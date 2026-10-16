@@ -35,6 +35,9 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-head .dp-head-text{display:flex;flex-direction:column;gap:.05rem;min-width:0}
 .dp-head .dp-brand{font-size:.78rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ax-muted)}
 .dp-head .dp-title{margin:0;font-family:var(--ax-font-display);font-size:1.55rem;font-weight:800;letter-spacing:-.02em;line-height:1.15;color:var(--ax-heading)}
+.dp-asof{margin-left:auto;align-self:center;font-size:.76rem;font-weight:600;color:var(--ax-muted);background:var(--ax-card);border:1px solid var(--ax-line);border-radius:999px;padding:.28rem .7rem;white-space:nowrap}
+.dp-asof.stale{color:var(--ax-badge-warn-ink);background:var(--ax-badge-warn-bg);border-color:transparent}
+.dp-asof.stale::before{content:"⚠ "}
 
 /* ---- section headings (lone ::LABEL, ::SECTION) ---- */
 .section{grid-column:1/-1;margin:.9rem 0 -.4rem;font-family:var(--ax-font-display);font-size:1.2rem;font-weight:700;letter-spacing:-.02em;color:var(--ax-heading);display:flex;align-items:center;gap:.55rem}

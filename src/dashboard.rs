@@ -141,11 +141,12 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             .map(|(_, r)| *r)
             .find(|r| roles::is_chrome_directive(*r));
         if let Some(r) = chrome_role {
-            let v = provider
+            // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
+            let cells = provider
                 .query(&panel.sql)
-                .ok()
-                .and_then(|rows| first_text(&rows));
-            chrome.apply(r, v);
+                .map(|cols| cols.iter().map(|(_, v)| v.first().map(value_str)).collect())
+                .unwrap_or_default();
+            chrome.apply_row(r, cells);
             continue;
         }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
@@ -379,7 +380,7 @@ fn render_inner(
 /// no branding. Returns the fragment and its height.
 fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)> {
     let b = &t.brand;
-    if b.title.is_none() && b.name.is_none() && b.logo.is_none() {
+    if b.title.is_none() && b.name.is_none() && b.logo.is_none() && b.asof.is_none() {
         return None;
     }
     let h = 52.0;
@@ -412,6 +413,21 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
             hd = hex(t.colors.heading),
         )),
         (None, None) => {}
+    }
+    // The ::ASOF freshness chip, right-aligned (amber text once stale).
+    if let (Some(at), Some(now)) = (b.asof, crate::freshness::now_epoch()) {
+        let l = t
+            .locale
+            .as_deref()
+            .and_then(Locale::from_tag)
+            .unwrap_or_default();
+        let (text, stale) = crate::freshness::chip_text(at, b.stale_secs, now, &l);
+        s.push_str(&format!(
+            "<text class=\"dp-asof\" x=\"{w:.0}\" y=\"30\" text-anchor=\"end\" font-family=\"{f}\" font-size=\"12\" font-weight=\"600\" fill=\"{c}\">{}</text>",
+            esc(&text),
+            f = esc(&t.font.family),
+            c = hex(if stale { t.colors.warning } else { t.colors.muted }),
+        ));
     }
     s.push_str("</svg>");
     Some((s, h))

@@ -280,6 +280,27 @@ where
                     ),
                     Severity::Error,
                 ),
+                Role::AsOf => {
+                    if crate::freshness::parse_timestamp(&v).is_none() {
+                        bad(
+                            "asof/unparseable",
+                            format!("::ASOF value `{v}` is not a date or timestamp — the freshness chip is hidden"),
+                            Severity::Warning,
+                        );
+                    }
+                    let opt = rows.first().and_then(|row| {
+                        row.values().skip(1).find_map(|c| {
+                            c.as_str().filter(|c| crate::freshness::is_stale_option(c))
+                        })
+                    });
+                    if let Some(o) = opt.filter(|o| crate::freshness::parse_stale(o).is_none()) {
+                        bad(
+                            "asof/bad-stale",
+                            format!("`{o}` is not a stale threshold — write 'stale=24h' (s, m, h, d or w)"),
+                            Severity::Warning,
+                        );
+                    }
+                }
                 Role::Logo | Role::Favicon if !crate::theme::safe_url(&v) => bad(
                     "chrome/bad-url",
                     format!("`{v}` is not an allowed image URL (relative, https: or data:image/)"),
@@ -1343,6 +1364,23 @@ mod design_tests {
             let d = input_defaults(InputKind::Toggle, 0, &r);
             assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
         }
+    }
+
+    #[test]
+    fn asof_value_and_stale_option_are_checked() {
+        let d = check("SELECT 'yesterday'::ASOF, 'stale=soon';", |_q| {
+            Ok(rows(1, |_| json!({ "c0": "yesterday", "o": "stale=soon" })))
+        });
+        let codes: Vec<_> = d.iter().map(|x| x.code).collect();
+        assert!(codes.contains(&"asof/unparseable"), "{d:?}");
+        assert!(codes.contains(&"asof/bad-stale"), "{d:?}");
+        let d = check("SELECT max(t)::ASOF, 'stale=24h' FROM x;", |_q| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "2026-10-16 09:24:16.87+02", "o": "stale=24h" }),
+            ))
+        });
+        assert!(!d.iter().any(|x| x.code.starts_with("asof/")), "{d:?}");
     }
 
     #[test]

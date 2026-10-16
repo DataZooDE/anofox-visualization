@@ -2068,7 +2068,7 @@ const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 const directive = (s) => DIRECTIVES.find((d) => role(s, d));
 // Dashboard chrome directives (::THEME, ::LOCALE, ::DASHBOARD_TITLE, ::BRAND,
 // ::LOGO, ::FAVICON) — collected in the pre-pass, before any panel renders.
-let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON"];
+let CHROME = ["THEME", "LOCALE", "DASHBOARD_TITLE", "BRAND", "LOGO", "FAVICON", "ASOF"];
 const chromeRole = (s) => CHROME.find((d) => role(s, d));
 
 // ---- theme (src/theme.rs is the source of truth; plan T1/T4/T12) ----
@@ -2163,10 +2163,78 @@ function axToken(name, fallback = "") {
   return v || fallback;
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
+// ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
+let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+// A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
+// ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
+function asofParse(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const m = String(v)
+    .trim()
+    .match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(:\d{2}(?:\.\d+)?)?)?\s*(Z|UTC|[+-]\d{2}(?::?\d{2})?)?$/);
+  if (!m) return null;
+  let off = m[4] || "Z";
+  if (off === "UTC") off = "Z";
+  else if (/^[+-]\d{2}$/.test(off)) off += ":00";
+  else if (/^[+-]\d{4}$/.test(off)) off = off.slice(0, 3) + ":" + off.slice(3);
+  const t = Date.parse(`${m[1]}T${m[2] || "00:00"}${m[3] || ""}${off}`);
+  return Number.isNaN(t) ? null : t;
+}
+// 'stale=24h' / '90m' / '2d' / '1w' → seconds (0 = never stale).
+function asofStale(v) {
+  const m = String(v ?? "").match(/^\s*(?:stale\s*=?\s*)?(\d+)\s*([smhdw])\s*$/i);
+  return m ? Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2].toLowerCase()] : 0;
+}
+function asofRelative(sec) {
+  sec = Math.max(0, sec);
+  if (sec < 60) return "just now";
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+  if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
+  return `${Math.floor(sec / 86400)} d ago`;
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const d = new Date(a.at);
+  const now = Date.now();
+  const age = (now - a.at) / 1000;
+  const loc = dashLocale() || undefined;
+  let t;
+  try {
+    t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() !== new Date(now).toDateString()) t = d.toLocaleDateString(loc) + " " + t;
+  } catch (_) {
+    t = d.toISOString().slice(0, 16).replace("T", " ");
+  }
+  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
+  el.title = d.toString();
+  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+}
+let asofTimer = null;
+function mkAsof() {
+  if (!dpAsof || dpAsof.at == null) return null;
+  const c = document.createElement("div");
+  c.className = "dp-asof";
+  c.setAttribute("role", "status");
+  paintAsof(c, dpAsof);
+  // keep the relative time current while the dashboard is open
+  asofTimer ||= setInterval(() => {
+    document.querySelectorAll(".dash .dp-asof").forEach((el) => dpAsof && dpAsof.at != null && paintAsof(el, dpAsof));
+  }, 60000);
+  return c;
+}
 function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
-  if (!b.title && !b.name && !b.logo) return null;
+  const chip = mkAsof();
+  if (!b.title && !b.name && !b.logo) {
+    if (!chip) return null;
+    const h = document.createElement("div");
+    h.className = "dp-head";
+    h.appendChild(chip);
+    return h;
+  }
   const h = document.createElement("div"); // not <header>: the builder styles that
   h.className = "dp-head";
   const logo = b.logo && safeUrl(b.logo, { image: true });
@@ -2192,6 +2260,7 @@ function dashHeader() {
     txt.appendChild(t);
   }
   h.appendChild(txt);
+  if (chip) h.appendChild(chip);
   return h;
 }
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
@@ -2851,6 +2920,7 @@ async function runOnce(fresh = true) {
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
   dpTheme.chrome = {};
+  dpAsof = null;
   const CHROME_KEY = { LOCALE: "locale", DASHBOARD_TITLE: "title", BRAND: "brand", LOGO: "logo", FAVICON: "favicon" };
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
@@ -2863,7 +2933,11 @@ async function runOnce(fresh = true) {
         if (v != null && typeof v === "object") v = JSON.stringify(v);
         v = v == null ? "" : String(v);
         if (cr === "THEME") dpTheme.spec = v;
-        else dpTheme.chrome[CHROME_KEY[cr]] = v;
+        else if (cr === "ASOF") {
+          // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
+          const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
+          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+        } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }
       if (s.setup) {

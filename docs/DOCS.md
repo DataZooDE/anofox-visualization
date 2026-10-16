@@ -149,6 +149,7 @@ terminal.
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
 | `::FAVICON` |  | chrome | browser-tab icon URL |
+| `::ASOF` | `::AS_OF`, `::FRESHNESS`, `::DATA_AS_OF` | chrome | data freshness: a 'Data as of 14:02 (2 h ago)' chip in the header; a 'stale=24h' column turns it amber |
 <!-- roles-table:end -->
 
 **Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
@@ -659,6 +660,29 @@ SELECT anofox_plot_terms(t, theme := 'colorblind') FROM coefs t;
 
 `dashboard --theme-css <T> [--dark]` prints a theme's CSS tokens (to style your
 own page around exported SVGs).
+
+#### Data freshness (`::ASOF`)
+
+Viewers of a locked dashboard or an exported page can't tell how current the
+data is. `::ASOF` puts a chip in the dashboard header — **"Data as of 14:02
+(2 h ago)"** — and an optional `'stale=…'` column turns it **amber** (with a ⚠)
+once the data is older than that:
+
+```sql
+SELECT max(loaded_at)::ASOF, 'stale=24h' FROM etl_log;   -- s, m, h, d or w
+```
+
+The value is a `TIMESTAMP`, `TIMESTAMPTZ` or `DATE`; a timestamp without a time
+zone is read as **UTC** (prefer `TIMESTAMPTZ`, e.g. `now()` or a `loaded_at`
+written with one). The chip shows the time in the viewer's zone and the
+dashboard locale (the date is added when it isn't today) and keeps its relative
+age current while the page is open. It is in every output: the browser, a
+locked server, the static HTML of `dashboard file.sql out.html` /
+`serve --dashboards` (rendered at build time, then refreshed by the page's
+script against the viewer's clock) and headless SVG (`dashboard --svg`,
+`render_dashboard_svg`: rendered at render time, in UTC). `--check` warns when
+the value isn't a date or timestamp (`asof/unparseable`) or the threshold
+can't be read (`asof/bad-stale`). The last `::ASOF` wins.
 
 ### Export & share
 

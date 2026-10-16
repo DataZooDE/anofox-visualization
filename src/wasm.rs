@@ -349,6 +349,7 @@ fn theme_json(spec: &str, chrome_json: &str) -> String {
             brand: s("brand"),
             logo: s("logo").filter(|u| crate::theme::safe_url(u)),
             favicon: s("favicon").filter(|u| crate::theme::safe_url(u)),
+            ..Default::default()
         };
         Ok(chrome.resolve(None))
     });

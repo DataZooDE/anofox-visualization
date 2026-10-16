@@ -57,3 +57,8 @@ fn web_url_state_is_validated() {
 fn web_chart_interactions() {
     run_node("interaction_test.mjs");
 }
+
+#[test]
+fn web_freshness_chip_matches_the_cli() {
+    run_node("asof_test.mjs");
+}

@@ -277,6 +277,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "brand / organisation name shown above the dashboard title"),
     e("LOGO", &[], R::Logo, "chrome", false, "header logo image URL (relative, https: or data:image/)"),
     e("FAVICON", &[], R::Favicon, "chrome", false, "browser-tab icon URL"),
+    e("ASOF", &["AS_OF", "FRESHNESS", "DATA_AS_OF"], R::AsOf, "chrome", false,
+      "data freshness: a 'Data as of 14:02 (2 h ago)' chip in the header; a 'stale=24h' column turns it amber"),
 ];
 
 /// Role tokens that are **also DuckDB type names** (`x::DATE` is a real cast).
@@ -435,6 +437,7 @@ pub fn is_chrome_directive(r: Role) -> bool {
             | Role::Brand
             | Role::Logo
             | Role::Favicon
+            | Role::AsOf
     )
 }
 
@@ -686,6 +689,7 @@ mod tests {
             Role::Brand,
             Role::Logo,
             Role::Favicon,
+            Role::AsOf,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -768,6 +772,7 @@ mod tests {
                 | Role::Brand
                 | Role::Logo
                 | Role::Favicon
+                | Role::AsOf
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

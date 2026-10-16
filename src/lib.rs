@@ -26,6 +26,7 @@ pub mod contract;
 pub mod dashboard;
 mod downsample;
 pub mod format;
+pub mod freshness;
 pub mod host;
 pub mod lint;
 pub mod macros;
@@ -359,6 +360,9 @@ pub enum Role {
     Logo,
     /// Page favicon URL (`::FAVICON`).
     Favicon,
+    /// The data's freshness (`::ASOF`): a "Data as of …" chip in the header,
+    /// amber once older than an optional `'stale=24h'` column.
+    AsOf,
     /// A section heading that always starts a new row (`::SECTION`).
     Section,
     /// Interaction: `::SELECT_AS` names the *next* chart's selection — a click

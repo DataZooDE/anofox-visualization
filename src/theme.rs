@@ -164,6 +164,11 @@ pub struct Brand {
     pub logo_dark: Option<String>,
     pub favicon: Option<String>,
     pub title_suffix: Option<String>,
+    /// `::ASOF`: the data's timestamp (epoch seconds, UTC) — the header's
+    /// "Data as of …" chip. Set by the dashboard, never by a theme.
+    pub asof: Option<i64>,
+    /// `::ASOF`'s `'stale=24h'`: the chip turns amber past this age (seconds).
+    pub stale_secs: Option<u64>,
 }
 
 /// Page-chrome style switches.
@@ -766,6 +771,8 @@ fn build(full: &J, name: &str, variant: Variant) -> Result<ResolvedTheme, String
             logo_dark: url("logo_dark")?,
             favicon: url("favicon")?,
             title_suffix: text(&brand, "title_suffix"),
+            asof: None,
+            stale_secs: None,
         },
         locale,
     })
@@ -1520,9 +1527,27 @@ pub struct DashboardChrome {
     pub brand: Option<String>,
     pub logo: Option<String>,
     pub favicon: Option<String>,
+    /// `::ASOF` value (a timestamp) and its optional `stale=…` option.
+    pub asof: Option<String>,
+    pub stale: Option<String>,
 }
 
 impl DashboardChrome {
+    /// [`apply`](Self::apply) a directive's first row (its cells in SELECT
+    /// order): the first cell is the value; an `::ASOF` also reads a
+    /// `'stale=24h'` cell.
+    pub fn apply_row(&mut self, role: crate::Role, cells: Vec<Option<String>>) -> bool {
+        if role == crate::Role::AsOf {
+            self.stale = cells
+                .iter()
+                .skip(1)
+                .flatten()
+                .find(|c| crate::freshness::is_stale_option(c))
+                .cloned();
+        }
+        self.apply(role, cells.into_iter().next().flatten())
+    }
+
     /// Record a directive's first value. Returns `true` when `role` is a
     /// chrome directive this struct handles.
     pub fn apply(&mut self, role: crate::Role, value: Option<String>) -> bool {
@@ -1537,6 +1562,7 @@ impl DashboardChrome {
             R::Brand => self.brand = v,
             R::Logo => self.logo = v.filter(|u| safe_url(u)),
             R::Favicon => self.favicon = v.filter(|u| safe_url(u)),
+            R::AsOf => self.asof = v,
             _ => return false,
         }
         true
@@ -1572,6 +1598,14 @@ impl DashboardChrome {
             if let Some(v) = &self.locale {
                 t.locale = Some(v.clone());
             }
+            t.brand.asof = self
+                .asof
+                .as_deref()
+                .and_then(crate::freshness::parse_timestamp);
+            t.brand.stale_secs = self
+                .stale
+                .as_deref()
+                .and_then(crate::freshness::parse_stale);
         }
         Ok(set)
     }
@@ -1581,7 +1615,7 @@ impl DashboardChrome {
 /// dashboard sets none.
 pub fn header_html(t: &ResolvedTheme) -> String {
     let b = &t.brand;
-    if b.title.is_none() && b.name.is_none() && b.logo.is_none() {
+    if b.title.is_none() && b.name.is_none() && b.logo.is_none() && b.asof.is_none() {
         return String::new();
     }
     let esc = crate::format::escape_xml;
@@ -1603,8 +1637,35 @@ pub fn header_html(t: &ResolvedTheme) -> String {
     if let Some(ti) = &b.title {
         s.push_str(&format!("<h1 class=\"dp-title\">{}</h1>", esc(ti)));
     }
-    s.push_str("</div></div>");
+    s.push_str("</div>");
+    s.push_str(&asof_html(t));
+    s.push_str("</div>");
     s
+}
+
+/// The `::ASOF` freshness chip (or ""): rendered now, kept current in the
+/// viewer's clock and locale by the page script from `data-asof` (epoch ms)
+/// and `data-stale` (seconds).
+pub fn asof_html(t: &ResolvedTheme) -> String {
+    let (Some(at), Some(now)) = (t.brand.asof, crate::freshness::now_epoch()) else {
+        return String::new();
+    };
+    let l = t
+        .locale
+        .as_deref()
+        .and_then(crate::format::Locale::from_tag)
+        .unwrap_or_default();
+    let (text, stale) = crate::freshness::chip_text(at, t.brand.stale_secs, now, &l);
+    format!(
+        "<div class=\"dp-asof{}\" role=\"status\" data-asof=\"{}\"{}>{}</div>",
+        if stale { " stale" } else { "" },
+        at * 1000,
+        t.brand
+            .stale_secs
+            .map(|s| format!(" data-stale=\"{s}\""))
+            .unwrap_or_default(),
+        crate::format::escape_xml(&text)
+    )
 }
 
 /// The mandatory credit footer (HTML).

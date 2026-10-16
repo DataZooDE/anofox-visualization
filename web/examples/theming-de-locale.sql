@@ -9,6 +9,9 @@
 
 SELECT 'de-DE'::LOCALE;
 SELECT 'Filialbericht Januar – September 2026'::DASHBOARD_TITLE;
+-- Datenstand: the last load was three days ago, the report wants daily data —
+-- the header chip turns amber (stale=24h).
+SELECT make_timestamp((epoch_ms(now()) - 3 * 86400 * 1000) * 1000)::ASOF, 'stale=24h';
 SELECT 'Drogeriemarkt Nordlicht · Controlling'::BRAND;
 SELECT '{"name":"nordlicht","extends":"light","colors":{"accent":"#0a0a0a","accent2":"#0a0a0a","info":"#0a0a0a"},"dark":{"colors":{"accent":"#ededed","accent2":"#ededed","info":"#ededed"}}}'::THEME;  -- the default look with a black accent
 
