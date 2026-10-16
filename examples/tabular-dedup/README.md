@@ -40,7 +40,8 @@ cd web && ../target/release/dashboard --check --strict ../examples/tabular-dedup
 It opens with the question and who asks it, then the inputs and a KPI strip
 at the chosen threshold: customers after merging (vs. records), precision and
 recall (vs. a plain `GROUP BY email`), pairs merged automatically, pairs for
-review and household pairs that would be merged wrongly. The inputs only
+review and household pairs that would be merged wrongly (green at none,
+amber up to five, red beyond; precision and recall amber below 90 %). The inputs only
 re-cut the stored pair scores:
 
 - **Match threshold (%)** — pairs at or above it are matches; the clusters use

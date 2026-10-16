@@ -64,21 +64,24 @@ SELECT 1::ENDGROUP;
 
 SELECT 'At the chosen threshold'::GROUP;
 SELECT (SELECT count(*) FROM dd_records) - (SELECT count(*) - count(DISTINCT cluster_id) FROM dd_clusters WHERE threshold = dd_step()) ::COMPACT,
-       (SELECT count(*) FROM dd_records) ::DELTA,
-       'customers after merging, vs. 2,502 records' ::LABEL;
+       (SELECT count(*) FROM dd_records) ::DELTA_LOWER_GOOD, 'vs 2,502 records' ::DELTA_LABEL,
+       'customers after merging' ::LABEL;
 SELECT 100 * count(*) FILTER (WHERE truth = 'same customer') / nullif(count(*), 0) ::PERCENT,
        (SELECT 100 * count(*) FILTER (WHERE truth = 'same customer') / count(*) FROM dd_pairs WHERE exact_email) ::DELTA,
-       'precision: matched pairs that are one customer, vs. GROUP BY email' ::LABEL
+       'abs' ::DELTA_FORMAT, 'vs GROUP BY email' ::DELTA_LABEL, '<85:bad; <90:warn; good' ::THRESHOLDS,
+       'precision: matched pairs that are one customer' ::LABEL
 FROM dd_pairs WHERE score >= dd_t();
 SELECT 100 * count(*) FILTER (WHERE truth = 'same customer') / (SELECT n FROM dd_true_pairs) ::PERCENT,
        (SELECT 100 * count(*) FILTER (WHERE truth = 'same customer') / (SELECT n FROM dd_true_pairs) FROM dd_pairs WHERE exact_email) ::DELTA,
-       'recall: duplicate pairs found, vs. GROUP BY email' ::LABEL
+       'abs' ::DELTA_FORMAT, 'vs GROUP BY email' ::DELTA_LABEL, '<85:bad; <90:warn; good' ::THRESHOLDS,
+       'recall: duplicate pairs found' ::LABEL
 FROM dd_pairs WHERE score >= dd_t();
 SELECT count(*) FILTER (WHERE score >= dd_auto()) ::METRIC, 'pairs merged without review' ::LABEL
 FROM dd_pairs WHERE score >= dd_t() AND dd_sys(dd_sysname(a_source), dd_sysname(b_source));
 SELECT count(*) FILTER (WHERE score < dd_auto()) ::METRIC, 'pairs for a steward to review' ::LABEL
 FROM dd_pairs WHERE score >= dd_t() AND dd_sys(dd_sysname(a_source), dd_sysname(b_source));
-SELECT count(*) ::METRIC, 'household pairs above the threshold (must not merge)' ::LABEL
+SELECT count(*) ::METRIC, '=0:good; <=5:warn; bad' ::THRESHOLDS, 'household pairs above the threshold (must not merge)' ::LABEL,
+       'Two people of one household (same surname, address and landline) scored as one customer: merging them would mix their orders.' ::INFO
 FROM dd_pairs WHERE score >= dd_t() AND truth = 'same household' AND dd_sys(dd_sysname(a_source), dd_sysname(b_source));
 SELECT 1::ENDGROUP;
 
@@ -103,13 +106,13 @@ WITH p AS (
            CASE WHEN truth = 'same customer' THEN 'one customer' ELSE 'wrong match' END AS kind, count(*) AS n
     FROM dd_pairs WHERE score >= dd_t() AND dd_sys(dd_sysname(a_source), dd_sysname(b_source)) GROUP BY ALL
 )
-SELECT systems ::XAXIS, kind ::CATEGORY, n ::BARCHART_STACKED, 1 ::FLIP,
+SELECT systems ::XAXIS, kind ::CATEGORY, n ::BARCHART_STACKED, 1 ::FLIP, 'tween' ::TRANSITION,
        'Matched pairs by system — most duplicates span webshop and loyalty cards'::TITLE
 FROM p ORDER BY sum(n) OVER (PARTITION BY systems) DESC, kind;
 
 SELECT 6::COL;
 SELECT 320::HEIGHT;
-SELECT CASE WHEN n >= 5 THEN '5+' ELSE n::VARCHAR END || ' records' ::XAXIS, count(*) ::BARCHART,
+SELECT CASE WHEN n >= 5 THEN '5+' ELSE n::VARCHAR END || ' records' ::XAXIS, count(*) ::BARCHART, 'tween' ::TRANSITION,
        'Merged customers by number of records — mostly pairs'::TITLE
 FROM (SELECT cluster_id, count(*) AS n FROM dd_clusters WHERE threshold = dd_step() GROUP BY ALL)
 GROUP BY ALL ORDER BY 1;
@@ -146,7 +149,7 @@ WITH p AS (
     SELECT evidence, truth, count(*) AS n FROM dd_pairs
     WHERE score >= dd_t() AND dd_sys(dd_sysname(a_source), dd_sysname(b_source)) GROUP BY ALL
 )
-SELECT evidence ::XAXIS, truth ::CATEGORY, n ::BARCHART_STACKED, 1 ::FLIP,
+SELECT evidence ::XAXIS, truth ::CATEGORY, n ::BARCHART_STACKED, 1 ::FLIP, 'tween' ::TRANSITION,
        'Pairs above the threshold by their strongest evidence — wrong matches share only a phone or an address'::TITLE
 FROM p ORDER BY sum(n) OVER (PARTITION BY evidence) DESC, CASE truth WHEN 'same customer' THEN 1 WHEN 'same household' THEN 2 ELSE 3 END;
 
