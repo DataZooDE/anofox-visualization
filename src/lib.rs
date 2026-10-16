@@ -225,6 +225,9 @@ pub enum Role {
     Metric(MetricFmt),
     /// A comparison value for a KPI (`::DELTA`) — shows the trend arrow + % change.
     Delta,
+    /// A comparison value where lower is better (`::DELTA_LOWER_GOOD`: churn,
+    /// cost, errors) — the same arrow, a rise drawn in the negative colour.
+    DeltaLowerGood,
     /// A horizontal reference/target line on a chart (`::REFLINE`/`::YLINE`).
     RefLine,
     /// A vertical reference line at an x-position (`::XLINE`).
@@ -3144,10 +3147,14 @@ fn render_calendar(
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
     th.legend_key.color = Some(o.theme.colors.card);
     th.legend_key_width = 9.0;
-    // the month outlines in the theme's muted ink (light and dark)
+    // Months read as blocks: the month boundary is a gutter in the card colour
+    // (light and dark), about a fifth of a tile wide — 2–5 px, so a multi-year
+    // calendar with small tiles keeps its tiles.
+    let weeks = ((max_day - min_day) as f64 / 7.0).ceil().max(1.0) + 1.0;
+    let tile = (width as f64 - 110.0).max(60.0) / weeks;
     th.calendar_month_border = ggplot_rs::theme::ElementLine {
-        color: o.theme.colors.muted,
-        width: 1.1,
+        color: o.theme.colors.card,
+        width: (tile * 0.22).clamp(2.0, 5.0),
         ..Default::default()
     };
     let mut plot = GGPlot::new(data)

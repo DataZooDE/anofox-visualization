@@ -184,8 +184,8 @@ SELECT '**Who asks:** the head of customer success, planning the Q4 retention bu
        'The question'::TITLE;
 
 SELECT 'Q3 2026 at a glance'::GROUP;
-SELECT (100 - (SELECT churn_pct FROM ch_history WHERE quarter = 'Q3 2026'))::PERCENT,
-       (100 - (SELECT churn_pct FROM ch_history WHERE quarter = 'Q2 2026'))::DELTA, 'Retained in Q3 (arrow vs Q2)'::LABEL;
+SELECT (SELECT churn_pct FROM ch_history WHERE quarter = 'Q3 2026')::PERCENT,
+       (SELECT churn_pct FROM ch_history WHERE quarter = 'Q2 2026')::DELTA_LOWER_GOOD, 'Churn in Q3 (arrow vs Q2; red = worse)'::LABEL;
 SELECT count(*) FILTER (WHERE churned)::METRIC, 'customers lost'::LABEL FROM ch_customers;
 SELECT round(sum(mrr) FILTER (WHERE churned))::METRIC, 'MRR lost (€ / month)'::LABEL FROM ch_customers;
 SELECT round(auc_agg(churned, score), 2)::METRIC, 'hold-out AUC of the model'::LABEL FROM ch_scores WHERE model = 'logistic model';
@@ -301,7 +301,7 @@ SELECT '**How the what-if works.** Each customer keeps their attributes; a lever
 SELECT 'A quarter with the levers (arrow = change vs. doing nothing)'::GROUP;
 SELECT round(sum(p_whatif))::METRIC, 'expected churners per quarter'::LABEL FROM ch_risk;
 SELECT round(sum(p_now - p_whatif))::METRIC, 'customers saved per quarter'::LABEL FROM ch_risk;
-SELECT round(100 * (1 - avg(p_whatif)), 1)::PERCENT, round(100 * (1 - avg(p_now)), 1)::DELTA, 'retention per quarter'::LABEL FROM ch_risk;
+SELECT round(100 * avg(p_whatif), 1)::PERCENT, round(100 * avg(p_now), 1)::DELTA_LOWER_GOOD, 'churn per quarter'::LABEL FROM ch_risk;
 SELECT round(sum((1 - p_whatif) * mrr))::METRIC, round(sum((1 - p_now) * mrr))::DELTA, 'MRR kept (€ / month, before discounts)'::LABEL FROM ch_risk;
 SELECT round(sum(mrr_saved_year - discount_cost_year))::METRIC, 'net € a year (the levers one by one, summed)'::LABEL FROM ch_levers;
 SELECT 1::ENDGROUP;

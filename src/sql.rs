@@ -544,6 +544,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 Role::Value(_)
                 | Role::Metric(_)
                 | Role::Delta
+                | Role::DeltaLowerGood
                 | Role::RefLine
                 | Role::VLine
                 | Role::BandLower

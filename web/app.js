@@ -304,7 +304,7 @@ SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
   },
 
   {
-    group: "Forecast (anofox-forecast)",
+    group: "Forecast", // = FORECAST_GROUP (declared below)
     ext: true,
     items: {
       "How much will each item sell next year?": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
@@ -797,11 +797,11 @@ SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP B
 // extensions", groups with `ext: true`), one group per extension, so they
 // never mix with the core feature tour (and a missing extension never blocks
 // the core demos).
-const STATS_GROUP = "Statistics (anofox-statistics)";
-const FORECAST_GROUP = "Forecast (anofox-forecast)";
-const TABULAR_GROUP = "Tabular (anofox-tabular)";
-const OPTIMIZE_GROUP = "Optimize (anofox-optimize)";
-const DECIDE_GROUP = "Decide (anofox-decide)";
+const STATS_GROUP = "Statistics";
+const FORECAST_GROUP = "Forecast";
+const TABULAR_GROUP = "Tabular";
+const OPTIMIZE_GROUP = "Optimize";
+const DECIDE_GROUP = "Decide";
 const THEMING_GROUP = "Theming";
 const EXT_GROUPS = [STATS_GROUP, FORECAST_GROUP, TABULAR_GROUP, OPTIMIZE_GROUP, DECIDE_GROUP];
 const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", THEMING_GROUP, ...EXT_GROUPS];
@@ -818,8 +818,8 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // scripts/gen-showcase-data.sh) because their extension can't run in
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
-  { group: THEMING_GROUP, name: "Theming: your branding (ACME)", url: "examples/theming-branded.sql" },
-  { group: THEMING_GROUP, name: "Locale: de-DE", url: "examples/theming-de-locale.sql" },
+  { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
+  { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
     group: STATS_GROUP,
     name: "What sets the price of a home?",
@@ -2823,7 +2823,8 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           const mr = metricRole(s);
           const lr = s.roles.find((r) => r[1] === "LABEL");
-          const dr = s.roles.find((r) => r[1] === "DELTA");
+          // ::DELTA: up is good; ::DELTA_LOWER_GOOD: down is good (churn, cost, errors)
+          const dr = s.roles.find((r) => r[1] === "DELTA" || r[1] === "DELTA_LOWER_GOOD");
           const fig = mkPanel();
           fig.classList.add("metric");
           let deltaHtml = "";
@@ -2833,8 +2834,9 @@ async function runOnce(fresh = true) {
             if (!isNaN(cur) && !isNaN(prev) && prev !== 0) {
               const pct = ((cur - prev) / Math.abs(prev)) * 100;
               const up = pct >= 0;
+              const good = dr[1] === "DELTA_LOWER_GOOD" ? !up : up;
               deltaHtml =
-                `<div class="metric-delta ${up ? "up" : "down"}">${up ? "▲" : "▼"} ` +
+                `<div class="metric-delta ${good ? "good" : "bad"}" title="${good ? "better" : "worse"} than the comparison">${up ? "▲" : "▼"} ` +
                 `${escapeHtml(fmtNum(Math.abs(pct), "PERCENT"))}</div>`;
             }
           }

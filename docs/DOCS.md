@@ -96,7 +96,8 @@ terminal.
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
 | `::COMPACT` |  | kpi | compact-number KPI / table column format (1.2K) |
-| `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI |
+| `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI (up = good) |
+| `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
@@ -905,8 +906,8 @@ URL — shows the SQL editor.
 **Examples in the sidebar** (open one directly with `?dashboard=<name>`):
 
 - **Examples** — the core feature tour: *Start here*, *Charts*,
-  *Interactivity*, *Tables*, *Layout* and *Theming* ("Theming: your branding
-  (ACME)", "Locale: de-DE"; sources in `examples/theming/`).
+  *Interactivity*, *Tables*, *Layout* and *Theming* ("A sales cockpit in your
+  brand", "A German branch report"; sources in `examples/theming/`).
 - **anofox extensions** — one group per anofox DuckDB extension:
   - *Statistics* — "What sets the price of a home?", computed live by the
     anofox_statistics wasm extension;
