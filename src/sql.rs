@@ -53,19 +53,25 @@ pub struct Panel {
     /// A contract plot call (`SELECT anofox_plot_terms(t) FROM … t`), rewritten
     /// to return the rows + arguments as JSON — see [`contract_call`].
     pub contract: Option<ContractPanel>,
+    /// Optional inputs (`-- @requires <path>` comment lines above the
+    /// statement): when one is missing the statement is skipped and its panel
+    /// reads "Not available" instead of an error.
+    pub requires: Vec<String>,
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
 pub fn plan(script: &str) -> Vec<Panel> {
-    let clean = strip_comments(script);
-    split_statements(&clean)
+    split_statements(script)
         .into_iter()
-        .filter_map(|stmt| {
-            let stmt = stmt.trim();
+        .filter_map(|raw| {
+            let requires = requires_of(&raw);
+            let clean = strip_comments(&raw);
+            let stmt = clean.trim();
             if stmt.is_empty() {
                 return None;
             }
-            if let Some((panel, _)) = contract_call::plan_contract(stmt) {
+            if let Some((mut panel, _)) = contract_call::plan_contract(stmt) {
+                panel.requires = requires;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -76,6 +82,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     roles,
                     names: Vec::new(),
                     contract: None,
+                    requires,
                 }
             } else {
                 Panel {
@@ -84,10 +91,41 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     roles,
                     names,
                     contract: None,
+                    requires,
                 }
             })
         })
         .collect()
+}
+
+/// The paths named by `-- @requires <path>[, <path>…]` comment lines in one
+/// raw statement (quotes optional).
+pub fn requires_of(raw: &str) -> Vec<String> {
+    raw.lines()
+        .filter_map(|l| l.trim().strip_prefix("--"))
+        .filter_map(|l| l.trim().strip_prefix("@requires"))
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .flat_map(|rest| rest.split([',', ' ', '\t']))
+        .map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"'))
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Does a query error say an input file / table is missing? (The class of
+/// error a `-- @requires` statement turns into "Not available".)
+pub fn is_missing_input_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    [
+        "no files found",
+        "cannot open file",
+        "no such file",
+        "does not exist",
+        "http 404",
+        "couldn't fetch",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// Build anofox-visualization [`Column`]s from JSON result rows (`[{c0:…,c1:…}, …]`) and the
@@ -650,5 +688,36 @@ mod decimal_x_tests {
         assert_eq!(maybe_decimal(s(&["2019", "2020"])), s(&["2019", "2020"]));
         assert_eq!(maybe_decimal(s(&["1.5", "app"])), s(&["1.5", "app"]));
         assert_eq!(maybe_decimal(s(&["1e3", "2.0"])), s(&["1e3", "2.0"]));
+    }
+}
+
+#[cfg(test)]
+mod requires_tests {
+    use super::*;
+
+    #[test]
+    fn requires_comments_attach_to_their_statement() {
+        let p = plan(
+            "SELECT 1 ::METRIC;\n-- optional output of the run\n-- @requires 'data/run/x.parquet', data/run/y.csv\n\
+             SELECT a ::XAXIS, b ::BARCHART FROM 'data/run/x.parquet';\n-- @requiresnothing\nSELECT 2 ::METRIC",
+        );
+        assert_eq!(p.len(), 3);
+        assert!(p[0].requires.is_empty());
+        assert_eq!(p[1].requires, vec!["data/run/x.parquet", "data/run/y.csv"]);
+        assert!(p[2].requires.is_empty());
+        assert!(!p[1].sql.contains("@requires"));
+    }
+
+    #[test]
+    fn missing_input_errors_are_recognised() {
+        assert!(is_missing_input_error(
+            r#"IO Error: No files found that match the pattern "x.parquet""#
+        ));
+        assert!(is_missing_input_error(
+            "Catalog Error: Table with name t does not exist!"
+        ));
+        assert!(!is_missing_input_error(
+            "Binder Error: Referenced column \"y\" not found"
+        ));
     }
 }

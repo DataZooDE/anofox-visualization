@@ -48,7 +48,8 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `silent-setup` | error | a query with `::ROLE` casts outside its main SELECT list ran as setup: the panel vanished (casts in a CTE body / subquery) |
 | `render-error` | error | the chart cannot be drawn (missing required aesthetic, e.g. `::HEATMAP` without `::YAXIS`) |
 | `render-warning` | warning | renders, but the engine dropped data: non-finite values (`NaN`, `±Inf`, `log` of ≤ 0), a stat layer with too little data (density of one value, smooth on two points). Filter in SQL (`WHERE isfinite(x)`, `NULLIF`) |
-| `empty-panel` | warning | 0 rows: a blank card (often a filter on an unset variable) |
+| `empty-panel` | warning | 0 rows: a blank card (often a filter on an unset variable); not raised after an `::EMPTY` message |
+| `optional/missing` | note | a `-- @requires <path>` input is missing: the panel reads "Not available" (not a failure, `--strict` passes) |
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
@@ -332,6 +333,7 @@ These silently break a panel (it renders wrong or vanishes):
 8. **Large or remote sources** (parquet, MotherDuck): `::PAGED` instead of `::TABLE`.
 9. **Clickable table rows need `'single'::ROWSELECT` / `'multi'::ROWSELECT`** before the table; without it a click does nothing and `getvariable('<first column>')` stays unset. The first column is the key and must be non-numeric (a text id / name). Table directives (`::ROWSELECT`, `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`, `::SUBTOTAL`) apply to the next table only.
 10. **No data yet?** Generate it with `range(n)` / `VALUES` in setup statements, as above.
+11. **Say what an empty result means**: `SELECT 'No orders in range — widen the dates'::EMPTY;` before a filtered panel replaces the generic "No data for this selection". **Optional outputs** (a file only some runs write): put `-- @requires data/run/x.parquet` on its own line directly above the statement — a missing file then shows "Not available" instead of an error card.
 
 ## Running it
 

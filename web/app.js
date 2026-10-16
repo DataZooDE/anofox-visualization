@@ -616,6 +616,8 @@ WHERE region = getvariable('region')
   AND (getvariable('selected') = '' OR channel = getvariable('selected'));
 
 SELECT 8::COL;
+-- ::EMPTY: what this panel says when the filters leave no rows (try min_n 60).
+SELECT 'No sessions match — lower the minimum or clear the text filter'::EMPTY;
 SELECT day::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions (all filters applied)'::TITLE
 FROM events
 WHERE region = getvariable('region')
@@ -632,6 +634,13 @@ WHERE list_contains(getvariable('code'), code);
 SELECT 8::COL;
 SELECT sum(v)::METRIC, 'Value across selected categories'::LABEL FROM cats
 WHERE list_contains(getvariable('code'), code);
+
+-- An optional input: one dashboard serves many runs, and not every run writes
+-- this file. \`-- @requires\` turns its absence into "Not available".
+SELECT 12::COL;
+-- @requires data/events/anomalies.parquet
+SELECT day::XAXIS, score::LINECHART, 'Anomaly score (optional output)'::TITLE
+FROM 'data/events/anomalies.parquet';
 
 SELECT 'Date range'::TAB;
 SELECT 12::COL;
@@ -1181,6 +1190,8 @@ async function ensureDataFiles(sql) {
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
 // builds the paging SQL itself.
 async function runSql(sql, page) {
+  const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
+  if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
   if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
   if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
@@ -1336,8 +1347,7 @@ async function boot() {
   if (tabParam) dpTab = tabParam;
   // Persistent cross-dashboard nav (served mode, 2+ dashboards).
   renderServedNav(served);
-  // Loading spinner + opt-in chart zoom (off by default; ?zoom=1 enables).
-  installSpinner();
+  // Opt-in chart zoom (off by default; ?zoom=1 enables).
   if (params.get("zoom") === "1") document.body.classList.add("dp-zoom");
   // Start on the dashboard (View); ✎ Edit — or ?mode=edit — opens the editor.
   setMode(params.get("mode") === "edit" ? "edit" : "view");
@@ -2006,7 +2016,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -2173,6 +2183,8 @@ function dashHeader() {
   return h;
 }
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
+let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
+let dpVarLast = {}; // … and at the end of the last completed run
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
@@ -2719,16 +2731,40 @@ function decorateSelections() {
   });
 }
 
-// A full-view loading spinner shown while queries are in flight (body.loading is
-// toggled by run(), including a series-change re-run). Injected once.
-function installSpinner() {
-  if (document.getElementById("dp-spinner")) return;
-  // (its CSS — and the range-slider / column-filter styles — live in
-  // web/theme-base.css on theme tokens)
-  const o = document.createElement("div");
-  o.id = "dp-spinner";
-  o.innerHTML = '<div class="dp-spin"></div>';
-  document.body.appendChild(o);
+// Per-panel loading state (no full-page veil): while a run is in flight the
+// panels on screen whose query reads a variable that changed (all of them on a
+// fresh run) get a placeholder shimmer + aria-busy; the rest stay untouched.
+// The first run, with nothing on screen yet, draws skeleton cards instead.
+const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
+function markPending(grid, stmts, fresh) {
+  const changed = new Set(
+    [...new Set([...Object.keys(dpVarNow), ...Object.keys(dpVarLast)])].filter((k) => dpVarNow[k] !== dpVarLast[k])
+  );
+  for (const fig of document.querySelectorAll(".dash .panel[data-stmt]")) {
+    const s = stmts[+fig.dataset.stmt];
+    if (s && (fresh || varsOf(s.sql).some((v) => changed.has(v)))) {
+      fig.classList.add("dp-pending");
+      fig.setAttribute("aria-busy", "true");
+    }
+  }
+  if (grid.querySelector(".panel")) return;
+  // First run: one skeleton card per visible panel (up to 12), KPI tiles short.
+  const skel = [];
+  for (const s of stmts) {
+    if (skel.length >= 12) break;
+    if (s.setup || directive(s) || isInput(s) || chromeRole(s) || isHeading(s) || role(s, "SECTION")) continue;
+    const el = document.createElement("div");
+    const kpi = !!metricRole(s) && !role(s, "TABLE");
+    el.className = "panel dp-skel" + (kpi ? " dp-skel-kpi" : "");
+    el.setAttribute("aria-hidden", "true");
+    el.style.gridColumn = `span ${kpi ? 3 : Math.max(1, Math.round(12 / dpCols))}`;
+    el.innerHTML = "<i></i><i></i><i></i>";
+    skel.push(el);
+  }
+  if (skel.length) {
+    grid.replaceChildren(...skel);
+    grid.setAttribute("aria-busy", "true");
+  }
 }
 
 // Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
@@ -2799,6 +2835,7 @@ async function runOnce(fresh = true) {
     grid.replaceChildren();
     return showError(grid, String(e));
   }
+  markPending(grid, stmts, fresh);
 
   await prepInteractions(stmts);
   await setSelectionVars();
@@ -2886,12 +2923,14 @@ async function runOnce(fresh = true) {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      showError(newGrid, `${s.sql}\n\n${e}`);
+      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${s.requires.join(", ")}`);
+      else newGrid.appendChild(mkErrorCard(e, s.sql, true));
     }
   }
 
   // URL seeds no input claimed are selections (`v.selected`, named ones).
   if (applySelectionSeeds()) await setSelectionVars();
+  markPending(grid, stmts, fresh); // now the changed variables are known
 
   // The theme (and its light/dark variant) for this run: CSS tokens on the
   // page, the wasm render context for every panel.
@@ -2916,6 +2955,7 @@ async function runOnce(fresh = true) {
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
   let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
   let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
+  let nextEmpty = ""; // ::EMPTY → the next panel's message for an empty result
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -2991,6 +3031,8 @@ async function runOnce(fresh = true) {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
           .toLowerCase();
+      } else if (d === "EMPTY") {
+        nextEmpty = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "SELECT_AS" || d === "DRILL") {
         Object.assign(nextIa, dpIa[i] || {});
       } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
@@ -3081,6 +3123,7 @@ async function runOnce(fresh = true) {
         nextRowSelect = "";
         nextTableOpts = {};
         nextIa = {};
+        nextEmpty = "";
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else if (s.contract) {
@@ -3100,7 +3143,7 @@ async function runOnce(fresh = true) {
         };
         if (!rows.length) {
           const fig = mk(title);
-          fig.appendChild(mkNoData());
+          fig.appendChild(mkNoData(nextEmpty));
           container.appendChild(fig);
           panels++;
         }
@@ -3132,6 +3175,7 @@ async function runOnce(fresh = true) {
         nextRowSelect = "";
         nextTableOpts = {};
         nextIa = {};
+        nextEmpty = "";
       } else if (role(s, "PAGED")) {
         // A SQL-driven table: only one page of rows (Scroll view: one block at
         // a time) is fetched, plus one statistics row (count, sums, means, ranges)
@@ -3152,6 +3196,7 @@ async function runOnce(fresh = true) {
         const idx = i;
         const rowSelect = nextRowSelect;
         const tableOpts = nextTableOpts;
+        const emptyMsg = nextEmpty;
         const titleHolder = document.createElement("div");
         const holder = document.createElement("div");
         fig.append(titleHolder, holder);
@@ -3222,11 +3267,17 @@ async function runOnce(fresh = true) {
               unfiltered = filtering ? Number((await pageReq({ count: true }, false))[0].n) : Number(stats.n);
           } catch (e) {
             holder.innerHTML = "";
-            showError(holder, String(e));
+            if (isOptionalMissing(s, e)) holder.appendChild(mkNotAvailable(s));
+            else holder.appendChild(mkErrorBody(e, base));
+            fig.classList.add(isOptionalMissing(s, e) ? "dp-na" : "dp-errcard");
             return;
           }
           titleHolder.innerHTML = "";
           holder.innerHTML = "";
+          if (emptyMsg && !unfiltered) {
+            holder.appendChild(mkNoData(emptyMsg));
+            return;
+          }
           let sk = -1;
           let caption = "";
           if (titleIdx >= 0 && rows.length) {
@@ -3303,6 +3354,7 @@ async function runOnce(fresh = true) {
         nextRowSelect = "";
         nextTableOpts = {};
         nextIa = {};
+        nextEmpty = "";
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
@@ -3393,7 +3445,8 @@ async function runOnce(fresh = true) {
           // ::SPARKLINE mini charts), keyed by output column index.
           const fmtByIdx = {};
           for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
-          fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+          if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
+          else fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -3434,7 +3487,7 @@ async function runOnce(fresh = true) {
           // A selection that filters everything out renders a clean note, not a
           // broken/empty chart box.
           if (!JSON.parse(rowsJson).length) {
-            fig.appendChild(mkNoData());
+            fig.appendChild(mkNoData(nextEmpty));
           } else {
             const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
             const isMap = s.roles.some((r) => r[1] === "MAP");
@@ -3468,9 +3521,25 @@ async function runOnce(fresh = true) {
         nextRowSelect = "";
         nextTableOpts = {};
         nextIa = {};
+        nextEmpty = "";
       }
     } catch (e) {
-      showError(container, `${s.sql}\n\n${e}`);
+      // A failing panel becomes a card in its own grid slot — the others keep
+      // rendering. An optional input (`-- @requires`) that is missing reads
+      // "Not available" instead.
+      const card = isOptionalMissing(s, e) ? mkNotAvailable(s) : mkErrorCard(e, s.sql);
+      if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
+      container.appendChild(card);
+      nextSpan = 0;
+      nextHeight = 0;
+      nextRowSelect = "";
+      nextTableOpts = {};
+      nextIa = {};
+      nextEmpty = "";
+    } finally {
+      // Tag this statement's panels (markPending finds them on the next run).
+      for (const root of [newGrid, tabWrap])
+        root?.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
     }
   }
   // If the remembered tab no longer exists, fall back to the first.
@@ -3514,6 +3583,8 @@ async function runOnce(fresh = true) {
   }
   if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
+  grid.removeAttribute("aria-busy");
+  dpVarLast = { ...dpVarNow };
   document.body.classList.remove("loading");
 }
 
@@ -3778,11 +3849,78 @@ function mkTitle(text) {
   return c;
 }
 
-function mkNoData() {
+// An empty result: the author's ::EMPTY message, else a generic note.
+function mkNoData(msg) {
   const d = document.createElement("div");
   d.className = "nodata";
-  d.textContent = "No data for this selection";
+  d.setAttribute("role", "status");
+  d.textContent = msg || "No data for this selection";
   return d;
+}
+
+// A failed query: a short message, the details (error + SQL) behind a toggle.
+// Stack frames / DuckDB stack traces are dropped — the viewer gets the cause.
+function shortError(msg) {
+  const line = errorDetail(msg)
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^LINE \d+:|^\^/.test(l));
+  const t = (line || "Unknown error").replace(/^(Uncaught )?Error:\s*/, "");
+  return t.length > 160 ? t.slice(0, 157) + "…" : t;
+}
+function errorDetail(msg) {
+  return String(msg)
+    .split(/\n\s*Stack Trace:/i)[0]
+    .split("\n")
+    .filter((l) => !/^\s+at\s/.test(l))
+    .join("\n")
+    .trim();
+}
+function mkErrorBody(e, sql) {
+  const box = document.createElement("div");
+  box.className = "dp-err";
+  const head = document.createElement("div");
+  head.className = "dp-err-head";
+  head.textContent = "Couldn't load this panel";
+  const msg = document.createElement("div");
+  msg.className = "dp-err-msg";
+  msg.textContent = shortError(e);
+  const det = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = "Details";
+  const pre = document.createElement("pre");
+  pre.textContent = errorDetail(e) + (sql ? "\n\n" + sql : "");
+  det.append(sum, pre);
+  box.append(head, msg, det);
+  return box;
+}
+function mkErrorCard(e, sql, wide = false) {
+  const fig = document.createElement("figure");
+  fig.className = "panel dp-errcard";
+  if (wide) fig.style.gridColumn = "1/-1";
+  fig.appendChild(mkErrorBody(e, sql));
+  return fig;
+}
+
+// An optional input (`-- @requires <path>` above the statement) whose file /
+// table is missing: the query failed with a missing-input error.
+const isOptionalMissing = (s, e) => !!(s && s.requires && s.requires.length) && isMissingInputError(String(e));
+function isMissingInputError(msg) {
+  return /no files found|cannot open file|no such file|does not exist|http 404|couldn't fetch/i.test(String(msg));
+}
+function mkNotAvailable(s) {
+  const fig = document.createElement("figure");
+  fig.className = "panel dp-na";
+  const d = document.createElement("div");
+  d.className = "nodata";
+  d.setAttribute("role", "status");
+  const b = document.createElement("strong");
+  b.textContent = "Not available";
+  const why = document.createElement("span");
+  why.textContent = "This run has no " + s.requires.map((p) => p.split("/").pop()).join(", ");
+  d.append(b, why);
+  fig.appendChild(d);
+  return fig;
 }
 
 const cleanNum = (v) => {

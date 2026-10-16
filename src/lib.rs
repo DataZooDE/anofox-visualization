@@ -362,6 +362,9 @@ pub enum Role {
     /// `'name'` or `'name multi'`), a brush on a continuous x sets
     /// `<name>_from` / `<name>_to`.
     SelectAs,
+    /// Layout: `::EMPTY` — the *next* panel's message when its query returns
+    /// no rows (default: "No data for this selection").
+    Empty,
     /// Interaction: `::DRILL` makes the *next* chart a drill-down over a level
     /// path (`'region > country > city'`, `'geo: …'` names the variables) —
     /// `<prefix>_level` / `_depth` / `_path` plus one variable per level, and a

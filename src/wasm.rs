@@ -49,6 +49,7 @@ fn plan_json(script: &str) -> String {
                     "args": c.args,
                     "groups": c.groups.iter().map(|(i, n)| serde_json::json!([i, n])).collect::<Vec<_>>(),
                 })),
+                "requires": p.requires,
             })
         })
         .collect();
