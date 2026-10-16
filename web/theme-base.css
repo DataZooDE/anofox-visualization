@@ -348,6 +348,15 @@ svg[data-kind="heatmap"] text{pointer-events:none}
 .panel-svg{position:relative}
 .dp-brush-ov{position:absolute;inset:0;cursor:crosshair;z-index:4}
 .dp-range-band{position:absolute;top:0;bottom:0;background:var(--ax-brush-fill);border-left:1px dashed var(--ax-brush-border);border-right:1px dashed var(--ax-brush-border);pointer-events:none;z-index:0}
+.dp-crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem;font-size:.78rem;font-weight:600;color:var(--ax-muted);margin:-.25rem 0 .5rem}
+.dp-crumb{font:inherit;color:var(--ax-accent);background:transparent;border:0;border-radius:var(--ax-radius-sm);padding:.1rem .3rem;cursor:pointer;box-shadow:none;transform:none}
+.dp-crumb:hover{background:var(--ax-tab-hover-bg);transform:none;box-shadow:none;filter:none}
+.dp-crumb:focus-visible{outline:2px solid var(--ax-focus-ring);outline-offset:1px}
+.dp-crumb-cur{color:var(--ax-ink);padding:.1rem .3rem}
+.dp-crumb-sep{opacity:.6}
+.dp-crumb-level{font-weight:500;margin-left:.35rem}
+.dp-link{color:var(--ax-accent);font-weight:600;text-decoration:none;white-space:nowrap}
+.dp-link:hover{text-decoration:underline}
 .dp-ia-bar{display:flex;flex-wrap:wrap;gap:.35rem;margin:-.25rem 0 .45rem}
 .dp-brush-rect{position:absolute;display:none;border:1px dashed var(--ax-brush-border);background:var(--ax-brush-fill);pointer-events:none}
 .dp-vmap{display:flex;align-items:center;gap:8px;margin:6px 8px 2px;font-size:.72rem;color:var(--ax-tool-ink)}

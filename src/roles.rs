@@ -209,6 +209,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "heatmap-colour a table column's cells, high = green (scores, accuracy)"),
     e("COLORSCALE_DIVERGING", &["DIVERGING", "HEAT_DIVERGING"], R::ColorScale(Scale::Diverging), "table", true,
       "colour a table column's cells around zero: negative red, positive green (deltas)"),
+    e("LINK", &["DRILLTHROUGH", "DRILL_THROUGH", "HREF"], R::Link, "table", true,
+      "drill-through on a chart click / a table link cell: '#Tab', '?v.x={value}', '/d/<id>?v.x={value}' or an https: URL ({value}, {column} placeholders)"),
     e("BADGE", &["STATUS", "PILL"], R::Badge, "table", true, "render a table column as status pills"),
     e("PLAIN", &["NOBAR"], R::Plain, "table", true, "a plain table column (no in-cell bar)"),
     e("DOWNLOAD_CSV", &[], R::Download(DownloadFmt::Csv), "table", false, "CSV export button"),
@@ -248,6 +250,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next table: a subtotal row after each group of a column — 'region' (not for ::PAGED)"),
     e("SELECT_AS", &["SELECTAS", "SELECTION"], R::SelectAs, "layout", false,
       "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
+    e("DRILL", &["DRILLDOWN", "DRILL_DOWN"], R::Drill, "layout", false,
+      "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
@@ -404,7 +408,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
-                | Role::SelectAs
+                | Role::SelectAs | Role::Drill
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -440,6 +444,7 @@ pub fn is_table_format(r: Role) -> bool {
             | Role::Badge
             | Role::Value(Kind::Sparkline)
             | Role::Plain
+            | Role::Link
     )
 }
 
@@ -519,6 +524,7 @@ mod tests {
             "SUBTAB",
             "PLACEHOLDER",
             "SELECT_AS",
+            "DRILL",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -676,6 +682,8 @@ mod tests {
             Role::Favicon,
             Role::Section,
             Role::SelectAs,
+            Role::Drill,
+            Role::Link,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -755,7 +763,9 @@ mod tests {
                 | Role::Logo
                 | Role::Favicon
                 | Role::Section
-                | Role::SelectAs => {}
+                | Role::SelectAs
+                | Role::Drill
+                | Role::Link => {}
             }
         }
         v

@@ -683,29 +683,71 @@ SELECT 'Selections & drill — named selections, brushing, drill-down and drill-
 
 SELECT 'Named selections'::TAB;
 SELECT 12::COL;
-SELECT 'Each chart below writes **its own variable** with **::SELECT_AS** instead of the shared getvariable(''selected''), so the selections compose. **Regions** is \`''region multi''\`: click a bar to pick one, **shift/ctrl-click** to add more — getvariable(''region'') is a list. **Channel** is single: getvariable(''channel'') is one value. On the **weekly line**, open the toolbox **▧ brush** and drag across a few weeks: the brushed range lands in getvariable(''week_from'') / getvariable(''week_to''). Each selection shows as a chip (× clears it); **Esc** or a click on empty space clears them all, and the address bar keeps them (\`?v.region=EU&v.week_from=…\`).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Each chart below writes **its own variable** with **::SELECT_AS** instead of the shared getvariable(''selected''), so the selections compose. **Regions** is \`''regions multi''\`: click a bar to pick one, **shift/ctrl-click** to add more — getvariable(''regions'') is a list. **Channel** is single: getvariable(''channel'') is one value. On the **weekly line**, open the toolbox **▧ brush** and drag across a few weeks: the brushed range lands in getvariable(''week_from'') / getvariable(''week_to''). Each selection shows as a chip (× clears it); **Esc** or a click on empty space clears them all, and the address bar keeps them (\`?v.regions=EU&v.week_from=…\`).'::MARKDOWN, 'What this shows'::TITLE;
 
-SELECT 4::COL; SELECT 'region multi'::SELECT_AS;
+SELECT 4::COL; SELECT 'regions multi'::SELECT_AS;
 SELECT region::XAXIS, sum(revenue)::BARCHART, 'Regions (click, shift-click)'::TITLE FROM orders
 WHERE channel = coalesce(nullif(getvariable('channel'), ''), channel)
   AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
 GROUP BY region ORDER BY 2 DESC;
 SELECT 4::COL; SELECT 'channel'::SELECT_AS;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, ''::FLIP, 'Channel (click)'::TITLE FROM orders
-WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
   AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
 GROUP BY channel ORDER BY 2;
 SELECT 4::COL;
 SELECT sum(revenue)::MONEY, 'Revenue in selection'::LABEL FROM orders
-WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
   AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
   AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week);
 
 SELECT 12::COL; SELECT 'week'::SELECT_AS;
 SELECT week::XAXIS, sum(revenue)::LINECHART, 'Weekly revenue (▧ brush a range)'::TITLE FROM orders
-WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+WHERE (len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region))
   AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
-GROUP BY week ORDER BY week;`,
+GROUP BY week ORDER BY week;
+
+SELECT 'Drill-down'::TAB;
+SELECT 12::COL;
+SELECT '**::DRILL** turns one chart into a drill-down: \`''region > country > city''\` shows regions first — **click a bar** to see that region''s countries, click again for its cities. The **breadcrumb** above the chart goes back (All › EU › Germany). The chart reads getvariable(''drill_level'') to pick its x column, and every level above sets a variable named after it (getvariable(''region''), getvariable(''country''); empty until drilled), so the trend on the right follows the drill too. The path is in the URL (\`?v.drill_path=EU\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 7::COL; SELECT 'region > country > city'::DRILL;
+SELECT CASE getvariable('drill_level') WHEN 'region' THEN region WHEN 'country' THEN country ELSE city END AS place ::XAXIS,
+       sum(revenue)::BARCHART, ('Revenue by ' || getvariable('drill_level'))::TITLE
+FROM orders
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY 1 ORDER BY 2 DESC;
+SELECT 5::COL;
+SELECT week::XAXIS, sum(revenue)::AREACHART,
+       ('Weekly revenue — ' || coalesce(nullif(getvariable('country'), ''), nullif(getvariable('region'), ''), 'all regions'))::TITLE
+FROM orders
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY week ORDER BY week;
+
+SELECT 'Drill-through'::TAB;
+SELECT 12::COL;
+SELECT 'A **::LINK** column is a drill-through target. Its value is a template — \`{value}\` is the clicked bar (or the table row''s first column), \`{column}\` any column of a table row. \`#Tab?v.x={value}\` opens a tab with variables set (an input only accepts one of its own options), \`/d/<id>?v.x={value}\` opens another served dashboard pre-filtered, an https: URL opens in a new browser tab. **Click a city bar or a table link** to open its detail page; **click a country** for its Wikipedia article.'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 6::COL;
+SELECT city::XAXIS, sum(revenue)::BARCHART, '#City detail?v.pick_city={value}'::LINK, 'Cities — click for the detail page'::TITLE
+FROM orders GROUP BY city ORDER BY 2 DESC;
+SELECT 6::COL;
+SELECT country::XAXIS, sum(revenue)::BARCHART, 'https://en.wikipedia.org/wiki/{value}'::LINK, 'Countries — click opens Wikipedia'::TITLE
+FROM orders GROUP BY country ORDER BY 2 DESC;
+SELECT 12::COL;
+SELECT city::TABLE, country, region, sum(revenue) AS revenue ::MONEY,
+       '#City detail?v.pick_city={city}' AS detail ::LINK
+FROM orders GROUP BY ALL ORDER BY revenue DESC;
+
+SELECT 'City detail'::TAB;
+SELECT 'City'::GROUP;
+SELECT DISTINCT city AS pick_city ::DROPDOWN FROM geo ORDER BY 1;
+SELECT 1::ENDGROUP;
+SELECT 4::COL;
+SELECT sum(revenue)::MONEY, ('Revenue — ' || getvariable('pick_city'))::LABEL FROM orders WHERE city = getvariable('pick_city');
+SELECT 8::COL;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, ('Weekly revenue by channel — ' || getvariable('pick_city'))::TITLE
+FROM orders WHERE city = getvariable('pick_city') GROUP BY ALL ORDER BY week, channel;`,
     },
   },
 
@@ -1671,6 +1713,7 @@ function loadDash(name, sql) {
   dpUrlSeed = {};
   dpVarDefault = {};
   dpRange = {};
+  dpDrill = {};
   dpPage = {};
   dpSort = {};
   dpPaged = {};
@@ -2314,6 +2357,7 @@ function urlStateParams() {
   for (const [k, r] of Object.entries(dpRange)) {
     if (r) add(k + "_from", r.from), add(k + "_to", r.to);
   }
+  for (const [p, path] of Object.entries(dpDrill)) if (path.length) add(p + "_path", path);
   return out;
 }
 function syncUrlState() {
@@ -2346,9 +2390,17 @@ async function prepInteractions(stmts) {
   dpIa = {};
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
-    if (s.setup || directive(s) !== "SELECT_AS") continue;
+    const d = s.setup ? null : directive(s);
+    if (d !== "SELECT_AS" && d !== "DRILL") continue;
     try {
       const rows = JSON.parse(await runSql(s.sql));
+      if (d === "DRILL") {
+        const drill = parseDrill(rows[0] ? Object.values(rows[0])[0] : "");
+        if (!drill) continue;
+        dpIa[i] = { drill };
+        seedDrill(drill);
+        continue;
+      }
       const sel = parseSelectAs(rows[0] ? Object.values(rows[0])[0] : "");
       if (!sel) continue;
       dpIa[i] = { select: sel };
@@ -2373,6 +2425,177 @@ function seedNamedSelection(sel) {
   const typed = (x) => (x && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(x[0]) && Number.isFinite(+x[0]) ? +x[0] : x && isIsoDate(x[0].slice(0, 10)) ? x[0] : null);
   if (typed(f) !== null && typed(t) !== null) dpRange[sel.name] = { from: typed(f), to: typed(t) };
 }
+// ---- drill-down (::DRILL) and drill-through (::LINK) ----
+// `'region > country > city'::DRILL` before a chart: the chart shows one level
+// at a time. Its variables (prefix `drill`, or `geo` for 'geo: region > …'):
+//   <p>_level  the level on screen ('country')   <p>_depth  0-based depth
+//   <p>_path   the values drilled through, VARCHAR[] (['EU'])
+//   region, country, city — the value chosen at each level above, else ''.
+// A click on a mark goes one level deeper; the breadcrumb above the chart goes
+// back. On the last level a click falls through to ::LINK / ::SELECT_AS /
+// `selected`. The path is part of the URL state (?v.drill_path=EU).
+let dpDrill = {}; // drill prefix -> path (array of values)
+function parseDrill(v) {
+  const m = String(v ?? "").match(/^\s*(?:([A-Za-z_][A-Za-z0-9_]{0,59})\s*:)?([^:]*)$/);
+  if (!m) return null;
+  const levels = m[2].split(">").map((x) => x.trim());
+  if (levels.length < 2 || !levels.every((l) => /^[A-Za-z_][A-Za-z0-9_]{0,59}$/.test(l))) return null;
+  return { prefix: m[1] || "drill", levels };
+}
+function seedDrill(drill) {
+  const k = drill.prefix + "_path";
+  const seed = dpUrlSeed[k];
+  delete dpUrlSeed[k];
+  if (seed && seed.every((x) => x.length <= 500)) dpDrill[drill.prefix] = seed.filter((x) => x !== "");
+  // never deeper than the last level (the levels may have changed)
+  dpDrill[drill.prefix] = (dpDrill[drill.prefix] || []).slice(0, drill.levels.length - 1);
+}
+// The drill variables of this run's ::DRILL charts.
+async function setDrillVars() {
+  const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+  for (const ia of Object.values(dpIa)) {
+    if (!ia.drill) continue;
+    const { prefix, levels } = ia.drill;
+    const path = dpDrill[prefix] || [];
+    try {
+      await runSql(`SET VARIABLE ${prefix}_level = ${q(levels[path.length])}`);
+      await runSql(`SET VARIABLE ${prefix}_depth = ${path.length}`);
+      await runSql(`SET VARIABLE ${prefix}_path = ${path.length ? `[${path.map(q).join(", ")}]` : "[]::VARCHAR[]"}`);
+      for (let j = 0; j < levels.length; j++) await runSql(`SET VARIABLE ${levels[j]} = ${q(j < path.length ? path[j] : "")}`);
+    } catch (_) {}
+  }
+}
+// The breadcrumb above a ::DRILL chart: All › EU › Germany · city. Each crumb
+// but the last goes back to that depth.
+function drillCrumbs(drill) {
+  const path = dpDrill[drill.prefix] || [];
+  const nav = document.createElement("nav");
+  nav.className = "dp-crumbs";
+  nav.setAttribute("aria-label", "Drill path");
+  const crumb = (text, depth) => {
+    if (depth === path.length) {
+      const cur = document.createElement("span");
+      cur.className = "dp-crumb-cur";
+      cur.setAttribute("aria-current", "location");
+      cur.textContent = text;
+      return cur;
+    }
+    const b = document.createElement("button");
+    b.className = "dp-crumb";
+    b.textContent = text;
+    b.title = depth ? `Back to ${text}` : "Back to the top level";
+    b.onclick = (e) => {
+      e.stopPropagation();
+      dpDrill[drill.prefix] = path.slice(0, depth);
+      run(false);
+    };
+    return b;
+  };
+  nav.appendChild(crumb("All", 0));
+  path.forEach((v, j) => {
+    const sep = document.createElement("span");
+    sep.className = "dp-crumb-sep";
+    sep.textContent = "›";
+    nav.append(sep, crumb(v, j + 1));
+  });
+  const lvl = document.createElement("span");
+  lvl.className = "dp-crumb-level";
+  const last = path.length >= drill.levels.length - 1;
+  lvl.textContent = last ? `by ${drill.levels[path.length]}` : `by ${drill.levels[path.length]} — click to drill into ${drill.levels[path.length + 1]}`;
+  nav.appendChild(lvl);
+  return nav;
+}
+// A click on a ::DRILL chart's mark: one level deeper. False on the last level
+// (the click then does what it would without ::DRILL).
+function drillInto(drill, key) {
+  const path = dpDrill[drill.prefix] || [];
+  if (path.length >= drill.levels.length - 1 || key === "") return false;
+  dpDrill[drill.prefix] = [...path, key];
+  run(false);
+  return true;
+}
+// Fill a ::LINK template: {value} = the clicked key, {x} / {series} on a chart,
+// any {column} of a table row, the drill levels — each URL-encoded.
+function fillLink(tpl, vars) {
+  return String(tpl ?? "").replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, k) =>
+    encodeURIComponent(vars[k] == null ? "" : String(vars[k]))
+  );
+}
+// Follow a filled ::LINK: '#Tab' (optionally '#Tab?v.x=…') opens a tab of this
+// dashboard, '?v.x=…' sets variables here (seeded like URL parameters — inputs
+// are validated), a path ('/d/<id>?v.x=…') navigates, an http(s) URL opens in
+// a new tab. Other schemes are refused (safeUrl).
+function followLink(url) {
+  const u = String(url ?? "").trim();
+  if (u.startsWith("#") || u.startsWith("?")) {
+    const qi = u.indexOf("?");
+    const tab = u.startsWith("#") ? decodeURIComponent(qi < 0 ? u.slice(1) : u.slice(1, qi)) : null;
+    const qs = qi < 0 ? "" : u.slice(qi);
+    const seed = readUrlSeed(qs);
+    for (const k of Object.keys(seed)) if (k in dpVarDefault) delete dpVars[k]; // re-seeded (validated) by the run
+    Object.assign(dpUrlSeed, seed);
+    const t = tab || new URLSearchParams(qs).get("tab");
+    if (t) {
+      dpTab = t;
+      setTabParam(t);
+    }
+    run(false);
+    return;
+  }
+  const safe = safeUrl(u);
+  if (!safe) return status("link blocked: only #tab, ?v.…, paths and http(s) URLs are followed");
+  if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
+  else location.href = safe;
+}
+// A chart mark's ::LINK: the template of the row the mark was drawn from
+// (matched on x and series), filled with the mark's values and the drill path.
+function chartLink(link, el, key, series) {
+  let rows = [];
+  try {
+    rows = JSON.parse(link.rows);
+  } catch (_) {}
+  const col = (name) => link.roles.find((r) => r[1] === name);
+  const xr = col("XAXIS");
+  const cr = col("CATEGORY");
+  const x = el.getAttribute("data-x") || "";
+  const ds = el.getAttribute("data-series");
+  const str = (v) => (v == null ? "" : String(v).replace(/^"|"$/g, ""));
+  const row =
+    rows.find((r) => (!xr || str(r["c" + xr[0]]) === x) && (!cr || ds == null || str(r["c" + cr[0]]) === ds)) ||
+    rows.find((r) => (xr && str(r["c" + xr[0]]) === key) || (cr && str(r["c" + cr[0]]) === key)) ||
+    rows[0] ||
+    {};
+  const vars = { value: key, x: xr ? str(row["c" + xr[0]]) : x, series };
+  for (const ia of Object.values(dpIa)) {
+    if (ia.drill) (dpDrill[ia.drill.prefix] || []).forEach((v, j) => (vars[ia.drill.levels[j]] = v));
+  }
+  return fillLink(str(row["c" + link.idx]), vars);
+}
+// A table's ::LINK cell: a link built from the row ({value} = its first column).
+function linkCell(tpl, row, key) {
+  const vars = { value: key };
+  for (const [k, v] of Object.entries(row)) vars[k] = v == null ? "" : String(v).replace(/^"|"$/g, "");
+  const url = fillLink(tpl, vars);
+  const a = document.createElement("a");
+  a.className = "dp-link";
+  const tab = url.startsWith("#") ? decodeURIComponent(url.slice(1).split("?")[0]) : "";
+  const external = /^https?:/i.test(url) && !url.startsWith(location.origin + "/");
+  a.textContent = tab ? `${tab} →` : external ? "Open ↗" : "Open →";
+  a.href = url.startsWith("#") || url.startsWith("?") ? "#" : safeUrl(url) || "#";
+  a.title = url;
+  if (external) {
+    a.target = "_blank";
+    a.rel = "noopener";
+  }
+  a.onclick = (e) => {
+    e.stopPropagation(); // not a row selection
+    if (e.ctrlKey || e.metaKey || e.shiftKey || external) return; // the browser opens it
+    e.preventDefault();
+    followLink(url);
+  };
+  return a;
+}
+
 // The brushed ranges as variables: <name>_from / <name>_to (NULL when unset).
 async function setRangeVars() {
   for (const [name, r] of Object.entries(dpRange)) {
@@ -2424,6 +2647,14 @@ function clearSelections() {
 // and show what is selected (with a ✕ to clear) above the chart.
 function decorateSelections() {
   document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const drill = panel._ia && panel._ia.drill;
+    if (drill) {
+      panel.querySelector(".dp-crumbs")?.remove();
+      const head = panel.querySelector(".panel-title");
+      const nav = drillCrumbs(drill);
+      head ? head.after(nav) : panel.prepend(nav);
+    }
+    if (panel._ia && panel._ia.link) panel.classList.add("dp-linked");
     const sel = panel._ia && panel._ia.select;
     if (!sel) return;
     panel.classList.add("dp-selectable");
@@ -2483,8 +2714,8 @@ function decorateSelections() {
       chip.appendChild(x);
       bar.appendChild(chip);
     }
-    const head = panel.querySelector(".panel-title");
-    head ? head.after(bar) : panel.prepend(bar);
+    const anchor = panel.querySelector(".dp-crumbs") || panel.querySelector(".panel-title");
+    anchor ? anchor.after(bar) : panel.prepend(bar);
   });
 }
 
@@ -2572,6 +2803,7 @@ async function runOnce(fresh = true) {
   await prepInteractions(stmts);
   await setSelectionVars();
   await setRangeVars();
+  await setDrillVars();
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
   // caching options for the render pass by statement index. Chrome directives
@@ -2759,7 +2991,7 @@ async function runOnce(fresh = true) {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
           .toLowerCase();
-      } else if (d === "SELECT_AS") {
+      } else if (d === "SELECT_AS" || d === "DRILL") {
         Object.assign(nextIa, dpIa[i] || {});
       } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
@@ -3193,6 +3425,10 @@ async function runOnce(fresh = true) {
           panels++;
         } else {
           const fig = mkPanel();
+          // Interactions (::SELECT_AS / ::DRILL before it, a ::LINK column) —
+          // set before the no-data check so a drilled-empty chart keeps its breadcrumb.
+          const lr = s.roles.find((r) => r[1] === "LINK");
+          fig._ia = lr ? { ...nextIa, link: { idx: lr[0], rows: rowsJson, roles: s.roles } } : nextIa;
           const t = titleOf(s, rowsJson);
           if (t) fig.appendChild(mkTitle(t));
           // A selection that filters everything out renders a clean note, not a
@@ -3217,7 +3453,6 @@ async function runOnce(fresh = true) {
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
             fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
-            fig._ia = nextIa;
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -4662,7 +4897,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // ── cells ──
   const tb = t.createTBody();
   const nil = () => `<span class="nil">—</span>`;
-  function fillCell(td, v, c) {
+  function fillCell(td, v, c, row) {
     const i = info[c];
     const f = i.f;
     if (typeof v === "string" && /^"-?[\d.]+"$/.test(v)) v = v.slice(1, -1);
@@ -4678,6 +4913,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     }
     if (f === "BADGE") {
       td.innerHTML = badgeHtml(unq(v));
+      return;
+    }
+    if (f === "LINK") {
+      td.replaceChildren(linkCell(unquote(v), row || {}, row && k0 != null ? unquote(row[k0]) : ""));
       return;
     }
     if (i.bool) {
@@ -4803,7 +5042,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     if (selectable) tr.setAttribute("aria-selected", String(tr.classList.contains("row-sel")));
     vc.forEach((c, ix) => {
       const td = tr.insertCell();
-      fillCell(td, r[c], c);
+      fillCell(td, r[c], c, r);
       decorate(td, r[c], c);
       if (repeat && c === subCol) td.classList.add("grp-rep"); // ::SUBTOTAL: the group's value once
       if (ix === 0 && selectable && selMode === "multi") {
@@ -6114,6 +6353,11 @@ function attachHover() {
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       const ia = el.closest(".panel")?._ia;
+      // The mark's own value — its x (a drill level is the x), else its series.
+      const dx = el.getAttribute("data-x");
+      const key = dx ? String(xTickLabel(el, dx)) : series;
+      if (ia && ia.drill && drillInto(ia.drill, key)) return;
+      if (ia && ia.link) return followLink(chartLink(ia.link, el, key, series));
       if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.

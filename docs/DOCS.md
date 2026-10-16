@@ -108,6 +108,7 @@ terminal.
 | `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red) |
 | `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells, high = green (scores, accuracy) |
 | `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells around zero: negative red, positive green (deltas) |
+| `::LINK` | `::DRILLTHROUGH`, `::DRILL_THROUGH`, `::HREF` | table | drill-through on a chart click / a table link cell: '#Tab', '?v.x={value}', '/d/<id>?v.x={value}' or an https: URL ({value}, {column} placeholders) |
 | `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
 | `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
 | `::DOWNLOAD_CSV` |  | table | CSV export button |
@@ -130,6 +131,7 @@ terminal.
 | `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
 | `::SUBTOTAL` | `::SUBTOTALS`, `::GROUP_TOTAL` | layout | next table: a subtotal row after each group of a column — 'region' (not for ::PAGED) |
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
+| `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
@@ -733,6 +735,64 @@ WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), re
 The browser (and `--check`) start with nothing selected — `''` / `[]` and NULL
 ranges — so the guards above are all a panel needs. See the **"Selections &
 drill"** sample.
+
+#### Drill-down (`::DRILL`) and drill-through (`::LINK`)
+
+A `::DRILL` directive before a chart makes it a **drill-down** over a level
+path. A click on a mark goes one level deeper; a **breadcrumb** above the chart
+(`All › EU › Germany · by city`) goes back. The chart's SQL picks its x column
+and filters from the drill variables:
+
+| Variable | Value |
+|---|---|
+| `drill_level` | the level on screen, e.g. `'country'` |
+| `drill_depth` | 0-based depth (`0` = the top level) |
+| `drill_path` | the values drilled through, `VARCHAR[]` (`['EU']`) |
+| `region`, `country`, … | one per level: the value chosen at that level, `''` until drilled past |
+
+`'geo: region > country > city'` names the variables `geo_level`, `geo_depth`,
+`geo_path` instead (for two drill charts on one page). A level variable is a
+DuckDB variable like any other, so other panels follow the drill too (do not
+name an input like a drill level). On the last level a click does what it
+would without `::DRILL` (a `::LINK`, a `::SELECT_AS`, or `selected`). The path
+is part of the URL state (`?v.drill_path=EU&v.drill_path=Germany`).
+
+```sql
+SELECT 'region > country > city'::DRILL;
+SELECT CASE getvariable('drill_level') WHEN 'region' THEN region
+            WHEN 'country' THEN country ELSE city END AS place ::XAXIS,
+       sum(revenue)::BARCHART, ('Revenue by ' || getvariable('drill_level'))::TITLE
+FROM orders
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+A **`::LINK`** column is a **drill-through** target. Its value is a template;
+`{value}` is the clicked mark's key (its x, else its series) or a table row's
+first column, `{x}` / `{series}` a chart mark's x and series, `{column}` any
+column of a table row, `{region}` … the drill path — each URL-encoded:
+
+| Template | A click… |
+|---|---|
+| `'#Detail'`, `'#City detail?v.pick_city={value}'` | opens that `::TAB`, after seeding the variables (an input only takes one of its own options) |
+| `'?v.region={value}'` | sets variables on this dashboard |
+| `'/d/sales?v.region={value}'` | opens another served dashboard pre-filtered (see *Viewer state in the URL*) |
+| `'https://en.wikipedia.org/wiki/{value}'` | opens the URL in a new browser tab |
+
+Any other scheme (`javascript:`, `data:`) is refused (`--check` warns:
+`link/bad-url`; it also warns `interaction/bad-value` on a malformed
+`::SELECT_AS` / `::DRILL` value and `interaction/name-clash` when an input, a
+selection and a drill level write the same variable). On a chart the click follows the link of the row the mark was
+drawn from; in a `::TABLE` / `::PAGED` table the column renders as a link cell
+(`City detail →`, `Open ↗`).
+
+```sql
+SELECT city::XAXIS, sum(revenue)::BARCHART, '#City detail?v.pick_city={value}'::LINK
+FROM orders GROUP BY city ORDER BY 2 DESC;
+SELECT city::TABLE, sum(revenue) AS revenue ::MONEY,
+       '#City detail?v.pick_city={city}' AS detail ::LINK
+FROM orders GROUP BY ALL ORDER BY revenue DESC;
+```
 
 #### Viewer state in the URL
 

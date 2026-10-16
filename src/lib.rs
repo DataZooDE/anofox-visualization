@@ -362,6 +362,15 @@ pub enum Role {
     /// `'name'` or `'name multi'`), a brush on a continuous x sets
     /// `<name>_from` / `<name>_to`.
     SelectAs,
+    /// Interaction: `::DRILL` makes the *next* chart a drill-down over a level
+    /// path (`'region > country > city'`, `'geo: …'` names the variables) —
+    /// `<prefix>_level` / `_depth` / `_path` plus one variable per level, and a
+    /// breadcrumb back.
+    Drill,
+    /// A drill-through target (`::LINK`): a template — `#Tab`, `?v.x=…`,
+    /// `/d/<id>?v.x=…` or an `https:` URL — with `{value}` / `{column}`
+    /// placeholders, followed on a chart click or from a table's link cell.
+    Link,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

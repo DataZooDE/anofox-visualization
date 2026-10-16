@@ -83,7 +83,32 @@ where
     let mut diags = Vec::new();
     let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
-                             // Cross-panel design counters (only used when opts.design).
+                             // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
+                             // so two different directives writing one variable are reported.
+    let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
+        std::collections::HashMap::new();
+    let mut claim = |diags: &mut Vec<Diagnostic>, names: &[String], stmt, kind, sql: &str| {
+        for n in names {
+            match owners.get(n) {
+                Some(&(other, k)) if other != stmt && (k != kind || kind == "::DRILL") => diags
+                    .push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "interaction/name-clash",
+                        message: format!(
+                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — \
+                             each overwrites the other; rename one"
+                        ),
+                        sql: sql.to_string(),
+                    }),
+                Some(_) => {}
+                None => {
+                    owners.insert(n.clone(), (stmt, kind));
+                }
+            }
+        }
+    };
+    // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
     let mut group_depth = 0i32;
@@ -156,6 +181,15 @@ where
         if let Some(kind) = input_kind(&p.roles) {
             match run_query(&format!("{prelude}{};", p.sql)) {
                 Ok(rows) => {
+                    let names: Vec<String> = rows
+                        .first()
+                        .map(|r| {
+                            let n = if kind == InputKind::DateRange { 2 } else { 1 };
+                            let at = input_index(&p.roles).min(r.len().saturating_sub(1));
+                            r.keys().skip(at).take(n).cloned().collect()
+                        })
+                        .unwrap_or_default();
+                    claim(&mut diags, &names, stmt, "input", &short);
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -247,8 +281,33 @@ where
         // Interaction directives: prime their variables the way the browser does
         // ("nothing selected"), so panels filtering by a selection are checked
         // with data; a malformed value is reported.
-        if p.roles.iter().any(|(_, r)| matches!(r, Role::SelectAs)) {
-            match select_as_prelude(&first_text(&rows)) {
+        if let Some((_, r)) = p
+            .roles
+            .iter()
+            .find(|(_, r)| matches!(r, Role::SelectAs | Role::Drill))
+        {
+            let v = first_text(&rows);
+            let sets = if *r == Role::Drill {
+                drill_prelude(&v)
+            } else {
+                select_as_prelude(&v)
+            };
+            if let Ok(sets) = &sets {
+                // the variable names the directive sets (`SET VARIABLE <name> = …`)
+                let names: Vec<String> = sets
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("SET VARIABLE "))
+                    .filter_map(|l| l.split(' ').next())
+                    .map(str::to_string)
+                    .collect();
+                let kind = if *r == Role::Drill {
+                    "::DRILL"
+                } else {
+                    "::SELECT_AS"
+                };
+                claim(&mut diags, &names, stmt, kind, &short);
+            }
+            match sets {
                 Ok(sets) => prelude.push_str(&sets),
                 Err(message) => diags.push(Diagnostic {
                     severity: Severity::Warning,
@@ -259,6 +318,28 @@ where
                 }),
             }
             continue;
+        }
+
+        // A ::LINK target must be a tab, a query, a path or an http(s) URL.
+        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Link) {
+            let cell = rows.first().and_then(|row| {
+                row.get(&format!("c{idx}"))
+                    .or_else(|| row.values().nth(*idx))
+                    .and_then(|v| v.as_str())
+            });
+            if let Some(t) = cell.filter(|t| !link_target_ok(t)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "link/bad-url",
+                    message: format!(
+                        "::LINK `{}` is not followed — use '#Tab', '?v.x={{value}}', \
+                         '/d/<id>?v.x={{value}}' or an http(s) URL",
+                        one_line(t)
+                    ),
+                    sql: short.clone(),
+                });
+            }
         }
 
         // ---- design: cross-panel layout counters. Run for every planned panel,
@@ -724,6 +805,44 @@ fn select_as_prelude(v: &str) -> Result<String, String> {
     ))
 }
 
+/// `'[prefix:] a > b > c'` of a `::DRILL` → the browser's initial variables:
+/// the top level, depth 0, an empty path and every level variable `''`.
+fn drill_prelude(v: &str) -> Result<String, String> {
+    let (prefix, path) = match v.split_once(':') {
+        Some((p, rest)) => (p.trim(), rest),
+        None => ("drill", v),
+    };
+    let levels: Vec<&str> = path.split('>').map(str::trim).collect();
+    if !is_ident(prefix) || levels.len() < 2 || !levels.iter().all(|l| is_ident(l)) {
+        return Err(format!(
+            "::DRILL `{v}` — expected two or more column names joined by '>' \
+             (e.g. 'region > country > city', optionally 'geo: region > …'); \
+             the chart does not drill"
+        ));
+    }
+    let mut out = format!(
+        "SET VARIABLE {prefix}_level = '{}';\nSET VARIABLE {prefix}_depth = 0;\n\
+         SET VARIABLE {prefix}_path = []::VARCHAR[];\n",
+        levels[0]
+    );
+    for l in &levels {
+        out.push_str(&format!("SET VARIABLE {l} = '';\n"));
+    }
+    Ok(out)
+}
+
+/// A `::LINK` template the browser follows: `#tab`, `?query`, a path, or an
+/// http(s) / mailto URL — never another scheme.
+fn link_target_ok(t: &str) -> bool {
+    let low = t.trim().to_ascii_lowercase();
+    match low.find(':') {
+        Some(i) if !low[..i].contains(['/', '?', '#', '{']) => {
+            ["http", "https", "mailto"].contains(&&low[..i])
+        }
+        _ => !low.is_empty(),
+    }
+}
+
 fn one_line(s: &str) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if s.chars().count() > 140 {
@@ -906,6 +1025,71 @@ mod design_tests {
         for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
             assert!(select_as_prelude(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn drill_primes_its_variables_and_links_are_checked() {
+        assert_eq!(
+            drill_prelude("geo: region > country").unwrap(),
+            "SET VARIABLE geo_level = 'region';\nSET VARIABLE geo_depth = 0;\n\
+             SET VARIABLE geo_path = []::VARCHAR[];\nSET VARIABLE region = '';\n\
+             SET VARIABLE country = '';\n"
+        );
+        assert!(drill_prelude("region > country > city")
+            .unwrap()
+            .starts_with("SET VARIABLE drill_level = 'region';"));
+        for bad in ["region", "a > ", "a > b c", "x y: a > b", "a > b; DROP"] {
+            assert!(drill_prelude(bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "#Detail",
+            "#Detail?v.r={value}",
+            "?v.r={value}",
+            "/d/sales?v.r={value}",
+            "https://x.y/{value}",
+            "detail.html",
+        ] {
+            assert!(link_target_ok(ok), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            " JavaScript:x",
+            "data:text/html,x",
+            "",
+        ] {
+            assert!(!link_target_ok(bad), "{bad}");
+        }
+        let d = lint_one(
+            "SELECT r::XAXIS, n::BARCHART, 'javascript:alert(1)'::LINK, 't'::TITLE FROM t;",
+            vec![
+                json!({ "c0": "a", "c1": 1.0, "c2": "javascript:alert(1)", "c3": "t" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+        );
+        assert!(has(&d, "link/bad-url"), "{d:?}");
+    }
+
+    #[test]
+    fn a_selection_named_like_a_drill_level_clashes() {
+        let d = check(
+            "SELECT 'region multi'::SELECT_AS;\nSELECT 'region > country'::DRILL;",
+            |q| {
+                let v = if q.trim_end().ends_with("::DRILL;") || q.contains("> country' AS") {
+                    "region > country"
+                } else {
+                    "region multi"
+                };
+                Ok(vec![json!({ "c0": v }).as_object().unwrap().clone()])
+            },
+        );
+        assert!(has(&d, "interaction/name-clash"), "{d:?}");
+        let ok = check(
+            "SELECT 'week'::SELECT_AS;\nSELECT 'week'::SELECT_AS;",
+            |_| Ok(vec![json!({ "c0": "week" }).as_object().unwrap().clone()]),
+        );
+        assert!(!has(&ok, "interaction/name-clash"), "{ok:?}");
     }
 
     #[test]
