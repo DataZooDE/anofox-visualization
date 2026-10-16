@@ -145,3 +145,32 @@ fn stats_ignore_text_that_reads_as_infinity() {
     let n: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(n[0]["n"], 1);
 }
+
+/// The profile groups by position: a table whose columns are named like the
+/// profile's own aliases (`k`, `v`, `n`) still profiles (it used to bind
+/// `GROUP BY v` to the table's column).
+#[test]
+fn profile_of_columns_named_like_its_aliases() {
+    let base =
+        "SELECT 'p' || (i % 4) AS code, i % 9 AS k, i * 0.5 AS v, i AS n FROM range(40) t(i)";
+    let p = parse_page(&serde_json::json!({ "profile": ["code", "k", "v", "n"] })).unwrap();
+    let Some(out) = duck(&page_sql_inline(base, &p)) else {
+        common::skip_without("duckdb", "profile_of_columns_named_like_its_aliases");
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows.as_array().unwrap();
+    for c in 0..4 {
+        let top: Vec<_> = rows
+            .iter()
+            .filter(|r| r["c"] == c && r["t"] == "t")
+            .collect();
+        assert_eq!(top.len(), 3, "column {c}: {rows:?}");
+    }
+    let hist: i64 = rows
+        .iter()
+        .filter(|r| r["c"] == 2 && r["t"] == "h")
+        .map(|r| r["n"].as_i64().unwrap())
+        .sum();
+    assert_eq!(hist, 40);
+}

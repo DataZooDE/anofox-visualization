@@ -735,14 +735,16 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
             .map(|(i, col)| {
                 let c = quote_ident(col);
                 let x = num(&c);
+                // GROUP / ORDER BY position: a table column named `k`, `v`
+                // or `n` would bind before the alias of the same name.
                 format!(
                     "SELECT {i} AS c, 'h' AS t, k, NULL::VARCHAR AS v, count(*) AS n FROM \
                      (SELECT CASE WHEN _hi > _lo THEN least(9, floor((_x - _lo) / (_hi - _lo) * 10))::INTEGER \
                      ELSE 0 END AS k FROM (SELECT {x} AS _x FROM _f) _v, \
-                     (SELECT min({x}) AS _lo, max({x}) AS _hi FROM _f) _b WHERE _x IS NOT NULL) _h GROUP BY k \
+                     (SELECT min({x}) AS _lo, max({x}) AS _hi FROM _f) _b WHERE _x IS NOT NULL) _h GROUP BY 3 \
                      UNION ALL SELECT {i}, 't', NULL::INTEGER, v, n FROM \
                      (SELECT CAST({c} AS VARCHAR) AS v, count(*) AS n FROM _f WHERE {c} IS NOT NULL \
-                     GROUP BY v ORDER BY n DESC, v LIMIT 3) _t"
+                     GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3) _t"
                 )
             })
             .collect();
@@ -1036,7 +1038,7 @@ mod tests {
         let (sql, params) = page_sql("SELECT * FROM t", &p);
         assert!(sql.starts_with("WITH _f AS (SELECT * FROM (SELECT * FROM t) _dp WHERE"));
         assert!(sql.contains("SELECT 0 AS c, 'h' AS t"));
-        assert!(sql.contains("ORDER BY n DESC, v LIMIT 3"));
+        assert!(sql.contains("GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3"));
         assert_eq!(params, vec!["5"]);
         // rejected
         for bad in [
