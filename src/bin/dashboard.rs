@@ -90,15 +90,16 @@ fn cmd_render(args: &[String]) {
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
     let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
-    // Every `duckdb` call is a fresh session: bound variables (a script's own
-    // SET VARIABLE, the inputs' defaults) are replayed before each query.
+    // Every `duckdb` call is a fresh session: session state (a script's own
+    // SET VARIABLE and LOAD, the inputs' defaults) is replayed before each
+    // statement.
     let mut vars = String::new();
     for p in sql::plan(&script) {
         if p.setup {
-            if inputs::is_set_variable(&p.sql) {
+            if is_session_state(&p.sql) {
                 vars.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';')));
             } else {
-                run(&db, &p.sql, false); // DDL/insert — run for effect
+                run(&db, &format!("{vars}{}", p.sql), false); // DDL/insert — run for effect
             }
             continue;
         }
@@ -222,18 +223,28 @@ fn cmd_render(args: &[String]) {
 /// setup statements persist between calls).
 struct CliProvider {
     db: String,
-    /// `SET VARIABLE`s replayed before every query (each `duckdb` call is a
-    /// fresh session; tables persist in the db file, variables don't).
+    /// `SET VARIABLE`s and `LOAD`s replayed before every statement (each
+    /// `duckdb` call is a fresh session; tables persist in the db file,
+    /// variables and loaded extensions don't).
     vars: String,
+}
+
+/// Session state a fresh `duckdb` call loses: a `SET VARIABLE` or a `LOAD`.
+fn is_session_state(sql: &str) -> bool {
+    inputs::is_set_variable(sql)
+        || sql
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("LOAD"))
 }
 
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
-        if inputs::is_set_variable(sql) {
+        if is_session_state(sql) {
             self.vars
                 .push_str(&format!("{};\n", sql.trim().trim_end_matches(';')));
         } else {
-            run(&self.db, sql, false);
+            run(&self.db, &format!("{}{sql}", self.vars), false);
         }
         Ok(())
     }

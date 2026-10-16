@@ -193,9 +193,12 @@ fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {
             false => Value::Str(s.clone()),
         },
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
-        // A list (a KPI's `list(v)::SPARKLINE`, a table's list column) keeps
-        // its JSON text.
-        Some(v @ serde_json::Value::Array(_)) => Value::Str(v.to_string()),
+        // A list (a KPI's `list(v)::SPARKLINE`, a table's list column) or a
+        // struct (a contract call's `json_object(…)` arguments) keeps its JSON
+        // text.
+        Some(v @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) => {
+            Value::Str(v.to_string())
+        }
         _ => Value::Na,
     }
 }
