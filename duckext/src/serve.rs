@@ -399,7 +399,7 @@ pub struct LockedOptions {
     pub cache_bytes: usize,
     /// Rebuild the snapshot this often (`refresh_s`; `None` = never).
     pub refresh: Option<Duration>,
-    /// A folder the panels may read (not write: see `writes_files`) — the
+    /// A folder the panels may read (not write: see `check_read_only`) — the
     /// canonical path of `options.data`.
     pub data: Option<PathBuf>,
     /// Variables whose values name a file or folder inside `data`: each must
@@ -487,8 +487,8 @@ impl LockedOptions {
                     if !p.is_dir() {
                         return Err(format!("options.data: '{d}' is not a directory"));
                     }
-                    if p.parent().is_none() {
-                        return Err("options.data: refusing to open the filesystem root".into());
+                    if let Some(why) = too_broad(&p) {
+                        return Err(format!("options.data: refusing '{}': {why} — point it at the folder that holds the data only", p.display()));
                     }
                     o.data = Some(p);
                 }
@@ -635,20 +635,6 @@ pub fn start_locked(
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     loads.extend(opts.load.iter().cloned());
-    if opts.data.is_some() {
-        // The data folder is writable to DuckDB (`allowed_directories` has no
-        // read-only form): refuse statements that write files.
-        for d in &dashboards {
-            for (i, (_, sql)) in d.stmts.iter().enumerate() {
-                if let Some(kw) = writes_files(sql) {
-                    return Err(format!(
-                        "dashboard '{}' statement {i}: {kw} is not allowed when serving a data folder",
-                        d.id
-                    ));
-                }
-            }
-        }
-    }
     let (snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &loads)?
@@ -669,6 +655,9 @@ pub fn start_locked(
                     Err(e) => return Err(format!("dashboard '{}' statement {i}: {e}", d.id)),
                 }
             }
+        }
+        if opts.data.is_some() {
+            check_read_only(&c, &dashboards)?;
         }
     }
     let addr = format!("127.0.0.1:{port}");
@@ -756,38 +745,173 @@ pub fn refresh(port: u16) -> Result<String, String> {
     Ok(locked.refresh(true)?.unwrap_or_default())
 }
 
-/// The leading keyword of `sql` if it is a statement that writes files
-/// (`COPY`, `EXPORT`, `ATTACH`, …) — refused when a data folder is open,
-/// since DuckDB lets `allowed_directories` be written to, too.
-fn writes_files(sql: &str) -> Option<&'static str> {
-    const DENY: [&str; 9] = [
-        "COPY",
-        "EXPORT",
-        "IMPORT",
-        "ATTACH",
-        "DETACH",
-        "INSTALL",
-        "LOAD",
-        "FORCE",
-        "CHECKPOINT",
+/// Why `dir` is too broad to open to every viewer as `options.data`: the
+/// filesystem root, a system directory, or a folder that contains the home
+/// directory or the temp directory (where the snapshots live).
+fn too_broad(dir: &Path) -> Option<String> {
+    let Some(parent) = dir.parent() else {
+        return Some("the filesystem root".into());
+    };
+    const SYSTEM: [&str; 16] = [
+        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin",
+        "sys", "tmp", "usr", "var",
     ];
-    let mut rest = sql;
-    loop {
-        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(' || c == ';');
-        if let Some(r) = rest.strip_prefix("--") {
-            rest = r.split_once('\n').map_or("", |(_, r)| r);
-        } else if let Some(r) = rest.strip_prefix("/*") {
-            rest = r.split_once("*/").map_or("", |(_, r)| r);
-        } else {
-            break;
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if parent.parent().is_none() && SYSTEM.contains(&name) {
+        return Some("a system directory".into());
+    }
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    for (what, p) in home
+        .map(|p| ("the home directory", p))
+        .chain([("the temp directory", std::env::temp_dir())])
+    {
+        if p.canonicalize().is_ok_and(|p| p.starts_with(dir)) {
+            return Some(format!("it contains {what}"));
         }
     }
-    let word: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase();
-    DENY.into_iter().find(|k| *k == word)
+    None
+}
+
+/// With a data folder open, every dashboard statement must be a query or one
+/// of the setup forms the server needs — classified by DuckDB's own parser —
+/// because DuckDB can write inside `allowed_directories` too (`COPY … TO`, and
+/// anything that runs a statement: `EXPLAIN ANALYZE`, `PREPARE`/`EXECUTE`,
+/// `CALL`, `PRAGMA`, …). An allowlist, so new statement kinds are refused.
+fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
+    let serialize = |sql: &str| -> Result<String, String> {
+        let out = c
+            .execute_prepared("SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", &[sql])
+            .and_then(|mut r| r.string_rows(1))
+            .map_err(|e| {
+                format!(
+                    "checking the dashboards for a data folder needs DuckDB's json extension: {}",
+                    e.lines().next().unwrap_or("")
+                )
+            })?;
+        Ok(out
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten())
+            .unwrap_or_default())
+    };
+    for d in dashboards {
+        for (i, (setup, sql)) in d.stmts.iter().enumerate() {
+            read_only_statement(sql, *setup, &serialize)
+                .map_err(|e| format!("dashboard '{}' statement {i}: {e}", d.id))?;
+        }
+    }
+    Ok(())
+}
+
+/// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a data
+/// folder open. `serialize` is DuckDB's `json_serialize_sql`: it parses without
+/// binding or running, and serialises only SELECT statements — `EXPLAIN`,
+/// `PREPARE`, `EXECUTE`, `COPY`, `PRAGMA`, `CALL`, a top-level `PIVOT`, … come
+/// back as errors.
+fn read_only_statement(
+    sql: &str,
+    setup: bool,
+    serialize: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let query = if setup {
+        setup_query(sql).ok_or(
+            "with a data folder, setup statements must be SET VARIABLE <name> = <expression> \
+             or CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>",
+        )?
+    } else {
+        sql.to_string()
+    };
+    let v: serde_json::Value = serde_json::from_str(&serialize(&query)?).unwrap_or_default();
+    if v["error"] == serde_json::Value::Bool(false)
+        && v["statements"].as_array().is_some_and(|a| a.len() == 1)
+    {
+        Ok(())
+    } else {
+        Err("with a data folder, only queries (SELECT …) are allowed".into())
+    }
+}
+
+/// The query inside an allowed setup statement — `SELECT <expr>` for
+/// `SET VARIABLE <name> = <expr>`, `<query>` for
+/// `CREATE [OR REPLACE] TEMP|TEMPORARY TABLE|VIEW [IF NOT EXISTS] <name> AS <query>`
+/// — or `None` for any other statement. (Comments are already stripped.)
+fn setup_query(sql: &str) -> Option<String> {
+    /// `s` after the keyword `w` (case-insensitive, whole word).
+    fn kw<'a>(s: &'a str, w: &str) -> Option<&'a str> {
+        let s = s.trim_start();
+        let head = s.get(..w.len())?;
+        let rest = &s[w.len()..];
+        (head.eq_ignore_ascii_case(w)
+            && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(rest)
+    }
+    /// `s` after a (dotted, plain or `"quoted"`) name.
+    fn name(s: &str) -> Option<&str> {
+        let mut s = s.trim_start();
+        loop {
+            if let Some(q) = s.strip_prefix('"') {
+                // `""` inside a quoted name is a literal quote
+                let mut end = None;
+                let mut chars = q.char_indices().peekable();
+                while let Some((i, c)) = chars.next() {
+                    if c == '"' {
+                        if chars.peek().is_some_and(|(_, c)| *c == '"') {
+                            chars.next();
+                        } else {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                }
+                s = &q[end? + 1..];
+            } else {
+                let end = s
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(s.len());
+                if end == 0 {
+                    return None;
+                }
+                s = &s[end..];
+            }
+            match s.strip_prefix('.') {
+                Some(r) => s = r,
+                None => return Some(s),
+            }
+        }
+    }
+    let body = sql
+        .trim()
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    if let Some(r) = kw(body, "SET").and_then(|r| kw(r, "VARIABLE")) {
+        let r = name(r)?.trim_start();
+        let expr = r.strip_prefix('=').or_else(|| kw(r, "TO"))?;
+        return Some(format!("SELECT {expr}"));
+    }
+    let r = kw(body, "CREATE")?;
+    let r = kw(r, "OR").and_then(|r| kw(r, "REPLACE")).unwrap_or(r);
+    let r = kw(r, "TEMPORARY").or_else(|| kw(r, "TEMP"))?;
+    let r = kw(r, "TABLE").or_else(|| kw(r, "VIEW"))?;
+    let r = kw(r, "IF")
+        .and_then(|r| kw(r, "NOT"))
+        .and_then(|r| kw(r, "EXISTS"))
+        .unwrap_or(r);
+    let query = kw(name(r)?, "AS")?.trim();
+    (!query.is_empty()).then(|| query.to_string())
+}
+
+/// A DuckDB error as a viewer sees it: the data folder's absolute path is
+/// replaced by `<data>` (the full text goes to the server log).
+fn redact(e: String, data: Option<&Path>) -> String {
+    match data.map(|d| d.to_string_lossy()) {
+        Some(d) if e.contains(d.as_ref()) => {
+            eprintln!("[anofox-serve] (unredacted) {e}");
+            e.replace(d.as_ref(), "<data>")
+        }
+        _ => e,
+    }
 }
 
 /// Is `lit` (a typed literal from `sv::sql_literal`) an acceptable value for a
@@ -971,7 +1095,13 @@ fn build_snapshot(
             #[cfg(unix)]
             let _ = std::fs::remove_file(file);
         }
+        // With a data folder the statements are checked with json_serialize_sql
+        // (`check_read_only`), which lives in the json extension.
+        let json = "json".to_string();
         let mut exts: Vec<&String> = loaded.iter().chain(extra_loads.iter()).collect();
+        if opts.data.is_some() {
+            exts.push(&json);
+        }
         exts.sort();
         exts.dedup();
         for e in exts {
@@ -1246,7 +1376,7 @@ fn run_panel(
         } else if e.contains("row limit") {
             (413, e)
         } else {
-            (400, e)
+            (400, redact(e, st.opts.data.as_deref()))
         }
     })
 }
@@ -1370,11 +1500,13 @@ mod tests {
         // directory other than the root.
         let tmp = std::env::temp_dir().canonicalize().unwrap();
         let json = |d: &str| format!(r#"{{"data":{}}}"#, serde_json::json!(d));
-        let sub = SnapshotDir::create().unwrap(); // any existing subdirectory
-        let name = sub.0.file_name().unwrap().to_string_lossy().into_owned();
-        let o =
-            LockedOptions::parse(Some(&json(&format!("{}/./{name}/..", tmp.display())))).unwrap();
-        assert_eq!(o.data.as_deref(), Some(tmp.as_path()));
+        let sub = SnapshotDir::create().unwrap(); // a private folder under tmp
+        let dir = sub.0.canonicalize().unwrap();
+        std::fs::create_dir(dir.join("run")).unwrap();
+        let o = LockedOptions::parse(Some(&json(&format!("{}/./run/..", dir.display())))).unwrap();
+        assert_eq!(o.data.as_deref(), Some(dir.as_path()));
+        // too broad: the temp directory itself (it holds the snapshots)
+        assert!(LockedOptions::parse(Some(&json(&tmp.to_string_lossy()))).is_err());
         assert!(LockedOptions::parse(Some(&json("/no/such/dir/anofox"))).is_err());
         assert!(LockedOptions::parse(Some(&json("/"))).is_err());
         assert!(LockedOptions::parse(Some(&json(""))).is_err());
@@ -1385,7 +1517,7 @@ mod tests {
         // path_vars: identifiers, and only together with data.
         let ok = format!(
             r#"{{"data":{},"path_vars":["run"]}}"#,
-            serde_json::json!(tmp.to_string_lossy())
+            serde_json::json!(dir.to_string_lossy())
         );
         assert_eq!(
             LockedOptions::parse(Some(&ok)).unwrap().path_vars,
@@ -1435,27 +1567,168 @@ mod tests {
         }
     }
 
+    /// DuckDB's `json_serialize_sql` through the `duckdb` CLI; `None` without
+    /// one (the test is skipped locally, but fails on CI — `CI` set — where
+    /// the workflow installs the pinned CLI).
+    fn cli_serialize(sql: &str) -> Option<Result<String, String>> {
+        let q = format!(
+            "SELECT json_serialize_sql({})::VARCHAR AS j",
+            sql_string_literal(sql)
+        );
+        let out = std::process::Command::new("duckdb")
+            .args(["-noheader", "-list", "-c", &q])
+            .output()
+            .ok()?;
+        Some(if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        })
+    }
+
     #[test]
-    fn file_writing_statements_are_spotted() {
-        for (sql, kw) in [
-            ("COPY (SELECT 1) TO 'x.csv'", "COPY"),
-            ("  copy t TO 'x'", "COPY"),
-            ("-- note\n/* c */ (EXPORT DATABASE 'x')", "EXPORT"),
-            ("ATTACH 'x.db'", "ATTACH"),
-            ("install httpfs", "INSTALL"),
-            ("FORCE INSTALL x", "FORCE"),
-        ] {
-            assert_eq!(writes_files(sql), Some(kw), "{sql}");
+    fn only_queries_run_with_a_data_folder() {
+        match cli_serialize("SELECT 1") {
+            Some(Ok(out)) if out.contains("\"error\":false") => {}
+            _ if std::env::var_os("CI").is_some() => {
+                panic!("CI needs a working `duckdb` CLI on PATH (json_serialize_sql) for this test")
+            }
+            _ => {
+                eprintln!("skipped: no working duckdb CLI");
+                return;
+            }
         }
+        let ser = |sql: &str| cli_serialize(sql).unwrap();
+        let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &ser);
         for sql in [
-            "SELECT * FROM read_parquet(getvariable('anofox_data') || '/x.parquet')",
-            "CREATE TEMP TABLE copy_of AS SELECT 1",
+            "SELECT * FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/x.parquet')",
             "FROM t",
             "WITH copy AS (SELECT 1) SELECT * FROM copy",
-            "-- COPY\nSELECT 1",
+            "(SELECT 1) UNION ALL (SELECT 2)",
+            "VALUES (1), (2)",
+            // a PIVOT with its values listed (one without can't be checked)
+            "SELECT * FROM (PIVOT (SELECT 'a' AS k, 1 AS v) ON k IN ('a') USING sum(v))",
         ] {
-            assert_eq!(writes_files(sql), None, "{sql}");
+            assert!(ok(sql, false).is_ok(), "{sql}");
         }
+        for sql in [
+            "SET VARIABLE lo = (SELECT min(x) FROM t)",
+            "set variable lo TO 5;",
+            "CREATE TEMP TABLE copy_of AS SELECT 1",
+            "CREATE OR REPLACE TEMPORARY VIEW v AS FROM t",
+            "create temp table if not exists \"x y\" AS SELECT 1",
+        ] {
+            assert!(ok(sql, true).is_ok(), "{sql}");
+        }
+        // #85: every way of running a write (or any other statement) fails,
+        // as a panel and as a setup statement.
+        let data = "/srv/data";
+        for sql in [
+            format!("COPY (SELECT 1) TO '{data}/x.csv'"),
+            format!("copy t TO '{data}/x'"),
+            format!("EXPLAIN ANALYZE COPY (SELECT 'pwn') TO '{data}/w_explain.csv'"),
+            format!("EXPLAIN COPY (SELECT 1) TO '{data}/x.csv'"),
+            "EXPLAIN SELECT 1".to_string(),
+            format!("PREPARE p AS COPY (SELECT 'pwn2') TO '{data}/w_prep.csv'"),
+            "PREPARE p AS SELECT 1".to_string(),
+            "EXECUTE p".to_string(),
+            format!("EXPORT DATABASE '{data}/x'"),
+            format!("IMPORT DATABASE '{data}/x'"),
+            format!("ATTACH '{data}/x.db' AS x"),
+            "DETACH x".to_string(),
+            "INSTALL httpfs".to_string(),
+            "LOAD httpfs".to_string(),
+            "FORCE INSTALL httpfs".to_string(),
+            "CHECKPOINT".to_string(),
+            "VACUUM".to_string(),
+            "PRAGMA database_size".to_string(),
+            "CALL pragma_version()".to_string(),
+            "SET threads = 1".to_string(),
+            "RESET threads".to_string(),
+            "USE memory".to_string(),
+            "INSERT INTO t SELECT 1".to_string(),
+            "CREATE TABLE t AS SELECT 1".to_string(),
+            "CREATE MACRO m() AS 1".to_string(),
+            format!("CREATE TEMP TABLE t AS EXPLAIN ANALYZE COPY (SELECT 1) TO '{data}/x.csv'"),
+            format!("CREATE TEMP TABLE t AS COPY (SELECT 1) TO '{data}/x.csv'"),
+            "CREATE TEMP TABLE t (a INT)".to_string(),
+            "CREATE TEMP TABLE t(a) AS SELECT 1".to_string(),
+            "SET VARIABLE x = 1; COPY (SELECT 1) TO 'x.csv'".to_string(),
+            format!("SELECT 1; COPY (SELECT 1) TO '{data}/x.csv'"),
+            "SELECT 1; SELECT 2".to_string(),
+            "PIVOT (SELECT 'a' AS k, 1 AS v) ON k USING sum(v)".to_string(),
+            "SELECT * FROM (PIVOT (SELECT 'a' AS k, 1 AS v) ON k USING sum(v))".to_string(),
+            "BEGIN".to_string(),
+            "".to_string(),
+        ] {
+            assert!(ok(&sql, false).is_err(), "panel: {sql}");
+            assert!(ok(&sql, true).is_err(), "setup: {sql}");
+        }
+        // A missing json extension fails closed.
+        let none = |_: &str| Err::<String, String>("no json_serialize_sql".into());
+        assert!(read_only_statement("SELECT 1", false, &none).is_err());
+        let garbage = |_: &str| Ok::<String, String>("not json".into());
+        assert!(read_only_statement("SELECT 1", false, &garbage).is_err());
+    }
+
+    #[test]
+    fn setup_forms() {
+        assert_eq!(
+            setup_query("SET VARIABLE a = 1").as_deref(),
+            Some("SELECT  1")
+        );
+        assert_eq!(
+            setup_query("CREATE TEMP VIEW v AS SELECT 2;").as_deref(),
+            Some("SELECT 2")
+        );
+        for sql in [
+            "SET a = 1",
+            "SET VARIABLEa = 1",
+            "CREATE TABLE t AS SELECT 1",
+            "CREATE TEMP SEQUENCE s",
+            "CREATE TEMP TABLE t AS",
+            "CREATE TEMP TABLE t",
+            "SET VARIABLE \"a = 1",
+            "CREATE TEMP TABLE . AS SELECT 1",
+            "CREATE TEMP TABLE a. AS SELECT 1",
+        ] {
+            assert_eq!(setup_query(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn data_errors_are_redacted() {
+        let d = Path::new("/srv/runs");
+        assert_eq!(
+            redact(
+                "Permission Error: Cannot access file \"/srv/runs/a/x.parquet\" and /srv/runs"
+                    .into(),
+                Some(d)
+            ),
+            "Permission Error: Cannot access file \"<data>/a/x.parquet\" and <data>"
+        );
+        assert_eq!(redact("other".into(), Some(d)), "other");
+        assert_eq!(redact("/srv/runs".into(), None), "/srv/runs");
+    }
+
+    #[test]
+    fn broad_data_folders_are_refused() {
+        assert!(too_broad(Path::new("/")).is_some());
+        for d in ["/etc", "/usr", "/home", "/tmp", "/var"] {
+            assert!(too_broad(Path::new(d)).is_some(), "{d}");
+        }
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        assert!(too_broad(&tmp).is_some());
+        if let Some(home) =
+            std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok())
+        {
+            assert!(too_broad(&home).is_some());
+            assert!(too_broad(home.parent().unwrap()).is_some());
+            assert!(too_broad(&home.join("runs")).is_none());
+        }
+        assert!(too_broad(&tmp.join("anofox-runs")).is_none());
+        assert!(too_broad(Path::new("/srv/runs")).is_none());
+        assert!(too_broad(Path::new("/data")).is_none());
     }
 
     #[test]

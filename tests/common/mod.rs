@@ -1,5 +1,15 @@
-//! Shared checks for rendered output.
+//! Shared checks for rendered output, and for tests that need an external tool.
 #![allow(dead_code)]
+
+/// A test needs an external tool (`duckdb`, `node`) that isn't on PATH: skip
+/// it locally (with a note), but fail on CI (`CI` set), where the workflow
+/// installs the tool — so a missing install can't silently skip the test.
+pub fn skip_without(tool: &str, test: &str) {
+    if std::env::var_os("CI").is_some() {
+        panic!("{test}: `{tool}` is required on CI but was not found on PATH");
+    }
+    eprintln!("skipped {test}: no `{tool}` on PATH");
+}
 
 /// Assert `svg` is well-formed XML rooted at `<svg>`, with no script vectors
 /// (no `<script>`/`<foreignObject>`/`<img>`/`<iframe>` element, no `on*`

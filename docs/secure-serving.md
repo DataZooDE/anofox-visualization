@@ -138,22 +138,42 @@ SELECT ds::XAXIS, yhat::LINECHART
 FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/forecast.parquet');
 ```
 
-- The folder (canonicalised: no `..` or symlink in the configured path; not
-  `/`) is the only path the snapshot instance may open — DuckDB's
+- The folder (canonicalised: no `..` or symlink in the configured path) is
+  the only path the snapshot instance may open — DuckDB's
   `allowed_directories` with `enable_external_access = false` and
   `lock_configuration = true`. DuckDB refuses any path outside it, including
   `…/run/../../etc`.
+- **Keep it narrow.** Every viewer can read every file in it. The server
+  refuses `/`, top-level system directories (`/etc`, `/home`, `/tmp`, `/usr`,
+  `/var`, …) and any folder that contains the home directory or the temp
+  directory (where the snapshots live); point it at the folder that holds the
+  served data and nothing else.
 - Each request gets `SET VARIABLE anofox_data = '<folder>'` after the viewer's
   variables; a viewer can't set `anofox_data` (`400`).
 - `path_vars` lists the variables whose values become path segments: each
   value must be a plain name — `[A-Za-z0-9_.-]`, not starting with `.` (so not
   `.`, `..` or a hidden file), no `/` — a non-negative integer, or `null`;
   anything else is `400` before any SQL runs.
-- **Read-only.** DuckDB can also *write* inside `allowed_directories`, so a
-  server with `data` refuses to start when a dashboard statement writes files
-  (`COPY`, `EXPORT`, `IMPORT`, `ATTACH`, `DETACH`, `INSTALL`, `LOAD`, `FORCE`,
-  `CHECKPOINT`). For defence in depth, make the folder read-only for the
-  server's OS user (or mount it read-only).
+- **Read-only — make it so in the OS.** DuckDB has no read-only form of
+  `allowed_directories`: a statement that writes (`COPY … TO`, `EXPORT`,
+  `ATTACH`, …, or anything that runs one: `EXPLAIN ANALYZE`,
+  `PREPARE`/`EXECUTE`) could write into the folder. The **hard guarantee** is
+  the operating system's: mount the folder read-only into the server
+  (`-v /srv/runs:/srv/runs:ro`, a read-only bind mount) or give the server's OS
+  user read permission only.
+- On top of that, with `data` set the server only starts if every dashboard
+  statement is classified as harmless by DuckDB's own parser
+  (`json_serialize_sql`, which parses without running and accepts only
+  `SELECT` statements): panels must be queries (`SELECT`, `WITH`, `FROM`,
+  `VALUES`, set operations; a `PIVOT` only as a subquery with its `IN (…)`
+  values listed), and setup statements must be `SET VARIABLE <name> =
+  <expression>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>`
+  with a query that passes the same check. Everything else — `EXPLAIN`,
+  `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
+  the start. The check needs DuckDB's `json` extension (loaded into the
+  snapshot automatically; without it the server refuses to start).
+- Error messages sent to viewers show the folder as `<data>`; the log keeps
+  the full path.
 - Files appear live: a new run is readable as soon as it is written, without a
   refresh. The result cache does *not* see file changes — runs that are
   rewritten in place need a refresh (which starts a new cache) or
