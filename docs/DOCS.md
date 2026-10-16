@@ -563,7 +563,11 @@ So `p_t` is statsmodels' `P>|t|`, `pr_t` R's `Pr(>|t|)`, `p_unc` pingouin's
   none matches, the closest one and what it misses — *…; closest: terms,
   missing estimate (did you mean \`estimat\`?)*;
 - a list where a number is read — *column \`estimate\` must be numeric, got
-  a list — take one element (estimate[1]) or unnest it*.
+  a list — take one element (estimate[1]) or unnest it*;
+- a column where the row belongs — the table alias is also a column name
+  (statsmodels' `t`), so `anofox_plot_terms(t) … FROM tbl t` passes that
+  column: *the argument is a column, not the row — pass the table alias …
+  and pick an alias that is not also a column name*.
 
 The same messages show in `dashboard --check` and on the dashboard panel.
 
@@ -582,6 +586,12 @@ SELECT anofox_plot_prediction(p) FROM (
 See `examples/regression/` (fixtures for every schema, plus scripts against
 the real anofox-statistics / anofox-forecast extensions) and
 `python3 examples/regression/render.py <script.sql> <out_dir>`.
+
+**Results from Python or R.** statsmodels, scikit-learn, scipy, pingouin,
+lifelines, statsforecast, Prophet and broom tables plot the same way — in
+process through the `duckdb` Python / R package, or written to Parquet for a
+dashboard. Recipes per library and the `anofox_viz` helper package:
+[Plotting results from Python and R](python-r.md).
 
 **Why row macros.** DuckDB macros cannot take a table *name* and return a
 scalar (that needs a table function per build), and positional column

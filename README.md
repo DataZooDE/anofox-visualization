@@ -264,6 +264,7 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 ## Documentation
 
 - **[Annotation model & role reference](docs/DOCS.md)** — every `::ROLE`, layout, and serving mode.
+- **[Plotting results from Python and R](docs/python-r.md)** — statsmodels, scikit-learn, scipy, broom, … into the `anofox_plot_*` macros; the [`anofox_viz`](python/) helper package.
 - **[Dashboard design principles](docs/dashboard-design.md)** — what makes a dashboard good (enforced by `dashboard --check`).
 - **[Visual review rubric](docs/dashboard-visual-review.md)** — the appearance gate.
 - **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving.
