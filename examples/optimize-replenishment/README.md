@@ -64,10 +64,11 @@ cd web && ../target/release/dashboard --check --strict examples/optimize-repleni
 
 ## Inputs and tabs
 
-Inputs: purchasing budget (snapped to €2,500 steps), target service level,
+Inputs: purchasing budget (snapped to €2,500 steps), target service level (buttons),
 plan (compared with today's rule) and the SKU to drill into.
 
-1. **Forecast** — a year of sales and the 8-week forecast with its band;
+1. **Forecast** — a year of sales and the 8-week forecast (flowing line from
+   the order day) with its band;
    forecast vs. 3 × the last four weeks for every SKU.
 2. **Accuracy** — the backtest: actual vs forecast vs 4-week average, error
    per SKU.
@@ -75,4 +76,7 @@ plan (compared with today's rule) and the SKU to drill into.
    subtotalled by category.
 4. **Budget** — demand served and stock left by budget for each rule; budget ×
    service level.
-5. **Decision** — the order to place and how much budget 99 % service needs.
+5. **Decision** — the order to place, each SKU's expected demand served
+   against the target service level (bullet), and how much budget 99 %
+   service needs. The demand-served tile is green from the target, amber
+   below it and red under 90 %.

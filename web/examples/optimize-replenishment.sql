@@ -35,6 +35,7 @@ CREATE OR REPLACE TABLE ir_provenance AS FROM read_csv('data/optimize-replenishm
 CREATE OR REPLACE MACRO ir_budget() AS
     least(60000, greatest(10000, round(coalesce(TRY_CAST(getvariable('budget_eur') AS DOUBLE), 25000) / 2500) * 2500))::INTEGER;
 CREATE OR REPLACE MACRO ir_sl() AS coalesce(getvariable('service_level'), '95 %');
+CREATE OR REPLACE MACRO ir_sl_pct() AS replace(ir_sl(), ' %', '')::INTEGER;
 CREATE OR REPLACE MACRO ir_rule() AS coalesce(getvariable('rule'), 'forecast, exact (proven optimum)');
 CREATE OR REPLACE MACRO ir_today() AS 'today: last 4 weeks, top sellers first';
 CREATE OR REPLACE MACRO ir_sku() AS coalesce(getvariable('sku'), 'Mulled wine 1 l');
@@ -53,17 +54,19 @@ SELECT ('**The category buyer** of a cash & carry wholesaler places the weekly o
 
 SELECT 'Planning inputs'::GROUP;
 SELECT 25000 AS budget_eur ::NUMBER, 'Purchasing budget this week (€, 10,000–60,000)'::LABEL;
-SELECT service_level ::DROPDOWN, 'Target service level'::LABEL FROM (VALUES (1, '95 %'), (2, '90 %'), (3, '98 %')) t(k, service_level) ORDER BY k;
+SELECT service_level ::BUTTONS, 'Target service level'::LABEL FROM (VALUES (1, '95 %'), (2, '90 %'), (3, '98 %')) t(k, service_level) ORDER BY k;
 SELECT rule ::DROPDOWN, 'Plan (vs. today''s rule)'::LABEL FROM (SELECT DISTINCT rule, ord FROM ir_summary WHERE rule <> ir_today()) ORDER BY ord DESC;
 SELECT name AS sku ::DROPDOWN, 'SKU to drill into'::LABEL FROM ir_skus ORDER BY name = 'Mulled wine 1 l' DESC, name;
 SELECT 1::ENDGROUP;
 
-SELECT 'Selected plan vs. today''s rule at the chosen budget (arrow = change from today; up is better)'::GROUP;
+SELECT 'Selected plan vs. today''s rule at the chosen budget'::GROUP;
+-- Green from the target service level, amber down to 90 %, red below.
 SELECT (SELECT fill_rate_pct FROM ir_sum() WHERE rule = ir_rule())::PERCENT,
-       (SELECT fill_rate_pct FROM ir_sum() WHERE rule = ir_today())::DELTA,
+       (SELECT fill_rate_pct FROM ir_sum() WHERE rule = ir_today())::DELTA, 'abs'::DELTA_FORMAT, 'vs today''s rule'::DELTA_LABEL,
+       ('<90:bad; <' || ir_sl_pct() || ':warn; good')::THRESHOLDS,
        'Expected demand served, next 3 weeks'::LABEL;
 SELECT (SELECT exp_margin FROM ir_sum() WHERE rule = ir_rule())::METRIC,
-       (SELECT exp_margin FROM ir_sum() WHERE rule = ir_today())::DELTA,
+       (SELECT exp_margin FROM ir_sum() WHERE rule = ir_today())::DELTA, 'vs today''s rule'::DELTA_LABEL,
        'Expected margin, next 3 weeks (€)'::LABEL;
 SELECT ((SELECT exp_lost_units FROM ir_sum() WHERE rule = ir_today()) - (SELECT exp_lost_units FROM ir_sum() WHERE rule = ir_rule()))::METRIC,
        'Lost sales avoided (units)'::LABEL;
@@ -82,6 +85,9 @@ SELECT ('**Step 1, anofox-forecast.** One grouped forecast call (MFLES, weekly, 
 SELECT 12::COL;
 SELECT 340::HEIGHT;
 SELECT week ::XAXIS, kind ::CATEGORY, units ::LINECHART, lo ::BAND_LOWER, hi ::BAND_UPPER,
+       CASE WHEN kind = 'forecast' THEN 'flow' END ::LINESTYLE,
+       CASE WHEN kind = 'forecast' AND week = DATE '2026-10-19' THEN week END ::XLINE,
+       CASE WHEN kind = 'forecast' AND week = DATE '2026-10-19' THEN 'order day' END ::XLINE_LABEL,
        (ir_sku() || ': a year of weekly sales and the 8-week forecast with its 90 % band')::TITLE
 FROM (
     SELECT x.week, 'sales' AS kind, x.units, x.units AS lo, x.units AS hi
@@ -138,7 +144,7 @@ SELECT ('**Step 2, anofox-optimize.** Each SKU''s need (forecast for 3 weeks + s
 
 SELECT 12::COL;
 SELECT 400::HEIGHT;
-SELECT name ::XAXIS, CASE WHEN rule = ir_today() THEN 'today' ELSE 'selected plan' END ::CATEGORY, pallets ::BARCHART, 1 ::FLIP,
+SELECT name ::XAXIS, CASE WHEN rule = ir_today() THEN 'today' ELSE 'selected plan' END ::CATEGORY, pallets ::BARCHART, 1 ::FLIP, 'tween'::TRANSITION,
        ('Pallets ordered per SKU at €' || ir_budget() || ' — the plan moves money to the lines that will sell')::TITLE
 FROM ir_pl() WHERE rule IN (ir_today(), ir_rule()) ORDER BY max(pallets_needed) OVER (PARTITION BY sku), name, 2 DESC;
 
@@ -195,6 +201,13 @@ SELECT ('### Recommendation' || chr(10) || chr(10) ||
              WHEN ir_enough() <= ir_budget() THEN 'The budget is enough: from **€' || ir_enough() || '** the plan already serves 99 % of demand.'
              ELSE 'To serve 99 % of demand the order needs **€' || ir_enough() || '** — **€' || (ir_enough() - ir_budget()) || '** more than this week''s budget; worth asking for.' END)::MARKDOWN
 FROM ir_sum() s, ir_sum() t WHERE s.rule = ir_rule() AND t.rule = ir_today();
+
+SELECT 12::COL;
+SELECT 420::HEIGHT;
+SELECT name ::XAXIS, fill_rate_pct ::BULLET, ir_sl_pct() ::GOAL, ('80,' || ir_sl_pct() || ',100') ::RANGE, 'percent'::YFORMAT,
+       'tween'::TRANSITION,
+       ('Expected demand served per SKU with this order — the tick is the ' || ir_sl() || ' target')::TITLE
+FROM ir_pl() WHERE rule = ir_rule() ORDER BY fill_rate_pct, name;
 
 SELECT 12::COL;
 SELECT 'Pallets: sum, Units: sum, Cost (€): sum, Expected fill rate %: mean'::TOTALS;
