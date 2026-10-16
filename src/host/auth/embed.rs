@@ -18,8 +18,8 @@
 use super::jwt::{looks_like_jwt, now_s, reason};
 use super::session::{secret, Seen, Sessions};
 use super::Scope;
-use crate::host::access::{clean_claim, is_reserved_var, AuthError, Claims, MAX_ATTRS, MAX_GROUPS};
-use crate::host::serving::{sql_literal, valid_ident};
+use crate::host::access::{clean_claim, AuthError, Claims, MAX_ATTRS, MAX_GROUPS};
+use crate::host::serving::sql_literal;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
@@ -173,7 +173,7 @@ impl Embed {
                 return Err("bad_vars");
             }
             for (name, val) in vs {
-                if !valid_ident(name) || is_reserved_var(name) {
+                if !super::lockable_var(name) {
                     return Err("bad_vars");
                 }
                 vars.push((name.clone(), sql_literal(val).map_err(|_| "bad_vars")?));
@@ -374,6 +374,7 @@ mod tests {
             ("vars", json!({"__claim_user": "admin"}), "bad_vars"),
             ("vars", json!({"__CLAIM_groups": ["admins"]}), "bad_vars"),
             ("vars", json!({"anofox_data": "/etc"}), "bad_vars"),
+            ("vars", json!({"__ANOFOX_rls_sales": 1}), "bad_vars"),
             ("vars", json!({"a; DROP": 1}), "bad_vars"),
             ("vars", json!({"x": {"nested": 1}}), "bad_vars"),
             ("claims", json!({"role": "admin"}), "malformed_identity"),

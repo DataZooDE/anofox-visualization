@@ -7,7 +7,7 @@
 //! replica that handled it (see `docs/secure-serving.md`).
 
 use super::Scope;
-use crate::host::access::{is_reserved_var, Claims};
+use crate::host::access::Claims;
 use crate::host::serving::valid_ident;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde_json::{json, Value};
@@ -216,9 +216,7 @@ impl Sessions {
             .map(|kv| Ok((s(&kv[0])?, s(&kv[1])?)))
             .collect::<Result<Vec<_>, &'static str>>()?;
         // Signed by us, but names still go into SQL: check them again.
-        if vars
-            .iter()
-            .any(|(n, _)| !valid_ident(n) || is_reserved_var(n))
+        if vars.iter().any(|(n, _)| !super::lockable_var(n))
             || attrs.iter().any(|(n, _)| !valid_ident(n))
         {
             return Err(bad);

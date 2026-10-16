@@ -53,6 +53,15 @@ pub struct Scope {
     pub vars: Vec<(String, String)>,
 }
 
+/// May a credential lock variable `name`? An identifier that is not a
+/// server-set variable: no `__claim_*`, no `anofox_data`, and nothing in the
+/// `__anofox` namespace (policy views, #49), in any case.
+pub fn lockable_var(name: &str) -> bool {
+    crate::host::serving::valid_ident(name)
+        && !access::is_reserved_var(name)
+        && !name.to_ascii_lowercase().starts_with("__anofox")
+}
+
 impl Scope {
     pub fn allows(&self, dashboard: &str) -> bool {
         self.dashboards
