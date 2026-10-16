@@ -1,0 +1,13 @@
+sku,name,category,unit_cost,margin,pallet_units,base,peak_week,amp,on_hand,on_order,last4_avg
+S01,Charcoal 10 kg,garden & BBQ,9.80,4.10,60,160,27,0.85,39.0,36.0,43.8
+S02,Ice tea 1.5 l (6-pack),drinks,4.20,1.60,120,260,29,0.60,242.0,136.0,172.3
+S03,Sparkling water (crate),drinks,3.10,1.20,144,420,0,0.00,672.0,481.0,505.5
+S04,Coffee beans 1 kg,grocery,11.50,4.80,200,210,0,0.00,302.0,195.0,239.5
+S05,De-icing salt 25 kg,winter,6.40,3.20,40,90,3,0.90,15.0,16.0,17.0
+S06,Mulled wine 1 l,drinks,2.30,1.40,300,340,50,0.95,219.0,102.0,174.5
+S07,Pasta 5 kg,grocery,5.60,1.90,180,300,0,0.00,234.0,228.0,337.3
+S08,Olive oil 5 l,grocery,24.00,7.50,96,110,0,0.00,101.0,100.0,115.3
+S09,Toilet paper (48 rolls),household,13.20,3.90,48,230,0,0.00,393.0,131.0,277.0
+S10,Sunscreen 1 l,household,8.70,5.10,160,70,26,0.90,20.0,8.0,13.5
+S11,Gingerbread 1 kg,grocery,6.10,3.30,210,280,50,0.95,110.0,123.0,166.5
+S12,Candles (100 pcs),household,14.50,6.20,80,120,51,0.70,84.0,31.0,80.3
