@@ -193,3 +193,11 @@ def test_pingouin_ttest_estimate_is_the_midpoint():
     tt = pd.DataFrame({"T": [2.0], "p-val": [0.05], "CI95%": [[0.2, 1.0]]})
     t = av.from_pingouin(tt)
     assert t.estimate.iloc[0] == pytest.approx(0.6)
+
+
+def test_pingouin_bf10_is_numeric():
+    # pairwise_tests returns BF10 as text; as text it would split the plot into panels.
+    pw = pd.DataFrame({"A": [0, 0], "B": [10, 20], "T": [-3.9, -7.1],
+                       "p-unc": [0.001, 1e-9], "BF10": ["156.665", "2.648e+09"]})
+    t = av.from_pingouin(pw)
+    assert t.BF10.tolist() == [156.665, 2.648e9]

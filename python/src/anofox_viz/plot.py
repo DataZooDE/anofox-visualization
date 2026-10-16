@@ -42,6 +42,14 @@ class SVG(str):
     def _repr_svg_(self) -> str:
         return str(self)
 
+    # A short text form: Jupyter stores it next to the picture (text/plain),
+    # where the whole markup would double the notebook's size.
+    def __repr__(self) -> str:
+        return f"<SVG, {len(self):,} characters>"
+
+    def _repr_pretty_(self, p: Any, cycle: bool) -> None:
+        p.text(repr(self))
+
     def save(self, path: str | os.PathLike) -> Path:
         p = Path(path)
         p.write_text(self, encoding="utf-8")

@@ -447,6 +447,10 @@ def from_pingouin(df: pd.DataFrame, method: str | None = None) -> pd.DataFrame:
     for c in ("group1", "group2"):
         if c in out:
             out[c] = out[c].astype(str)
+    if "BF10" in out:
+        # pingouin formats the Bayes factor as text ("1.23e+04"); a text column
+        # with several values would become the plot's panel key.
+        out["BF10"] = pd.to_numeric(out["BF10"], errors="coerce")
     return out
 
 

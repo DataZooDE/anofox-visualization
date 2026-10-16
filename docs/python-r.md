@@ -21,6 +21,9 @@ Two ways to get the table to the renderer:
 - [Python: recipes per library](#python-recipes-per-library) — statsmodels,
   scikit-learn, scipy, pingouin, lifelines, statsforecast, Prophet
 - [The `anofox_viz` helper package](#the-anofox_viz-helper-package)
+  — and an [example notebook](../examples/python/plot-results.ipynb)
+  (statsmodels, scikit-learn, scipy, pingouin, statsforecast → plots →
+  Parquet → dashboard)
 - [R: broom → DuckDB](#r-broom--duckdb)
 - [Files: Parquet into a dashboard](#files-parquet-into-a-dashboard)
 
@@ -328,6 +331,11 @@ av.plot(av.from_scipy({"b − a": stats.ttest_ind(b, a)}), "tests")
 | `from_prophet(forecast, history=None, model_id="prophet")` | `predict()` output | `prediction` |
 | `plot(data, chart=None, *, by=None, con=None, **options)` | a table (pandas, polars, Arrow) or a `from_*` dict | an `SVG` (`str` with `_repr_svg_` and `.save()`), or `{value: SVG}` with `by=` |
 | `connect(extension=None, con=None)` | the extension file, else `$ANOFOX_VIZ_EXTENSION`, an installed extension, the community repository, the project's release repository | a DuckDB connection with the extension loaded |
+
+[`examples/python/plot-results.ipynb`](../examples/python/plot-results.ipynb)
+uses the package end to end on a synthetic online shop: an OLS model, two
+classifiers, A/B tests and a statsforecast forecast with nested intervals and
+an events overlay, then Parquet files and the dashboard that reads them.
 
 `plot(..., chart="terms")` runs `anofox_plot_terms`; without `chart`,
 `anofox_plot` picks the plot from the columns. Keyword options are the

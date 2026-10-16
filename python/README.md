@@ -36,8 +36,10 @@ python -m venv .venv && .venv/bin/pip install -e ".[test]"
 ANOFOX_VIZ_EXTENSION=/path/to/anofox_visualization.duckdb_extension .venv/bin/pytest
 ```
 
-With `ANOFOX_VIZ_EXTENSION` set, the tests also render every plot and run
+With `ANOFOX_VIZ_EXTENSION` set, the tests also render every plot, run
 the Python snippets of `docs/python-r.md` (a snippet whose library is not
-installed is skipped). Build the extension with
+installed is skipped) and execute
+[`examples/python/plot-results.ipynb`](../examples/python/plot-results.ipynb)
+(needs `nbclient`, `ipykernel`, `pingouin` and `statsforecast`). Build the extension with
 `SKIP_WASM=1 OUT=$PWD/anofox_visualization.duckdb_extension bash duckext/scripts/build-native.sh --release`
 from the repository root.

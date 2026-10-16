@@ -30,6 +30,7 @@ def test_svg_repr(tmp_path):
     s = av.SVG("<svg/>")
     assert s._repr_svg_() == "<svg/>"
     assert s.save(tmp_path / "a.svg").read_text() == "<svg/>"
+    assert repr(s) == "<SVG, 6 characters>" and str(s) == "<svg/>"
 
 
 def test_argument_errors():
