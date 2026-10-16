@@ -44,7 +44,7 @@ OPTS=$(tr -d '\n' <<J
  {"mode":"jwt","issuer":"$ISS","audience":"dash-api","groups_claim":"groups","ca_file":"$WORK/ca.pem"},
  {"mode":"embed","secret_env":"EMBED_SECRET","claims":["tenant"]},
  {"mode":"api_keys","file":"$WORK/keys.json"}],
- "audit":"$WORK/audit.jsonl","log":"$WORK/requests.jsonl"}
+ "policy":"none","audit":"$WORK/audit.jsonl","log":"$WORK/requests.jsonl"}
 J
 )
 # The CLI keeps serving while its stdin stays open (the feeder's sleep).

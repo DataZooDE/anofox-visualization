@@ -577,6 +577,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
     {"mode": "embed", "secret_env": "ANOFOX_EMBED_SECRET", "claims": ["tenant"]},
     {"mode": "api_keys", "file": "/etc/anofox/keys.json"}
   ],
+  "policy": "/etc/anofox/policy.json",
   "audit": "/var/log/anofox/audit.jsonl",
   "log": "/var/log/anofox/requests.jsonl"
 }');
