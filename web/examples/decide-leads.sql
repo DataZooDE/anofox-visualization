@@ -216,12 +216,12 @@ SELECT ('**Recommendation for the week of ' || strftime(ld_monday(6), '%d %b %Y'
 FROM b, s, best;
 
 SELECT 12::COL;
-SELECT 'Deal value: sum, Score: mean'::TOTALS;
+SELECT 'none, Deal value: sum, Score: mean'::TOTALS;
 SELECT 'Score: top 3'::HIGHLIGHT;
 SELECT 'P(sales) < 40'::FLAG;
 SELECT ('Call list for the week of ' || strftime(ld_monday(6), '%d %b %Y') || ' — top ' || ld_cap() || ' of the sales queue by lead score')::TITLE,
        lead_id AS "Lead" ::TABLE, call_rank AS "Call #" ::PLAIN, round(score) AS "Score", reasons AS "Open with",
-       round(100 * p_sales, 1) AS "P(sales)" ::PERCENT, source AS "Source", warehouses AS "Warehouses" ::PLAIN,
+       round(100 * p_sales, 1) AS "P(sales)" ::PERCENT, warehouses AS "Warehouses" ::PLAIN,
        CASE WHEN converted THEN 'ok: became a deal' WHEN team <> 'sales' THEN 'failed: not a sales enquiry' ELSE 'review: no deal' END AS "Outcome (back-test)" ::BADGE,
        CASE WHEN converted THEN deal_value_eur END AS "Deal value", message AS "Message"
 FROM ld_now() WHERE week = 6 AND call_rank <= ld_cap() ORDER BY call_rank;
@@ -231,7 +231,7 @@ SELECT 'All leads'::TAB;
 
 SELECT 12::COL;
 SELECT 'queue'::SUBTOTAL;
-SELECT 'Deal value: sum, Score: mean'::TOTALS;
+SELECT 'none, Deal value: sum, Score: mean'::TOTALS;
 SELECT 'The last three weeks'' messages by queue, with the model''s answers and the CRM outcome'::TITLE,
        CASE WHEN call_rank <= ld_cap() THEN '1 call list' WHEN to_sales THEN '2 sales queue, not called' ELSE '3 not sales: ' || team_pred END AS queue ::TABLE,
        lead_id AS "Lead", ld_monday(week) AS "Week of", round(score) AS "Score", reasons AS "Reasons",

@@ -853,6 +853,8 @@ const FILE_SAMPLES = [
     name: "Can a model triage the support inbox?",
     url: "examples/decide-showcase.sql",
   },
+  { group: DECIDE_GROUP, name: "Which claims can we fast-track?", url: "examples/decide-claims.sql" },
+  { group: DECIDE_GROUP, name: "Who should sales call first?", url: "examples/decide-leads.sql" },
 ];
 async function loadFileSamples() {
   // Fetch in parallel, register in FILE_SAMPLES order (stable sidebar order).
@@ -4038,16 +4040,25 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       return w + PAD_CH;
     });
     const total = ws.reduce((a, b) => a + b, 0);
+    // the narrowest the table may get before it scrolls sideways: long text
+    // (messages, descriptions) wraps down to ~24ch first
+    const LONG_MIN = 24 + PAD_CH;
+    const minTotal = visCols().reduce((acc, c, k) => acc + (info[c].longText ? Math.min(ws[k], LONG_MIN) : ws[k]), 0);
     const cg = document.createElement("colgroup");
-    for (const w of ws) {
+    // with long text: the other columns keep their natural width and the long
+    // ones share what is left (they wrap); else the slack is shared in proportion
+    const long = visCols().map((c) => info[c].longText);
+    const hasLong = long.some(Boolean);
+    ws.forEach((w, k) => {
       const col = document.createElement("col");
-      col.style.width = `${((100 * w) / total).toFixed(2)}%`;
+      if (!hasLong) col.style.width = `${((100 * w) / total).toFixed(2)}%`;
+      else if (!long[k]) col.style.width = `${w.toFixed(1)}ch`;
       cg.appendChild(col);
-    }
+    });
     t.insertBefore(cg, t.tHead);
     // never narrower than the content (the card scrolls sideways instead), and
     // at most ~1.6× its natural width, so a few columns don't spread over a wide card
-    t.style.minWidth = `${total.toFixed(1)}ch`;
+    t.style.minWidth = `${minTotal.toFixed(1)}ch`;
     wrap.style.maxWidth = `max(44rem, ${(total * 1.6 * 0.84).toFixed(1)}ch)`;
   }
   function renderHead() {
