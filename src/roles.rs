@@ -68,6 +68,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LABEL", &[], R::Label, "encoding", true,
       "section heading when alone; chart title / per-mark or per-feature label otherwise"),
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
+    e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
+      "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
@@ -197,6 +199,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
     e("MARKDOWN", &["MD", "TEXTBOX", "RICHTEXT"], R::Markdown, "kpi", true,
       "a Markdown box (browser)"),
+    e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
+      "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     // ── tables ─────────────────────────────────────────────────────────────
     e("TABLE", &["GRID"], R::Table, "table", true,
       "the whole result as a table (one marker per panel)"),
@@ -690,6 +694,8 @@ mod tests {
             Role::Logo,
             Role::Favicon,
             Role::AsOf,
+            Role::Info,
+            Role::Callout,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -773,6 +779,8 @@ mod tests {
                 | Role::Logo
                 | Role::Favicon
                 | Role::AsOf
+                | Role::Info
+                | Role::Callout
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

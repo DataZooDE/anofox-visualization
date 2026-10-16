@@ -484,6 +484,19 @@ fn render_panel_svg(
         .and_then(|(_, v)| v.first())
         .map(value_str)
         .filter(|s| !s.is_empty());
+    // ::INFO: an ⓘ after the title whose SVG <title> is the definition (a
+    // hover tooltip wherever the SVG is shown).
+    let info = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Info))
+        .and_then(|(i, _)| column_at(rows, *i))
+        .and_then(|(_, v)| v.first())
+        .map(value_str)
+        .filter(|s| !s.trim().is_empty());
+    let title = match (title, &info) {
+        (None, Some(_)) => Some(String::new()),
+        (t, _) => t,
+    };
     let title_h = if title.is_some() { 26.0 } else { 0.0 };
     let pad = 14.0;
 
@@ -541,8 +554,19 @@ fn render_panel_svg(
         .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(tt) = &title {
+        let mark = info
+            .as_deref()
+            .map(|i| {
+                format!(
+                    "<tspan class=\"dp-info\" fill=\"{m}\" font-weight=\"400\">{sp}ⓘ<title>{}</title></tspan>",
+                    esc(i),
+                    m = hex(ropts.theme.colors.muted),
+                    sp = if tt.is_empty() { "" } else { " " },
+                )
+            })
+            .unwrap_or_default();
         svg.push_str(&format!(
-            "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}</text>",
+            "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}{mark}</text>",
             esc(tt),
             f = esc(&ropts.theme.font.display),
             hd = hex(ropts.theme.colors.heading),

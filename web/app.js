@@ -3423,9 +3423,11 @@ async function runOnce(fresh = true) {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
         const boxH = nextHeight;
+        const made = []; // this statement's panels (an ::INFO decorates the first)
         const mkPanel = () => {
           const fig = document.createElement("figure");
           fig.className = "panel";
+          made.push(fig);
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           if (boxH) fig.style.minHeight = boxH + "px";
           return fig;
@@ -3477,6 +3479,14 @@ async function runOnce(fresh = true) {
           const r0 = JSON.parse(rowsJson)[0] || {};
           if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
           const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
+          // ::CALLOUT 'note' | 'warning' | 'success': a tinted box with an icon.
+          const cr = s.roles.find((r) => r[1] === "CALLOUT");
+          if (cr) {
+            const kind = calloutKind(r0["c" + cr[0]]);
+            fig.classList.add("dp-callout", "dp-callout-" + kind);
+            fig.setAttribute("role", "note"); // static text: never an assertive alert
+            fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+          }
           const body = document.createElement("div");
           body.className = "md-body";
           body.innerHTML = renderMarkdown(mdr ? r0["c" + mdr[0]] : firstCell());
@@ -3494,9 +3504,18 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         } else if (role(s, "TABLE")) {
-          const rows = JSON.parse(rowsJson);
+          let rows = JSON.parse(rowsJson);
           const fig = mkPanel();
-          const tr = s.roles.find((r) => r[1] === "TITLE");
+          // An ::INFO column is the ⓘ text, not a cell: drop it (by key).
+          let troles = s.roles;
+          const infoR = troles.find((r) => r[1] === "INFO");
+          if (infoR && rows.length) {
+            const k = Object.keys(rows[0])[infoR[0]];
+            const shift = (ri) => (ri[0] > infoR[0] ? [ri[0] - 1, ri[1]] : ri);
+            rows = rows.map(({ [k]: _, ...rest }) => rest);
+            troles = troles.filter((r) => r !== infoR).map(shift);
+          }
+          const tr = troles.find((r) => r[1] === "TITLE");
           let skip = -1;
           let caption = "";
           if (tr && rows.length) {
@@ -3508,7 +3527,7 @@ async function runOnce(fresh = true) {
           // formats, ::TREND arrows, ::COLORSCALE heatmap cells, ::BADGE pills,
           // ::SPARKLINE mini charts), keyed by output column index.
           const fmtByIdx = {};
-          for (const [idx, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
+          for (const [idx, r] of troles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
           container.appendChild(fig);
           panels++;
@@ -3579,6 +3598,8 @@ async function runOnce(fresh = true) {
           container.appendChild(fig);
           panels++;
         }
+        const ir = s.roles.find((r) => r[1] === "INFO");
+        if (ir && made.length) addInfo(made[0], cellAt(rowsJson, ir[0]));
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
@@ -3962,6 +3983,91 @@ function titleOf(s, rowsJson) {
   }
   const v = rows[0] ? rows[0]["c" + tr[0]] : null;
   return v == null ? null : String(v).replace(/^"|"$/g, "");
+}
+
+// ::CALLOUT value → 'note' | 'warning' | 'success' (src/lint.rs CALLOUT_KINDS).
+function calloutKind(v) {
+  const k = String(v ?? "").trim().toLowerCase();
+  if (k === "warning" || k === "caution" || k === "danger") return "warning";
+  if (k === "success" || k === "tip") return "success";
+  return "note";
+}
+// One cell of a result (by output position) as text.
+function cellAt(rowsJson, idx) {
+  let r0;
+  try {
+    r0 = JSON.parse(rowsJson)[0];
+  } catch (_) {
+    return "";
+  }
+  const v = r0 ? (r0["c" + idx] ?? Object.values(r0)[idx]) : null;
+  return v == null ? "" : String(v).replace(/^"|"$/g, "");
+}
+// ::INFO: an ⓘ button on the panel's title bar (top-right corner without one)
+// that shows the definition on hover, keyboard focus or click; Esc closes it.
+// The tooltip is placed on <body> while open, so a tile's clipping or
+// stacking never hides it.
+let dpInfoSeq = 0;
+function addInfo(fig, text) {
+  if (!text.trim()) return;
+  const id = "dp-info-" + ++dpInfoSeq;
+  const wrap = document.createElement("span");
+  wrap.className = "dp-info";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-info-btn";
+  btn.textContent = "ⓘ";
+  btn.setAttribute("aria-label", "About this panel");
+  btn.setAttribute("aria-describedby", id);
+  btn.setAttribute("aria-expanded", "false");
+  const pop = document.createElement("div");
+  pop.className = "dp-info-pop";
+  pop.id = id;
+  pop.setAttribute("role", "tooltip");
+  pop.textContent = text;
+  pop.hidden = true;
+  wrap.append(btn, pop);
+  let pinned = false;
+  const show = (on) => {
+    btn.setAttribute("aria-expanded", on ? "true" : "false");
+    wrap.classList.toggle("open", on);
+    if (!on) {
+      pop.hidden = true;
+      if (pop.parentNode !== wrap) wrap.appendChild(pop); // keep it in the panel (aria, export)
+      return;
+    }
+    document.body.appendChild(pop);
+    pop.hidden = false;
+    const r = btn.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    const left = Math.max(8, Math.min(r.left - 6, innerWidth - w - 8));
+    const below = r.bottom + 6 + pop.offsetHeight < innerHeight;
+    pop.style.left = left + scrollX + "px";
+    pop.style.top = (below ? r.bottom + 6 : r.top - 6 - pop.offsetHeight) + scrollY + "px";
+  };
+  btn.onmouseenter = () => show(true);
+  btn.onmouseleave = () => pinned || show(false);
+  btn.onfocus = () => show(true);
+  btn.onblur = () => {
+    pinned = false;
+    show(false);
+  };
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    pinned = !pinned;
+    show(pinned);
+  };
+  btn.onkeydown = (e) => {
+    if (e.key !== "Escape") return;
+    pinned = false;
+    show(false);
+  };
+  const title = fig.querySelector(".panel-title");
+  if (title) title.appendChild(wrap);
+  else {
+    wrap.classList.add("corner");
+    fig.appendChild(wrap);
+  }
 }
 
 function mkTitle(text) {

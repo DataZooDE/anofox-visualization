@@ -31,6 +31,7 @@ terminal.
 | `::CATEGORY` | `::SERIES`, `::COLOR`, `::COLOUR` | encoding | grouping / colour series (discrete) |
 | `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
+| `::INFO` | `::DESCRIPTION`, `::DEFINITION` | encoding | a definition behind an ⓘ on the panel's title bar (hover, focus or click) |
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
@@ -102,6 +103,7 @@ terminal.
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser) |
+| `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
@@ -519,6 +521,39 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
 - `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
   tooltips.
+
+### Definitions and callouts (`::INFO`, `::CALLOUT`)
+
+A panel's fine print doesn't need its own box. An `::INFO` column puts an **ⓘ**
+on the panel's title bar (top-right corner when it has no title); hovering it,
+tabbing to it or clicking it shows the text, `Esc` dismisses it:
+
+```sql
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL,
+       'Net of returns, in USD; source: the ERP order ledger.'::INFO
+FROM orders;
+SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly orders'::TITLE,
+       'Orders by ISO week; cancelled orders excluded.'::INFO
+FROM orders GROUP BY ALL ORDER BY 1;
+```
+
+It works on charts, KPIs, `::TABLE`s (the column is not shown as a cell) and
+Markdown boxes; in headless SVG the ⓘ follows the title and carries the text as
+its tooltip (`<title>`).
+
+`::CALLOUT` turns a `::MARKDOWN` box into a highlighted **note**, **warning**
+or **success** box (tinted, with an icon; theme tokens, so dark mode follows):
+
+```sql
+SELECT '**Margins of the last two weeks are provisional** — late returns still come in.'::MARKDOWN,
+       'warning'::CALLOUT;
+```
+
+`info` counts as `note`, `tip` as `success`, `caution` / `danger` as `warning`;
+`--check` warns on an unknown kind (`callout/unknown`) or a `::CALLOUT` without
+`::MARKDOWN` text (`callout/no-text`). Like `::MARKDOWN`, callouts are drawn by the
+browser (builder, `serve`, locked servers). The *A sales cockpit in your brand*
+sample has both.
 
 ### Formatted tooltips
 

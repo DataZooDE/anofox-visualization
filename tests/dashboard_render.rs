@@ -146,3 +146,26 @@ fn headless_header_shows_the_freshness_chip() {
         "stale chip not amber: {chip}"
     );
 }
+
+/// `::INFO` (#36): headless panels carry an ⓘ whose SVG `<title>` is the
+/// definition (a hover tooltip wherever the SVG is shown).
+#[test]
+fn headless_info_is_a_tooltip_on_the_title() {
+    let script = "SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::INFO FROM t GROUP BY ALL;";
+    struct Bars;
+    impl DataProvider for Bars {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+                ("c2".into(), s(&["Weekly", "Weekly"])),
+            ])
+        }
+    }
+    let svg = render_dashboard_svg(script, &mut Bars, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains("class=\"dp-info\""), "no ⓘ: {svg}");
+    assert!(svg.contains("ⓘ<title>Weekly</title>"), "no definition");
+}

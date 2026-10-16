@@ -311,6 +311,42 @@ where
             continue;
         }
 
+        // ::CALLOUT styles a ::MARKDOWN box: an unknown kind falls back to 'note',
+        // a callout without Markdown text shows nothing.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::Callout) {
+            let kind = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !CALLOUT_KINDS.contains(&kind.as_str()) {
+                warn(
+                    "callout/unknown",
+                    format!(
+                        "::CALLOUT `{kind}` — use 'note', 'warning' or 'success' (drawn as a note)"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "callout/no-text",
+                    "::CALLOUT needs a ::MARKDOWN column in the same SELECT (the callout's text)"
+                        .into(),
+                );
+            }
+        }
+
         // Interaction directives: prime their variables the way the browser does
         // ("nothing selected"), so panels filtering by a selection are checked
         // with data; a malformed value is reported.
@@ -786,6 +822,12 @@ fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> V
         )],
     }
 }
+
+/// `::CALLOUT` kinds the browser draws (`info` = note, `tip` = success,
+/// `caution` / `danger` = warning).
+const CALLOUT_KINDS: &[&str] = &[
+    "note", "info", "warning", "caution", "danger", "success", "tip",
+];
 
 /// A `::TOGGLE` default as a boolean: `true`, a non-zero number, or the text
 /// `true` / `1` / `yes` / `on` (as the browser reads it).
@@ -1364,6 +1406,25 @@ mod design_tests {
             let d = input_defaults(InputKind::Toggle, 0, &r);
             assert_eq!(d, vec![format!("SET VARIABLE \"net\" = {want}")]);
         }
+    }
+
+    #[test]
+    fn callout_kind_and_text_are_checked() {
+        let one = |c1: &str| {
+            let c1 = c1.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": c1.clone() }),
+                ))
+            }
+        };
+        let d = check("SELECT 'x'::MARKDOWN, 'warning'::CALLOUT;", one("warning"));
+        assert!(!d.iter().any(|x| x.code.starts_with("callout/")), "{d:?}");
+        let d = check("SELECT 'x'::MARKDOWN, 'alarm'::CALLOUT;", one("alarm"));
+        assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
+        let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
+        assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
     }
 
     #[test]

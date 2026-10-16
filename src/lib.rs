@@ -301,6 +301,11 @@ pub enum Role {
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
+    Info,
+    /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
+    /// `'warning'` or `'success'` (the value).
+    Callout,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).

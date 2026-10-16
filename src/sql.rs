@@ -516,7 +516,9 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
                     if let Some(rr) = parse_role(tok) {
-                        if rr == Role::Title || crate::roles::is_table_format(rr) {
+                        if matches!(rr, Role::Title | Role::Info)
+                            || crate::roles::is_table_format(rr)
+                        {
                             roles.push((idx, rr));
                         }
                     }

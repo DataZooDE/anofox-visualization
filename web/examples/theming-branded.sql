@@ -63,7 +63,8 @@ SELECT 1::ENDGROUP;
 
 -- ── KPIs: the period vs the one before ───────────────────────────────────────
 SELECT 'vs. the previous period'::GROUP;
-SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'Revenue'::LABEL
+SELECT sum(revenue) FILTER (WHERE acme_cur(day))::MONEY, sum(revenue) FILTER (WHERE acme_prev(day))::DELTA, 'Revenue'::LABEL,
+       'Invoiced revenue net of returns, in USD; source: the ERP''s order ledger. Compared with the period of the same length before.'::INFO
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT round(sum(revenue / aov) FILTER (WHERE acme_cur(day)))::COMPACT, sum(revenue / aov) FILTER (WHERE acme_prev(day))::DELTA, 'Orders'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
@@ -71,7 +72,8 @@ SELECT (sum(revenue) FILTER (WHERE acme_cur(day)) / sum(revenue / aov) FILTER (W
        (sum(revenue) FILTER (WHERE acme_prev(day)) / sum(revenue / aov) FILTER (WHERE acme_prev(day)))::DELTA, 'Average order'::LABEL
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue * margin_pct) FILTER (WHERE acme_cur(day)) / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
-       (100 * sum(revenue * margin_pct) FILTER (WHERE acme_prev(day)) / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'Gross margin'::LABEL
+       (100 * sum(revenue * margin_pct) FILTER (WHERE acme_prev(day)) / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'Gross margin'::LABEL,
+       'Revenue minus cost of goods sold, as a share of revenue (revenue-weighted across orders).'::INFO
 FROM acme_orders WHERE acme_in(region, channel);
 SELECT (100 * sum(revenue) FILTER (WHERE acme_cur(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_cur(day)))::PERCENT,
        (100 * sum(revenue) FILTER (WHERE acme_prev(day) AND product = 'Software') / sum(revenue) FILTER (WHERE acme_prev(day)))::DELTA, 'Software share'::LABEL
@@ -111,6 +113,7 @@ FROM acme_orders WHERE acme_in(region, channel) AND acme_cur(day) GROUP BY ALL O
 
 SELECT 12::COL;
 SELECT 'Product lines by region'::TITLE,
+       'Revenue and margin in the selected period; Returns % is refunded revenue over revenue. Status compares revenue with the period before: growing ≥ +5 %, shrinking < −3 %.'::INFO,
        product AS "Product line" ::TABLE, region AS "Region",
        list(rev ORDER BY wk) FILTER (WHERE nd = 7) AS "Weekly revenue" ::SPARKLINE,
        sum(rev) AS "Revenue" ::MONEY,
@@ -128,6 +131,10 @@ FROM (SELECT product, region, date_trunc('week', day) AS wk, sum(revenue) AS rev
 JOIN (SELECT product, region, sum(revenue) AS prev FROM acme_orders WHERE acme_in(region, channel) AND acme_prev(day) GROUP BY ALL)
   USING (product, region)
 GROUP BY product, region ORDER BY "Revenue" DESC;
+
+SELECT 12::COL;
+SELECT '**Margins of the last two weeks are provisional.** Returns are booked when the goods arrive back, so recent weeks still lose about 1–2 points of margin as late returns come in.'::MARKDOWN,
+       'warning'::CALLOUT;
 
 -- ── 2 · Regions ──────────────────────────────────────────────────────────────
 SELECT 'Regions'::TAB;
