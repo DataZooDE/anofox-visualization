@@ -702,6 +702,13 @@ It uses the server's classifier and function list; it runs the `duckdb` CLI
 on PATH to parse, and warns (`policy/duckdb-version`) when that is not the
 pinned 1.5.6. The server checks again at start and fails closed either way.
 
+`duckext/scripts/policy-key-e2e.sh <extension>` runs a locked server with a
+known `hash` key and checks that the key is on no reachable surface (panel
+results and errors, `::PAGED` profiles, the page, `/healthz`, stderr, the
+request log), that the served hash is the specified HMAC, and that SQL which
+could show it (`duckdb_views()`, `current_query()`, `json_serialize_plan`,
+`current_setting`) and `auth` without a policy refuse to start.
+
 ### Threat model (P2)
 
 | Threat | Mitigation |
