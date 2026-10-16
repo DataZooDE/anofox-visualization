@@ -86,3 +86,8 @@ fn web_markdown_math() {
 fn web_diagram_text_alternative() {
     run_node("diagram_test.mjs");
 }
+
+#[test]
+fn web_story_keys_match_marks() {
+    run_node("anim_test.mjs");
+}

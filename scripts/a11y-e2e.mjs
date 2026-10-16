@@ -2,13 +2,16 @@
 // Tab into a chart, walk its marks with the arrow keys, Enter selects (the
 // dashboard re-runs and the focus comes back), Esc leaves; every chart SVG has
 // a summary; "Charts as tables" swaps each chart for a table. With axe-core on
-// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard.
+// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard. A
+// ::STORY chart's first step must light some marks, dim the rest and draw
+// its connector.
 //
 //   python3 serve_nocache.py 8791 &
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/a11y-e2e.mjs \
 //       [--url http://127.0.0.1:8791/] [--dashboard "Selections & drill"] [--axe axe.min.js]
+//       [--sql file.sql]   (a dashboard from a file, passed in the #sql hash)
 import { createRequire } from "module";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -19,6 +22,7 @@ const arg = (k, d) => {
 const base = arg("--url", "http://127.0.0.1:8791/");
 const dash = arg("--dashboard", "Overview");
 const axe = arg("--axe", "");
+const sqlFile = arg("--sql", "");
 const fail = (m) => {
   console.error("FAIL: " + m);
   process.exitCode = 1;
@@ -28,7 +32,8 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e)));
-await page.goto(`${base}?embed=1&dashboard=${encodeURIComponent(dash)}`);
+if (sqlFile) await page.goto(`${base}?embed=1#sql=${Buffer.from(readFileSync(sqlFile, "utf8"), "utf8").toString("base64")}`);
+else await page.goto(`${base}?embed=1&dashboard=${encodeURIComponent(dash)}`);
 // Loaded: a chart with its summary, or (a dashboard without charts) panels and
 // no loading skeletons left.
 await page.waitForFunction(
@@ -50,6 +55,31 @@ for (const [role, label] of svgs) {
   if (!role || !/\.$/.test(label)) fail(`chart without a summary: role=${role} label=${label}`);
 }
 console.log("summary:", svgs[0]?.[1]);
+
+// Each ::STORY chart's first step lights the marks at its key (some lit, the
+// rest dimmed) and draws the connector; then back to the overview.
+const stories = await page.$$eval(".dash .panel", (ps) =>
+  ps.flatMap((p, i) => {
+    if (!p.querySelector(".dp-story-next")) return [];
+    p.querySelector(".dp-story-next").click();
+    const svg = p.querySelector(".panel-svg > svg[data-story]");
+    const marks = [...svg.querySelectorAll("[data-x]")].filter((e) => !e.hasAttribute("data-rule") && !e.closest(".dp-ghost"));
+    const lit = marks.filter((e) => !e.style.opacity);
+    const out = {
+      i,
+      key: JSON.parse(svg.getAttribute("data-story"))[0].k,
+      lit: [...new Set(lit.map((e) => e.getAttribute("data-x")))].slice(0, 4),
+      dimmed: marks.length - lit.length,
+      link: !!p.querySelector(".dp-story-link path"),
+    };
+    p.querySelector(".dp-story-prev").click(); // step 1 → the overview
+    return [out];
+  })
+);
+for (const s of stories) {
+  console.log("story step 1:", JSON.stringify(s));
+  if (!s.lit.length || !s.dimmed || !s.link) fail(`story in panel ${s.i}: step 1 (${s.key}) lit no marks or drew no connector`);
+}
 
 // A reference rule (data-rule: ::XLINE "Today", ::REFLINE) shows its tooltip
 // under the pointer (on a crosshair chart as a "Reference line" row) but is no
