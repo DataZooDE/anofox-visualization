@@ -1,0 +1,926 @@
+delivery_date,check_name,category,severity,check_type,value,lower_threshold,upper_threshold,status
+2026-08-17,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-08-17,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-17,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-17,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-08-17,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-17,File arrived by 06:00,Freshness,warning,freshness,2340.0,0.0,,pass
+2026-08-17,Mean price 30–50 €,Distribution,blocking,agg,37.9169,30.0,50.0,pass
+2026-08-17,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-17,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-17,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-17,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-17,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-17,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-17,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-18,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-08-18,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-18,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-18,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-08-18,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-18,File arrived by 06:00,Freshness,warning,freshness,2400.0,0.0,,pass
+2026-08-18,Mean price 30–50 €,Distribution,blocking,agg,37.9188,30.0,50.0,pass
+2026-08-18,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-18,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-18,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-18,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-18,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-18,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-18,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-19,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-08-19,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-19,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-19,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-08-19,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-19,File arrived by 06:00,Freshness,warning,freshness,2520.0,0.0,,pass
+2026-08-19,Mean price 30–50 €,Distribution,blocking,agg,37.96,30.0,50.0,pass
+2026-08-19,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-19,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-19,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-19,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-19,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-19,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-19,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-20,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-08-20,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-20,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-20,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-08-20,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-20,File arrived by 06:00,Freshness,warning,freshness,1800.0,0.0,,pass
+2026-08-20,Mean price 30–50 €,Distribution,blocking,agg,37.9897,30.0,50.0,pass
+2026-08-20,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-20,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-20,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-20,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-20,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-20,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-20,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-21,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-08-21,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-21,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-21,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-08-21,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-21,File arrived by 06:00,Freshness,warning,freshness,2040.0,0.0,,pass
+2026-08-21,Mean price 30–50 €,Distribution,blocking,agg,38.0061,30.0,50.0,pass
+2026-08-21,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-21,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-21,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-21,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-21,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-21,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-21,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-22,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-08-22,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-22,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-22,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-08-22,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-22,File arrived by 06:00,Freshness,warning,freshness,2220.0,0.0,,pass
+2026-08-22,Mean price 30–50 €,Distribution,blocking,agg,38.0334,30.0,50.0,pass
+2026-08-22,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-22,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-22,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-22,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-22,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-22,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-22,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-23,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-08-23,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-23,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-23,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-08-23,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-23,File arrived by 06:00,Freshness,warning,freshness,2220.0,0.0,,pass
+2026-08-23,Mean price 30–50 €,Distribution,blocking,agg,38.0183,30.0,50.0,pass
+2026-08-23,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-23,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-23,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-23,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-23,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-23,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-23,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-24,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-08-24,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-24,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-24,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-08-24,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-24,File arrived by 06:00,Freshness,warning,freshness,2580.0,0.0,,pass
+2026-08-24,Mean price 30–50 €,Distribution,blocking,agg,38.0188,30.0,50.0,pass
+2026-08-24,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-24,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-24,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-24,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-24,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0006,-0.3,0.3,pass
+2026-08-24,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-24,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-24,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-25,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-25,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-25,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-25,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-08-25,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-25,File arrived by 06:00,Freshness,warning,freshness,1920.0,0.0,,pass
+2026-08-25,Mean price 30–50 €,Distribution,blocking,agg,38.0353,30.0,50.0,pass
+2026-08-25,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-25,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-25,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-25,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-25,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0013,-0.3,0.3,pass
+2026-08-25,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-25,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-25,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-26,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-26,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-26,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-26,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-08-26,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-26,File arrived by 06:00,Freshness,warning,freshness,2340.0,0.0,,pass
+2026-08-26,Mean price 30–50 €,Distribution,blocking,agg,38.0675,30.0,50.0,pass
+2026-08-26,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-26,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-26,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-26,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-26,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0011,-0.3,0.3,pass
+2026-08-26,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-26,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-26,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-27,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-27,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-27,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-27,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-08-27,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-27,File arrived by 06:00,Freshness,warning,freshness,2220.0,0.0,,pass
+2026-08-27,Mean price 30–50 €,Distribution,blocking,agg,38.1383,30.0,50.0,pass
+2026-08-27,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-27,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-27,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-27,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-27,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0008,-0.3,0.3,pass
+2026-08-27,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-27,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-27,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-28,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-28,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-28,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-28,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-08-28,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-28,File arrived by 06:00,Freshness,warning,freshness,2520.0,0.0,,pass
+2026-08-28,Mean price 30–50 €,Distribution,blocking,agg,38.1031,30.0,50.0,pass
+2026-08-28,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-28,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-28,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-28,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-28,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0006,-0.3,0.3,pass
+2026-08-28,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-28,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-28,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-29,"At least 1,000 SKUs",Volume,blocking,volume,553.0,1000.0,,fail
+2026-08-29,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-29,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-29,EAN has 13 digits,Validity,warning,regex_match,0.9982,0.99,,pass
+2026-08-29,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-29,File arrived by 06:00,Freshness,warning,freshness,1380.0,0.0,,pass
+2026-08-29,Mean price 30–50 €,Distribution,blocking,agg,38.9101,30.0,50.0,pass
+2026-08-29,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-29,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-29,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-29,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-29,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.5436,-0.3,0.3,fail
+2026-08-29,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-29,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-29,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-30,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-30,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-30,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-30,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-08-30,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-30,File arrived by 06:00,Freshness,warning,freshness,1320.0,0.0,,pass
+2026-08-30,Mean price 30–50 €,Distribution,blocking,agg,38.1372,30.0,50.0,pass
+2026-08-30,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-30,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-30,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-30,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-30,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0845,-0.3,0.3,pass
+2026-08-30,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-30,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-30,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-08-31,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-08-31,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-08-31,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-08-31,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-08-31,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-31,File arrived by 06:00,Freshness,warning,freshness,1260.0,0.0,,pass
+2026-08-31,Mean price 30–50 €,Distribution,blocking,agg,38.1095,30.0,50.0,pass
+2026-08-31,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-08-31,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-08-31,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-08-31,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-08-31,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0844,-0.3,0.3,pass
+2026-08-31,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-08-31,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-08-31,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-01,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-01,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-01,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-01,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-09-01,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-01,File arrived by 06:00,Freshness,warning,freshness,2520.0,0.0,,pass
+2026-09-01,Mean price 30–50 €,Distribution,blocking,agg,38.1246,30.0,50.0,pass
+2026-09-01,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-01,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-01,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-01,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-01,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0842,-0.3,0.3,pass
+2026-09-01,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-01,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-01,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-02,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-02,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-02,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-02,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-02,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-02,File arrived by 06:00,Freshness,warning,freshness,1500.0,0.0,,pass
+2026-09-02,Mean price 30–50 €,Distribution,blocking,agg,38.1267,30.0,50.0,pass
+2026-09-02,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-02,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-02,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-02,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-02,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0842,-0.3,0.3,pass
+2026-09-02,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-02,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-02,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-03,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-03,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-03,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-03,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-03,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-03,File arrived by 06:00,Freshness,warning,freshness,960.0,0.0,,pass
+2026-09-03,Mean price 30–50 €,Distribution,blocking,agg,38.1198,30.0,50.0,pass
+2026-09-03,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-03,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-03,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-03,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-03,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0842,-0.3,0.3,pass
+2026-09-03,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-03,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-03,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-04,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-04,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-04,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-04,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-04,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-04,File arrived by 06:00,Freshness,warning,freshness,960.0,0.0,,pass
+2026-09-04,Mean price 30–50 €,Distribution,blocking,agg,38.1503,30.0,50.0,pass
+2026-09-04,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-04,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-04,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-04,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-04,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0842,-0.3,0.3,pass
+2026-09-04,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-04,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-04,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-05,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-05,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-05,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-05,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-05,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-05,File arrived by 06:00,Freshness,warning,freshness,2460.0,0.0,,pass
+2026-09-05,Mean price 30–50 €,Distribution,blocking,agg,38.1679,30.0,50.0,pass
+2026-09-05,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-05,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-05,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-05,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-05,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0842,-0.3,0.3,pass
+2026-09-05,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-05,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-05,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-06,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-06,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-06,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-06,EAN has 13 digits,Validity,warning,regex_match,0.9959,0.99,,pass
+2026-09-06,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-06,File arrived by 06:00,Freshness,warning,freshness,2760.0,0.0,,pass
+2026-09-06,Mean price 30–50 €,Distribution,blocking,agg,38.2151,30.0,50.0,pass
+2026-09-06,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-06,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-06,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-06,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-06,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0,-0.3,0.3,pass
+2026-09-06,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-06,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-06,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-07,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-09-07,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-07,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-07,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-07,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-07,File arrived by 06:00,Freshness,warning,freshness,1800.0,0.0,,pass
+2026-09-07,Mean price 30–50 €,Distribution,blocking,agg,38.2312,30.0,50.0,pass
+2026-09-07,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-07,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-07,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-07,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-07,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0008,-0.3,0.3,pass
+2026-09-07,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-07,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-07,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-08,"At least 1,000 SKUs",Volume,blocking,volume,1247.0,1000.0,,pass
+2026-09-08,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-08,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-08,EAN has 13 digits,Validity,warning,regex_match,0.996,0.99,,pass
+2026-09-08,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-08,File arrived by 06:00,Freshness,warning,freshness,1080.0,0.0,,pass
+2026-09-08,Mean price 30–50 €,Distribution,blocking,agg,38.2857,30.0,50.0,pass
+2026-09-08,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-08,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-08,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-08,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-08,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0288,-0.3,0.3,pass
+2026-09-08,SKU is unique,Volume,blocking,duplicate_count,34.0,,0.0,fail
+2026-09-08,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-08,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-09,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-09-09,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-09,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-09,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-09-09,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-09,File arrived by 06:00,Freshness,warning,freshness,1200.0,0.0,,pass
+2026-09-09,Mean price 30–50 €,Distribution,blocking,agg,38.2167,30.0,50.0,pass
+2026-09-09,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-09,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-09,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-09,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-09,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.005,-0.3,0.3,pass
+2026-09-09,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-09,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-09,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-10,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-10,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-10,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-10,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-10,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-10,File arrived by 06:00,Freshness,warning,freshness,2400.0,0.0,,pass
+2026-09-10,Mean price 30–50 €,Distribution,blocking,agg,38.2344,30.0,50.0,pass
+2026-09-10,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-10,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-10,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-10,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-10,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0041,-0.3,0.3,pass
+2026-09-10,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-10,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-10,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-11,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-09-11,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-11,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-11,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-11,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-11,File arrived by 06:00,Freshness,warning,freshness,960.0,0.0,,pass
+2026-09-11,Mean price 30–50 €,Distribution,blocking,agg,38.2238,30.0,50.0,pass
+2026-09-11,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-11,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-11,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-11,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-11,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0033,-0.3,0.3,pass
+2026-09-11,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-11,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-11,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-12,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-09-12,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-12,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-12,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-12,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-12,File arrived by 06:00,Freshness,warning,freshness,1380.0,0.0,,pass
+2026-09-12,Mean price 30–50 €,Distribution,blocking,agg,38.2181,30.0,50.0,pass
+2026-09-12,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-12,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-12,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-12,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-12,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0034,-0.3,0.3,pass
+2026-09-12,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-12,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-12,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-13,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-09-13,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-13,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-13,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-09-13,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-13,File arrived by 06:00,Freshness,warning,freshness,2700.0,0.0,,pass
+2026-09-13,Mean price 30–50 €,Distribution,blocking,agg,38.2592,30.0,50.0,pass
+2026-09-13,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-13,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-13,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-13,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-13,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0035,-0.3,0.3,pass
+2026-09-13,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-13,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-13,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-14,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-14,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-14,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-14,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-09-14,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-14,File arrived by 06:00,Freshness,warning,freshness,1620.0,0.0,,pass
+2026-09-14,Mean price 30–50 €,Distribution,blocking,agg,38.2621,30.0,50.0,pass
+2026-09-14,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.2621,37.46799107589605,38.778820183969145,pass
+2026-09-14,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-14,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-14,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-14,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-14,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0028,-0.3,0.3,pass
+2026-09-14,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-14,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-14,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-15,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-15,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-15,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-15,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-15,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-15,File arrived by 06:00,Freshness,warning,freshness,2400.0,0.0,,pass
+2026-09-15,Mean price 30–50 €,Distribution,blocking,agg,38.2889,30.0,50.0,pass
+2026-09-15,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.2889,37.48076900467522,38.773615332231465,pass
+2026-09-15,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-15,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-15,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-15,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-15,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0029,-0.3,0.3,pass
+2026-09-15,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-15,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-15,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-16,"At least 1,000 SKUs",Volume,blocking,volume,1215.0,1000.0,,pass
+2026-09-16,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-16,Currency is EUR,Validity,blocking,values_in_set,0.93,1.0,,fail
+2026-09-16,EAN has 13 digits,Validity,warning,regex_match,0.9959,0.99,,pass
+2026-09-16,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-16,File arrived by 06:00,Freshness,warning,freshness,1140.0,0.0,,pass
+2026-09-16,Mean price 30–50 €,Distribution,blocking,agg,38.2984,30.0,50.0,pass
+2026-09-16,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.2984,37.560855480643006,38.724183204027256,pass
+2026-09-16,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-16,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-16,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-16,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-16,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0018,-0.3,0.3,pass
+2026-09-16,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-16,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-16,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-17,"At least 1,000 SKUs",Volume,blocking,volume,1215.0,1000.0,,pass
+2026-09-17,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-17,Currency is EUR,Validity,blocking,values_in_set,0.93,1.0,,fail
+2026-09-17,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-09-17,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-17,File arrived by 06:00,Freshness,warning,freshness,1200.0,0.0,,pass
+2026-09-17,Mean price 30–50 €,Distribution,blocking,agg,38.3275,30.0,50.0,pass
+2026-09-17,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.3275,37.68081484890058,38.645316862632185,pass
+2026-09-17,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-17,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-17,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-17,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-17,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0013,-0.3,0.3,pass
+2026-09-17,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-17,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-17,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-18,"At least 1,000 SKUs",Volume,blocking,volume,1216.0,1000.0,,pass
+2026-09-18,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-18,Currency is EUR,Validity,blocking,values_in_set,0.9301,1.0,,fail
+2026-09-18,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-09-18,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-18,File arrived by 06:00,Freshness,warning,freshness,1140.0,0.0,,pass
+2026-09-18,Mean price 30–50 €,Distribution,blocking,agg,38.3524,30.0,50.0,pass
+2026-09-18,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.3524,37.70991492399443,38.638571217952425,pass
+2026-09-18,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-18,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-18,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-18,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-18,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0018,-0.3,0.3,pass
+2026-09-18,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-18,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-18,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-19,"At least 1,000 SKUs",Volume,blocking,volume,1215.0,1000.0,,pass
+2026-09-19,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-19,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-19,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-09-19,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-19,File arrived by 06:00,Freshness,warning,freshness,1740.0,0.0,,pass
+2026-09-19,Mean price 30–50 €,Distribution,blocking,agg,38.3697,30.0,50.0,pass
+2026-09-19,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.3697,37.689176022357245,38.68797294928831,pass
+2026-09-19,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-19,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-19,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-19,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-19,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0006,-0.3,0.3,pass
+2026-09-19,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-19,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-19,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-20,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-20,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-20,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-20,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-09-20,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-20,File arrived by 06:00,Freshness,warning,freshness,1980.0,0.0,,pass
+2026-09-20,Mean price 30–50 €,Distribution,blocking,agg,38.3803,30.0,50.0,pass
+2026-09-20,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.3803,37.689587837125984,38.70185318086178,pass
+2026-09-20,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-20,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-20,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-20,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-20,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0005,-0.3,0.3,pass
+2026-09-20,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-20,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-20,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-21,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-21,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-21,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-21,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-21,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-21,File arrived by 06:00,Freshness,warning,freshness,-5700.0,0.0,,warn
+2026-09-21,Mean price 30–50 €,Distribution,blocking,agg,38.4144,30.0,50.0,pass
+2026-09-21,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.4144,37.644955572099406,38.7677256288401,pass
+2026-09-21,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-21,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-21,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-21,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-21,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0006,-0.3,0.3,pass
+2026-09-21,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-21,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-21,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-22,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-22,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-22,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-22,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-09-22,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-22,File arrived by 06:00,Freshness,warning,freshness,2640.0,0.0,,pass
+2026-09-22,Mean price 30–50 €,Distribution,blocking,agg,38.4027,30.0,50.0,pass
+2026-09-22,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.4027,37.6644215985345,38.76142232956675,pass
+2026-09-22,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-22,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-22,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-22,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-22,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0006,-0.3,0.3,pass
+2026-09-22,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-22,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-22,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-23,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-23,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-23,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-23,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-09-23,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-23,File arrived by 06:00,Freshness,warning,freshness,2940.0,0.0,,pass
+2026-09-23,Mean price 30–50 €,Distribution,blocking,agg,38.4208,30.0,50.0,pass
+2026-09-23,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.4208,37.63496174061876,38.80872056696384,pass
+2026-09-23,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-23,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-23,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-23,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-23,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0006,-0.3,0.3,pass
+2026-09-23,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-23,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-23,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-24,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-24,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-24,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-24,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-09-24,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-24,File arrived by 06:00,Freshness,warning,freshness,2100.0,0.0,,pass
+2026-09-24,Mean price 30–50 €,Distribution,blocking,agg,38.5098,30.0,50.0,pass
+2026-09-24,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.5098,37.58801186206928,38.89302213770316,pass
+2026-09-24,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-24,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-24,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-24,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-24,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0005,-0.3,0.3,pass
+2026-09-24,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-24,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-24,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-25,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-09-25,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-25,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-25,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-25,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-25,File arrived by 06:00,Freshness,warning,freshness,1920.0,0.0,,pass
+2026-09-25,Mean price 30–50 €,Distribution,blocking,agg,38.5324,30.0,50.0,pass
+2026-09-25,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.5324,37.58384545052642,38.93634481733989,pass
+2026-09-25,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-25,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-25,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-25,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-25,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0004,-0.3,0.3,pass
+2026-09-25,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-25,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-25,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-26,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-26,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-26,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-26,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-09-26,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-26,File arrived by 06:00,Freshness,warning,freshness,2160.0,0.0,,pass
+2026-09-26,Mean price 30–50 €,Distribution,blocking,agg,38.5321,30.0,50.0,pass
+2026-09-26,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.5321,37.69620722846595,38.87941002651191,pass
+2026-09-26,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-26,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-26,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-26,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-26,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0018,-0.3,0.3,pass
+2026-09-26,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-26,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-26,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-27,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-09-27,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-27,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-27,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-09-27,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-27,File arrived by 06:00,Freshness,warning,freshness,2880.0,0.0,,pass
+2026-09-27,Mean price 30–50 €,Distribution,blocking,agg,38.5433,30.0,50.0,pass
+2026-09-27,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.5433,37.69620722846595,38.87941002651191,pass
+2026-09-27,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-27,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-27,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-27,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-27,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0006,-0.3,0.3,pass
+2026-09-27,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-27,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-27,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-28,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-28,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-28,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-28,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-28,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-28,File arrived by 06:00,Freshness,warning,freshness,1020.0,0.0,,pass
+2026-09-28,Mean price 30–50 €,Distribution,blocking,agg,38.605,30.0,50.0,pass
+2026-09-28,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.605,37.70732928135588,38.894878347879256,pass
+2026-09-28,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-28,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-28,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-28,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-28,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0013,-0.3,0.3,pass
+2026-09-28,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-28,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-28,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-29,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-09-29,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-29,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-29,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-09-29,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-29,File arrived by 06:00,Freshness,warning,freshness,1680.0,0.0,,pass
+2026-09-29,Mean price 30–50 €,Distribution,blocking,agg,109.3739,30.0,50.0,fail
+2026-09-29,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,109.3739,37.654124301759154,38.96928475967739,warn
+2026-09-29,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-29,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-29,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-29,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-29,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0019,-0.3,0.3,pass
+2026-09-29,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-29,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-29,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-09-30,"At least 1,000 SKUs",Volume,blocking,volume,1212.0,1000.0,,pass
+2026-09-30,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-09-30,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-09-30,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-09-30,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-30,File arrived by 06:00,Freshness,warning,freshness,1260.0,0.0,,pass
+2026-09-30,Mean price 30–50 €,Distribution,blocking,agg,109.104,30.0,50.0,fail
+2026-09-30,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,109.104,37.64143486916192,38.996921685855035,warn
+2026-09-30,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-09-30,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-09-30,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-09-30,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-09-30,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0007,-0.3,0.3,pass
+2026-09-30,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-09-30,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-09-30,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-01,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-01,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-01,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-01,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-10-01,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-01,File arrived by 06:00,Freshness,warning,freshness,1020.0,0.0,,pass
+2026-10-01,Mean price 30–50 €,Distribution,blocking,agg,109.2353,30.0,50.0,fail
+2026-10-01,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,109.2353,37.58804961285708,39.084318020999675,warn
+2026-10-01,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-01,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-01,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-01,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-01,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0013,-0.3,0.3,pass
+2026-10-01,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-01,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-01,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-02,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-02,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-02,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-02,EAN has 13 digits,Validity,warning,regex_match,0.9967,0.99,,pass
+2026-10-02,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-02,File arrived by 06:00,Freshness,warning,freshness,2580.0,0.0,,pass
+2026-10-02,Mean price 30–50 €,Distribution,blocking,agg,38.6749,30.0,50.0,pass
+2026-10-02,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.6749,37.38806571085273,39.360904954345564,pass
+2026-10-02,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-02,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-02,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-02,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-02,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0009,-0.3,0.3,pass
+2026-10-02,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-02,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-02,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-03,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-10-03,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-03,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-03,EAN has 13 digits,Validity,warning,regex_match,0.9959,0.99,,pass
+2026-10-03,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-03,File arrived by 06:00,Freshness,warning,freshness,1980.0,0.0,,pass
+2026-10-03,Mean price 30–50 €,Distribution,blocking,agg,38.6868,30.0,50.0,pass
+2026-10-03,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.6868,37.41542993489632,39.36971602322712,pass
+2026-10-03,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-03,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-03,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-03,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-03,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0014,-0.3,0.3,pass
+2026-10-03,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-03,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-03,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-04,"At least 1,000 SKUs",Volume,blocking,volume,1210.0,1000.0,,pass
+2026-10-04,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-04,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-04,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-10-04,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-04,File arrived by 06:00,Freshness,warning,freshness,1860.0,0.0,,pass
+2026-10-04,Mean price 30–50 €,Distribution,blocking,agg,38.6918,30.0,50.0,pass
+2026-10-04,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.6918,37.44012497776005,39.35639529920925,pass
+2026-10-04,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-04,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-04,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-04,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-04,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,-0.0012,-0.3,0.3,pass
+2026-10-04,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-04,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-04,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-05,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-05,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-05,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-05,EAN has 13 digits,Validity,warning,regex_match,0.9959,0.99,,pass
+2026-10-05,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-05,File arrived by 06:00,Freshness,warning,freshness,2880.0,0.0,,pass
+2026-10-05,Mean price 30–50 €,Distribution,blocking,agg,38.7486,30.0,50.0,pass
+2026-10-05,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7486,37.44320290398997,39.395359842245504,pass
+2026-10-05,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-05,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-05,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-05,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-05,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0,-0.3,0.3,pass
+2026-10-05,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-05,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-05,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-06,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-06,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-06,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-06,EAN has 13 digits,Validity,warning,regex_match,0.995,0.99,,pass
+2026-10-06,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-06,File arrived by 06:00,Freshness,warning,freshness,1080.0,0.0,,pass
+2026-10-06,Mean price 30–50 €,Distribution,blocking,agg,38.7693,30.0,50.0,pass
+2026-10-06,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7693,37.28495393064106,39.62566492638249,pass
+2026-10-06,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-06,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-06,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-06,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-06,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0001,-0.3,0.3,pass
+2026-10-06,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-06,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-06,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-07,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-07,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-07,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-07,EAN has 13 digits,Validity,warning,regex_match,0.9992,0.99,,pass
+2026-10-07,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-07,File arrived by 06:00,Freshness,warning,freshness,2280.0,0.0,,pass
+2026-10-07,Mean price 30–50 €,Distribution,blocking,agg,38.7522,30.0,50.0,pass
+2026-10-07,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7522,37.15054490247847,39.823340152740364,pass
+2026-10-07,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-07,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-07,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-07,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-07,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0001,-0.3,0.3,pass
+2026-10-07,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-07,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-07,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-08,"At least 1,000 SKUs",Volume,blocking,volume,1211.0,1000.0,,pass
+2026-10-08,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-08,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-08,EAN has 13 digits,Validity,warning,regex_match,0.9983,0.99,,pass
+2026-10-08,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-08,File arrived by 06:00,Freshness,warning,freshness,2100.0,0.0,,pass
+2026-10-08,Mean price 30–50 €,Distribution,blocking,agg,38.7522,30.0,50.0,pass
+2026-10-08,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7522,37.21687212189214,39.79138929701066,pass
+2026-10-08,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-08,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-08,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-08,Prices at most 30 h old,Freshness,blocking,freshness,115200.0,,108000.0,fail
+2026-10-08,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0002,-0.3,0.3,pass
+2026-10-08,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-08,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-08,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-09,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-10-09,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-09,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-09,EAN has 13 digits,Validity,warning,regex_match,1.0,0.99,,pass
+2026-10-09,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-09,File arrived by 06:00,Freshness,warning,freshness,2400.0,0.0,,pass
+2026-10-09,Mean price 30–50 €,Distribution,blocking,agg,38.7624,30.0,50.0,pass
+2026-10-09,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7624,37.26664952803578,39.78552421760949,pass
+2026-10-09,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-09,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-09,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-09,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-09,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0019,-0.3,0.3,pass
+2026-10-09,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-09,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-09,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-10,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-10-10,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-10,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-10,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-10-10,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-10,File arrived by 06:00,Freshness,warning,freshness,1020.0,0.0,,pass
+2026-10-10,Mean price 30–50 €,Distribution,blocking,agg,38.7874,30.0,50.0,pass
+2026-10-10,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.7874,37.212902331796954,39.90191645924474,pass
+2026-10-10,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-10,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-10,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-10,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-10,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0017,-0.3,0.3,pass
+2026-10-10,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-10,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-10,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-11,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-10-11,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-11,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-11,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-10-11,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-11,File arrived by 06:00,Freshness,warning,freshness,1020.0,0.0,,pass
+2026-10-11,Mean price 30–50 €,Distribution,blocking,agg,38.858,30.0,50.0,pass
+2026-10-11,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.858,37.254003647656674,39.87587009662746,pass
+2026-10-11,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-11,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-11,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-11,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-11,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0021,-0.3,0.3,pass
+2026-10-11,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-11,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-11,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-12,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-10-12,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-12,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-12,EAN has 13 digits,Validity,warning,regex_match,0.9951,0.99,,pass
+2026-10-12,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-12,File arrived by 06:00,Freshness,warning,freshness,2460.0,0.0,,pass
+2026-10-12,Mean price 30–50 €,Distribution,blocking,agg,38.8773,30.0,50.0,pass
+2026-10-12,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.8773,37.32424899606546,39.82763162413684,pass
+2026-10-12,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-12,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-12,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-12,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-12,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0008,-0.3,0.3,pass
+2026-10-12,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-12,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-12,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-13,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-10-13,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-13,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-13,EAN has 13 digits,Validity,warning,regex_match,0.9984,0.99,,pass
+2026-10-13,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-13,File arrived by 06:00,Freshness,warning,freshness,2580.0,0.0,,pass
+2026-10-13,Mean price 30–50 €,Distribution,blocking,agg,38.8966,30.0,50.0,pass
+2026-10-13,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.8966,37.35363164041612,39.821945978621414,pass
+2026-10-13,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-13,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-13,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-13,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-13,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0006,-0.3,0.3,pass
+2026-10-13,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-13,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-13,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-14,"At least 1,000 SKUs",Volume,blocking,volume,1213.0,1000.0,,pass
+2026-10-14,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-14,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-14,EAN has 13 digits,Validity,warning,regex_match,0.9975,0.99,,pass
+2026-10-14,EAN present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-14,File arrived by 06:00,Freshness,warning,freshness,2760.0,0.0,,pass
+2026-10-14,Mean price 30–50 €,Distribution,blocking,agg,38.9085,30.0,50.0,pass
+2026-10-14,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,38.9085,37.355421691234454,39.837568579726906,pass
+2026-10-14,No columns outside the contract,Schema,warning,compliance,1.0,1.0,,pass
+2026-10-14,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-14,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-14,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-14,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0004,-0.3,0.3,pass
+2026-10-14,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-14,Stock present,Completeness,blocking,null_rate,0.0,,0.02,pass
+2026-10-14,stock_qty column delivered,Schema,blocking,null_rate,0.0,,0.999,pass
+2026-10-15,"At least 1,000 SKUs",Volume,blocking,volume,1214.0,1000.0,,pass
+2026-10-15,Category is known,Validity,warning,values_in_set,1.0,1.0,,pass
+2026-10-15,Currency is EUR,Validity,blocking,values_in_set,1.0,1.0,,pass
+2026-10-15,EAN has 13 digits,Validity,warning,regex_match,0.9982,0.99,,pass
+2026-10-15,EAN present,Completeness,blocking,null_rate,0.0824,,0.02,fail
+2026-10-15,File arrived by 06:00,Freshness,warning,freshness,-10320.0,0.0,,warn
+2026-10-15,Mean price 30–50 €,Distribution,blocking,agg,73.1972,30.0,50.0,fail
+2026-10-15,Mean price inside its 28-day IQR band,Distribution,warning,metric_anomaly_iqr,73.1972,37.535278762065516,39.75732051933272,warn
+2026-10-15,No columns outside the contract,Schema,warning,compliance,0.0,1.0,,warn
+2026-10-15,Price is positive,Validity,blocking,compliance,1.0,1.0,,pass
+2026-10-15,Price present,Completeness,blocking,null_rate,0.0,,0.005,pass
+2026-10-15,Prices at most 30 h old,Freshness,blocking,freshness,28800.0,,108000.0,pass
+2026-10-15,Row count within ±30 % of 7-day mean,Volume,blocking,rel_count_change,0.0009,-0.3,0.3,pass
+2026-10-15,SKU is unique,Volume,blocking,duplicate_count,0.0,,0.0,pass
+2026-10-15,Stock present,Completeness,blocking,null_rate,1.0,,0.02,fail
+2026-10-15,stock_qty column delivered,Schema,blocking,null_rate,1.0,,0.999,fail
