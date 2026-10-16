@@ -7416,6 +7416,7 @@ function attachToolbox() {
     const svg = panel.querySelector("svg");
     if (!svg || !svg.viewBox || !svg.viewBox.baseVal || !svg.viewBox.baseVal.width) return;
     if (panel.querySelector(".dp-table")) return; // a table's sparklines are not a chart
+    if (panel.classList.contains("metric")) return; // nor is a KPI tile's trend line
     panel.dataset.toolboxWired = "1";
     const bar = document.createElement("div");
     bar.className = "dp-toolbox";
