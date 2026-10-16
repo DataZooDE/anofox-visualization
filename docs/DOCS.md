@@ -44,6 +44,8 @@ terminal.
 | `::FACET_FREE` | `::FACET_WRAP_FREE` | encoding | small multiples with independent axes per panel (y only on a discrete x) |
 | `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
 | `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
+| `::UPSTREAM` | `::PARENTS` | encoding | a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node |
+| `::EDGES` |  | encoding | a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow'}) FROM e) |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
 | `::BARCHART_PERCENT` | `::BAR_PERCENT` | chart | dodged bars as % of each x's total (fractions ≤ 1 are drawn as given) |
@@ -75,6 +77,7 @@ terminal.
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
+| `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
 | `::XLINE` |  | annotation | vertical reference line at an x (a number, date or timestamp) |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
@@ -103,6 +106,7 @@ terminal.
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
+| `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
 | `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
 | `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
@@ -921,6 +925,61 @@ FROM funnel ORDER BY i;
   values are skipped; the value axis is hidden (widths read relative to the
   first stage).
 - Each needs an `::XAXIS` — `--check` reports `chart/needs-xaxis` otherwise.
+
+### Diagrams: pipelines, lineage and processes (`::DIAGRAM`)
+
+A node/edge diagram drawn from data: boxes for the steps, arrows for what flows
+between them, laid out automatically. One row per node; the `::DIAGRAM` column
+is the node's id.
+
+```sql
+-- Edges from each node's inputs (a list of ids).
+SELECT stage::DIAGRAM, title::LABEL, records::COMPACT, status::BADGE,
+       inputs::UPSTREAM, 'How data moves through the pipeline'::TITLE
+FROM run_manifest ORDER BY seq;
+
+-- Edges with a value, a label or a style: a list of structs (one scalar subquery).
+SELECT stage::DIAGRAM, title::LABEL, records::COMPACT,
+       (SELECT list({'from': from_stage, 'to': to_stage, 'value': n,
+                     'label': format('{:,}', n), 'style': 'flow'})
+        FROM run_edges)::EDGES,
+       'TB'::DIRECTION
+FROM run_manifest ORDER BY seq;
+```
+
+- **Nodes.** `::DIAGRAM` (alias `::NODE`) is the id (text or a number; unique —
+  the first row wins). In the box: `::LABEL` (default: the id; wrapped to two
+  lines), a value in a KPI format (`::METRIC` / `::MONEY` / `::PERCENT` /
+  `::COMPACT`, in the dashboard locale) and a `::BADGE` status pill.
+  `::THRESHOLDS` gives a node its status from its value (else the badge's
+  word does, as in a table's pills: `ok`, `at risk`, `failed`, `alarm`, …): a status bar on the box, a `warn` /
+  `bad` border. `::CATEGORY` gives nodes a palette accent.
+- **Edges.** `::UPSTREAM` (alias `::PARENTS`) holds the node(s) feeding the
+  row's node: one id or a list. `::EDGES` (the first non-NULL cell) is a list
+  of structs `{from, to [, value, label, style]}` — `source` / `target` work
+  too; `style` is `'solid'`, `'dashed'` or `'flow'` (moving dashes in the
+  browser, still dashes in static output). Both may be combined; the same
+  `(from, to)` pair is one edge.
+- **Layout.** Layers run left to right (`'TB'::DIRECTION`: top to bottom); a
+  loop (`calibrate → build`) is drawn as an edge running back. The layout is a
+  pure function of the rows (ties follow row order), so the browser,
+  `dashboard --svg` and exports draw the same picture, scaled down to fit the
+  panel (`::HEIGHT` gives a large diagram room). At most 150 nodes and 300
+  edges are drawn (the first ones), with a note.
+- **Interaction.** A node is a mark like a bar: its tooltip shows its label,
+  value and status, a click cross-filters (`getvariable('selected')` is the
+  node id) and `::SELECT_AS` names the selection. Edges show a tooltip only.
+- **Accessibility.** The summary reads *"Diagram: How data moves through the
+  pipeline; 7 steps in 5 stages, from Ingest to Recommend orders; 8
+  connections; 1 loop (Calibrate → Build twin); largest Ingest (10K)."*; the
+  arrow keys walk the nodes in reading order (layer by layer). *Charts as
+  tables* shows the steps as an ordered list (each with where it leads) and the
+  connections as a table; the SVG's `<desc>` carries the same list headless.
+- `dashboard --check` reports `diagram/null-id`, `diagram/duplicate-node`,
+  `diagram/unknown-node` (an edge to an id that is no row),
+  `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction` and
+  `diagram/too-large`. A loop is no problem: it is drawn as an edge running
+  back and named in the summary.
 
 ### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)
 

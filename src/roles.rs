@@ -88,6 +88,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "score ranking points for ::LABEL_TOP (higher = labelled first)"),
     e("CENSOR", &["CENSORED", "N_CENSOR"], R::Censor, "encoding", true,
       "censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier)"),
+    e("UPSTREAM", &["PARENTS"], R::Upstream, "encoding", true,
+      "a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node"),
+    e("EDGES", &[], R::Edges, "encoding", true,
+      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow'}) FROM e)"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),
@@ -146,6 +150,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "WKT-geometry map, coloured by a measure"),
     e("BASEMAP", &["MAPBASE", "BACKDROP"], R::Basemap, "chart", true,
       "grey WKT backdrop layer under a ::MAP"),
+    e("DIAGRAM", &["NODE"], R::Diagram, "chart", true,
+      "node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES)"),
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
       "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick"),
@@ -202,6 +208,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "gauge zone colours, comma-separated hex"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
       "gauge zone labels, comma-separated (drawn at each zone)"),
+    e("DIRECTION", &[], R::Direction, "modifier", true,
+      "a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom)"),
     e("ANIMATE", &["ANIMATION", "ENTRANCE"], R::Animate, "modifier", true,
       "entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none'"),
     e("STORY", &["STORYLINE", "NARRATIVE"], R::Story, "annotation", true,
@@ -767,6 +775,10 @@ mod tests {
             Role::StoryBy,
             Role::Transition,
             Role::Track,
+            Role::Diagram,
+            Role::Upstream,
+            Role::Edges,
+            Role::Direction,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -867,7 +879,11 @@ mod tests {
                 | Role::Story
                 | Role::StoryBy
                 | Role::Transition
-                | Role::Track => {}
+                | Role::Track
+                | Role::Diagram
+                | Role::Upstream
+                | Role::Edges
+                | Role::Direction => {}
             }
         }
         v

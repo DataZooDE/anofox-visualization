@@ -81,3 +81,8 @@ fn web_markdown_values_are_inert() {
 fn web_markdown_math() {
     run_node("math_test.mjs");
 }
+
+#[test]
+fn web_diagram_text_alternative() {
+    run_node("diagram_test.mjs");
+}

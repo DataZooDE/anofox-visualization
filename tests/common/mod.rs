@@ -46,6 +46,14 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     | "data-xlevels"
                     | "data-ylevels"
                     | "data-warnings"
+                    // a ::DIAGRAM's node ids, labels and its summary are text
+                    | "data-node"
+                    | "data-edge"
+                    | "data-from"
+                    | "data-to"
+                    | "data-fx"
+                    | "data-summary"
+                    | "data-badge"
                     | "class"
                     | "id"
             ) {

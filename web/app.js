@@ -963,6 +963,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // scripts/gen-showcase-data.sh) because their extension can't run in
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
+  { group: "Charts", name: "How does data move through our pipeline?", url: "examples/diagram-pipeline.sql" },
   { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
   { group: "Interactivity", name: "How will demand develop after today?", url: "examples/motion-demand.sql" },
   { group: "Charts", name: "When could we run out of stock?", url: "examples/stock-outlook.sql" },
@@ -2198,7 +2199,8 @@ function loadRoleSets() {
 }
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
-const metricRole = (s) => s.roles.find((r) => METRICS.includes(r[1]));
+// A ::DIAGRAM's KPI format is its nodes' value line, not a KPI tile.
+const metricRole = (s) => !role(s, "DIAGRAM") && s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
 // A lone ::THRESHOLDS statement is the next table's rules (beside other roles
 // it colours that KPI / gauge / chart).
@@ -6686,7 +6688,8 @@ function divColor(u) {
   return `rgb(${m(0)},${m(1)},${m(2)})`;
 }
 
-// ::BADGE — a coloured status pill; colour inferred from common status words.
+// ::BADGE — a coloured status pill; colour inferred from common status words
+// (src/diagram.rs `badge_status` mirrors these lists for diagram nodes).
 function badgeHtml(text) {
   const t = text.toLowerCase();
   let cls = "badge-neutral";
@@ -6695,7 +6698,7 @@ function badgeHtml(text) {
     cls = "badge-good";
   else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|knapp|prüfen|offen)\b/.test(t))
     cls = "badge-warn";
-  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
+  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
     cls = "badge-bad";
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
@@ -7781,7 +7784,8 @@ function attachHover() {
     el.classList.add("dp-hit");
     // A reference rule (::XLINE, ::REFLINE, thresholds) keeps its tooltip but
     // is no value to click: it neither selects, drills nor cross-filters.
-    const rule = el.hasAttribute("data-rule");
+    // A ::DIAGRAM edge is hover-only too (it names no value to select).
+    const rule = el.hasAttribute("data-rule") || el.hasAttribute("data-edge");
     el.style.cursor = rule ? "default" : "pointer";
     // A thin dashed rule is hard to hover (the pointer falls into its dash
     // gaps or onto the axis below): a transparent, wider twin on top hands the
@@ -7874,6 +7878,7 @@ const CHART_KINDS = [
   [/^CALENDAR/, "Calendar heatmap"],
   [/^CANDLESTICK/, "Candlestick chart"],
   [/^MAP/, "Map"],
+  [/^DIAGRAM/, "Diagram"],
 ];
 function chartKind(roles) {
   for (const r of roles || []) for (const [re, name] of CHART_KINDS) if (re.test(r[1])) return name;
@@ -7911,7 +7916,9 @@ function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString(
 // A chart's data marks — not its reference rules (`data-rule`: ::XLINE,
 // ::REFLINE, thresholds), which keep their tooltip but are no data point.
 function chartMarks(svg) {
-  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip") && !el.hasAttribute("data-rule"));
+  return [...svg.querySelectorAll(".dp-hit")].filter(
+    (el) => el.getAttribute("data-tip") && !el.hasAttribute("data-rule") && !el.hasAttribute("data-edge")
+  );
 }
 
 function attachChartA11y() {
@@ -7930,8 +7937,11 @@ function attachChartA11y() {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
       return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
     });
+    // A ::DIAGRAM brings its own summary (steps, stages, loops) from the renderer.
+    const ds = svg.getAttribute("data-summary");
     const kind = svg._track ? "Strip under the chart" : chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles));
-    const summary = chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
+    const summary =
+      ds != null ? `Diagram${title ? `: ${title}` : ""}; ${ds}.` : chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -8020,6 +8030,9 @@ function keyboardScrollers() {
 
 // Marks of a chart in reading order: series by first appearance, each sorted by x.
 function markGrid(svg) {
+  // A ::DIAGRAM: one row of nodes in reading order (layer by layer).
+  if (svg.hasAttribute("data-diagram"))
+    return [chartMarks(svg).sort((a, b) => +a.getAttribute("data-order") - +b.getAttribute("data-order"))].filter((r) => r.length);
   const by = new Map();
   for (const el of chartMarks(svg)) {
     const k = el.getAttribute("data-series") || "";
@@ -8088,9 +8101,11 @@ function applyAsTables() {
       view = document.createElement("div");
       view.className = "dp-astable-view";
       const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
-      view.innerHTML =
-        dataTableHtml(fig._dp, 200, title) +
-        (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
+      const dsvg = holder.querySelector(":scope > svg[data-diagram]");
+      view.innerHTML = dsvg
+        ? diagramTextHtml(dsvg, title)
+        : dataTableHtml(fig._dp, 200, title) +
+          (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
       holder.after(view);
     }
     holder.hidden = dpAsTables;
@@ -8157,7 +8172,7 @@ function attachToolbox() {
     // dataView: show the panel's underlying rows as a table.
     if (dp) mkTool("Data view", "▤", () => showDataView(panel));
     // brush + value filter: only for charts with real marks (points or bars).
-    if (dp && !dp.isMap && svg.querySelector(".dp-hit")) {
+    if (dp && !dp.isMap && !svg.hasAttribute("data-diagram") && svg.querySelector(".dp-hit")) {
       mkTool("Brush select", "▧", () => toggleBrush(panel));
       mkTool("Value filter", "◧", () => toggleVisualMap(panel));
     }
@@ -8227,6 +8242,32 @@ function parseRowsLenient(json) {
     return JSON.parse(fixed);
   }
 }
+// A ::DIAGRAM as text: its steps as an ordered list in reading order (value,
+// status, where each leads) and its connections as a table — read from the
+// SVG's node and edge marks.
+function diagramTextHtml(svg, caption) {
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
+  const nodes = [...svg.querySelectorAll("rect[data-node]")].sort((a, b) => +a.dataset.order - +b.dataset.order);
+  const edges = [...svg.querySelectorAll("polyline[data-edge]")];
+  const name = new Map(nodes.map((n) => [n.dataset.node, n.dataset.fx || n.dataset.node]));
+  const items = nodes.map((n) => {
+    const st = n.dataset.status && n.dataset.status !== "neutral" ? n.dataset.status : "";
+    const extra = [n.dataset.fvalue, n.dataset.badge || st].filter(Boolean);
+    const next = edges.filter((e) => e.dataset.from === n.dataset.node).map((e) => name.get(e.dataset.to) || e.dataset.to);
+    return `<li>${esc(name.get(n.dataset.node))}${extra.length ? ` (${esc(extra.join(", "))})` : ""}${next.length ? ` → ${esc(next.join(", "))}` : ""}</li>`;
+  });
+  const label = caption ? ` aria-label="${esc(caption)}"` : "";
+  const rows = edges.length
+    ? edges.map((e) => `<tr><td>${esc(name.get(e.dataset.from))}</td><td>${esc(name.get(e.dataset.to))}</td><td>${esc(e.dataset.fvalue || "")}</td></tr>`)
+    : [];
+  const table = edges.length
+    ? `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}: connections"` : ""}><thead><tr><th scope="col">From</th><th scope="col">To</th><th scope="col">Value</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+    : `<table class="dp-dv"${label}><thead><tr><th scope="col">Step</th><th scope="col">Value</th></tr></thead><tbody>${nodes
+        .map((n) => `<tr><td>${esc(name.get(n.dataset.node))}</td><td>${esc(n.dataset.fvalue || "")}</td></tr>`)
+        .join("")}</tbody></table>`;
+  return `<ol class="dp-diagram-steps"${label}>${items.join("")}</ol>${table}`;
+}
+
 function dataTableHtml(dp, limit, caption) {
   let rows;
   try {
@@ -8617,7 +8658,7 @@ function attachAxisPointer() {
     // Radar is polar, bullet/funnel are horizontal and jitter/scatter has no
     // shared-x series — a vertical x-crosshair is wrong for all of them; their
     // per-point (<title>) hover takes over.
-    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART)$/.test(r[1]))) return;
+    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART|DIAGRAM)$/.test(r[1]))) return;
     const scatterOnly =
       roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
       !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
