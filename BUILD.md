@@ -12,7 +12,7 @@ One Cargo workspace (root `Cargo.toml`):
 
 | | Render-only (`make`) | Full toolkit (`duckext/scripts/build-native.sh`) |
 |---|---|---|
-| SQL surface | `anofox_render`, `anofox_bar/_line/_scatter/_area/_xy/_xyc` | the same **plus** `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` |
+| SQL surface | `anofox_render`, `anofox_bar/_line/_scatter/_area/_xy/_xyc` | the same **plus** `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` |
 | Shell | C++ (`csrc/`), DuckDB C++ extension ABI, built by extension-ci-tools + CMake + corrosion | Rust only, DuckDB **C extension API** (`duckext/src`), no libduckdb linking |
 | DuckDB compatibility | exactly the pinned version (`duckdb` submodule, v1.5.6) | any DuckDB providing C-API v1.2.0 (v1.2+) |
 | Macros | registered as internal catalog entries (with descriptions) | created with SQL (see caveat below) |

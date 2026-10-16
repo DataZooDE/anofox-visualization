@@ -4,14 +4,16 @@ description: >
   Serve anofox-visualization dashboards from DuckDB: anofox_serve(port) (the
   authoring builder wired to the live session), anofox_serve_dashboards(dir,
   port[, options]) (locked, read-only serving of a folder of ::ROLE .sql
-  dashboards to consumers), anofox_serve_stop(port), and the standalone
+  dashboards to consumers), anofox_serve_refresh(port),
+  anofox_serve_stop(port), and the standalone
   `serve` binary (authoring on a database file, or `serve --dashboards`
   static server-side rendering with whitelisted -- @param values) plus the
   `dashboard` CLI renderer. Covers the trust model (loopback bind,
   per-server token cookie, Host / Origin checks against DNS rebinding and
   CSRF, server-owned SQL with typed variable binding, read-only snapshot with
   external access, extension loading and configuration locked), the options
-  and limits (max_rows, timeout_ms, max_body_bytes, threads, attach, load;
+  and limits (max_rows, timeout_ms, max_body_bytes, threads, attach, load,
+  refresh_s, data, path_vars;
   --max-rows, --timeout, --threads, --cache, --init, --bind), header
   comments (-- @title, -- @load, -- @param), refreshing data, and which mode
   to pick. Use when the user wants to "share / publish / host a dashboard",
@@ -35,7 +37,7 @@ user-invocable: false
 | For | you, on this machine | untrusted consumers, interactive | untrusted consumers, static |
 | UI | full builder + SQL editor | the real client, editor removed | server-side SVG pages |
 | Client sends | SQL (`POST /query`) | `{dashboard, panel, vars, page}` (`POST /api/panel`) — **no SQL** | dashboard id + whitelisted `?param=` values |
-| Data | the live read-write session / file | a private read-only snapshot taken at start | `duckdb -readonly` |
+| Data | the live read-write session / file | a private read-only snapshot, refreshable while serving; optionally one read-only data folder | `duckdb -readonly` |
 | Bind | `127.0.0.1` (enforced) | `127.0.0.1` | `--bind` (default `127.0.0.1`) |
 | Access control | loopback `Host`, same-origin, per-server token | same-origin `POST`; auth / TLS in a reverse proxy | auth / TLS in a reverse proxy |
 
@@ -47,6 +49,7 @@ Rule of thumb: explore your own data → authoring; hand a fixed dashboard to ot
 |---|---|
 | `anofox_serve(port INTEGER)` | starts the builder on `http://127.0.0.1:<port>/?token=…`, opens the browser, returns a message with the URL. Panels query the **current session** (its tables, attached databases, loaded extensions) |
 | `anofox_serve_dashboards(dir VARCHAR, port INTEGER[, options VARCHAR])` | serves every `.sql` file of `dir`: `/` lists them, `/d/<id>` opens one (ids `[A-Za-z0-9_.-]`); returns `anofox-visualization serving N locked, read-only dashboard(s) at http://127.0.0.1:<port>/ — server owns the SQL` |
+| `anofox_serve_refresh(port INTEGER)` | rebuilds a locked server's snapshot from the session's committed data and swaps it in atomically (running requests finish on the old one); returns `… now serves snapshot epoch N` |
 | `anofox_serve_stop(port INTEGER)` | stops that server (and deletes a locked server's snapshot); `nothing is serving on port N` if there is none |
 
 Starting a second server on a used port fails with `anofox-visualization is already serving on port N`; another process on the port gives `could not bind 127.0.0.1:N: …`.
@@ -60,7 +63,8 @@ SELECT anofox_serve_stop(8080);
 
 SELECT anofox_serve_dashboards('dashboards', 8095,
   '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8}');
-SELECT anofox_serve_stop(8095);      -- stop + delete the snapshot; re-run to refresh the data
+SELECT anofox_serve_refresh(8095);   -- fresh data now, no restart
+SELECT anofox_serve_stop(8095);      -- stop + delete the snapshot
 ```
 
 ### Locked-server options (JSON, third argument)
@@ -73,6 +77,9 @@ SELECT anofox_serve_stop(8095);      -- stop + delete the snapshot; re-run to re
 | `threads` | 4 | worker pool |
 | `attach` | `true` | snapshot every attached DuckDB database; `false` = only the current one |
 | `load` | `[]` | extensions to load in the snapshot instance (`["spatial"]`) |
+| `refresh_s` | — | rebuild the snapshot every *n* seconds and swap it in atomically (new epoch, empty result cache); `/healthz` shows `epoch` + `snapshot_age_s` |
+| `data` | — | a folder the panels may read in place (DuckDB `allowed_directories`; nothing else on disk); panels get its path as `getvariable('anofox_data')`; dashboards that write files (`COPY`, `ATTACH`, …) are refused |
+| `path_vars` | `[]` | variables used as path segments under `data` (`getvariable('run')`): values must be plain names `[A-Za-z0-9_.-]`, no leading `.`, else `400` |
 | `theme` | — | default theme for dashboards without their own `::THEME`: a name (`"dark"`, `"acme+dark"`) or a theme JSON object; validated and frozen at start |
 
 Unknown keys are an error naming the valid ones.
@@ -128,7 +135,7 @@ FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY month;
 ## Gotchas
 
 1. **Community build = no serving.** `anofox_serve*` exist only in the C-API build (`duckdb -unsigned`, `LOAD '/path/anofox_visualization.duckdb_extension'`).
-2. **The locked snapshot is taken at start.** Stop and start again to show new data; heavy setup belongs in tables before serving (setup statements re-run per request).
+2. **The locked snapshot is taken at start** and rebuilt only by `refresh_s` / `anofox_serve_refresh(port)` (uncommitted rows are not seen). A rebuild briefly needs the snapshot's space twice. Heavy setup belongs in tables before serving (setup statements re-run per request). Files under `data` are read live, but cached results are not: refresh (or `cache_mb: 0`) if files change in place.
 3. **Attach DuckDB, not foreign catalogs**, for locked serving: copy Postgres / SQLite / MotherDuck data into local DuckDB tables first.
 4. **Inputs, tabs, cross-filter and downloads** need the browser UI (authoring or A); the static `dashboard` HTML and mode B render panels only.
 5. **Themes in served pages.** `--theme T` / `options.theme` is only a default — a dashboard's own `::THEME` wins. Viewers can switch light/dark (`?theme=dark`, the 🌙 toggle) only when the theme follows the viewer; a URL never injects a theme, and `?locale=` is ignored in served/locked mode. A `read_text` theme file must be readable when the locked snapshot is taken (or pass the JSON in `options.theme`). The "Powered by DataZoo GmbH" credit is shown on every page and cannot be hidden.

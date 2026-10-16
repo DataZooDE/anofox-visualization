@@ -1,10 +1,10 @@
 //! anofox-visualization — a DuckDB C-API extension: `SELECT anofox_render()` →
 //! an SVG rendered by ggplot-rs (via the anofox-visualization core), plus the
 //! serving functions (`anofox_serve`, `anofox_serve_dashboards`,
-//! `anofox_serve_stop`; native only). Uses the C Extension API — the DuckDB
-//! functions are resolved at load time through the `access` struct, so nothing
-//! links against libduckdb. That's what lets the same crate become a
-//! DuckDB-Wasm side-module.
+//! `anofox_serve_refresh`, `anofox_serve_stop`; native only). Uses the C
+//! Extension API — the DuckDB functions are resolved at load time through the
+//! `access` struct, so nothing links against libduckdb. That's what lets the
+//! same crate become a DuckDB-Wasm side-module.
 //!
 //! Every `extern "C"` callback runs inside `catch_unwind`; failures surface as
 //! real SQL errors via `duckdb_scalar_function_set_error`.
@@ -28,6 +28,8 @@ use std::ptr;
 use std::sync::OnceLock;
 
 // Live-session HTTP servers (native only).
+#[cfg(not(target_arch = "wasm32"))]
+mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod panel_cache;
 #[cfg(not(target_arch = "wasm32"))]
@@ -279,6 +281,17 @@ mod serve_fns {
         })
     }
 
+    /// `anofox_serve_refresh(port)` → rebuild a locked server's snapshot now.
+    pub(super) unsafe extern "C" fn anofox_serve_refresh_fn(
+        info: duckdb_function_info,
+        input: duckdb_data_chunk,
+        output: duckdb_vector,
+    ) {
+        guarded(info, || {
+            per_row(input, output, 1, |d, i| serve::refresh(port_at(d[0], i)?))
+        })
+    }
+
     /// `anofox_serve_stop(port)`.
     pub(super) unsafe extern "C" fn anofox_serve_stop_fn(
         info: duckdb_function_info,
@@ -446,6 +459,14 @@ unsafe fn init(
             true,
             Some(&make),
             destroy,
+        ) && register_scalar(
+            raw,
+            c"anofox_serve_refresh",
+            &[&[DUCKDB_TYPE_INTEGER]],
+            serve_fns::anofox_serve_refresh_fn,
+            true,
+            None,
+            None,
         ) && register_scalar(
             raw,
             c"anofox_serve_stop",

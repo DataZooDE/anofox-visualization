@@ -129,6 +129,7 @@ SELECT anofox_serve(8080);              -- http://127.0.0.1:8080/?token=…
 SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/           a list of the folder's dashboards
 -- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
+SELECT anofox_serve_refresh(8095);      -- re-snapshot now (or options.refresh_s)
 SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
 ```
 
@@ -154,7 +155,7 @@ macros (SQL → SVG). Serving and the builder are not included (see below).
 
 Every [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases)
 carries the **full toolkit** — rendering **plus** `anofox_serve`,
-`anofox_serve_dashboards`, `anofox_serve_stop` with the browser builder
+`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` with the browser builder
 embedded — prebuilt for each platform, together with the `dashboard` / `serve`
 CLIs and a `SHA256SUMS` file:
 
@@ -223,7 +224,7 @@ There are two native builds (see [BUILD.md](BUILD.md) for why):
 
 | | `make` (CMake, C++ shell) | `duckext/scripts/build-native.sh` (C-API) |
 |---|---|---|
-| Provides | rendering: `anofox_render` + macros | **full toolkit**: rendering + `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` (embedded web builder) |
+| Provides | rendering: `anofox_render` + macros | **full toolkit**: rendering + `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` (embedded web builder) |
 | Same as | the community binary | — |
 | DuckDB | exactly the pinned version (v1.5.6) | any DuckDB with C-API v1.2.0+ (v1.2 or newer) |
 | Needs | submodules, CMake, a C++ toolchain, Rust | Rust, libclang (bindgen), `wasm-pack`, Python 3, a `duckdb` CLI |
@@ -304,7 +305,7 @@ Install it in a Claude Code session:
 | `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs from-source build |
 | `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs and tables, inputs and `getvariable()`, cross-filter, contract plots as panels, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
 | `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial` and `anofox_plot` with all options, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11 and anofox-forecast, use in dashboards and the browser builder |
-| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: the trust model, options and limits, header comments, which mode to use |
+| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: the trust model, options and limits, header comments, which mode to use |
 
 The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualization/). To use a local checkout instead of the marketplace, start Claude Code with `claude --plugin-dir ./plugins/anofox-visualization`. Every `sql` block in the skills is executed in CI against the built extension (`scripts/validate_skills_sql.py`; dashboard scripts are linted with `dashboard --check --strict`).
 

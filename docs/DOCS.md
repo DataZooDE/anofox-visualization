@@ -1732,13 +1732,32 @@ the wire** — the client asks for panel *n* of dashboard *id* with variable
 *values* (`POST /api/panel`), which the server binds as typed literals. It is
 **read-only by construction**: at startup it snapshots the session's databases
 into a private temp directory and serves them through a fresh DuckDB instance
-with external access, extension loading and configuration changes disabled (it
-serves that snapshot; `anofox_serve_stop` + re-run to refresh). Each request
-gets its own connection, a row cap and a timeout (optional third argument:
-`'{"max_rows": …, "timeout_ms": …, "threads": …, "cache_mb": …}'`). Panel
-results are cached per server (`cache_mb`, default 64, `0` = off), identical
-concurrent requests run once, and a `::PAGED` table that is paged or scrolled
-quickly cancels its superseded queries.
+with external access, extension loading and configuration changes disabled.
+Each request gets its own connection, a row cap and a timeout (optional third
+argument: `'{"max_rows": …, "timeout_ms": …, "threads": …, "cache_mb": …}'`).
+Panel results are cached per snapshot (`cache_mb`, default 64, `0` = off),
+identical concurrent requests run once, and a `::PAGED` table that is paged or
+scrolled quickly cancels its superseded queries.
+
+**Fresh data without a restart.** `'{"refresh_s": 300}'` rebuilds the snapshot
+every 5 minutes, `SELECT anofox_serve_refresh(8095)` right now; the new
+snapshot is swapped in atomically (requests already running finish on the old
+one) and the result cache starts over. `/healthz` reports the snapshot's
+`epoch` and `snapshot_age_s`.
+
+**A live data folder.** For files too large or too live to snapshot (e.g. one
+parquet folder per forecast run), `'{"data": "/srv/runs", "path_vars": ["run"]}'`
+lets the panels read that one folder — and nothing else on disk — with the run
+picked by a variable:
+
+```sql
+SELECT ds::XAXIS, yhat::LINECHART
+FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/forecast.parquet');
+```
+
+`anofox_data` is set by the server; a `path_vars` value must be a plain name
+(`[A-Za-z0-9_.-]`, no leading `.`), so `../` never reaches DuckDB, which refuses
+any path outside the folder anyway. New runs are readable immediately.
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
