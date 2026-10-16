@@ -57,8 +57,9 @@ jobs:
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
 
-      # The Python helper (python/) and the snippets of docs/python-r.md,
-      # rendered through the extension built above.
+      # The Python helper (python/), the snippets of docs/python-r.md and the
+      # example notebook (examples/python), rendered through the extension
+      # built above.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -70,7 +71,7 @@ jobs:
         env:
           ANOFOX_VIZ_EXTENSION: ${{ runner.temp }}/anofox_visualization.duckdb_extension
         run: |
-          pip install "duckdb==1.5.6" -e ".[test]" pingouin lifelines
+          pip install "duckdb==1.5.6" -e ".[test]" pingouin lifelines statsforecast nbclient ipykernel
           pytest -q -rs
 
   web:
