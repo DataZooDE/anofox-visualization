@@ -1874,7 +1874,8 @@ any path outside the folder anyway. New runs are readable immediately.
 `forward_auth`, nginx `auth_request`, Cloudflare Access), `options.auth`
 (`{"mode": "proxy", "shared_secret_env": "…"}`) makes every request carry the
 viewer's identity. The server exposes it to the panels as the reserved
-variables `getvariable('__claim_user')` and `getvariable('__claim_groups')`, so a
+variables `getvariable('__claim_user')` and, if the proxy sends groups and
+`header_groups` is set, `getvariable('__claim_groups')`, so a
 panel can filter rows by the viewer
 (`WHERE region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))`).
 Viewers can't set `__claim_*`, and cached results are kept per viewer.

@@ -243,8 +243,10 @@ Consumers pick a dashboard id and whitelisted params
 - `--auth '<json>'` (or `--auth @auth.json`) — login via an auth proxy, the
   same object as `options.auth` below; `--log <path|stderr>` and
   `--log-vars none|names|values` — the request log. With `--auth` the render
-  cache (`--cache`) is kept per viewer. A non-loopback `--bind` without
-  `--auth` prints a `WARNING`.
+  cache (`--cache`) is kept per viewer; it holds at most 1,024 pages / 64 MiB
+  (oldest first out) and drops expired pages. A non-loopback `--bind` without
+  `--auth` prints a `WARNING`. A request target with a control character is
+  `400`.
 
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
@@ -274,7 +276,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
     "trusted_proxies": ["127.0.0.1"],
     "header_user": "X-Forwarded-User",
     "header_groups": "X-Forwarded-Groups",
-    "claims": {"tenant": "X-Forwarded-Tenant"}
+    "claims": {"tenant": {"header": "X-Forwarded-Tenant", "required": true}}
   },
   "log": "/var/log/anofox/requests.jsonl"
 }');
@@ -285,10 +287,15 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 | `mode` | (required) | `"proxy"` — the only mode in P1 |
 | `shared_secret` / `shared_secret_env` | (one is required) | The secret the proxy sends on every request; ≥ 32 printable characters (`openssl rand -hex 32`). Prefer `shared_secret_env` (the name of an environment variable of the DuckDB process): a literal in the SQL ends up in shell history and query logs |
 | `secret_header` | `X-Anofox-Proxy-Secret` | Header carrying the secret |
-| `trusted_proxies` | any peer | Addresses / CIDR ranges (`10.0.0.0/8`, `::1`) the proxy connects from; any other peer is refused even with the right secret |
+| `trusted_proxies` | key absent: any peer | Addresses / CIDR ranges (`10.0.0.0/8`, `::1`) the proxy connects from; any other peer is refused even with the right secret. An empty list is an error. Write IPv4 ranges as IPv4 (`::ffff:…` forms are rejected; IPv4-mapped peers are matched as IPv4) |
 | `header_user` | `X-Forwarded-User` | Header with the user name / e-mail (required, non-empty) |
-| `header_groups` | `X-Forwarded-Groups` | Groups, split on `groups_separator` (default `,`); `null` = none |
-| `claims` | — | Extra claims: `{name: header}` → `__claim_<name>` (up to 16) |
+| `header_groups` | off (`null`) | **Opt-in.** Groups header, split on `groups_separator` (default `,`) |
+| `claims` | — | Extra claims → `__claim_<name>` (up to 16): `{name: "Header"}` or `{name: {"header": "Header", "required": true}}` |
+
+`header_groups` takes the same `{"header": …, "required": true}` form. A
+`required` claim that is absent or empty is `401` (`deny: missing_claim`);
+otherwise an absent claim is `NULL` (groups: `[]`). The start message lists the
+identity headers the server trusts — compare it with the proxy configuration.
 
 **How a request is checked.** With `auth` set, every request except `GET
 /health` must (1) come from a `trusted_proxies` address (when given), (2) carry
@@ -300,6 +307,14 @@ client sends directly are never believed. A repeated identity header (a proxy
 that appends instead of replacing) is refused rather than guessed at. A broken
 `auth` object fails the server start: the server never falls back to serving
 without login.
+
+**The secret proves that a request came through the proxy — not that the proxy
+wrote every header in it.** A proxy forwards the client's other headers, so
+every configured identity header (user, groups, each claim) must be **set or
+removed by the proxy on every request**; one it leaves alone reaches the server
+with the client's value. That is why groups and extra claims are opt-in:
+configure only headers your proxy controls (the recipes below do this for each
+header they name).
 
 **Claims are reserved variables.** After the viewer's own variables, the
 server sets, on the request's private connection:
@@ -339,44 +354,109 @@ too. Supersession tickets are scoped to the user as well.
 
 ### Proxy recipes
 
-The proxy must **authenticate every request, overwrite (not append) the
-identity headers, add the secret, and be the only way to reach the server**.
-Keep the server on loopback (or on a private network with `trusted_proxies`).
+The proxy must **authenticate every request, set or remove every configured
+identity header (never append, never pass the client's through), add the
+secret, and be the only way to reach the server**. Keep the server on loopback
+(or on a private network with `trusted_proxies`). The nginx, Caddy and
+oauth2-proxy configs below were checked with `nginx -t`, `caddy validate` and
+oauth2-proxy's strict config loader. The nginx and Caddy recipes were also run
+in front of a server, with a stand-in for oauth2-proxy's `/oauth2/auth`, while
+a client sent forged `X-Forwarded-User`, `X-Forwarded-Groups` and
+`X-Forwarded-Tenant`: the server saw only the proxy's values (and no groups or
+tenant when the login had none).
 
-nginx + oauth2-proxy (`auth_request`):
+nginx + oauth2-proxy (`auth_request`). `proxy_set_header` replaces the client's
+header, and with an empty value nginx sends no header at all. So every identity
+header gets a `proxy_set_header` line, even one the IdP may not return:
 
 ```nginx
-location /oauth2/ { proxy_pass http://127.0.0.1:4180; }
+location = /oauth2/auth {
+  internal;
+  proxy_pass http://127.0.0.1:4180;
+  proxy_pass_request_body off;
+  proxy_set_header Content-Length "";
+}
 location / {
   auth_request /oauth2/auth;
   auth_request_set $user   $upstream_http_x_auth_request_email;
   auth_request_set $groups $upstream_http_x_auth_request_groups;
-  proxy_set_header X-Forwarded-User   $user;      # replaces any client value
-  proxy_set_header X-Forwarded-Groups $groups;
+  auth_request_set $tenant $upstream_http_x_auth_request_tenant;
+  proxy_set_header X-Forwarded-User   $user;    # set or removed, never the client's
+  proxy_set_header X-Forwarded-Groups $groups;  # (only if header_groups is set)
+  proxy_set_header X-Forwarded-Tenant $tenant;  # one line per claims header
   proxy_set_header X-Anofox-Proxy-Secret "<secret>";
-  proxy_set_header Host $host;                    # list it in options.hosts
+  proxy_set_header Host $host;                  # list it in options.hosts
   proxy_pass http://127.0.0.1:8095;
 }
 ```
 
-Caddy (`forward_auth`; `copy_headers` replaces the client's headers):
+(Plus oauth2-proxy's own `location /oauth2/ { proxy_pass http://127.0.0.1:4180; }`
+and `error_page 401 = /oauth2/sign_in;` for the login redirect.)
+
+Caddy (`forward_auth`). Delete every identity header first, inside a `route`
+block so the directives run in the written order (outside `route`, Caddy sorts
+them). `copy_headers` then sets the ones the auth response carries:
 
 ```caddy
 dash.example.com {
-  forward_auth 127.0.0.1:4180 {
-    uri /oauth2/auth
-    copy_headers X-Auth-Request-Email>X-Forwarded-User X-Auth-Request-Groups>X-Forwarded-Groups
+  route {
+    request_header -X-Forwarded-User
+    request_header -X-Forwarded-Groups
+    request_header -X-Forwarded-Tenant
+    forward_auth 127.0.0.1:4180 {
+      uri /oauth2/auth
+      copy_headers X-Auth-Request-Email>X-Forwarded-User X-Auth-Request-Groups>X-Forwarded-Groups X-Auth-Request-Tenant>X-Forwarded-Tenant
+    }
+    request_header X-Anofox-Proxy-Secret {env.ANOFOX_PROXY_SECRET}
+    reverse_proxy 127.0.0.1:8095
   }
-  request_header X-Anofox-Proxy-Secret {env.ANOFOX_PROXY_SECRET}
-  reverse_proxy 127.0.0.1:8095
 }
 ```
 
-Cloudflare Access: `cloudflared` forwards `Cf-Access-Authenticated-User-Email`;
-set `"header_user": "Cf-Access-Authenticated-User-Email"`, add the secret with a
-Transform Rule (or run a local proxy that adds it), and only let `cloudflared`
-reach the server. P1 does not verify the `Cf-Access-Jwt-Assertion` itself
-(that is JWT verification, P3).
+oauth2-proxy on its own (alpha config). oauth2-proxy removes each
+`injectRequestHeaders` header from the client's request before setting it
+(`preserveRequestValue: false` is the default), and joins multi-valued claims
+such as groups with `,`:
+
+```yaml
+upstreamConfig:
+  upstreams:
+  - id: anofox
+    path: /
+    uri: http://127.0.0.1:8095
+injectRequestHeaders:
+- name: X-Forwarded-User
+  values:
+  - claimSource:
+      claim: email
+- name: X-Forwarded-Groups        # only with "header_groups": "X-Forwarded-Groups"
+  values:
+  - claimSource:
+      claim: groups
+- name: X-Anofox-Proxy-Secret
+  values:
+  - secretSource:
+      fromFile: /etc/anofox/proxy-secret
+```
+
+Cloudflare Access (not tested here): Access sets
+`Cf-Access-Authenticated-User-Email` on requests it has authenticated. Use it as
+the only identity header: `"header_user": "Cf-Access-Authenticated-User-Email"`,
+with **no `header_groups` and no `claims`**, because Cloudflare passes other
+client headers such as `X-Forwarded-Groups` through to the origin. Add the
+secret with a Transform Rule (*Modify Request Header → Set static*, which
+replaces a client's value), and let only `cloudflared` reach the server. Groups
+or other claims from Access require verifying the signed
+`Cf-Access-Jwt-Assertion`, which is P3 (#50).
+
+**Folded headers (obs-fold).** An HTTP/1.1 header line that starts with a space
+or tab continues the previous header (obsolete line folding, RFC 9112 §5.2).
+The server's HTTP parser does **not** unfold such a line; it reads it as a
+header of its own. A proxy that forwarded folded lines unchanged would
+therefore let a client add identity headers the proxy never saw. The proxy must
+reject folded headers or unfold them before forwarding, as RFC 9112 requires.
+Both were checked: nginx answers `400`, and Caddy (Go) unfolds the line into
+the previous header's value.
 
 ### Request log
 
@@ -391,15 +471,20 @@ every refused request (static assets are not logged):
 
 - `ts` UTC, `ms` latency, `cache` = `hit` / `shared` (joined a running
   identical query) / `run`, `bytes` = response size, `deny` = `untrusted_peer` /
-  `bad_secret` / `no_user` / `malformed_identity`.
+  `bad_secret` / `no_user` / `missing_claim` / `malformed_identity`.
 - `log_vars` (`--log-vars`): `"names"` (default) logs variable names only;
   `"values"` logs their SQL literals (may be personal data — opt in);
   `"none"` omits them. The path is logged without its query string. Headers,
   cookies, the secret and claims other than the user are never logged.
-- The file is created `0600` and reopened for every line, so a rename-based
-  rotation needs no signal (logrotate: `daily`, `rotate 14`, `compress`,
-  `delaycompress`, no `copytruncate` needed). Each line is one `write` with
-  `O_APPEND`.
+- The file is created `0600` (an existing file readable by others is set to
+  `0600`), never through a symlink (`O_NOFOLLOW`), and reopened for every line,
+  so a rename-based rotation needs no signal (logrotate: `daily`, `rotate 14`,
+  `compress`, `delaycompress`, no `copytruncate` needed). Each line is one
+  `write` with `O_APPEND`.
+- With `"stderr"`, the server's plain diagnostics share the stream; they start
+  with `[anofox-serve]` and escape every control character in request data
+  (a newline is written as `\n`), so only the request log writes lines that
+  start with `{`. A request target containing a control character is `400`.
 
 ### Threat model (P1)
 
@@ -407,6 +492,8 @@ every refused request (static assets are not logged):
 |---|---|
 | A client sends `X-Forwarded-User: admin` directly to the server | No secret → `401`; identity headers are only read after the secret matches. Keep the server reachable only by the proxy (loopback / private network + `trusted_proxies`) |
 | A client sends identity headers *through* the proxy | The proxy must overwrite them (recipes above); a duplicated header is `401` |
+| A client sends identity headers the proxy **doesn't set** (groups, extra claims) — the secret still matches | Groups and claims are opt-in (only `header_user` by default); the proxy must set or remove every configured header on every request (each recipe does; checked with forged headers through nginx and Caddy); `required` claims make a missing value `401`; the start message lists the trusted headers |
+| Folded (obs-fold) header lines smuggling an identity header past the proxy | The proxy must reject or unfold them (nginx: `400`, Caddy: unfolds); the server can't tell a folded line from a header |
 | The secret leaks (config file, `ps`, SQL history) | `shared_secret_env`, `trusted_proxies` as a second factor; the secret never appears in errors, `Debug` output or the log. Rotate by restarting with a new value |
 | Brute-forcing the secret | ≥ 32 characters, constant-time comparison |
 | A viewer sets `__claim_user` / `__claim_groups` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored; claims are set by the server after the viewer's variables |
@@ -415,7 +502,8 @@ every refused request (static assets are not logged):
 | One viewer cancels another's query | Supersession tickets are scoped to user + 128-bit page id |
 | A misconfigured `auth` serves without login | A bad `auth` fails the start; there is no fallback to anonymous |
 | Server reachable from the network without login | `serve --bind` beyond loopback without `--auth` prints a `WARNING`; the extension binds loopback |
-| Log injection / personal data in logs | JSON-escaped lines; variable values only with `log_vars: "values"` |
+| Log injection / personal data in logs | JSON-escaped lines; diagnostics on the same stderr escape control characters, and a URL with one is `400`; variable values only with `log_vars: "values"`; the log file is `0600` and never opened through a symlink |
+| Many viewers fill the static server's `--cache` | Capped at 1,024 pages / 64 MiB, expired pages purged |
 | DNS rebinding, CSRF, SQL from the client | Unchanged: Host allowlist (`421`), same-origin `POST`s, no SQL endpoint |
 
 **Out of scope for P1** (see #49, #50): column masking and policies the server

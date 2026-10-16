@@ -713,8 +713,9 @@ pub fn start_locked(
     });
     let auth_note = match &state.opts.auth {
         Some(a) => format!(
-            "; login via auth proxy (identity from {}, secret in {})",
-            a.header_user, a.secret_header
+            "; login via auth proxy (trusted identity headers: {}; secret in {}) — the proxy must set or remove each of them on every request",
+            a.trusted_headers(),
+            a.secret_header
         ),
         None => String::new(),
     };
@@ -1081,7 +1082,18 @@ fn handle_locked(st: &Locked, req: Request) {
 
 fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -> u16 {
     let m = meta(&req);
-    eprintln!("[anofox-serve] {} {}", req.method(), path);
+    // Request data in a diagnostic is escaped (access::diag): a `\n` in it
+    // could otherwise forge a line of the request log on the same stderr.
+    eprintln!(
+        "[anofox-serve] {} {}",
+        access::diag(&req.method().to_string()),
+        access::diag(path)
+    );
+    // tiny_http ends the request line only at CRLF: a bare control character
+    // in the target is never a legitimate URL.
+    if access::has_control_chars(req.url()) {
+        return reply(req, 400, "bad request: control character in the URL");
+    }
     // DNS rebinding: only loopback names (or `options.hosts`) are served.
     if !sv::host_allowed(m.host, st.port, &st.opts.hosts) {
         return reply(
@@ -1147,7 +1159,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 }
                 Err((code, e)) => {
                     if code != SUPERSEDED.0 {
-                        eprintln!("[anofox-serve] {code}: {e}");
+                        eprintln!("[anofox-serve] {code}: {}", access::diag(&e));
                     }
                     reply(req, code, &e)
                 }
@@ -1372,8 +1384,9 @@ fn run_panel(
                 // reported in the log, the panel still runs.
                 if let Err(e) = c.execute_prepared(sql, &[]) {
                     eprintln!(
-                        "[anofox-serve] setup statement failed in '{}': {e}",
-                        dash.id
+                        "[anofox-serve] setup statement failed in '{}': {}",
+                        dash.id,
+                        access::diag(&e)
                     );
                 }
             }

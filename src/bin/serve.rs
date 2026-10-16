@@ -440,8 +440,7 @@ struct ServeState {
     allow_hosts: Vec<String>,
     db: String,
     dashboards: Vec<Dashboard>,
-    cache_ttl: Duration,
-    cache: Mutex<HashMap<String, (Instant, String)>>,
+    cache: RenderCache,
     max_rows: usize,
     timeout: Duration,
     auth: Option<ProxyAuth>,
@@ -491,8 +490,9 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
     );
     match (&o.auth, sv::is_loopback_bind(&o.bind)) {
         (Some(a), _) => println!(
-            "  login: auth proxy (identity from {}, secret in {})",
-            a.header_user, a.secret_header
+            "  login: auth proxy (trusted identity headers: {}; secret in {})\n  the proxy must set or remove each of these headers on every request",
+            a.trusted_headers(),
+            a.secret_header
         ),
         (None, false) => eprintln!(
             "  WARNING: bound to {} WITHOUT --auth — every viewer who can reach this address sees every dashboard; \
@@ -513,8 +513,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
             .collect(),
         db,
         dashboards,
-        cache_ttl: Duration::from_secs(o.cache_secs),
-        cache: Mutex::new(HashMap::new()),
+        cache: RenderCache::new(Duration::from_secs(o.cache_secs)),
         max_rows: o.max_rows,
         timeout: o.timeout,
         auth: o.auth.take(),
@@ -554,6 +553,66 @@ fn reply(req: Request, status: u16, msg: &str) -> u16 {
     status
 }
 
+/// The `--cache` render cache: entries expire after the TTL and are purged
+/// on insert; beyond [`RenderCache::MAX_ENTRIES`] entries or
+/// [`RenderCache::MAX_BYTES`] the oldest go first. (With `--auth` every viewer
+/// has their own entries, so it must not grow without bound.)
+struct RenderCache {
+    ttl: Duration,
+    map: Mutex<HashMap<String, (Instant, String)>>,
+}
+
+impl RenderCache {
+    const MAX_ENTRIES: usize = 1024;
+    const MAX_BYTES: usize = 64 << 20;
+
+    fn new(ttl: Duration) -> Self {
+        RenderCache {
+            ttl,
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &str, now: Instant) -> Option<String> {
+        if self.ttl.is_zero() {
+            return None;
+        }
+        let map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(key)
+            .filter(|(ts, _)| now.duration_since(*ts) < self.ttl)
+            .map(|(_, h)| h.clone())
+    }
+
+    fn insert(&self, key: String, html: String, now: Instant) {
+        if self.ttl.is_zero() || html.len() > Self::MAX_BYTES / 4 {
+            return;
+        }
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, (ts, _)| now.duration_since(*ts) < self.ttl);
+        map.remove(&key);
+        let mut bytes: usize = map.values().map(|(_, h)| h.len()).sum();
+        while !map.is_empty()
+            && (map.len() >= Self::MAX_ENTRIES || bytes + html.len() > Self::MAX_BYTES)
+        {
+            let oldest = map
+                .iter()
+                .min_by_key(|(_, (ts, _))| *ts)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                if let Some((_, h)) = map.remove(&k) {
+                    bytes -= h.len();
+                }
+            }
+        }
+        map.insert(key, (now, html));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+}
+
 fn route_serve(
     st: &ServeState,
     req: Request,
@@ -564,6 +623,10 @@ fn route_serve(
 ) -> u16 {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
+    // A bare control character in the target is never a legitimate URL.
+    if access::has_control_chars(&url) {
+        return reply(req, 400, "bad request: control character in the URL");
+    }
     // DNS rebinding: only loopback names (or --allow-host names) are served.
     if !sv::host_allowed(req_header(&req, "Host"), st.port, &st.allow_hosts) {
         return reply(
@@ -621,27 +684,13 @@ fn route_serve(
     };
     params.clone_from(&resolved);
     let key = cache_key(&dash.id, &resolved, claims.as_ref());
-    if !st.cache_ttl.is_zero() {
-        let hit = st
-            .cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-            .filter(|(ts, _)| ts.elapsed() < st.cache_ttl)
-            .map(|(_, h)| h.clone());
-        if let Some(html) = hit {
-            respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
-            return 200; // no DB touched
-        }
+    if let Some(html) = st.cache.get(&key, Instant::now()) {
+        respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+        return 200; // no DB touched
     }
     match render_dashboard_page(st, dash, &resolved, claims.as_ref()) {
         Ok(html) => {
-            if !st.cache_ttl.is_zero() {
-                st.cache
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(key, (Instant::now(), html.clone()));
-            }
+            st.cache.insert(key, html.clone(), Instant::now());
             respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
             200
         }
@@ -925,5 +974,76 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
         Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
         Err(String::from_utf8_lossy(&stderr).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_cache_expires_and_is_capped() {
+        let c = RenderCache::new(Duration::from_secs(60));
+        let t0 = Instant::now();
+        c.insert("a".into(), "A".into(), t0);
+        assert_eq!(
+            c.get("a", t0 + Duration::from_secs(59)).as_deref(),
+            Some("A")
+        );
+        assert_eq!(c.get("a", t0 + Duration::from_secs(61)), None);
+        // expired entries are purged on the next insert
+        c.insert("b".into(), "B".into(), t0 + Duration::from_secs(61));
+        assert_eq!(c.len(), 1);
+        // at most MAX_ENTRIES (one per viewer with --auth): oldest evicted
+        let t1 = t0 + Duration::from_secs(62);
+        for i in 0..RenderCache::MAX_ENTRIES + 10 {
+            c.insert(
+                format!("k{i}"),
+                "x".into(),
+                t1 + Duration::from_millis(i as u64),
+            );
+        }
+        assert_eq!(c.len(), RenderCache::MAX_ENTRIES);
+        let late = t1 + Duration::from_secs(1);
+        assert_eq!(c.get("k0", late), None);
+        assert!(c
+            .get(&format!("k{}", RenderCache::MAX_ENTRIES + 9), late)
+            .is_some());
+        // byte cap: a huge page is not cached; big pages evict old ones
+        let c = RenderCache::new(Duration::from_secs(60));
+        c.insert(
+            "huge".into(),
+            "x".repeat(RenderCache::MAX_BYTES / 4 + 1),
+            t0,
+        );
+        assert_eq!(c.len(), 0);
+        let big = "x".repeat(RenderCache::MAX_BYTES / 4);
+        for i in 0..6 {
+            c.insert(format!("p{i}"), big.clone(), t0 + Duration::from_millis(i));
+        }
+        assert_eq!(c.len(), 4);
+        assert!(c.get("p0", t0).is_none() && c.get("p5", t0).is_some());
+        // ttl 0 = off
+        let off = RenderCache::new(Duration::ZERO);
+        off.insert("a".into(), "A".into(), t0);
+        assert_eq!((off.len(), off.get("a", t0)), (0, None));
+    }
+
+    #[test]
+    fn cache_keys_are_per_viewer() {
+        let r = vec![("region".to_string(), "EU".to_string())];
+        let alice = Claims {
+            user: "alice".into(),
+            ..Default::default()
+        };
+        let bob = Claims {
+            user: "bob".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            cache_key("d", &r, Some(&alice)),
+            cache_key("d", &r, Some(&bob))
+        );
+        assert_ne!(cache_key("d", &r, Some(&alice)), cache_key("d", &r, None));
     }
 }
