@@ -531,8 +531,8 @@ impl LockedOptions {
                     let m = val
                         .as_str()
                         .map(str::trim)
-                        .filter(|m| !m.is_empty() && m.len() <= 32 && m.chars().all(|c| c.is_ascii_alphanumeric() || " .%".contains(c)))
-                        .ok_or("options.memory_limit must be a size like \"2GB\" or \"50%\"")?;
+                        .filter(|m| valid_memory_limit(m))
+                        .ok_or("options.memory_limit must be a size like \"2GB\", \"512MiB\" or \"50%\"")?;
                     o.memory_limit = Some(m.to_string());
                 }
                 "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
@@ -553,6 +553,40 @@ impl LockedOptions {
         }
         Ok(o)
     }
+}
+
+/// A DuckDB size: a positive number, then a unit (B, KB/KiB … TB/TiB, also
+/// spelled out, any case) or `%` of RAM.
+fn valid_memory_limit(m: &str) -> bool {
+    let unit_at = m
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(m.len());
+    let (num, unit) = m.split_at(unit_at);
+    let unit = unit.trim().to_ascii_lowercase();
+    num.parse::<f64>().is_ok_and(|n| n > 0.0)
+        && matches!(
+            unit.as_str(),
+            "%" | "b"
+                | "byte"
+                | "bytes"
+                | "kb"
+                | "kib"
+                | "kilobyte"
+                | "kilobytes"
+                | "mb"
+                | "mib"
+                | "megabyte"
+                | "megabytes"
+                | "gb"
+                | "gib"
+                | "gigabyte"
+                | "gigabytes"
+                | "tb"
+                | "tib"
+                | "terabyte"
+                | "terabytes"
+        )
+        && (unit != "%" || num.parse::<f64>().is_ok_and(|n| n <= 100.0))
 }
 
 struct Dash {
@@ -1702,6 +1736,16 @@ mod tests {
             .is_unspecified());
         assert!(LockedOptions::parse(Some(r#"{"bind":"example.com"}"#)).is_err());
         assert!(LockedOptions::parse(Some(r#"{"memory_limit":"1GB'; x"}"#)).is_err());
+        for ok in ["2GB", "512 MiB", "1.5gb", "50%", "4096MB"] {
+            assert!(valid_memory_limit(ok), "{ok}");
+        }
+        for bad in ["", "GB", "2", "2 parsecs", "0GB", "150%", "-1GB", "1e9GB"] {
+            assert!(!valid_memory_limit(bad), "{bad}");
+        }
+        assert!(LockedOptions::parse(Some(r#"{"bind":"localhost"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"bind":"1.2.3"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"bind":1}"#)).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"duckdb_threads":"4"}"#)).is_err());
         assert!(LockedOptions::parse(Some(r#"{"duckdb_threads":0}"#)).is_err());
         // The variables' order doesn't matter; their values, the panel, the
         // dashboard and the page do.
