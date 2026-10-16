@@ -963,9 +963,12 @@ FROM run_manifest ORDER BY seq;
 - **Edges.** `::UPSTREAM` (alias `::PARENTS`) holds the node(s) feeding the
   row's node: one id or a list. `::EDGES` (the first non-NULL cell) is a list
   of structs `{from, to [, value, label, style]}` — `source` / `target` work
-  too; `style` is `'solid'`, `'dashed'` or `'flow'` (moving dashes in the
-  browser, still dashes in static output). Both may be combined; the same
-  `(from, to)` pair is one edge.
+  too; `style` is `'solid'`, `'dashed'`, `'flow'` (moving dashes in the
+  browser) or `'flow-dots'` (dots travelling along the edge); static output
+  keeps the dashes / dots. Both may be combined; the same `(from, to)` pair is
+  one edge. `::LINESTYLE` on a row styles the edges **into** that row's node
+  (`'flow'::LINESTYLE` as a constant: every edge); a `style` in `::EDGES`
+  wins.
 - **Layout.** Layers run left to right (`'TB'::DIRECTION`: top to bottom); a
   loop (`calibrate → build`) is drawn as an edge running back. The layout is a
   pure function of the rows (ties follow row order), so the browser,
@@ -974,11 +977,25 @@ FROM run_manifest ORDER BY seq;
   edges are drawn (the first ones), with a note.
 - **Interaction.** A node is a mark like a bar: its tooltip shows its label,
   value and status, a click cross-filters (`getvariable('selected')` is the
-  node id) and `::SELECT_AS` names the selection. Edges show a tooltip only.
+  node id), `::SELECT_AS` names the selection and a `::LINK` column follows
+  the clicked node's row. Edges show a tooltip only (a click on an edge does
+  nothing: the node is what a selection or link names).
+- **Motion** (browser only; *reduce motion* shows the final state). The
+  entrance plays stage by stage: each layer's nodes fade in, then every edge
+  draws from its source (`'none'::ANIMATE` turns it off). A `::STORY` caption
+  on a row makes a step that lights that node and **every edge touching it**
+  (in and out) and dims the rest; Step / Play walk the steps in row order, as
+  on a chart. `::TRANSITION` does not apply (a re-run redraws the diagram).
 - **Accessibility.** The summary reads *"Diagram: How data moves through the
   pipeline; 7 steps in 5 stages, from Ingest to Recommend orders; 8
-  connections; 1 loop (Calibrate → Build twin); largest Ingest (10K)."*; the
-  arrow keys walk the nodes in reading order (layer by layer). *Charts as
+  connections; 1 loop (Calibrate → Build twin); largest Ingest (10K)."*. The
+  diagram is one Tab stop; the arrow keys follow the **connections**: → to the
+  next step (pressed again on the same node: its next connection in turn), ←
+  back the way you came, ↑/↓ within a stage (on a `'TB'` diagram ↓/↑ follow the
+  connections and ←/→ move within a stage), Home / End the first / last step.
+  Each node reads its tooltip and where it connects (*"… from Ingest,
+  Calibrate. to Step & project, Replay history"*); reached along an edge it
+  first names that edge (*"Ingest → Build twin: 9.8K. …"*). *Charts as
   tables* shows the steps as an ordered list (each with where it leads) and the
   connections as a table; the SVG's `<desc>` carries the same list headless.
 - `dashboard --check` reports `diagram/null-id`, `diagram/duplicate-node`,

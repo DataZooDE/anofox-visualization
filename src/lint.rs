@@ -1111,7 +1111,8 @@ fn motion_diags(
         let Some(v) = texts.first().map(|t| t.to_ascii_lowercase()) else {
             continue;
         };
-        if *r == Role::LineStyle {
+        // a ::DIAGRAM's edge styles are checked as diagram/bad-style
+        if *r == Role::LineStyle && !has(Role::Diagram) {
             if let Some(bad) = texts
                 .iter()
                 .map(|t| t.to_ascii_lowercase())
@@ -1154,7 +1155,7 @@ fn motion_diags(
                         crate::ANIMATE_MODES.join(", ")
                     ),
                 ));
-            } else if v == "reveal" && !has(Role::VLine) {
+            } else if v == "reveal" && !has(Role::VLine) && !has(Role::Diagram) {
                 out.push((
                     "animate/reveal-no-xline",
                     "::ANIMATE 'reveal' grows forward from the panel's ::XLINE (e.g. Today); \

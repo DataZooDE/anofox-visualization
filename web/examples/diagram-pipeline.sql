@@ -5,7 +5,12 @@
 --   * dg_stages: one row per stage — its records and a status;
 --   * dg_edges: what flows between stages, with a count.
 -- ::DIAGRAM lays the stages out left to right; the loop calibrate → build
--- twin runs back. Click a stage to see its details in the table below.
+-- twin runs back. The stages appear one after another, records travel into
+-- the twin as moving dots ('flow-dots'::LINESTYLE on the row they arrive at)
+-- and the loop flows; Step / Play walk through three stages (::STORY), each
+-- lighting its stage and every connection touching it. Click a stage to see
+-- its details in the table below; with the keyboard, the arrow keys follow
+-- the connections.
 --
 -- Synthetic, deterministic data.
 
@@ -47,6 +52,12 @@ SELECT stage::DIAGRAM,
        title::LABEL,
        records::COMPACT,
        status::BADGE,
+       CASE stage WHEN 'build' THEN 'flow-dots' END::LINESTYLE,
+       CASE stage
+         WHEN 'ingest' THEN '10,000 records arrive; 200 malformed rows are rejected'
+         WHEN 'monitor' THEN '412 twins drift away from the recorded stock'
+         WHEN 'calibrate' THEN '29 calibrations go back into the twin'
+       END::STORY,
        (SELECT list({'from': from_stage, 'to': to_stage, 'value': n,
                      'style': CASE WHEN to_stage = 'build' AND from_stage = 'calibrate' THEN 'flow' END}
                     ORDER BY from_stage, to_stage)

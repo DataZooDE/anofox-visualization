@@ -380,6 +380,21 @@ the contract macro, story/animate, the graph keyboard walk (M1 walks the nodes
 in reading order). wasm growth: +57 KB raw / +23 KB gzip (over the 50 KB
 target; the layout, SVG writer and parser are ~20 KB each).
 
+**M2 status (branch `feat/issue-43-diagram-m2`):** implemented —
+`::STORY` per node (a step lights the node and every edge touching it, in and
+out; decision 7), the stage-by-stage entrance (`::ANIMATE`: nodes by layer,
+edges draw in after their source; reduced motion = the final state), edge
+styles `'flow'` / `'flow-dots'` (also from a row's `::LINESTYLE`: the edges into
+that node), the keyboard walk along the edges with the edge announced, `::LINK`
+on a node, and the export replay (all in `web/anim.js` / attributes). **Edges stay
+hover-only** (decision 11): an edge names no value a selection or link could
+use (`::SELECT_AS` and `::LINK` key on the node id), its numbers are in its
+tooltip, the summary and the connections table, and a thin polyline is a poor
+click target next to the boxes it joins. Revisit if a use case needs an edge
+selection (e.g. "show the records moved on this edge") — that would be a new
+`'edge'::SELECT_AS` variant setting `<name>_from` / `<name>_to`. wasm growth:
++5.7 KB raw / +2.9 KB gzip.
+
 ## 5. Risks
 
 | Risk | Mitigation |
