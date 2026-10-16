@@ -90,6 +90,9 @@ pub struct Sessions {
     /// `session_secret_env` given: sessions survive restarts and work on
     /// every replica with the same secret.
     pub persistent: bool,
+    /// The longest session this key issues: a token claiming a longer life
+    /// (`exp - iat`) is refused, whoever signed it.
+    max_ttl: u64,
     revoked: Mutex<HashMap<String, u64>>,
 }
 
@@ -102,8 +105,9 @@ impl std::fmt::Debug for Sessions {
 }
 
 impl Sessions {
-    /// `label` separates the keys of different uses of one secret.
-    pub fn new(secret: Option<&str>, label: &str) -> Sessions {
+    /// `label` separates the keys of different uses of one secret; `max_ttl`
+    /// is the longest session [`Sessions::issue`] is asked for.
+    pub fn new(secret: Option<&str>, label: &str, max_ttl: u64) -> Sessions {
         use aws_lc_rs::hmac;
         let (base, persistent) = match secret {
             Some(s) => (s.as_bytes().to_vec(), true),
@@ -119,6 +123,7 @@ impl Sessions {
             enc: EncodingKey::from_secret(key.as_ref()),
             dec: DecodingKey::from_secret(key.as_ref()),
             persistent,
+            max_ttl,
             revoked: Mutex::new(HashMap::new()),
         }
     }
@@ -184,6 +189,10 @@ impl Sessions {
     pub fn verify(&self, aud: &str, token: &str) -> Result<Session, &'static str> {
         let p = self.verify_raw(aud, token)?;
         let bad = "malformed_token";
+        let (exp, iat) = (p["exp"].as_u64().ok_or(bad)?, p["iat"].as_u64().ok_or(bad)?);
+        if exp.saturating_sub(iat) > self.max_ttl {
+            return Err("session_ttl");
+        }
         let s = |v: &Value| v.as_str().map(str::to_string).ok_or(bad);
         let strs = |v: &Value| -> Result<Vec<String>, &'static str> {
             v.as_array().ok_or(bad)?.iter().map(s).collect()
@@ -279,7 +288,7 @@ mod tests {
 
     #[test]
     fn sessions_round_trip_and_are_bound_to_key_and_audience() {
-        let s = Sessions::new(None, "login");
+        let s = Sessions::new(None, "login", 3600);
         let scope = Scope {
             dashboards: Some(vec!["sales".into()]),
             vars: vec![("region".into(), "'EU'".into())],
@@ -290,7 +299,7 @@ mod tests {
         assert_eq!(back.claims, claims());
         // another audience, another server's key, a tampered payload
         assert_eq!(s.verify("embed", &tok), Err("bad_audience"));
-        let other = Sessions::new(None, "login");
+        let other = Sessions::new(None, "login", 3600);
         assert_eq!(other.verify("login", &tok), Err("bad_signature"));
         let parts: Vec<&str> = tok.split('.').collect();
         let mut p: Value = {
@@ -308,9 +317,9 @@ mod tests {
         };
         assert_eq!(s.verify("login", &forged), Err("bad_signature"));
         // the same secret gives the same key (replicas); labels separate uses
-        let a = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "login");
-        let b = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "login");
-        let c = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "embed");
+        let a = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "login", 3600);
+        let b = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "login", 3600);
+        let c = Sessions::new(Some("0123456789abcdef0123456789abcdef"), "embed", 3600);
         let (t, _) = a.issue("login", 60, &claims(), &Scope::default());
         assert!(b.verify("login", &t).is_ok());
         assert_eq!(c.verify("login", &t), Err("bad_signature"));
@@ -318,12 +327,19 @@ mod tests {
 
     #[test]
     fn expiry_and_revocation() {
-        let s = Sessions::new(None, "login");
+        let s = Sessions::new(None, "login", 3600);
         let t = s.sign_raw("login", super::super::jwt::now_s() - 1, json!({"sid": "x"}));
         assert_eq!(s.verify("login", &t), Err("expired"));
         let (t, sess) = s.issue("login", 60, &claims(), &Scope::default());
         s.revoke(&sess.sid, sess.exp);
         assert_eq!(s.verify("login", &t), Err("revoked"));
+        // a token signed with the key but claiming a longer life (#114)
+        let long = s.sign_raw(
+            "login",
+            super::super::jwt::now_s() + 7200,
+            json!({"sid": "y"}),
+        );
+        assert_eq!(s.verify("login", &long), Err("session_ttl"));
     }
 
     #[test]

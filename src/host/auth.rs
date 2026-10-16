@@ -202,6 +202,42 @@ pub struct JwtAuth {
     pub cookie: Option<String>,
 }
 
+/// Refuse a configuration in which one secret plays two roles (#114): the
+/// host application holding the embed link secret must not be able to sign
+/// login sessions, page sessions or proxy requests, and so on. Only the two
+/// session secrets (OIDC and embed) may be the same value — their keys are
+/// derived per use.
+fn distinct_secrets(items: &[&Value], env: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for it in items {
+        let Some(o) = it.as_object() else { continue };
+        let mode = o.get("mode").and_then(Value::as_str).unwrap_or("");
+        let keys: &[&str] = match mode {
+            "proxy" => &["shared_secret"],
+            "embed" => &["secret", "session_secret"],
+            "oidc" => &["session_secret"],
+            _ => &[],
+        };
+        for k in keys {
+            // Malformed values are reported by the method's own parser.
+            if let Ok(Some(v)) = session::secret(o, k, env, false) {
+                seen.push((format!("{mode}.{k}"), v));
+            }
+        }
+    }
+    for (i, (a, va)) in seen.iter().enumerate() {
+        for (b, vb) in &seen[i + 1..] {
+            let sessions = a.ends_with("session_secret") && b.ends_with("session_secret");
+            if !sessions && session::ct_eq(va, vb) {
+                return Err(format!(
+                    "auth: {a} and {b} must be different secrets (one party could otherwise sign for the other)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The configured login methods.
 #[derive(Default)]
 pub struct Auth {
@@ -246,6 +282,7 @@ impl Auth {
             Value::Array(_) => return Err("auth: a list of 1 to 5 login methods".into()),
             o => vec![o],
         };
+        distinct_secrets(&items, env)?;
         let mut a = Auth::default();
         for it in items {
             let o = it

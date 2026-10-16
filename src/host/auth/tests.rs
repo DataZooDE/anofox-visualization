@@ -417,6 +417,37 @@ fn public_assets_only_with_embed_and_only_code() {
 }
 
 #[test]
+fn one_secret_never_plays_two_roles() {
+    // #114: the embed link secret reused as the OIDC session secret would let
+    // the host application forge login cookies for anyone.
+    let f = idp(&[]);
+    let fetch = move |_: Option<&std::path::Path>| -> Result<Arc<dyn http::Fetch>, String> {
+        Ok(f.clone())
+    };
+    let env = |k: &str| match k {
+        "SAME" => Some(EMBED_SECRET.to_string()),
+        "OTHER" => Some("other-secret-0123456789abcdef0123456789".to_string()),
+        _ => None,
+    };
+    let oidc = |sess: &str| {
+        json!({"mode": "oidc", "issuer": ISS, "client_id": "dash",
+               "redirect_url": "https://dash.test/auth/callback", "session_secret_env": sess})
+    };
+    for bad in [
+        json!([{"mode": "embed", "secret_env": "SAME"}, oidc("SAME")]),
+        json!([{"mode": "embed", "secret": EMBED_SECRET}, oidc("SAME")]),
+        json!([{"mode": "embed", "secret_env": "SAME"}, {"mode": "proxy", "shared_secret_env": "SAME"}]),
+        json!([{"mode": "embed", "secret_env": "OTHER"}, {"mode": "proxy", "shared_secret_env": "SAME"}, oidc("SAME")]),
+    ] {
+        let e = Auth::from_json_with(&bad, &env, &fetch).unwrap_err();
+        assert!(e.contains("different secrets"), "{bad}: {e}");
+    }
+    // distinct secrets, and the two session secrets shared, are fine
+    let ok = json!([{"mode": "embed", "secret_env": "SAME", "session_secret_env": "OTHER"}, oidc("OTHER")]);
+    assert!(Auth::from_json_with(&ok, &env, &fetch).is_ok());
+}
+
+#[test]
 fn misconfiguration_fails_closed() {
     let f = idp(&[]);
     let fetch = move |_: Option<&std::path::Path>| -> Result<Arc<dyn http::Fetch>, String> {

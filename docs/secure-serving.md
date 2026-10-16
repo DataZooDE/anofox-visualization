@@ -590,8 +590,11 @@ cookie, a JWT cookie. A credential that is present but invalid is refused
 credential a page view (`/`, `/d/…`) is sent to `/auth/login` when `oidc` is
 configured, everything else is `401`. With `proxy` as the only method,
 behaviour is exactly P1. A broken `auth` (an unknown key, a missing or short
-secret, an `http://` issuer, an `HS*` or `none` algorithm, an unreadable key
-file, …) fails the server start.
+secret, one secret used for two roles, an `http://` issuer, an `HS*` or `none`
+algorithm, an unreadable key file, …) fails the server start. Every secret
+plays one role: the embed link secret, the proxy's shared secret and the
+session secrets must all differ (the OIDC and embed session secrets may be
+the same value; their keys are derived per use).
 
 ### JWT bearer tokens (`"mode": "jwt"`)
 
@@ -693,7 +696,7 @@ and links to `/d/sales?embed=<token>` (e.g. as an iframe's `src`).
 | `session_ttl_s` | `3600` | The page session's lifetime (≤ 1 day) |
 | `one_time` | `false` | Accept a link (it must carry a `jti`) once per server process |
 | `leeway_s` | `30` | Clock skew |
-| `session_secret_env` | random per start | Signs page sessions (must differ from `secret`: the host must not be able to mint sessions) |
+| `session_secret_env` | random per start | Signs page sessions. Must differ from `secret` (the host must not be able to mint sessions) |
 
 The server checks the signature (constant time), requires `exp`, refuses
 links valid for longer than `max_link_ttl_s`, unknown fields, claim names not
@@ -813,7 +816,7 @@ signed the request in.
 | A stolen or forged session cookie | Server-signed (HS256), `HttpOnly; Secure; SameSite=Lax; __Host-`; server-side expiry; logout revokes the id (per replica, documented); two session cookies → `401` |
 | A tampered or expired embed link; a link for one dashboard used on another; `?v.*` or a panel request overriding the link's variables | HMAC check in constant time; `exp` required and ≤ `max_link_ttl_s`; the link must name the dashboard; the page session is server-signed and scoped; locked variables replace the viewer's and are set after them (unit-tested order) |
 | A replayed embed link | Short `max_link_ttl_s`; `one_time` with `jti` (per process); documented: a link is a bearer credential until it expires |
-| The host application mints server sessions | `session_secret` must differ from the link `secret` |
+| The host application mints server sessions (#114) | The embed link `secret` must differ from every other configured secret — both session secrets and the proxy's — or the start fails; a session claiming a longer life (`exp - iat`) than its method's `session_ttl_s` is refused |
 | A leaked API key file; a guessed key; a revoked key still working | Only SHA-256 hashes of 256-bit keys; constant-time hash compare; the file is re-read on change (≤ 2 s); revoked/expired keys refused; a broken or group/world-writable file disables every key |
 | Keys, tokens or codes in logs | Never logged; the audit log names key ids and session ids only (unit-tested) |
 | A credential plus another to confuse the server | Exactly one credential counts per request, in a fixed order; an invalid one is refused, never skipped |

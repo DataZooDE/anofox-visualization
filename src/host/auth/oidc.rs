@@ -176,7 +176,7 @@ impl Oidc {
             redirect_url,
             scopes,
             session_ttl,
-            sessions: Sessions::new(session_secret.as_deref(), "login"),
+            sessions: Sessions::new(session_secret.as_deref(), "login", session_ttl),
             post_logout_url,
         })
     }

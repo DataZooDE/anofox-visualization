@@ -116,10 +116,11 @@ impl Embed {
                 claims.push(n.to_ascii_lowercase());
             }
         }
+        let session_ttl = secs("session_ttl_s", 3600, 86_400)?;
         Ok(Embed {
             key: DecodingKey::from_secret(s.as_bytes()),
             max_link_ttl: secs("max_link_ttl_s", 300, 86_400)?,
-            session_ttl: secs("session_ttl_s", 3600, 86_400)?,
+            session_ttl,
             leeway: secs("leeway_s", 30, super::jwt::MAX_LEEWAY_S)?,
             claims,
             one_time: match o.get("one_time") {
@@ -127,7 +128,7 @@ impl Embed {
                 Some(v) => v.as_bool().ok_or("auth.one_time must be a boolean")?,
             },
             seen: Seen::default(),
-            sessions: Sessions::new(session_secret.as_deref(), "embed"),
+            sessions: Sessions::new(session_secret.as_deref(), "embed", session_ttl),
         })
     }
 
