@@ -97,26 +97,31 @@ SELECT 4 AS siu_capacity ::NUMBER, 'Fraud-team capacity (claims / week)'::LABEL;
 SELECT DISTINCT lob ::MULTISELECT, 'Line of business'::LABEL FROM cl_scored ORDER BY lob;
 SELECT 1::ENDGROUP;
 
-SELECT 'Rules + description at your thresholds (arrow: change from rules only)'::GROUP;
+SELECT 'Rules + description at your thresholds'::GROUP;
 SELECT round(100 * avg((queue = 'Fast track')::INTEGER), 1)::PERCENT,
-       round(100 * avg((queue_rules = 'Fast track')::INTEGER), 1)::DELTA,
+       round(100 * avg((queue_rules = 'Fast track')::INTEGER), 1)::DELTA, 'abs'::DELTA_FORMAT, 'vs rules only'::DELTA_LABEL,
        'claims paid on the fast track'::LABEL
 FROM cl_routed();
 SELECT round(sum(cl_stopped(queue, fraud, amount_eur)))::METRIC,
-       round(sum(cl_stopped(queue_rules, fraud, amount_eur)))::DELTA,
+       round(sum(cl_stopped(queue_rules, fraud, amount_eur)))::DELTA, 'vs rules only'::DELTA_LABEL,
        'fraud stopped (€)'::LABEL
 FROM cl_routed();
 SELECT round(100 * count(*) FILTER (WHERE queue = 'Fraud review' AND fraud) / nullif(count(*) FILTER (WHERE queue = 'Fraud review'), 0), 1)::PERCENT,
        round(100 * count(*) FILTER (WHERE queue_rules = 'Fraud review' AND fraud) / nullif(count(*) FILTER (WHERE queue_rules = 'Fraud review'), 0), 1)::DELTA,
+       'abs'::DELTA_FORMAT, 'vs rules only'::DELTA_LABEL,
        'of fraud reviews find fraud'::LABEL
 FROM cl_routed();
 SELECT round(avg(cl_cost('Adjuster', fraud, amount_eur) - cl_cost(queue, fraud, amount_eur)))::METRIC,
-       round(avg(cl_cost('Adjuster', fraud, amount_eur) - cl_cost(queue_rules, fraud, amount_eur)))::DELTA,
-       'saved per claim vs. "all to an adjuster" (€)'::LABEL
+       round(avg(cl_cost('Adjuster', fraud, amount_eur) - cl_cost(queue_rules, fraud, amount_eur)))::DELTA, 'vs rules only'::DELTA_LABEL,
+       'saved per claim vs. "all to an adjuster" (€)'::LABEL,
+       'Back-tested on the investigated claims: handling (fast track 40 €, adjuster 220 €, fraud review 900 €), plus the fraud each queue misses (an adjuster stops 30 %, fraud review 90 %), plus 300 € goodwill for a genuine claimant held in fraud review.'::INFO
 FROM cl_routed();
-SELECT round(count(*) FILTER (WHERE queue = 'Fraud review') / cl_weeks(), 1)::METRIC,
+-- Green within the fraud team's capacity, amber up to a quarter over it, red beyond.
+WITH w AS (SELECT week, count(*) FILTER (WHERE queue = 'Fraud review') AS n FROM cl_routed() GROUP BY week)
+SELECT round(sum(n) / cl_weeks(), 1)::METRIC, list(n ORDER BY week)::SPARKLINE,
+       ('<=' || cl_cap() || ':good; <=' || 1.25 * cl_cap() || ':warn; bad')::THRESHOLDS,
        ('fraud reviews a week (capacity ' || cl_cap()::INTEGER || ')')::LABEL
-FROM cl_routed();
+FROM w;
 SELECT 1::ENDGROUP;
 
 -- ── 1 · Overview ─────────────────────────────────────────────────────────────
@@ -125,14 +130,15 @@ SELECT 'Overview'::TAB;
 SELECT 7::COL;
 SELECT 330::HEIGHT;
 WITH q AS (SELECT queue, policy, count(*) AS n FROM cl_policies() GROUP BY ALL)
-SELECT queue ::XAXIS, policy ::CATEGORY, n ::BARCHART,
+SELECT queue ::XAXIS, policy ::CATEGORY, n ::BARCHART, 'tween'::TRANSITION,
        'Where the claims go — the description adds fast-track and fraud-review cases'::TITLE
 FROM q ORDER BY max(n) FILTER (WHERE policy = 'rules + description') OVER (PARTITION BY queue) DESC, policy;
 
 SELECT 5::COL;
 SELECT 330::HEIGHT;
-SELECT cl_monday(week) ::XAXIS, count(*) FILTER (WHERE queue = 'Fraud review') ::BARCHART, cl_cap() ::REFLINE,
-       'Fraud reviews per week against the team''s capacity (line)'::TITLE
+SELECT cl_monday(week) ::XAXIS, count(*) FILTER (WHERE queue = 'Fraud review') ::BARCHART, 'tween'::TRANSITION,
+       cl_cap() ::REFLINE, 'capacity'::REFLINE_LABEL,
+       'Fraud reviews per week against the team''s capacity'::TITLE
 FROM cl_routed() GROUP BY week ORDER BY week;
 
 SELECT 12::COL;
@@ -142,6 +148,7 @@ WITH c AS (
     FROM range(5, 100, 5) r(t), cl_policies() p GROUP BY ALL),
 o AS (SELECT arg_min(th, cost) AS best, round(min(cost)) AS best_cost FROM c WHERE policy = 'rules + description')
 SELECT round(100 * c.th) ::XAXIS, c.policy ::CATEGORY, round(c.cost) ::LINECHART, '€'::YFORMAT, 100 * cl_siu() ::XLINE,
+       'Back-tested on the investigated claims: handling (fast track 40 €, adjuster 220 €, fraud review 900 €), plus the fraud each queue misses (an adjuster stops 30 %, fraud review 90 %, the fast track none), plus 300 € goodwill for a genuine claimant held in fraud review.'::INFO,
        ('Cost per claim by fraud-review threshold, P(fraud) % — rules + description is cheapest at ' || round(100 * o.best)::INTEGER
         || ' % (' || o.best_cost::INTEGER || ' € a claim); yours dashed')::TITLE
 FROM c, o ORDER BY c.th, c.policy;
@@ -199,11 +206,12 @@ FROM cl_metrics ORDER BY brier;
 SELECT 'Fraud review queue'::TAB;
 
 SELECT 12::COL;
-SELECT 'The queue at your thresholds, highest P(fraud) first. **Back-test:** the outcome column is what the investigation found later — it is not known when the claim arrives. Claims past the team''s weekly capacity are marked; they wait or go to an adjuster.'::MARKDOWN,
+SELECT 'The queue at your thresholds, highest P(fraud) first; click a reason to list only its claims. **Back-test:** the outcome column is what the investigation found later — it is not known when the claim arrives. Claims past the team''s weekly capacity are marked; they wait or go to an adjuster.'::MARKDOWN,
        'Reading the queue'::TITLE;
 
 SELECT 5::COL;
 SELECT 380::HEIGHT;
+SELECT 'reason'::SELECT_AS;
 SELECT reason ::XAXIS, count(*) ::BARCHART, 1::FLIP, 'Why claims land in fraud review (reasons ≥ 0.5 points)'::TITLE
 FROM (SELECT unnest(string_split(regexp_replace(reasons, ' \+[0-9.]+', '', 'g'), ' · ')) AS reason FROM cl_routed() WHERE queue = 'Fraud review')
 WHERE reason <> 'no red flags' GROUP BY ALL ORDER BY 2 DESC;
@@ -218,13 +226,15 @@ SELECT 12::COL;
 SELECT 'Amount: sum, P(fraud): mean'::TOTALS;
 SELECT 'Amount: top 3'::HIGHLIGHT;
 WITH q AS (SELECT *, row_number() OVER (PARTITION BY week ORDER BY p_fraud DESC) AS week_rank FROM cl_routed() WHERE queue = 'Fraud review')
-SELECT 'Fraud review queue at your thresholds'::TITLE,
+SELECT ('Fraud review queue at your thresholds' || CASE WHEN coalesce(getvariable('reason'), '') <> '' THEN ' — ' || getvariable('reason') ELSE '' END)::TITLE,
        claim_id AS "Claim" ::TABLE, cl_monday(week) AS "Week of", lob AS "Line", amount_eur AS "Amount", round(100 * p_fraud, 1) AS "P(fraud)" ::PERCENT,
        CASE WHEN week_rank <= cl_cap() THEN 'ok: within capacity' ELSE 'review: over capacity' END AS "Capacity" ::BADGE,
        reasons AS "Reasons (points)",
        CASE WHEN fraud THEN 'failed: fraud confirmed' ELSE 'ok: genuine' END AS "Outcome (back-test)" ::BADGE,
        description AS "Description"
-FROM q ORDER BY p_fraud DESC;
+FROM q
+WHERE coalesce(getvariable('reason'), '') = '' OR reasons LIKE '%' || getvariable('reason') || ' +%'
+ORDER BY p_fraud DESC;
 
 -- ── 4 · Fast track ───────────────────────────────────────────────────────────
 SELECT 'Fast track'::TAB;
@@ -285,6 +295,23 @@ SELECT ('**Recommendation.** Route on **rules + description** and send claims to
         || n || ' investigated claims, so re-fit them (`decide_fit_calibration`) on next quarter''s outcomes before trusting the savings.')::MARKDOWN,
        'What to do'::TITLE
 FROM r;
+
+SELECT 12::COL;
+SELECT 320::HEIGHT;
+WITH b AS (SELECT coalesce((SELECT best FROM cl_options()), 0.95) AS best),
+r AS (SELECT count(*) / cl_weeks() * 52 AS per_year,
+             avg(cl_cost('Adjuster', fraud, amount_eur)) AS c_today,
+             avg(cl_cost(queue_rules, fraud, amount_eur)) AS c_rules,
+             avg(cl_cost(queue, fraud, amount_eur)) AS c_desc,
+             avg(cl_cost(cl_queue(p_fraud, amount_eur, injury, b.best, cl_fast(), cl_limit()), fraud, amount_eur)) AS c_best
+      FROM cl_routed(), b)
+SELECT step ::XAXIS, round(eur, -2) ::WATERFALL, '€'::YFORMAT,
+       'Saving a year against "all to an adjuster", step by step'::TITLE
+FROM (SELECT 1 AS i, 'Rules, your thresholds' AS step, (c_today - c_rules) * per_year AS eur FROM r
+      UNION ALL SELECT 2, '+ reading the description', (c_rules - c_desc) * per_year FROM r
+      UNION ALL SELECT 3, '+ the cheapest threshold within capacity', (c_desc - c_best) * per_year FROM r
+      UNION ALL SELECT 4, 'Recommended', NULL)
+ORDER BY i;
 
 SELECT 12::COL;
 SELECT 'Cost per claim: bottom 1, Fraud stopped: top 1'::HIGHLIGHT;

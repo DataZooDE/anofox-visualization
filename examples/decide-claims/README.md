@@ -17,7 +17,10 @@ anofox extensions → Decide).
 
 1. **Overview** — where the claims go under *rules only* and *rules +
    description*, fraud reviews per week against the team's capacity, and the
-   cost per claim by fraud-review threshold (cheapest marked, yours dashed).
+   cost per claim by fraud-review threshold (cheapest marked, yours dashed;
+   the ⓘ spells out the cost model). The KPI strip compares with the rules
+   alone; the fraud-review tile turns amber or red when the weekly load passes
+   the team's capacity, with the load per week as a sparkline.
 2. **Fraud signals** — how well each signal separates fraud on its own
    (AUROC), the ROC of both scores, P(fraud) per claim and the model's raw
    answers scored with `decide_accuracy`, `decide_brier_score`, `decide_ece`.
@@ -25,13 +28,15 @@ anofox extensions → Decide).
    one (*"Is this claim suspicious?"*), and raw answers need calibration.
 3. **Fraud review queue** — the queue at your thresholds with each claim's
    reasons (weights in log-odds points), capacity badges and the back-tested
-   outcome.
+   outcome. A click on a reason bar lists only the claims with that reason.
 4. **Fast track** — share fast-tracked per line of business, why a claim is
    not fast-tracked, and the fraud that is paid without a review.
 5. **All claims** — the last four weeks by queue (subtotals, totals).
 6. **Decision** — a recommendation (the cheapest threshold the fraud team can
-   handle, the yearly saving against the rules alone) and the options side by
-   side.
+   handle, the yearly saving against the rules alone), a bridge of the yearly
+   saving against "all to an adjuster" step by step (rules → reading the
+   description → the cheapest threshold within capacity) and the options side
+   by side.
 
 ## How the score works
 
