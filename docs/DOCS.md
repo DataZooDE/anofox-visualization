@@ -891,6 +891,17 @@ just recoloured cards), and a PNG / HTML export keeps the variant on screen. The
 builder chrome (sidebar, editor, toolbar) stays neutral and product-branded; only
 the dashboard follows the dashboard theme.
 
+**In the builder's Edit mode** the name and logo are edited in the dashboard
+header: click the name (or Tab to it and press Enter), type, and press Enter or
+leave the field to save (Esc cancels); **Add logo** / **Change logo** takes an
+image URL (the `::LOGO` rules above) or an uploaded PNG, JPEG, GIF, WebP or SVG
+of up to 256 KB, embedded as a `data:image/` URL. Both write plain SQL: the
+`::DASHBOARD_TITLE` / `::LOGO` statement is updated, or added at the end of the
+`-- ── Look` section (else after the leading comments); an empty name or
+**Remove logo** deletes it. So the change travels with Share links, the HTML
+export and `dashboard` / `serve`. A computed title (`name::DASHBOARD_TITLE FROM
+…`) is replaced by the typed text. View mode shows the header as it is.
+
 **A theme file** is JSON; every key is optional and merges over `extends`
 (default `light`):
 
@@ -1548,7 +1559,8 @@ Edit the SQL, press **Run**, hover the marks. Load your own data with DuckDB’s
 readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
 
 The app opens in **View** (the dashboard); **✎ Edit** — or `?mode=edit` in the
-URL — shows the SQL editor.
+URL — shows the SQL editor, and makes the dashboard name and logo in the header
+editable in place (see *Themes, dark mode, branding and locale*).
 
 **Examples in the sidebar** (open one directly with `?dashboard=<name>`):
 
