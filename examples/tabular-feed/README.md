@@ -34,7 +34,8 @@ cd web && ../target/release/dashboard --check --strict ../examples/tabular-feed/
 
 It opens with the question and who asks it, then the inputs and a KPI strip
 for the selected delivery (decision, blocking checks and warnings against the
-night before, rows against the 7-day mean, missing EANs, arrival time). The
+night before, rows against the 7-day mean, missing EANs, arrival time; a
+failing blocking check or more missing EANs than allowed turns its tile red). The
 inputs only re-slice the stored tables:
 
 - **Delivery to judge** — every panel about "the delivery" (default: today);
@@ -43,8 +44,9 @@ inputs only re-slice the stored tables:
 - **Unusual price move from score (%)** — the isolation-forest cut-off;
 - **History** — the date range of the history charts.
 
-1. **Overview** — failing checks per night by kind, the verdicts over 60
-   nights and every delivery with a finding.
+1. **Overview** — failing checks per night by kind with the incidents
+   labelled, the verdicts over 60 nights and every delivery with a finding
+   (its link opens that night's go / no-go).
 2. **Schema & completeness** — empty values per column over the last 14
    deliveries (today's file has a different shape), `schema_check` and
    `profile_table` for today vs. yesterday.
