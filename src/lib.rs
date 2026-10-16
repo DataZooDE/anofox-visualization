@@ -1575,12 +1575,22 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     svg
 }
 
-/// A cell as the mark's `data-x` / `data-series` spells it.
+/// A cell as text: a string as is, a number without a trailing `.0`.
 pub(crate) fn key_text(v: &Value) -> Option<String> {
     match v {
         Value::Str(s) => Some(s.clone()),
         Value::Na => None,
         v => v.as_f64().map(|f| f.to_string()),
+    }
+}
+
+/// A cell as the mark's `data-x` / `data-series` spells it — ggplot-rs's
+/// own formatting: a date (time) as `2026-09-01` (`2026-09-01 09:30:00`),
+/// not its epoch seconds; a number rounded to 3 decimals.
+fn mark_key_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Na => None,
+        v => Some(ggplot_rs::format::format_value(v)).filter(|s| !s.is_empty()),
     }
 }
 
@@ -1601,7 +1611,7 @@ fn story_steps(cols: &[Column]) -> Option<String> {
         let Some(t) = v.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
             continue;
         };
-        let Some(k) = keys.values.get(i).and_then(key_text) else {
+        let Some(k) = keys.values.get(i).and_then(mark_key_text) else {
             continue;
         };
         if !steps.iter().any(|(sk, _)| *sk == k) {

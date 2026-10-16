@@ -241,3 +241,107 @@ fn tween_rides_on_the_root() {
     let svg = line(vec![Column::new("t", Role::Transition, strs(&["none"; 4]))]);
     assert!(!svg.contains("data-transition"));
 }
+
+/// Every `data-story` key of the SVG, unescaped.
+fn story_keys(svg: &str) -> Vec<String> {
+    let r = root(svg);
+    let a = r.find("data-story=\"").expect("data-story") + 12;
+    let json = r[a..a + r[a..].find('"').unwrap()]
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["k"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The `data-x` of every mark in the SVG.
+fn mark_xs(svg: &str) -> Vec<String> {
+    svg.split(" data-x=\"")
+        .skip(1)
+        .map(|s| s[..s.find('"').unwrap()].to_string())
+        .collect()
+}
+
+/// Each step key spells its x exactly as the marks' `data-x` does, so the
+/// browser lights them: dates and timestamps (not epoch seconds), numbers.
+#[test]
+fn story_keys_match_mark_x() {
+    let day = 86_400;
+    let sep1 = 1_788_220_800; // 2026-09-01
+    let cases: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "date",
+            (0..3).map(|i| Value::DateTime(sep1 + i * day)).collect(),
+        ),
+        (
+            "timestamp",
+            (0..3)
+                .map(|i| Value::DateTime(sep1 + i * day + 9 * 3600 + 30 * 60))
+                .collect(),
+        ),
+        ("integer", (1..4).map(Value::Integer).collect()),
+        ("float", nums(&[0.5, 1.12345, 2.25])),
+        (
+            "string date",
+            strs(&["2026-09-01", "2026-09-02", "2026-09-03"]),
+        ),
+    ];
+    for (name, xs) in cases {
+        for kind in [Kind::Bar, Kind::Point, Kind::Line] {
+            let cols = vec![
+                Column::new("x", Role::X, xs.clone()),
+                Column::new("v", Role::Value(kind), nums(&[1.0, 3.0, 2.0])),
+                Column::new(
+                    "s",
+                    Role::Story,
+                    vec![Value::Na, Value::Str("the second one".into()), Value::Na],
+                ),
+            ];
+            let svg = render(&cols, 480, 300).unwrap();
+            let keys = story_keys(&svg);
+            let marks = mark_xs(&svg);
+            assert_eq!(keys.len(), 1, "{name} {kind:?}");
+            assert!(
+                marks.contains(&keys[0]),
+                "{name} {kind:?}: key {:?} is no mark's data-x {marks:?}",
+                keys[0]
+            );
+        }
+    }
+    // a date axis spells the day
+    let cols = vec![
+        Column::new(
+            "x",
+            Role::X,
+            vec![Value::DateTime(sep1), Value::DateTime(sep1 + day)],
+        ),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.0])),
+        Column::new("s", Role::Story, strs(&["first", ""])),
+    ];
+    assert_eq!(
+        story_keys(&render(&cols, 480, 300).unwrap()),
+        ["2026-09-01"]
+    );
+    // 'series'::STORY_BY: a numeric series key as the marks' data-series
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W1", "W2", "W2"])),
+        Column::new("c", Role::Category, nums(&[1.0, 2.12345, 1.0, 2.12345])),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0, 4.0])),
+        Column::new("s", Role::Story, strs(&["", "the second series", "", ""])),
+        Column::new("b", Role::StoryBy, strs(&["series"; 4])),
+    ];
+    let svg = render(&cols, 480, 300).unwrap();
+    let series: Vec<String> = svg
+        .split(" data-series=\"")
+        .skip(1)
+        .map(|s| s[..s.find('"').unwrap()].to_string())
+        .collect();
+    let keys = story_keys(&svg);
+    assert!(
+        series.contains(&keys[0]),
+        "key {keys:?} is no mark's data-series {series:?}"
+    );
+}
