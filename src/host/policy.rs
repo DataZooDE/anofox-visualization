@@ -484,9 +484,13 @@ impl Walker<'_> {
             }
         }
         // A table reference: BASE_TABLE, JOIN, SUBQUERY, … (expressions have
-        // a "class"; query nodes have no "alias").
-        let is_ref =
-            o.contains_key("alias") && o.contains_key("sample") && !o.contains_key("class");
+        // a "class"; query nodes have no "alias"). Recognised by its type as
+        // well as its shape, so a serializer that leaves out default-valued
+        // keys can't hide one.
+        let is_ref = !o.contains_key("class")
+            && (o.contains_key("table_name")
+                || (o.contains_key("alias") && o.contains_key("sample"))
+                || matches!(ty.as_str(), "BASE_TABLE" | "TABLE_FUNCTION" | "SHOW_REF"));
         if o.contains_key("table_name") && !matches!(ty.as_str(), "BASE_TABLE" | "SHOW_REF") {
             return Err(format!("unsupported table reference ({ty})"));
         }
@@ -506,7 +510,7 @@ impl Walker<'_> {
                 other => return Err(format!("unsupported table reference ({other})")),
             }
         }
-        if (o.contains_key("cte_map") || o.contains_key("modifiers"))
+        if (o.contains_key("cte_map") || o.contains_key("modifiers") || ty.ends_with("_NODE"))
             && !matches!(
                 ty.as_str(),
                 "SELECT_NODE" | "SET_OPERATION_NODE" | "RECURSIVE_CTE_NODE"
@@ -1369,6 +1373,15 @@ mod tests {
         assert!(run(odd).is_err());
         let node =
             serde_json::json!({"type": "STATEMENT_NODE", "modifiers": [], "cte_map": {"map": []}});
+        assert!(run(node).is_err());
+        // A serializer that drops default-valued keys can't hide a table or
+        // a table function.
+        let bare = serde_json::json!({"type": "BASE_TABLE", "table_name": "payroll"});
+        assert!(run(bare).unwrap_err().contains("no access policy"));
+        let bare = serde_json::json!({"type": "TABLE_FUNCTION",
+            "function": {"class": "FUNCTION", "type": "FUNCTION", "function_name": "query"}});
+        assert!(run(bare).is_err());
+        let node = serde_json::json!({"type": "CTE_NODE"});
         assert!(run(node).is_err());
         // A recursive CTE outside its WITH can't be resolved.
         let rec = serde_json::json!({"type": "RECURSIVE_CTE_NODE", "modifiers": [],
