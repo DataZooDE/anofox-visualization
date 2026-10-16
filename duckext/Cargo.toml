@@ -22,6 +22,9 @@ tiny_http = "0.12"
 include_dir = "0.7"
 serde_json = "1"
 open = "5"
+# The access policy's `hash` mask: HMAC-SHA256 with the server's key (#49).
+hmac = "0.12"
+sha2 = "0.10"
 
 [build-dependencies]
 bindgen = "0.72"

@@ -314,9 +314,16 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
     "header_groups": "X-Forwarded-Groups",
     "claims": {"tenant": {"header": "X-Forwarded-Tenant", "required": true}}
   },
+  "policy": "/etc/anofox/policy.json",
   "log": "/var/log/anofox/requests.jsonl"
 }');
 ```
+
+With `auth`, the server needs an access policy (`policy`, or `policy.json`
+in the dashboard folder — see
+[Row and column policies](#row-and-column-policies-access-control-p2)), or an
+explicit `"policy": "none"` to rely on claim filters in the panels as below;
+otherwise it refuses to start.
 
 | `auth` key | Default | Meaning |
 |---|---|---|
@@ -590,11 +597,12 @@ Pass the path of the policy, or put it in `policy.json` next to the dashboards:
 A `policy.json` in the dashboard folder is enforced even without the option, so
 forgetting the option can't serve every row. **Keep the policy outside the
 dashboard folder** when the people who write dashboards should not decide who
-sees what: with `options.policy` a missing or broken file stops the start,
-while a deleted `policy.json` in the folder simply means no policy. The start
-message says `access policy on N table(s)`; with `auth` but no policy it
-warns; with a policy but no `auth` it warns that every viewer is anonymous
-(claims unset, so claim-based row filters return nothing).
+sees what: with `options.policy` a missing or broken file stops the start.
+With `auth` and no policy found (e.g. a `policy.json` deleted from the
+folder) the server refuses to start unless `"policy": "none"` says that the
+panels filter on the claims themselves. The start message says `access policy
+on N table(s)`; with a policy but no `auth` it warns that every viewer is
+anonymous (claims unset, so claim-based row filters return nothing).
 
 Under a policy, a viewer whose panel fails gets a generic message ("this
 panel could not be shown"); the DuckDB error, which might quote a value, goes
@@ -608,6 +616,12 @@ to the server log only.
 | `tables.*.rows` | **Required.** A SQL condition over the table's columns that a row must meet, or `true` for every row. It may read the viewer only through `getvariable('__claim_…')` with a literal name (a viewer variable is refused). It may use other tables (e.g. an entitlement table): those are read directly, without their own policy, and the panels still can't read them unless they have a rule too. It must be one condition: text that ends the `WHERE` (`… ) UNION SELECT …`) is refused. |
 | `tables.*.columns` | `{"<column>": "deny" \| "null" \| "mask" \| "hash"}` for everyone, or `{"allow_groups": [...], "allow_users": [...], "else": "deny" \| "null" \| "mask" \| "hash"}` (default `else`: `null`). Viewers in an allowed group (`__claim_groups`) or with an allowed user name (`__claim_user`) see the value. Columns not listed are visible. |
 | `table_functions` | File readers the dashboards may call (`read_parquet`, `read_csv`, `read_json`, … `glob`). Off by default. Files have no row or column policy (DuckDB still confines them to `options.data`). Nothing else can be allowed. |
+| `functions` | Extra scalar / aggregate functions the dashboards may call — an extension's (`st_area`, …), after you reviewed that they only compute on their arguments. A function the reviewed list denies can't be added. |
+
+The `hash` mask's key is random per server start; set
+`"policy_key_env": "ANOFOX_POLICY_KEY"` (the name of an environment variable
+holding ≥ 32 characters, e.g. `openssl rand -hex 32`) in the server options
+to keep hashes stable across restarts.
 
 Unknown keys are errors. The policy is checked against the snapshot at start
 and at every refresh: a table or column it names that doesn't exist, a row
@@ -620,7 +634,7 @@ start (a failing refresh keeps the previous snapshot in service,
 | `deny` | no column: it is not in the view (`SELECT *` leaves it out; a panel naming it fails for this viewer — lint below) |
 | `null` | `NULL` of the column's type: the panel keeps working |
 | `mask` | `'****'` (`NULL` stays `NULL`) |
-| `hash` | 16 hex digits of a keyed SHA-256 over the column's name and the value: equal values in one column stay equal, so grouping and `count(DISTINCT …)` work, but the value can't be looked up, and the same value hashes differently in another column. The key is random per server start (hashes change on a restart) |
+| `hash` | 16 hex digits of HMAC-SHA256(key, column ‖ value): equal values in one column stay equal, so grouping and `count(DISTINCT …)` work, but the value can't be looked up, and the same value hashes differently in another column. The server computes it in its own function (`__anofox_policy_hash`), so the key is never in SQL, plans, errors or logs. Random per server start unless `policy_key_env` is set |
 
 ### How it is enforced
 
@@ -653,17 +667,18 @@ start (the error names the dashboard and statement), when it:
   the policy's `table_functions` — so `query()`, `query_table()`,
   `json_execute_serialized_sql()`, the `duckdb_*()` / `pragma_*()` catalog
   functions, `sql_auto_complete()`, table macros and file readers;
-- calls a macro: every user macro, and the built-in ones that read the
-  catalog (`pg_get_viewdef`, `format_type`, …) — a macro body is not checked;
-- calls a function that reads the catalog, statistics, settings or a SQL text
-  of its own, outside the views: `json_serialize_plan` (it binds and optimizes
-  any SQL string against the raw tables — its plans would leak min/max
+- calls a user macro (its body is not checked);
+- calls a function that is not on the **allowlist**
+  (`src/host/policy_functions.txt`: every function of the pinned DuckDB
+  1.5.6, classified `allow` or `deny`) or in the policy's `functions`. Denied:
+  the functions that read the catalog, statistics, settings or a SQL text of
+  their own, outside the views — `json_serialize_plan` (it binds and
+  optimizes any SQL string against the raw tables; its plans would leak min/max
   statistics and the view definitions), `stats`, `json_serialize_sql`,
-  `json_deserialize_sql`, `current_setting`, `current_query`, `currval`,
-  `nextval`, `getenv`, … (`policy::DENIED_FUNCTIONS`). Every function of the
-  pinned DuckDB is on a reviewed list in the tests, so a DuckDB upgrade that
-  adds one fails the tests until it is reviewed. Functions of extensions you
-  `load` are not on that list: review them before serving with a policy;
+  `current_setting`, `current_query`, `currval`, `nextval`, `getenv`, the
+  `pg_*` / `has_*_privilege` catalog macros, … A function the list doesn't know
+  (a newer DuckDB, a loaded extension) is refused; a test fails when the
+  pinned DuckDB has an unclassified function;
 - uses time travel (`AT (VERSION => …)`), `SHOW TABLES` or `DESCRIBE` /
   `SUMMARIZE` of a table without a rule;
 - is not a query, `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>` or
@@ -683,9 +698,9 @@ all work, and all read the viewer's views. A viewer request that sets a
 (`policy/refused`), panels that use a column some viewers can't see
 (`policy/denied-column`: a warning, an error when nobody may see it — the
 panel then always fails) and masked columns (`policy/masked-column`, a note).
-The lint runs the `duckdb` CLI on PATH without the server's `load`
-extensions: use the same DuckDB version as the server. The server checks
-again at start and fails closed either way.
+It uses the server's classifier and function list; it runs the `duckdb` CLI
+on PATH to parse, and warns (`policy/duckdb-version`) when that is not the
+pinned 1.5.6. The server checks again at start and fails closed either way.
 
 ### Threat model (P2)
 
@@ -703,10 +718,10 @@ again at start and fails closed either way.
 | A row filter reads a viewer-settable variable | Refused at start: a row filter may read only `getvariable('__claim_…')` |
 | Row filter text that ends the `WHERE` clause | Refused: the filter must stay one condition |
 | A masked or denied column via `::PAGED` filter / sort / stats / distinct / profile | Paging wraps the rewritten panel; it sees `NULL` / `****` / a hash, a denied column doesn't exist |
-| Guessing a hashed value (dictionary attack on `md5(email)`) | The hash is keyed with a random per-server key and the column's name; functions that could show the key (`json_serialize_plan`) are refused |
-| Probing tables, statistics or the views' SQL through `json_serialize_plan('…')`, `stats(col)`, `current_setting`, `current_query` (#105) | Refused (`DENIED_FUNCTIONS`); every DuckDB function is on a reviewed list in the tests |
+| Guessing a hashed value (dictionary attack on `md5(email)`) | HMAC-SHA256 with a server key and the column's name, computed in Rust: the key never appears in SQL, plans, errors or logs |
+| Probing tables, statistics or the views' SQL through `json_serialize_plan('…')`, `stats(col)`, `current_setting`, `current_query` (#105) | Functions are allowlisted: those are `deny`, and anything not classified is refused |
 | An error message quotes a value the viewer may not see | Under a policy viewers get a generic error; the details go to the log |
-| A dashboard author deletes `policy.json` from the dashboard folder | Keep the policy outside it (`options.policy`: a missing file stops the start); `auth` without a policy warns at start |
+| A dashboard author deletes `policy.json` from the dashboard folder | With `auth`, no policy refuses the start unless `"policy": "none"`; keep the policy outside the folder (`options.policy`: a missing file stops the start) |
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (P1) |
 | A refresh brings a renamed table or column | The policy is re-checked; the refresh fails and the previous snapshot stays |
 | A rewrite bug lets a table through | The rewritten SQL is parsed again and verified against an allowlist of names; a mismatch stops the start |

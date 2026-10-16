@@ -163,7 +163,10 @@ impl Fx {
         v: &Viewer,
         wrap: impl Fn(&str) -> String,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
-        let mut sql = String::new();
+        // The server registers the keyed hash in Rust; here a stand-in.
+        let mut sql = String::from(
+            "CREATE TEMP MACRO __anofox_policy_hash(d, v) AS left(sha256('test-key:' || d || ':' || v), 16);\n",
+        );
         if let Some(u) = &v.user {
             sql.push_str(&format!(
                 "SET VARIABLE __claim_user = {};\n",
@@ -731,34 +734,74 @@ fn the_lint_reports_refusals_and_hidden_columns() {
 }
 
 #[test]
-fn every_duckdb_function_is_reviewed() {
+fn every_duckdb_function_is_classified() {
     let Some(f) = fx() else { return };
-    let reviewed: std::collections::HashSet<&str> =
-        include_str!("fixtures/duckdb_functions_reviewed.txt")
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.is_empty())
-            .collect();
+    let list = anofox_visualization::host::policy::functions();
     let rows = json(
         &f.db.file,
-        "LOAD json; SELECT DISTINCT function_name AS f FROM duckdb_functions() \
-         WHERE function_type IN ('scalar', 'aggregate')",
+        "LOAD json; SELECT DISTINCT function_type AS t, function_name AS f FROM duckdb_functions() \
+         WHERE function_type <> 'pragma' AND internal",
     )
     .unwrap();
-    let new: Vec<String> = col(&rows, "f")
+    let missing: Vec<String> = rows
         .iter()
-        .filter_map(|v| v.as_str())
-        // ICU's per-locale collations differ between builds (harmless).
-        .filter(|f| !reviewed.contains(f) && !f.starts_with("icu_collate_"))
-        .map(str::to_string)
+        .filter_map(|r| {
+            let (t, name) = (r["t"].as_str()?, r["f"].as_str()?);
+            let table = matches!(t, "table" | "table_macro");
+            // ICU's per-locale collations differ between builds (harmless).
+            (list.get(table, name).is_none() && !name.starts_with("icu_collate_"))
+                .then(|| format!("{t} {name}"))
+        })
         .collect();
     assert!(
-        new.is_empty(),
-        "functions not reviewed for the access policy (see the fixture's header): {new:?}"
+        missing.is_empty(),
+        "functions not classified for the access policy (src/host/policy_functions.txt): {missing:?}"
     );
-    for f in anofox_visualization::host::policy::DENIED_FUNCTIONS {
-        if f != "sql_auto_complete" {
-            assert!(reviewed.contains(f), "{f} is denied but not in the list");
-        }
+    // The functions #105 found stay denied, and the generators allowed.
+    for name in [
+        "json_serialize_plan",
+        "stats",
+        "current_setting",
+        "currval",
+        "getenv",
+    ] {
+        assert_eq!(list.get(false, name).map(|x| x.0), Some(false), "{name}");
+    }
+    for name in [
+        "query",
+        "query_table",
+        "duckdb_tables",
+        "read_csv",
+        "json_execute_serialized_sql",
+    ] {
+        assert_eq!(list.get(true, name).map(|x| x.0), Some(false), "{name}");
+    }
+    for name in ["range", "generate_series", "unnest"] {
+        assert_eq!(list.get(true, name).map(|x| x.0), Some(true), "{name}");
+    }
+}
+
+#[test]
+fn unknown_functions_need_the_policy() {
+    let Some(f) = fx() else { return };
+    f.refused(
+        &["SELECT my_ext_fn(id) FROM sales"],
+        "reviewed function list",
+    );
+    f.refused(
+        &["SELECT __anofox_policy_hash('x', 'y')"],
+        "reviewed function list",
+    );
+    let Some(g) = fx_with(r#"{"tables": {"sales": {"rows": true}}, "functions": ["my_ext_fn"]}"#)
+    else {
+        return;
+    };
+    assert!(g.rewrite(&["SELECT my_ext_fn(id) FROM sales"]).is_ok());
+    for bad in [
+        r#"{"functions": ["json_serialize_plan"]}"#,
+        r#"{"functions": ["__anofox_policy_hash"]}"#,
+    ] {
+        assert!(Policy::parse(bad).is_err(), "{bad}");
     }
 }
 

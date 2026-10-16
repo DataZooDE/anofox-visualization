@@ -1975,15 +1975,20 @@ variables `getvariable('__claim_user')` and, if the proxy sends groups and
 panel can filter rows by the viewer
 (`WHERE region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))`).
 Viewers can't set `__claim_*`, and cached results are kept per viewer.
-`options.log` writes a JSON-lines request log.
+`options.log` writes a JSON-lines request log. With `auth`, pass an access
+policy (below) — or `"policy": "none"` to rely on the panels' own claim
+filters; otherwise the server refuses to start.
 
-**Row and column policies.** Instead of a claim filter in every panel, put a
-`policy.json` next to the dashboards (or pass `options.policy`): every table a
+**Row and column policies.** Instead of a claim filter in every panel, pass
+`options.policy` (a path; keep it outside the dashboard folder) or put a
+`policy.json` next to the dashboards: every table a
 dashboard reads needs a rule — a row condition over the claims and per-column
 `deny` / `null` / `mask` / `hash` unless the viewer is in an allowed group.
 The server rewrites every statement to read per-viewer views and refuses to
 start when a statement could get around them (a table without a rule,
-`query()`, catalog functions, macros, database-qualified names, …).
+`query()`, catalog functions, macros, database-qualified names, a function
+not on the reviewed allowlist, …). Under a policy, viewers see generic panel
+errors (details in the server log).
 
 ```json
 {"tables": {

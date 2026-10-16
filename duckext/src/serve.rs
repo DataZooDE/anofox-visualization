@@ -425,6 +425,22 @@ pub struct LockedOptions {
     /// Row and column access policy (`policy`: a JSON file; `policy.json`
     /// next to the dashboards is used when the option is not given).
     pub policy: Option<Arc<Policy>>,
+    /// `"policy": "none"`: serve without a policy although `auth` is set
+    /// (otherwise that combination refuses to start).
+    pub policy_none: bool,
+    /// Key of the policy's `hash` mask (`policy_key_env`; random per server
+    /// start when not given).
+    pub policy_key: Option<PolicyKey>,
+}
+
+/// The `hash` mask's HMAC key. Never printed.
+#[derive(Clone)]
+pub struct PolicyKey(Arc<Vec<u8>>);
+
+impl std::fmt::Debug for PolicyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PolicyKey(…)")
+    }
 }
 
 impl Default for LockedOptions {
@@ -448,6 +464,8 @@ impl Default for LockedOptions {
             memory_limit: None,
             duckdb_threads: None,
             policy: None,
+            policy_none: false,
+            policy_key: None,
         }
     }
 }
@@ -545,10 +563,22 @@ impl LockedOptions {
                 }
                 "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
                 "policy" => {
-                    let path = val.as_str().filter(|p| !p.trim().is_empty()).ok_or("options.policy must be the path of a policy file")?;
-                    o.policy = Some(Arc::new(read_policy(Path::new(path))?));
+                    let path = val.as_str().filter(|p| !p.trim().is_empty()).ok_or("options.policy must be the path of a policy file, or \"none\"")?;
+                    if path == "none" {
+                        o.policy_none = true;
+                    } else {
+                        o.policy = Some(Arc::new(read_policy(Path::new(path))?));
+                    }
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy)")),
+                "policy_key_env" => {
+                    let name = val.as_str().ok_or("options.policy_key_env must be the name of an environment variable")?;
+                    let key = std::env::var(name).map_err(|_| format!("options.policy_key_env: environment variable '{name}' is not set"))?;
+                    if key.len() < 32 {
+                        return Err("options.policy_key_env: the key must be at least 32 characters (e.g. `openssl rand -hex 32`)".into());
+                    }
+                    o.policy_key = Some(PolicyKey(Arc::new(key.into_bytes())));
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env)")),
             }
         }
         if !o.path_vars.is_empty() && o.data.is_none() {
@@ -674,8 +704,14 @@ struct Enforced {
 /// Check the access policy against a new snapshot and rewrite every dashboard
 /// for it. Fail closed: anything the policy refuses stops the start (or the
 /// refresh — the previous snapshot then stays in service).
-fn enforce(snap: &mut Snapshot, dashboards: &[Dash], policy: &Policy) -> Result<(), String> {
+fn enforce(
+    snap: &mut Snapshot,
+    dashboards: &[Dash],
+    policy: &Policy,
+    key: &PolicyKey,
+) -> Result<(), String> {
     let c = snap.db.connect()?;
+    crate::register_policy_hash(&c, key.0.clone())?;
     let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
     let enf = Enforcer::compile(policy, &mut duck, &snap.default_db).map_err(|e| {
         if e.contains("json_serialize_sql") {
@@ -721,8 +757,8 @@ impl Locked {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
             build_snapshot(&conn, &self.opts, &self.loads)?
         };
-        if let Some(p) = &self.opts.policy {
-            enforce(&mut snap, &self.dashboards, p)?;
+        if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
+            enforce(&mut snap, &self.dashboards, p, k)?;
         }
         Ok((snap, warnings))
     }
@@ -787,13 +823,22 @@ pub fn start_locked(
     if opts.policy.is_some() {
         // json_serialize_sql: the policy rewrite parses with DuckDB.
         loads.push("json".into());
+        if opts.policy_key.is_none() {
+            let k = format!("{}{}", sv::random_token(), sv::random_token());
+            opts.policy_key = Some(PolicyKey(Arc::new(k.into_bytes())));
+        }
+    } else if opts.auth.is_some() && !opts.policy_none {
+        // A login without a policy relies on every panel filtering on the
+        // claims; a policy.json deleted from the dashboard folder must not
+        // silently get there.
+        return Err("anofox-visualization: `auth` is set but no access policy was found (options.policy, or policy.json in the dashboard folder) — pass \"policy\": \"none\" to serve with per-panel claim filters only".into());
     }
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &loads)?
     };
-    if let Some(p) = &opts.policy {
-        enforce(&mut snap, &dashboards, p)?;
+    if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
+        enforce(&mut snap, &dashboards, p, k)?;
     }
     let policy_note = match (&opts.policy, &opts.auth) {
         (Some(p), Some(_)) => format!(
@@ -804,8 +849,7 @@ pub fn start_locked(
             "; access policy on {} table(s) — every other table is refused; WARNING: no auth, so every viewer is anonymous (no claims)",
             p.tables.len()
         ),
-        // A deleted policy.json next to the dashboards must not go unnoticed.
-        (None, Some(_)) => "; WARNING: no access policy — panels must filter on the claims themselves (put the policy outside the dashboard folder and pass options.policy)".into(),
+        (None, Some(_)) => "; no access policy (\"policy\": \"none\") — panels must filter on the claims themselves".into(),
         (None, None) => String::new(),
     };
     // Validate every statement with DuckDB's parser: exactly one each.
@@ -1864,6 +1908,21 @@ mod tests {
         std::fs::write(&f, r#"{"tables": {"sales": {}}}"#).unwrap();
         assert!(LockedOptions::parse(Some(&opt(&f))).is_err());
         assert!(LockedOptions::parse(Some(r#"{"policy":""}"#)).is_err());
+        let o = LockedOptions::parse(Some(r#"{"policy":"none"}"#)).unwrap();
+        assert!(o.policy_none && o.policy.is_none());
+        // The hash key: from the environment, long enough, never printed.
+        std::env::set_var("ANOFOX_TEST_POLICY_KEY", "k".repeat(40));
+        std::env::set_var("ANOFOX_TEST_POLICY_KEY_SHORT", "short");
+        let o =
+            LockedOptions::parse(Some(r#"{"policy_key_env":"ANOFOX_TEST_POLICY_KEY"}"#)).unwrap();
+        assert!(!format!("{o:?}").contains(&"k".repeat(40)));
+        for bad in [
+            r#"{"policy_key_env":"ANOFOX_TEST_POLICY_KEY_SHORT"}"#,
+            r#"{"policy_key_env":"ANOFOX_TEST_NO_SUCH_VAR"}"#,
+        ] {
+            let e = LockedOptions::parse(Some(bad)).unwrap_err();
+            assert!(!e.contains("short"), "{e}");
+        }
     }
 
     #[test]

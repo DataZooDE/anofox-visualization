@@ -35,7 +35,7 @@
 //! queries, so the extension, the `dashboard --check` lint and the tests share
 //! it.
 
-use crate::host::serving::{quote_ident, random_token, sql_string_literal, valid_ident};
+use crate::host::serving::{quote_ident, sql_string_literal, valid_ident};
 use crate::sql::lex::{self, TokKind};
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
@@ -48,32 +48,66 @@ pub const VIEW_PREFIX: &str = "__anofox_rls_";
 /// A CTE is renamed to `__anofox_cte_<n>`.
 pub const CTE_PREFIX: &str = "__anofox_cte_";
 
-/// Table functions a dashboard may always call: generators over values.
-const SAFE_TABLE_FUNCTIONS: [&str; 3] = ["range", "generate_series", "unnest"];
-/// Scalar functions a dashboard may never call under a policy: they read the
-/// catalog, statistics, settings or a SQL text of their own, outside the views
-/// — `json_serialize_plan('SELECT … FROM t WHERE n > 41')` binds and optimizes
-/// against the raw tables (min/max statistics, the hash key in a view), and
-/// `stats(col)` shows the base table's statistics. `tests/policy_duckdb.rs`
-/// checks every function of the pinned DuckDB against a reviewed list, so a
-/// new one fails the tests until it is reviewed.
-pub const DENIED_FUNCTIONS: [&str; 15] = [
-    "json_serialize_plan",
-    "json_serialize_sql",
-    "json_deserialize_sql",
-    "stats",
-    "current_setting",
-    "current_query",
-    "current_query_id",
-    "currval",
-    "nextval",
-    "getenv",
-    "write_log",
-    "in_search_path",
-    "current_schemas",
-    "parse_duckdb_log_message",
-    "sql_auto_complete",
-];
+/// Every function of the pinned DuckDB (+ json), classified: under a policy
+/// a dashboard may call an `allow` function only — an **allowlist**, so a
+/// function this list doesn't know (a new DuckDB, an extension) is refused
+/// until it is reviewed. `deny` = it reads the catalog, statistics, settings,
+/// files or a SQL text of its own outside the policy's views
+/// (`json_serialize_plan`, `stats`, `current_setting`, `query`, …, #105).
+/// `tests/policy_duckdb.rs` fails when the pinned DuckDB has a function the
+/// list doesn't classify.
+pub const FUNCTION_LIST: &str = include_str!("policy_functions.txt");
+
+/// The DuckDB version [`FUNCTION_LIST`] was reviewed against (and CI pins).
+pub const PINNED_DUCKDB: &str = "v1.5.6";
+
+/// The keyed hash behind the `hash` mask: `__anofox_policy_hash(<column id>,
+/// <value>)`, registered by the server with its secret key (HMAC-SHA256), so
+/// the key never appears in SQL, plans, errors or logs.
+pub const HASH_FUNCTION: &str = "__anofox_policy_hash";
+
+/// The classified functions: `(kind, name) → (allowed, reason)`.
+pub struct FunctionList {
+    entries: std::collections::HashMap<(bool, String), (bool, String)>,
+}
+
+impl FunctionList {
+    /// `(is_table_function, name)` → `Some((allowed, reason))`, `None` if
+    /// not classified.
+    pub fn get(&self, table: bool, name: &str) -> Option<(bool, &str)> {
+        self.entries
+            .get(&(table, name.to_ascii_lowercase()))
+            .map(|(a, r)| (*a, r.as_str()))
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = (bool, &str)> {
+        self.entries.keys().map(|(t, n)| (*t, n.as_str()))
+    }
+}
+
+/// [`FUNCTION_LIST`], parsed once.
+pub fn functions() -> &'static FunctionList {
+    static LIST: std::sync::OnceLock<FunctionList> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut entries = std::collections::HashMap::new();
+        for line in FUNCTION_LIST.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (spec, reason) = line.split_once('#').unwrap_or((line, ""));
+            let mut w = spec.split_whitespace();
+            let (Some(kind), Some(verdict), Some(name)) = (w.next(), w.next(), w.next()) else {
+                continue;
+            };
+            entries.insert(
+                (kind == "table", name.to_ascii_lowercase()),
+                (verdict == "allow", reason.trim().to_string()),
+            );
+        }
+        FunctionList { entries }
+    })
+}
 
 /// File readers a policy may allow (`"table_functions"`). Files have no row
 /// or column policy; DuckDB still confines them to the server's data folder.
@@ -194,9 +228,9 @@ pub struct Policy {
     pub tables: Vec<TablePolicy>,
     /// Extra table functions allowed (file readers only).
     pub table_functions: Vec<String>,
-    /// Key of the `hash` mask: random per parse (so per server, stable
-    /// across snapshot refreshes), never from the file.
-    pub hash_key: String,
+    /// Extra scalar functions allowed (an extension's, reviewed by the
+    /// operator); never one the function list denies.
+    pub functions: Vec<String>,
 }
 
 /// The viewer a request runs for (the claims of issue #48). Without a login
@@ -238,6 +272,7 @@ impl Policy {
         let o = v.as_object().ok_or("policy must be a JSON object")?;
         let mut tables = Vec::new();
         let mut table_functions = Vec::new();
+        let mut functions = Vec::new();
         for (k, val) in o {
             match k.as_str() {
                 "tables" => {
@@ -260,9 +295,20 @@ impl Policy {
                         table_functions.push(f);
                     }
                 }
+                "functions" => {
+                    for f in str_list(val, "policy.functions")? {
+                        let f = f.to_ascii_lowercase();
+                        if self::functions().get(false, &f).is_some_and(|(ok, _)| !ok)
+                            || f.starts_with(RESERVED_PREFIX)
+                        {
+                            return Err(format!("policy.functions: '{f}' can't be allowed"));
+                        }
+                        functions.push(f);
+                    }
+                }
                 other => {
                     return Err(format!(
-                        "policy: unknown key '{other}' (tables, table_functions)"
+                        "policy: unknown key '{other}' (tables, table_functions, functions)"
                     ))
                 }
             }
@@ -277,7 +323,7 @@ impl Policy {
         Ok(Policy {
             tables,
             table_functions,
-            hash_key: random_token(),
+            functions,
         })
     }
 
@@ -522,7 +568,24 @@ impl Walker<'_> {
         if is_ref {
             match ty.as_str() {
                 "BASE_TABLE" => return self.table(o),
-                "TABLE_FUNCTION" => self.table_function(o)?,
+                "TABLE_FUNCTION" => {
+                    self.table_function(o)?;
+                    // The arguments, not the name: it is a table function,
+                    // not a scalar one.
+                    if let Some(Value::Object(f)) = o.get_mut("function") {
+                        for (k, x) in f.iter_mut() {
+                            if k != "function_name" {
+                                self.walk(x)?;
+                            }
+                        }
+                    }
+                    for (k, x) in o.iter_mut() {
+                        if k != "function" {
+                            self.walk(x)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 "SHOW_REF" => {
                     if o.get("query").is_none_or(Value::is_null) {
                         return Err(
@@ -721,7 +784,7 @@ impl Walker<'_> {
         let qualified =
             f.is_some_and(|f| !s(f, "schema").is_empty() || !s(f, "catalog").is_empty());
         let ok = !qualified
-            && (SAFE_TABLE_FUNCTIONS.contains(&name.as_str())
+            && (functions().get(true, &name).is_some_and(|(ok, _)| ok)
                 || self.enf.policy.table_functions.contains(&name));
         if ok {
             Ok(())
@@ -734,15 +797,26 @@ impl Walker<'_> {
 
     fn function(&mut self, name: &str, o: &Map<String, Value>) -> Result<(), String> {
         let lower = name.to_ascii_lowercase();
-        if DENIED_FUNCTIONS.contains(&lower.as_str()) {
-            return Err(format!(
-                "'{name}()' is not allowed under the access policy (it reads the catalog, statistics, settings or SQL text outside the policy's views)"
-            ));
-        }
         if self.enf.denied_functions.contains(&lower) {
             return Err(format!(
                 "'{name}()' is a macro: its body would run outside the access policy"
             ));
+        }
+        match functions().get(false, &lower) {
+            Some((true, _)) => {}
+            Some((false, why)) => {
+                return Err(format!(
+                    "'{name}()' is not allowed under the access policy ({why})"
+                ))
+            }
+            // ICU's per-locale collations differ between builds.
+            None if lower.starts_with("icu_collate_") => {}
+            None if self.enf.policy.functions.contains(&lower) => {}
+            None => {
+                return Err(format!(
+                    "'{name}()' is not allowed under the access policy: it is not on the reviewed function list (an extension's function can be allowed with the policy's \"functions\")"
+                ))
+            }
         }
         if self.mode == Mode::Rows && lower == "getvariable" {
             let arg = o
@@ -1108,19 +1182,12 @@ impl Enforcer {
                         Mask::Mask => replace.push(format!(
                             "(CASE WHEN {q} IS NULL THEN NULL ELSE '****' END) AS {q}"
                         )),
-                        // Keyed and separated by column: the same value
-                        // hashes differently in another column.
+                        // A keyed HMAC, separated by column (the same value
+                        // hashes differently in another column); the key
+                        // lives in the server, not in this SQL.
                         Mask::Hash => replace.push(format!(
-                            "left(sha256({} || CAST({q} AS VARCHAR)), 16) AS {q}",
-                            sql_string_literal(&format!(
-                                "{}:{}:",
-                                self.policy.hash_key,
-                                serde_json::json!([
-                                    t.schema.to_ascii_lowercase(),
-                                    t.table.to_ascii_lowercase(),
-                                    c.column.to_ascii_lowercase()
-                                ])
-                            ))
+                            "{HASH_FUNCTION}({}, CAST({q} AS VARCHAR)) AS {q}",
+                            sql_string_literal(&hash_domain(t, &c.column))
                         )),
                     }
                 }
@@ -1157,6 +1224,17 @@ impl Enforcer {
             })
             .collect()
     }
+}
+
+/// The column id that separates the `hash` mask's inputs:
+/// `["schema","table","column"]` (lower case, JSON — unambiguous).
+pub fn hash_domain(t: &TablePolicy, column: &str) -> String {
+    serde_json::json!([
+        t.schema.to_ascii_lowercase(),
+        t.table.to_ascii_lowercase(),
+        column.to_ascii_lowercase()
+    ])
+    .to_string()
 }
 
 /// Is `node` still `SELECT * FROM <target> WHERE <condition>` — nothing
@@ -1354,10 +1432,7 @@ mod tests {
     /// `tests/policy_duckdb.rs`).
     fn enforcer(policy: &str) -> Enforcer {
         Enforcer {
-            policy: Policy {
-                hash_key: "k".into(),
-                ..Policy::parse(policy).unwrap()
-            },
+            policy: Policy::parse(policy).unwrap(),
             default_db: "db".into(),
             bodies: Vec::new(),
             denied_functions: ["pg_get_viewdef".to_string()].into_iter().collect(),
@@ -1520,7 +1595,7 @@ mod tests {
         assert!(v.contains("(CASE WHEN false THEN \"salary\" END) AS \"salary\""));
         assert!(v.contains("ELSE '****' END) AS \"email\""));
         assert!(v.contains(
-            "left(sha256('k:[\"main\",\"emp\",\"name\"]:' || CAST(\"name\" AS VARCHAR)), 16) AS \"name\""
+            "__anofox_policy_hash('[\"main\",\"emp\",\"name\"]', CAST(\"name\" AS VARCHAR)) AS \"name\""
         ));
         let hr = Viewer {
             user: Some("x".into()),
@@ -1528,7 +1603,7 @@ mod tests {
         };
         let v = &enf.view_statements(&[0], &hr)[0];
         assert!(!v.contains("\"salary\" END"), "{v}");
-        assert!(!v.contains("sha256"), "{v}");
+        assert!(!v.contains("__anofox_policy_hash"), "{v}");
         assert!(v.contains("EXCLUDE (\"ssn\")"));
     }
 }

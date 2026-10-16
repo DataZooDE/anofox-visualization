@@ -53,7 +53,8 @@ pub struct Diagnostic {
     /// (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
-    /// (errors) | `policy/denied-column` | `policy/masked-column` (a note).
+    /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
+    /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.

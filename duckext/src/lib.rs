@@ -292,6 +292,46 @@ mod serve_fns {
         })
     }
 
+    /// `__anofox_policy_hash(column id, value)` — the access policy's `hash`
+    /// mask: the first 8 bytes of HMAC-SHA256(key, column id ‖ 0 ‖ value), as
+    /// hex. The key is the function's extra_info: it never appears in SQL,
+    /// plans, errors or logs.
+    pub(super) unsafe extern "C" fn policy_hash_fn(
+        info: duckdb_function_info,
+        input: duckdb_data_chunk,
+        output: duckdb_vector,
+    ) {
+        guarded(info, || {
+            let key = capi!(duckdb_scalar_function_get_extra_info)(info) as *const Arc<Vec<u8>>;
+            if key.is_null() {
+                return Err("no key".into());
+            }
+            let key = &**key;
+            per_row(input, output, 2, |d, i| {
+                Ok(policy_hmac(key, &str_at(d[0], i)?, &str_at(d[1], i)?))
+            })
+        })
+    }
+
+    pub(super) fn policy_hmac(key: &[u8], domain: &str, value: &str) -> String {
+        use hmac::{Hmac, Mac};
+        let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
+            .expect("HMAC takes a key of any length");
+        m.update(domain.as_bytes());
+        m.update(&[0]);
+        m.update(value.as_bytes());
+        m.finalize().into_bytes()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    pub(super) unsafe extern "C" fn drop_key(p: *mut c_void) {
+        if !p.is_null() {
+            drop(Box::from_raw(p as *mut Arc<Vec<u8>>));
+        }
+    }
+
     /// `anofox_serve_stop(port)`.
     pub(super) unsafe extern "C" fn anofox_serve_stop_fn(
         info: duckdb_function_info,
@@ -301,6 +341,37 @@ mod serve_fns {
         guarded(info, || {
             per_row(input, output, 1, |d, i| serve::stop(port_at(d[0], i)?))
         })
+    }
+}
+
+/// Register the access policy's keyed hash ([`anofox_visualization::host::policy::HASH_FUNCTION`])
+/// on a snapshot connection.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn register_policy_hash(
+    conn: &db::Conn,
+    key: std::sync::Arc<Vec<u8>>,
+) -> Result<(), String> {
+    let name = CString::new(anofox_visualization::host::policy::HASH_FUNCTION)
+        .map_err(|_| "bad function name")?;
+    let make = || Box::into_raw(Box::new(key.clone())) as *mut c_void;
+    let ok = unsafe {
+        register_scalar(
+            conn.raw,
+            &name,
+            &[&[
+                duckdb_type::DUCKDB_TYPE_VARCHAR,
+                duckdb_type::DUCKDB_TYPE_VARCHAR,
+            ]],
+            serve_fns::policy_hash_fn,
+            false,
+            Some(&make),
+            Some(serve_fns::drop_key),
+        )
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("could not register the access policy's hash function".into())
     }
 }
 
@@ -507,5 +578,48 @@ pub unsafe extern "C" fn anofox_visualization_init_c_api(
             }
             false
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod policy_hash_tests {
+    use super::serve_fns::policy_hmac;
+
+    #[test]
+    fn keyed_and_separated_by_column() {
+        let h = policy_hmac(b"key-one", "[\"main\",\"emp\",\"name\"]", "Ann");
+        assert_eq!(h.len(), 16);
+        assert!(h.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            h,
+            policy_hmac(b"key-one", "[\"main\",\"emp\",\"name\"]", "Ann")
+        );
+        assert_ne!(
+            h,
+            policy_hmac(b"key-two", "[\"main\",\"emp\",\"name\"]", "Ann")
+        );
+        assert_ne!(
+            h,
+            policy_hmac(b"key-one", "[\"main\",\"emp\",\"email\"]", "Ann")
+        );
+        assert_ne!(
+            h,
+            policy_hmac(b"key-one", "[\"main\",\"emp\",\"name\"]", "Anna")
+        );
+        // The separator: ("a", "bc") and ("ab", "c") differ.
+        assert_ne!(policy_hmac(b"k", "a", "bc"), policy_hmac(b"k", "ab", "c"));
+        // HMAC-SHA256 (RFC 4231 test case 2), first 8 bytes.
+        assert_eq!(
+            {
+                use hmac::{Hmac, Mac};
+                let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(b"Jefe").unwrap();
+                m.update(b"what do ya want for nothing?");
+                m.finalize().into_bytes()[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            },
+            "5bdcc146bf60754e"
+        );
     }
 }

@@ -496,6 +496,28 @@ fn policy_diags(script: &str, db: &str, path: &str) -> Vec<lint::Diagnostic> {
             })
             .collect())
     };
+    // The function list was reviewed against the pinned DuckDB; another
+    // version parses (and lists macros) its own way.
+    let mut out = Vec::new();
+    if let Ok(v) = duck("SELECT version()::VARCHAR") {
+        let v = v
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten())
+            .unwrap_or_default();
+        if v != anofox_visualization::host::policy::PINNED_DUCKDB {
+            out.push(lint::Diagnostic {
+                severity: Severity::Warning,
+                stmt: 0,
+                code: "policy/duckdb-version",
+                message: format!(
+                    "the duckdb CLI on PATH is {v}, the server's is {}: parse trees and the built-in macros can differ (the server checks again at start)",
+                    anofox_visualization::host::policy::PINNED_DUCKDB
+                ),
+                sql: String::new(),
+            });
+        }
+    }
     let default_db = match duck("SELECT current_database()::VARCHAR") {
         Ok(r) => r
             .into_iter()
@@ -505,9 +527,10 @@ fn policy_diags(script: &str, db: &str, path: &str) -> Vec<lint::Diagnostic> {
         Err(e) => return fail(e),
     };
     match Enforcer::compile(&policy, &mut duck, &default_db) {
-        Ok(enf) => lint::check_policy(script, &enf, &mut duck),
-        Err(e) => fail(e),
+        Ok(enf) => out.extend(lint::check_policy(script, &enf, &mut duck)),
+        Err(e) => out.extend(fail(e)),
     }
+    out
 }
 
 /// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
