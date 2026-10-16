@@ -52,6 +52,9 @@ struct Opts {
     /// `--theme`: default theme (name, `a+b`, or a `.json` file) when a
     /// dashboard sets no `::THEME`.
     theme: Option<String>,
+    /// `--allow-host` (repeatable): extra `Host` names accepted besides the
+    /// loopback names; `*` disables the check.
+    allow_hosts: Vec<String>,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -60,7 +63,7 @@ fn theme_default() -> Option<&'static str> {
     THEME.get().and_then(|t| t.as_deref())
 }
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -80,6 +83,7 @@ fn parse_args() -> Opts {
         timeout: Duration::from_secs(30),
         threads: 4,
         theme: None,
+        allow_hosts: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
@@ -112,6 +116,10 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|| usage("--bind needs an address"))
             }
             "--cache" => o.cache_secs = num(args.next(), "--cache"),
+            "--allow-host" => o.allow_hosts.push(
+                args.next()
+                    .unwrap_or_else(|| usage("--allow-host needs a host name")),
+            ),
             "--max-rows" => o.max_rows = num(args.next(), "--max-rows").max(1) as usize,
             "--timeout" => o.timeout = Duration::from_secs(num(args.next(), "--timeout").max(1)),
             "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
@@ -380,6 +388,8 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
 }
 
 struct ServeState {
+    port: u16,
+    allow_hosts: Vec<String>,
     db: String,
     dashboards: Vec<Dashboard>,
     cache_ttl: Duration,
@@ -436,6 +446,15 @@ fn serve_dashboards(dir: &str, o: &Opts) {
         );
     }
     let st = ServeState {
+        port: o.port,
+        // the --allow-host names, plus the bind address itself (direct access
+        // by IP) unless it is a wildcard address
+        allow_hosts: o
+            .allow_hosts
+            .iter()
+            .cloned()
+            .chain((!["0.0.0.0", "::", "[::]"].contains(&o.bind.as_str())).then(|| o.bind.clone()))
+            .collect(),
         db,
         dashboards,
         cache_ttl: Duration::from_secs(o.cache_secs),
@@ -449,6 +468,14 @@ fn serve_dashboards(dir: &str, o: &Opts) {
 fn handle_serve(st: &ServeState, req: Request) {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
+    // DNS rebinding: only loopback names (or --allow-host names) are served.
+    if !sv::host_allowed(req_header(&req, "Host"), st.port, &st.allow_hosts) {
+        return text(
+            req,
+            421,
+            "misdirected request: unknown Host — start the server with --allow-host <name>",
+        );
+    }
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
