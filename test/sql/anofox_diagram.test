@@ -4,6 +4,9 @@
 
 require anofox_visualization
 
+# json_object (the anofox_render options) lives in the json extension.
+require json
+
 statement ok
 LOAD anofox_visualization
 
