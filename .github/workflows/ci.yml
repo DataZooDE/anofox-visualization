@@ -42,8 +42,8 @@ jobs:
       - name: test (core incl. serve)
         run: cargo test --locked --features serve
 
-      - name: test (ffi + duckext)
-        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb
+      - name: test (ffi + duckext + vendored tiny_http)
+        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
 
       - name: Install DuckDB CLI (pinned) for the extension smoke test
         run: |
