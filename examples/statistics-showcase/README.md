@@ -2,7 +2,7 @@
 
 Every statistics plot anofox-visualization draws for anofox-statistics results,
 in modelling order, on a synthetic property market in a made-up city
-(2023–2025). It's the "Statistics showcase: property market" example of the [live demo](https://datazoode.github.io/anofox-visualization/).
+(2023–2025). It's the "What sets the price of a home?" example of the [live demo](https://datazoode.github.io/anofox-visualization/).
 
 `showcase.sql` is a link to `web/examples/statistics-showcase.sql`, the single
 source the browser demo loads. It has two parts:

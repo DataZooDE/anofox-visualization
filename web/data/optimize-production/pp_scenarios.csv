@@ -1,0 +1,9 @@
+volume,volume_factor,changeovers,changeover_factor
++10 % (heatwave),1.1,SMED project (-40 %),0.6
++10 % (heatwave),1.1,today's changeovers,1.0
++20 % (heatwave + promo),1.2,SMED project (-40 %),0.6
++20 % (heatwave + promo),1.2,today's changeovers,1.0
+-10 % (cool week),0.9,SMED project (-40 %),0.6
+-10 % (cool week),0.9,today's changeovers,1.0
+as booked,1.0,SMED project (-40 %),0.6
+as booked,1.0,today's changeovers,1.0

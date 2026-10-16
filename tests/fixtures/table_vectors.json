@@ -1,0 +1,57 @@
+{
+  "_doc": "Table formatting vectors shared by the Rust table module (tests/table.rs) and the browser table (tests/web/table_test.mjs: wasm table_profile + app.js tableNumText). Each case: the columns of a table and, per column, the header people read and the text of each numeric cell. Group separators compare with narrow / no-break spaces read as spaces.",
+  "cases": [
+    {
+      "locale": "en-US",
+      "cols": [
+        { "name": "region", "values": ["North", "South", "East"] },
+        { "name": "revenue", "fmt": "MONEY", "values": [4610000, 3420000, 5350000],
+          "head": "Revenue ($M)", "cells": ["4.61", "3.42", "5.35"] },
+        { "name": "orders", "fmt": "COMPACT", "values": [18400, -7100, 120500],
+          "head": "Orders (K)", "cells": ["18", "−7", "121"] },
+        { "name": "plan", "fmt": "MONEY", "values": [12.5, 7.25, 3],
+          "head": "Plan ($)", "cells": ["12.50", "7.25", "3.00"] },
+        { "name": "avg_basket", "values": [23.456, 19.1, 21.75],
+          "head": "Avg basket", "cells": ["23.456", "19.100", "21.750"] },
+        { "name": "load_pct", "values": [0.0405, 0.12, 0.3],
+          "head": "Load %", "cells": ["0.0405", "0.1200", "0.3000"] },
+        { "name": "store_id", "values": [1001, 1002, 12003],
+          "head": "Store ID", "cells": ["1001", "1002", "12003"] },
+        { "name": "open_year", "values": [2019, 2021, 2015],
+          "head": "Open year", "cells": ["2019", "2021", "2015"] },
+        { "name": "n_orders", "values": [18400, -7100, 0],
+          "head": "N orders", "cells": ["18,400", "−7,100", "0"] },
+        { "name": "share", "fmt": "PERCENT", "values": [12.5, -3, 100],
+          "head": "Share", "cells": ["12.5%", "−3%", "100%"] },
+        { "name": "Margin %", "values": ["18.2", "12.5", "9.8"],
+          "head": "Margin %", "cells": ["18.2", "12.5", "9.8"] },
+        { "name": "avgMae", "values": [1.5, 2, 2.25],
+          "head": "Avg MAE", "cells": ["1.50", "2.00", "2.25"] }
+      ]
+    },
+    {
+      "locale": "de-DE",
+      "cols": [
+        { "name": "filiale", "values": ["Berlin", "Köln"] },
+        { "name": "umsatz", "fmt": "MONEY", "values": [3368734.15, -1997968.55],
+          "head": "Umsatz (Mio. €)", "cells": ["3,37", "−2,00"] },
+        { "name": "kunden", "fmt": "COMPACT", "values": [18400, 120500],
+          "head": "Kunden (Tsd.)", "cells": ["18", "121"] },
+        { "name": "bon", "values": [1234.5, 23.25],
+          "head": "Bon", "cells": ["1.234,50", "23,25"] },
+        { "name": "anteil", "fmt": "PERCENT", "values": [12.5, 3],
+          "head": "Anteil", "cells": ["12,5 %", "3 %"] }
+      ]
+    },
+    {
+      "locale": "fr-FR",
+      "cols": [
+        { "name": "magasin", "values": ["Paris", "Lyon"] },
+        { "name": "ventes", "fmt": "MONEY", "values": [2500000000, 1200000000],
+          "head": "Ventes (Md €)", "cells": ["2,50", "1,20"] },
+        { "name": "commandes", "values": [18400, 1234567],
+          "head": "Commandes", "cells": ["18 400", "1 234 567"] }
+      ]
+    }
+  ]
+}

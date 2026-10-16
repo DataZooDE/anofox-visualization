@@ -1,0 +1,179 @@
+capacity,algorithm,wave,class,lines
+80,arrival order (today),1,express,51
+80,arrival order (today),1,priority,12
+80,arrival order (today),1,standard,16
+80,arrival order (today),2,express,38
+80,arrival order (today),2,standard,39
+80,arrival order (today),3,priority,10
+80,arrival order (today),3,standard,70
+80,arrival order (today),4,priority,29
+80,arrival order (today),4,standard,45
+80,arrival order (today),5,standard,79
+80,arrival order (today),6,priority,43
+80,arrival order (today),6,standard,36
+80,arrival order (today),7,express,29
+80,arrival order (today),7,standard,50
+80,arrival order (today),8,express,32
+80,arrival order (today),8,priority,36
+80,arrival order (today),8,standard,12
+80,arrival order (today),9,standard,80
+80,arrival order (today),10,priority,38
+80,arrival order (today),10,standard,40
+80,arrival order (today),11,standard,67
+80,arrival order (today),12,express,31
+80,arrival order (today),12,priority,17
+80,arrival order (today),12,standard,29
+80,arrival order (today),13,express,45
+80,arrival order (today),13,standard,26
+80,arrival order (today),14,priority,16
+80,arrival order (today),14,standard,64
+80,arrival order (today),15,priority,21
+80,arrival order (today),15,standard,48
+80,arrival order (today),16,express,34
+80,arrival order (today),16,standard,45
+80,arrival order (today),17,priority,28
+80,arrival order (today),17,standard,43
+80,arrival order (today),18,priority,46
+80,best of,1,express,51
+80,best of,1,priority,22
+80,best of,2,express,29
+80,best of,2,priority,33
+80,best of,2,standard,10
+80,best of,3,express,63
+80,best of,3,standard,11
+80,best of,4,express,34
+80,best of,4,priority,21
+80,best of,4,standard,24
+80,best of,5,express,38
+80,best of,5,priority,28
+80,best of,5,standard,13
+80,best of,6,express,45
+80,best of,6,priority,29
+80,best of,7,priority,74
+80,best of,8,priority,43
+80,best of,8,standard,31
+80,best of,9,priority,46
+80,best of,9,standard,21
+80,best of,10,standard,67
+80,best of,11,standard,73
+80,best of,12,standard,55
+80,best of,13,standard,64
+80,best of,14,standard,72
+80,best of,15,standard,79
+80,best of,16,standard,43
+80,best of,17,standard,43
+80,best of,18,standard,44
+80,best of,19,standard,45
+80,best of,20,standard,46
+80,best of,21,standard,48
+120,arrival order (today),1,express,89
+120,arrival order (today),1,priority,12
+120,arrival order (today),1,standard,16
+120,arrival order (today),2,priority,10
+120,arrival order (today),2,standard,109
+120,arrival order (today),3,priority,29
+120,arrival order (today),3,standard,91
+120,arrival order (today),4,priority,43
+120,arrival order (today),4,standard,72
+120,arrival order (today),5,express,32
+120,arrival order (today),5,priority,36
+120,arrival order (today),5,standard,50
+120,arrival order (today),6,express,29
+120,arrival order (today),6,standard,89
+120,arrival order (today),7,priority,38
+120,arrival order (today),7,standard,71
+120,arrival order (today),8,express,31
+120,arrival order (today),8,priority,17
+120,arrival order (today),8,standard,65
+120,arrival order (today),9,express,45
+120,arrival order (today),9,standard,69
+120,arrival order (today),10,standard,114
+120,arrival order (today),11,priority,67
+120,arrival order (today),11,standard,43
+120,arrival order (today),12,express,34
+120,arrival order (today),12,priority,44
+120,best of,1,express,51
+120,best of,1,priority,55
+120,best of,1,standard,10
+120,best of,2,express,92
+120,best of,2,priority,21
+120,best of,3,express,117
+120,best of,4,priority,93
+120,best of,4,standard,23
+120,best of,5,priority,81
+120,best of,5,standard,25
+120,best of,6,priority,46
+120,best of,6,standard,74
+120,best of,7,standard,118
+120,best of,8,standard,119
+120,best of,9,standard,111
+120,best of,10,standard,83
+120,best of,11,standard,87
+120,best of,12,standard,91
+120,best of,13,standard,48
+160,arrival order (today),1,express,89
+160,arrival order (today),1,priority,12
+160,arrival order (today),1,standard,55
+160,arrival order (today),2,priority,29
+160,arrival order (today),2,standard,129
+160,arrival order (today),3,priority,43
+160,arrival order (today),3,standard,116
+160,arrival order (today),4,express,61
+160,arrival order (today),4,priority,46
+160,arrival order (today),4,standard,50
+160,arrival order (today),5,priority,55
+160,arrival order (today),5,standard,105
+160,arrival order (today),6,express,31
+160,arrival order (today),6,standard,122
+160,arrival order (today),7,express,45
+160,arrival order (today),7,standard,103
+160,arrival order (today),8,priority,46
+160,arrival order (today),8,standard,109
+160,arrival order (today),9,express,34
+160,arrival order (today),9,priority,65
+160,best of,1,express,80
+160,best of,1,priority,76
+160,best of,2,express,135
+160,best of,2,standard,21
+160,best of,3,express,45
+160,best of,3,priority,93
+160,best of,3,standard,12
+160,best of,4,priority,81
+160,best of,4,standard,77
+160,best of,5,priority,46
+160,best of,5,standard,90
+160,best of,6,standard,136
+160,best of,7,standard,144
+160,best of,8,standard,126
+160,best of,9,standard,135
+160,best of,10,standard,48
+200,arrival order (today),1,express,89
+200,arrival order (today),1,priority,12
+200,arrival order (today),1,standard,92
+200,arrival order (today),2,priority,39
+200,arrival order (today),2,standard,160
+200,arrival order (today),3,express,32
+200,arrival order (today),3,priority,79
+200,arrival order (today),3,standard,86
+200,arrival order (today),4,express,29
+200,arrival order (today),4,priority,38
+200,arrival order (today),4,standard,129
+200,arrival order (today),5,express,76
+200,arrival order (today),5,standard,122
+200,arrival order (today),6,priority,38
+200,arrival order (today),6,standard,157
+200,arrival order (today),7,express,34
+200,arrival order (today),7,priority,90
+200,arrival order (today),7,standard,43
+200,best of,1,express,143
+200,best of,1,priority,55
+200,best of,2,express,117
+200,best of,2,priority,78
+200,best of,3,priority,117
+200,best of,3,standard,73
+200,best of,4,priority,46
+200,best of,4,standard,152
+200,best of,5,standard,180
+200,best of,6,standard,158
+200,best of,7,standard,178
+200,best of,8,standard,48

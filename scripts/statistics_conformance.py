@@ -78,6 +78,12 @@ def response(model: str) -> str:
 
 def producer_sql(name: str) -> str | None:
     """The table a producer emits (both groups), or None when unknown."""
+    # online / sequential fits: an order column before y
+    m = re.fullmatch(r"(lm_dynamic|passive_aggressive)_(tidy|glance)_by", name)
+    if m:
+        return f"{name}('d', grp, id, y, {X})"
+    if name == "lowess_by":
+        return "lowess_by('d', grp, x1, y)"
     m = re.fullmatch(r"(\w+?)_(tidy|glance|augment|prediction|effects|rolling_tidy|path|cv)_by", name)
     if m:
         model, kind = m.groups()

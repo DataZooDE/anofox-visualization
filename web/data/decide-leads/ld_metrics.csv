@@ -1,0 +1,7 @@
+model,reason,accuracy,brier,ece,leads,positives
+laya-multilingual,budget approved,0.7588,0.1943,0.1662,170,67
+laya-multilingual,buys this quarter,0.7471,0.1752,0.0873,170,59
+laya-multilingual,decision maker,0.6118,0.2502,0.1215,170,77
+laya-typed-decisions,budget approved,0.7647,0.1777,0.1232,170,67
+laya-typed-decisions,buys this quarter,0.8765,0.1392,0.2212,170,59
+laya-typed-decisions,decision maker,0.7176,0.1844,0.0569,170,77

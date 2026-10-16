@@ -1,0 +1,10 @@
+plan,vans,ord,km,late_stops,weighted_late_min,last_back_min,driver_h,max_cages,max_stops
+deadline-aware,4,3,305.1,0,0.0,285.0,16.8,22,11
+deadline-aware,5,3,306.1,0,0.0,271.0,16.8,18,10
+deadline-aware,6,3,338.3,0,0.0,242.0,17.6,16,8
+shortest route,4,2,268.1,6,404.0,278.0,15.8,22,11
+shortest route,5,2,306.1,0,0.0,271.0,16.8,18,10
+shortest route,6,2,326.1,1,86.0,224.0,17.3,16,8
+"today: districts, order list",4,1,516.1,13,1735.0,513.0,22.0,33,16
+"today: districts, order list",5,1,479.4,11,827.0,396.0,21.1,26,13
+"today: districts, order list",6,1,500.6,7,569.0,336.0,21.6,24,11

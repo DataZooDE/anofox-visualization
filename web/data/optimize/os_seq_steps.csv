@@ -1,0 +1,41 @@
+algorithm,pos,colour,darkness,step_min,cum_min
+2-opt,1,white,0,0.0,0.0
+2-opt,2,ivory,1,7.0,7.0
+2-opt,3,sand,2,7.0,14.0
+2-opt,4,yellow,3,7.0,21.0
+2-opt,5,grey,4,7.0,28.0
+2-opt,6,green,5,7.0,35.0
+2-opt,7,red,6,7.0,42.0
+2-opt,8,brown,7,7.0,49.0
+2-opt,9,navy,8,7.0,56.0
+2-opt,10,black,9,7.0,63.0
+best of,1,white,0,0.0,0.0
+best of,2,ivory,1,7.0,7.0
+best of,3,sand,2,7.0,14.0
+best of,4,yellow,3,7.0,21.0
+best of,5,grey,4,7.0,28.0
+best of,6,green,5,7.0,35.0
+best of,7,red,6,7.0,42.0
+best of,8,brown,7,7.0,49.0
+best of,9,navy,8,7.0,56.0
+best of,10,black,9,7.0,63.0
+nearest neighbour,1,white,0,0.0,0.0
+nearest neighbour,2,ivory,1,7.0,7.0
+nearest neighbour,3,sand,2,7.0,14.0
+nearest neighbour,4,yellow,3,7.0,21.0
+nearest neighbour,5,grey,4,7.0,28.0
+nearest neighbour,6,green,5,7.0,35.0
+nearest neighbour,7,red,6,7.0,42.0
+nearest neighbour,8,brown,7,7.0,49.0
+nearest neighbour,9,navy,8,7.0,56.0
+nearest neighbour,10,black,9,7.0,63.0
+order book (today),1,white,0,0.0,0.0
+order book (today),2,navy,8,21.0,21.0
+order book (today),3,ivory,1,72.0,93.0
+order book (today),4,red,6,15.0,108.0
+order book (today),5,sand,2,54.0,162.0
+order book (today),6,black,9,19.0,181.0
+order book (today),7,yellow,3,66.0,247.0
+order book (today),8,green,5,9.0,256.0
+order book (today),9,grey,4,36.0,292.0
+order book (today),10,brown,7,11.0,303.0

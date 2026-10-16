@@ -57,6 +57,53 @@ jobs:
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
 
+  web:
+    # The browser-side tests (tests/web/*.mjs): app.js against the wasm build —
+    # table formatting vectors, locale, contract plots, SVG attributes,
+    # sanitising, the .xlsx writer and the DuckDB-Wasm extension smoke test.
+    # A test that skips (a missing web/pkg, DuckDB-Wasm or wasm extension)
+    # fails the job, so the wasm parts always run here.
+    name: web tests (node + wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the wasm package (web/pkg)
+        run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+
+      - name: Install DuckDB-Wasm (tests/web)
+        run: npm install --prefix tests/web --no-audit --no-fund
+
+      - name: Fetch the anofox DuckDB-Wasm extensions (web/localext)
+        run: |
+          for i in 1 2 3; do scripts/fetch-wasm-extensions.sh && break; echo "fetch attempt $i failed; retrying"; sleep 10; done
+
+      - name: Run tests/web/*.mjs (no skips)
+        run: |
+          status=0
+          for t in tests/web/*.mjs; do
+            echo "== $t"
+            out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; continue; }
+            echo "$out"
+            if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
+          done
+          exit $status
+
   statistics-conformance:
     # Every anofox-statistics contract producer (141 functions: tagged
     # anofox.contract = '1') → anofox_plot(...) and its specific macro, on the

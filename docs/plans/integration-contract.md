@@ -35,7 +35,8 @@ Principles
 | `test` | **method, statistic, p_value**, test_id, group1, group2, p_adj, df1, df2, estimate, conf_low, conf_high, effect_size, effect_name, alternative, alpha | all `*_test_agg`, post-hoc pairwise, Diebold–Mariano | p-value brackets, effect-size forest, critical-region plot |
 
 `curve_type` vocabulary: `roc, pr, calibration, lambda_cv, km, acf, pacf, qq,
-null_dist, pdp, lift`.
+null_dist, pdp, lift, lowess` (`lowess`: a smoothed y over x per group, e.g.
+anofox-statistics `lowess_by` — drawn as a plain line like `pdp`).
 
 ## Model objects between extensions
 

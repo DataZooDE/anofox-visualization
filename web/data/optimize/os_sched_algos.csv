@@ -1,0 +1,6 @@
+algorithm,ord,weighted_tardiness,makespan
+ATCS,3,795.0,649.0
+WSPT,2,1041.0,675.0
+earliest due date (today),1,998.0,662.0
+exact (proven optimum),5,771.0,649.0
+local search,4,771.0,649.0

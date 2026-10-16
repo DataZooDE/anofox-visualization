@@ -24,7 +24,17 @@ SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
 ```
 
 **[▶ Live demo](https://datazoode.github.io/anofox-visualization/)** — the full
-builder running in your browser on DuckDB-Wasm.
+builder running in your browser on DuckDB-Wasm. Its sidebar has two areas:
+
+- **Examples** — the feature tour: charts, interactivity, tables, layout and
+  theming (corporate branding, a de-DE locale).
+- **anofox extensions** — a showcase per anofox DuckDB extension:
+  [statistics](examples/statistics-showcase/) and forecast computed **live** in
+  the browser by their wasm builds; [tabular](examples/tabular-showcase/)
+  (a data-quality report), [optimize](examples/optimize-showcase/)
+  (decisions at a distribution centre) and [decide](examples/decide-showcase/)
+  (support-ticket triage with a decision model) as **stored results** computed
+  natively, because those extensions can't run in DuckDB-Wasm yet.
 
 ## Features
 

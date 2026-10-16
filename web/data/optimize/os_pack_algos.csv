@@ -1,0 +1,29 @@
+capacity,algorithm,ord,bins_used,lower_bound,avg_fill_pct
+800,best fit decreasing,3,48,48,99.0
+800,best of,7,48,48,99.0
+800,bin completion,5,48,48,99.0
+800,first fit decreasing,2,48,48,99.0
+800,local search,6,48,48,99.0
+800,next fit (today),1,59,48,80.5
+800,worst fit decreasing,4,49,48,97.0
+1000,best fit decreasing,3,39,39,97.5
+1000,best of,7,39,39,97.5
+1000,bin completion,5,39,39,97.5
+1000,first fit decreasing,2,39,39,97.5
+1000,local search,6,39,39,97.5
+1000,next fit (today),1,46,39,82.7
+1000,worst fit decreasing,4,39,39,97.5
+1250,best fit decreasing,3,31,31,98.1
+1250,best of,7,31,31,98.1
+1250,bin completion,5,31,31,98.1
+1250,first fit decreasing,2,31,31,98.1
+1250,local search,6,31,31,98.1
+1250,next fit (today),1,36,31,84.5
+1250,worst fit decreasing,4,31,31,98.1
+1500,best fit decreasing,3,26,26,97.5
+1500,best of,7,26,26,97.5
+1500,bin completion,5,26,26,97.5
+1500,first fit decreasing,2,26,26,97.5
+1500,local search,6,26,26,97.5
+1500,next fit (today),1,29,26,87.4
+1500,worst fit decreasing,4,26,26,97.5

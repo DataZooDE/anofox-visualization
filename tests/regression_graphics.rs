@@ -2,6 +2,7 @@
 //! scales, reference lines, top-k labels, smoothing methods) and for the
 //! rendering bugs fixed alongside them.
 
+use anofox_visualization::theme::DEFAULT_PALETTE;
 use anofox_visualization::{render, Column, Kind, Role};
 use ggplot_rs::prelude::Value;
 
@@ -10,6 +11,11 @@ fn strs(v: &[&str]) -> Vec<Value> {
 }
 fn nums(v: &[f64]) -> Vec<Value> {
     v.iter().map(|&f| Value::Float(f)).collect()
+}
+/// Default palette slot `i` as it appears in an SVG (`#rrggbb`, upper case).
+fn slot(i: usize) -> String {
+    let (r, g, b) = DEFAULT_PALETTE[i];
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 fn svg(cols: Vec<Column>) -> String {
     render(&cols, 480, 320).expect("renders")
@@ -31,11 +37,14 @@ fn bars(svg: &str, s: &str) -> Vec<(f64, f64)> {
     }
     out
 }
-/// Point lists of non-grid `<polyline>`s.
+/// Point lists of non-grid `<polyline>`s (the grid is drawn in the theme's
+/// grid colour).
 fn polylines(svg: &str) -> Vec<String> {
+    let (r, g, b) = anofox_visualization::theme::default_light().chart_grid();
+    let grid = format!("#{r:02X}{g:02X}{b:02X}");
     svg.split("<polyline ")
         .skip(1)
-        .filter(|t| !t.contains("#EBEBEB"))
+        .filter(|t| !t.contains(&grid))
         .map(|t| t[..t.find('>').unwrap()].to_string())
         .collect()
 }
@@ -126,7 +135,8 @@ fn step_per_category() {
     ]);
     let lines = polylines(&s);
     assert_eq!(lines.len(), 2, "two step lines: {lines:?}");
-    assert!(lines[0].contains("#456481") && lines[1].contains("#E86433"));
+    let (l0, l1) = (lines[0].to_uppercase(), lines[1].to_uppercase());
+    assert!(l0.contains(&slot(0)) && l1.contains(&slot(1)), "{lines:?}");
 }
 
 // ── A4: maps keep their fill (measure, numeric ::CHOROPLETH, category) ───
@@ -155,7 +165,8 @@ fn map_fill_by_value_and_category() {
         Column::new("g", Role::Geometry, wkt.clone()),
         Column::new("c", Role::Category, strs(&["a", "b"])),
     ]);
-    assert_eq!(fills(&s), vec!["#456481", "#E86433"]);
+    let f: Vec<String> = fills(&s).iter().map(|c| c.to_uppercase()).collect();
+    assert_eq!(f, vec![slot(0), slot(1)]);
     // Unfilled: a brand tint, not ggplot's default blue.
     let s = svg(vec![Column::new("g", Role::Geometry, wkt)]);
     assert!(!s.contains("#619CFF"));
@@ -179,7 +190,10 @@ fn violin_and_box_are_filled() {
             !s.contains("fill=\"#FFFFFF\" fill-opacity=\"1.000\" stroke"),
             "{kind:?}"
         );
-        assert!(s.contains("#CBD4DC"), "{kind:?} brand tint");
+        assert!(
+            s.contains("#C2D3F9"),
+            "{kind:?} brand tint (slot 0, lightened)"
+        );
     }
 }
 
@@ -604,7 +618,11 @@ fn contract_km_band_and_censor_marks() {
         .filter(|t| t.contains("fill-opacity=\"0.180\""))
         .collect();
     assert_eq!(ribbons.len(), 2, "{s}");
-    assert!(ribbons[0].contains("#456481") && ribbons[1].contains("#E86433"));
+    let (r0, r1) = (ribbons[0].to_uppercase(), ribbons[1].to_uppercase());
+    assert!(
+        r0.contains(&slot(0)) && r1.contains(&slot(1)),
+        "{ribbons:?}"
+    );
     // A `+` censoring mark per group (stroked paths).
     assert_eq!(s.matches("<path ").count(), 2, "{s}");
 }
@@ -801,12 +819,12 @@ fn contract_model_colours_are_stable_across_charts() {
                   {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
     let two = r#"[{"model_id":"huber","term":"x1","estimate":0.5,"conf_low":0.1,"conf_high":0.9},
                   {"model_id":"ridge","term":"x1","estimate":0.4,"conf_low":0.2,"conf_high":0.6}]"#;
-    let ridge = "#3FA66F";
+    let ridge = slot(5); // ridge = DataZoo slot 5, mapped to the default palette's slot 5
     for rows in [one, two] {
         let s = spec("terms", rows, "{}").unwrap();
         assert!(
-            s.to_uppercase().contains(ridge),
-            "ridge is green in every chart"
+            s.to_uppercase().contains(&ridge),
+            "ridge keeps its colour in every chart"
         );
     }
 }
@@ -940,4 +958,238 @@ fn plain_bars_with_intervals_are_one_colour() {
         !s.contains("#E86433") && !s.contains("#e86433"),
         "no per-bar palette"
     );
+}
+
+// ── Chart chrome follows the dashboard theme ─────────────────────────────
+fn hexu((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+fn render_in(cols: &[Column], spec: &str, dark: bool) -> String {
+    use anofox_visualization::{render_with, RenderOptions};
+    let set = anofox_visualization::theme::resolve(spec).unwrap();
+    let t = if dark { set.dark } else { set.light };
+    let o = RenderOptions {
+        theme: std::sync::Arc::new(t),
+        ..RenderOptions::default()
+    };
+    render_with(cols, 480, 320, &o).unwrap()
+}
+
+#[test]
+fn chart_text_and_grid_use_theme_tokens() {
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W3"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 22.0, 41.0])),
+    ];
+    for dark in [false, true] {
+        let set = anofox_visualization::theme::resolve("light").unwrap();
+        let t = if dark { &set.dark } else { &set.light };
+        let s = render_in(&cols, "light", dark);
+        // No ggplot defaults: grey30 tick text, grey92 grid, dark bar outlines,
+        // the generic font.
+        for gone in [
+            "#4D4D4D",
+            "#EBEBEB",
+            "#323232",
+            "font-family=\"sans-serif\"",
+        ] {
+            assert!(!s.contains(gone), "dark={dark}: {gone} left in {s}");
+        }
+        assert!(
+            s.contains(&format!("fill=\"{}\">W1<", hexu(t.chart_text()))),
+            "{s}"
+        );
+        assert!(
+            s.contains(&hexu(t.chart_grid())),
+            "grid in the theme colour"
+        );
+        assert!(s.contains("Hanken Grotesk"), "theme font family");
+        // Bars part with a card-coloured hairline.
+        assert!(
+            s.contains(&format!("stroke=\"{}\"", hexu(t.colors.card))),
+            "{s}"
+        );
+    }
+    // A custom theme's muted ink paints the ticks.
+    let acme =
+        r##"{"name":"acme","colors":{"muted":"#5b6478"},"font":{"family":"Inter, sans-serif"}}"##;
+    let s = render_in(&cols, acme, false);
+    assert!(
+        s.contains("fill=\"#5B6478\">W1<") && s.contains("font-family=\"Inter, sans-serif\""),
+        "{s}"
+    );
+}
+
+fn heatmap_cols(labels: bool) -> Vec<Column> {
+    let mut cols = vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W1", "W2"])),
+        Column::new("c", Role::Y, strs(&["web", "web", "api", "api"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&[1.5, 40.25, 20.0, 1234.5]),
+        ),
+        Column::new("f", Role::YFormat, strs(&["$"])),
+    ];
+    if labels {
+        cols.push(Column::new("l", Role::DataLabels, strs(&[""])));
+    }
+    cols
+}
+
+#[test]
+fn heatmap_labels_contrast_and_order() {
+    let t = anofox_visualization::theme::default_light();
+    let s = svg(heatmap_cols(true));
+    // Values in the panel format, written into the cells.
+    assert!(s.contains(">$1.5<") && s.contains(">$1,235<"), "{s}");
+    // Dark text on the pale low cell, light (card) text on the deep high cell.
+    assert!(
+        s.contains(&format!("fill=\"{}\">$1.5<", hexu(t.colors.ink))),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!("fill=\"{}\">$1,235<", hexu(t.colors.card))),
+        "{s}"
+    );
+    // Rows keep the SQL order, first on top: "web" is drawn above "api".
+    let y_of = |label: &str| -> f64 {
+        let i = s.find(&format!(">{label}</text>")).unwrap();
+        let tag = &s[s[..i].rfind("<text").unwrap()..i];
+        let k = tag.find(" y=\"").unwrap() + 4;
+        tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap()
+    };
+    assert!(y_of("web") < y_of("api"));
+    // Thin card-coloured gaps between cells, no dark borders.
+    assert!(s.contains(&format!(
+        "stroke=\"{}\" stroke-width=\"2.00\"",
+        hexu(t.colors.card)
+    )));
+    assert!(!s.contains("#323232"));
+    // Formatted tooltip values beside the raw ones; the colourbar in dollars.
+    assert!(
+        s.contains("data-value=\"1234.5\"") && s.contains("data-fvalue=\"$1,234.50\""),
+        "{s}"
+    );
+    assert!(
+        s.contains(">W1, api: $20<") || s.contains("W1, api: $20"),
+        "{s}"
+    );
+    // Without ::DATALABELS no cell text.
+    assert!(!svg(heatmap_cols(false)).contains(">$1.5<"));
+}
+
+#[test]
+fn heatmap_diverges_around_zero() {
+    let t = anofox_visualization::theme::default_light();
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["a", "b", "c"])),
+        Column::new("c", Role::Y, strs(&["r", "r", "r"])),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&[-10.0, 0.0, 10.0])),
+    ]);
+    let [lo, mid, hi] = t.diverging_ramp();
+    for c in [lo, mid, hi] {
+        assert!(s.contains(&hexu(c)), "{} in {s}", hexu(c));
+    }
+}
+
+#[test]
+fn tooltip_values_follow_yformat_and_locale() {
+    use anofox_visualization::{format::Locale, render_with, RenderOptions};
+    let cols = vec![
+        Column::new("d", Role::X, strs(&["2024-03-01", "2024-03-02"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[1234.5, 12.0])),
+        Column::new("f", Role::YFormat, strs(&["€"])),
+    ];
+    let s = svg(cols.clone());
+    assert!(s.contains("data-fvalue=\"€1,234.50\""), "{s}");
+    assert!(!s.contains("data-fx="), "en-US keeps ISO dates");
+    let o = RenderOptions {
+        locale: Locale::DE_DE,
+        ..RenderOptions::default()
+    };
+    let s = render_with(&cols, 480, 320, &o).unwrap();
+    assert!(
+        s.contains("data-fvalue=\"1.234,50 €\"") && s.contains("data-fx=\"01.03.2024\""),
+        "{s}"
+    );
+    // A percent kind's fractions read as percent.
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W1"])),
+        Column::new("c", Role::Category, strs(&["a", "b"])),
+        Column::new("n", Role::Value(Kind::BarPercent), nums(&[30.0, 10.0])),
+    ]);
+    assert!(s.contains("data-fvalue=\"75%\""), "{s}");
+}
+
+// ── a bar + line combo: the line takes the next palette colour, drawn above
+// the bars (it used to share the bars' brand colour and vanish into them) ──
+#[test]
+fn bar_line_combo_line_is_visible() {
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W2", "W3"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[30.0, 41.0, 26.0])),
+        Column::new("r", Role::Value(Kind::Line), nums(&[24.0, 32.0, 20.0])),
+    ]);
+    let lines = polylines(&s);
+    assert_eq!(lines.len(), 1, "{s}");
+    assert!(
+        lines[0].contains(&slot(1)),
+        "line in palette slot 1: {}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains(&slot(0)),
+        "not the bars' colour: {}",
+        lines[0]
+    );
+    let last_bar = s.rfind("<rect ").unwrap();
+    assert!(
+        s.rfind("<polyline ").unwrap() > last_bar,
+        "line drawn above the bars"
+    );
+}
+
+// ── a ::YFORMAT starting with a space is a suffix (`' kg'` → "12 kg"), on the
+// axis and in tooltips — the spec must reach the formatter untrimmed ──
+#[test]
+fn yformat_leading_space_is_a_suffix() {
+    let s = svg(vec![
+        Column::new("w", Role::X, strs(&["W1", "W2"])),
+        Column::new("n", Role::Value(Kind::Bar), nums(&[12.0, 30.0])),
+        Column::new("f", Role::YFormat, strs(&[" kg", " kg"])),
+    ]);
+    assert!(s.contains("12 kg"), "suffix in the tooltip value: {s}");
+    assert!(!s.contains(">kg"), "no unit before the number: {s}");
+}
+
+// One model's coefficients: above the null value in the brand blue, below it
+// in the theme's red (the sign at a glance); several models keep series colours.
+#[test]
+fn contract_terms_colour_by_sign() {
+    let th = anofox_visualization::theme::default_light();
+    let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02X}{g:02X}{b:02X}");
+    let (blue, red) = (slot(0), hex(th.colors.negative));
+    let s = spec(
+        "terms",
+        r#"[{"term":"up","estimate":0.5,"conf_low":0.2,"conf_high":0.8},
+            {"term":"down","estimate":-0.4,"conf_low":-0.7,"conf_high":-0.1}]"#,
+        "{}",
+    )
+    .unwrap();
+    let circles: Vec<&str> = s.split("<circle ").skip(1).collect();
+    assert!(
+        circles.iter().any(|c| c.contains(&blue)),
+        "a blue point: {s}"
+    );
+    assert!(circles.iter().any(|c| c.contains(&red)), "a red point: {s}");
+    // odds ratios: below 1 is red
+    let s = spec(
+        "terms",
+        r#"[{"term":"or","estimate":0.8,"conf_low":0.7,"conf_high":0.9}]"#,
+        r#"{"reference":1}"#,
+    )
+    .unwrap();
+    assert!(s.split("<circle ").skip(1).any(|c| c.contains(&red)), "{s}");
 }

@@ -65,7 +65,7 @@ terminal.
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
 | `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
-| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure |
+| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0) |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
@@ -77,12 +77,12 @@ terminal.
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
 | `::BAND_UPPER` | `::BANDUPPER` | annotation | upper edge of a shaded band |
 | `::MARKAREA` | `::MARK_AREA`, `::SHADE` | annotation | shade the x-region [min, max] of this column |
-| `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark (value = font size) |
+| `::DATALABELS` | `::DATALABEL`, `::VALUELABELS`, `::SHOWLABELS` | annotation | draw the value on each mark or heatmap cell (value = font size) |
 | `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
-| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | y-axis tick format: '€', '$', 'percent', 'comma', ' kg'… |
+| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent', 'comma', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
@@ -104,7 +104,9 @@ terminal.
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
-| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells |
+| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red) |
+| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells, high = green (scores, accuracy) |
+| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells around zero: negative red, positive green (deltas) |
 | `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
 | `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
 | `::DOWNLOAD_CSV` |  | table | CSV export button |
@@ -120,6 +122,12 @@ terminal.
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
+| `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
+| `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum, Margin: mean' |
+| `::COLGROUP` | `::COL_GROUP`, `::HEADER_GROUP` | layout | next table's grouped header: 'Backtest: mae, rmse \| Holdout: mae_h, rmse_h' |
+| `::FLAG` | `::THRESHOLD` | layout | next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5' |
+| `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
+| `::SUBTOTAL` | `::SUBTOTALS`, `::GROUP_TOTAL` | layout | next table: a subtotal row after each group of a column — 'region' (not for ::PAGED) |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
@@ -158,6 +166,13 @@ SELECT DISTINCT channel::DROPDOWN FROM sessions ORDER BY channel;  -- variable `
 
 SELECT week::XAXIS, sum(n)::BARCHART
 FROM sessions WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
+```
+
+A `::LABEL` column sets the control's caption (default: the variable name), so
+the variable can stay a short identifier:
+
+```sql
+SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
 ```
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change);
@@ -221,9 +236,9 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 
 | Macro | Schema (required **bold**) | Draws |
 |---|---|---|
-| `anofox_plot_terms(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL, facet := NULL, reference := NULL)` | **term, estimate**, conf_low, conf_high, conf_level, model_id, id, index_name, index_value, window_end | coefficient forest (x "estimate (95% CI)"; models — or groups, `id` — dodged + coloured with the legend in stacking order; rows without an interval as hollow rings, noted under the plot; models × groups: one panel per group). With `index_value`: a **λ path** (ridge / elastic net) is one panel with every coefficient overlaid on a log-λ axis and labelled at its line end (`highlight := ['tv', …]` greys the others; λ.min / λ.1se as dashed lines from `lambda_min :=` / `lambda_1se :=` or the table's `lambda_min`/`is_min` columns; `facet := true` keeps one panel per term); a **LARS path** on x = \|β\|₁ / max \|β\|₁; the **quantile process** (x "τ (quantile)") and **rolling coefficients** (x = `window_end`, a date axis) one panel per term, with a dashed full-sample reference (± CI shaded) from the input's index-less rows (e.g. an `ols` tidy table `UNION ALL BY NAME`) or `reference := (SELECT list(t) FROM ols_tidy_by(…) t)` |
+| `anofox_plot_terms(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL, facet := NULL, reference := NULL)` | **term, estimate**, conf_low, conf_high, conf_level, model_id, id, index_name, index_value, window_end | coefficient forest (x "estimate (95% CI)"; models — or groups, `id` — dodged + coloured with the legend in stacking order; rows without an interval as hollow rings, noted under the plot; a coefficient whose interval contains 0 — not significant — is drawn at half opacity (point and interval, "n.s." in its tooltip, "faded = interval crosses 0" under the plot); one model's coefficients are blue above the no-effect line and red below it (the theme's brand and negative colours; several models keep their series colours); a numeric `reference := 1` moves that no-effect line, e.g. for odds ratios; models × groups: one panel per group). With `index_value`: a **λ path** (ridge / elastic net) is one panel with every coefficient overlaid on a log-λ axis and labelled at its line end (`highlight := ['tv', …]` greys the others; λ.min / λ.1se as dashed lines from `lambda_min :=` / `lambda_1se :=` or the table's `lambda_min`/`is_min` columns; `facet := true` keeps one panel per term); a **LARS path** on x = \|β\|₁ / max \|β\|₁; the **quantile process** (x "τ (quantile)") and **rolling coefficients** (x = `window_end`, a date axis) one panel per term, with a dashed full-sample reference (± CI shaded) from the input's index-less rows (e.g. an `ols` tidy table `UNION ALL BY NAME`) or `reference := (SELECT list(t) FROM ols_tidy_by(…) t)` |
 | `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL, band := NULL, kind := NULL)` | **x \| ds, yhat**, y, yhat_lower, yhat_upper, split \| is_training, model_id \| model_name, id, focal, focal_name | observed y as neutral grey points, the fit as a coloured line with a light band; split changes along x as labelled dashed vertical lines ("hold-out", "forecast", else the split name; when splits interleave along x the non-train points are marked instead). Several models in a panel: one band only (`band := 'model'`, default `ols` or the first model) and a line per model in its stable colour; `kind := 'difference'` plots each model minus the reference. Effects tables (`focal`): y "P(y = 1)" for logistic / binomial, "expected count" for poisson / negbinom, else "predicted y"; x from `focal_name` when present. Several `id`s become panels |
-| `anofox_plot_curve(tbl, base_rate := NULL)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, auc, n_censor \| censored, n_risk, n_event (km), is_min, is_1se (lambda_cv) | roc: square, diagonal, the AUC (trapezoid, or an `auc` column) in each legend label; pr: the recall-0 points trimmed, a dashed base-rate line (`base_rate :=`, else the precision at the lowest threshold with full recall); calibration: square, diagonal, point size by the bin count (`weight`); km: step curves from S(0) = 1, step-ribbon band, small `+` censor marks, a dashed 50 % line with drops at each stratum's median and a number-at-risk table under the curves; acf/pacf: lollipops without lag 0 (ACF), significance bounds (one panel per series); lambda_cv: CV error ± SE on a log-λ axis with λ.min / λ.1se; qq / pdp / lift / null_dist: line or points (+ band). One `curve_type` per call (`GROUP BY curve_type`) |
+| `anofox_plot_curve(tbl, base_rate := NULL)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, auc, n_censor \| censored, n_risk, n_event (km), is_min, is_1se (lambda_cv) | roc: square, diagonal, the AUC (trapezoid, or an `auc` column) in each legend label; pr: the recall-0 points trimmed, a dashed base-rate line (`base_rate :=`, else the precision at the lowest threshold with full recall); calibration: square, diagonal, point size by the bin count (`weight`); km: step curves from S(0) = 1, step-ribbon band, small `+` censor marks, a dashed 50 % line with drops at each stratum's median and a number-at-risk table under the curves; acf/pacf: lollipops without lag 0 (ACF), significance bounds (one panel per series); lambda_cv: CV error ± SE on a log-λ axis with λ.min / λ.1se; qq / pdp / lift / null_dist / lowess: line or points (+ band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl, metrics := NULL, baseline := 'range')` | **metric, value**, model_id \| model_name, id, conf_low, conf_high | a grid of small panels, one per metric with its own scale; one model order in every panel (best first by the first metric), the value beside each dot, "n/a" for a missing metric, the best model highlighted for metrics with a direction; `baseline := 'range'` zooms to the values and prints the range ("Δ = …") in the panel title, `'zero'` starts the axis at 0; n_observations / n_features / iterations only when `metrics := [...]` asks |
 | `anofox_plot_tests(tbl, alpha := 0.05, value := NULL, label := 'p')` | **p_value \| p_adj \| statistic**, test_id, group1, group2, estimate, conf_low, conf_high, method | comparison forest: one row per test (pairs as "B − A"), x "difference (95% CI)" (else the statistic, else −log10 p; `value :=` forces one), coloured by significance at `alpha`, `p = … **` beside each row (`label := 'stars'`: stars only). Estimates without any interval (pairwise_t_test_by today) fall back to −log10(p) bars with a labelled significance line, said in the axis label. Several groups get a panel each. A column holding a `*_agg` STRUCT / LIST is expanded |
 | `anofox_plot_compare(tbl, value :=, factor :=, tests := NULL, kind := 'box', hide_ns := NULL, label := 'stars')` | the raw rows: the **value** and **factor** columns named by the arguments | box / violin / points per group with significance brackets from `tests :=` (a LIST of test STRUCTs: `(SELECT list(t) FROM tukey_hsd_by(…) t)` or `tukey_hsd_agg(y, g)`; one two-sample STRUCT for two groups); `hide_ns` defaults to true above 3 groups; `label := 'stars' \| 'p'` or a template (`'p = {p.adj}'`, `'{p.signif}'`) |
@@ -432,6 +447,47 @@ that are not in the rows are not drawn and reported as a render warning
 `scripts/statistics_conformance.py` renders the output of every producer
 (see the README).
 
+### Heatmaps
+
+```sql
+SELECT week::XAXIS, channel::YAXIS, sum(revenue)::HEATMAP,
+       '$'::YFORMAT,      -- cell labels, legend and tooltip in dollars
+       ''::DATALABELS,    -- write each value into its cell (a number = font size)
+       'Revenue by week × channel'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+```
+
+- **Order**: text axes keep the SQL row order — the first `::YAXIS` level is the
+  top row (a matrix reads like a table), the first `::XAXIS` level the left
+  column. Numeric axes stay continuous.
+- **Colour**: the theme's sequential ramp, one hue light → dark (pale → brand →
+  a deeper brand; in dark mode the low end recedes into the card and the high
+  end is the brightest). When the values **span zero** the theme's diverging
+  ramp is used instead: two hues around a neutral midpoint at 0, both arms
+  scaled to the larger |end|, so −2…+10 reads as a little red and a lot of blue.
+  A theme's explicit `sequential` pair is used as given.
+- **Labels** (`::DATALABELS`): the short value (`$1,235`, `12K`, `1,2 Mio.` in
+  `de-DE`), dark text on light cells and light text on dark ones; the font size
+  fits the cell unless the role's value sets it.
+- **Hover / click**: the tooltip shows the column (header), the row and the
+  formatted value; a click cross-filters like any chart — it sets
+  `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
+- `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
+  tooltips.
+
+### Formatted tooltips
+
+Hover tooltips show values the way the panel formats them: its `::YFORMAT`
+(`'$'`, `'€'`, `'percent'`, `'comma'`, `' kg'`, `'CHF '` — the same keywords as
+the axis) in the dashboard `::LOCALE`, with cents kept for currency
+(`$1,234.50`, `1.234,50 €`). Share charts (`::BARCHART_PERCENT`,
+`::BAR_STACKED_PERCENT`, a fractional `::LINECHART_PERCENT`) read as percent.
+The x value follows `::XFORMAT`, and ISO dates take the locale's date order
+(`01.03.2024`) when a `::LOCALE` is set. Data labels (`::DATALABELS`) use the
+same format in short form. The renderer writes these as `data-fvalue` /
+`data-fx` next to the raw `data-value` / `data-x` on each mark, so any host can
+show them; selection and filtering keep using the raw values.
+
 ### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
@@ -447,6 +503,17 @@ footer) and every output — the browser, embed / served / locked pages, the CLI
 static HTML, `dashboard --svg`, and the ⤓ HTML / PNG exports. The page reads
 it as CSS custom properties (`--ax-*`, see `web/theme-base.css`); colour
 literals live only in the theme.
+
+**Charts wear the theme too.** Every chart — the role charts and the
+contract plots (`anofox_plot_*`: calibration, ROC, terms, …) — draws its text
+in the theme's font family, tick labels and axis titles in the muted ink,
+legend entries a step stronger, titles in the heading colour, a hairline grid a
+step quieter than the card border (no minor grid), and leaves the background
+transparent so the card shows through. Bars, slices and heatmap cells part with
+a thin card-coloured gap instead of a dark outline; reference lines
+(`::REFLINE`/`::XLINE`) are quiet dashed rules; box/violin bodies and gauge
+tracks are a tint of the brand on the card. Series colours follow the palette.
+All of it follows the light/dark variant and a custom theme's `colors`.
 
 ```sql
 SELECT 'dark'::THEME;                                    -- a built-in
@@ -465,7 +532,7 @@ SELECT 'Revenue'::SECTION;                               -- a section heading (a
 
 | Theme | Look |
 |-------|------|
-| `light` (= `datazoo`, `default`) | the default DataZoo look; follows the viewer's light/dark preference |
+| `light` (= `default`, `datazoo`) | the default graphite look: cool grey page, white cards, electric-blue accent, flat; follows the viewer's light/dark preference |
 | `dark` | always dark: dark cards, light ink, lifted palette |
 | `print` | white page, black ink, no shadows or gradients |
 | `colorblind` | the light look with the Okabe-Ito palette |
@@ -493,12 +560,17 @@ the dashboard follows the dashboard theme.
  "font": {"family": "Inter, system-ui, sans-serif", "display": "Inter, sans-serif"},
  "radius": 10,
  "chrome": {"gradient": false, "background": "plain", "kpi_value": "accent",
-            "table_zebra": true, "shadow": "sm"},
+            "table_zebra": true, "shadow": "sm", "negatives": "parens", "zero": "dash"},
  "brand": {"name": "ACME Analytics", "logo": "logo.svg", "logo_dark": "logo-dark.svg",
            "favicon": "favicon.svg", "title_suffix": " · ACME"},
  "locale": "de-DE",
  "dark": {"colors": {"bg": "#0f1729", "card": "#162033", "ink": "#e5e7eb"}}}
 ```
+
+`chrome.negatives` sets how tables show negative numbers — `"minus"` (−5, the
+default), `"red"` (−5 in the negative colour) or `"parens"` (accounting: (5)) —
+and `chrome.zero` shows zero as a muted `"muted"` 0 (default) or a `"dash"` (–).
+Zebra rows (`table_zebra`) are left out of a table that draws in-cell bars.
 
 Theme JSON is data: colours must be `#rgb`/`#rrggbb`, fonts plain font-family
 lists, logos relative paths, `https:` or `data:image/` URIs; anything else (and
@@ -607,6 +679,112 @@ GROUP BY ALL ORDER BY week;
 
 Clicking a channel narrows those panels to that channel; clicking empty space
 clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
+
+**Selecting table rows** is opt-in per table, with a `::ROWSELECT` directive
+before it (tables without one are not clickable):
+
+| `SELECT … ::ROWSELECT;` | A click on a row… |
+|---|---|
+| `'none'` (default) | does nothing |
+| `'single'` | sets `getvariable('selected')` and `getvariable('<first column>')` to the row's first value; click it again (or empty space) to clear |
+| `'multi'` | toggles a check mark; `getvariable('<first column>')` is the list of checked values (`[]::VARCHAR[]` when none) |
+
+```sql
+SELECT 'multi'::ROWSELECT;
+SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku;
+SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
+WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
+```
+
+### Tables
+
+A `::TABLE` / `::PAGED` panel comes with a toolbar: the row count ("8 of 24
+rows") with a chip per active filter, a **search** box, **Filters** (a filter
+under each header: a dropdown for a column with few values, `> n` / `< n` and a
+range slider for numbers, "contains" for text), **Σ Totals** (a totals row
+over every matching row, not just the page: sums of amounts and counts, means of
+rates, shares and scores, counts of badge values — each numeric total carries a
+small tag, e.g. "sum ▾", to switch it to mean, median, min, max or count; the
+choice is kept per table), **Stats** (a strip under the header: a 10-bin
+histogram with min and max for each number column, the top 3 values with their
+share for the others, "all N values distinct" for ids and names, empty counts —
+over the matching rows), **Columns** (show / hide),
+**Pages | Scroll**, **Compact | Comfortable** row density (compact by default
+above 50 rows) and **⤓ Export**: CSV (the matching rows, visible columns, raw
+values) or Excel (the same rows as an `.xlsx` that reads like the table: the headers
+with their units, the grouped header, each column's number format — scaled units
+keep the raw value, e.g. `#,##0.00,,` shows 5,350,000 as 5.35 — dates as dates,
+subtotal and totals rows as live `SUBTOTAL()` formulas, a frozen header with a
+filter; a `::PAGED` table exports the loaded rows and its SQL totals as values).
+`::DOWNLOAD_XLSX` writes the raw query rows as a real `.xlsx` (numbers, dates and
+booleans typed). Hovering a
+header shows the column's min / max / mean, empty and distinct counts.
+
+Formatting (one set of rules, `src/table.rs`, for the browser table and the
+headless `dashboard --svg` / static HTML table — which also right-aligns
+numbers, moves units into the header and adds the default totals row): raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
+"Avg MAE"; an `AS "Header"` alias is kept as written) and wrap onto two lines;
+numbers are formatted per column — aligned decimals, grouping (ids and years stay
+ungrouped), a true minus sign, muted zeros, and one unit per `::MONEY` /
+`::COMPACT` column ("$5.87M … $1.71M", never "$4M" next to "$5.9M"); a currency or K / M / B unit
+moves into the header once ("Revenue ($M)" over plain 4.61, 3.42, …); `::TREND`
+shows a signed change (▲ +2.7, ▼ −3.1, – 0.0). The totals row sits under a double
+rule and stays in view on a long page; a line under the table says which
+aggregation each column shows ("sum of Revenue · median of Accuracy"). Columns take their natural width (header and formatted cells; long text wraps),
+and a table with few columns stays narrower than a wide card. Plain
+numeric columns get a slim in-cell bar, empty cells show "—" and booleans ✓ / ✗.
+
+Options for the *next* table (directives, like `::ROWSELECT`; columns are named
+by their raw name or their header, case-insensitive):
+
+| Directive | Value | Effect |
+|---|---|---|
+| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum, Margin: mean, Score: median'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); `'none'` hides the row and its button. Without it: sums of amounts and counts, means of rates / shares / scores. The viewer's pick in a cell wins. |
+| `::COLGROUP` (`::COL_GROUP`, `::HEADER_GROUP`) | `'Backtest: mae, rmse \| Holdout: mae_h, rmse_h'` | a header row with a label over adjacent columns (a thin rule under each label) |
+| `::FLAG` (`::THRESHOLD`) | `'mape > 0.2, bias < -5, status = breach'` | cells meeting a condition (`>` `>=` `<` `<=` `=` `!=`) get a ⚠ and the warning tint — never colour alone |
+| `::HIGHLIGHT` (`::TOPN`) | `'Revenue: top 3, Margin: bottom 2'` (`'top 3'` alone: the first numeric column) | the top / bottom n values in bold with their rank (#1, #2 / ↓1, ↓2); a `::PAGED` table ranks within the page |
+| `::SUBTOTAL` (`::SUBTOTALS`, `::GROUP_TOTAL`) | `'region'` | the rows grouped by that column (groups in the order of their first row; sorting by the column orders the groups, any other column sorts within them), the group's value shown once, and a subtotal row after each group — each numeric column with the aggregation its total uses. A `::TABLE` only (a `::PAGED` table holds one page). |
+
+```sql
+SELECT 'revenue: sum, margin: mean, accuracy: median'::TOTALS;
+SELECT 'Money: plan, revenue | Quality: accuracy, bias'::COLGROUP;
+SELECT 'margin < 12'::FLAG;
+SELECT 'revenue: top 2'::HIGHLIGHT;
+SELECT region::TABLE, plan::MONEY, revenue::MONEY, margin,
+       accuracy::COLORSCALE_HIGH_GOOD, bias::COLORSCALE_DIVERGING
+FROM regions;
+```
+
+Colour scales: `::COLORSCALE` shades low values green and high values red (errors,
+latency); `::COLORSCALE_HIGH_GOOD` the other way round (accuracy, scores);
+`::COLORSCALE_DIVERGING` shades around zero (positive green with a "+", negative
+red, zero neutral) for deltas and biases.
+
+Accessibility and print: each table has a `<caption>` (the panel title, for
+screen readers), `scope` on its headers, `aria-sort` on the sorted column and
+`aria-selected` on selectable rows. Printing (or the browser's PDF) hides the
+toolbar, filters, check marks and pager, prints every matching row of a
+`::TABLE` (a `::PAGED` table prints its page), repeats the header on each page
+and puts the totals at the end.
+
+**Scroll** is a virtualised view: only the rows around the viewport are drawn,
+so it stays smooth over any number of rows.
+
+| | `::TABLE` | `::PAGED` |
+|---|---|---|
+| data in the browser | the whole result | one page (Scroll: 100-row blocks, fetched as you scroll) |
+| sort, search, column filters | in the browser | in DuckDB (`ORDER BY`, `WHERE`) |
+| totals and column statistics | in the browser | one aggregate query in DuckDB (count, distinct, sum, mean, median, min, max) |
+| filter dropdown values | from the rows | `SELECT DISTINCT` in DuckDB (under the other filters) |
+| Stats strip | in the browser | one query in DuckDB: a 10-bin histogram and the top 3 values per column |
+| good for | up to ~10k rows | any size: Parquet on S3, MotherDuck, a served database |
+
+A `::PAGED` request is the same everywhere: in the browser and the authoring
+`serve` the query is built by the wasm `page_sql()`; a **locked** server
+(`anofox_serve_dashboards`) receives only the structured request — page, sort,
+search, column filters (`eq`, `contains`, `gt`, `ge`, `lt`, `le`), a statistics,
+column-profile or distinct-values request — and builds the identical SQL itself, with every
+value a bound parameter and every column name a quoted identifier.
 
 ### Example
 
@@ -720,6 +898,33 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 
 Edit the SQL, press **Run**, hover the marks. Load your own data with DuckDB’s
 readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
+
+The app opens in **View** (the dashboard); **✎ Edit** — or `?mode=edit` in the
+URL — shows the SQL editor.
+
+**Examples in the sidebar** (open one directly with `?dashboard=<name>`):
+
+- **Examples** — the core feature tour: *Start here*, *Charts*,
+  *Interactivity*, *Tables*, *Layout* and *Theming* ("Theming: your branding
+  (ACME)", "Locale: de-DE"; sources in `examples/theming/`).
+- **anofox extensions** — one group per anofox DuckDB extension:
+  - *Statistics* — "What sets the price of a home?", computed live by the
+    anofox_statistics wasm extension;
+  - *Forecast* — "How much will each item sell next year?" and "Which forecast
+    method fits our demand?", live anofox_forecast;
+  - *Tabular*, *Optimize*, *Decide* — one dashboard per business question
+    (e.g. "Can we switch on the new CRM?", "Which van serves which stop
+    tomorrow?", "Can a model triage the support inbox?"); the sidebar names
+    are the questions, each dashboard says on the page that its results are
+    stored. These extensions can't run in DuckDB-Wasm (no loadable wasm
+    build, or a native model runtime), so the results were computed natively
+    (`examples/<ext>-showcase/compute.sql` → `scripts/gen-showcase-data.sh` →
+    `web/data/<ext>/*.csv`) and the dashboards only read them — each page says so.
+
+The live extensions are fetched by `scripts/fetch-wasm-extensions.sh` into
+`web/localext/` and loaded on first use; a statement that reads
+`'data/<ext>/<file>.csv'` gets that file fetched and registered with
+DuckDB-Wasm first.
 
 ### b2) Serve the UI on a live DuckDB — explore existing data
 

@@ -125,17 +125,33 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     } else {
         "estimate".to_string()
     };
+    // The no-effect value: 0, or a numeric `reference :=` (e.g. 1 for odds
+    // ratios). An interval that contains it is not significant: faded.
+    let null = options
+        .get("reference")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0);
+    let any_faded = rows.iter().any(|r| crosses(r, null));
+    let caption = [
+        missing_ci.then_some("○ = no interval reported".to_string()),
+        any_faded.then(|| format!("faded = interval crosses {}", fmt_num(null))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
     let small = panels.len() > 1;
     let mut plots = Vec::new();
     for p in &panels {
         let prs: Vec<&Coef> = rows.iter().filter(|r| r.panel == *p).collect();
-        let mut plot = forest_panel(&prs, &terms, &series, o, small, missing_ci);
+        let mut plot = forest_panel(&prs, &terms, &series, o, small, missing_ci, null);
         plot = labels.apply(plot, &xlab, "");
         if let Some(p) = p {
             plot = plot.title(p);
         }
-        if missing_ci && p == panels.last().unwrap_or(&None) {
-            plot = plot.caption("○ = no interval reported");
+        if !caption.is_empty() && p == panels.last().unwrap_or(&None) {
+            plot = plot.caption(&caption);
         }
         plots.push(plot);
     }
@@ -146,6 +162,15 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
 }
 
+/// Does a coefficient's interval contain the no-effect value `null` (not
+/// significant)? Rows without an interval never fade.
+fn crosses(r: &Coef, null: f64) -> bool {
+    matches!((r.lo, r.hi), (Some(a), Some(b)) if a.min(b) <= null && null <= a.max(b))
+}
+
+/// Opacity of a non-significant coefficient's point and interval.
+const FADED: f64 = 0.5;
+
 fn forest_panel(
     rows: &[&Coef],
     terms: &[String],
@@ -153,6 +178,7 @@ fn forest_panel(
     o: &RenderOptions,
     small: bool,
     missing_ci: bool,
+    null: f64,
 ) -> GGPlot {
     let n = terms.len();
     let k = series.len().max(1);
@@ -174,54 +200,76 @@ fn forest_panel(
     };
     let col = |r: &Coef| s(r.series.clone().unwrap_or_else(|| "estimate".into()));
     let keep: Vec<&&Coef> = rows.iter().filter(|r| r.est.is_some()).collect();
-    let data: Frame = vec![
-        (
-            "x".into(),
-            keep.iter()
-                .map(|r| Value::Float(r.est.unwrap_or(0.0)))
-                .collect(),
-        ),
-        (
-            "y".into(),
-            keep.iter()
-                .map(|r| ypos(r).map_or(Value::Na, Value::Float))
-                .collect(),
-        ),
-        ("model".into(), keep.iter().map(|r| col(r)).collect()),
-        (
-            "tip".into(),
-            keep.iter()
-                .map(|r| {
-                    let ci = match (r.lo, r.hi) {
-                        (Some(a), Some(b)) => format!(" [{}, {}]", fmt_num(a), fmt_num(b)),
-                        _ => " (no CI)".into(),
-                    };
-                    s(format!(
-                        "{}{}: {}{ci}",
-                        r.term,
-                        r.series
-                            .as_ref()
-                            .map(|s| format!(" · {s}"))
-                            .unwrap_or_default(),
-                        fmt_num(r.est.unwrap_or(0.0))
-                    ))
-                })
-                .collect(),
-        ),
-    ];
+    let points = |set: &[&&Coef]| -> Frame {
+        vec![
+            (
+                "x".into(),
+                set.iter()
+                    .map(|r| Value::Float(r.est.unwrap_or(0.0)))
+                    .collect(),
+            ),
+            (
+                "y".into(),
+                set.iter()
+                    .map(|r| ypos(r).map_or(Value::Na, Value::Float))
+                    .collect(),
+            ),
+            ("model".into(), set.iter().map(|r| col(r)).collect()),
+            (
+                "tip".into(),
+                set.iter()
+                    .map(|r| {
+                        let ci = match (r.lo, r.hi) {
+                            (Some(a), Some(b)) => format!(" [{}, {}]", fmt_num(a), fmt_num(b)),
+                            _ => " (no CI)".into(),
+                        };
+                        let ns = if crosses(r, null) { " · n.s." } else { "" };
+                        s(format!(
+                            "{}{}: {}{ci}{ns}",
+                            r.term,
+                            r.series
+                                .as_ref()
+                                .map(|s| format!(" · {s}"))
+                                .unwrap_or_default(),
+                            fmt_num(r.est.unwrap_or(0.0))
+                        ))
+                    })
+                    .collect(),
+            ),
+        ]
+    };
+    let data = points(&keep);
     let several = series.len() > 1;
     let mut aes = Aes::new().x("x").y("y").label("tip");
     if several {
         aes = aes.color("model");
     }
     let mut plot = GGPlot::new(data).aes(aes);
-    plot = look::vline(plot, 0.0);
-    let with_ci: Vec<&&Coef> = keep
-        .iter()
-        .copied()
-        .filter(|r| r.lo.is_some() && r.hi.is_some())
-        .collect();
-    if !with_ci.is_empty() {
+    plot = look::vline(plot, null);
+    // One model: the sign reads at a glance — above the null value in the
+    // theme's blue (brand), below it in its red (negative). Several models keep
+    // their series colours.
+    let below = |r: &Coef| !several && r.est.is_some_and(|e| e < null);
+    let paint = |neg: bool| {
+        if neg {
+            o.theme.colors.negative
+        } else {
+            o.brand()
+        }
+    };
+    let groups = [(false, false), (false, true), (true, false), (true, true)];
+    // Significant intervals opaque, those containing the null value faded.
+    for (faded, neg) in groups {
+        let with_ci: Vec<&&Coef> = keep
+            .iter()
+            .copied()
+            .filter(|r| {
+                r.lo.is_some() && r.hi.is_some() && crosses(r, null) == faded && below(r) == neg
+            })
+            .collect();
+        if with_ci.is_empty() {
+            continue;
+        }
         let mut frame: Frame = vec![
             (
                 "y".into(),
@@ -252,20 +300,32 @@ fn forest_panel(
         }
         plot = plot
             .geom_errorbarh_with(GeomErrorbarh {
-                color: o.brand(),
+                color: paint(neg),
                 width: 1.5,
                 cap_height: 0.0,
-                alpha: 1.0,
+                alpha: if faded { FADED } else { 1.0 },
             })
             .layer_data(frame)
             .layer_aes(a);
     }
-    plot = plot.geom_point_with(GeomPoint {
-        size: 3.2,
-        color: o.brand(),
-        alpha: 1.0,
-    });
-    // Rows without an interval: a hollow ring (a white dot over the point).
+    for (faded, neg) in groups {
+        let set: Vec<&&Coef> = keep
+            .iter()
+            .copied()
+            .filter(|r| crosses(r, null) == faded && below(r) == neg)
+            .collect();
+        if set.is_empty() {
+            continue;
+        }
+        plot = plot
+            .geom_point_with(GeomPoint {
+                size: 3.2,
+                color: paint(neg),
+                alpha: if faded { FADED } else { 1.0 },
+            })
+            .layer_data(points(&set));
+    }
+    // Rows without an interval: a hollow ring (a card-coloured dot over the point).
     if missing_ci {
         let bare: Vec<&&Coef> = keep
             .iter()
@@ -276,7 +336,7 @@ fn forest_panel(
             plot = plot
                 .geom_point_with(GeomPoint {
                     size: 1.7,
-                    color: (255, 255, 255),
+                    color: o.theme.colors.card,
                     alpha: 1.0,
                 })
                 .layer_data(vec![

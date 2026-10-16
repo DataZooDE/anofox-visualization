@@ -68,9 +68,10 @@ POSTs
   lists, NUL bytes and oversize values are rejected — there is no way to turn a
   value into an expression or a subquery.
 - `page` (for `::PAGED` tables) is structural: the server builds the
-  `COUNT(*)` / `ORDER BY` / `LIMIT` / `OFFSET` query itself; the sort column is
-  quoted as an identifier and the full-text filter is bound as a
-  **prepared-statement parameter**.
+  `COUNT(*)` / `ORDER BY` / `LIMIT` / `OFFSET` query itself (and the statistics,
+  column-profile and distinct-values queries); column names are quoted as
+  identifiers and the full-text filter and column-filter values are bound as
+  **prepared-statement parameters**.
 - Unknown fields, dashboards or panels are rejected (`400`/`404`). There is no
   `/query` endpoint (`410`).
 - Every statement of every dashboard is checked with DuckDB's own parser at

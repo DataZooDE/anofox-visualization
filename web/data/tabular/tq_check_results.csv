@@ -1,0 +1,15 @@
+check_name,check_type,table_name,identifier,value,lower_threshold,upper_threshold,status,message
+Customers: business has a VAT ID,compliance,tq_customers_legacy,"",0.9933,1.0,,fail,compliance value 0.9933333333333333 violates thresholds
+Customers: email unique,duplicate_count,tq_customers_legacy,"",0.0,,0.0,pass,duplicate_count value 0.0 is within thresholds
+Customers: email well-formed,regex_match,tq_customers_legacy,"",0.935,0.98,,fail,regex_match value 0.935 violates thresholds
+Customers: phone present,null_rate,tq_customers_legacy,"",0.035,,0.02,fail,null_rate value 0.035 violates thresholds
+Customers: segment is known,values_in_set,tq_customers_legacy,"",1.0,1.0,,pass,values_in_set value 1.0 is within thresholds
+"Orders per channel: ≥ 1,000",volume,tq_orders,app,1446.0,1000.0,,pass,volume value 1446.0 is within thresholds
+"Orders per channel: ≥ 1,000",volume,tq_orders,marketplace,1555.0,1000.0,,pass,volume value 1555.0 is within thresholds
+"Orders per channel: ≥ 1,000",volume,tq_orders,web,1508.0,1000.0,,pass,volume value 1508.0 is within thresholds
+Orders: amount is positive,compliance,tq_orders,"",0.9989,1.0,,fail,compliance value 0.9988911066755378 violates thresholds
+"Orders: at least 3,000 rows",volume,tq_orders,"",4509.0,3000.0,,pass,volume value 4509.0 is within thresholds
+Orders: customer exists,match_rate,tq_orders,"",0.978,0.99,,fail,match_rate value 0.9780439121756487 violates thresholds
+Orders: mean amount 50–150 €,agg,tq_orders,"",95.7175,50.0,150.0,pass,agg value 95.71748281215348 is within thresholds
+Orders: order_id is unique,duplicate_count,tq_orders,"",4.0,,0.0,fail,duplicate_count value 4.0 violates thresholds
+Orders: status is a known value,values_in_set,tq_orders,"",0.9929,1.0,,fail,values_in_set value 0.992903082723442 violates thresholds

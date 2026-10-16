@@ -243,7 +243,7 @@ fn json_theme_file_recolours_the_palette() {
     let svg = render_with(&bars(), 480, 320, &o)
         .unwrap()
         .to_ascii_lowercase();
-    assert!(svg.contains("#0b5fff"), "acme palette[0]");
+    assert!(svg.contains("#4338ca"), "acme palette[0]");
     assert!(
         !svg.contains("#456481"),
         "DataZoo steel leaked into a custom theme"
