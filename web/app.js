@@ -4316,18 +4316,17 @@ function fitWidth(holder, rw) {
 }
 
 // Redraw every chart whose fitted width changed (after a run, and debounced on
-// resize / orientation change / a tab coming into view), and fold the toolbox
-// of narrow panels and touch screens behind its "⋯" button. True when a chart
-// was redrawn: follow with wireCharts(). `watch` (after a run) re-points the
-// resize observer at the fresh charts.
+// resize / orientation change / a tab coming into view), and re-fold the
+// toolboxes (foldTools). True when a chart was redrawn: follow with
+// wireCharts(). `watch` (after a run) re-points the resize observer at the
+// fresh charts.
 let dpFitObs = null,
   dpFitTimer = 0;
 function fitCharts(watch = false) {
-  const touch = matchMedia("(hover: none)").matches;
   let changed = false;
   if (watch) dpFitObs?.disconnect();
   document.querySelectorAll(".dash .panel").forEach((panel) => {
-    if (panel.clientWidth) panel.classList.toggle("dp-narrow", touch || panel.clientWidth < 480);
+    foldTools(panel);
     const dp = panel._dp;
     const holder = panel.querySelector(":scope > .panel-svg");
     if (!dp || !holder) return;
@@ -4342,6 +4341,25 @@ function fitCharts(watch = false) {
   });
   return changed;
 }
+// Fold a panel's toolbox behind its "⋯" button (.dp-narrow) where the full
+// bar would cover the title: narrow panels, touch screens (no hover to hide
+// it), and a title long enough to run under it. Elsewhere it stays the
+// hover-only bar.
+function foldTools(panel) {
+  const bar = panel.querySelector(":scope > .dp-toolbox");
+  if (!bar || !panel.clientWidth) return;
+  let fold = matchMedia("(hover: none)").matches || panel.clientWidth < 480;
+  const title = !fold && panel.querySelector(":scope > .panel-title");
+  if (title) {
+    panel.classList.remove("dp-narrow"); // measure the unfolded bar and title
+    const b = bar.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(title);
+    fold = [...range.getClientRects()].some((t) => t.right > b.left && t.top < b.bottom && t.bottom > b.top);
+  }
+  panel.classList.toggle("dp-narrow", fold);
+}
+
 if (typeof ResizeObserver !== "undefined")
   dpFitObs = new ResizeObserver(() => {
     clearTimeout(dpFitTimer);
@@ -8332,8 +8350,8 @@ function attachToolbox() {
       bar.appendChild(b);
       return b;
     };
-    // Narrow panels and touch screens (.dp-narrow, set by fitCharts) fold the
-    // tools behind this one button, so they never cover the title.
+    // Where the bar would cover the title (.dp-narrow, set by foldTools) the
+    // tools fold behind this one button.
     const more = document.createElement("button");
     more.className = "dp-tool dp-tool-more";
     more.title = "Chart tools";
@@ -8381,6 +8399,7 @@ function attachToolbox() {
     mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
     panel.appendChild(bar);
+    foldTools(panel);
   });
   if (!dpToolsAutoClose) {
     dpToolsAutoClose = true;
