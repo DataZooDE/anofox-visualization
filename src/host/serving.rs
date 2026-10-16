@@ -84,13 +84,18 @@ pub fn random_token() -> String {
     out
 }
 
-/// Constant-time string comparison (for tokens).
+/// Constant-time string comparison (for tokens and secrets). No early return
+/// on a length mismatch either: every byte of the longer input is visited.
 pub fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
+    let n = a.len().max(b.len());
+    let mut diff = (a.len() ^ b.len()) as u64;
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= u64::from(x ^ y);
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    std::hint::black_box(diff) == 0
 }
 
 /// Is `bind` a loopback address (`127.0.0.0/8`, `::1`, `localhost`)?
@@ -468,6 +473,11 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
             if !valid_ident(k) {
                 return Err(format!("invalid variable name '{k}'"));
             }
+            if crate::host::access::is_reserved_var(k) {
+                return Err(format!(
+                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
+                ));
+            }
             let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
             vars.push((k.clone(), lit));
         }
@@ -760,10 +770,15 @@ pub struct DashboardMeta {
     pub refresh: u32,
     /// Extensions to `LOAD` before serving (`-- @load name`), identifier-only.
     pub loads: Vec<String>,
+    /// `-- @vars a, b`: the only variables a viewer may set on a locked server
+    /// (others are dropped); `None` = any (not reserved) variable.
+    pub vars: Option<Vec<String>>,
 }
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
-/// `-- @load <extension>` header comments.
+/// `-- @load <extension>`, `-- @vars a, b` header comments. A `@param` or
+/// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
+/// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
     let mut m = DashboardMeta {
         title: id.to_string(),
@@ -779,6 +794,13 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             let ext = r.trim();
             if valid_ident(ext) {
                 m.loads.push(ext.to_string());
+            }
+        } else if let Some(r) = l.strip_prefix("-- @vars ") {
+            let vars = m.vars.get_or_insert_with(Vec::new);
+            for v in r.split(',').map(str::trim) {
+                if valid_ident(v) && !crate::host::access::is_reserved_var(v) {
+                    vars.push(v.to_ascii_lowercase());
+                }
             }
         } else if let Some(r) = l.strip_prefix("-- @param ") {
             if let (Some(o), Some(c)) = (r.find('['), r.find(']')) {
@@ -798,7 +820,10 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
                     .filter(|s| !s.is_empty())
                     .or_else(|| allowed.first().cloned())
                     .unwrap_or_default();
-                if valid_ident(&name) && !allowed.is_empty() {
+                if valid_ident(&name)
+                    && !crate::host::access::is_reserved_var(&name)
+                    && !allowed.is_empty()
+                {
                     m.params.push(Param {
                         name,
                         allowed,
@@ -1116,6 +1141,44 @@ mod tests {
         assert_eq!(m.title, "Sales");
         assert_eq!(m.params[0].default, "US");
         assert_eq!(m.loads, vec!["anofox_forecast".to_string()]);
+        assert_eq!(m.vars, None);
+        // claims are never viewer-settable: not as a @param, not in @vars
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @param __claim_user [alice, bob]\n-- @param __CLAIM_x [a]\n-- @vars Region, selected, __claim_groups, bad name\nSELECT 1;",
+        );
+        assert!(m.params.is_empty());
+        assert_eq!(
+            m.vars,
+            Some(vec!["region".to_string(), "selected".to_string()])
+        );
+    }
+
+    #[test]
+    fn reserved_claim_variables_are_rejected() {
+        for name in [
+            "__claim_user",
+            "__CLAIM_USER",
+            "__claim_groups",
+            "__Claim_tenant",
+        ] {
+            let body = format!(r#"{{"dashboard":"d","panel":1,"vars":{{"{name}":"admin"}}}}"#);
+            let e = parse_panel_request(&body).unwrap_err();
+            assert!(e.contains("reserved"), "{name}: {e}");
+        }
+        assert!(
+            parse_panel_request(r#"{"dashboard":"d","panel":1,"vars":{"claim_user":"x"}}"#).is_ok()
+        );
+        for name in ["anofox_data", "ANOFOX_Data"] {
+            let body = format!(r#"{{"dashboard":"d","panel":1,"vars":{{"{name}":"/etc"}}}}"#);
+            assert!(
+                parse_panel_request(&body).unwrap_err().contains("reserved"),
+                "{name}"
+            );
+        }
+        // ct_eq: equal only when equal, whatever the lengths
+        assert!(ct_eq("abc", "abc") && !ct_eq("abc", "abd") && !ct_eq("abc", "abcd"));
+        assert!(!ct_eq("", "a") && ct_eq("", "") && !ct_eq("abc\0", "abc"));
     }
 
     #[test]

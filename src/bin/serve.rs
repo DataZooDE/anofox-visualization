@@ -17,6 +17,7 @@
 //! See `docs/secure-serving.md`.
 
 use anofox_visualization::format::Locale;
+use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
 use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
@@ -55,6 +56,10 @@ struct Opts {
     /// `--allow-host` (repeatable): extra `Host` names accepted besides the
     /// loopback names; `*` disables the check.
     allow_hosts: Vec<String>,
+    /// `--auth <json | @file>`: viewer login via a trusted auth proxy.
+    auth: Option<ProxyAuth>,
+    /// `--log <path | stderr>` (+ `--log-vars`): JSON-lines request log.
+    log: Option<RequestLog>,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -63,7 +68,7 @@ fn theme_default() -> Option<&'static str> {
     THEME.get().and_then(|t| t.as_deref())
 }
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login via an auth proxy, see docs/secure-serving.md)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -84,7 +89,10 @@ fn parse_args() -> Opts {
         threads: 4,
         theme: None,
         allow_hosts: Vec::new(),
+        auth: None,
+        log: None,
     };
+    let (mut log, mut log_vars) = (None, None);
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
         v.and_then(|v| v.parse().ok())
@@ -139,18 +147,57 @@ fn parse_args() -> Opts {
                 }
                 o.theme = Some(spec);
             }
+            "--auth" => {
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| usage("--auth needs a JSON object or @file"));
+                let json = match v.strip_prefix('@') {
+                    Some(f) => std::fs::read_to_string(f)
+                        .unwrap_or_else(|e| usage(&format!("--auth {f}: {e}"))),
+                    None => v,
+                };
+                let val: serde_json::Value = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| usage(&format!("--auth: bad JSON: {e}")));
+                o.auth = Some(
+                    ProxyAuth::from_json(&val, |k| std::env::var(k).ok())
+                        .unwrap_or_else(|e| usage(&format!("--{e}"))),
+                );
+            }
+            "--log" => {
+                log = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage("--log needs a path or stderr")),
+                )
+            }
+            "--log-vars" => {
+                log_vars = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage("--log-vars needs none|names|values")),
+                )
+            }
             s if s.starts_with('-') => usage(&format!("unknown option {s}")),
             _ => o.db = a,
         }
+    }
+    match (log, log_vars) {
+        (Some(l), v) => {
+            o.log =
+                Some(RequestLog::new(&l, v.as_deref()).unwrap_or_else(|e| usage(&format!("--{e}"))))
+        }
+        (None, Some(_)) => usage("--log-vars needs --log"),
+        (None, None) => {}
+    }
+    if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
+        usage("--auth and --log apply to --dashboards serving");
     }
     o
 }
 
 fn main() {
-    let o = parse_args();
+    let mut o = parse_args();
     let _ = THEME.set(o.theme.clone());
     match o.dashboards_dir.clone() {
-        Some(dir) => serve_dashboards(&dir, &o),
+        Some(dir) => serve_dashboards(&dir, &mut o),
         None => authoring_mode(&o),
     }
 }
@@ -393,13 +440,14 @@ struct ServeState {
     allow_hosts: Vec<String>,
     db: String,
     dashboards: Vec<Dashboard>,
-    cache_ttl: Duration,
-    cache: Mutex<HashMap<String, (Instant, String)>>,
+    cache: RenderCache,
     max_rows: usize,
     timeout: Duration,
+    auth: Option<ProxyAuth>,
+    log: Option<RequestLog>,
 }
 
-fn serve_dashboards(dir: &str, o: &Opts) {
+fn serve_dashboards(dir: &str, o: &mut Opts) {
     let db = if o.db.is_empty() {
         private_dir("anofox-dashboards")
             .join("dashboards.duckdb")
@@ -440,11 +488,18 @@ fn serve_dashboards(dir: &str, o: &Opts) {
         "anofox-visualization serving {} dashboard(s) at http://{addr}/ (read-only; no client SQL; cache: {cache_note})\n  database: {db}\n  dashboards: {dir}\n  (put TLS + auth in front for public use — docs/secure-serving.md)",
         dashboards.len()
     );
-    if !sv::is_loopback_bind(&o.bind) {
-        println!(
-            "  note: bound to {} — reachable from the network; put a TLS/auth proxy in front",
+    match (&o.auth, sv::is_loopback_bind(&o.bind)) {
+        (Some(a), _) => println!(
+            "  login: auth proxy (trusted identity headers: {}; secret in {})\n  the proxy must set or remove each of these headers on every request",
+            a.trusted_headers(),
+            a.secret_header
+        ),
+        (None, false) => eprintln!(
+            "  WARNING: bound to {} WITHOUT --auth — every viewer who can reach this address sees every dashboard; \
+             put a TLS/auth proxy in front and pass --auth (docs/secure-serving.md)",
             o.bind
-        );
+        ),
+        (None, true) => {}
     }
     let st = ServeState {
         port: o.port,
@@ -458,74 +513,188 @@ fn serve_dashboards(dir: &str, o: &Opts) {
             .collect(),
         db,
         dashboards,
-        cache_ttl: Duration::from_secs(o.cache_secs),
-        cache: Mutex::new(HashMap::new()),
+        cache: RenderCache::new(Duration::from_secs(o.cache_secs)),
         max_rows: o.max_rows,
         timeout: o.timeout,
+        auth: o.auth.take(),
+        log: o.log.take(),
     };
     run_workers(server, o.threads, move |req| handle_serve(&st, req));
 }
 
 fn handle_serve(st: &ServeState, req: Request) {
+    let t0 = Instant::now();
+    let method = req.method().to_string();
+    let path = req.url().split('?').next().unwrap_or("/").to_string();
+    let peer = req.remote_addr().map(|a| a.ip());
+    let mut user = None;
+    let mut deny = None;
+    let mut dashboard = None;
+    let mut params = Vec::new();
+    let status = route_serve(st, req, &mut user, &mut deny, &mut dashboard, &mut params);
+    if let Some(log) = &st.log {
+        log.write(&LogEntry {
+            method: &method,
+            path: &path,
+            status,
+            ms: t0.elapsed().as_millis(),
+            user: user.as_deref(),
+            peer,
+            dashboard: dashboard.as_deref(),
+            vars: &params,
+            deny,
+            ..Default::default()
+        });
+    }
+}
+
+fn reply(req: Request, status: u16, msg: &str) -> u16 {
+    text(req, status, msg);
+    status
+}
+
+/// The `--cache` render cache: entries expire after the TTL and are purged
+/// on insert; beyond [`RenderCache::MAX_ENTRIES`] entries or
+/// [`RenderCache::MAX_BYTES`] the oldest go first. (With `--auth` every viewer
+/// has their own entries, so it must not grow without bound.)
+struct RenderCache {
+    ttl: Duration,
+    map: Mutex<HashMap<String, (Instant, String)>>,
+}
+
+impl RenderCache {
+    const MAX_ENTRIES: usize = 1024;
+    const MAX_BYTES: usize = 64 << 20;
+
+    fn new(ttl: Duration) -> Self {
+        RenderCache {
+            ttl,
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &str, now: Instant) -> Option<String> {
+        if self.ttl.is_zero() {
+            return None;
+        }
+        let map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(key)
+            .filter(|(ts, _)| now.duration_since(*ts) < self.ttl)
+            .map(|(_, h)| h.clone())
+    }
+
+    fn insert(&self, key: String, html: String, now: Instant) {
+        if self.ttl.is_zero() || html.len() > Self::MAX_BYTES / 4 {
+            return;
+        }
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, (ts, _)| now.duration_since(*ts) < self.ttl);
+        map.remove(&key);
+        let mut bytes: usize = map.values().map(|(_, h)| h.len()).sum();
+        while !map.is_empty()
+            && (map.len() >= Self::MAX_ENTRIES || bytes + html.len() > Self::MAX_BYTES)
+        {
+            let oldest = map
+                .iter()
+                .min_by_key(|(_, (ts, _))| *ts)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                if let Some((_, h)) = map.remove(&k) {
+                    bytes -= h.len();
+                }
+            }
+        }
+        map.insert(key, (now, html));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+}
+
+fn route_serve(
+    st: &ServeState,
+    req: Request,
+    user: &mut Option<String>,
+    deny: &mut Option<&'static str>,
+    dashboard: &mut Option<String>,
+    params: &mut Vec<(String, String)>,
+) -> u16 {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
+    // A bare control character in the target is never a legitimate URL.
+    if access::has_control_chars(&url) {
+        return reply(req, 400, "bad request: control character in the URL");
+    }
     // DNS rebinding: only loopback names (or --allow-host names) are served.
     if !sv::host_allowed(req_header(&req, "Host"), st.port, &st.allow_hosts) {
-        return text(
+        return reply(
             req,
             421,
             "misdirected request: unknown Host — start the server with --allow-host <name>",
         );
     }
+    // Login (--auth): the proxy's identity + secret on every request.
+    let claims: Option<Claims> = match &st.auth {
+        Some(auth) => {
+            let headers: Vec<(&str, &str)> = req
+                .headers()
+                .iter()
+                .map(|h| (h.field.as_str().as_str(), h.value.as_str()))
+                .collect();
+            match auth.authenticate(req.remote_addr().map(|a| a.ip()), &headers) {
+                Ok(c) => {
+                    *user = Some(c.user.clone());
+                    Some(c)
+                }
+                Err(e) => {
+                    *deny = Some(e.reason());
+                    return reply(req, 401, access::UNAUTHORIZED);
+                }
+            }
+        }
+        None => None,
+    };
     if req.method() != &Method::Get {
-        return text(req, 405, "method not allowed");
+        return reply(req, 405, "method not allowed");
     }
     if path == "/" {
-        return respond(
+        respond(
             req,
             200,
             "text/html; charset=utf-8",
             list_page(&st.dashboards).into_bytes(),
         );
+        return 200;
     }
     let Some(rest) = path.strip_prefix("/d/") else {
         // No /query, no static assets, no SQL — the whole surface is id + params.
-        return text(req, 404, "not found");
+        return reply(req, 404, "not found");
     };
     let id = rest.trim_end_matches('/');
     let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
-        return text(req, 404, "no such dashboard");
+        return reply(req, 404, "no such dashboard");
     };
+    *dashboard = Some(dash.id.clone());
     // Validate params against the whitelist (unknown/disallowed → 400).
     let resolved = match resolve_params(dash, &sv::parse_query(&url)) {
         Ok(r) => r,
-        Err(e) => return text(req, 400, &e),
+        Err(e) => return reply(req, 400, &e),
     };
-    let key = cache_key(&dash.id, &resolved);
-    if !st.cache_ttl.is_zero() {
-        let hit = st
-            .cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-            .filter(|(ts, _)| ts.elapsed() < st.cache_ttl)
-            .map(|(_, h)| h.clone());
-        if let Some(html) = hit {
-            return respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
-            // no DB touched
-        }
+    params.clone_from(&resolved);
+    let key = cache_key(&dash.id, &resolved, claims.as_ref());
+    if let Some(html) = st.cache.get(&key, Instant::now()) {
+        respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+        return 200; // no DB touched
     }
-    match render_dashboard_page(st, dash, &resolved) {
+    match render_dashboard_page(st, dash, &resolved, claims.as_ref()) {
         Ok(html) => {
-            if !st.cache_ttl.is_zero() {
-                st.cache
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(key, (Instant::now(), html.clone()));
-            }
-            respond(req, 200, "text/html; charset=utf-8", html.into_bytes())
+            st.cache.insert(key, html.clone(), Instant::now());
+            respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+            200
         }
-        Err(e) => text(req, 400, &e),
+        Err(e) => reply(req, 400, &e),
     }
 }
 
@@ -550,9 +719,10 @@ fn resolve_params(
     Ok(out)
 }
 
-fn cache_key(id: &str, resolved: &[(String, String)]) -> String {
-    let params: Vec<String> = resolved.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    format!("{id}|{}", params.join("&"))
+/// The render cache key: dashboard, params and — with a login — the viewer's
+/// claims, so one viewer's page is never served to another.
+fn cache_key(id: &str, resolved: &[(String, String)], claims: Option<&Claims>) -> String {
+    format!("{:?}", (id, resolved, claims.map(Claims::key)))
 }
 
 /// Render one dashboard to a view-only HTML page: binds the (whitelisted)
@@ -563,6 +733,7 @@ fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
     resolved: &[(String, String)],
+    claims: Option<&Claims>,
 ) -> Result<String, String> {
     let value_of = |name: &str| -> String {
         resolved
@@ -581,6 +752,11 @@ fn render_dashboard_page(
             "SET VARIABLE {name} = {}; ",
             sql_string_literal(val)
         ));
+    }
+    // The login's claims (a @param can't name them: parse_dashboard_meta
+    // ignores `__claim_*` params).
+    for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
+        prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
     }
     let mut selects = String::new();
     for p in &dash.meta.params {
@@ -633,7 +809,7 @@ fn render_dashboard_page(
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
-                if !resolved.iter().any(|(n, _)| n == name) {
+                if !resolved.iter().any(|(n, _)| n == name) && !access::is_reserved_var(name) {
                     prefix.push_str(&set);
                     prefix.push_str("; ");
                 }
@@ -798,5 +974,76 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
         Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
         Err(String::from_utf8_lossy(&stderr).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_cache_expires_and_is_capped() {
+        let c = RenderCache::new(Duration::from_secs(60));
+        let t0 = Instant::now();
+        c.insert("a".into(), "A".into(), t0);
+        assert_eq!(
+            c.get("a", t0 + Duration::from_secs(59)).as_deref(),
+            Some("A")
+        );
+        assert_eq!(c.get("a", t0 + Duration::from_secs(61)), None);
+        // expired entries are purged on the next insert
+        c.insert("b".into(), "B".into(), t0 + Duration::from_secs(61));
+        assert_eq!(c.len(), 1);
+        // at most MAX_ENTRIES (one per viewer with --auth): oldest evicted
+        let t1 = t0 + Duration::from_secs(62);
+        for i in 0..RenderCache::MAX_ENTRIES + 10 {
+            c.insert(
+                format!("k{i}"),
+                "x".into(),
+                t1 + Duration::from_millis(i as u64),
+            );
+        }
+        assert_eq!(c.len(), RenderCache::MAX_ENTRIES);
+        let late = t1 + Duration::from_secs(1);
+        assert_eq!(c.get("k0", late), None);
+        assert!(c
+            .get(&format!("k{}", RenderCache::MAX_ENTRIES + 9), late)
+            .is_some());
+        // byte cap: a huge page is not cached; big pages evict old ones
+        let c = RenderCache::new(Duration::from_secs(60));
+        c.insert(
+            "huge".into(),
+            "x".repeat(RenderCache::MAX_BYTES / 4 + 1),
+            t0,
+        );
+        assert_eq!(c.len(), 0);
+        let big = "x".repeat(RenderCache::MAX_BYTES / 4);
+        for i in 0..6 {
+            c.insert(format!("p{i}"), big.clone(), t0 + Duration::from_millis(i));
+        }
+        assert_eq!(c.len(), 4);
+        assert!(c.get("p0", t0).is_none() && c.get("p5", t0).is_some());
+        // ttl 0 = off
+        let off = RenderCache::new(Duration::ZERO);
+        off.insert("a".into(), "A".into(), t0);
+        assert_eq!((off.len(), off.get("a", t0)), (0, None));
+    }
+
+    #[test]
+    fn cache_keys_are_per_viewer() {
+        let r = vec![("region".to_string(), "EU".to_string())];
+        let alice = Claims {
+            user: "alice".into(),
+            ..Default::default()
+        };
+        let bob = Claims {
+            user: "bob".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            cache_key("d", &r, Some(&alice)),
+            cache_key("d", &r, Some(&bob))
+        );
+        assert_ne!(cache_key("d", &r, Some(&alice)), cache_key("d", &r, None));
     }
 }

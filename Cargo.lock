@@ -17,6 +17,7 @@ version = "2026.10.16"
 dependencies = [
  "ggplot-rs",
  "include_dir",
+ "libc",
  "open",
  "roxmltree",
  "serde_json",

@@ -1873,6 +1873,17 @@ any path outside the folder anyway. New runs are readable immediately. With
 TABLE|VIEW … AS <query>`); mount the folder read-only for a hard guarantee
 ([`secure-serving.md`](secure-serving.md)).
 
+**Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy
+`forward_auth`, nginx `auth_request`, Cloudflare Access), `options.auth`
+(`{"mode": "proxy", "shared_secret_env": "…"}`) makes every request carry the
+viewer's identity. The server exposes it to the panels as the reserved
+variables `getvariable('__claim_user')` and, if the proxy sends groups and
+`header_groups` is set, `getvariable('__claim_groups')`, so a
+panel can filter rows by the viewer
+(`WHERE region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__claim_user'))`).
+Viewers can't set `__claim_*`, and cached results are kept per viewer.
+`options.log` writes a JSON-lines request log.
+
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
 files is a linked set, served with a shared cross-dashboard nav bar.
