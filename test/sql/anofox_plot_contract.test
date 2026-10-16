@@ -353,3 +353,34 @@ statement error
 SELECT anofox_plot_terms(c, width := 100000) FROM coefs c;
 ----
 outside [16, 8192]
+
+# scikit-learn metric names have a direction too: average_precision marks
+# its best model (one more point than an unknown metric draws).
+query I
+SELECT (length(a) - length(replace(a, '<circle', ''))) // 7 - (length(b) - length(replace(b, '<circle', ''))) // 7
+FROM (SELECT anofox_plot_summary(s) AS a FROM (VALUES ('a', 'average_precision', 0.66),
+        ('b', 'average_precision', 0.64)) s(model_id, metric, value)),
+     (SELECT anofox_plot_summary(s) AS b FROM (VALUES ('a', 'my_score', 0.66),
+        ('b', 'my_score', 0.64)) s(model_id, metric, value));
+----
+1
+
+# pingouin's pairwise_tests as it comes: BF10 is text holding a number, so
+# it does not split the forest into one panel per Bayes factor.
+query II
+SELECT (length(svg) - length(replace(svg, '<svg', ''))) // 4, svg LIKE '%156.665%' FROM (
+  SELECT anofox_plot_tests(r) AS svg FROM (VALUES
+    ('g', 0, 10, -3.9, 0.0005, 0.001, 'holm', '156.665'),
+    ('g', 0, 20, -7.1, 1e-9, 3e-9, 'holm', '2.648e+09'),
+    ('g', 10, 20, -2.2, 0.03, 0.03, 'holm', '1.2'))
+  r("Contrast", group1, group2, "T", "p-unc", "p-corr", "p-adjust", "BF10"));
+----
+1	false
+
+# Opaque points carry no fill-opacity (the SVG default), hover data stays.
+query II
+SELECT svg NOT SIMILAR TO '.*<circle [^>]*fill-opacity="1.000".*', svg LIKE '%<circle %data-value=%<title>%'
+FROM (SELECT anofox_plot_diagnostics(o) AS svg FROM (
+  SELECT i AS row_id, i::DOUBLE AS fitted, sin(i) AS residual FROM range(30) r(i)) o);
+----
+true	true
