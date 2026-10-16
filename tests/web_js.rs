@@ -52,3 +52,8 @@ fn web_locale_formatting_matches_the_cli() {
 fn web_url_state_is_validated() {
     run_node("urlstate_test.mjs");
 }
+
+#[test]
+fn web_chart_interactions() {
+    run_node("interaction_test.mjs");
+}

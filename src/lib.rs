@@ -357,6 +357,11 @@ pub enum Role {
     Favicon,
     /// A section heading that always starts a new row (`::SECTION`).
     Section,
+    /// Interaction: `::SELECT_AS` names the *next* chart's selection — a click
+    /// sets `getvariable('<name>')` instead of the shared `selected` (value
+    /// `'name'` or `'name multi'`), a brush on a continuous x sets
+    /// `<name>_from` / `<name>_to`.
+    SelectAs,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

@@ -129,6 +129,7 @@ terminal.
 | `::FLAG` | `::THRESHOLD` | layout | next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5' |
 | `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
 | `::SUBTOTAL` | `::SUBTOTALS`, `::GROUP_TOTAL` | layout | next table: a subtotal row after each group of a column — 'region' (not for ::PAGED) |
+| `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
@@ -697,6 +698,41 @@ SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku;
 SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
 WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
 ```
+
+#### Named chart selections (`::SELECT_AS`)
+
+By default every chart click writes the one shared `selected`. A
+`::SELECT_AS` directive before a chart gives that chart **its own variable**, so
+two charts filter independently (and compose):
+
+| `SELECT … ::SELECT_AS;` | A click on a mark… | A brush (toolbox ▧)… |
+|---|---|---|
+| `'region'` | sets `getvariable('region')` to the mark's key (`''` = nothing; click it again to clear) | on a continuous / date x: sets `region_from` / `region_to` |
+| `'region multi'` | selects just that value; **shift / ctrl / ⌘-click** adds or removes one — `getvariable('region')` is a `VARCHAR[]` (`[]` = nothing) | same range; on a discrete x it selects the brushed values |
+
+The mark's key is the one the shared `selected` would get (its `::CATEGORY`
+series, else its x). The brushed range is the smallest and largest x of the
+marks inside the band — numbers on a numeric x, `'YYYY-MM-DD'` text on a date x
+(cast it: `getvariable('week_from')::DATE`); `NULL` when nothing is brushed.
+The selected marks stay bright, the rest dim, a brushed range stays shaded, and
+a chip above the chart shows the selection (× clears it). **Esc** or a click on
+empty space clears every selection. Selections are part of the URL state.
+
+```sql
+SELECT 'region multi'::SELECT_AS;
+SELECT region::XAXIS, sum(revenue)::BARCHART FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT 'week'::SELECT_AS;
+SELECT week::XAXIS, sum(revenue)::LINECHART FROM orders GROUP BY 1 ORDER BY 1;
+
+SELECT sum(revenue)::MONEY FROM orders
+WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week)
+               AND coalesce(getvariable('week_to')::DATE, week);
+```
+
+The browser (and `--check`) start with nothing selected — `''` / `[]` and NULL
+ranges — so the guards above are all a panel needs. See the **"Selections &
+drill"** sample.
 
 #### Viewer state in the URL
 

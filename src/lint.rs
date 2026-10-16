@@ -244,6 +244,23 @@ where
             continue;
         }
 
+        // Interaction directives: prime their variables the way the browser does
+        // ("nothing selected"), so panels filtering by a selection are checked
+        // with data; a malformed value is reported.
+        if p.roles.iter().any(|(_, r)| matches!(r, Role::SelectAs)) {
+            match select_as_prelude(&first_text(&rows)) {
+                Ok(sets) => prelude.push_str(&sets),
+                Err(message) => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "interaction/bad-value",
+                    message,
+                    sql: short.clone(),
+                }),
+            }
+            continue;
+        }
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -661,6 +678,52 @@ fn lit(v: &Value) -> String {
     }
 }
 
+/// The first cell of a result as text (`""` when there is none).
+fn first_text(rows: &[Map<String, Value>]) -> String {
+    rows.first()
+        .and_then(|row| row.values().next())
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            v => v.to_string(),
+        })
+        .unwrap_or_default()
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut c = s.chars();
+    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && s.len() <= 60
+}
+
+/// `'name'` / `'name multi'` of a `::SELECT_AS` → the browser's initial
+/// variables: the selection (`''`, or `[]` in multi mode) and an unset brushed
+/// range (`<name>_from` / `<name>_to` = NULL).
+fn select_as_prelude(v: &str) -> Result<String, String> {
+    let mut parts = v
+        .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
+        .filter(|p| !p.is_empty());
+    let name = parts.next().unwrap_or("");
+    let mode = parts.next().unwrap_or("single").to_ascii_lowercase();
+    if !is_ident(name) || !matches!(mode.as_str(), "single" | "multi") || parts.next().is_some() {
+        return Err(format!(
+            "::SELECT_AS `{v}` — expected a variable name, optionally followed by \
+             'single' or 'multi' (e.g. 'region' or 'region multi'); the chart keeps \
+             the shared `selected` click"
+        ));
+    }
+    let sel = if mode == "multi" {
+        "[]::VARCHAR[]"
+    } else {
+        "''"
+    };
+    Ok(format!(
+        "SET VARIABLE {n} = {sel};\nSET VARIABLE {n}_from = NULL;\nSET VARIABLE {n}_to = NULL;\n",
+        n = name
+    ))
+}
+
 fn one_line(s: &str) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if s.chars().count() > 140 {
@@ -817,6 +880,41 @@ mod design_tests {
 
     fn has(diags: &[Diagnostic], code: &str) -> bool {
         diags.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn select_as_primes_its_variables() {
+        let mut seen = Vec::new();
+        let d = check(
+            "SELECT 'week multi'::SELECT_AS;\nSELECT 1::METRIC FROM t WHERE list_contains(getvariable('week'), x);",
+            |q| {
+                seen.push(q.to_string());
+                Ok(vec![json!({ "c0": "week multi" }).as_object().unwrap().clone()])
+            },
+        );
+        assert!(!has(&d, "interaction/bad-value"), "{d:?}");
+        let last = seen.last().unwrap();
+        assert!(
+            last.contains("SET VARIABLE week = []::VARCHAR[];"),
+            "{last}"
+        );
+        assert!(last.contains("SET VARIABLE week_from = NULL;"), "{last}");
+        assert_eq!(
+            select_as_prelude("region").unwrap(),
+            "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
+        );
+        for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
+            assert!(select_as_prelude(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn select_as_with_a_bad_value_warns() {
+        let d = lint_one(
+            "SELECT 'not a name'::SELECT_AS;",
+            vec![json!({ "c0": "not a name" }).as_object().unwrap().clone()],
+        );
+        assert!(has(&d, "interaction/bad-value"), "{d:?}");
     }
 
     #[test]

@@ -668,6 +668,44 @@ SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & market)'::TITLE 
 WHERE (len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku))
   AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'))
 GROUP BY month ORDER BY month;`,
+      "Selections & drill": `-- A small sales cube: region > country > city, three channels, 26 weeks.
+CREATE OR REPLACE TABLE geo AS SELECT * FROM (VALUES
+  ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
+  ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
+  ('APAC','Japan','Tokyo'),('APAC','Japan','Osaka'),('APAC','Australia','Sydney')
+) t(region, country, city);
+CREATE OR REPLACE TABLE orders AS
+SELECT DATE '2024-01-01' + (7 * w)::INT AS week, g.region, g.country, g.city, c.channel,
+       (abs(hash(g.city || c.channel || w)) % 60 + 20 + 2 * w) AS revenue
+FROM geo g, (VALUES ('web'),('app'),('store')) c(channel), range(26) r(w);
+
+SELECT 'Selections & drill — named selections, brushing, drill-down and drill-through'::LABEL;
+
+SELECT 'Named selections'::TAB;
+SELECT 12::COL;
+SELECT 'Each chart below writes **its own variable** with **::SELECT_AS** instead of the shared getvariable(''selected''), so the selections compose. **Regions** is \`''region multi''\`: click a bar to pick one, **shift/ctrl-click** to add more — getvariable(''region'') is a list. **Channel** is single: getvariable(''channel'') is one value. On the **weekly line**, open the toolbox **▧ brush** and drag across a few weeks: the brushed range lands in getvariable(''week_from'') / getvariable(''week_to''). Each selection shows as a chip (× clears it); **Esc** or a click on empty space clears them all, and the address bar keeps them (\`?v.region=EU&v.week_from=…\`).'::MARKDOWN, 'What this shows'::TITLE;
+
+SELECT 4::COL; SELECT 'region multi'::SELECT_AS;
+SELECT region::XAXIS, sum(revenue)::BARCHART, 'Regions (click, shift-click)'::TITLE FROM orders
+WHERE channel = coalesce(nullif(getvariable('channel'), ''), channel)
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
+GROUP BY region ORDER BY 2 DESC;
+SELECT 4::COL; SELECT 'channel'::SELECT_AS;
+SELECT channel::XAXIS, sum(revenue)::BARCHART, ''::FLIP, 'Channel (click)'::TITLE FROM orders
+WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week)
+GROUP BY channel ORDER BY 2;
+SELECT 4::COL;
+SELECT sum(revenue)::MONEY, 'Revenue in selection'::LABEL FROM orders
+WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+  AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
+  AND week BETWEEN coalesce(getvariable('week_from')::DATE, week) AND coalesce(getvariable('week_to')::DATE, week);
+
+SELECT 12::COL; SELECT 'week'::SELECT_AS;
+SELECT week::XAXIS, sum(revenue)::LINECHART, 'Weekly revenue (▧ brush a range)'::TITLE FROM orders
+WHERE (len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region))
+  AND channel = coalesce(nullif(getvariable('channel'), ''), channel)
+GROUP BY week ORDER BY week;`,
     },
   },
 
@@ -1632,6 +1670,7 @@ function loadDash(name, sql) {
   dpXf = {};
   dpUrlSeed = {};
   dpVarDefault = {};
+  dpRange = {};
   dpPage = {};
   dpSort = {};
   dpPaged = {};
@@ -2272,6 +2311,9 @@ function urlStateParams() {
     if (k in dpVarDefault || v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
     add(k, v);
   }
+  for (const [k, r] of Object.entries(dpRange)) {
+    if (r) add(k + "_from", r.from), add(k + "_to", r.to);
+  }
   return out;
 }
 function syncUrlState() {
@@ -2281,6 +2323,169 @@ function syncUrlState() {
     for (const [k, v] of urlStateParams()) u.searchParams.append(k, v);
     if (u.href !== location.href) history.replaceState(null, "", u);
   } catch (_) {}
+}
+
+// ---- chart interactions: named selections (::SELECT_AS) ----
+// `'region'::SELECT_AS` before a chart: a click sets getvariable('region') (''
+// = nothing) instead of the shared `selected`; `'region multi'` keeps a list
+// (VARCHAR[], [] = nothing) — a click selects one value, shift/ctrl-click adds
+// or removes one. A brush (toolbox ▧) on a continuous / date x sets
+// `region_from` / `region_to` (NULL = no range); on a discrete x in multi mode
+// it selects the brushed values. Esc or a click on empty space clears.
+let dpIa = {}; // statement index -> {select: {name, mode}} (this run's interaction directives)
+let dpRange = {}; // named selection -> {from, to} brushed x range (numbers or ISO dates)
+function parseSelectAs(v) {
+  const m = String(v ?? "")
+    .trim()
+    .match(/^([A-Za-z_][A-Za-z0-9_]{0,59})(?:\s*[\s:,]\s*(single|multi))?$/i);
+  return m ? { name: m[1], mode: (m[2] || "single").toLowerCase() } : null;
+}
+// Evaluate the interaction directives before any panel queries, so their
+// variables exist (and URL seeds apply) when the panels run.
+async function prepInteractions(stmts) {
+  dpIa = {};
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
+    if (s.setup || directive(s) !== "SELECT_AS") continue;
+    try {
+      const rows = JSON.parse(await runSql(s.sql));
+      const sel = parseSelectAs(rows[0] ? Object.values(rows[0])[0] : "");
+      if (!sel) continue;
+      dpIa[i] = { select: sel };
+      seedNamedSelection(sel);
+      const cur = dpXf[sel.name];
+      if (sel.mode === "multi" && !Array.isArray(cur)) dpXf[sel.name] = cur ? [cur] : [];
+      if (sel.mode === "single" && typeof cur !== "string") dpXf[sel.name] = Array.isArray(cur) ? cur[0] ?? "" : "";
+      dpRange[sel.name] ||= null;
+    } catch (_) {}
+  }
+}
+function seedNamedSelection(sel) {
+  const take = (k) => {
+    const v = dpUrlSeed[k];
+    delete dpUrlSeed[k];
+    return v && v.every((x) => x.length <= 500) ? v : null;
+  };
+  const v = take(sel.name);
+  if (v) dpXf[sel.name] = sel.mode === "multi" ? v.filter((x) => x !== "") : v[0];
+  const f = take(sel.name + "_from");
+  const t = take(sel.name + "_to");
+  const typed = (x) => (x && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(x[0]) && Number.isFinite(+x[0]) ? +x[0] : x && isIsoDate(x[0].slice(0, 10)) ? x[0] : null);
+  if (typed(f) !== null && typed(t) !== null) dpRange[sel.name] = { from: typed(f), to: typed(t) };
+}
+// The brushed ranges as variables: <name>_from / <name>_to (NULL when unset).
+async function setRangeVars() {
+  for (const [name, r] of Object.entries(dpRange)) {
+    const lit = (v) => (v == null ? "NULL" : typeof v === "number" ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
+    try {
+      await runSql(`SET VARIABLE ${name}_from = ${lit(r && r.from)}`);
+      await runSql(`SET VARIABLE ${name}_to = ${lit(r && r.to)}`);
+    } catch (_) {}
+  }
+}
+// A click on a mark of a ::SELECT_AS chart. `add` (shift/ctrl/⌘) toggles one
+// value in a multi selection; a plain click selects just that value (again: clear).
+function clickNamedSelection(sel, key, add) {
+  const cur = dpXf[sel.name];
+  if (sel.mode !== "multi") dpXf[sel.name] = cur === key ? "" : key;
+  else {
+    const set = new Set(Array.isArray(cur) ? cur : []);
+    if (add) set.has(key) ? set.delete(key) : set.add(key);
+    else if (set.size === 1 && set.has(key)) set.clear();
+    else {
+      set.clear();
+      set.add(key);
+    }
+    dpXf[sel.name] = [...set];
+  }
+  run(false);
+}
+// The shape of a chart's x from its marks' data-x: "num", "date" or null (discrete).
+function xKindOf(xs) {
+  if (!xs.length) return null;
+  if (xs.every((x) => x !== "" && Number.isFinite(Number(x)))) return "num";
+  if (xs.every((x) => /^\d{4}-\d{2}-\d{2}/.test(x))) return "date";
+  return null;
+}
+const xVal = (x, kind) => (kind === "num" ? Number(x) : x);
+// Clear every click / brush selection (Esc, a click on empty space). Returns
+// true if there was anything to clear.
+function clearSelections() {
+  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
+  const anyRange = Object.values(dpRange).some((r) => r);
+  if (!dpFilter && dpSelected === null && !anyNamed && !anyRange) return false;
+  dpFilter = "";
+  dpSelected = null;
+  for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
+  for (const k in dpRange) dpRange[k] = null;
+  return true;
+}
+// After a render: dim the marks outside each named selection / brushed range
+// and show what is selected (with a ✕ to clear) above the chart.
+function decorateSelections() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const sel = panel._ia && panel._ia.select;
+    if (!sel) return;
+    panel.classList.add("dp-selectable");
+    const cur = dpXf[sel.name];
+    const keys = new Set(Array.isArray(cur) ? cur : cur ? [cur] : []);
+    const r = dpRange[sel.name];
+    const kind = r ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
+    if (keys.size || (r && kind)) {
+      filterMarks(panel, (el) => {
+        if (keys.size && !keys.has(el.getAttribute("data-series"))) return false;
+        if (!r || !kind) return true;
+        const x = xVal(el.getAttribute("data-x") || "", kind);
+        return x >= r.from && x <= r.to;
+      });
+    }
+    // The brushed range stays visible as a translucent band over the marks it kept.
+    const holder = panel.querySelector(".panel-svg");
+    holder?.querySelector(".dp-range-band")?.remove();
+    if (r && kind && holder) {
+      const hr = holder.getBoundingClientRect();
+      const xs = [...marksOf(panel)]
+        .filter((el) => {
+          const x = xVal(el.getAttribute("data-x") || "", kind);
+          return x >= r.from && x <= r.to;
+        })
+        .map((el) => el.getBoundingClientRect())
+        .flatMap((b) => [b.left, b.right]);
+      if (xs.length && hr.width) {
+        const band = document.createElement("div");
+        band.className = "dp-range-band";
+        band.style.left = Math.min(...xs) - hr.left - 4 + "px";
+        band.style.width = Math.max(...xs) - Math.min(...xs) + 8 + "px";
+        holder.appendChild(band);
+      }
+    }
+    panel.querySelector(".dp-ia-bar")?.remove();
+    const parts = [];
+    if (keys.size) parts.push([`${sel.name}: ${[...keys].join(", ")}`, () => (dpXf[sel.name] = Array.isArray(cur) ? [] : "")]);
+    if (r) parts.push([`${sel.name}: ${r.from} – ${r.to}`, () => (dpRange[sel.name] = null)]);
+    if (!parts.length) return;
+    const bar = document.createElement("div");
+    bar.className = "dp-ia-bar";
+    for (const [text, clear] of parts) {
+      const chip = document.createElement("span");
+      chip.className = "tbl-chip";
+      chip.title = text;
+      chip.append(text);
+      const x = document.createElement("button");
+      x.textContent = "×";
+      x.title = "Clear this selection";
+      x.setAttribute("aria-label", "Clear " + text);
+      x.onclick = (e) => {
+        e.stopPropagation();
+        clear();
+        run(false);
+      };
+      chip.appendChild(x);
+      bar.appendChild(chip);
+    }
+    const head = panel.querySelector(".panel-title");
+    head ? head.after(bar) : panel.prepend(bar);
+  });
 }
 
 // A full-view loading spinner shown while queries are in flight (body.loading is
@@ -2364,7 +2569,9 @@ async function runOnce(fresh = true) {
     return showError(grid, String(e));
   }
 
+  await prepInteractions(stmts);
   await setSelectionVars();
+  await setRangeVars();
 
   // Pre-pass: run setup + set each dropdown's DuckDB variable (before charts),
   // caching options for the render pass by statement index. Chrome directives
@@ -2476,6 +2683,7 @@ async function runOnce(fresh = true) {
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
   let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
+  let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
   let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
@@ -2551,6 +2759,8 @@ async function runOnce(fresh = true) {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
           .toLowerCase();
+      } else if (d === "SELECT_AS") {
+        Object.assign(nextIa, dpIa[i] || {});
       } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "TAB") {
@@ -2638,6 +2848,7 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
       } else if (isInput(s)) {
         if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
       } else if (s.contract) {
@@ -2688,6 +2899,7 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
       } else if (role(s, "PAGED")) {
         // A SQL-driven table: only one page of rows (Scroll view: one block at
         // a time) is fetched, plus one statistics row (count, sums, means, ranges)
@@ -2858,6 +3070,7 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
       } else {
         const rowsJson = await runSql(s.sql);
         const span = Math.min(12, nextSpan || defaultSpan);
@@ -3004,6 +3217,7 @@ async function runOnce(fresh = true) {
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
             fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
+            fig._ia = nextIa;
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -3018,6 +3232,7 @@ async function runOnce(fresh = true) {
         nextHeight = 0;
         nextRowSelect = "";
         nextTableOpts = {};
+        nextIa = {};
       }
     } catch (e) {
       showError(container, `${s.sql}\n\n${e}`);
@@ -5898,6 +6113,8 @@ function attachHover() {
     });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      const ia = el.closest(".panel")?._ia;
+      if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.
       dpFilter = dpFilter === series ? "" : series;
@@ -5906,6 +6123,7 @@ function attachHover() {
     });
   });
   apply();
+  decorateSelections();
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
@@ -6100,6 +6318,11 @@ function toggleBrush(panel) {
   ov.appendChild(rect);
   holder.appendChild(ov);
   panel._brush = ov;
+  // On a ::SELECT_AS chart with a continuous / date x the brush is an x band.
+  const sel = panel._ia && panel._ia.select;
+  const xKind = sel ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
+  const xBand = !!xKind;
+  ov.addEventListener("click", (e) => e.stopPropagation()); // a drag is not a click on empty space
   let start = null;
   const rel = (e) => {
     const r = ov.getBoundingClientRect();
@@ -6118,9 +6341,9 @@ function toggleBrush(panel) {
     if (!start) return;
     const p = rel(e);
     const x = Math.min(start.x, p.x),
-      y = Math.min(start.y, p.y),
+      y = xBand ? 0 : Math.min(start.y, p.y),
       w = Math.abs(p.x - start.x),
-      h = Math.abs(p.y - start.y);
+      h = xBand ? ov.clientHeight : Math.abs(p.y - start.y);
     Object.assign(rect.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" });
   });
   ov.addEventListener("mouseup", (e) => {
@@ -6139,12 +6362,25 @@ function toggleBrush(panel) {
       return;
     }
     const ovr = ov.getBoundingClientRect();
-    filterMarks(panel, (el) => {
+    const inBox = (el) => {
       const b = el.getBoundingClientRect();
       const cx = b.left + b.width / 2 - ovr.left,
         cy = b.top + b.height / 2 - ovr.top;
-      return cx >= box.x0 && cx <= box.x1 && cy >= box.y0 && cy <= box.y1;
-    });
+      return cx >= box.x0 && cx <= box.x1 && (xBand || (cy >= box.y0 && cy <= box.y1));
+    };
+    filterMarks(panel, inBox);
+    // A ::SELECT_AS chart turns the brush into variables: the brushed x range
+    // (<name>_from / <name>_to) on a continuous / date x, the brushed values on a
+    // discrete x in multi mode.
+    if (!sel) return;
+    const hit = [...marksOf(panel)].filter(inBox);
+    if (xKind) {
+      const xs = hit.map((el) => xVal(el.getAttribute("data-x") || "", xKind)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      dpRange[sel.name] = xs.length ? { from: xs[0], to: xs[xs.length - 1] } : null;
+    } else if (sel.mode === "multi") {
+      dpXf[sel.name] = [...new Set(hit.map((el) => el.getAttribute("data-series")))];
+    } else return;
+    run(false);
   });
 }
 
@@ -6613,13 +6849,16 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
 
 // Click empty dashboard space to clear all cross-filters / selections.
 document.querySelector(".dash").addEventListener("click", () => {
-  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
-  if (dpFilter || dpSelected !== null || anyNamed) {
-    dpFilter = "";
-    dpSelected = null;
-    for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
-    run(false);
-  }
+  if (clearSelections()) run(false);
+});
+// Esc does the same (unless a dialog, menu or text field has the key).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  const el = document.activeElement;
+  const tag = ((el && el.tagName) || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tag) || document.querySelector(".dp-modal-back")) return;
+  document.querySelectorAll(".dash .panel").forEach((p) => p._brush && toggleBrush(p)); // close an open brush
+  if (clearSelections()) run(false);
 });
 
 boot().catch((e) => status("boot failed: " + e));

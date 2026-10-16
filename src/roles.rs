@@ -246,6 +246,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2'"),
     e("SUBTOTAL", &["SUBTOTALS", "GROUP_TOTAL"], R::TableOpt(TableOpt::Subtotal), "layout", false,
       "next table: a subtotal row after each group of a column — 'region' (not for ::PAGED)"),
+    e("SELECT_AS", &["SELECTAS", "SELECTION"], R::SelectAs, "layout", false,
+      "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
@@ -402,6 +404,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
+                | Role::SelectAs
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -515,6 +518,7 @@ mod tests {
             "TAB",
             "SUBTAB",
             "PLACEHOLDER",
+            "SELECT_AS",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -671,6 +675,7 @@ mod tests {
             Role::Logo,
             Role::Favicon,
             Role::Section,
+            Role::SelectAs,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -749,7 +754,8 @@ mod tests {
                 | Role::Brand
                 | Role::Logo
                 | Role::Favicon
-                | Role::Section => {}
+                | Role::Section
+                | Role::SelectAs => {}
             }
         }
         v
