@@ -279,7 +279,7 @@ body.loading #dp-spinner{display:flex}
 .metric-value{font-family:var(--ax-font-display);font-size:2.6rem;font-weight:800;letter-spacing:-.03em;line-height:1.02;font-variant-numeric:tabular-nums;background:var(--ax-kpi-bg);-webkit-background-clip:text;background-clip:text;color:var(--ax-kpi-ink)}
 .metric-cap{color:var(--ax-muted);font-size:.72rem;font-weight:700;letter-spacing:.045em;text-transform:uppercase;margin-top:.38rem}
 .metric-delta{font-size:.85rem;font-weight:700;margin-top:.2rem;display:inline-flex;align-items:center;gap:.2rem}
-.metric-delta.up{color:var(--ax-positive)}.metric-delta.down{color:var(--ax-negative)}
+.metric-delta.good{color:var(--ax-positive)}.metric-delta.bad{color:var(--ax-negative)}
 .textcard{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:.4rem;min-height:150px}
 .text-value{font-weight:700;letter-spacing:-.02em;color:var(--ax-ink);line-height:1.25}
 .text-small .text-value{font-size:1rem}

@@ -189,7 +189,9 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("COMPACT", &[], R::Metric(MetricFmt::Compact), "kpi", true,
       "compact-number KPI / table column format (1.2K)"),
     e("DELTA", &["COMPARE", "PREVIOUS"], R::Delta, "kpi", true,
-      "comparison value → trend arrow + % on a KPI"),
+      "comparison value → trend arrow + % on a KPI (up = good)"),
+    e("DELTA_LOWER_GOOD", &["COMPARE_LOWER_GOOD", "DELTA_INVERSE"], R::DeltaLowerGood, "kpi", true,
+      "comparison value where lower is better (churn, cost): a rise is drawn red"),
     e("TEXT_SMALL", &[], R::Text(TextSize::Small), "kpi", true, "small text card"),
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
@@ -612,6 +614,7 @@ mod tests {
             Role::Table,
             Role::PagedTable,
             Role::Delta,
+            Role::DeltaLowerGood,
             Role::RefLine,
             Role::VLine,
             Role::BandLower,
@@ -690,6 +693,7 @@ mod tests {
                 | Role::PagedTable
                 | Role::Metric(_)
                 | Role::Delta
+                | Role::DeltaLowerGood
                 | Role::RefLine
                 | Role::VLine
                 | Role::BandLower
