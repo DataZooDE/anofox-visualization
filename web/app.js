@@ -3563,6 +3563,20 @@ async function runOnce(fresh = true) {
   const dash = document.querySelector(".dash");
   dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
   if (tabBar) dash.append(tabBar, tabWrap);
+  // Accessibility: swap every chart for its data table (state survives runs).
+  if (!dash.querySelector(".dp-a11y-bar")) {
+    const bar = document.createElement("div");
+    bar.className = "dp-a11y-bar";
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "dp-astable-btn";
+    b.textContent = "▦ Charts as tables";
+    b.title = "Show every chart as its data table";
+    b.setAttribute("aria-pressed", String(dpAsTables));
+    b.onclick = toggleAsTables;
+    bar.appendChild(b);
+    dash.prepend(bar);
+  }
   // A "Powered by DataZoo GmbH" credit at the foot of every dashboard.
   dash.querySelector(".dp-credit")?.remove();
   const credit = document.createElement("div");
@@ -3665,6 +3679,7 @@ function makeControl(meta, bar) {
   let input;
   if (meta.kind === "DROPDOWN") {
     input = document.createElement("select");
+    input.setAttribute("aria-label", meta.caption || meta.varname);
     meta.options.forEach((o, k) => {
       const opt = document.createElement("option");
       opt.value = o;
@@ -6509,7 +6524,212 @@ function attachHover() {
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
+  attachChartA11y();
 }
+
+// ---- accessible charts (#37) ----
+// Every chart SVG gets a one-sentence screen-reader summary (aria-label +
+// <desc>). A chart with marks is one Tab stop: arrow keys walk its marks
+// (←/→ along a series, ↑/↓ across series, Home/End), Enter/Space clicks the
+// focused mark (select / drill / link), Esc returns to the chart. The focused
+// mark shows its tooltip. "Charts as tables" swaps every chart for its data.
+let dpAsTables = (() => {
+  try {
+    return new URLSearchParams(location.search).get("tables") === "1" || localStorage.getItem("dp-as-tables") === "1";
+  } catch (_) {
+    return false;
+  }
+})();
+let dpA11yFocus = null; // {stmt, series, x} — the mark to refocus after a re-run
+
+const CHART_KINDS = [
+  [/^BARCHART|^BAR_/, "Bar chart"],
+  [/^LINECHART|^STEP|^SPARKLINE/, "Line chart"],
+  [/^AREACHART/, "Area chart"],
+  [/^SCATTER|^BUBBLE|^JITTER|^SMOOTH/, "Scatter plot"],
+  [/^PIE/, "Pie chart"],
+  [/^DONUT/, "Donut chart"],
+  [/^GAUGE/, "Gauge"],
+  [/^RADAR/, "Radar chart"],
+  [/^HISTOGRAM/, "Histogram"],
+  [/^DENSITY/, "Density plot"],
+  [/^BOXPLOT/, "Box plot"],
+  [/^VIOLIN/, "Violin plot"],
+  [/^QQ/, "Q-Q plot"],
+  [/^HEATMAP/, "Heatmap"],
+  [/^CALENDAR/, "Calendar heatmap"],
+  [/^CANDLESTICK/, "Candlestick chart"],
+  [/^MAP/, "Map"],
+];
+function chartKind(roles) {
+  for (const r of roles || []) for (const [re, name] of CHART_KINDS) if (re.test(r[1])) return name;
+  return "Chart";
+}
+
+// One sentence: kind, title, series, x range, value range and extremes.
+// items = [{series, x, value}] (value a number or null).
+function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString()) {
+  let out = kind + (title ? `: ${title}` : "");
+  if (!items.length) return out + ".";
+  const series = [...new Set(items.map((m) => m.series).filter((v) => v !== "" && v != null))];
+  const xs = [...new Set(items.map((m) => m.x).filter((v) => v !== "" && v != null))];
+  const parts = [];
+  const multi = series.length > 1 && !series.every((v, i) => v === xs[i]);
+  if (multi)
+    parts.push(
+      `${series.length} series (${series.slice(0, 4).join(", ")}${series.length > 4 ? `, and ${series.length - 4} more` : ""})`
+    );
+  if (xs.length > 1) parts.push(`${xs.length} points from ${xs[0]} to ${xs[xs.length - 1]}`);
+  const vals = items.filter((m) => m.value != null && Number.isFinite(m.value));
+  if (vals.length) {
+    const hi = vals.reduce((a, b) => (b.value > a.value ? b : a));
+    const lo = vals.reduce((a, b) => (b.value < a.value ? b : a));
+    const at = (m) => {
+      const w = [multi ? m.series : "", m.x || (!multi ? m.series : "")].filter(Boolean);
+      return w.length ? ` (${w.join(", ")})` : "";
+    };
+    if (hi === lo) parts.push(`value ${fmt(hi.value)}${at(hi)}`);
+    else parts.push(`highest ${fmt(hi.value)}${at(hi)}, lowest ${fmt(lo.value)}${at(lo)}`);
+  }
+  return out + (parts.length ? "; " + parts.join("; ") : "") + ".";
+}
+
+function chartMarks(svg) {
+  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip"));
+}
+
+function attachChartA11y() {
+  for (const fig of document.querySelectorAll(".dash .panel")) {
+    const svg = fig.querySelector(".panel-svg > svg");
+    if (!svg || svg.dataset.a11y) continue;
+    svg.dataset.a11y = "1";
+    const marks = chartMarks(svg);
+    const title = fig.querySelector(".panel-title")?.textContent?.trim() || "";
+    const items = marks.map((el) => {
+      const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
+      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: markValue(el) };
+    });
+    const summary = chartSummary(chartKind(fig._dp && fig._dp.roles), title, items, (v) => fmtTipValue(String(v)));
+    svg.setAttribute("aria-label", summary);
+    svg.setAttribute("aria-roledescription", "chart");
+    svg.querySelector(":scope > desc")?.remove();
+    const desc = document.createElementNS("http://www.w3.org/2000/svg", "desc");
+    desc.textContent = summary;
+    svg.prepend(desc);
+    if (!marks.length) {
+      svg.setAttribute("role", "img");
+      continue;
+    }
+    svg.setAttribute("role", "group");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("aria-description", "Arrow keys move between data points, Enter selects, Escape leaves.");
+    marks.forEach((el) => {
+      el.setAttribute("tabindex", "-1");
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", el.getAttribute("data-tip"));
+      el.addEventListener("focus", () => {
+        el.dispatchEvent(new MouseEvent("mouseenter"));
+        const r = el.getBoundingClientRect();
+        const tip = $("dp-tip");
+        if (tip) {
+          tip.style.left = r.right + 8 + "px";
+          tip.style.top = r.top + 8 + "px";
+        }
+      });
+      el.addEventListener("blur", () => el.dispatchEvent(new MouseEvent("mouseleave")));
+    });
+    svg.addEventListener("keydown", (e) => chartKey(e, svg, fig));
+  }
+  if (dpA11yFocus) {
+    const f = dpA11yFocus;
+    dpA11yFocus = null;
+    const svg = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"] .panel-svg > svg`);
+    const marks = svg ? chartMarks(svg) : [];
+    (marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0] || svg)?.focus();
+  }
+  applyAsTables();
+}
+
+// Marks of a chart in reading order: series by first appearance, each sorted by x.
+function markGrid(svg) {
+  const by = new Map();
+  for (const el of chartMarks(svg)) {
+    const k = el.getAttribute("data-series") || "";
+    (by.get(k) || by.set(k, []).get(k)).push(el);
+  }
+  const cx = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.left + r.width / 2;
+  };
+  return [...by.values()].map((els) => els.map((el) => [cx(el), el]).sort((a, b) => a[0] - b[0]).map((p) => p[1]));
+}
+
+function chartKey(e, svg, fig) {
+  const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "Escape"];
+  if (!keys.includes(e.key)) return;
+  const grid = markGrid(svg);
+  if (!grid.length) return;
+  const cur = e.target;
+  if (cur === svg) {
+    if (e.key === "Escape") return;
+    e.preventDefault();
+    (e.key === "End" ? grid[grid.length - 1].at(-1) : grid[0][0]).focus();
+    return;
+  }
+  let si = grid.findIndex((g) => g.includes(cur));
+  if (si < 0) return;
+  let mi = grid[si].indexOf(cur);
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === "Escape") return svg.focus();
+  if (e.key === "Enter" || e.key === " ") {
+    dpA11yFocus = { stmt: fig.dataset.stmt, series: cur.getAttribute("data-series"), x: cur.getAttribute("data-x") || "" };
+    cur.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }));
+    return;
+  }
+  if (e.key === "ArrowRight") mi = Math.min(grid[si].length - 1, mi + 1);
+  else if (e.key === "ArrowLeft") mi = Math.max(0, mi - 1);
+  else if (e.key === "Home") mi = 0;
+  else if (e.key === "End") mi = grid[si].length - 1;
+  else {
+    // ↑/↓: the neighbouring series, at the mark nearest in x
+    const x = cur.getBoundingClientRect().left;
+    si = Math.max(0, Math.min(grid.length - 1, si + (e.key === "ArrowDown" ? 1 : -1)));
+    const near = grid[si].map((el, k) => [Math.abs(el.getBoundingClientRect().left - x), k]).sort((a, b) => a[0] - b[0]);
+    mi = near[0][1];
+  }
+  grid[si][mi].focus();
+}
+
+// "Charts as tables": every chart panel shows its data table instead.
+function applyAsTables() {
+  document.body.classList.toggle("dp-as-tables", dpAsTables);
+  $("dp-tip")?.classList.remove("show"); // a focused mark may just have been hidden
+  const btn = document.querySelector(".dp-astable-btn");
+  if (btn) btn.setAttribute("aria-pressed", String(dpAsTables));
+  for (const fig of document.querySelectorAll(".dash .panel")) {
+    const holder = fig.querySelector(".panel-svg");
+    if (!holder || !fig._dp) continue;
+    let view = fig.querySelector(".dp-astable-view");
+    if (dpAsTables && !view) {
+      view = document.createElement("div");
+      view.className = "dp-astable-view";
+      const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+      view.innerHTML = dataTableHtml(fig._dp, 200, title);
+      holder.after(view);
+    }
+    holder.hidden = dpAsTables;
+    if (view) view.hidden = !dpAsTables;
+  }
+}
+function toggleAsTables() {
+  dpAsTables = !dpAsTables;
+  try {
+    localStorage.setItem("dp-as-tables", dpAsTables ? "1" : "0");
+  } catch (_) {}
+  applyAsTables();
+}
+
 
 // One tooltip row: colour swatch + series + value (+ the full tooltip text
 // when it carries more, e.g. box-plot stats or OHLC). A single-series bar's
@@ -6610,14 +6830,13 @@ function toggleMagicType(panel) {
 }
 
 // A modal listing the panel's rows as a table (ECharts toolbox "data view").
-function showDataView(panel) {
-  const dp = panel._dp;
-  if (!dp) return;
+// A panel's data (fig._dp: rows + roles) as an HTML table, data columns only.
+function dataTableHtml(dp, limit, caption) {
   let rows;
   try {
-    rows = JSON.parse(dp.rows);
+    rows = typeof dp.rows === "string" ? JSON.parse(dp.rows) : dp.rows;
   } catch (_) {
-    return;
+    return "";
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
@@ -6636,20 +6855,28 @@ function showDataView(panel) {
     return k;
   };
   const esc = (v) => escapeHtml(v == null ? "" : String(v));
-  const head = keys.map((k) => `<th>${esc(nameFor(k))}</th>`).join("");
+  const head = keys.map((k) => `<th scope="col">${esc(nameFor(k))}</th>`).join("");
   const body = rows
-    .slice(0, 500)
+    .slice(0, limit)
     .map((r) => `<tr>${keys.map((k) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
     .join("");
+  return (
+    `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}"` : ""}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (rows.length > limit ? `<div class="dp-modal-note">Showing ${limit} of ${rows.length} rows</div>` : "")
+  );
+}
+
+function showDataView(panel) {
+  const dp = panel._dp;
+  if (!dp) return;
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
   const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Data";
   const back = document.createElement("div");
   back.className = "dp-modal-back";
   back.innerHTML =
     `<div class="dp-modal"><div class="dp-modal-head"><b>${esc(title)}</b>` +
     `<button class="dp-modal-x" title="Close">✕</button></div>` +
-    `<div class="dp-modal-body"><table class="dp-dv"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
-    (rows.length > 500 ? `<div class="dp-modal-note">Showing 500 of ${rows.length} rows</div>` : "") +
-    `</div></div>`;
+    `<div class="dp-modal-body">${dataTableHtml(dp, 500, title)}</div></div>`;
   const close = () => back.remove();
   back.addEventListener("click", (e) => {
     if (e.target === back || e.target.classList.contains("dp-modal-x")) close();

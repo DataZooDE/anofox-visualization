@@ -621,6 +621,32 @@ SELECT anofox_plot_terms(t, theme := 'colorblind') FROM coefs t;
 `dashboard --theme-css <T> [--dark]` prints a theme's CSS tokens (to style your
 own page around exported SVGs).
 
+### Accessibility
+
+Charts are usable without a mouse and without sight of the screen:
+
+- **Keyboard.** Each chart with data marks is one Tab stop (a visible focus
+  ring). Arrow keys walk the marks — ←/→ along a series, ↑/↓ to the
+  neighbouring series, Home/End — and the focused mark shows its tooltip.
+  Enter (or Space) acts like a click: cross-filter, `::SELECT_AS`, `::DRILL`,
+  `::LINK`; after the re-run the focus returns to the same mark. Esc goes back
+  to the chart, Tab moves on.
+- **Screen readers.** Every chart SVG carries a generated one-sentence summary
+  (`aria-label` and `<desc>`): kind, title, series, the x range and the
+  extremes — *"Bar chart: Sessions by channel; 3 series (api, app, web);
+  4 points from W1 to W4; highest 48 (app, W4), lowest 9 (api, W3)."* Each
+  mark is labelled with its tooltip text.
+- **Charts as tables.** The *▦ Charts as tables* switch at the top right of
+  every dashboard (also in embed and served views; `?tables=1` turns it on, the
+  choice is remembered) swaps every chart for its data table.
+- **Reduced motion.** With the system's *reduce motion* setting there are no
+  entrance animations, line draw-ins, shimmers or transitions.
+- Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
+  `high-contrast` themes cover colour.
+
+`scripts/a11y-e2e.mjs` checks this in a real browser (Tab into a chart, arrows,
+Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`).
+
 ### Export & share
 
 - Every chart/table panel has a hover **⤓** button — charts download as **PNG**,

@@ -319,6 +319,10 @@ SELECT <cat>::XAXIS, <measure>::BOXPLOT, '<takeaway>'::TITLE FROM <t>
 WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat>));
 ```
 
+## Accessibility (built in)
+
+Charts are keyboard-navigable (Tab into a chart, arrows across marks, Enter = click, Esc leaves), each gets a generated screen-reader summary, a *Charts as tables* switch swaps every chart for its data, and reduced motion is honoured. The summary uses the panel's `::TITLE` — give every chart one (also `design/untitled-chart`).
+
 ## Gotchas
 
 These silently break a panel (it renders wrong or vanishes):
