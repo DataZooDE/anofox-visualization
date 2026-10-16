@@ -645,6 +645,10 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                     }
                     format!("CAST({core} AS DOUBLE) AS c{i}")
                 }
+                // An ::XLINE may be a number or a date / timestamp ("Today" on
+                // a date axis), which has no cast to DOUBLE: it travels as
+                // text and the renderer reads either.
+                Role::VLine => format!("CAST({} AS VARCHAR) AS c{i}", trailing_alias(expr).0),
                 // Inputs keep the original column name — it becomes the
                 // DuckDB variable name the browser binds the control to.
                 Role::Input(_) => expr.to_string(),

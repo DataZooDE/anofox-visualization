@@ -103,6 +103,7 @@ terminal.
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
+| `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
@@ -1246,6 +1247,40 @@ Only variable **values** travel, never SQL: on a locked server
 literals like any input change, so an embedding app or another dashboard can
 open a dashboard pre-filtered. Example:
 `?dashboard=Filters%20%26%20inputs&tab=Cross-filter&v.sku=SKU-A&v.market=EU`.
+
+### Motion: entrances, flow lines, stories and transitions
+
+Charts move only where the motion carries meaning, and only in the browser:
+`--svg`, PNG and PDF output stay static, and under the viewer's *reduce
+motion* setting every chart shows its final state at once. Motion runs on
+data marks only (lines, bands, points, bars) — never on grid lines or axes —
+and a finished animation leaves no state behind.
+
+**Entrance (`::ANIMATE`).** On a full run (load, *Run*) each panel fades in
+and its chart plays an entrance; cross-filter and input re-runs stay instant.
+
+| `::ANIMATE` | Entrance |
+|---|---|
+| `'auto'` (default) | by chart kind: lines and areas draw in left to right, bars grow from their baseline staggered by x, points pop in left to right; other charts only fade in with their panel |
+| `'draw'` | lines draw in; points, bars and bands are wiped in with them |
+| `'grow'` | bars grow staggered by x, points pop in, lines draw in |
+| `'reveal'` | the chart wipes in up to the panel's `::XLINE` (e.g. Today), pauses, then the rest — a forecast fan, its median, its points — grows forward from it |
+| `'none'` | no motion at all, not even the panel fade |
+
+```sql
+SELECT week ::XAXIS, series ::CATEGORY, demand ::LINECHART,
+       lo ::BAND_LOWER, hi ::BAND_UPPER,
+       DATE '2026-10-12' ::XLINE,          -- Today: a date works on a date axis
+       'reveal' ::ANIMATE
+FROM outlook;
+```
+
+Above about 500 marks the per-mark stagger becomes a single wipe. An
+`::XLINE` may be a number or, on a date axis, a `DATE` / `TIMESTAMP`; its
+tooltip shows the date. `--check` warns on an unknown mode
+(`animate/unknown`) and on `'reveal'` without an `::XLINE`
+(`animate/reveal-no-xline`, the chart then wipes in from the left). The
+static HTML export replays the entrances.
 
 ### Tables
 

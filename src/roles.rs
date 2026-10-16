@@ -202,6 +202,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "gauge zone colours, comma-separated hex"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
       "gauge zone labels, comma-separated (drawn at each zone)"),
+    e("ANIMATE", &["ANIMATION", "ENTRANCE"], R::Animate, "modifier", true,
+      "entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
     e("METRIC", &["KPI", "BIGNUMBER"], R::Metric(MetricFmt::Plain), "kpi", true,
       "big-number KPI (add ::LABEL for a caption)"),
@@ -749,6 +751,7 @@ mod tests {
             Role::Drill,
             Role::Link,
             Role::Empty,
+            Role::Animate,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -843,7 +846,8 @@ mod tests {
                 | Role::SelectAs
                 | Role::Drill
                 | Role::Link
-                | Role::Empty => {}
+                | Role::Empty
+                | Role::Animate => {}
             }
         }
         v

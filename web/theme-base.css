@@ -144,10 +144,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel{position:relative;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.15rem 1.25rem;box-shadow:var(--ax-shadow)}
 .panel svg{width:100%;height:auto;display:block}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
-@keyframes dp-line-draw{to{stroke-dashoffset:0}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
-.panel.dp-in svg polyline.dp-draw{animation:dp-line-draw .8s cubic-bezier(.22,.61,.36,1) both}
-@media (prefers-reduced-motion: reduce){.panel.dp-in,.panel.dp-in svg polyline.dp-draw,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
+@media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
 .group-body .panel .panel-title{border-bottom:0;padding-bottom:.2rem}

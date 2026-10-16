@@ -18,6 +18,9 @@ import init, {
   kpi_parts,
   threshold_rules,
 } from "./pkg/anofox_visualization.js";
+import { animKit } from "./anim.js";
+
+const dpAnim = animKit(window); // chart motion (web/anim.js)
 
 // Examples, grouped for the sidebar. Each entry is a full dashboard script.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
@@ -960,6 +963,7 @@ const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g
 // DuckDB-Wasm; their names and dashboards say so.
 const FILE_SAMPLES = [
   { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
+  { group: "Interactivity", name: "How will demand develop after today?", url: "examples/motion-demand.sql" },
   { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
   { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
   {
@@ -3776,6 +3780,7 @@ async function runOnce(fresh = true) {
             const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
             if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
+            markAnim(holder, s.roles);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
             fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
@@ -3877,31 +3882,37 @@ async function runOnce(fresh = true) {
   document.body.classList.remove("loading");
 }
 
-// Entrance animation on a fresh render: panels fade+rise in and line series
-// "draw" left-to-right (stroke-dashoffset). Skipped for cross-filter re-runs so
-// interactions feel instant, and honours prefers-reduced-motion via CSS.
+// Entrance animation on a fresh render: panels fade+rise in and each chart
+// plays its ::ANIMATE mode (web/anim.js — only data marks move, never grid
+// lines). Skipped for cross-filter re-runs so interactions feel instant;
+// prefers-reduced-motion shows the final state at once.
 function animateIn() {
-  // Reduced motion: no draw-in at all (the CSS drops the animation, which would
-  // otherwise leave every line at its hidden start dash offset).
-  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (still) return;
+  if (dpAnim.still()) return;
   document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const svg = panel.querySelector(".panel-svg > svg");
+    if (svg && svg.getAttribute("data-anim") === "none") return; // ::ANIMATE 'none' opts out entirely
     panel.classList.remove("dp-in");
     void panel.offsetWidth; // reflow so the animation restarts
     panel.classList.add("dp-in");
-    panel.querySelectorAll("svg polyline").forEach((pl) => {
-      let len;
-      try {
-        len = pl.getTotalLength();
-      } catch (_) {
-        return;
-      }
-      if (!len || !isFinite(len)) return;
-      pl.style.strokeDasharray = len;
-      pl.style.strokeDashoffset = len;
-      pl.classList.add("dp-draw");
-    });
+    if (svg) dpAnim.enter(svg, svg.getAttribute("data-anim"));
   });
+}
+
+// The entrance a chart plays, on its root <svg> as `data-anim` (the static
+// export replays it from there): its ::ANIMATE, else by chart kind — lines
+// draw, bars grow, points pop; other kinds only fade in with their panel.
+function markAnim(holder, roles) {
+  const svg = holder.querySelector(":scope > svg");
+  if (!svg) return;
+  let mode = svg.getAttribute("data-animate") || "auto";
+  if (mode === "auto") {
+    const kinds = roles.map((r) => r[1]);
+    if (kinds.some((k) => /^(LINECHART|LINECHART_PERCENT|STEP|SMOOTH|AREACHART|AREACHART_STACKED|DENSITY)$/.test(k)))
+      mode = "draw";
+    else if (kinds.some((k) => /^(BARCHART.*|HISTOGRAM|WATERFALL|SCATTER|BUBBLE|JITTER|QQ)$/.test(k))) mode = "grow";
+    else mode = "fade";
+  }
+  svg.setAttribute("data-anim", mode);
 }
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
@@ -6910,6 +6921,7 @@ async function downloadHtml() {
   // A snapshot has no live tables: drop their search / filter / pager controls.
   const snap = document.querySelector(".dash").cloneNode(true);
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  dpAnim.strip(snap); // never a mid-animation frame
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
@@ -6920,8 +6932,16 @@ async function downloadHtml() {
     (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
     `<style>${tokens}\n${base}\nbody{margin:0}</style></head><body class="embed">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
-    `<script>${SNAPSHOT_JS}<\/script></body></html>`;
+    `<script>${SNAPSHOT_JS}<\/script><script>${snapshotMotion()}<\/script></body></html>`;
   download(new Blob([html], { type: "text/html" }), "dashboard.html");
+}
+
+// The export's chart motion: web/anim.js's kit (its own source, so there is
+// one implementation) replaying each chart's entrance.
+function snapshotMotion() {
+  return `(function(){var K=(${animKit})(window);
+  document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
+})();`;
 }
 
 // Self-contained hover + tab switching for the exported snapshot.

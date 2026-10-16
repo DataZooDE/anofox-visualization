@@ -50,6 +50,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `render-warning` | warning | renders, but the engine dropped data: non-finite values (`NaN`, `±Inf`, `log` of ≤ 0), a stat layer with too little data (density of one value, smooth on two points). Filter in SQL (`WHERE isfinite(x)`, `NULLIF`) |
 | `empty-panel` | warning | 0 rows: a blank card (often a filter on an unset variable); not raised after an `::EMPTY` message |
 | `optional/missing` | note | a `-- @requires <path>` input is missing: the panel reads "Not available" (not a failure, `--strict` passes) |
+| `animate/unknown`, `animate/reveal-no-xline` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from |
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
@@ -342,6 +343,12 @@ WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat
 SELECT <cat>::XAXIS, <measure>::BOXPLOT, '<takeaway>'::TITLE FROM <t>
 WHERE (len(getvariable('<cat>')) = 0 OR list_contains(getvariable('<cat>'), <cat>));
 ```
+
+## Motion (browser only)
+
+Use motion where it tells the story, not as decoration; `--svg`/PNG/PDF stay static and *reduce motion* shows the final state.
+- Default entrance (`'auto'`): lines draw, bars grow by x, points pop in. Opt out per chart with `'none'::ANIMATE`.
+- Forecasts: `DATE '…'::XLINE` (Today) + `'reveal'::ANIMATE` — history wipes in, then the fan grows forward from Today.
 
 ## Accessibility (built in)
 

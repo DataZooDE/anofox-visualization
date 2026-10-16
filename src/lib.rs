@@ -430,6 +430,10 @@ pub enum Role {
     /// `/d/<id>?v.x=…` or an `https:` URL — with `{value}` / `{column}`
     /// placeholders, followed on a chart click or from a table's link cell.
     Link,
+    /// Motion: the panel's entrance animation (`::ANIMATE`) — `'auto'`
+    /// (default: lines draw, bars grow, points stagger), `'draw'`, `'grow'`,
+    /// `'reveal'` (forward from the panel's `::XLINE`) or `'none'`. Browser only.
+    Animate,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1207,8 +1211,67 @@ fn render_placed(
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
         let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
-        Ok((with_formatted_values(svg, &cols, o), warnings))
+        let svg = with_xline_dates(svg, &cols);
+        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        Ok((svg, warnings))
     })
+}
+
+/// A date `::XLINE` is drawn at its epoch seconds; its tooltip and `data-x`
+/// say the date it was given (`2026-10-12`), not `x = 1791763200`.
+fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
+    let Some(c) = find_role(cols, Role::VLine) else {
+        return svg;
+    };
+    for v in &c.values {
+        let Some(d) = v.as_str().map(str::trim) else {
+            continue;
+        };
+        if d.parse::<f64>().is_ok() {
+            continue;
+        }
+        let Some(e) = sql::parse_iso_epoch(d) else {
+            continue;
+        };
+        let d = format::escape_xml(d.strip_suffix(" 00:00:00").unwrap_or(d));
+        svg = svg
+            .replace(
+                &format!(" data-x=\"{e}\" data-value=\"{e}\">"),
+                &format!(" data-x=\"{d}\">"),
+            )
+            .replace(
+                &format!("<title>x = {e}</title>"),
+                &format!("<title>{d}</title>"),
+            );
+    }
+    svg
+}
+
+/// The `::ANIMATE` modes the browser plays.
+pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
+
+/// Pass a panel's motion directives to the browser as attributes on the SVG
+/// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
+/// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
+/// (epoch seconds on a date axis, a level on a discrete one).
+fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
+    if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
+        if ANIMATE_MODES.contains(&mode.as_str()) {
+            if mode == "reveal" {
+                if let Some(c) = find_role(cols, Role::VLine) {
+                    let at = xline_nums(&c.values)
+                        .first()
+                        .map(|f| f.to_string())
+                        .or_else(|| c.values.iter().find_map(|v| v.as_str().map(str::to_string)));
+                    if let Some(at) = at {
+                        svg = with_root_attr(svg, "data-xline", &at);
+                    }
+                }
+            }
+            svg = with_root_attr(svg, "data-animate", &mode);
+        }
+    }
+    svg
 }
 
 /// Give every hoverable mark its value as the panel formats it: the
@@ -2435,7 +2498,11 @@ fn cartesian(
         let Some(c) = find_role(cols, role) else {
             continue;
         };
-        let vals = distinct_nums(&c.values);
+        let vals = if vertical {
+            xline_nums(&c.values)
+        } else {
+            distinct_nums(&c.values)
+        };
         if vals.is_empty() {
             continue;
         }
@@ -3753,6 +3820,27 @@ fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) ->
 
 /// Distinct finite numeric values from a column, in first-seen order — used to
 /// draw one reference line per value.
+/// An `::XLINE`'s positions (the query sends it as text): numbers as they
+/// are, a date / timestamp (`DATE '2026-06-30'::XLINE`, "Today" on a date
+/// axis) as its epoch seconds — the unit a date x is drawn in.
+fn xline_nums(vals: &[Value]) -> Vec<f64> {
+    let nums = distinct_nums(vals);
+    if !nums.is_empty() {
+        return nums;
+    }
+    let parsed: Vec<Value> = vals
+        .iter()
+        .filter_map(|v| {
+            let s = v.as_str()?.trim();
+            s.parse::<f64>()
+                .ok()
+                .or_else(|| sql::parse_iso_epoch(s).map(|t| t as f64))
+        })
+        .map(Value::Float)
+        .collect();
+    distinct_nums(&parsed)
+}
+
 fn distinct_nums(vals: &[Value]) -> Vec<f64> {
     // O(n) dedup on the exact bit pattern (+0.0 normalised); capped so a
     // pathological column can't draw thousands of reference lines.

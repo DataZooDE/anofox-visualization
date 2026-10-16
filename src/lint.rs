@@ -45,7 +45,8 @@ pub struct Diagnostic {
     /// | `chrome/bad-url` | `period/bad-spec` (a `::PERIOD` spec with an
     /// unknown key / preset / grain / compare or a bad date) |
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
-    /// `kpi/sparkline-not-list` (warning) | `optional/missing` (a note: a
+    /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
+    /// `animate/reveal-no-xline` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -564,6 +565,18 @@ where
             });
         }
 
+        diags.extend(
+            motion_diags(&p.roles, &rows)
+                .into_iter()
+                .map(|(code, message)| Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                }),
+        );
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -987,6 +1000,55 @@ fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
 const CALLOUT_KINDS: &[&str] = &[
     "note", "info", "warning", "caution", "danger", "success", "tip",
 ];
+
+/// The non-empty text cells of result column `idx` (`c{idx}`, else by position).
+fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| {
+            row.get(&format!("c{idx}"))
+                .or_else(|| row.values().nth(idx))
+        })
+        .filter_map(|v| match v {
+            Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
+/// `'reveal'` with no `::XLINE` to start from.
+fn motion_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    for (idx, r) in roles {
+        let texts = column_texts(rows, *idx);
+        let Some(v) = texts.first().map(|t| t.to_ascii_lowercase()) else {
+            continue;
+        };
+        if *r == Role::Animate {
+            if !crate::ANIMATE_MODES.contains(&v.as_str()) {
+                out.push((
+                    "animate/unknown",
+                    format!(
+                        "::ANIMATE `{v}` is not a mode ({}) — the chart plays 'auto'",
+                        crate::ANIMATE_MODES.join(", ")
+                    ),
+                ));
+            } else if v == "reveal" && !has(Role::VLine) {
+                out.push((
+                    "animate/reveal-no-xline",
+                    "::ANIMATE 'reveal' grows forward from the panel's ::XLINE (e.g. Today); \
+                     without one it wipes in from the left"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    out
+}
 
 /// The first cell of a result as text (`""` when there is none).
 fn first_text(rows: &[Map<String, Value>]) -> String {
@@ -1715,6 +1777,36 @@ mod design_tests {
         assert_eq!(w.len(), 1, "{d:?}");
         assert_eq!(w[0].severity, Severity::Warning);
         assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn motion_directives_are_checked() {
+        let codes = |sql: &str, row: Value| -> Vec<&'static str> {
+            let data = vec![row.as_object().unwrap().clone()];
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .map(|d| d.code)
+                .filter(|c| c.starts_with("animate/"))
+                .collect()
+        };
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "wobble" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::LINECHART, 'wobble'::ANIMATE FROM t;",
+                row
+            ),
+            vec!["animate/unknown"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "reveal" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::LINECHART, 'reveal'::ANIMATE FROM t;",
+                row
+            ),
+            vec!["animate/reveal-no-xline"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
+        assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
     }
 
     #[test]
