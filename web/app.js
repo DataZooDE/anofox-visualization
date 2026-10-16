@@ -825,6 +825,10 @@ const FILE_SAMPLES = [
     name: "What sets the price of a home?",
     url: "examples/statistics-showcase.sql",
   },
+  { group: STATS_GROUP, name: "Did the new checkout lift conversion?", url: "examples/statistics-ab-test.sql" },
+  { group: STATS_GROUP, name: "Why do customers cancel?", url: "examples/statistics-churn-drivers.sql" },
+  { group: FORECAST_GROUP, name: "Will any substation exceed its capacity next week?", url: "examples/forecast-energy-load.sql" },
+  { group: FORECAST_GROUP, name: "How many agents do we need per half-hour?", url: "examples/forecast-callcentre-staffing.sql" },
   {
     group: TABULAR_GROUP,
     name: "Can we switch on the new CRM?",
@@ -1050,8 +1054,8 @@ let fcParquet = null;
 async function ensureForecast(sql) {
   if (backend === "live") return; // native backend resolves paths + extension itself
   if (!db) throw new Error("in-browser DuckDB not ready");
-  // 1. Register the parquet (memoised) — this is the "load the data" step.
-  if (!fcParquet) {
+  // 1. Register the parquet (memoised) — only for statements that read it.
+  if (/m5_monthly/i.test(sql) && !fcParquet) {
     fcParquet = (async () => {
       const bytes = new Uint8Array(await (await fetch("m5_monthly.parquet")).arrayBuffer());
       await db.registerFileBuffer("m5_monthly.parquet", bytes);
@@ -1060,7 +1064,7 @@ async function ensureForecast(sql) {
       throw e;
     });
   }
-  await fcParquet;
+  if (fcParquet) await fcParquet;
   // 2. The extension, only for statements that use it.
   if (/\bts_\w+\b|\banofox_forecast\b/i.test(sqlCode(sql))) await ensureExtension("anofox_forecast");
 }
