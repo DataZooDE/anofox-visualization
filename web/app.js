@@ -4228,6 +4228,10 @@ async function runOnce(fresh = true) {
           fig._ia = lr ? { ...nextIa, link: { idx: lr[0], rows: rowsJson, roles: s.roles } } : nextIa;
           const t = titleOf(s, rowsJson);
           if (t) fig.appendChild(mkTitle(t));
+          // The drill breadcrumb is part of the panel from the start: added only
+          // after the swap, the chart would sit one row higher for a layout,
+          // and scroll anchoring would move the page.
+          if (fig._ia.drill) fig.appendChild(drillCrumbs(fig._ia.drill));
           // A selection that filters everything out renders a clean note, not a
           // broken/empty chart box.
           if (!JSON.parse(rowsJson).length) {
