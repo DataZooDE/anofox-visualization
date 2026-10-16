@@ -32,6 +32,7 @@ use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
+use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
     AuthoringGuard, RequestMeta,
@@ -418,6 +419,9 @@ pub struct LockedOptions {
     pub memory_limit: Option<String>,
     /// DuckDB `threads` of the snapshot instance, shared by all queries.
     pub duckdb_threads: Option<usize>,
+    /// Row and column access policy (`policy`: a JSON file; `policy.json`
+    /// next to the dashboards is used when the option is not given).
+    pub policy: Option<Arc<Policy>>,
 }
 
 impl Default for LockedOptions {
@@ -440,6 +444,7 @@ impl Default for LockedOptions {
             bind: std::net::Ipv4Addr::LOCALHOST.into(),
             memory_limit: None,
             duckdb_threads: None,
+            policy: None,
         }
     }
 }
@@ -536,7 +541,11 @@ impl LockedOptions {
                     o.memory_limit = Some(m.to_string());
                 }
                 "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads)")),
+                "policy" => {
+                    let path = val.as_str().filter(|p| !p.trim().is_empty()).ok_or("options.policy must be the path of a policy file")?;
+                    o.policy = Some(Arc::new(read_policy(Path::new(path))?));
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy)")),
             }
         }
         if !o.path_vars.is_empty() && o.data.is_none() {
@@ -587,6 +596,13 @@ fn valid_memory_limit(m: &str) -> bool {
                 | "terabytes"
         )
         && (unit != "%" || num.parse::<f64>().is_ok_and(|n| n <= 100.0))
+}
+
+/// Read and parse an access policy file.
+fn read_policy(path: &Path) -> Result<Policy, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("policy: cannot read '{}': {e}", path.display()))?;
+    Policy::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 struct Dash {
@@ -641,7 +657,41 @@ struct Snapshot {
     db: Database,
     /// The source session's default database (each request connection `USE`s it).
     default_db: String,
+    /// The access policy, checked against this snapshot, and the dashboards
+    /// rewritten for it (indexed like `Locked::dashboards`).
+    policy: Option<Enforced>,
     _dir: SnapshotDir,
+}
+
+struct Enforced {
+    enf: Enforcer,
+    scripts: Vec<Script>,
+}
+
+/// Check the access policy against a new snapshot and rewrite every dashboard
+/// for it. Fail closed: anything the policy refuses stops the start (or the
+/// refresh — the previous snapshot then stays in service).
+fn enforce(snap: &mut Snapshot, dashboards: &[Dash], policy: &Policy) -> Result<(), String> {
+    let c = snap.db.connect()?;
+    let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
+    let enf = Enforcer::compile(policy, &mut duck, &snap.default_db).map_err(|e| {
+        if e.contains("json_serialize_sql") {
+            format!("{e} (the access policy needs the json extension: INSTALL json)")
+        } else {
+            e
+        }
+    })?;
+    let mut scripts = Vec::new();
+    for d in dashboards {
+        scripts.push(enf.rewrite_script(&mut duck, &d.stmts).map_err(|(i, e)| {
+            format!(
+                "dashboard '{}' statement {i}: {e} (refused by the access policy)",
+                d.id
+            )
+        })?);
+    }
+    snap.policy = Some(Enforced { enf, scripts });
+    Ok(())
 }
 
 struct Locked {
@@ -664,8 +714,14 @@ use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
-        let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &self.opts, &self.loads)
+        let (mut snap, warnings) = {
+            let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+            build_snapshot(&conn, &self.opts, &self.loads)?
+        };
+        if let Some(p) = &self.opts.policy {
+            enforce(&mut snap, &self.dashboards, p)?;
+        }
+        Ok((snap, warnings))
     }
 
     /// Rebuild the snapshot and swap it in (`wait`: see [`Current::rebuild`]).
@@ -717,9 +773,31 @@ pub fn start_locked(
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     loads.extend(opts.load.iter().cloned());
-    let (snap, warnings) = {
+    // A policy file next to the dashboards is enforced even without the
+    // option: forgetting the option must not serve every row.
+    if opts.policy.is_none() {
+        let p = Path::new(dir).join("policy.json");
+        if p.exists() {
+            opts.policy = Some(Arc::new(read_policy(&p)?));
+        }
+    }
+    if opts.policy.is_some() {
+        // json_serialize_sql: the policy rewrite parses with DuckDB.
+        loads.push("json".into());
+    }
+    let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &loads)?
+    };
+    if let Some(p) = &opts.policy {
+        enforce(&mut snap, &dashboards, p)?;
+    }
+    let policy_note = match &opts.policy {
+        Some(p) => format!(
+            "; access policy on {} table(s) — every other table is refused",
+            p.tables.len()
+        ),
+        None => String::new(),
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -808,7 +886,7 @@ pub fn start_locked(
         format!(" (warnings: {})", warnings.join("; "))
     };
     Ok(format!(
-        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{warn}"
+        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{policy_note}{warn}"
     ))
 }
 
@@ -1237,6 +1315,7 @@ fn build_snapshot(
         Snapshot {
             db,
             default_db: current,
+            policy: None,
             _dir: dir,
         },
         warnings,
@@ -1478,6 +1557,14 @@ fn locked_panel(
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
     for (name, lit) in &r.vars {
+        // The policy's row filters read the claims: no viewer may set them.
+        if st.opts.policy.is_some()
+            && [policy::CLAIM_PREFIX, policy::RESERVED_PREFIX]
+                .iter()
+                .any(|p| name.to_ascii_lowercase().starts_with(p))
+        {
+            return Err((400, format!("variable '{name}' is set by the server")));
+        }
         if st
             .opts
             .path_vars
@@ -1494,19 +1581,22 @@ fn locked_panel(
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
-    let dash = st
+    let di = st
         .dashboards
         .iter()
-        .find(|d| d.id == r.dashboard)
+        .position(|d| d.id == r.dashboard)
         .ok_or((404, "no such dashboard".to_string()))?;
+    let dash = &st.dashboards[di];
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
     if let Some(allowed) = &dash.vars {
         r.vars
             .retain(|(k, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(k)));
     }
     info.vars = r.vars.clone();
-    let (is_setup, panel_sql) = dash
-        .stmts
+    // Under a policy, the statements rewritten for this snapshot.
+    let script = gen.snap.policy.as_ref().map(|p| &p.scripts[di]);
+    let stmts = script.map_or(&dash.stmts, |s| &s.stmts);
+    let (is_setup, panel_sql) = stmts
         .get(r.panel)
         .ok_or((404, "no such panel".to_string()))?;
     if *is_setup {
@@ -1532,7 +1622,9 @@ fn locked_panel(
     let key = panel_key(&r, claims);
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
-        run_panel(st, &gen, dash, panel_sql, &r, claims, abort)
+        run_panel(
+            st, &gen, &dash.id, stmts, script, panel_sql, &r, claims, abort,
+        )
     });
     info.cache = Some(match how {
         Served::Hit => "hit",
@@ -1580,10 +1672,13 @@ fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Pat
 /// objects can be created — the snapshot is read-only), and the panel query
 /// executed as a single prepared statement under the row cap + timeout. The
 /// query is interrupted when every request waiting for it has been superseded.
+#[allow(clippy::too_many_arguments)]
 fn run_panel(
     st: &Locked,
     gen: &Generation<Snapshot>,
-    dash: &Dash,
+    dash_id: &str,
+    stmts: &[(bool, String)],
+    script: Option<&Script>,
     panel_sql: &str,
     r: &sv::PanelRequest,
     claims: Option<&Claims>,
@@ -1601,14 +1696,19 @@ fn run_panel(
         for set in request_sets(r, claims, st.opts.data.as_deref()) {
             c.exec(&set)?;
         }
-        for (setup, sql) in &dash.stmts[..r.panel] {
+        // The policy's views, for this viewer (before any dashboard SQL).
+        if let (Some(p), Some(s)) = (&gen.snap.policy, script) {
+            for v in p.enf.view_statements(&s.tables, &Viewer::default()) {
+                c.exec(&v)?;
+            }
+        }
+        for (setup, sql) in &stmts[..r.panel] {
             if *setup {
                 // Best effort, like the browser: a failing setup statement is
                 // reported in the log, the panel still runs.
                 if let Err(e) = c.execute_prepared(sql, &[]) {
                     eprintln!(
-                        "[anofox-serve] setup statement failed in '{}': {}",
-                        dash.id,
+                        "[anofox-serve] setup statement failed in '{dash_id}': {}",
                         access::diag(&e)
                     );
                 }
@@ -1809,6 +1909,21 @@ mod tests {
         assert!(LockedOptions::parse(Some(r#"{"path_vars":["run"]}"#)).is_err());
         let bad = ok.replace("\"run\"", "\"a-b\"");
         assert!(LockedOptions::parse(Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn policy_option() {
+        let dir = SnapshotDir::create().unwrap();
+        let f = dir.0.join("p.json");
+        let opt = |p: &Path| format!(r#"{{"policy":{}}}"#, serde_json::json!(p.to_string_lossy()));
+        std::fs::write(&f, r#"{"tables": {"sales": {"rows": true}}}"#).unwrap();
+        let o = LockedOptions::parse(Some(&opt(&f))).unwrap();
+        assert_eq!(o.policy.unwrap().tables[0].table, "sales");
+        // A policy that can't be read or parsed stops the start.
+        assert!(LockedOptions::parse(Some(&opt(&dir.0.join("nope.json")))).is_err());
+        std::fs::write(&f, r#"{"tables": {"sales": {}}}"#).unwrap();
+        assert!(LockedOptions::parse(Some(&opt(&f))).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"policy":""}"#)).is_err());
     }
 
     #[test]

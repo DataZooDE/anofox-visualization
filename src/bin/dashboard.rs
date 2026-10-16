@@ -24,6 +24,7 @@ const USAGE: &str = "usage:\n  \
      dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]\n  \
                                              render the whole dashboard headless to one SVG\n  \
      dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
+               [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
@@ -369,6 +370,9 @@ fn cmd_check(args: &[String]) {
     // --db <file>: validate against a prebuilt (read-only) database — its views
     // and tables are already in scope, so the dashboards are pure queries.
     let mut db: Option<String> = None;
+    // --policy <file.json>: also check the dashboard against an access policy
+    // (needs --db: the policy is checked against that database's tables).
+    let mut policy: Option<String> = None;
     let mut path = None;
     let mut design = true; // --no-design turns off the design/* advisory pass
     let mut strict = false; // --strict makes design/* warnings fail the exit code
@@ -376,6 +380,7 @@ fn cmd_check(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().cloned(),
+            "--policy" => policy = it.next().cloned(),
             "--json" => {}
             "--no-design" => design = false,
             "--strict" => strict = true,
@@ -386,7 +391,7 @@ fn cmd_check(args: &[String]) {
     let Some(path) = path else {
         eprintln!(
             "usage: dashboard --check <file.sql> [--json] [--db prebuilt.duckdb] \
-             [--strict] [--no-design]"
+             [--policy policy.json] [--strict] [--no-design]"
         );
         std::process::exit(2);
     };
@@ -397,11 +402,18 @@ fn cmd_check(args: &[String]) {
 
     // Each call runs a full script (prelude + one statement) in a fresh session
     // (in-memory, or read-only against --db) — the linter replays session state.
-    let diags = lint::check_opts(
+    let mut diags = lint::check_opts(
         &script,
         |sql| run_query(db.as_deref(), sql),
         lint::LintOptions { design },
     );
+    if let Some(p) = &policy {
+        let Some(db) = db.as_deref() else {
+            eprintln!("--policy needs --db <the database the server snapshots>");
+            std::process::exit(2);
+        };
+        diags.extend(policy_diags(&script, db, p));
+    }
 
     let errors = diags
         .iter()
@@ -447,6 +459,54 @@ fn cmd_check(args: &[String]) {
     }
     if failed {
         std::process::exit(1);
+    }
+}
+
+/// `--check --policy`: compile the policy against `db` (as the locked server
+/// does against its snapshot) and lint the script with it.
+fn policy_diags(script: &str, db: &str, path: &str) -> Vec<lint::Diagnostic> {
+    use anofox_visualization::host::policy::{Enforcer, Policy};
+    let fail = |message: String| {
+        vec![lint::Diagnostic {
+            severity: Severity::Error,
+            stmt: 0,
+            code: "policy/invalid",
+            message,
+            sql: String::new(),
+        }]
+    };
+    let policy = match std::fs::read_to_string(path)
+        .map_err(|e| format!("read {path}: {e}"))
+        .and_then(|t| Policy::parse(&t))
+    {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+    let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+        Ok(run_query(Some(db), sql)?
+            .into_iter()
+            .map(|r| {
+                r.into_values()
+                    .map(|v| match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        other => Some(other.to_string()),
+                    })
+                    .collect()
+            })
+            .collect())
+    };
+    let default_db = match duck("SELECT current_database()::VARCHAR") {
+        Ok(r) => r
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten())
+            .unwrap_or_default(),
+        Err(e) => return fail(e),
+    };
+    match Enforcer::compile(&policy, &mut duck, &default_db) {
+        Ok(enf) => lint::check_policy(script, &enf, &mut duck),
+        Err(e) => fail(e),
     }
 }
 
