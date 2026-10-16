@@ -93,6 +93,39 @@ impl QueryResult {
     }
 }
 
+impl QueryResult {
+    /// Call `f` with the first column of every row (a VARCHAR column; `None`
+    /// for NULL), chunk by chunk, without collecting the rows.
+    pub fn for_each_first(
+        &mut self,
+        mut f: impl FnMut(Option<&[u8]>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        unsafe {
+            loop {
+                let mut chunk = capi!(duckdb_fetch_chunk)(self.0);
+                if chunk.is_null() {
+                    return Ok(());
+                }
+                let n = capi!(duckdb_data_chunk_get_size)(chunk);
+                let v = capi!(duckdb_data_chunk_get_vector)(chunk, 0);
+                let data = capi!(duckdb_vector_get_data)(v) as *const duckdb_string_t;
+                let validity = capi!(duckdb_vector_get_validity)(v);
+                let mut r = Ok(());
+                for i in 0..n {
+                    let val = (!data.is_null() && row_valid(validity, i))
+                        .then(|| read_string(&*data.add(i as usize)));
+                    r = f(val);
+                    if r.is_err() {
+                        break;
+                    }
+                }
+                capi!(duckdb_destroy_data_chunk)(&mut chunk);
+                r?;
+            }
+        }
+    }
+}
+
 impl Drop for QueryResult {
     fn drop(&mut self) {
         unsafe { capi!(duckdb_destroy_result)(&mut self.0) }
@@ -333,12 +366,17 @@ impl Drop for Prepared {
 
 /// Run a single-statement query whose rows are converted to JSON by DuckDB
 /// (`to_json(row)`), returning a JSON array of row objects. `max_rows` caps the
-/// result (exceeding it is an error, not a silent truncation).
+/// result (exceeding it is an error, not a silent truncation). The array is
+/// written row by row. Before its buffer grows, `grow(len, wanted)` is asked
+/// for a capacity for a `len`-byte result: it returns the capacity to allocate
+/// (`len..=wanted`), or an `Err` that stops the query (a size cap, a memory
+/// budget). The result has no spare capacity.
 pub fn json_rows(
     conn: &Conn,
     query: &str,
     params: &[&str],
     max_rows: usize,
+    grow: &mut dyn FnMut(usize, usize) -> Result<usize, String>,
 ) -> Result<String, String> {
     let q = query.trim().trim_end_matches(';');
     let wrapped = format!(
@@ -346,18 +384,34 @@ pub fn json_rows(
         max_rows.saturating_add(1)
     );
     let mut res = conn.execute_prepared(&wrapped, params)?;
-    let rows = res.string_rows(max_rows)?;
-    let mut out = String::from("[");
-    for (i, r) in rows.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
+    let mut out = String::new();
+    let mut push = |s: &str| -> Result<(), String> {
+        let len = out.len() + s.len();
+        if len > out.capacity() {
+            let cap = grow(len, len.max(out.capacity() * 2).max(4096))?.max(len);
+            out.reserve_exact(cap - out.len());
         }
-        out.push_str(r.first().and_then(|v| v.as_deref()).unwrap_or("null"));
-    }
-    out.push(']');
-    // Non-finite doubles (a sum that overflowed, 'nan'::DOUBLE) come out of
-    // to_json as bare Infinity / NaN, which is not JSON: make them null.
-    Ok(anofox_visualization::sql::sanitize_json_numbers(&out).into_owned())
+        out.push_str(s);
+        Ok(())
+    };
+    push("[")?;
+    let mut rows = 0usize;
+    res.for_each_first(|v| {
+        if rows == max_rows {
+            return Err(format!("result exceeds the row limit ({max_rows})"));
+        }
+        if rows > 0 {
+            push(",")?;
+        }
+        rows += 1;
+        // Non-finite doubles (a sum that overflowed, 'nan'::DOUBLE) come out
+        // of to_json as bare Infinity / NaN, which is not JSON: make them null.
+        let row = String::from_utf8_lossy(v.unwrap_or(b"null"));
+        push(&anofox_visualization::sql::sanitize_json_numbers(&row))
+    })?;
+    push("]")?;
+    out.shrink_to_fit();
+    Ok(out)
 }
 
 /// An owned database handle (closed on Drop — after all connections are gone).
