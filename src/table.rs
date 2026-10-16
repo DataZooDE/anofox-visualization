@@ -230,8 +230,10 @@ fn parse_float(s: &str) -> Option<f64> {
     let mut best = None;
     while end < b.len() {
         end += 1;
-        if let Ok(v) = t[..end].parse::<f64>() {
-            if t[..end].bytes().any(|c| c.is_ascii_digit()) {
+        // a multi-byte character ('—', '€') is never part of a number
+        let Some(prefix) = t.get(..end) else { continue };
+        if let Ok(v) = prefix.parse::<f64>() {
+            if prefix.bytes().any(|c| c.is_ascii_digit()) {
                 best = Some(v);
             }
         } else if !matches!(b[end - 1], b'-' | b'+' | b'.' | b'e' | b'E') {
@@ -698,6 +700,8 @@ mod tests {
         );
         assert_eq!(parse_float("12.5abc"), Some(12.5));
         assert_eq!(parse_float("abc"), None);
+        assert_eq!(parse_float("—"), None);
+        assert_eq!(parse_float("3 €"), Some(3.0));
         assert_eq!(col_decimals(&[1.0, 2.5, 3.25]), 2);
         assert_eq!(col_decimals(&[0.0405, 0.1]), 4);
         assert!(id_like("store_id") && id_like("#") && id_like("id_x") && !id_like("paid"));
