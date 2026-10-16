@@ -804,7 +804,9 @@ pub fn start_locked(
             "; access policy on {} table(s) — every other table is refused; WARNING: no auth, so every viewer is anonymous (no claims)",
             p.tables.len()
         ),
-        (None, _) => String::new(),
+        // A deleted policy.json next to the dashboards must not go unnoticed.
+        (None, Some(_)) => "; WARNING: no access policy — panels must filter on the claims themselves (put the policy outside the dashboard folder and pass options.policy)".into(),
+        (None, None) => String::new(),
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -1658,11 +1660,23 @@ fn run_panel(
             cancelled()
         } else if e.contains("row limit") {
             (413, e)
+        } else if gen.snap.policy.is_some() && !e.starts_with("query timed out") {
+            // Under a policy, a DuckDB error could quote a value from a row or
+            // column the viewer may not see: the viewer gets a generic
+            // message, the log the details.
+            eprintln!(
+                "[anofox-serve] panel failed in '{dash_id}': {}",
+                access::diag(&redact(e, st.opts.data.as_deref()))
+            );
+            (400, POLICY_PANEL_ERROR.to_string())
         } else {
             (400, redact(e, st.opts.data.as_deref()))
         }
     })
 }
+
+/// What a viewer sees when a panel fails under an access policy.
+const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log has the details)";
 
 /// index.html with `window.__served = {id,title,sql,nav,locked}` injected
 /// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a

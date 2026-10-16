@@ -50,6 +50,31 @@ pub const CTE_PREFIX: &str = "__anofox_cte_";
 
 /// Table functions a dashboard may always call: generators over values.
 const SAFE_TABLE_FUNCTIONS: [&str; 3] = ["range", "generate_series", "unnest"];
+/// Scalar functions a dashboard may never call under a policy: they read the
+/// catalog, statistics, settings or a SQL text of their own, outside the views
+/// — `json_serialize_plan('SELECT … FROM t WHERE n > 41')` binds and optimizes
+/// against the raw tables (min/max statistics, the hash key in a view), and
+/// `stats(col)` shows the base table's statistics. `tests/policy_duckdb.rs`
+/// checks every function of the pinned DuckDB against a reviewed list, so a
+/// new one fails the tests until it is reviewed.
+pub const DENIED_FUNCTIONS: [&str; 15] = [
+    "json_serialize_plan",
+    "json_serialize_sql",
+    "json_deserialize_sql",
+    "stats",
+    "current_setting",
+    "current_query",
+    "current_query_id",
+    "currval",
+    "nextval",
+    "getenv",
+    "write_log",
+    "in_search_path",
+    "current_schemas",
+    "parse_duckdb_log_message",
+    "sql_auto_complete",
+];
+
 /// File readers a policy may allow (`"table_functions"`). Files have no row
 /// or column policy; DuckDB still confines them to the server's data folder.
 const FILE_READERS: [&str; 13] = [
@@ -709,6 +734,11 @@ impl Walker<'_> {
 
     fn function(&mut self, name: &str, o: &Map<String, Value>) -> Result<(), String> {
         let lower = name.to_ascii_lowercase();
+        if DENIED_FUNCTIONS.contains(&lower.as_str()) {
+            return Err(format!(
+                "'{name}()' is not allowed under the access policy (it reads the catalog, statistics, settings or SQL text outside the policy's views)"
+            ));
+        }
         if self.enf.denied_functions.contains(&lower) {
             return Err(format!(
                 "'{name}()' is a macro: its body would run outside the access policy"
@@ -1078,9 +1108,19 @@ impl Enforcer {
                         Mask::Mask => replace.push(format!(
                             "(CASE WHEN {q} IS NULL THEN NULL ELSE '****' END) AS {q}"
                         )),
+                        // Keyed and separated by column: the same value
+                        // hashes differently in another column.
                         Mask::Hash => replace.push(format!(
                             "left(sha256({} || CAST({q} AS VARCHAR)), 16) AS {q}",
-                            sql_string_literal(&self.policy.hash_key)
+                            sql_string_literal(&format!(
+                                "{}:{}:",
+                                self.policy.hash_key,
+                                serde_json::json!([
+                                    t.schema.to_ascii_lowercase(),
+                                    t.table.to_ascii_lowercase(),
+                                    c.column.to_ascii_lowercase()
+                                ])
+                            ))
                         )),
                     }
                 }
@@ -1479,7 +1519,9 @@ mod tests {
         ));
         assert!(v.contains("(CASE WHEN false THEN \"salary\" END) AS \"salary\""));
         assert!(v.contains("ELSE '****' END) AS \"email\""));
-        assert!(v.contains("left(sha256('k' || CAST(\"name\" AS VARCHAR)), 16) AS \"name\""));
+        assert!(v.contains(
+            "left(sha256('k:[\"main\",\"emp\",\"name\"]:' || CAST(\"name\" AS VARCHAR)), 16) AS \"name\""
+        ));
         let hr = Viewer {
             user: Some("x".into()),
             groups: vec!["hr".into()],

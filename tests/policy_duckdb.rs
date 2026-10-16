@@ -729,3 +729,66 @@ fn the_lint_reports_refusals_and_hidden_columns() {
         "{d:#?}"
     );
 }
+
+#[test]
+fn every_duckdb_function_is_reviewed() {
+    let Some(f) = fx() else { return };
+    let reviewed: std::collections::HashSet<&str> =
+        include_str!("fixtures/duckdb_functions_reviewed.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .collect();
+    let rows = json(
+        &f.db.file,
+        "LOAD json; SELECT DISTINCT function_name AS f FROM duckdb_functions() \
+         WHERE function_type IN ('scalar', 'aggregate')",
+    )
+    .unwrap();
+    let new: Vec<String> = col(&rows, "f")
+        .iter()
+        .filter_map(|v| v.as_str())
+        // ICU's per-locale collations differ between builds (harmless).
+        .filter(|f| !reviewed.contains(f) && !f.starts_with("icu_collate_"))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        new.is_empty(),
+        "functions not reviewed for the access policy (see the fixture's header): {new:?}"
+    );
+    for f in anofox_visualization::host::policy::DENIED_FUNCTIONS {
+        if f != "sql_auto_complete" {
+            assert!(reviewed.contains(f), "{f} is denied but not in the list");
+        }
+    }
+}
+
+#[test]
+fn plan_stats_and_settings_functions_are_refused() {
+    let Some(f) = fx() else { return };
+    for q in [
+        "SELECT json_serialize_plan('SELECT * FROM payroll WHERE bonus > 42', optimize := true)",
+        "SELECT json_serialize_plan('SELECT name FROM temp.main.__anofox_rls_1')",
+        "SELECT stats(region) FROM sales",
+        "SELECT json_serialize_sql('SELECT 1')",
+        "SELECT json_deserialize_sql(json_serialize_sql('SELECT 1'))",
+        "SELECT current_setting('allowed_directories')",
+        "SELECT current_query()",
+        "SELECT nextval('s')",
+        "SELECT currval('s')",
+        "SELECT getenv('HOME')",
+        "SELECT id FROM sales WHERE stats(amount) LIKE '%Max%'",
+        "SET VARIABLE x = json_serialize_plan('FROM payroll')",
+        "SELECT JSON_SERIALIZE_PLAN('FROM payroll')",
+    ] {
+        f.refused(&[q], "not allowed under the access policy");
+    }
+    // …in a row filter, too.
+    let file = f.db.file.clone();
+    let e = Enforcer::compile(
+        &Policy::parse(r#"{"tables": {"sales": {"rows": "stats(region) IS NOT NULL"}}}"#).unwrap(),
+        &mut |sql: &str| rows_as_text(&file, sql),
+        "snap",
+    )
+    .unwrap_err();
+    assert!(e.contains("not allowed"), "{e}");
+}
