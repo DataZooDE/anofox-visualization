@@ -5,8 +5,8 @@ monitoring an incoming data feed. A made-up wholesaler, Nordwind, sends a
 home-and-garden shop its full price and stock list every night. At 07:00 the
 data engineer on duty decides whether to load it into the product catalogue:
 a bad load puts wrong prices on the website within the hour, holding it back
-keeps yesterday's prices for another day. It's the "Stored results: supplier
-feed monitoring" example of the
+keeps yesterday's prices for another day. It's the "Is today's supplier
+feed safe to load?" example of the
 [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Tabular).
 

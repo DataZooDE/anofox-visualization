@@ -2,7 +2,7 @@
 
 A use-case dashboard for [anofox-optimize](https://github.com/DataZooDE/anofox-optimize):
 production scheduling with sequence-dependent changeovers. It's the
-"Stored results: production scheduling" example of the
+"Which line runs which order, with the least changeover?" example of the
 [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Optimize).
 

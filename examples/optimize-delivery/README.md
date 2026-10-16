@@ -1,7 +1,7 @@
 # Which van serves which stop tomorrow, so every customer gets its delivery on time?
 
 A use-case dashboard for [anofox-optimize](https://github.com/DataZooDE/anofox-optimize):
-a delivery plan for a small fleet. It's the "Stored results: delivery routing"
+a delivery plan for a small fleet. It's the "Which van serves which stop tomorrow?"
 example of the [live demo](https://datazoode.github.io/anofox-visualization/)
 (sidebar: anofox extensions → Optimize).
 

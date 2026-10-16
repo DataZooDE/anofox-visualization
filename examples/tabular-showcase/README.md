@@ -3,8 +3,8 @@
 A data-quality report built with
 [anofox-tabular](https://github.com/DataZooDE/anofox-tabular): a made-up online
 shop moves its customer master to a new CRM and checks 600 customers and 4,509
-orders (Jun–Sep 2026) before switching over. It's the "Stored results: CRM
-data quality" example of the
+orders (Jun–Sep 2026) before switching over. It's the "Can we switch on the new CRM?" example
+of the
 [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Tabular).
 

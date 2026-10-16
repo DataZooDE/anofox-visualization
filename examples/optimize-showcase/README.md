@@ -7,7 +7,7 @@ packing cartons into containers (`opt_pack_*`), choosing shipments for a cheap
 carrier (`opt_knapsack_*`), cutting pick waves (`opt_wave_*`), scheduling the
 packing line against due dates (`opt_schedule_*`), sequencing the paint line
 (`opt_sequence_*`) and picking a portfolio for the reserve fund
-(`opt_portfolio_*`). It's the "Stored results: distribution centre" example of
+(`opt_portfolio_*`). It's the "How do we plan a busy day at the distribution centre?" example of
 the [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Optimize).
 

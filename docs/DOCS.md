@@ -905,13 +905,15 @@ readers, e.g. `CREATE TABLE t AS SELECT * FROM read_csv_auto('https://…');`.
   *Interactivity*, *Tables*, *Layout* and *Theming* ("Theming: your branding
   (ACME)", "Locale: de-DE"; sources in `examples/theming/`).
 - **anofox extensions** — one group per anofox DuckDB extension:
-  - *Statistics* — "Statistics showcase: property market (live
-    anofox-statistics)", computed live by the anofox_statistics wasm extension;
-  - *Forecast* — "M5 forecast (live extension)" and "M5 analytics", live
-    anofox_forecast;
-  - *Tabular*, *Optimize*, *Decide* — "Stored results: CRM data quality",
-    "Stored results: distribution centre", "Stored results: support inbox
-    triage". These extensions can't run in DuckDB-Wasm (no loadable wasm
+  - *Statistics* — "What sets the price of a home?", computed live by the
+    anofox_statistics wasm extension;
+  - *Forecast* — "How much will each item sell next year?" and "Which forecast
+    method fits our demand?", live anofox_forecast;
+  - *Tabular*, *Optimize*, *Decide* — one dashboard per business question
+    (e.g. "Can we switch on the new CRM?", "Which van serves which stop
+    tomorrow?", "Can a model triage the support inbox?"); the sidebar names
+    are the questions, each dashboard says on the page that its results are
+    stored. These extensions can't run in DuckDB-Wasm (no loadable wasm
     build, or a native model runtime), so the results were computed natively
     (`examples/<ext>-showcase/compute.sql` → `scripts/gen-showcase-data.sh` →
     `web/data/<ext>/*.csv`) and the dashboards only read them — each page says so.

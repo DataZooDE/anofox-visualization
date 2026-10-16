@@ -4,7 +4,7 @@ A cross-extension use-case dashboard: **forecast → optimize**.
 [anofox-forecast](https://github.com/DataZooDE/anofox-forecast) forecasts
 weekly demand per SKU, [anofox-optimize](https://github.com/DataZooDE/anofox-optimize)
 picks the pallets to buy under the week's purchasing budget. It's the
-"Stored results: forecast → optimize" example of the
+"What should we order this week to sell the most?" example of the
 [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Optimize; the page says both extensions are used).
 

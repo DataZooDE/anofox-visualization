@@ -7,7 +7,7 @@ CRM owner has to decide how strict the matching is: a low threshold merges
 different people (above all, members of one household), a high one leaves
 duplicates — double mailings and split purchase histories. Pairs between the
 match threshold and the auto-merge threshold go to a steward. It's the
-"Stored results: duplicate customers" example of the
+"Which duplicate customers should we merge?" example of the
 [live demo](https://datazoode.github.io/anofox-visualization/) (sidebar:
 anofox extensions → Tabular).
 

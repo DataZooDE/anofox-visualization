@@ -307,7 +307,7 @@ SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
     group: "Forecast (anofox-forecast)",
     ext: true,
     items: {
-      "M5 forecast (live extension)": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
+      "How much will each item sell next year?": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
 -- anofox-forecast extension entirely client-side — no server. On boot the app
 -- registers the parquet and, on a v1.5.x engine, does the equivalent of:
 --
@@ -431,7 +431,7 @@ SELECT item    AS "Item × store" ::PAGED,
        es_rmse AS "ES · RMSE"    ::COMPACT,
        sn_rmse AS "SN · RMSE"    ::COMPACT
 FROM lx_scores ORDER BY item;`,
-      "M5 analytics": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
+      "Which forecast method fits our demand?": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
 -- one dashboard across all categories (monthly). Methods: MFLES vs MSTL.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS an_cat AS
@@ -822,24 +822,31 @@ const FILE_SAMPLES = [
   { group: THEMING_GROUP, name: "Locale: de-DE", url: "examples/theming-de-locale.sql" },
   {
     group: STATS_GROUP,
-    name: "Statistics showcase: property market (live anofox-statistics)",
+    name: "What sets the price of a home?",
     url: "examples/statistics-showcase.sql",
   },
   {
     group: TABULAR_GROUP,
-    name: "Stored results: CRM data quality",
+    name: "Can we switch on the new CRM?",
     url: "examples/tabular-showcase.sql",
   },
-  { group: TABULAR_GROUP, name: "Stored results: is today's supplier feed safe to load?", url: "examples/tabular-feed.sql" },
-  { group: TABULAR_GROUP, name: "Stored results: duplicate customers — which to merge?", url: "examples/tabular-dedup.sql" },
+  { group: TABULAR_GROUP, name: "Is today's supplier feed safe to load?", url: "examples/tabular-feed.sql" },
+  { group: TABULAR_GROUP, name: "Which duplicate customers should we merge?", url: "examples/tabular-dedup.sql" },
   {
     group: OPTIMIZE_GROUP,
-    name: "Stored results: distribution centre",
+    name: "How do we plan a busy day at the distribution centre?",
     url: "examples/optimize-showcase.sql",
+  },
+  { group: OPTIMIZE_GROUP, name: "Which line runs which order, with the least changeover?", url: "examples/optimize-production.sql" },
+  { group: OPTIMIZE_GROUP, name: "Which van serves which stop tomorrow?", url: "examples/optimize-delivery.sql" },
+  {
+    group: OPTIMIZE_GROUP,
+    name: "What should we order this week to sell the most?",
+    url: "examples/optimize-replenishment.sql",
   },
   {
     group: DECIDE_GROUP,
-    name: "Stored results: support inbox triage",
+    name: "Can a model triage the support inbox?",
     url: "examples/decide-showcase.sql",
   },
 ];
@@ -1024,6 +1031,12 @@ async function ensureExtension(name) {
   return extReady[name];
 }
 
+// The code of a statement without its string literals and comments, so a
+// title or a note that merely names a function ('… with ts_forecast_by')
+// never loads an extension.
+function sqlCode(sql) {
+  return String(sql).replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, " ");
+}
 // Statements that call anofox_statistics (its producers, fit/test aggregates).
 const STATS_RE =
   /\b(?:\w+_(?:tidy|glance|augment|prediction|effects|partial_residuals|rolling_tidy|path|cv|fit_predict)_by|quantile_process_by|(?:roc|pr|calibration)_curve_by|kaplan_meier_by|p?acf_by|tukey_hsd_by|pairwise_t_test_by|dunn_test_by|\w+_fit_agg|\w+_fit_predict_agg|\w+_test_agg|\w+_fit_predict|anofox_contract_version|anofox_statistics)\b/i;
@@ -1049,7 +1062,7 @@ async function ensureForecast(sql) {
   }
   await fcParquet;
   // 2. The extension, only for statements that use it.
-  if (/\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureExtension("anofox_forecast");
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(sqlCode(sql))) await ensureExtension("anofox_forecast");
 }
 
 // Stored showcase results: an example that reads 'data/<ext>/<table>.csv'
@@ -1082,9 +1095,10 @@ async function ensureDataFiles(sql) {
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
 // builds the paging SQL itself.
 async function runSql(sql, page) {
-  if (/\bST_Read\b|\bspatial\b/i.test(sql)) await ensureGeo();
-  if (/m5_monthly|\bts_\w+\b|\banofox_forecast\b/i.test(sql)) await ensureForecast(sql);
-  if (STATS_RE.test(sql)) await ensureExtension("anofox_statistics");
+  const code = sqlCode(sql); // (the data/… file check below reads the strings)
+  if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
+  if (STATS_RE.test(code)) await ensureExtension("anofox_statistics");
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
   if (servedMode) {
     // Capture a SET VARIABLE (never sent as SQL) …
