@@ -7353,13 +7353,35 @@ function attachChartA11y() {
       });
     });
     svg.addEventListener("keydown", (e) => chartKey(e, svg, fig));
+    // A click on a mark of the focused chart may re-run the dashboard too
+    // (capture phase: before the mark's own handler starts the run).
+    svg.addEventListener(
+      "click",
+      (e) => {
+        const m = e.target.closest?.(".dp-hit");
+        if (m && svg.contains(document.activeElement)) dpA11yFocus = markKey(fig, m);
+      },
+      true
+    );
   }
+  // After a re-run that replaced the chart, focus the same mark, else the
+  // chart, else (the chart came back empty) the panel's title or the panel.
+  // While the old chart still holds the focus the run is yet to come.
   if (dpA11yFocus) {
     const f = dpA11yFocus;
-    dpA11yFocus = null;
-    const svg = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"] .panel-svg > svg`);
-    const marks = svg ? chartMarks(svg) : [];
-    (marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0] || svg)?.focus();
+    const fig = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"]`);
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (lost || !fig?.contains(document.activeElement)) dpA11yFocus = null;
+    if (fig && lost) {
+      const svg = fig.querySelector(".panel-svg > svg");
+      const marks = svg ? chartMarks(svg) : [];
+      let to = marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0];
+      if (!to) {
+        to = svg || fig.querySelector(".panel-title") || fig;
+        if (!to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+      }
+      to.focus();
+    }
   }
   applyAsTables();
   requestAnimationFrame(keyboardScrollers);
@@ -7399,6 +7421,11 @@ function markGrid(svg) {
   return [...by.values()].map((els) => els.map((el) => [cx(el), el]).sort((a, b) => a[0] - b[0]).map((p) => p[1]));
 }
 
+// What identifies a mark across re-runs (dpA11yFocus).
+function markKey(fig, el) {
+  return { stmt: fig.dataset.stmt, series: el.getAttribute("data-series"), x: el.getAttribute("data-x") || "" };
+}
+
 function chartKey(e, svg, fig) {
   const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "Escape"];
   if (!keys.includes(e.key)) return;
@@ -7418,7 +7445,7 @@ function chartKey(e, svg, fig) {
   e.stopPropagation();
   if (e.key === "Escape") return svg.focus();
   if (e.key === "Enter" || e.key === " ") {
-    dpA11yFocus = { stmt: fig.dataset.stmt, series: cur.getAttribute("data-series"), x: cur.getAttribute("data-x") || "" };
+    dpA11yFocus = markKey(fig, cur);
     cur.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }));
     return;
   }
