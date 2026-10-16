@@ -202,6 +202,16 @@ pub static REGISTRY: &[RoleSpec] = &[
       "gauge zone colours, comma-separated hex"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
       "gauge zone labels, comma-separated (drawn at each zone)"),
+    e("ANIMATE", &["ANIMATION", "ENTRANCE"], R::Animate, "modifier", true,
+      "entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none'"),
+    e("STORY", &["STORYLINE", "NARRATIVE"], R::Story, "annotation", true,
+      "per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims)"),
+    e("STORY_BY", &["STORYBY"], R::StoryBy, "modifier", true,
+      "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
+    e("TRANSITION", &["TWEEN"], R::Transition, "modifier", true,
+      "on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart"),
+    e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
+      "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
     e("METRIC", &["KPI", "BIGNUMBER"], R::Metric(MetricFmt::Plain), "kpi", true,
       "big-number KPI (add ::LABEL for a caption)"),
@@ -749,6 +759,11 @@ mod tests {
             Role::Drill,
             Role::Link,
             Role::Empty,
+            Role::Animate,
+            Role::LineStyle,
+            Role::Story,
+            Role::StoryBy,
+            Role::Transition,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -843,7 +858,12 @@ mod tests {
                 | Role::SelectAs
                 | Role::Drill
                 | Role::Link
-                | Role::Empty => {}
+                | Role::Empty
+                | Role::Animate
+                | Role::LineStyle
+                | Role::Story
+                | Role::StoryBy
+                | Role::Transition => {}
             }
         }
         v

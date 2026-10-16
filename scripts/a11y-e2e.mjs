@@ -40,8 +40,9 @@ await page.waitForFunction(
 );
 await page.waitForTimeout(500);
 
-// Every chart has a one-sentence summary.
-const svgs = await page.$$eval(".dash .panel-svg > svg", (s) => s.map((e) => [e.getAttribute("role"), e.getAttribute("aria-label") || ""]));
+// Every chart has a one-sentence summary (decorative overlays such as the
+// ::STORY connector are aria-hidden and skipped).
+const svgs = await page.$$eval(".dash .panel-svg > svg:not([aria-hidden=\"true\"])", (s) => s.map((e) => [e.getAttribute("role"), e.getAttribute("aria-label") || ""]));
 console.log(`${svgs.length} charts`);
 for (const [role, label] of svgs) {
   if (!role || !/\.$/.test(label)) fail(`chart without a summary: role=${role} label=${label}`);

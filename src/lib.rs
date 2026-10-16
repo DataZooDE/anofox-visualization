@@ -430,6 +430,23 @@ pub enum Role {
     /// `/d/<id>?v.x=…` or an `https:` URL — with `{value}` / `{column}`
     /// placeholders, followed on a chart click or from a table's link cell.
     Link,
+    /// Motion: the panel's entrance animation (`::ANIMATE`) — `'auto'`
+    /// (default: lines draw, bars grow, points stagger), `'draw'`, `'grow'`,
+    /// `'reveal'` (forward from the panel's `::XLINE`) or `'none'`. Browser only.
+    Animate,
+    /// A series' line style (`::LINESTYLE`, per row, keyed by its
+    /// `::CATEGORY`): `'flow'` = dashes that move in the browser (a forecast,
+    /// "predicted"), `'dashed'` = still dashes; static output shows dashes.
+    LineStyle,
+    /// A story caption per row (`::STORY`): rows with text become steps that
+    /// light up their x (or their series, see [`Role::StoryBy`]) in the browser.
+    Story,
+    /// What a `::STORY` step lights up (`::STORY_BY`): `'x'` (default) or
+    /// `'series'` (the row's `::CATEGORY`).
+    StoryBy,
+    /// How the chart changes on a re-run (`::TRANSITION`): `'tween'` moves
+    /// the marks to their new values, `'none'` (default) swaps the chart.
+    Transition,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1207,8 +1224,221 @@ fn render_placed(
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
         let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
-        Ok((with_formatted_values(svg, &cols, o), warnings))
+        let svg = with_line_styles(with_xline_dates(svg, &cols), &cols);
+        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        Ok((svg, warnings))
     })
+}
+
+/// A date `::XLINE` is drawn at its epoch seconds; its tooltip and `data-x`
+/// say the date it was given (`2026-10-12`), not `x = 1791763200`.
+fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
+    let Some(c) = find_role(cols, Role::VLine) else {
+        return svg;
+    };
+    for v in &c.values {
+        let (e, d) = match v {
+            Value::DateTime(e) => (*e, xline_date_text(*e)),
+            Value::Str(s) => {
+                let s = s.trim();
+                if s.parse::<f64>().is_ok() {
+                    continue;
+                }
+                let Some(e) = sql::parse_iso_epoch(s) else {
+                    continue;
+                };
+                (e, s.strip_suffix(" 00:00:00").unwrap_or(s).to_string())
+            }
+            _ => continue,
+        };
+        let d = format::escape_xml(&d);
+        svg = svg
+            .replace(
+                &format!(" data-x=\"{e}\" data-value=\"{e}\">"),
+                &format!(" data-x=\"{d}\">"),
+            )
+            .replace(
+                &format!("<title>x = {e}</title>"),
+                &format!("<title>{d}</title>"),
+            );
+    }
+    svg
+}
+
+/// Epoch seconds as `2026-10-12` (or `2026-10-12 08:30:00` off midnight).
+fn xline_date_text(secs: i64) -> String {
+    let day = crate::period::Date::from_days(secs.div_euclid(86_400)).iso();
+    let s = secs.rem_euclid(86_400);
+    if s == 0 {
+        day
+    } else {
+        format!("{day} {:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    }
+}
+
+/// The `::LINESTYLE` values.
+pub const LINE_STYLES: &[&str] = &["solid", "dashed", "flow"];
+
+/// `::LINESTYLE`: dash the lines of the series whose rows say `'dashed'` or
+/// `'flow'` (every data line when there is no `::CATEGORY`), and mark the
+/// flowing ones `class="dp-flow"` — the browser moves their dashes (pure CSS),
+/// static output keeps plain dashes.
+fn with_line_styles(svg: String, cols: &[Column]) -> String {
+    let Some(st) = find_role(cols, Role::LineStyle) else {
+        return svg;
+    };
+    let cat = find_role(cols, Role::Category);
+    // series → flowing?  (None key = every line: no ::CATEGORY)
+    let mut styled: Vec<(Option<String>, bool)> = Vec::new();
+    for (i, v) in st.values.iter().enumerate() {
+        let Some(s) = v.as_str().map(|s| s.trim().to_ascii_lowercase()) else {
+            continue;
+        };
+        if s != "flow" && s != "dashed" {
+            continue;
+        }
+        let key = match cat {
+            Some(c) => match c.values.get(i) {
+                Some(Value::Str(k)) => Some(k.clone()),
+                Some(v) => v.as_f64().map(|f| f.to_string()),
+                None => None,
+            },
+            None => None,
+        };
+        if cat.is_some() && key.is_none() {
+            continue;
+        }
+        match styled.iter_mut().find(|(k, _)| *k == key) {
+            Some(e) => e.1 |= s == "flow",
+            None => styled.push((key, s == "flow")),
+        }
+    }
+    if styled.is_empty() {
+        return svg;
+    }
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(tag[k..k + tag[k..].find('"')?].to_string())
+    };
+    let mut out = String::with_capacity(svg.len() + 256);
+    let mut rest = svg.as_str();
+    while let Some(i) = rest.find("<polyline ") {
+        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
+            break;
+        };
+        let tag = &rest[i..end];
+        let points = attr(tag, "points").unwrap_or_default();
+        // a data line: not a dashed rule, not a 2-point grid / axis line
+        let data_line = !tag.contains(" stroke-dasharray=\"")
+            && (tag.contains(" data-series=\"") || points.split_whitespace().count() > 2);
+        let hit = if !data_line {
+            None
+        } else if cat.is_some() {
+            let s = attr(tag, "data-series").map(|s| s.replace("&amp;", "&"));
+            styled.iter().find(|(k, _)| s.is_some() && *k == s)
+        } else {
+            styled.first()
+        };
+        let (head, close) = match tag.strip_suffix('/') {
+            Some(h) => (h, "/>"),
+            None => (tag, ">"),
+        };
+        out.push_str(&rest[..i]);
+        out.push_str(head);
+        if let Some((_, flow)) = hit {
+            out.push_str(" stroke-dasharray=\"6 4\"");
+            if *flow {
+                out.push_str(" class=\"dp-flow\"");
+            }
+        }
+        out.push_str(close);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `::ANIMATE` modes the browser plays.
+pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
+
+/// Pass a panel's motion directives to the browser as attributes on the SVG
+/// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
+/// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
+/// (epoch seconds on a date axis, a level on a discrete one); `data-story` +
+/// `data-story-by` (`::STORY`, `::STORY_BY`); `data-transition`
+/// (`'tween'::TRANSITION`).
+fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
+    if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
+        if ANIMATE_MODES.contains(&mode.as_str()) {
+            if mode == "reveal" {
+                if let Some(c) = find_role(cols, Role::VLine) {
+                    let at = xline_nums(&c.values)
+                        .first()
+                        .map(|f| f.to_string())
+                        .or_else(|| c.values.iter().find_map(|v| v.as_str().map(str::to_string)));
+                    if let Some(at) = at {
+                        svg = with_root_attr(svg, "data-xline", &at);
+                    }
+                }
+            }
+            svg = with_root_attr(svg, "data-animate", &mode);
+        }
+    }
+    if role_str(cols, Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween")) {
+        svg = with_root_attr(svg, "data-transition", "tween");
+    }
+    if let Some(steps) = story_steps(cols) {
+        let by = match role_str(cols, Role::StoryBy).map(|b| b.to_ascii_lowercase()) {
+            Some(b) if b == "series" && find_role(cols, Role::Category).is_some() => "series",
+            _ => "x",
+        };
+        svg = with_root_attr(svg, "data-story-by", by);
+        svg = with_root_attr(svg, "data-story", &steps);
+    }
+    svg
+}
+
+/// A cell as the mark's `data-x` / `data-series` spells it.
+fn key_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.clone()),
+        Value::Na => None,
+        v => v.as_f64().map(|f| f.to_string()),
+    }
+}
+
+/// `::STORY` steps as JSON `[{"k": key, "t": caption}, …]`, in row order:
+/// one per distinct key (the row's x, or its `::CATEGORY` with
+/// `'series'::STORY_BY`) whose caption is non-empty; the first caption wins.
+fn story_steps(cols: &[Column]) -> Option<String> {
+    let story = find_role(cols, Role::Story)?;
+    let by_series = role_str(cols, Role::StoryBy).is_some_and(|b| b.eq_ignore_ascii_case("series"));
+    let keys = if by_series {
+        find_role(cols, Role::Category)
+    } else {
+        None
+    }
+    .or_else(|| find_role(cols, Role::X))?;
+    let mut steps: Vec<(String, String)> = Vec::new();
+    for (i, v) in story.values.iter().enumerate() {
+        let Some(t) = v.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let Some(k) = keys.values.get(i).and_then(key_text) else {
+            continue;
+        };
+        if !steps.iter().any(|(sk, _)| *sk == k) {
+            steps.push((k, t.to_string()));
+        }
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    let json: Vec<serde_json::Value> = steps
+        .into_iter()
+        .map(|(k, t)| serde_json::json!({ "k": k, "t": t }))
+        .collect();
+    serde_json::to_string(&json).ok()
 }
 
 /// Give every hoverable mark its value as the panel formats it: the
@@ -2435,7 +2665,11 @@ fn cartesian(
         let Some(c) = find_role(cols, role) else {
             continue;
         };
-        let vals = distinct_nums(&c.values);
+        let vals = if vertical {
+            xline_nums(&c.values)
+        } else {
+            distinct_nums(&c.values)
+        };
         if vals.is_empty() {
             continue;
         }
@@ -3749,6 +3983,27 @@ fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) ->
         .filter(|c| matches!(c.role, Role::RefLine | Role::BandUpper))
         .flat_map(|c| c.values.iter());
     max(&mut ycols.chain(extra).filter_map(Value::as_f64))
+}
+
+/// An `::XLINE`'s positions (a DATE arrives as epoch seconds, text as is): numbers as they
+/// are, a date / timestamp (`DATE '2026-06-30'::XLINE`, "Today" on a date
+/// axis) as its epoch seconds — the unit a date x is drawn in.
+fn xline_nums(vals: &[Value]) -> Vec<f64> {
+    let nums = distinct_nums(vals);
+    if !nums.is_empty() {
+        return nums;
+    }
+    let parsed: Vec<Value> = vals
+        .iter()
+        .filter_map(|v| {
+            let s = v.as_str()?.trim();
+            s.parse::<f64>()
+                .ok()
+                .or_else(|| sql::parse_iso_epoch(s).map(|t| t as f64))
+        })
+        .map(Value::Float)
+        .collect();
+    distinct_nums(&parsed)
 }
 
 /// Distinct finite numeric values from a column, in first-seen order — used to
