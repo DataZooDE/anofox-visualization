@@ -26,7 +26,7 @@
 
 LOAD anofox_forecast;
 
-SELECT 'anofox_forecast · live in your browser'::BRAND;
+SELECT 'anofox_forecast'::BRAND;
 SELECT 'How many agents do we need per half-hour for the next three weeks?'::DASHBOARD_TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ WHERE isodow(c.ds) <> 7 AND c.yhat > 0 GROUP BY c.queue;
 -- Header: who asks
 -- ─────────────────────────────────────────────────────────────────────────────
 SELECT 12::COL;
-SELECT 'Asked every Friday by the **workforce-management planner** of a customer-service centre (three queues: Billing, Technical support, Sales) before the roster for the **next three weeks** (Mon 19 Oct – Sun 8 Nov) is published: how many agents are needed **every half-hour**, and where does the current shift plan fall short? Daily contacts are forecast **live** with anofox_forecast (four methods backtested per queue, the best one kept), widened to the quantile you plan for, spread over the day with the recent intraday profile and turned into agents with **Erlang C**.'::MARKDOWN,
+SELECT 'Asked every Friday by the **workforce-management planner** of a customer-service centre (three queues: Billing, Technical support, Sales) before the roster for the **next three weeks** (Mon 19 Oct – Sun 8 Nov) is published: how many agents are needed **every half-hour**, and where does the current shift plan fall short? Daily contacts are forecast per queue (four methods backtested, the best one kept), widened to the quantile you plan for, spread over the day with the recent intraday profile and turned into agents with **Erlang C**.'::MARKDOWN,
        'The question'::TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -237,20 +237,24 @@ FROM cc_erlang GROUP BY queue, ds;
 -- ─────────────────────────────────────────────────────────────────────────────
 SELECT 'Next three weeks at a glance'::GROUP;
 SELECT round(sum(contacts))::COMPACT,
-       (SELECT sum(contacts) FROM cc_daily WHERE ds > DATE '2026-09-27')::DELTA,
-       ('contacts to plan for (' || left(getvariable('plan_at'), 3) || ') vs the last three weeks')::LABEL
+       (SELECT sum(contacts) FROM cc_daily WHERE ds > DATE '2026-09-27')::DELTA, 'vs the last three weeks'::DELTA_LABEL,
+       ('contacts to plan for (' || left(getvariable('plan_at'), 3) || ')')::LABEL
 FROM cc_day;
-SELECT round(sum(agent_hours))::COMPACT, (SELECT sum(rostered_hours) FROM cc_day)::DELTA,
-       'agent-hours needed vs rostered — enough hours, in the wrong half-hours'::LABEL
+SELECT round(sum(agent_hours))::COMPACT, (SELECT sum(rostered_hours) FROM cc_day)::DELTA_LOWER_GOOD, 'vs rostered'::DELTA_LABEL,
+       'agent-hours needed — enough hours, in the wrong half-hours'::LABEL,
+       'Agents needed per half-hour (Erlang C, with the shrinkage added), summed over the three weeks; rostered = the current shift plan.'::INFO
 FROM cc_day;
 SELECT max(peak_heads)::METRIC, ('agents needed in the busiest half-hour (' || (SELECT queue || ', ' || strftime(ds, '%a %d %b') FROM cc_day ORDER BY peak_heads DESC LIMIT 1) || ')')::LABEL
 FROM cc_day;
-SELECT sum(slots_short)::METRIC, 'half-hours the current roster is short'::LABEL FROM cc_day;
+SELECT sum(slots_short)::METRIC, 'half-hours the current roster is short'::LABEL, '=0:good; <20:warn; bad'::THRESHOLDS FROM cc_day;
 SELECT round(sum(sl_rostered * contacts) / sum(contacts), 1)::PERCENT,
-       ('service level the current roster would reach (target ' || getvariable('sl_target_pct') || ' % in ' || getvariable('answer_s') || ' s)')::LABEL
+       ('service level the current roster would reach (target ' || getvariable('sl_target_pct') || ' % in ' || getvariable('answer_s') || ' s)')::LABEL,
+       ('<' || (getvariable('sl_target_pct')::DOUBLE - 10) || ':bad; <' || getvariable('sl_target_pct') || ':warn; good')::THRESHOLDS,
+       'Service level: the share of calls answered within the target time. Erlang C per half-hour for the agents the current roster puts on the phone (after shrinkage), weighted by the calls.'::INFO
 FROM cc_day;
 SELECT round(100 - avg(s.mape), 1)::PERCENT, (SELECT round(100 - avg(mape), 1) FROM cc_score WHERE method = 'SeasonalNaive')::DELTA,
-       'backtest accuracy (100 − MAPE), chosen methods vs same-day-last-week'::LABEL
+       'vs same day last week'::DELTA_LABEL, 'backtest accuracy (100 − MAPE) of the chosen methods'::LABEL,
+       'MAPE: the mean absolute error of daily contacts as a % of the actual, on open days over four three-week backtest folds.'::INFO
 FROM cc_score s JOIN cc_winner USING (queue, method);
 SELECT 1::ENDGROUP;
 
@@ -262,11 +266,18 @@ SELECT 'Demand'::TAB;
 SELECT 12::COL;
 SELECT 380::HEIGHT;
 SELECT ds ::XAXIS, queue ::CATEGORY, contacts ::LINECHART, contacts ::BAND_LOWER, contacts ::BAND_UPPER,
+       DATE '2026-10-19' ::XLINE, 'roster period' ::XLINE_LABEL, 'reveal' ::ANIMATE,
        'Daily contacts: last 8 weeks and the 3-week forecast (shaded = P10–P90 from the backtest errors) — the bill run lifts Billing on Mon 2 Nov'::TITLE
 FROM cc_daily WHERE ds > DATE '2026-08-23' AND isodow(ds) <> 7
 UNION ALL
-SELECT ds, queue, round(yhat), round(lo), round(hi), NULL FROM cc_plan
+SELECT ds, queue, round(yhat), round(lo), round(hi), NULL, NULL, NULL, NULL FROM cc_plan
 ORDER BY 1, 2;
+-- What moves the contacts: the monthly bill runs and the storm outage.
+SELECT d ::XAXIS, what ::LABEL, 'Events' ::TRACK
+FROM (VALUES (DATE '2026-09-01', 'Bill run: Billing up to +35 % on the 1st–3rd'),
+             (DATE '2026-09-08', 'Storm outage: Technical support ×2.6'),
+             (DATE '2026-10-01', 'Bill run: Billing up to +35 % on the 1st–3rd'),
+             (DATE '2026-11-02', 'Bill run (forecast): Billing up to +35 %')) t(d, what);
 
 SELECT 6::COL;
 SELECT 320::HEIGHT;
@@ -277,7 +288,8 @@ FROM cc_profile WHERE dow <= 5 GROUP BY ALL ORDER BY 1, 2;
 SELECT 6::COL;
 SELECT 320::HEIGHT;
 SELECT queue ::XAXIS, round(sum(contacts)) AS "Contacts to plan for" ::BARCHART, 1 ::FLIP,
-       'Billing carries most of the next three weeks'' contacts'::TITLE
+       '#Staffing gap?v.queue={value}' ::LINK,
+       'Billing carries most of the next three weeks'' contacts (click a queue for its staffing gaps)'::TITLE
 FROM cc_day GROUP BY queue ORDER BY 2 DESC;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -295,13 +307,16 @@ FROM cc_erlang WHERE queue = getvariable('queue') ORDER BY ds, slot;
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
-SELECT strftime(DATE '2000-01-01' + slot, '%H:%M') ::XAXIS, 'needed (heads incl. shrinkage)' ::CATEGORY, heads ::STEP,
-       ('Worst day ' || strftime(ds, '%a %d %b') || ': needed vs rostered agents') ::TITLE
+-- x = the half-hour's start as hours since midnight (8.5 = 08:30), so the
+-- short half-hours can be shaded.
+SELECT hour(slot) + minute(slot) / 60.0 ::XAXIS, 'needed (heads incl. shrinkage)' ::CATEGORY, heads ::STEP,
+       CASE WHEN heads > rostered THEN hour(slot) + minute(slot) / 60.0 END ::MARKAREA,
+       ('Worst day ' || strftime(ds, '%a %d %b') || ': needed vs rostered agents by hour of day (grey = short)') ::TITLE
 FROM cc_erlang
 WHERE queue = getvariable('queue')
   AND ds = (SELECT ds FROM cc_day WHERE queue = getvariable('queue') ORDER BY short_by DESC, ds LIMIT 1)
 UNION ALL
-SELECT strftime(DATE '2000-01-01' + slot, '%H:%M'), 'rostered', rostered, NULL FROM cc_erlang
+SELECT hour(slot) + minute(slot) / 60.0, 'rostered', rostered, NULL, NULL FROM cc_erlang
 WHERE queue = getvariable('queue')
   AND ds = (SELECT ds FROM cc_day WHERE queue = getvariable('queue') ORDER BY short_by DESC, ds LIMIT 1)
 ORDER BY 1, 2;
@@ -320,6 +335,17 @@ SELECT k ::XAXIS, round(100 * (1 - (k * b / (k - erlangs * (1 - b))) * exp(-(k -
        getvariable('sl_target_pct')::DOUBLE ::REFLINE, ' %'::YFORMAT,
        ('Erlang C at the busiest half-hour (' || round(any_value(calls) OVER ())::INTEGER || ' calls): service level by agents on the phone — each agent near the target matters') ::TITLE
 FROM t ORDER BY k;
+
+SELECT 12::COL;
+SELECT 'Each half-hour''s calls $\lambda$ and average handling time give the offered load $A = \lambda \cdot \text{AHT} / 1800\,\text{s}$ (in Erlangs). With $N$ agents on the phone, **Erlang C** is the chance that a caller has to wait, and the service level the share answered within $T$ seconds:
+
+$$C(N, A) = \frac{\frac{A^N}{N!}\,\frac{N}{N-A}}{\sum_{k=0}^{N-1} \frac{A^k}{k!} + \frac{A^N}{N!}\,\frac{N}{N-A}}$$
+
+$$\text{SL}(N) = 1 - C(N, A)\, e^{-(N-A)\,T/\text{AHT}}$$
+
+The agents needed are the smallest $N$ with $\text{SL}(N)$ at or above the target ({{sl}} % in {{t}} s); the heads to roster add the shrinkage ({{shrink}} %).'::MARKDOWN,
+       getvariable('sl_target_pct') AS sl, getvariable('answer_s') AS t, getvariable('shrinkage_pct') AS shrink,
+       'How the agents are computed'::TITLE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3 · Backtest
@@ -366,6 +392,7 @@ SELECT ('**Recommendation.** With the current shift plan ' || (SELECT count(*) F
         || (SELECT string_agg('**' || queue || ' ' || strftime(ds, '%a %d %b') || '** (+' || short_by || ' at ' || strftime(DATE '2000-01-01' + worst_slot, '%H:%M') || ')', ', ' ORDER BY short_by DESC)
             FROM (SELECT * FROM cc_day WHERE short_by > 0 ORDER BY short_by DESC LIMIT 3))
         || '. Add the agents to the shift that covers the worst half-hour (table below); lower the planning quantile or the service level above to see the cost of a leaner roster.')::MARKDOWN,
+       CASE WHEN (SELECT count(*) FROM cc_day WHERE short_by > 0) > 0 THEN 'warning' ELSE 'success' END::CALLOUT,
        'What to do'::TITLE;
 
 SELECT 12::COL;

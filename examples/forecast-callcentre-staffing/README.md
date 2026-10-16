@@ -25,8 +25,11 @@ the single source the browser demo loads.
   (service level, answer time and shrinkage are inputs), then compared with a
   three-shift roster.
 - **Dashboard.** The question and who asks it, staffing rules, a KPI strip,
-  then four tabs: demand · staffing gap (per queue) · backtest · roster
-  recommendation (per day and queue, what to add to which shift).
+  then four tabs: demand (the forecast revealed from the roster start, a strip
+  of the bill runs and the storm outage under it; a click on a queue opens its
+  gaps) · staffing gap (per queue; the short half-hours of the worst day
+  shaded, Erlang C as a formula) · backtest · roster recommendation (per day
+  and queue, what to add to which shift).
 
 ## Where it runs
 
