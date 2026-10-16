@@ -758,7 +758,9 @@ pub struct Script {
     pub uses: Vec<(BTreeSet<usize>, BTreeSet<String>)>,
 }
 
-/// A setup statement the policy can check.
+/// The dashboard statements a locked server accepts under a policy or with a
+/// data folder: queries, `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS
+/// <query>` and `SET VARIABLE <name> = <expr>`.
 enum Setup<'a> {
     Query,
     Create {
@@ -799,7 +801,7 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
     let word = |i: usize, kw: &str| toks.get(i).is_some_and(|t| t.is_word(sql, kw));
     let refuse = || {
         format!(
-            "{} statements are not allowed under the access policy (only queries, CREATE TEMP TABLE/VIEW … AS <query> and SET VARIABLE)",
+            "{} statements are not allowed (only queries, CREATE TEMP TABLE/VIEW … AS <query> and SET VARIABLE)",
             lex::first_keyword(sql).unwrap_or_else(|| "this".into())
         )
     };
@@ -823,7 +825,7 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
             i += 2;
         }
         if !(word(i, "TEMP") || word(i, "TEMPORARY")) {
-            return Err("only TEMP tables and views can be created under the access policy".into());
+            return Err("only TEMP tables and views can be created".into());
         }
         i += 1;
         let kind = if word(i, "TABLE") {
@@ -844,9 +846,12 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
             .get(i)
             .and_then(|t| ident_text(sql, t))
             .ok_or_else(refuse)?;
-        let as_ = toks.get(i + 1).filter(|t| t.is_word(sql, "AS")).ok_or_else(|| {
-            format!("CREATE TEMP {kind} {name}: only the form `… AS <query>` is allowed under the access policy")
-        })?;
+        let as_ = toks
+            .get(i + 1)
+            .filter(|t| t.is_word(sql, "AS"))
+            .ok_or_else(|| {
+                format!("CREATE TEMP {kind} {name}: only the form `… AS <query>` is allowed")
+            })?;
         return Ok(Setup::Create {
             head,
             name,
@@ -854,6 +859,25 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
         });
     }
     Err(refuse())
+}
+
+/// The query DuckDB must accept for dashboard statement `sql`: the statement
+/// itself, the query of `CREATE TEMP … AS <query>`, or `SELECT <expr>` for
+/// `SET VARIABLE`. Any other statement is an error.
+pub fn statement_query(sql: &str) -> Result<String, String> {
+    let sql = sql.trim().trim_end_matches(';');
+    Ok(match classify(sql)? {
+        Setup::Query => sql.to_string(),
+        Setup::Create { body, .. } => body.to_string(),
+        Setup::SetVariable { expr, .. } => format!("SELECT {expr}"),
+    })
+}
+
+/// Is `sql` exactly one query, by DuckDB's parser (`json_serialize_sql`
+/// parses without binding or running, and serialises only SELECT
+/// statements: `EXPLAIN`, `PREPARE`, `COPY`, `PRAGMA`, `CALL`, … fail)?
+pub fn check_query(duck: &mut dyn Duck, sql: &str) -> Result<(), String> {
+    serialize(duck, sql).map(|_| ())
 }
 
 const MACROS_SQL: &str = "SELECT DISTINCT lower(function_name)::VARCHAR, internal::VARCHAR, \
