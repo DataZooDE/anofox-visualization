@@ -38,9 +38,16 @@ SELECT anofox_plot_terms(p) LIKE '%>price</text>%' FROM (
 true
 
 statement error
-SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 0.2)) c(term, coef);
+SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 0.2)) c(term, weight);
 ----
 needs column(s) estimate
+
+# A producer's own column name is read as the contract one (#54): statsmodels'
+# coef is the estimate.
+query I
+SELECT anofox_plot_terms(c) LIKE '<svg%>x1</text>%' FROM (VALUES ('x1', 0.2)) c(term, coef);
+----
+true
 
 statement error
 SELECT anofox_plot_terms(c) FROM (VALUES ('x1', 'big')) c(term, estimate);
