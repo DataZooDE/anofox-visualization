@@ -1913,6 +1913,7 @@ function setMode(m) {
   $("mode-edit").classList.toggle("active", m === "edit");
   $("mode-view").classList.toggle("active", m === "view");
   $("side-explore").classList.toggle("active", m === "explore");
+  document.querySelectorAll(".dash .dp-title[data-title]").forEach(paintHeadTitle);
   if (m === "explore") loadCatalog();
 }
 
@@ -2363,7 +2364,10 @@ function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
   const chip = mkAsof();
-  if (!b.title && !b.name && !b.logo) {
+  // The builder's Edit mode edits the name and logo in place (#60); a served or
+  // embedded dashboard (and View mode) shows them as they are.
+  const editable = !servedMode && !document.body.classList.contains("embed");
+  if (!b.title && !b.name && !b.logo && !editable) {
     if (!chip) return null;
     const h = document.createElement("div");
     h.className = "dp-head";
@@ -2388,15 +2392,181 @@ function dashHeader() {
     n.textContent = b.name;
     txt.appendChild(n);
   }
-  if (b.title) {
+  if (editable) {
+    const t = document.createElement("h1");
+    t.className = "dp-title";
+    t.dataset.title = b.title || "";
+    paintHeadTitle(t);
+    txt.appendChild(t);
+  } else if (b.title) {
     const t = document.createElement("h1");
     t.className = "dp-title";
     t.textContent = b.title;
     txt.appendChild(t);
   }
   h.appendChild(txt);
+  if (editable) {
+    h.appendChild(mkLogoEdit(h, b.logo || ""));
+    if (!b.title && !b.name && !logo && !chip) h.classList.add("dp-head-blank");
+  }
   if (chip) h.appendChild(chip);
   return h;
+}
+// ---- editing the header in the builder (#60): plain SQL, so Share links, the
+// HTML export and `dashboard` / `serve` keep the change ----
+const LOGO_MAX_BYTES = 256 * 1024; // an uploaded logo is embedded as a data: URL
+const LOGO_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
+// Write `value` as the dashboard's ::<roleName> statement, then re-run; `focusKey`
+// names the header control to focus again once the new header is on screen.
+function editChrome(roleName, value, focusKey) {
+  const ta = $("sql");
+  const next = setChromeSql(ta.value, roleName, value);
+  if (next !== ta.value) {
+    ta.value = next;
+    ta.dispatchEvent(new Event("input"));
+  }
+  dpRefocus = focusKey;
+  run();
+}
+// The header name: plain text in View mode; in Edit mode a button that turns
+// into a text field (Enter / blur saves, Esc cancels). Called again on a mode
+// switch (setMode).
+function paintHeadTitle(h1) {
+  const t = h1.dataset.title;
+  if (bodyMode() !== "edit") {
+    h1.textContent = t;
+    h1.hidden = !t;
+    return;
+  }
+  h1.hidden = false;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-title-btn" + (t ? "" : " dp-title-add");
+  btn.textContent = t || "Add a dashboard name";
+  btn.title = "Edit the dashboard name (::DASHBOARD_TITLE)";
+  if (t) btn.setAttribute("aria-label", `Dashboard name: ${t}. Edit`);
+  btn.onclick = () => editHeadTitle(h1);
+  h1.replaceChildren(btn);
+  refocus("head:title", btn);
+}
+function editHeadTitle(h1) {
+  const cur = h1.dataset.title;
+  const inp = document.createElement("input");
+  inp.className = "dp-title-input";
+  inp.value = cur;
+  inp.placeholder = "Dashboard name";
+  inp.setAttribute("aria-label", "Dashboard name");
+  inp.spellcheck = false;
+  h1.replaceChildren(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const v = inp.value.trim();
+    if (save && v !== cur) return editChrome("DASHBOARD_TITLE", v, "head:title");
+    paintHeadTitle(h1);
+    if (!save) h1.firstChild.focus();
+  };
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  inp.addEventListener("blur", () => finish(true));
+}
+// "Add logo" / "Change logo" and its form: an image URL or an uploaded file
+// (embedded as a data:image/ URL up to LOGO_MAX_BYTES), checked like ::LOGO.
+function mkLogoEdit(head, cur) {
+  const wrap = document.createElement("div");
+  wrap.className = "dp-hedit dp-logo-edit";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-hbtn";
+  btn.textContent = cur ? "Change logo" : "Add logo";
+  btn.setAttribute("aria-expanded", "false");
+  const form = document.createElement("form");
+  form.className = "dp-logo-form";
+  form.id = "dp-logo-form";
+  form.hidden = true;
+  form.setAttribute("aria-label", "Dashboard logo");
+  btn.setAttribute("aria-controls", form.id);
+  const field = (label, input) => {
+    const l = document.createElement("label");
+    l.append(label, input);
+    return l;
+  };
+  const url = document.createElement("input");
+  url.type = "text";
+  url.spellcheck = false;
+  url.placeholder = "https://… or logo.svg";
+  url.value = cur.startsWith("data:") ? "" : cur;
+  const file = document.createElement("input");
+  file.type = "file";
+  file.accept = LOGO_TYPES.join(",");
+  const err = document.createElement("div");
+  err.className = "dp-logo-err";
+  err.setAttribute("role", "alert");
+  const acts = document.createElement("div");
+  acts.className = "dp-logo-acts";
+  const mk = (text, type, cls) => {
+    const b = document.createElement("button");
+    b.type = type;
+    b.className = cls;
+    b.textContent = text;
+    acts.appendChild(b);
+    return b;
+  };
+  mk("Apply", "submit", "dp-hbtn dp-hbtn-main");
+  if (cur) mk("Remove logo", "button", "dp-hbtn").onclick = () => editChrome("LOGO", "", "head:logo");
+  const cancel = mk("Cancel", "button", "dp-hbtn");
+  form.append(field("Image URL", url), field("or upload an image", file), err, acts);
+  const toggle = (open) => {
+    form.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    head.classList.toggle("dp-head-editing", open);
+    err.textContent = "";
+    if (open) url.focus();
+  };
+  btn.onclick = () => toggle(form.hidden);
+  cancel.onclick = () => {
+    toggle(false);
+    btn.focus();
+  };
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancel.onclick();
+    }
+  });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    let v = url.value.trim();
+    const f = file.files && file.files[0];
+    if (f) {
+      if (!LOGO_TYPES.includes(f.type)) return (err.textContent = "Choose a PNG, JPEG, GIF, WebP or SVG image.");
+      if (f.size > LOGO_MAX_BYTES)
+        return (err.textContent = `The image is ${Math.ceil(f.size / 1024)} KB; logos are embedded up to ${LOGO_MAX_BYTES / 1024} KB.`);
+      v = await new Promise((ok, no) => {
+        const r = new FileReader();
+        r.onload = () => ok(String(r.result));
+        r.onerror = () => no(r.error);
+        r.readAsDataURL(f);
+      }).catch(() => "");
+    }
+    if (!v) return (err.textContent = "Enter an image URL or choose a file.");
+    if (!chromeUrlOk(v)) return (err.textContent = "Not an allowed image URL: use a relative path, https: or data:image/.");
+    editChrome("LOGO", v, "head:logo");
+  };
+  wrap.append(btn, form);
+  refocus("head:logo", btn);
+  return wrap;
 }
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
@@ -6580,6 +6750,48 @@ function safeUrl(u, { image = false } = {}) {
   if (image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);/.test(probe)) return s;
   return "";
 }
+// An image URL ::LOGO / ::FAVICON accept — the rules of safe_url in
+// src/theme.rs (lint chrome/bad-url): relative, http(s): or data:image/, no
+// quotes, brackets, backslashes or control characters, at most 512 000 long.
+function chromeUrlOk(u) {
+  const t = String(u ?? "").trim();
+  if (!t || t.length > 512000 || /["'<>()\\`\u0000-\u001f\u007f-\u009f]/.test(t)) return false;
+  const low = t.toLowerCase();
+  if (low.startsWith("data:")) return low.startsWith("data:image/");
+  const i = low.indexOf(":");
+  return i < 0 || low.slice(0, i).includes("/") || low.startsWith("https:") || low.startsWith("http:");
+}
+// The SQL text with its `'…'::<roleName>` statement set to `value`: the first
+// statement casting to the role is replaced (a string inside quotes doesn't
+// count), else one is added at the end of the "-- ── Look" section (or after
+// the leading comments). An empty value removes the statement.
+function setChromeSql(sql, roleName, value) {
+  const str = "'(?:[^']|'')*'";
+  const re = new RegExp(`^[ \\t]*SELECT\\b(?:${str}|[^';])*?::\\s*${roleName}\\b(?:${str}|[^';])*(?:;|(?![\\s\\S]))`, "im");
+  const stmt = value ? `SELECT '${String(value).replace(/'/g, "''")}'::${roleName};` : "";
+  const m = sql.match(re);
+  if (m) {
+    const rest = sql.slice(m.index + m[0].length);
+    return sql.slice(0, m.index) + (stmt || "") + (stmt ? rest : rest.replace(/^[ \t]*\r?\n?/, ""));
+  }
+  if (!stmt) return sql;
+  const lines = sql.split("\n");
+  let at = lines.findIndex((l) => /^\s*--\s*─+\s*Look\b/i.test(l));
+  if (at >= 0) {
+    at++;
+    while (at < lines.length && lines[at].trim()) at++;
+    lines.splice(at, 0, stmt);
+    return lines.join("\n");
+  }
+  at = 0;
+  while (at < lines.length && /^\s*(--.*)?$/.test(lines[at])) at++;
+  while (at > 0 && !lines[at - 1].trim()) at--;
+  const add = [stmt];
+  if (at > 0) add.unshift("");
+  if (at < lines.length && lines[at].trim()) add.push("");
+  lines.splice(at, 0, ...add);
+  return lines.join("\n");
+}
 
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
 // fenced code, links, blockquotes, ordered/unordered lists, rules, paragraphs).
@@ -7057,6 +7269,13 @@ async function downloadHtml() {
   // A snapshot has no live tables: drop their search / filter / pager controls.
   const snap = document.querySelector(".dash").cloneNode(true);
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot").forEach((el) => el.remove());
+  // …nor the builder's header editing (#60).
+  snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
+  snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
+    if (!h.dataset.title) return h.remove();
+    h.textContent = h.dataset.title;
+    h.removeAttribute("data-title");
+  });
   dpAnim.strip(snap); // never a mid-animation frame
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];

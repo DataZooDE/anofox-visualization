@@ -183,6 +183,28 @@ body.mode-explore #run,body.mode-explore #save,body.mode-explore #cols,body.mode
 :where(header,.sidebar,.toolbar,.editor,.explore,.md-dialog) select{border:1px solid var(--ui-input-border,var(--ui-line));background:var(--ui-input-bg);color:var(--ui-ink)}
 :where(header,.sidebar,.toolbar,.editor,.explore,.md-dialog) select:hover{border-color:var(--ui-select-hover)}
 header .actions select{padding:.42rem .5rem}
+/* editing the dashboard header in Edit mode (#60) */
+body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
+.dp-head.dp-head-editing{flex-wrap:wrap}
+.dp-head .dp-title-btn{font:inherit;letter-spacing:inherit;color:inherit;background:none;border:0;box-shadow:none;padding:0 .2rem;margin:0 -.2rem;border-radius:6px;text-align:left;cursor:text;transition:none}
+.dp-head .dp-title-btn:hover{background:var(--ui-tint-2);filter:none}
+.dp-head .dp-title-btn:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px}
+.dp-head .dp-title-add{color:var(--ui-muted);font-weight:600;font-style:italic}
+.dp-head .dp-title-input{font:inherit;letter-spacing:inherit;color:var(--ui-ink);background:var(--ui-input-bg);border:1px solid var(--ui-accent);border-radius:8px;padding:0 .3rem;margin:0 -.3rem;width:min(40ch,100%);box-shadow:var(--ui-focus);outline:none}
+.dp-head .dp-hbtn{font:inherit;font-size:.78rem;font-weight:600;color:var(--ui-ink);background:var(--ui-btn2-bg);border:1px solid var(--ui-input-border,var(--ui-line));box-shadow:none;border-radius:8px;padding:.3rem .65rem}
+.dp-head .dp-hbtn:hover{background:var(--ui-btn2-hover);filter:none}
+.dp-head .dp-hbtn:focus-visible{outline:none;border-color:var(--ui-accent);box-shadow:var(--ui-focus)}
+.dp-head .dp-hbtn-main{background:linear-gradient(135deg,var(--ui-accent),var(--ui-accent2));color:var(--ui-on-accent);border-color:transparent}
+.dp-head .dp-logo-edit{display:contents}
+.dp-head .dp-logo-form{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:flex-end;gap:.6rem;padding:.6rem .7rem;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-btn2-bg);color:var(--ui-ink)}
+.dp-head .dp-logo-form[hidden]{display:none}
+.dp-head .dp-logo-form label{display:flex;flex-direction:column;gap:.25rem;font-size:.75rem;font-weight:600;color:var(--ui-muted)}
+.dp-head .dp-logo-form input{font:inherit;font-size:.82rem;color:var(--ui-ink);background:var(--ui-input-bg);border:1px solid var(--ui-input-border,var(--ui-line));border-radius:8px;padding:.3rem .5rem;min-width:16rem}
+.dp-head .dp-logo-form input[type=file]{min-width:0}
+.dp-head .dp-logo-form input:focus-visible{outline:none;border-color:var(--ui-accent);box-shadow:var(--ui-focus)}
+.dp-head .dp-logo-acts{display:flex;gap:.4rem}
+.dp-head .dp-logo-err{flex-basis:100%;font-size:.78rem;font-weight:600;color:var(--ui-err)}
+.dp-head .dp-logo-err:empty{display:none}
 /* MotherDuck connect dialog */
 .md-dialog{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:var(--ui-veil);backdrop-filter:blur(3px)}
 .md-dialog[hidden]{display:none}
