@@ -11,6 +11,10 @@ Wants=network-online.target
 Type=exec
 ExecStart=/opt/anofox/run-locked.sh /etc/anofox/serve.sql
 Environment=DUCKDB=/opt/anofox/duckdb
+# Control FIFO for SQL in the serving session (e.g. a snapshot refresh):
+#   echo "SELECT anofox_serve_refresh(8080);" | sudo tee /run/anofox-dashboards/control
+RuntimeDirectory=anofox-dashboards
+Environment=ANOFOX_CONTROL=/run/anofox-dashboards/control
 # A dedicated user with read access to the data and the dashboards only.
 DynamicUser=yes
 ReadOnlyPaths=/data /etc/anofox

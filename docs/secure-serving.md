@@ -422,7 +422,7 @@ location / {
   proxy_set_header X-Forwarded-Groups $groups;  # (only if header_groups is set)
   proxy_set_header X-Forwarded-Tenant $tenant;  # one line per claims header
   proxy_set_header X-Anofox-Proxy-Secret "<secret>";
-  proxy_set_header Host $host;                  # list it in options.hosts
+  proxy_set_header Host $http_host;             # with its port; list it in options.hosts
   proxy_pass http://127.0.0.1:8095;
 }
 ```

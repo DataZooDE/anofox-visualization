@@ -45,19 +45,26 @@ Attach the data `READ_ONLY`. Two things don't work here:
 At startup the server copies the session's DuckDB databases into a private
 snapshot and checks every dashboard statement. Only then does it bind the
 port. So once `GET /healthz` answers `{"status":"ok",...}`, the server is ready.
-For the 2-million-row load-test data that took 2–5 s. The snapshot never
-changes while the server runs. To serve new data, start a new server (§5).
+For the 2-million-row load-test data that took 2–5 s. The snapshot changes
+only when it is refreshed (§5).
 
 The process must stay in the foreground. The DuckDB CLI exits when its stdin
 ends, and the servers stop with it. [`deploy/run-locked.sh`](../deploy/run-locked.sh)
 gives the CLI a stdin that never ends: a FIFO it holds open for both reading and
 writing. It then `exec`s the CLI, so signals reach DuckDB directly: `SIGTERM`
-stops it. With `-bail`, an error in SERVE_SQL exits with status 1 rather than
-leaving a process that serves nothing.
+stops it. An error in SERVE_SQL ends the CLI with status 1, so a process that
+serves nothing doesn't stay up.
+
+With `ANOFOX_CONTROL=/run/anofox/control`, that FIFO lives at a known path
+(mode `0600`). SQL written to it runs in the serving session, e.g. a refresh
+(§5). An error there is printed and the server keeps running. Whoever can
+write to the FIFO can run any SQL in the read-write session, so keep it
+private to the server's user.
 
 ```sh
 DUCKDB=/opt/anofox/duckdb deploy/run-locked.sh /etc/anofox/serve.sql
-curl -s http://127.0.0.1:8080/healthz      # {"status":"ok","dashboards":3}
+curl -s http://127.0.0.1:8080/healthz
+# {"status":"ok","dashboards":3,"epoch":1,"snapshot_age_s":4,"refresh_s":null,"refreshing":false,"refresh_failed":false}
 ```
 
 The DuckDB CLI must be the version the extension was built for (1.5.6 here).
@@ -102,7 +109,9 @@ The unit ([`anofox-dashboards.service`](../deploy/anofox-dashboards.service)):
   snapshot files are unlinked as soon as they are attached. A server stopped by
   a signal leaves an empty `anofox-snap-*` directory, which goes away with the
   private temp directory;
-- restarts on failure, including a SERVE_SQL error (`-bail`);
+- restarts on failure, including a SERVE_SQL error;
+- keeps the control FIFO at `/run/anofox-dashboards/control`
+  (`echo "SELECT anofox_serve_refresh(8080);" | sudo tee /run/anofox-dashboards/control`);
 - limits resources: `MemoryMax`, `CPUQuota`, `TasksMax`, `LimitNOFILE` (see §6);
 - sandboxes the process: `ProtectSystem=strict`, `NoNewPrivileges`, etc.
 
@@ -130,7 +139,9 @@ differ in a container:
 
 - **`"bind": "0.0.0.0"`**: the port is reached from outside the container's
   loopback. Publish it on the host's loopback only (`-p 127.0.0.1:8080:8080`)
-  and let the proxy reach it there.
+  and let the proxy reach it there. Without `auth`, the start message warns
+  that the server is bound beyond loopback. That is expected here: the
+  published port is what limits who can reach it.
 - **`Host`**: a request through the published port carries
   `Host: 127.0.0.1:8080`, which counts as loopback on the server's port, so it
   passes. That only works if the host port equals the server's port: with
@@ -139,7 +150,12 @@ differ in a container:
   another container network sends its own name, so list that name in `hosts`.
 
 The image has no `curl`. A health check can use bash's `/dev/tcp` (as
-`compose.yaml` does) or come from the orchestrator.
+`compose.yaml` does) or come from the orchestrator. For the control FIFO, pass
+`-e ANOFOX_CONTROL=/tmp/control` and write to it with `docker exec`:
+
+```sh
+docker exec dash sh -c 'echo "SELECT anofox_serve_refresh(8080);" > /tmp/control'
+```
 
 ## 3. Reverse proxy: TLS, authentication, `Host`
 
@@ -172,11 +188,24 @@ dash.example.com {
 `client_max_body_size` at or below the server's `max_body_bytes` and
 `proxy_read_timeout` above its `timeout_ms`.
 
-For single sign-on, put an authenticating proxy (oauth2-proxy, Authelia,
-Cloudflare Access) in the same place. The server doesn't see who the viewer
-is: every authenticated viewer can open every dashboard the server serves. To
-give groups different dashboards, run separate servers (directories, ports) and
-route them at the proxy.
+Basic auth only keeps strangers out: every viewer who logs in sees every
+dashboard. For per-viewer data, the server can take the viewer's identity from
+an authenticating proxy (oauth2-proxy, Caddy `forward_auth`, nginx
+`auth_request`). It uses the `auth` option with a shared secret, and the
+claims reach the SQL as `__claim_*` variables. See
+[Login via an auth proxy](secure-serving.md#login-via-an-auth-proxy-access-control-p1)
+for the options and tested proxy recipes. Things that matter for deployment:
+
+- `/healthz` stays reachable without a login (it then answers only
+  `{"status":"ok"}`), so health checks need no secret.
+- With `"bind": "0.0.0.0"`, set `trusted_proxies` to the proxy's address or
+  network.
+- The cache and the single-flight key include each viewer's claims. Panels
+  that depend on the user are therefore cached per user, so the hit rates in
+  §7 apply per user and per group of identical claims.
+
+To give groups different dashboards without `auth`, run separate servers
+(directories, ports) and route them at the proxy.
 
 ## 4. Several replicas behind a load balancer
 
@@ -203,8 +232,8 @@ Route a viewer to the same replica (Caddy `lb_policy cookie`, nginx
   of filters is computed up to N times before every replica has it cached.
   Popular dashboards still reach a high hit rate. For the load test's five
   shared combinations that's a few extra queries in total.
-- *Snapshots may differ* while replicas restart one after another (§5). A sticky
-  viewer sees one snapshot for all panels of a dashboard.
+- *Snapshots may differ* while replicas refresh or restart one after another
+  (§5). A sticky viewer sees one snapshot for all panels of a dashboard.
 
 Without stickiness (plain round robin), everything still works. Expect more
 executions and no cancellation across replicas.
@@ -224,9 +253,8 @@ replica is safe.
 To give all replicas the same data, publish one immutable DuckDB file per data
 version and point every replica at it. Options: a read-only volume, a file
 synced from object storage before start, or `ATTACH 's3://…' (READ_ONLY)` with
-`httpfs` loaded in SERVE_SQL. The snapshot is copied at startup, so the source
-may change or disappear afterwards. To refresh, start replicas on the new file
-and drain the old ones (§5). A replica's memory holds its own snapshot (§6),
+`httpfs` loaded in SERVE_SQL. The snapshot is a copy, so the source may change
+or disappear afterwards. To refresh, see §5. A replica's memory holds its own snapshot (§6),
 whatever the replica count.
 
 **Try it locally** ([`deploy/compose.yaml`](../deploy/compose.yaml)): two
@@ -236,7 +264,7 @@ is 216 MB, and each replica used about 190 MB with the 2M-row demo data:
 
 ```sh
 docker compose -f deploy/compose.yaml up --build -d
-curl -k -u viewer:demo https://localhost:8443/healthz      # {"status":"ok","dashboards":1}
+curl -k -u viewer:demo https://localhost:8443/healthz      # {"status":"ok","dashboards":1,"epoch":1,...}
 # open https://localhost:8443/d/ops (user viewer, password demo)
 docker compose -f deploy/compose.yaml stop dash1           # its viewers move to dash2 at once
 docker compose -f deploy/compose.yaml down
@@ -244,16 +272,37 @@ docker compose -f deploy/compose.yaml down
 
 ## 5. Refreshing the data
 
-Until the server can refresh its snapshot in place (#21), new data needs a
-restart. To avoid downtime:
+A server can rebuild its snapshot while it serves, without failed requests
+([details](secure-serving.md)):
 
-- **One process:** start a second server on another port with the new data,
-  switch the proxy's upstream, then stop the old one. With Caddy that means
-  editing the `reverse_proxy` target and `caddy reload`; with nginx, the
-  `server` lines and `nginx -s reload`.
-- **Replicas:** restart them one at a time (`docker compose restart dash1`,
-  wait until it is healthy, then `dash2`). The health check keeps traffic off a
-  replica until its new snapshot is ready.
+- **On a schedule:** `"refresh_s": 300` rebuilds it every 5 minutes from what
+  the serving session sees.
+- **On demand:** run `SELECT anofox_serve_refresh(8080);` in the serving
+  session. Under `run-locked.sh` that means through the control FIFO:
+
+  ```sh
+  echo "SELECT anofox_serve_refresh(8080);" > /run/anofox/control
+  ```
+
+An attached file stays open, so replacing it on disk (a new file moved over
+the old one) is not seen. Re-attach it in the same statement batch:
+
+```sh
+echo "DETACH warehouse; ATTACH '/data/warehouse.duckdb' AS warehouse (READ_ONLY);
+SELECT anofox_serve_refresh(8080);" > /run/anofox/control
+```
+
+Views defined on `warehouse.*` (as in §1) keep working across the re-attach.
+While a rebuild runs, the old and the new snapshot both exist: plan for twice
+the snapshot's disk and memory. `/healthz` reports `epoch` (+1 per refresh)
+and `refresh_failed`.
+
+**Replicas** refresh independently, so for a short time they serve different
+snapshots. Sticky routing (§4) keeps one viewer on one replica. To switch all
+replicas at once instead, start new ones on the new file and drain the old
+ones. Without an in-place refresh, the alternative is a rolling restart
+(`docker compose restart dash1`, wait until it is healthy, then `dash2`). The
+health check keeps traffic off a replica until its snapshot is ready.
 
 ## 6. Resource limits
 
@@ -273,12 +322,12 @@ restart. To avoid downtime:
   pages, statistics and distributions;
 - one thread stack per worker and per DuckDB thread.
 
-In the load test, ordinary viewers stayed under a few hundred MB on 2 million
-rows. The abusive clients pushed the server to 1.2 GB with 16 workers,
-whether or not `memory_limit` was 512 MB. With 4 workers it was 550 MB (§7).
-A safe `MemoryMax`:
+In the load test, ordinary viewers stayed under 450 MB on 2 million rows,
+including a snapshot refresh. The abusive clients pushed the server to
+1.1–1.4 GB with 16 workers, whether or not `memory_limit` was 512 MB, and to
+0.8 GB with 4 workers (§7). A safe `MemoryMax`:
 
-    memory_limit + cache_mb + threads × 50 MB + 100 MB
+    memory_limit + cache_mb + threads × 60 MB + 200 MB
 
 If SERVE_SQL also creates tables in memory, add their size: they live in the
 CLI's own DuckDB instance, besides the snapshot. Attach a file instead.
@@ -320,6 +369,7 @@ passes the options JSON, and `--url` targets a running server instead (with
 | burst | 100 | arrive at once on a fresh server and open the dashboard |
 | cold | 20 | each picks its own period, so the cache can't help |
 | hot | 200 | five filter combinations shared by everyone (presets) |
+| refresh | 100 | the hot viewers, while the server rebuilds its snapshot every 5 s |
 | scroll | 100 | page the table only: 10 superseding page requests 25 ms apart, random sort column |
 | abuse | 20 + 10 | 20 clients sending the largest pages, statistics and distributions of every column, oversized and unknown requests, next to 10 ordinary viewers |
 
@@ -327,60 +377,70 @@ Viewers think for 1 s between actions, and each scenario runs for 30 s. So one
 virtual viewer is much busier than a person reading a dashboard: count it as
 several real viewers.
 
-### Measured (2026-10-16)
+### Measured (2026-10-17)
 
 Setup: Intel i9-13900H (6 P-cores + 8 E-cores, 20 hardware threads), 62 GB
-RAM, Linux 6.18, DuckDB CLI 1.5.6, release build, Node 24. The client ran on
-the same machine. It was a shared workstation: other jobs kept the load
-average at 11–46 during the runs, so read the numbers as conservative. Latency
-is per request as the client sees it, in ms. "Dashboard load" is the full
-sequence of 16 requests for one dashboard.
+RAM, Linux 6.18, DuckDB CLI 1.5.6, release build of this branch, Node 24. The
+client ran on the same machine. It was a shared workstation: other jobs kept
+the load average at 9–30 during the runs, so read the numbers as conservative.
+Latency is per request as the client sees it, in ms. "Dashboard load" is the
+full sequence of 16 requests for one dashboard. "refresh" rebuilds the snapshot
+every 5 s (`refresh_s`).
 
 **Whole machine**, `{"threads": 16}` (DuckDB's defaults: 20 threads, 80 % of
 RAM):
 
 | Scenario | Viewers | Req/s | Panel p50 / p95 / p99 | Page p50 / p95 / p99 | Dashboard load p50 / p95 | Executions | Cache / shared | 409 | Errors | Peak RSS MB |
 |---|---|---|---|---|---|---|---|---|---|---|
-| burst | 100 | 381 | 167 / 289 / 379 | 260 / 509 / 668 | 3,138 / 4,089 | 1,201 | 25 % | 0 | 0 | 350 |
-| cold | 20 | 154 | 7.7 / 47 / 88 | 14 / 43 / 72 | 218 / 689 | 4,261 | 15 % | 0 | 0 | 330 |
-| hot | 200 | 1,670 | 1.5 / 15 / 39 | 0.6 / 6.2 / 25 | 28 / 442 | 120 | 99.8 % | 0 | 0 | 210 |
-| scroll | 100 | 80 | – | 3,159 / 6,250 / 6,954 | – | 6,166 | 0.1 % | 3,439 | 0 | 609 |
-| abuse | 20 + 10 | 53 | 62 / 170 / 272 | 72 / 208 / 752 | 1,162 / 2,462 | 2,343 | – | 0 | 0 | 1,187 |
+| burst | 100 | 514 | 107 / 211 / 277 | 98 / 548 / 581 | 2,329 / 3,024 | 1,201 | 25 % | 0 | 0 | 347 |
+| cold | 20 | 157 | 5.9 / 34 / 65 | 12 / 42 / 74 | 166 / 536 | 4,432 | 15 % | 0 | 0 | 344 |
+| hot | 200 | 1,667 | 1.1 / 14 / 27 | 0.6 / 6.9 / 40 | 21 / 419 | 120 | 99.8 % | 0 | 0 | 205 |
+| refresh | 100 | 838 | 2.7 / 18 / 29 | 0.8 / 14 / 90 | 67 / 288 | 720 | 97.3 % | 0 | 0 | 445 |
+| scroll | 100 | 124 | – | 1,882 / 4,146 / 4,723 | – | 8,716 | 0.1 % | 4,700 | 0 | 722 |
+| abuse | 20 + 10 | 58 | 48 / 149 / 222 | 58 / 149 / 432 | 1,095 / 1,715 | 2,952 | – | 0 | 0 | 1,373 |
 
 **Two P-cores** (`--cpus 0-3`: 4 hardware threads),
 `{"threads": 16, "duckdb_threads": 4, "memory_limit": "2GB"}`:
 
 | Scenario | Viewers | Req/s | Panel p50 / p95 / p99 | Page p50 / p95 / p99 | Dashboard load p50 / p95 | Cache / shared | 409 | Errors | Peak RSS MB |
 |---|---|---|---|---|---|---|---|---|---|
-| burst | 100 | 125 | 411 / 1,108 / 1,479 | 946 / 2,302 / 3,228 | 9,420 / 12,646 | 25 % | 0 | 0 | 267 |
-| cold | 5 | 39 | 5.0 / 47 / 84 | 13 / 64 / 192 | 278 / 569 | 14 % | 0 | 0 | 205 |
-| cold | 20 | 104 | 13 / 228 / 337 | 41 / 205 / 808 | 1,250 / 2,365 | 15 % | 2 | 0 | 258 |
-| cold | 50 | 144 | 201 / 444 / 596 | 239 / 570 / 1,284 | 4,096 / 5,165 | 15 % | 2 | 0 | 316 |
-| hot | 50 | 422 | 0.7 / 19 / 53 | 0.4 / 5.1 / 113 | 11 / 709 | 99.1 % | 0 | 0 | 168 |
-| hot | 200 | 1,649 | 0.7 / 27 / 71 | 0.4 / 6.4 / 124 | 12 / 1,152 | 99.8 % | 0 | 0 | 183 |
-| hot | 500 | 4,089 | 1.3 / 17 / 72 | 0.4 / 14 / 202 | 22 / 1,144 | 99.9 % | 0 | 0 | 186 |
-| scroll | 100 | 38 | – | 6,447 / 17,676 / 18,787 | – | 0.2 % | 2,312 | 0 | 552 |
-| abuse | 20 + 10 | 37 | 132 / 429 / 547 | 160 / 694 / 2,557 | 2,425 / 5,457 | – | 2 | 0 | 846 |
+| burst | 100 | 138 | 404 / 913 / 1,172 | 579 / 2,563 / 2,658 | 8,749 / 11,499 | 25 % | 0 | 0 | 285 |
+| cold | 5 | 39 | 3.8 / 36 / 68 | 11 / 42 / 71 | 179 / 446 | 14 % | 0 | 0 | 191 |
+| cold | 20 | 116 | 9.3 / 181 / 258 | 27 / 131 / 607 | 926 / 2,114 | 14 % | 0 | 0 | 283 |
+| cold | 50 | 136 | 213 / 464 / 576 | 331 / 666 / 1,433 | 4,386 / 5,643 | 15 % | 7 | 0 | 299 |
+| hot | 50 | 418 | 0.6 / 20 / 52 | 0.4 / 7.7 / 166 | 11 / 638 | 99.1 % | 0 | 0 | 171 |
+| hot | 200 | 1,659 | 0.9 / 24 / 49 | 0.4 / 9.3 / 322 | 16 / 820 | 99.8 % | 0 | 0 | 177 |
+| hot | 500 | 4,071 | 2.0 / 18 / 68 | 0.5 / 10 / 176 | 38 / 1,165 | 99.9 % | 0 | 0 | 179 |
+| refresh | 100 | 755 | 1.6 / 53 / 102 | 0.5 / 66 / 649 | 32 / 724 | 97.2 % | 0 | 0 | 422 |
+| scroll | 100 | 37 | – | 7,219 / 19,028 / 20,194 | – | 0.7 % | 2,201 | 0 | 561 |
+| abuse | 20 + 10 | 35 | 141 / 420 / 530 | 169 / 532 / 2,351 | 2,526 / 5,491 | – | 0 | 0 | 1,068 |
 
 "Cache / shared" is the share of successful requests answered without running
 a query: from the cache, or by waiting for an identical running request. Even
-"cold" viewers share the dashboard's inputs and layout statements. A data
-server started in 2.2–5.1 s, including copying the 2M-row snapshot.
+"cold" viewers share the dashboard's inputs and layout statements. A server
+started in 2.1–3.2 s, including copying the 2M-row snapshot.
 
 ### What the numbers say
 
 - **Popular dashboards are cheap.** When viewers share filter values (presets,
   defaults), the cache answers 99.8 % of the requests. Two P-cores served 500
-  busy viewers at 4,000 requests/s with a panel p95 of 17 ms. The first load of
-  each combination is the slow tail: dashboard-load p95 is about 1 s, p50 is 22 ms.
+  busy viewers at 4,000 requests/s with a panel p95 of 18 ms. The first load of
+  each combination is the slow tail: dashboard-load p95 is about 1 s, p50 is
+  38 ms.
 - **Distinct filters need cores.** When every viewer picks its own values,
   each request is a DuckDB query over the data (here 2M rows).
-  - On two P-cores, 5 busy viewers loaded a dashboard in 0.28 s (p95 0.57 s);
-    20 took 1.25 s (p95 2.4 s); 50 took 4.1 s.
-  - The whole machine handled 20 in 0.22 s (p95 0.69 s).
+  - On two P-cores, 5 busy viewers loaded a dashboard in 0.18 s (p95 0.45 s);
+    20 took 0.93 s (p95 2.1 s); 50 took 4.4 s.
+  - The whole machine handled 20 in 0.17 s (p95 0.54 s).
   - As a rule of thumb for data of this size: one physical core for every 3–4
     busy viewers who all pick different filters keeps a dashboard load under
     a second. Real viewers who read before clicking need far fewer cores.
+- **Refreshing under load is smooth.** Six rebuilds in 30 s under 100 viewers
+  caused no errors and no latency cliff.
+  - Each rebuild starts an empty cache, so the hit rate fell from 99.8 % to
+    97 %. Panel p95 went from 14 to 18 ms on the whole machine, and from 24 to
+    53 ms on two P-cores.
+  - Peak RSS grew by the second snapshot that exists during a rebuild.
 - **A dashboard load is 16 requests in sequence.** The client fetches the
   panels one after another, so a load takes the sum of their latencies, not the
   slowest one. More panels mean a slower first load, even on a fast server.
@@ -388,43 +448,42 @@ server started in 2.2–5.1 s, including copying the 2M-row snapshot.
   answered `409` and its query interrupted. No query ran to completion for a
   request nobody wanted any more. 100 viewers dragging the Scroll view
   non-stop, each sorting up to 1M rows by a random column, still saturate any
-  box (p50 3 s on the whole machine). Sorting a large table by an arbitrary
+  box (p50 1.9 s on the whole machine). Sorting a large table by an arbitrary
   column is the most expensive request a viewer can make.
 - **Abuse is contained but costs memory.**
   - 20 clients sent the largest pages (10,000 rows), statistics and value
     distributions of every column, and oversized and unknown requests, without
     pause. Ordinary viewers next to them got no errors. Their panels slowed to
-    a p50 of 62 ms (1.5 ms in the "hot" run, which has the same viewers without
+    a p50 of 48 ms (1.1 ms in the "hot" run, which has the same viewers without
     the abusers).
   - Rejected requests were answered `400`, `404` and `413`.
-  - Peak RSS reached 1.2 GB. `memory_limit` didn't change that much: with
-    `"memory_limit": "512MB"` the peak was still 1.1 GB. Each request in
-    flight holds its result outside DuckDB's buffer pool, and the number of
-    requests in flight is `threads`: with `"threads": 4` the peak dropped to
-    550 MB.
-  - **Bound memory with `threads`** (HTTP workers) as well as `memory_limit`,
-    and keep heavy requests out with proxy rate limits.
+  - Peak RSS reached 1.4 GB. `memory_limit` didn't bound it: with
+    `"memory_limit": "512MB"` the peak was still 1.1 GB, and with 4 workers
+    instead of 16 it was 0.8 GB. Results in flight and the allocator's caches
+    sit outside DuckDB's buffer pool.
+  - **Size memory per worker** (§6), and keep heavy requests out with proxy
+    rate limits.
 - **Idle footprint:** about 90 MB RSS with the 2M-row snapshot (the snapshot
   stays on disk until queries touch it).
 
-**Before the tiny_http fixes** (same machine, the same day): in a 20-viewer
-"cold" run, 10 requests were never answered within the 2-minute timeout. The
-HTTP server's thread pool had left their connections waiting
-(`vendor/tiny_http/README.anofox.md`). Every response bigger than about one
-TCP segment also waited ~40 ms for a delayed ACK: "hot" panel p95 was 47 ms
-(now 15), and a dashboard load took 209 ms (now 28).
+**Before the tiny_http fixes of #93** (same machine, the day before): in a
+20-viewer "cold" run, 10 requests were never answered within the 2-minute
+timeout. The HTTP server's thread pool had left their connections waiting.
+Every response bigger than about one TCP segment also waited ~40 ms for a
+delayed ACK: "hot" panel p95 was 47 ms (now 14), and a dashboard load took
+209 ms (now 21). The load test found both bugs.
 
 ### Against the targets of the serving plan
 
 | Target ([plan §5](plans/plan-duckdb2-server.md#5-load-test-plan)) | Goal | Measured |
 |---|---|---|
-| panel p50 / p95, hot, 200 viewers | ≤ 50 / 300 ms | 1.5 / 15 ms (2 P-cores: 0.7 / 27 ms) |
-| dashboard load p95, cold, 20 viewers | ≤ 2 s | 0.69 s (2 P-cores: 2.4 s) |
+| panel p50 / p95, hot, 200 viewers | ≤ 50 / 300 ms | 1.1 / 14 ms (2 P-cores: 0.9 / 24 ms) |
+| dashboard load p95, cold, 20 viewers | ≤ 2 s | 0.54 s (2 P-cores: 2.1 s) |
 | cache hit rate, hot | ≥ 90 % | 99.8 % |
 | wasted executions, scroll | ≤ 10 % | 0 %: every superseded query was interrupted |
+| refresh under load (L4) | no error spike or latency cliff | 0 errors; panel p95 14 → 18 ms |
 | errors (not 4xx by design) | 0 | 0 in every scenario |
-| RSS ≤ snapshot + `memory_limit` + cache | | missed under abuse: per-request results sit outside `memory_limit`, so bound `threads` |
-| L4 refresh under load | | not run: needs the snapshot refresh (#21) |
+| RSS ≤ snapshot + `memory_limit` + cache | | missed under abuse: results in flight sit outside `memory_limit` (§6) |
 
 ## Checklist
 

@@ -146,48 +146,21 @@ browser ──POST /api/panel──▶ web tier (locked server)
 Acceptance for B later: rerun L1–L4 against `PanelBackend::Quack` on the same
 hardware; adopt only if p95 is within 1.5× of A and the §6 blockers are closed.
 
-**Results (S5, 2026-10-16).** `scripts/load-test.mjs` implements L1 (cold),
-L2 (hot), L3 (scroll) and L5 (abuse), plus a burst of arrivals on a fresh
-server. It uses the reference dashboard `examples/load-test/dash/ops.sql`,
-which has a `::PAGED` table over 2M rows. The measured numbers, the machine
-and how to rerun them are in
+**Results (S5, 2026-10-17).** `scripts/load-test.mjs` implements L1 (cold),
+L2 (hot), L3 (scroll), L4 (refresh) and L5 (abuse), plus a burst of arrivals
+on a fresh server. It uses the reference dashboard
+`examples/load-test/dash/ops.sql`, which has a `::PAGED` table over 2M rows.
+The measured numbers, the machine and how to rerun them are in
 [`deployment.md` §7](../deployment.md#7-sizing). On a shared 20-thread laptop
-every target above was met: hot panel p95 15 ms, cold dashboard-load p95
-0.69 s with 20 viewers, cache hits 99.8 %, no wasted executions, no errors.
+every target above was met:
+
+- hot panel p95 14 ms;
+- cold dashboard-load p95 0.54 s with 20 viewers;
+- cache hits 99.8 %;
+- no wasted executions;
+- a refresh every 5 s with no errors (panel p95 18 ms);
+- no errors anywhere.
+
 The exception is RSS under abuse: results in flight sit outside
-`memory_limit`, so cap them with `threads`. L4 waits for the snapshot refresh
-(#21).
-
-The load test found two bugs in the HTTP server (tiny_http 0.12), both now
-fixed in `vendor/tiny_http`:
-
-- its thread pool could leave a new connection waiting until another one
-  closed, which with keep-alive could mean minutes;
-- without `TCP_NODELAY`, every response bigger than one segment waited ~40 ms
-  for a delayed ACK.
-
-## 6. Blockers for option B ("not yet")
-
-1. **2.0.0 unreleased** (calendar: 2026-10-21, tentative); Quack is 0.x and
-   explicitly subject to change until then. Our `duckext` builds on the
-   v1.5.6 C API; 2.0 compatibility of the C-API extension is untested.
-2. **Security parity unproven**: no documented parameter binding over Quack;
-   unknown whether `SET VARIABLE` / TEMP setup objects resolve server-side on
-   an `ATTACH`ed catalog; the server's only per-query gate is an
-   authorization callback over SQL text.
-3. **Read-only + locked config on a live, writable server**: ETL needs write
-   and external access on the same instance; viewers need a `READ_ONLY`
-   catalog and `enable_external_access=false`. Needs a verified recipe
-   (e.g. a second read-only attach of the same file, or a read-only Quack
-   server per catalog).
-4. **Timeout/cancel across the wire**: must verify `duckdb_interrupt` on the
-   client stops the remote query (else a 30 s timeout still burns the
-   server).
-5. **Resource isolation**: no documented per-connection memory/thread limits
-   on a Quack server; one heavy dashboard can starve others.
-6. **Scale-out not solved by B alone**: the Quack server is still one
-   process; B buys *live data*, not more cores. For read scale-out, N
-   replicas of A (or MotherDuck read scaling) remain the answer.
-
-Re-test checklist on 2.0.0: (2)–(5) as sqllogictests + an S6 spike against
-`quack_serve` on localhost; then decide.
+`memory_limit`. The load test also found the two tiny_http bugs fixed in #93:
+connections left waiting in its thread pool, and the missing `TCP_NODELAY`.
