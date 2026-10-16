@@ -17,7 +17,7 @@
 LOAD anofox_statistics;
 
 SELECT 'Why do customers cancel, and which lever pays off?'::DASHBOARD_TITLE;
-SELECT 'anofox_statistics · live'::BRAND;
+SELECT 'anofox_statistics'::BRAND;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Data (setup statements: plain SQL, no files)
@@ -180,15 +180,18 @@ SELECT 'Q3 2026', round(100 * avg(churned::INTEGER), 1) FROM ch_customers;
 SELECT 'Overview'::TAB;
 
 SELECT 12::COL;
-SELECT '**Who asks:** the head of customer success, planning the Q4 retention budget — *churn has crept up for five quarters: what drives it, and which lever is worth paying for?* **The data:** the 5,000 customers on 1 July 2026 and whether they cancelled by 30 September (Q3). **The model:** a logistic regression of churn on ten customer attributes (`logistic_tidy_by`), checked on a 25% hold-out (Model check), then used to size four levers (What-if) and rank the accounts to call (Action list). Everything is computed live by **anofox_statistics**.'::MARKDOWN,
+SELECT '**Who asks:** the head of customer success, planning the Q4 retention budget — *churn has crept up for five quarters: what drives it, and which lever is worth paying for?* **The data:** the 5,000 customers on 1 July 2026 and whether they cancelled by 30 September (Q3). **The model:** a logistic regression of churn on ten customer attributes (`logistic_tidy_by`), checked on a 25% hold-out (Model check), then used to size four levers (What-if) and rank the accounts to call (Action list).'::MARKDOWN,
        'The question'::TITLE;
 
 SELECT 'Q3 2026 at a glance'::GROUP;
 SELECT (SELECT churn_pct FROM ch_history WHERE quarter = 'Q3 2026')::PERCENT,
-       (SELECT churn_pct FROM ch_history WHERE quarter = 'Q2 2026')::DELTA_LOWER_GOOD, 'Churn in Q3 (arrow vs Q2; red = worse)'::LABEL;
+       (SELECT churn_pct FROM ch_history WHERE quarter = 'Q2 2026')::DELTA_LOWER_GOOD, 'vs Q2'::DELTA_LABEL, 'Churn in Q3'::LABEL,
+       'Customers who cancelled in Q3 as a share of the 5,000 customers on 1 July.'::INFO;
 SELECT count(*) FILTER (WHERE churned)::METRIC, 'customers lost'::LABEL FROM ch_customers;
 SELECT round(sum(mrr) FILTER (WHERE churned))::METRIC, 'MRR lost (€ / month)'::LABEL FROM ch_customers;
-SELECT round(auc_agg(churned, score), 2)::METRIC, 'hold-out AUC of the model'::LABEL FROM ch_scores WHERE model = 'logistic model';
+SELECT round(auc_agg(churned, score), 2)::METRIC, 'hold-out AUC of the model'::LABEL, '<0.65:bad; <0.75:warn; good'::THRESHOLDS,
+       'AUC: the chance that a customer who churned gets a higher score than one who stayed, on the 25 % of customers the model was not fitted on. 0.5 is a coin flip, 1 a perfect ranking.'::INFO
+FROM ch_scores WHERE model = 'logistic model';
 SELECT term::TEXT_LARGE, 'strongest driver (odds × ' || printf('%.1f', exp(estimate)) || ')'::LABEL
 FROM ch_terms WHERE term <> '(Intercept)' AND estimate > 0 ORDER BY estimate DESC LIMIT 1;
 SELECT 1::ENDGROUP;
@@ -216,7 +219,7 @@ FROM ch_customers GROUP BY ALL ORDER BY 3 DESC;
 SELECT 'Drivers'::TAB;
 
 SELECT 12::COL;
-SELECT '**How to read the drivers.** Each odds ratio compares two customers who differ in one attribute only: an **annual contract** multiplies the odds of churning by about 0.27 (a 73% cut), a **failed payment** by 3.7, each **support ticket** in the last 90 days by 1.3, each **10-point drop in usage** by 1.37. **What to look for:** faded terms have a 95% interval that includes 1 — *mobile app*, *newsletter*, *DACH region* and *MRR* do not predict churn once the rest is known, so money spent on pushing the app or the newsletter will not retain anyone. The effect curves turn two drivers into probabilities with the other attributes held at their average. Tickets and usage drop are correlated (struggling customers file tickets): the VIF table in Model check shows the overlap is small enough to read them separately.'::MARKDOWN,
+SELECT '**How to read the drivers.** The model links the log-odds of churning to the attributes, $\log\frac{p}{1-p} = \beta_0 + \beta_1 x_1 + \dots + \beta_k x_k$, so one unit more of $x_j$ multiplies the odds by $\text{OR}_j = e^{\beta_j}$. Each odds ratio compares two customers who differ in one attribute only: an **annual contract** multiplies the odds of churning by about 0.27 (a 73% cut), a **failed payment** by 3.7, each **support ticket** in the last 90 days by 1.3, each **10-point drop in usage** by 1.37. **What to look for:** faded terms have a 95% interval that includes 1 — *mobile app*, *newsletter*, *DACH region* and *MRR* do not predict churn once the rest is known, so money spent on pushing the app or the newsletter will not retain anyone. The effect curves turn two drivers into probabilities with the other attributes held at their average. Tickets and usage drop are correlated (struggling customers file tickets): the VIF table in Model check shows the overlap is small enough to read them separately.'::MARKDOWN,
        'What to look for'::TITLE;
 
 SELECT 12::COL;
@@ -254,7 +257,9 @@ SELECT '**Can we trust the score?** The model is refitted on 75% of the customer
 SELECT 'Hold-out scores (1,250 customers)'::GROUP;
 SELECT round(auc_agg(churned, score), 3)::METRIC, 'AUC — logistic model'::LABEL FROM ch_scores WHERE model = 'logistic model';
 SELECT round(auc_agg(churned, score), 3)::METRIC, 'AUC — red-flag rule'::LABEL FROM ch_scores WHERE model = 'red-flag rule';
-SELECT round(brier_agg(churned, score), 4)::METRIC, 'Brier — logistic (lower is better)'::LABEL FROM ch_scores WHERE model = 'logistic model';
+SELECT round(brier_agg(churned, score), 4)::METRIC, 'Brier — logistic (lower is better)'::LABEL,
+       'Brier score: the mean squared difference between the predicted churn probability and what happened (1 = churned, 0 = stayed). It rewards probabilities that are both sharp and calibrated.'::INFO
+FROM ch_scores WHERE model = 'logistic model';
 SELECT round(brier_agg(churned, score), 4)::METRIC, 'Brier — red-flag rule'::LABEL FROM ch_scores WHERE model = 'red-flag rule';
 SELECT round(max(value) FILTER (WHERE metric = 'pseudo_r_squared'), 3)::METRIC, 'pseudo R² (all customers)'::LABEL
 FROM logistic_glance_by('ch_model', segment, churn_d,
@@ -303,18 +308,20 @@ SELECT round(sum(p_whatif))::METRIC, 'expected churners per quarter'::LABEL FROM
 SELECT round(sum(p_now - p_whatif))::METRIC, 'customers saved per quarter'::LABEL FROM ch_risk;
 SELECT round(100 * avg(p_whatif), 1)::PERCENT, round(100 * avg(p_now), 1)::DELTA_LOWER_GOOD, 'churn per quarter'::LABEL FROM ch_risk;
 SELECT round(sum((1 - p_whatif) * mrr))::METRIC, round(sum((1 - p_now) * mrr))::DELTA, 'MRR kept (€ / month, before discounts)'::LABEL FROM ch_risk;
-SELECT round(sum(mrr_saved_year - discount_cost_year))::METRIC, 'net € a year (the levers one by one, summed)'::LABEL FROM ch_levers;
+SELECT round(sum(mrr_saved_year - discount_cost_year))::METRIC, 'net € a year (the levers one by one, summed)'::LABEL, '<0:bad; good'::THRESHOLDS FROM ch_levers;
 SELECT 1::ENDGROUP;
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
 SELECT lever::XAXIS, round(mrr_saved_year - discount_cost_year) AS "net € a year" ::BARCHART, 1::FLIP, 0::REFLINE, '€'::YFORMAT,
+       'tween'::TRANSITION,
        'Net value per lever — the annual discount costs more than it saves'::TITLE
 FROM ch_levers ORDER BY 2;
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
 SELECT plan::XAXIS, scenario::CATEGORY, round(churners, 1) AS "expected churners" ::BARCHART,
+       'tween'::TRANSITION,
        'Expected churners per quarter by plan — now vs. with the levers'::TITLE
 FROM (SELECT plan, 'now' AS scenario, sum(p_now) AS churners, 1 AS k FROM ch_risk GROUP BY plan
       UNION ALL SELECT plan, 'with the levers', sum(p_whatif), 2 FROM ch_risk GROUP BY plan)
