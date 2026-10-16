@@ -157,6 +157,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-story-play[aria-pressed="true"]{color:var(--ax-accent);border-color:var(--ax-accent)}
 .dp-story-pos{font-size:.74rem;color:var(--ax-muted);margin-left:.2rem}
 .dp-story-cap{position:absolute;z-index:2;max-width:min(320px,60%);padding:.42rem .62rem;font-size:.8rem;line-height:1.35;color:var(--ax-tip-ink);background:var(--ax-tip-bg);border:1px solid var(--ax-callout-border);border-left:3px solid var(--ax-accent);border-radius:var(--ax-radius-sm);box-shadow:var(--ax-tip-shadow);pointer-events:none}
+.dp-story-cap.dp-story-cap-out{position:relative;left:auto;top:auto;max-width:none;margin-top:.5rem}
 .dp-story-link{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
 .dp-story-link path{fill:none;stroke:var(--ax-accent);stroke-width:1.5;stroke-dasharray:6 4}
 /* story steps fade (a re-run re-applies its dimming at once: no flash) */
