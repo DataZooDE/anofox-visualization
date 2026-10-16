@@ -119,7 +119,7 @@ terminal.
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
-| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
@@ -786,6 +786,44 @@ inside a link URL is dropped — after the Markdown is rendered and sanitised (t
 sanitiser is unchanged). An unknown name stays as written; `--check` warns
 (`markdown/unknown-placeholder`, `markdown/unknown-format`). The *A German branch
 report* sample opens with such a summary.
+
+### Formulas in Markdown (`$…$`, `$$…$$`)
+
+A `::MARKDOWN` text (and so a `::CALLOUT`) can explain a model or a KPI
+definition with **TeX math**: `$…$` inline, `$$…$$` as a centred display
+formula (on its own lines or in a paragraph):
+
+```sql
+SELECT 'Simple exponential smoothing weighs the latest observation by $\alpha$:
+
+$$\hat{y}_{t+1} = \alpha y_t + (1-\alpha)\hat{y}_t$$
+
+With $\alpha = {{alpha}}$ the forecast reacts within a few weeks.'::MARKDOWN,
+       0.3 AS alpha;
+```
+
+- The delimiters follow KaTeX auto-render / pandoc: an opening `$` needs a
+  non-space right after it, a closing `$` a non-space right before it and no
+  digit right after it, and an inline formula ends at its first unescaped `$`
+  — so *"costs $5 and $10"* stays text. `\$` is always a literal dollar; a
+  `` `code` `` span is never math.
+- `{{col}}` / `{{col:fmt}}` work inside a formula too: the formatted value is
+  set as TeX text (`\text{…}`, its `$ % & # _ { } \ ^ ~` escaped), so a value
+  can never become a TeX command.
+- **Browser:** KaTeX (pinned, with SRI) is loaded from jsDelivr only when a
+  dashboard has a formula. It writes MathML for screen readers next to the
+  visual HTML and takes the text colour, so it follows light and dark themes.
+  KaTeX runs with `trust: false`: `\href`, `\url`, `\includegraphics` and
+  `\htmlClass`/`\htmlId`/`\htmlStyle`/`\htmlData` draw as error text, never
+  as links or markup. Offline, or for a formula KaTeX rejects, the TeX source
+  stays in monospace (marked in the error colour, the reason on hover).
+- **⤓ HTML export:** the typeset formulas and KaTeX's stylesheet with its
+  fonts (woff2, inlined) are embedded, so the file draws them offline.
+- **Headless** (`dashboard`, `serve`, `--svg`): the TeX source in a monospace
+  font; a display formula gets lines of its own.
+- `--check` reports a formula KaTeX can't parse as `markdown/bad-math`
+  (unbalanced braces, `\left` without `\right`, `\begin`/`\end` that don't
+  match, an unknown command or environment, a disabled command).
 
 ### Definitions and callouts (`::INFO`, `::CALLOUT`)
 
