@@ -1568,7 +1568,8 @@ mod tests {
     }
 
     /// DuckDB's `json_serialize_sql` through the `duckdb` CLI; `None` without
-    /// one (the test is skipped, like tests/paged_sql_duckdb.rs).
+    /// one (the test is skipped locally, but fails on CI — `CI` set — where
+    /// the workflow installs the pinned CLI).
     fn cli_serialize(sql: &str) -> Option<Result<String, String>> {
         let q = format!(
             "SELECT json_serialize_sql({})::VARCHAR AS j",
@@ -1587,9 +1588,15 @@ mod tests {
 
     #[test]
     fn only_queries_run_with_a_data_folder() {
-        if cli_serialize("SELECT 1").is_none() {
-            eprintln!("skipped: no duckdb CLI");
-            return;
+        match cli_serialize("SELECT 1") {
+            Some(Ok(out)) if out.contains("\"error\":false") => {}
+            _ if std::env::var_os("CI").is_some() => {
+                panic!("CI needs a working `duckdb` CLI on PATH (json_serialize_sql) for this test")
+            }
+            _ => {
+                eprintln!("skipped: no working duckdb CLI");
+                return;
+            }
         }
         let ser = |sql: &str| cli_serialize(sql).unwrap();
         let ok = |sql: &str, setup: bool| read_only_statement(sql, setup, &ser);
