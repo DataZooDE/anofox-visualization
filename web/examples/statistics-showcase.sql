@@ -238,10 +238,10 @@ FROM pm_listings WHERE sold_30 IS NOT NULL;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Dashboard
 -- ─────────────────────────────────────────────────────────────────────────────
-SELECT 'What sets the price of a home? A regression workflow on 900 sales, computed live'::LABEL;
+SELECT 'What sets the price of a home? A regression workflow on 900 sales'::LABEL;
 
 SELECT 12::COL;
-SELECT 'Every chart below is computed **in your browser**: DuckDB-Wasm builds a synthetic property market with plain SQL — 900 home sales, 1,400 listings and 320 flats in a made-up city, 2023–2025 — the **anofox_statistics** extension fits the models (`ols_tidy_by`, `ols_augment_by`, `ridge_cv_by`, `kaplan_meier_by`, `tukey_hsd_by`, …) and each panel hands the producer''s long table to a **contract plot**, e.g. `SELECT anofox_plot_terms(t) FROM ols_tidy_by(…) t`. The tabs follow the modelling workflow: **state the question → compare models → check the fit → predict → regularise → look beyond the mean → over time → classification → survival → group comparisons.** Open the SQL editor to see (and change) every query.'::MARKDOWN, 'About this dashboard'::TITLE;
+SELECT 'A made-up city''s property market, 2023–2025 — 900 home sales, 1,400 listings and 320 flats. The **anofox_statistics** extension fits the models (`ols_tidy_by`, `ols_augment_by`, `ridge_cv_by`, `kaplan_meier_by`, `tukey_hsd_by`, …) and each panel hands the producer''s long table to a **contract plot**, e.g. `SELECT anofox_plot_terms(t) FROM ols_tidy_by(…) t`. The tabs follow the modelling workflow: **state the question → compare models → check the fit → predict → regularise → look beyond the mean → over time → classification → survival → group comparisons.** Open the SQL editor to see (and change) every query.'::MARKDOWN, 'About this dashboard'::TITLE;
 
 -- ── 1 · Overview ─────────────────────────────────────────────────────────────
 SELECT '1 Overview'::TAB;
@@ -250,14 +250,16 @@ SELECT 12::COL;
 SELECT '**Question:** what sets the sale price of a home? We model the price (k€) of 900 sales on **living area** (per 10 m²), **rooms**, **age** (per decade), **condition** (1–5), **distance to the centre**, a **garden** and the **district** (dummies; North Park is the reference) — with four estimators: **OLS**, robust **Huber**, **ridge** (shrunk) and the **median** (quantile) regression. **What to look for:** each dot is an effect with its 95% interval; intervals crossing the dashed zero line are noise (here: **rooms** for three of the four estimators — once the area is known, an extra room adds little). Where the estimators disagree, a few rows are pulling some of them: OLS and ridge put the **Hillside** premium at **37 k€** and **area at 35 k€ per 10 m²**, the robust Huber and median fits at **13–16 k€** and **31–32 k€** — tab 3 finds the culprits.'::MARKDOWN, 'The question'::TITLE;
 
 SELECT 'The price model at a glance'::GROUP;
-SELECT round(max(value), 3)::METRIC, ('Best R² — ' || arg_max(model_id, value))::LABEL
+SELECT round(max(value), 3)::METRIC, ('Best R² — ' || arg_max(model_id, value))::LABEL,
+       'R²: the share of the variation in sale prices that the model explains (0 = none, 1 = all).'::INFO
 FROM (SELECT * FROM ols_glance_by('pm_sales', market, price_k, [area_10, rooms, age_10, condition, dist_centre, has_garden, old_town, harbour, hillside, west_end])
       UNION ALL BY NAME SELECT * FROM huber_glance_by('pm_sales', market, price_k, [area_10, rooms, age_10, condition, dist_centre, has_garden, old_town, harbour, hillside, west_end])
       UNION ALL BY NAME SELECT * FROM ridge_glance_by('pm_sales', market, price_k, [area_10, rooms, age_10, condition, dist_centre, has_garden, old_town, harbour, hillside, west_end], options := {'alpha': 5.0}))
 WHERE metric = 'r_squared';
 SELECT count(*)::COMPACT, 'homes sold, 2023–2025'::LABEL FROM pm_sales;
 SELECT round(median(price_k))::METRIC, 'median price (k€)'::LABEL FROM pm_sales;
-SELECT round(10 * estimate)::METRIC, '€ per extra m² (Huber)'::LABEL
+SELECT round(10 * estimate)::METRIC, '€ per extra m² (Huber)'::LABEL,
+       'The area coefficient of the robust Huber fit, with rooms, age, condition, distance, garden and district held fixed. Huber down-weights the few mis-keyed sales that pull least squares.'::INFO
 FROM huber_tidy_by('pm_sales', market, price_k, [area_10, rooms, age_10, condition, dist_centre, has_garden, old_town, harbour, hillside, west_end])
 WHERE term = 'x1';
 SELECT round(median(1000 * price_k / living_area))::METRIC, 'median € per m²'::LABEL FROM pm_sales;
@@ -402,7 +404,13 @@ FROM poisson_effects_by('pm_listings', market, viewings, [photos, premium_pct], 
 SELECT '5 Regularise'::TAB;
 
 SELECT 12::COL;
-SELECT 'What are the extras worth? 320 comparable three-room flats (70–90 m²) with **ten amenities** that come in bundles — upmarket flats tend to have several — of which only **garage, heat pump, renovated kitchen and balcony** change the price. **Ridge** shrinks all coefficients towards zero as the penalty λ grows; the **elastic net** and **LARS** set them to zero one by one — the order they enter is a variable ranking. **Cross-validation** picks λ: **λ.min** has the lowest error, **λ.1se** is the simplest model within one standard error of it. **What to look for:** the four real amenities (highlighted) stay large the longest; the six others hover around zero.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'What are the extras worth? 320 comparable three-room flats (70–90 m²) with **ten amenities** that come in bundles — upmarket flats tend to have several — of which only **garage, heat pump, renovated kitchen and balcony** change the price. All three minimise the squared error plus a penalty on the coefficients,
+
+$$\min_{\beta}\; \frac{1}{2n}\lVert y - X\beta \rVert_2^2 + \lambda\, P_\alpha(\beta)$$
+
+$$P_\alpha(\beta) = \alpha \lVert \beta \rVert_1 + \tfrac{1-\alpha}{2} \lVert \beta \rVert_2^2$$
+
+**Ridge** ($\alpha = 0$) shrinks all coefficients towards zero as the penalty λ grows; the **elastic net** ($\alpha = 0.8$ here) and **LARS** (the lasso path, $\alpha = 1$) set them to zero one by one — the order they enter is a variable ranking. **Cross-validation** picks λ: **λ.min** has the lowest error, **λ.1se** is the simplest model within one standard error of it. **What to look for:** the four real amenities (highlighted) stay large the longest; the six others hover around zero.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 'Ridge'::SUBTAB;
 SELECT 12::COL;
@@ -445,7 +453,7 @@ WHERE term <> '(Intercept)';
 SELECT '6 Quantiles'::TAB;
 
 SELECT 12::COL;
-SELECT 'Least squares describes the **average** home. A **quantile regression** fits each quantile τ of the price separately; `quantile_process_by` runs it over a grid of τ (the `terms` schema with `index_name = ''tau''`), and the dashed line is the OLS estimate for comparison. **What to look for:** a flat line means the effect is the same for cheap and expensive homes. Here **each extra m²** is worth about **2.8 k€ at the 5% quantile** but **4.1 k€ at the 95% quantile** (OLS: 3.3) — the price spread fans out with size, so at the top of the market a m² costs much more. **Distance to the centre**, by contrast, costs 4.5–6.7 k€ per km at every quantile: a nearly flat line.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'Least squares describes the **average** home. A **quantile regression** fits each quantile τ of the price separately, minimising the asymmetric check loss $\sum_i \rho_\tau(y_i - x_i^\top\beta)$ with $\rho_\tau(u) = u\,(\tau - \mathbf{1}[u < 0])$; `quantile_process_by` runs it over a grid of τ (the `terms` schema with `index_name = ''tau''`), and the dashed line is the OLS estimate for comparison. **What to look for:** a flat line means the effect is the same for cheap and expensive homes. Here **each extra m²** is worth about **2.8 k€ at the 5% quantile** but **4.1 k€ at the 95% quantile** (OLS: 3.3) — the price spread fans out with size, so at the top of the market a m² costs much more. **Distance to the centre**, by contrast, costs 4.5–6.7 k€ per km at every quantile: a nearly flat line.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 12::COL;
 SELECT 400::HEIGHT;
@@ -515,7 +523,9 @@ SELECT 12::COL;
 SELECT 'Will a listing sell **within 30 days**? Two scores for the same 1,363 listings (those online for at least 30 days): a **logistic regression** on the asking-price premium, the number of photos and the district, and an agent''s **rule of thumb** (points for a modest premium, ≥ 20 photos and a central district). `roc_curve_by`, `pr_curve_by` and `calibration_curve_by` return the `curve` schema, one curve per model. **What to look for:** the **ROC** curve further from the diagonal (higher AUC) ranks the quick sales better; the **precision-recall** curve shows the trade-off against the 25.5% base rate (dashed); in the **calibration** plot, a calibrated model''s predicted probabilities lie on the diagonal — the rule of thumb is both less sharp (AUC 0.76 vs 0.81) and miscalibrated (Brier 0.178 vs 0.141).'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 'Discrimination and calibration'::GROUP;
-SELECT round(auc_agg(sold_30, score), 3)::METRIC, 'AUC — logistic'::LABEL FROM pm_scores WHERE model = 'logistic';
+SELECT round(auc_agg(sold_30, score), 3)::METRIC, 'AUC — logistic'::LABEL,
+       'AUC: the chance that a listing which sold within 30 days gets a higher score than one which did not. 0.5 is a coin flip, 1 a perfect ranking.'::INFO
+FROM pm_scores WHERE model = 'logistic';
 SELECT round(auc_agg(sold_30, score), 3)::METRIC, 'AUC — rule of thumb'::LABEL FROM pm_scores WHERE model = 'rule of thumb';
 SELECT round(brier_agg(sold_30, score), 3)::METRIC, 'Brier score — logistic (lower is better)'::LABEL FROM pm_scores WHERE model = 'logistic';
 SELECT round(brier_agg(sold_30, score), 3)::METRIC, 'Brier score — rule of thumb'::LABEL FROM pm_scores WHERE model = 'rule of thumb';
@@ -538,7 +548,7 @@ ORDER BY CASE curve_type WHEN 'roc' THEN 1 WHEN 'pr' THEN 2 ELSE 3 END;
 SELECT '9 Survival'::TAB;
 
 SELECT 12::COL;
-SELECT 'How long does a home stay on the market? `kaplan_meier_by` estimates, per district, the share of listings **still unsold** after each day — from times that are partly **censored**: homes still listed after a year, or at the end of the study on 31 Dec 2025 (marked +), only tell us they took *at least* that long. **What to look for:** a curve that drops faster sells faster; where it crosses 50% is the **median time on market** — about 37 days in the Old Town against 99 in the West End. The **log-rank** test confirms the districts differ.'::MARKDOWN, 'What to look for'::TITLE;
+SELECT 'How long does a home stay on the market? `kaplan_meier_by` estimates, per district, the share of listings **still unsold** after each day, $\hat S(t) = \prod_{t_i \le t} \big(1 - d_i / n_i\big)$ ($d_i$ sold on day $t_i$ of the $n_i$ still listed) — from times that are partly **censored**: homes still listed after a year, or at the end of the study on 31 Dec 2025 (marked +), only tell us they took *at least* that long. **What to look for:** a curve that drops faster sells faster; where it crosses 50% is the **median time on market** — about 37 days in the Old Town against 99 in the West End. The **log-rank** test confirms the districts differ.'::MARKDOWN, 'What to look for'::TITLE;
 
 SELECT 8::COL;
 SELECT 400::HEIGHT;
