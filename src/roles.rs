@@ -229,6 +229,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "free-text input (value = default)"),
     e("DATERANGE", &["DATE_RANGE"], R::Input(InputKind::DateRange), "input", false,
       "two date columns → from/to variables"),
+    e("PERIOD", &["PERIOD_PICKER", "DATE_PERIOD"], R::Input(InputKind::Period), "input", false,
+      "date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
@@ -588,6 +590,7 @@ mod tests {
                 I::Text,
                 I::Multiselect,
                 I::DateRange,
+                I::Period,
             ]
             .map(Role::Input),
         );

@@ -294,6 +294,19 @@ pub fn human_header(raw: &str) -> String {
     crate::table::human_header(raw)
 }
 
+/// Resolve a `::PERIOD` spec + the viewer's choice to the control's model and
+/// the variables to bind ([`crate::period::resolve_json`]): `state_json` =
+/// `{preset?, from?, to?, grain?, compare?, today?, column?}` (today = the
+/// viewer's local `YYYY-MM-DD`, column = the ::PERIOD column's name). Returns
+/// `{ok, errors, prefix, presets:[{id,label}], grains,
+/// compares:[{id,label}], preset, grain, grain_auto, compare, from, to, today,
+/// vars:{from,to,prev_from,prev_to,grain,compare,label,prev_label}}`.
+#[wasm_bindgen]
+pub fn period_resolve(spec: &str, state_json: &str) -> String {
+    guard(|| Ok(crate::period::resolve_json(spec, state_json).to_string()))
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "errors": [e.to_string()]}).to_string())
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

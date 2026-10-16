@@ -148,6 +148,17 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             chrome.apply(r, v);
             continue;
         }
+        // An input renders nothing headless, but its default value is bound
+        // (`SET VARIABLE`) so downstream getvariable() panels read it — the
+        // same default the browser picks on first load.
+        if crate::inputs::input_kind(&panel.roles).is_some() {
+            if let Ok(rows) = provider.query(&panel.sql) {
+                for set in crate::inputs::panel_defaults(&panel.roles, &rows) {
+                    provider.execute(&set).ok();
+                }
+            }
+            continue;
+        }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
         let layout =
             has(&|r| matches!(r, Role::Columns | Role::Span | Role::Height | Role::Section));

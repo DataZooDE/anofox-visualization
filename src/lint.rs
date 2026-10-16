@@ -11,6 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
+use crate::inputs::{input_defaults, input_index, input_kind};
 use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
 use serde_json::{Map, Value};
 
@@ -38,7 +39,8 @@ pub struct Diagnostic {
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
     /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
-    /// | `chrome/bad-url`. Design advisories
+    /// | `chrome/bad-url` | `period/bad-spec` (a `::PERIOD` spec with an
+    /// unknown key / preset / grain / compare or a bad date). Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
     pub code: &'static str,
@@ -156,6 +158,24 @@ where
         if let Some(kind) = input_kind(&p.roles) {
             match run_query(&format!("{prelude}{};", p.sql)) {
                 Ok(rows) => {
+                    if kind == InputKind::Period {
+                        let spec = rows
+                            .first()
+                            .and_then(|r| r.values().nth(input_index(&p.roles)))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        for e in crate::period::parse_spec(spec).1 {
+                            diags.push(Diagnostic {
+                                severity: Severity::Error,
+                                stmt,
+                                code: "period/bad-spec",
+                                message: format!(
+                                    "::PERIOD spec: {e} — the control falls back to its defaults"
+                                ),
+                                sql: short.clone(),
+                            });
+                        }
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -583,82 +603,6 @@ fn unknown_casts(sql: &str) -> Vec<String> {
         }
     }
     out
-}
-
-fn input_kind(roles: &[(usize, Role)]) -> Option<InputKind> {
-    roles.iter().find_map(|(_, r)| match r {
-        Role::Input(k) => Some(*k),
-        _ => None,
-    })
-}
-
-/// Output position of a panel's input column.
-fn input_index(roles: &[(usize, Role)]) -> usize {
-    roles
-        .iter()
-        .find(|(_, r)| matches!(r, Role::Input(_)))
-        .map(|(i, _)| *i)
-        .unwrap_or(0)
-}
-
-/// Quote a DuckDB identifier (`"a""b"`).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// `SET VARIABLE` statement(s) that give an input its default value — the first
-/// option for a single input, all options for a multiselect, both ends for a
-/// date range — so downstream `getvariable()` panels have something to read.
-/// `idx` is the input column's output position (rows keep SELECT column order,
-/// via serde_json's `preserve_order`); the variable name is quoted.
-fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Value>]) -> Vec<String> {
-    let Some(first) = rows.first() else {
-        return Vec::new();
-    };
-    let keys: Vec<&String> = first.keys().collect();
-    let Some(k) = keys.get(idx).or(keys.first()).copied() else {
-        return Vec::new();
-    };
-    match kind {
-        InputKind::DateRange => keys
-            .iter()
-            .skip(idx.min(keys.len().saturating_sub(1)))
-            .take(2)
-            .filter_map(|k| {
-                first
-                    .get(*k)
-                    .map(|v| format!("SET VARIABLE {} = {}", quote_ident(k), lit(v)))
-            })
-            .collect(),
-        InputKind::Multiselect => {
-            let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
-            vec![format!(
-                "SET VARIABLE {} = [{}]",
-                quote_ident(k),
-                vals.join(", ")
-            )]
-        }
-        _ => vec![format!(
-            "SET VARIABLE {} = {}",
-            quote_ident(k),
-            first.get(k).map(lit).unwrap_or_else(|| "NULL".into())
-        )],
-    }
-}
-
-fn lit(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => {
-            if *b {
-                "TRUE".into()
-            } else {
-                "FALSE".into()
-            }
-        }
-        _ => "NULL".into(),
-    }
 }
 
 fn one_line(s: &str) -> String {

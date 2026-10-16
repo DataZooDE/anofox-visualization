@@ -47,3 +47,8 @@ fn web_wasm_extensions_load() {
 fn web_locale_formatting_matches_the_cli() {
     run_node("locale_test.mjs");
 }
+
+#[test]
+fn web_period_control_matches_the_rust_vectors() {
+    run_node("period_test.mjs");
+}

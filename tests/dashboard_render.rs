@@ -99,3 +99,45 @@ fn renders_contract_calls() {
     assert!(svg.contains("Coefficients — huber"));
     assert!(svg.contains("promo"));
 }
+
+// Headless: an input renders nothing, but its default is bound with
+// `SET VARIABLE` before the panels that read it (here a ::PERIOD).
+struct InputMock {
+    executed: Vec<String>,
+}
+impl DataProvider for InputMock {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        self.executed.push(sql.to_string());
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        if sql.contains("presets=") {
+            return Ok(vec![
+                (
+                    "p".into(),
+                    s(&["presets=30d,ytd; default=ytd; today=2026-09-30"]),
+                ),
+                ("c1".into(), s(&["Period"])),
+            ]);
+        }
+        Ok(vec![("c0".into(), f(&[1.0])), ("c1".into(), s(&["N"]))])
+    }
+}
+
+#[test]
+fn headless_binds_input_defaults() {
+    let script = "SELECT 'presets=30d,ytd; default=ytd; today=2026-09-30' AS p ::PERIOD, 'Period'::LABEL;\n\
+                  SELECT count(*)::METRIC, 'N'::LABEL FROM t WHERE d >= getvariable('p_from')::DATE;";
+    let mut db = InputMock { executed: vec![] };
+    render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        db.executed
+            .contains(&"SET VARIABLE \"p_from\" = '2026-01-01'".to_string()),
+        "{:?}",
+        db.executed
+    );
+    assert!(db
+        .executed
+        .contains(&"SET VARIABLE \"p_prev_to\" = '2025-09-30'".to_string()));
+    assert_eq!(db.executed.len(), 8);
+}

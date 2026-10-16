@@ -27,9 +27,11 @@ pub mod dashboard;
 mod downsample;
 pub mod format;
 pub mod host;
+pub mod inputs;
 pub mod lint;
 pub mod macros;
 pub mod page;
+pub mod period;
 pub mod roles;
 mod smooth;
 pub mod sql;
@@ -144,6 +146,8 @@ pub enum InputKind {
     Text,
     Multiselect,
     DateRange,
+    /// `::PERIOD`: date presets + grain + comparison ([`period`]).
+    Period,
 }
 
 /// How a KPI value is formatted.

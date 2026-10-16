@@ -56,6 +56,18 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .control select[multiple] option:checked{background:linear-gradient(0deg,var(--ax-accent),var(--ax-accent));color:var(--ax-accent-ink)}
 .control select[multiple]:focus option:checked{background:linear-gradient(0deg,var(--ax-accent),var(--ax-accent))}
 .control .daterange-arrow{margin:0 .1rem;color:var(--ax-muted)}
+/* ::PERIOD — preset + custom dates + grain switch + comparison, one control */
+.dp-period{flex-wrap:wrap;row-gap:.45rem}
+.dp-period select{min-width:0}
+.dp-period input[type=date]{min-width:0;width:9.5rem}
+.dp-seg{display:inline-flex;background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:10px;padding:2px;box-shadow:var(--ax-input-shadow)}
+.dp-seg button{background:none;color:var(--ax-muted);box-shadow:none;border:0;border-radius:8px;padding:.38rem .62rem;font:inherit;font-size:.8rem;font-weight:600;cursor:pointer;transition:color .12s,background .12s}
+.dp-seg button:hover{color:var(--ax-ink);background:var(--ax-pill-hover);filter:none;box-shadow:none}
+.dp-seg button[aria-pressed=true]{color:var(--ax-accent-ink);background:var(--ax-btn-bg)}
+.dp-seg button:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+.dp-period-range{font-size:.78rem;font-weight:500;color:var(--ax-muted);white-space:nowrap}
+.dp-period-range b{font-weight:700;color:var(--ax-ink)}
+.dp-period-err{font-size:.75rem;font-weight:600;color:var(--ax-err-ink)}
 /* Dropdown-style multiselect */
 .dp-ms{position:relative;display:inline-block}
 .dp-ms>summary{list-style:none;cursor:pointer;font:inherit;font-size:.85rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:10px;padding:.5rem 2rem .5rem .8rem;min-width:130px;box-shadow:var(--ax-input-shadow);transition:border-color .15s,box-shadow .15s;background-image:var(--ax-chevron);background-repeat:no-repeat;background-position:right .7rem center}
