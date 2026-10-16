@@ -1,0 +1,5 @@
+question,accuracy,brier,ece,claims,fraud_claims,model
+no_evidence,0.2406,0.56,0.6174,320,39,laya-multilingual
+pressure,0.9281,0.0695,0.0464,320,39,laya-multilingual
+recent,0.8844,0.1083,0.074,320,39,laya-multilingual
+suspicious,0.7375,0.1583,0.1043,320,39,laya-multilingual
