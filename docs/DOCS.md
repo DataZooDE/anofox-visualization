@@ -2005,6 +2005,11 @@ Viewers can't set `__claim_*`, and cached results are kept per viewer.
 `options.log` writes a JSON-lines request log. With `auth`, pass an access
 policy (below) — or `"policy": "none"` to rely on the panels' own claim
 filters; otherwise the server refuses to start.
+The server can also sign viewers in itself — JWT bearer tokens and an OIDC
+login (`"mode": "jwt"` / `"oidc"`), signed embed links for a host application
+(`"embed"`), and hashed API keys for scripts (`"api_keys"`); `auth` takes a
+list to combine them. Every method sets the same `__claim_*` variables.
+`options.audit` logs every login, logout and refused credential.
 
 **Row and column policies.** Instead of a claim filter in every panel, pass
 `options.policy` (a path; keep it outside the dashboard folder) or put a
