@@ -19,6 +19,7 @@ use serde_json::{Map, Value as J};
 
 mod curves;
 mod look;
+mod names;
 mod stats;
 mod terms;
 
@@ -58,13 +59,28 @@ pub(crate) fn render(
     o: &RenderOptions,
     place: Place,
 ) -> Result<(String, Vec<String>), RenderError> {
+    // Producer spellings (`coef`, `P>|t|`, `.fitted`, …) read as contract
+    // columns; `compare` takes raw rows whose columns the options name.
+    let mut renamed = Vec::new();
+    let mut rename = |rows: &[Row]| match plot {
+        "compare" => None,
+        _ => names::normalize(rows, options, &mut renamed),
+    };
+    let normed;
+    let rows = match rename(rows) {
+        Some(r) => {
+            normed = r;
+            &normed[..]
+        }
+        None => rows,
+    };
     // A column holding the test STRUCT (or LIST of them) of a `*_agg`
     // aggregate: one row per test.
     let flat;
     let rows = match plot {
         "tests" | "auto" => match flatten(rows) {
             Some(f) if plot == "tests" || detect(rows).is_err() => {
-                flat = f;
+                flat = rename(&f).unwrap_or(f);
                 &flat[..]
             }
             _ => rows,
@@ -89,12 +105,26 @@ pub(crate) fn render(
     }
     let fail = |e: String| {
         RenderError::Render(if plot == "auto" {
-            format!("anofox_plot (anofox contract v{CONTRACT_VERSION}, drawn as {name}): {e}")
+            format!("anofox_plot (anofox contract v{CONTRACT_VERSION}, detected the {name} schema): {e}")
         } else {
-            format!("anofox_plot_{name}: {e}")
+            // Missing columns of a table that follows another schema: say which.
+            let other = match detect(rows) {
+                Ok(d)
+                    if e.starts_with(NEEDS)
+                        && d != name
+                        && !(d == "diagnostics" && name == "obs") =>
+                {
+                    format!(" — the columns follow the {d} schema (anofox_plot_{d})")
+                }
+                _ => String::new(),
+            };
+            format!("anofox_plot_{name}: {e}{other}")
         })
     };
-    let t = Table { rows };
+    let t = Table {
+        rows,
+        renamed: &renamed,
+    };
     let (w, h) = (
         crate::clamp_dim(width as u64),
         crate::clamp_dim(height as u64),
@@ -473,15 +503,72 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method) or partial residuals (term, x, \
-             partial_residual)",
-            keys.join(", ")
+             partial_residual){}",
+            keys.join(", "),
+            closest(&keys)
         )));
     })
 }
 
+/// The required columns of each schema [`detect`] tells apart.
+const SCHEMAS: &[(&str, &[&str])] = &[
+    ("terms", &["term", "estimate"]),
+    ("prediction", &["yhat"]),
+    ("curve", &["curve_type", "x", "y"]),
+    ("summary", &["metric", "value"]),
+    ("diagnostics", &["fitted", "residual"]),
+    ("partial", &["term", "x", "partial_residual"]),
+    ("tests", &["p_value"]),
+];
+
+/// For an undetected table: the schema whose required columns are nearest —
+/// present or misspelled — with what is missing (`""` when none is close).
+fn closest(keys: &[&str]) -> String {
+    // max_by_key keeps the last of equals: walk backwards so the first wins.
+    let best = SCHEMAS
+        .iter()
+        .rev()
+        .map(|(name, req)| {
+            let found: Vec<(&str, Option<&str>)> = req
+                .iter()
+                .map(|c| {
+                    (
+                        *c,
+                        (!keys.contains(c)).then(|| names::near(c, keys)).flatten(),
+                    )
+                })
+                .collect();
+            let score = req.len()
+                - found
+                    .iter()
+                    .filter(|(c, n)| !keys.contains(c) && n.is_none())
+                    .count();
+            (score, name, found)
+        })
+        .filter(|(score, ..)| *score > 0)
+        .max_by_key(|(score, ..)| *score);
+    let Some((_, name, found)) = best else {
+        return String::new();
+    };
+    let hints: Vec<String> = found
+        .iter()
+        .filter(|(c, _)| !keys.contains(c))
+        .map(|(c, n)| match n {
+            Some(n) => format!("{c} (did you mean `{n}`?)"),
+            None => c.to_string(),
+        })
+        .collect();
+    format!("; closest: {name}, missing {}", hints.join(", "))
+}
+
+/// How every missing-column error starts.
+const NEEDS: &str = "needs column(s) ";
+
 /// Row access by contract column name.
 struct Table<'a> {
     rows: &'a [Row],
+    /// Producer columns read as contract columns: (original, contract).
+    renamed: &'a [(String, String)],
 }
 
 impl Table<'_> {
@@ -490,23 +577,51 @@ impl Table<'_> {
             .iter()
             .any(|r| r.get(k).is_some_and(|v| !v.is_null()))
     }
+    /// The columns as given (a renamed one as `coef → estimate`).
     fn keys(&self) -> String {
         self.rows
             .first()
-            .map(|r| r.keys().cloned().collect::<Vec<_>>().join(", "))
+            .map(|r| {
+                r.keys()
+                    .map(|k| match self.renamed.iter().find(|(_, c)| c == k) {
+                        Some((o, c)) => format!("{o} → {c}"),
+                        None => k.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default()
     }
+    /// The required `cols`, else an error naming what is missing, the
+    /// present column it may be misspelled as and the other accepted names.
     fn need(&self, cols: &[&str]) -> Result<(), String> {
         let missing: Vec<&str> = cols.iter().copied().filter(|c| !self.has(c)).collect();
         if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "needs column(s) {} (got: {})",
-                missing.join(", "),
-                self.keys()
-            ))
+            return Ok(());
         }
+        let keys: Vec<&str> = self
+            .rows
+            .first()
+            .map(|r| r.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let hints: Vec<String> = missing
+            .iter()
+            .filter_map(|m| match (names::near(m, &keys), names::also(m)) {
+                (Some(k), _) => Some(format!("did you mean `{k}` for {m}?")),
+                (None, Some(a)) => Some(format!("{m} is also read from {a}")),
+                (None, None) => None,
+            })
+            .collect();
+        Err(format!(
+            "{NEEDS}{} (got: {}){}",
+            missing.join(", "),
+            self.keys(),
+            if hints.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", hints.join("; "))
+            }
+        ))
     }
     /// Numbers (DuckDB writes DECIMAL as a string; booleans count 0/1).
     fn num(&self, k: &str) -> Result<Vec<Value>, String> {
@@ -524,6 +639,10 @@ impl Table<'_> {
                     Err(_) => Err(format!("column `{k}` must be numeric, got '{s}'")),
                 },
                 Some(J::Bool(b)) => Ok(Value::Float(*b as u8 as f64)),
+                Some(J::Array(_)) => Err(format!(
+                    "column `{k}` must be numeric, got a list — take one element ({k}[1]) or \
+                     unnest it"
+                )),
                 Some(other) => Err(format!("column `{k}` must be numeric, got {other}")),
             })
             .collect()
@@ -1072,6 +1191,96 @@ mod tests {
         )
         .unwrap();
         assert!(!svg.contains("faded"));
+    }
+
+    #[test]
+    fn producer_spellings_plot() {
+        // A raw statsmodels coefficient table (summary2().tables[1]).
+        let sm = r#"[{"term":"x1","Coef.":0.5,"Std.Err.":0.1,"t":5.0,"P>|t|":0.001,"[0.025":0.3,"0.975]":0.7},
+            {"term":"x2","Coef.":-0.3,"Std.Err.":0.2,"t":-1.5,"P>|t|":0.2,"[0.025":-0.7,"0.975]":0.1}]"#;
+        let svg = go("terms", sm, "{}").unwrap();
+        assert!(svg.contains("x2: -0.3 [-0.7, 0.1] · n.s."), "interval read");
+        assert_eq!(detect(&rows(sm)).ok(), None, "detect sees raw names");
+        assert!(go("auto", sm, "{}")
+            .unwrap()
+            .contains("faded = interval crosses 0"));
+        // broom::augment → diagnostics.
+        let aug = r#"[{".fitted":1,".resid":0.2,".hat":0.1,".cooksd":0.01},
+            {".fitted":2,".resid":-0.1,".hat":0.2,".cooksd":0.02},
+            {".fitted":3,".resid":0.0,".hat":0.3,".cooksd":0.03}]"#;
+        assert!(go("auto", aug, "{}")
+            .unwrap()
+            .contains("Residuals vs leverage"));
+        // A test table from pingouin.
+        let pg = r#"[{"Contrast":"g","A":"a","B":"b","T":2.1,"p-unc":0.04}]"#;
+        assert!(go("auto", pg, "{}").unwrap().contains("p = 0.04"));
+    }
+
+    #[test]
+    fn missing_columns_are_explained() {
+        // Misnamed: the near miss is suggested.
+        let e = go("terms", r#"[{"term":"a","estimat":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs column(s) estimate"), "{e}");
+        assert!(e.contains("did you mean `estimat` for estimate?"), "{e}");
+        // Missing: the accepted spellings are named.
+        let e = go("terms", r#"[{"term":"a","beta":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("estimate is also read from coef, params"), "{e}");
+        // A renamed column shows as such among the columns got.
+        let e = go("diagnostics", r#"[{".fitted":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("got: .fitted → fitted"), "{e}");
+        assert!(e.contains("residual is also read from resid"), "{e}");
+        // A table of another schema: the one it follows is named.
+        let e = go("terms", r#"[{"ds":"2024-01-01","yhat":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("the columns follow the prediction schema (anofox_plot_prediction)"),
+            "{e}"
+        );
+        // anofox_plot: the detected schema, else the closest one.
+        let e = go("auto", r#"[{"curve_type":"roc","x":0}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("detected the curve schema") && e.contains("needs column(s) y"),
+            "{e}"
+        );
+        let e = go("auto", r#"[{"term":"a","estimat":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("closest: terms, missing estimate (did you mean `estimat`?)"),
+            "{e}"
+        );
+        let e = go("auto", r#"[{"a":1}]"#, "{}").unwrap_err().to_string();
+        assert!(!e.contains("closest"), "{e}");
+        // A list where a number belongs.
+        let e = go("terms", r#"[{"term":"a","estimate":[1,2]}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("got a list"), "{e}");
+    }
+
+    #[test]
+    fn docs_alias_table_is_in_sync() {
+        let doc = include_str!("../docs/DOCS.md");
+        let start = "<!-- contract-aliases:start -->\n";
+        let a = doc.find(start).expect("start marker") + start.len();
+        let b = doc
+            .find("<!-- contract-aliases:end -->")
+            .expect("end marker");
+        let want = names::markdown_table();
+        assert_eq!(
+            &doc[a..b],
+            want,
+            "docs/DOCS.md contract alias table is stale — replace it with:\n{want}"
+        );
     }
 
     #[test]

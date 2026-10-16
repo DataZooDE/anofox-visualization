@@ -62,7 +62,7 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
 
-Errors are SQL errors naming the problem (missing column, unknown `kind`, mixed `curve_type`, the contract version); no rows give a "No data" SVG. Tests naming groups that are not in the rows of `anofox_plot_compare` are skipped and reported on the SVG root (`data-warnings`).
+Errors are SQL errors naming the problem (missing column, unknown `kind`, mixed `curve_type`, the contract version); no rows give a "No data" SVG. A missing-column error lists the columns it got, then either the near miss ("did you mean \`estimat\` for estimate?") or the other names the column accepts ("estimate is also read from coef, params, coefficient"); for a table of another schema it adds "the columns follow the prediction schema (anofox_plot_prediction)". `anofox_plot(t)` names the schema it detected ("detected the curve schema"), and when none matches, the closest one and what it misses ("closest: terms, missing estimate"). Tests naming groups that are not in the rows of `anofox_plot_compare` are skipped and reported on the SVG root (`data-warnings`).
 
 ## Without anofox_statistics: contract-shaped tables
 
@@ -86,6 +86,26 @@ FROM (VALUES ('b-a', 'a', 'b', 1.2, 0.4, 2.0, 0.003), ('c-a', 'a', 'c', 0.3, -0.
      t(test_id, group1, group2, estimate, conf_low, conf_high, p_adj);
 
 SELECT anofox_contract_version();   -- '1'
+```
+
+**Other producers' column names are read as contract columns**, so raw statsmodels / R / broom / pingouin tables plot without renaming. Names compare with case, `.`, spaces and symbols ignored (`Std. Error` = `std.error` = `std_error`, broom's `.fitted` = `fitted`), plus these spellings (the first present wins; a column the contract name already has, or one an option names, is left alone; `anofox_plot_compare` reads its rows as given):
+
+| Contract column | Also read from |
+|---|---|
+| `estimate` | `coef`, `params`, `coefficient` |
+| `std_error` | `std_err`, `bse`, `std_errors`, `se` |
+| `statistic` | `t`, `z`, `tvalues`, `zvalues`, `t value`, `z value`, `t_stat` |
+| `p_value` | `P>\|t\|`, `P>\|z\|`, `Pr(>\|t\|)`, `Pr(>\|z\|)`, `p-val`, `p-unc`, `pvalues`, `pval`, `p` |
+| `p_adj` | `p-corr`, `padj`, `p_adjusted` |
+| `conf_low` / `conf_high` | `[0.025` / `0.975]` (any level), `ci_lower` / `ci_upper`, `lower` / `upper`, `mean_ci_lower` / `mean_ci_upper`, `conf_lower` / `conf_upper` |
+| `fitted`, `residual`, `std_residual` | `fittedvalues`; `resid`, `residuals`; `std_resid`, `standard_resid` |
+| `leverage`, `cooks_d` | `hat`, `hat_diag`; `cooksd`, `cooks_distance`, `cook_d` |
+
+In a table with `yhat`, the interval columns (`lower` / `upper`, `mean_ci_*`, `ci_*`, `conf_*`, `[0.025` / `0.975]`) become `yhat_lower` / `yhat_upper`. A statsmodels coefficient frame still needs its index as `term`:
+
+```python
+tbl = res.summary2().tables[1].reset_index(names="term")   # Coef., Std.Err., t, P>|t|, [0.025, 0.975]
+duckdb.sql("SELECT anofox_plot_terms(t) FROM tbl t")
 ```
 
 ## Producer → macro (anofox-statistics v0.11, anofox-forecast)

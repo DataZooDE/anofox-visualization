@@ -68,6 +68,16 @@ if (existsSync(pkg) && existsSync(wasm)) {
   const svg = m.render_contract("anofox_plot_terms", rows, "{}", 600, 340, "");
   assert.match(svg, /^<svg/);
   assert.ok(svg.includes("promo"));
+  // Producer spellings (statsmodels) are read as contract columns.
+  const sm = JSON.stringify([
+    { term: "price", "Coef.": -17.5, "P>|t|": 0.001, "[0.025": -19.2, "0.975]": -15.9 },
+    { term: "promo", "Coef.": 14.3, "P>|t|": 0.002, "[0.025": 12.1, "0.975]": 16.4 },
+  ]);
+  const smSvg = m.render_contract("anofox_plot_terms", sm, "{}", 600, 340, "");
+  assert.ok(smSvg.includes("promo: 14.3 [12.1, 16.4]"), smSvg.slice(0, 400));
+  // A misnamed column: the error SVG suggests it.
+  const bad = JSON.stringify([{ term: "a", estimat: 1 }]);
+  assert.match(m.render_contract("anofox_plot_terms", bad, "{}", 600, 340, ""), /did you mean/);
   // A macro the build doesn't know yet → a note, not an error.
   assert.match(m.render_contract("anofox_plot_wibble", "[]", "{}", 600, 340, ""), /next anofox-visualization release/);
   // Bad input → an error SVG (never a throw).
