@@ -487,6 +487,28 @@ where
             ));
         }
 
+        // Waterfall / bullet / funnel rows are named by their ::XAXIS (step,
+        // category, stage); without it the panel only shows a note.
+        if let Some(k @ (Kind::Waterfall | Kind::Bullet | Kind::Funnel)) = chart_kind(&p.roles) {
+            if role_index(&p.roles, Role::X).is_none() {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "chart/needs-xaxis",
+                    message: format!(
+                        "::{} needs an ::XAXIS column naming each {}.",
+                        Role::Value(k).token(),
+                        match k {
+                            Kind::Waterfall => "step",
+                            Kind::Bullet => "row",
+                            _ => "stage",
+                        }
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
+
         // ---- design: per-panel advisory checks (see docs/dashboard-design.md) ----
         if opts.design {
             // Count content panels (charts/tables/markdown) toward the
@@ -918,6 +940,9 @@ fn is_big_chart(k: Kind) -> bool {
             | Kind::Density
             | Kind::Heatmap
             | Kind::Radar
+            | Kind::Waterfall
+            | Kind::Bullet
+            | Kind::Funnel
     )
 }
 
@@ -1160,6 +1185,16 @@ mod design_tests {
             ],
         );
         assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{d:?}");
+    }
+
+    #[test]
+    fn variance_charts_need_an_xaxis() {
+        let data = rows(3, |i| json!({ "c0": i as f64 }));
+        let d = lint_one("SELECT v::WATERFALL, 'Bridge'::TITLE FROM t;", data);
+        assert!(has(&d, "chart/needs-xaxis"), "{d:?}");
+        let data = rows(3, |i| json!({ "c0": format!("s{i}"), "c1": i as f64 }));
+        let d = lint_one("SELECT s::XAXIS, v::FUNNEL, 'Funnel'::TITLE FROM t;", data);
+        assert!(!has(&d, "chart/needs-xaxis"), "{d:?}");
     }
 
     #[test]

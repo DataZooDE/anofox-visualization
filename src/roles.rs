@@ -118,6 +118,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "value as an arc toward ::RANGE 'min,max' (zones: ::COLORS, ::LABELS)"),
     e("RADAR", &["SPIDER"], R::Value(Kind::Radar), "chart", true,
       "radar / spider chart — axes from XAXIS, one polygon per CATEGORY"),
+    e("WATERFALL", &["BRIDGE"], R::Value(Kind::Waterfall), "chart", true,
+      "bridge from a start total through signed steps (NULL / ::CATEGORY 'total' rows = totals)"),
+    e("BULLET", &["BULLETCHART"], R::Value(Kind::Bullet), "chart", true,
+      "measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100'"),
+    e("FUNNEL", &["FUNNELCHART"], R::Value(Kind::Funnel), "chart", true,
+      "ordered XAXIS stages, widths by value, conversion % from the previous stage"),
     e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure"),
     e("DENSITY", &["KDE"], R::Value(Kind::Density), "chart", true,
       "kernel density curve (one per CATEGORY)"),
@@ -140,7 +146,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "grey WKT backdrop layer under a ::MAP"),
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
-      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar"),
+      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick"),
     e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
@@ -174,7 +180,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
-    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100)"),
+    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
       "gauge zone colours, comma-separated hex"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
@@ -594,6 +600,9 @@ mod tests {
             K::Candlestick,
             K::Radar,
             K::Bubble,
+            K::Waterfall,
+            K::Bullet,
+            K::Funnel,
         ];
         let mut v: Vec<Role> = kinds.into_iter().map(Role::Value).collect();
         v.extend(

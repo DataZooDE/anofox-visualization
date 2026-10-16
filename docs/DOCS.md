@@ -60,6 +60,9 @@ terminal.
 | `::DONUTCHART` | `::DONUT`, `::DONUTCHART_PERCENT` | chart | donut (pie with a hole) |
 | `::GAUGE` | `::GAUGE_PERCENT` | chart | value as an arc toward ::RANGE 'min,max' (zones: ::COLORS, ::LABELS) |
 | `::RADAR` | `::SPIDER` | chart | radar / spider chart — axes from XAXIS, one polygon per CATEGORY |
+| `::WATERFALL` | `::BRIDGE` | chart | bridge from a start total through signed steps (NULL / ::CATEGORY 'total' rows = totals) |
+| `::BULLET` | `::BULLETCHART` | chart | measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100' |
+| `::FUNNEL` | `::FUNNELCHART` | chart | ordered XAXIS stages, widths by value, conversion % from the previous stage |
 | `::HISTOGRAM` | `::HIST` | chart | histogram of the measure |
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
@@ -71,7 +74,7 @@ terminal.
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
-| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar |
+| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
 | `::XLINE` |  | annotation | vertical reference line at an x |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line |
@@ -89,7 +92,7 @@ terminal.
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
-| `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100) |
+| `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
@@ -579,6 +582,55 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
 - `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
   tooltips.
+
+### Waterfall, bullet and funnel
+
+The classic variance views. All three are drawn from plain bars, segments and
+text, so headless SVG / PDF exports match the browser, and every bar carries the
+usual hover metadata (`data-x`, `data-series`, `data-value`; the series is the
+row's own `::XAXIS` value): tooltips show the formatted value, and a click
+anywhere on a step / row / stage cross-filters — `getvariable('selected')` (or
+the `::SELECT_AS` name) is its `::XAXIS` value.
+
+```sql
+-- A bridge: the first row is the start total, the others signed steps.
+SELECT step::XAXIS, eur::WATERFALL, '€'::YFORMAT, 'Volume beat budget'::TITLE
+FROM bridge ORDER BY i;
+
+-- Measure vs goal over qualitative bands, one horizontal row per category.
+SELECT region::XAXIS, attained::BULLET, goal::GOAL, '60,85,110'::RANGE,
+       'Two regions short of target'::TITLE
+FROM attainment ORDER BY i;
+
+-- Conversion stages, first on top.
+SELECT stage::XAXIS, n::FUNNEL, 'A quarter of sign-ups never start a trial'::TITLE
+FROM funnel ORDER BY i;
+```
+
+- **`::WATERFALL`** (alias `::BRIDGE`): rows in SQL order. The first row is the
+  **start total** (a full bar from 0), every further row a **signed step**
+  floating from the running total — increases in the theme's `positive`
+  colour, decreases in `negative`, totals in the brand colour. A row whose value
+  is **NULL** is a subtotal (the running total so far); a row whose
+  `::CATEGORY` is `'total'` / `'subtotal'` is a total at its own value (e.g. the
+  booked actual). Unless the last row is a total, the bridge closes with an
+  **End** bar. Thin connectors carry the level from bar to bar; every bar is
+  labelled (steps signed, `::YFORMAT` short form). `data-value` is the step's
+  own change (a total's level).
+- **`::BULLET`** (alias `::BULLETCHART`): one horizontal row per `::XAXIS`
+  value, first row on top. `::GOAL` (an alias of `::REFLINE`) is each row's
+  target, drawn as a strong tick across the bar; its tooltip reads
+  `Goal 85%`, a band's `Range 60 – 85` (only the measure carries a value).
+  `::RANGE` holds the qualitative band edges, ascending — `'60,85,110'` gives
+  three graded washes 0–60, 60–85, 85–110; one value applies to every row, a
+  per-row column gives each row its own bands. Without `::RANGE` the bullet is
+  a bar with a goal tick.
+- **`::FUNNEL`** (alias `::FUNNELCHART`): stages in SQL order, first on top,
+  each bar centred with its width by value. The label beside each bar is the
+  value and the conversion from the previous stage (`6,200 · 13%`). Negative
+  values are skipped; the value axis is hidden (widths read relative to the
+  first stage).
+- Each needs an `::XAXIS` — `--check` reports `chart/needs-xaxis` otherwise.
 
 ### Formatted tooltips
 

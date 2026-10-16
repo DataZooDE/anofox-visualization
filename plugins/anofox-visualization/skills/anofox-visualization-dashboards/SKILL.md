@@ -60,7 +60,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 
 | Group | Roles (aliases in brackets) |
 |---|---|
-| Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) |
+| Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::WATERFALL` `::BULLET` `::FUNNEL` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) |
 | Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble) · `::OPEN` `::HIGH` `::LOW` (candles) |
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` · `::BAND_LOWER` + `::BAND_UPPER` · `::MARKAREA` · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
@@ -294,7 +294,9 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | a distribution | `::HISTOGRAM`, or `::BOXPLOT` / `::VIOLIN` by a category |
 | two numbers | `::SCATTER` (third as `::BUBBLE` / `::SIZE`) |
 | two categories + a measure | `::HEATMAP` |
-| progress toward a goal | `::GAUGE` + `::RANGE` |
+| progress toward a goal | `::GAUGE` + `::RANGE`; several rows vs their targets → `::BULLET` + `::GOAL` + `::RANGE 'poor,ok,good edges'` |
+| how a total moved (budget → actual, last year → this year) | `::WATERFALL`: first row = start, then signed steps (NULL row = subtotal) |
+| conversion through ordered stages | `::FUNNEL` (stages in SQL order, first on top) |
 | geography (WKT) | `::MAP` |
 | row-level detail | `::TABLE` (`::PAGED` if large / remote); flag / rank with `::FLAG` / `::HIGHLIGHT`, not colour alone |
 

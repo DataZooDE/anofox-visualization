@@ -38,6 +38,7 @@ mod smooth;
 pub mod sql;
 pub mod table;
 pub mod theme;
+mod variance;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -98,6 +99,14 @@ pub enum Kind {
     /// chart measure (`y::SCATTER, pop::BUBBLE`) it is that chart's size.
     /// Resolved before rendering (never reaches a geom).
     Bubble,
+    /// A bridge from a start total to an end total through signed steps
+    /// (`::WATERFALL`).
+    Waterfall,
+    /// A measure against a `::GOAL` over `::RANGE` bands, one row per
+    /// category (`::BULLET`).
+    Bullet,
+    /// Ordered conversion stages, widths by value (`::FUNNEL`).
+    Funnel,
 }
 
 impl Kind {
@@ -118,6 +127,9 @@ impl Kind {
                 | Kind::Candlestick
                 | Kind::Radar
                 | Kind::Sparkline
+                | Kind::Waterfall
+                | Kind::Bullet
+                | Kind::Funnel
         )
     }
 }
@@ -1434,6 +1446,15 @@ fn render_inner(
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, width, height),
+        Kind::Waterfall => {
+            return variance::render_waterfall(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Bullet => {
+            return variance::render_bullet(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Funnel => {
+            return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
         _ => {}
     }
     render_cartesian(o, kind, value, cols, title, width, height)
@@ -2217,7 +2238,10 @@ fn cartesian(
         | Kind::Calendar
         | Kind::Candlestick
         | Kind::Radar
-        | Kind::Sparkline => {
+        | Kind::Sparkline
+        | Kind::Waterfall
+        | Kind::Bullet
+        | Kind::Funnel => {
             unreachable!("handled above")
         }
     };
