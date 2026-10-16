@@ -1,0 +1,11 @@
+# docker build -f deploy/Dockerfile . — only the sources the build needs.
+**/target
+**/node_modules
+web/pkg
+web/localext
+.git
+.cache
+build
+dist
+*.duckdb
+*.duckdb_extension

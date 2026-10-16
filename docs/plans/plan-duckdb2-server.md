@@ -146,6 +146,26 @@ browser ──POST /api/panel──▶ web tier (locked server)
 Acceptance for B later: rerun L1–L4 against `PanelBackend::Quack` on the same
 hardware; adopt only if p95 is within 1.5× of A and the §6 blockers are closed.
 
+**Results (S5, 2026-10-16).** `scripts/load-test.mjs` implements L1 (cold),
+L2 (hot), L3 (scroll) and L5 (abuse), plus a burst of arrivals on a fresh
+server. It uses the reference dashboard `examples/load-test/dash/ops.sql`,
+which has a `::PAGED` table over 2M rows. The measured numbers, the machine
+and how to rerun them are in
+[`deployment.md` §7](../deployment.md#7-sizing). On a shared 20-thread laptop
+every target above was met: hot panel p95 15 ms, cold dashboard-load p95
+0.69 s with 20 viewers, cache hits 99.8 %, no wasted executions, no errors.
+The exception is RSS under abuse: results in flight sit outside
+`memory_limit`, so cap them with `threads`. L4 waits for the snapshot refresh
+(#21).
+
+The load test found two bugs in the HTTP server (tiny_http 0.12), both now
+fixed in `vendor/tiny_http`:
+
+- its thread pool could leave a new connection waiting until another one
+  closed, which with keep-alive could mean minutes;
+- without `TCP_NODELAY`, every response bigger than one segment waited ~40 ms
+  for a delayed ACK.
+
 ## 6. Blockers for option B ("not yet")
 
 1. **2.0.0 unreleased** (calendar: 2026-10-21, tentative); Quack is 0.x and

@@ -1,0 +1,29 @@
+# Two replicas behind Caddy (deploy/compose.yaml): TLS, basic auth, sticky
+# cookie, active health checks. For production, replace `localhost` with your
+# domain (Caddy then gets a certificate automatically), drop `tls internal`,
+# and replace the demo user (`caddy hash-password`).
+localhost {
+	tls internal
+	basic_auth {
+		# user "viewer", password "demo"
+		viewer $2a$14$WRZy.oQ6EbAgdc.JkbMrNeOFSvnh8nYCZqNWdRkmu8BJF84CkbDH.
+	}
+	reverse_proxy dash1:8080 dash2:8080 {
+		# Keeps a viewer on one replica: its superseded page requests are
+		# cancelled there, and it reuses that replica's cache.
+		lb_policy cookie anofox_replica
+		# A replica that refuses a connection is marked down for 30 s and the
+		# request is retried on another one (passive health check).
+		lb_try_duration 5s
+		fail_duration 30s
+		health_uri /healthz
+		health_interval 5s
+		health_timeout 2s
+		# Proxied requests keep the client's Host (localhost:8443), which the
+		# replicas accept through "hosts": ["localhost"]; health checks would
+		# send the upstream's (dash1:8080) and get 421 without this.
+		health_headers {
+			Host localhost
+		}
+	}
+}

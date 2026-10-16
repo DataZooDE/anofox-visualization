@@ -1,0 +1,42 @@
+# systemd unit for a locked dashboard server (docs/deployment.md).
+#   install -m 755 deploy/run-locked.sh /opt/anofox/run-locked.sh
+#   cp deploy/anofox-dashboards.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now anofox-dashboards
+[Unit]
+Description=anofox-visualization locked dashboards
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/opt/anofox/run-locked.sh /etc/anofox/serve.sql
+Environment=DUCKDB=/opt/anofox/duckdb
+# A dedicated user with read access to the data and the dashboards only.
+DynamicUser=yes
+ReadOnlyPaths=/data /etc/anofox
+# The snapshot (a copy of the attached databases) and spill files go to
+# $TMPDIR: keep it on disk (/tmp is RAM on many systems), private to the unit.
+PrivateTmp=yes
+Environment=TMPDIR=/var/tmp
+Restart=on-failure
+RestartSec=2s
+# Resource limits: keep MemoryMax above memory_limit + cache_mb + ~200 MB.
+MemoryMax=4G
+CPUQuota=400%
+TasksMax=512
+LimitNOFILE=8192
+# Hardening.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
