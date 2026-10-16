@@ -39,7 +39,7 @@ CREATE OR REPLACE MACRO el_rnorm(a, b, c) AS
     sqrt(-2.0 * ln(el_unif(a, b, c || ':u1'))) * cos(2.0 * pi() * el_unif(a, b, c || ':u2'));
 
 -- Six substations: what they serve, base load, the mix of a residential /
--- commercial / EV-charging daily profile, load growth over the 10 weeks, MW per
+-- commercial / EV-charging daily profile, load growth over the 8 weeks, MW per
 -- degree below 14 °C (electric heating) and the firm (N-1) capacity.
 CREATE OR REPLACE TABLE el_sub AS SELECT * FROM (VALUES
   ('Harbour',          'EV truck depot + shore power', 58.0, 0.20, 0.30, 0.50, 0.24, 0.6, 68.0),
