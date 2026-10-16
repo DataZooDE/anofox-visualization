@@ -3152,7 +3152,7 @@ function chartLink(link, el, key, series) {
     rows = JSON.parse(link.rows);
   } catch (_) {}
   const col = (name) => link.roles.find((r) => r[1] === name);
-  const xr = col("XAXIS") || col("DIAGRAM"); // a ::DIAGRAM node's x is its id
+  const xr = col("DIAGRAM") || col("XAXIS"); // a ::DIAGRAM node's x is its id (its ::XAXIS a pin)
   const cr = col("CATEGORY");
   const x = el.getAttribute("data-x") || "";
   const ds = el.getAttribute("data-series");
@@ -4233,14 +4233,16 @@ async function runOnce(fresh = true) {
           if (!JSON.parse(rowsJson).length) {
             fig.appendChild(mkNoData(nextEmpty));
           } else {
-            const ph = boxH || (role(s, "SPARKLINE") ? 90 : 300); // ::HEIGHT, else default
+            // a lone sparkline is a small strip; a ::DIAGRAM's are in its boxes
+            const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM");
+            const ph = boxH || (spark ? 90 : 300); // ::HEIGHT, else default
             const isMap = s.roles.some((r) => r[1] === "MAP");
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
-            const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
+            const rw = isMap || spark ? 460 : Math.max(300, span * 100);
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.

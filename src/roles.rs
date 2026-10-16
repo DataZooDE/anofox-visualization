@@ -90,6 +90,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier)"),
     e("UPSTREAM", &["PARENTS"], R::Upstream, "encoding", true,
       "a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node"),
+    e("LANE", &["SWIMLANE"], R::Lane, "encoding", true,
+      "a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band"),
     e("EDGES", &[], R::Edges, "encoding", true,
       "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status"),
     // ── charts (cast the measure column) ───────────────────────────────────
@@ -779,6 +781,7 @@ mod tests {
             Role::Upstream,
             Role::Edges,
             Role::Direction,
+            Role::Lane,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -883,7 +886,8 @@ mod tests {
                 | Role::Diagram
                 | Role::Upstream
                 | Role::Edges
-                | Role::Direction => {}
+                | Role::Direction
+                | Role::Lane => {}
             }
         }
         v

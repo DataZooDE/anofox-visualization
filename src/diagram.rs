@@ -33,7 +33,14 @@ pub const MAX_EDGES: usize = 300;
 /// The `::DIRECTION` values.
 pub const DIRECTIONS: &[&str] = &["LR", "TB"];
 /// The edge `style` values of `::EDGES`.
-pub const EDGE_STYLES: &[&str] = &["solid", "dashed", "flow", "flow-dots"];
+pub const EDGE_STYLES: &[&str] = &[
+    "solid",
+    "dashed",
+    "flow",
+    "flow-dots",
+    "flow-volume",
+    "flow-dots-volume",
+];
 
 /// Layout direction: layers run left to right or top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,22 +63,26 @@ pub enum EdgeStyle {
     Solid,
     Dashed,
     /// Moving dashes in the browser (`class="dp-flow"`), still dashes in
-    /// static output.
-    Flow,
+    /// static output; `true` = faster the more the edge carries
+    /// (`'flow-volume'`).
+    Flow(bool),
     /// Moving dots (`'flow-dots'`): dots travelling along the edge, still
-    /// dots in static output.
-    Dots,
+    /// dots in static output; `true` = speed by volume (`'flow-dots-volume'`).
+    Dots(bool),
 }
 
 impl EdgeStyle {
-    /// A style word (`solid`, `dashed`, `flow`, `flow-dots`); `None` for an
+    /// A style word (`solid`, `dashed`, `flow`, `flow-dots`, and the
+    /// speed-by-volume `flow-volume`, `flow-dots-volume`); `None` for an
     /// unknown one.
     fn parse(s: &str) -> Option<EdgeStyle> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "" | "solid" => EdgeStyle::Solid,
             "dashed" => EdgeStyle::Dashed,
-            "flow" => EdgeStyle::Flow,
-            "flow-dots" | "dots" => EdgeStyle::Dots,
+            "flow" => EdgeStyle::Flow(false),
+            "flow-volume" => EdgeStyle::Flow(true),
+            "flow-dots" | "dots" => EdgeStyle::Dots(false),
+            "flow-dots-volume" | "dots-volume" => EdgeStyle::Dots(true),
             _ => return None,
         })
     }
@@ -90,6 +101,12 @@ pub struct Node {
     pub category: Option<usize>,
     /// The node's `::STORY` caption: a story step that lights it up.
     pub story: Option<String>,
+    /// The node's swimlane (`::LANE`), an index into [`Diagram::lanes`].
+    pub lane: Option<usize>,
+    /// A pinned layer (`::XAXIS`) and, with `::YAXIS`, a pinned position.
+    pub pin: (Option<f64>, Option<f64>),
+    /// A mini trend in the box (`list(v)::SPARKLINE`).
+    pub spark: Vec<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +133,10 @@ pub struct Diagram {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub dir: Dir,
+    /// Swimlane names (`::LANE`), in first-appearance order.
+    pub lanes: Vec<String>,
+    /// Every node has `::XAXIS` and `::YAXIS`: drawn where it is placed.
+    pub explicit: bool,
     /// The `::ANIMATE` mode, when it is one the browser plays.
     pub animate: Option<String>,
     /// `'tween'::TRANSITION`: a re-run changes widths, colours and values in place.
@@ -127,15 +148,22 @@ pub struct Diagram {
 }
 
 /// A cell as an id: text, or a number written without a trailing `.0`.
+/// Text as an SVG may carry it: trimmed, without the control characters XML
+/// forbids (a stray NUL in a name would break the whole document).
+fn clean(s: &str) -> String {
+    s.trim()
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        .collect()
+}
+
 fn id_of(v: &Value) -> Option<String> {
-    key_text(v)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    key_text(v).map(|s| clean(&s)).filter(|s| !s.is_empty())
 }
 
 fn json_id(v: &J) -> Option<String> {
     match v {
-        J::String(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+        J::String(s) => Some(clean(s)).filter(|s| !s.is_empty()),
         J::Number(n) => n.as_f64().map(|f| f.to_string()),
         J::Bool(b) => Some(b.to_string()),
         _ => None,
@@ -153,8 +181,8 @@ fn num(v: &Value) -> Option<f64> {
 fn text(v: &Value) -> Option<String> {
     match v {
         Value::Na => None,
-        Value::Str(s) => Some(s.trim().to_string()),
-        v => key_text(v),
+        Value::Str(s) => Some(clean(s)),
+        v => key_text(v).map(|s| clean(&s)),
     }
     .filter(|s| !s.is_empty())
 }
@@ -174,11 +202,11 @@ fn upstream_ids(v: &Value) -> Vec<String> {
             .trim_start_matches('[')
             .trim_end_matches(']')
             .split(',')
-            .map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
+            .map(|p| clean(p.trim().trim_matches(|c| c == '\'' || c == '"')))
             .filter(|p| !p.is_empty())
             .collect();
     }
-    Some(t.to_string())
+    Some(clean(t))
         .filter(|t| !t.is_empty())
         .into_iter()
         .collect()
@@ -208,6 +236,9 @@ impl Diagram {
         let edges_col = col(Role::Edges);
         let story = col(Role::Story);
         let line_style = col(Role::LineStyle);
+        let lane_col = col(Role::Lane);
+        let (xcol, ycol) = (col(Role::X), col(Role::Y));
+        let spark_col = col(Role::Value(crate::Kind::Sparkline));
         let first_text = |r: Role| col(r).and_then(|c| c.values.iter().find_map(text));
         let mut problems = Vec::new();
         let mut problem = |code, message: String| problems.push(Problem { code, message });
@@ -236,6 +267,8 @@ impl Diagram {
         let mut nodes: Vec<Node> = Vec::new();
         let mut rows: Vec<usize> = Vec::new(); // node → its row
         let mut cats: Vec<String> = Vec::new();
+        let mut lanes: Vec<String> = Vec::new();
+        let mut bad_pins = 0usize;
         let (mut nulls, mut dups) = (0usize, Vec::new());
         for (i, v) in idc.values.iter().enumerate() {
             let Some(id) = id_of(v) else {
@@ -269,6 +302,25 @@ impl Diagram {
                 status,
                 category,
                 story: cell(story).and_then(text),
+                lane: cell(lane_col).and_then(text).map(|k| {
+                    lanes.iter().position(|c| *c == k).unwrap_or_else(|| {
+                        lanes.push(k);
+                        lanes.len() - 1
+                    })
+                }),
+                pin: {
+                    let mut pin = |c: Option<&'a Column>| match cell(c) {
+                        None | Some(Value::Na) => None,
+                        Some(v) => num(v).or_else(|| {
+                            bad_pins += 1;
+                            None
+                        }),
+                    };
+                    (pin(xcol), pin(ycol))
+                },
+                spark: cell(spark_col)
+                    .map(crate::kpi::spark_values)
+                    .unwrap_or_default(),
             });
             rows.push(i);
         }
@@ -284,6 +336,27 @@ impl Diagram {
                 format!(
                     "node id(s) {} appear more than once — the first row is drawn",
                     quoted(&dups)
+                ),
+            );
+        }
+        if bad_pins > 0 {
+            problem(
+                "diagram/bad-pin",
+                format!("{bad_pins} ::XAXIS / ::YAXIS value(s) are not numbers — those nodes are placed by the layout"),
+            );
+        }
+        // every node pinned in x and y: drawn where placed; some: x pins a layer
+        let pinned_xy = nodes
+            .iter()
+            .filter(|n| n.pin.0.is_some() && n.pin.1.is_some())
+            .count();
+        let explicit = !nodes.is_empty() && pinned_xy == nodes.len();
+        if pinned_xy > 0 && !explicit {
+            problem(
+                "diagram/partial-pins",
+                format!(
+                    "{pinned_xy} of {} nodes have ::XAXIS and ::YAXIS — exact positions need both on every node; ::XAXIS only pins a node's stage",
+                    nodes.len()
                 ),
             );
         }
@@ -476,6 +549,8 @@ impl Diagram {
             nodes,
             edges,
             dir,
+            lanes,
+            explicit,
             animate,
             tween,
             total_nodes,
@@ -625,6 +700,11 @@ const BOX_MAX_W: f64 = 176.0;
 const MARGIN: f64 = 10.0;
 const ARROW: f64 = 7.0;
 const LOOP: f64 = 16.0;
+/// A sparkline's strip in a box.
+const SPARK_H: f64 = 22.0;
+/// Extra space between swimlanes, and a lane's label strip.
+const LANE_GAP: f64 = 22.0;
+const LANE_HEAD: f64 = 16.0;
 
 /// Approximate rendered width of `s` at `px` (proportional sans-serif).
 fn text_w(s: &str, px: f64, bold: bool) -> f64 {
@@ -692,6 +772,10 @@ fn box_of(n: &Node) -> Box_ {
     if let Some(b) = &n.badge {
         w = w.max(text_w(b, BADGE_PX, false) + 22.0);
         h += 20.0;
+    }
+    if n.spark.len() >= 2 {
+        w = w.max(110.0);
+        h += SPARK_H;
     }
     Box_ {
         w: (w + 2.0 * BOX_PAD_X).clamp(BOX_MIN_W, BOX_MAX_W),
@@ -780,6 +864,8 @@ struct Placed {
     edges: Vec<Vec<(f64, f64)>>,
     back: Vec<bool>,
     layers: usize,
+    /// Swimlane bands: (lane, x0, y0, x1, y1) in px.
+    bands: Vec<(usize, f64, f64, f64, f64)>,
 }
 
 struct PNode {
@@ -876,7 +962,115 @@ fn place(want: &[f64], weight: &[f64], gap: &[f64]) -> Vec<f64> {
     out
 }
 
+/// Where a line from a box's centre towards `to` leaves the box: the port of
+/// a straight edge (pinned nodes, edges against the pinned stages).
+fn exit(p: &PNode, to: (f64, f64)) -> (f64, f64) {
+    let (dx, dy) = (to.0 - p.cx, to.1 - p.cy);
+    let sx = if dx != 0.0 {
+        p.w / 2.0 / dx.abs()
+    } else {
+        f64::INFINITY
+    };
+    let sy = if dy != 0.0 {
+        p.h / 2.0 / dy.abs()
+    } else {
+        f64::INFINITY
+    };
+    let k = sx.min(sy);
+    if k.is_finite() {
+        (p.cx + dx * k, p.cy + dy * k)
+    } else {
+        (p.cx, p.cy)
+    }
+}
+
+/// A straight edge between two placed boxes.
+fn straight(pn: &[PNode], u: usize, v: usize) -> Vec<(f64, f64)> {
+    let (a, b) = (&pn[u], &pn[v]);
+    vec![exit(a, (b.cx, b.cy)), exit(b, (a.cx, a.cy))]
+}
+
+/// A self-loop over (LR) or beside (TB) its box.
+fn self_loop(p: &PNode, lr: bool) -> Vec<(f64, f64)> {
+    if lr {
+        let top = p.cy - p.h / 2.0;
+        vec![
+            (p.cx + p.w / 4.0, top),
+            (p.cx + p.w / 4.0, top - LOOP),
+            (p.cx - p.w / 4.0, top - LOOP),
+            (p.cx - p.w / 4.0, top),
+        ]
+    } else {
+        let right = p.cx + p.w / 2.0;
+        vec![
+            (right, p.cy - p.h / 4.0),
+            (right + LOOP, p.cy - p.h / 4.0),
+            (right + LOOP, p.cy + p.h / 4.0),
+            (right, p.cy + p.h / 4.0),
+        ]
+    }
+}
+
+/// Every node pinned (`::XAXIS` + `::YAXIS`): boxes on a grid of the widest
+/// / tallest box, `x` across and `y` down, edges straight.
+fn layout_explicit(d: &Diagram) -> Placed {
+    let boxes: Vec<Box_> = d.nodes.iter().map(box_of).collect();
+    let sx = boxes.iter().map(|b| b.w).fold(0.0, f64::max) + 48.0;
+    let sy = boxes.iter().map(|b| b.h).fold(0.0, f64::max) + 24.0;
+    let pin = |v: usize| {
+        (
+            d.nodes[v].pin.0.unwrap_or(0.0),
+            d.nodes[v].pin.1.unwrap_or(0.0),
+        )
+    };
+    let mut xs: Vec<f64> = (0..d.nodes.len()).map(|v| pin(v).0).collect();
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let reading = ordered(
+        (0..d.nodes.len())
+            .map(|v| (pin(v).0, pin(v).1, v))
+            .collect(),
+    );
+    let mut pn: Vec<PNode> = boxes
+        .into_iter()
+        .enumerate()
+        .map(|(v, b)| PNode {
+            cx: pin(v).0 * sx,
+            cy: pin(v).1 * sy,
+            w: b.w,
+            h: b.h,
+            lines: b.lines,
+            layer: xs.iter().position(|&x| x == pin(v).0).unwrap_or(0),
+            order: 0,
+        })
+        .collect();
+    for (i, &v) in reading.iter().enumerate() {
+        pn[v].order = i;
+    }
+    let edges = d
+        .edges
+        .iter()
+        .map(|e| {
+            if e.from == e.to {
+                self_loop(&pn[e.from], d.dir == Dir::LR)
+            } else {
+                straight(&pn, e.from, e.to)
+            }
+        })
+        .collect();
+    finish(
+        pn,
+        edges,
+        vec![false; d.edges.len()],
+        xs.len().max(1),
+        Vec::new(),
+    )
+}
+
 fn layout(d: &Diagram) -> Placed {
+    if d.explicit {
+        return layout_explicit(d);
+    }
     let n = d.nodes.len();
     let boxes: Vec<Box_> = d.nodes.iter().map(box_of).collect();
     let (dag, loops) = break_cycles(d);
@@ -905,18 +1099,27 @@ fn layout(d: &Diagram) -> Placed {
             indeg[w] -= 1;
         }
     }
+    // a pinned stage (`::XAXIS`) wins over the longest path
+    let pinned = |v: usize| {
+        d.nodes[v]
+            .pin
+            .0
+            .map(|x| x.round().clamp(0.0, 1000.0) as usize)
+    };
+    let any_pin = (0..n).any(|v| pinned(v).is_some());
     let mut rank = vec![0usize; n];
     for &v in &topo {
-        rank[v] = preds[v].iter().map(|&p| rank[p] + 1).max().unwrap_or(0);
+        rank[v] =
+            pinned(v).unwrap_or_else(|| preds[v].iter().map(|&p| rank[p] + 1).max().unwrap_or(0));
     }
     for &v in topo.iter().rev() {
-        if preds[v].is_empty() {
+        if preds[v].is_empty() && pinned(v).is_none() {
             if let Some(m) = succs[v].iter().map(|&s| rank[s]).min() {
                 rank[v] = rank[v].max(m.saturating_sub(1));
             }
         }
     }
-    // drop empty ranks
+    // drop empty ranks (pinned stages keep their numbers)
     let mut used = vec![false; rank.iter().max().map_or(1, |m| m + 1)];
     for &r in &rank {
         used[r] = true;
@@ -925,12 +1128,15 @@ fn layout(d: &Diagram) -> Placed {
     let mut nl = 0;
     for (r, u) in used.iter().enumerate() {
         renumber[r] = nl;
-        nl += usize::from(*u);
+        nl += usize::from(*u || any_pin);
     }
     for r in &mut rank {
         *r = renumber[*r];
     }
     let nl = nl.max(1);
+    // edges the pins make run within or against the stages: drawn straight
+    let (dag, free): (Vec<DagEdge>, Vec<DagEdge>) =
+        dag.into_iter().partition(|&(u, v, _, _)| rank[v] > rank[u]);
 
     // vertices: the nodes, then one dummy per layer an edge passes
     let mut vrank: Vec<usize> = rank.clone();
@@ -957,6 +1163,17 @@ fn layout(d: &Diagram) -> Placed {
     }
     let nv = vrank.len();
     let dummy = |v: usize| v >= n;
+    // a vertex's swimlane (unlaned nodes last; a dummy runs in its source's)
+    let mut vlane: Vec<usize> = (0..n)
+        .map(|v| d.nodes[v].lane.unwrap_or(d.lanes.len()))
+        .collect();
+    vlane.resize(nv, 0);
+    for ch in &chains {
+        for &dm in &ch[1..ch.len() - 1] {
+            vlane[dm] = vlane[ch[0]];
+        }
+    }
+    let laned = !d.lanes.is_empty();
 
     // initial order: DFS from the vertices by (rank, index)
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); nl];
@@ -977,6 +1194,16 @@ fn layout(d: &Diagram) -> Placed {
                     stack.push(w);
                 }
             }
+        }
+    }
+    if laned {
+        for l in &mut layers {
+            *l = ordered(
+                l.iter()
+                    .enumerate()
+                    .map(|(i, &v)| (vlane[v] as f64, i as f64, v))
+                    .collect(),
+            );
         }
     }
     let mut pos = vec![0usize; nv];
@@ -1017,7 +1244,7 @@ fn layout(d: &Diagram) -> Placed {
                     } else {
                         nb[v].iter().map(|&w| pos[w] as f64).sum::<f64>() / nb[v].len() as f64
                     };
-                    (k, pos[v] as f64, v)
+                    (vlane[v] as f64 * 1e6 + k, pos[v] as f64, v)
                 })
                 .collect();
             layers[r] = ordered(keyed);
@@ -1031,6 +1258,9 @@ fn layout(d: &Diagram) -> Placed {
             for layer in layers.iter_mut() {
                 for i in 0..layer.len().saturating_sub(1) {
                     let (a, b) = (layer[i], layer[i + 1]);
+                    if vlane[a] != vlane[b] {
+                        continue;
+                    }
                     let pair = |x: usize, y: usize| -> usize {
                         let c = |l: &[Vec<usize>]| {
                             l[x].iter()
@@ -1069,7 +1299,12 @@ fn layout(d: &Diagram) -> Placed {
             (false, false) => node_gap,
             _ => 12.0,
         };
-        size(a) / 2.0 + g + size(b) / 2.0
+        let lane = if vlane[a] != vlane[b] {
+            LANE_GAP + LANE_HEAD
+        } else {
+            0.0
+        };
+        size(a) / 2.0 + g + lane + size(b) / 2.0
     };
     let mut y = vec![0.0f64; nv];
     for l in &layers {
@@ -1134,6 +1369,40 @@ fn layout(d: &Diagram) -> Placed {
     }
     for r in 0..nl {
         relax(&mut y, r, true, true);
+    }
+    // swimlanes: shift each lane clear of the one before (across all stages)
+    let mut lane_span: Vec<(f64, f64)> = Vec::new();
+    if laned {
+        let nlanes = d.lanes.len() + 1;
+        let span = |y: &[f64], l: usize| {
+            (0..nv)
+                .filter(|&v| vlane[v] == l)
+                .map(|v| (y[v] - size(v) / 2.0, y[v] + size(v) / 2.0))
+                .fold(None, |acc: Option<(f64, f64)>, (a, b)| match acc {
+                    None => Some((a, b)),
+                    Some((x, z)) => Some((x.min(a), z.max(b))),
+                })
+        };
+        let mut floor: Option<f64> = None;
+        for l in 0..nlanes {
+            let Some((lo, _)) = span(&y, l) else {
+                lane_span.push((f64::NAN, f64::NAN));
+                continue;
+            };
+            if let Some(f) = floor {
+                let need = f + LANE_GAP + LANE_HEAD - lo;
+                if need > 0.0 {
+                    for v in 0..nv {
+                        if vlane[v] == l {
+                            y[v] += need;
+                        }
+                    }
+                }
+            }
+            let (lo, hi) = span(&y, l).expect("lane has vertices");
+            lane_span.push((lo, hi));
+            floor = Some(hi);
+        }
     }
 
     // positions along the rank axis: each layer as thick as its widest node
@@ -1222,28 +1491,45 @@ fn layout(d: &Diagram) -> Placed {
         back[k] = rev;
     }
     for k in loops {
-        let v = d.edges[k].from;
-        let p = &pn[v];
-        edge_pts[k] = if lr {
-            let top = p.cy - p.h / 2.0;
-            vec![
-                (p.cx + p.w / 4.0, top),
-                (p.cx + p.w / 4.0, top - LOOP),
-                (p.cx - p.w / 4.0, top - LOOP),
-                (p.cx - p.w / 4.0, top),
-            ]
-        } else {
-            let right = p.cx + p.w / 2.0;
-            vec![
-                (right, p.cy - p.h / 4.0),
-                (right + LOOP, p.cy - p.h / 4.0),
-                (right + LOOP, p.cy + p.h / 4.0),
-                (right, p.cy + p.h / 4.0),
-            ]
-        };
+        edge_pts[k] = self_loop(&pn[d.edges[k].from], lr);
     }
+    for &(u, v, k, rev) in &free {
+        let mut pts = straight(&pn, u, v);
+        if rev {
+            pts.reverse();
+        }
+        edge_pts[k] = pts;
+        back[k] = rev;
+    }
+    // swimlane bands across every stage: the lane's span along the stages'
+    // axis, its label strip before it
+    let total = start_at[nl - 1] + thick[nl - 1];
+    let bands = lane_span
+        .iter()
+        .enumerate()
+        .filter(|(l, (lo, _))| *l < d.lanes.len() && lo.is_finite())
+        .map(|(l, &(lo, hi))| {
+            // the label strip: before the lane (LR), before the stages (TB)
+            let (a, b) = if lr {
+                xy(-12.0, lo - LANE_HEAD - 6.0)
+            } else {
+                xy(-LANE_HEAD - 10.0, lo - 8.0)
+            };
+            let (c, e) = xy(total + 12.0, hi + 8.0);
+            (l, a, b, c, e)
+        })
+        .collect();
+    finish(pn, edge_pts, back, nl, bands)
+}
 
-    // translate to the margin
+/// Move a layout to the margin and round it to half pixels.
+fn finish(
+    mut pn: Vec<PNode>,
+    mut edge_pts: Vec<Vec<(f64, f64)>>,
+    back: Vec<bool>,
+    layers: usize,
+    mut bands: Vec<(usize, f64, f64, f64, f64)>,
+) -> Placed {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for p in &pn {
         x0 = x0.min(p.cx - p.w / 2.0);
@@ -1256,6 +1542,12 @@ fn layout(d: &Diagram) -> Placed {
         x1 = x1.max(px);
         y0 = y0.min(py);
         y1 = y1.max(py);
+    }
+    for &(_, a, b, c, e) in &bands {
+        x0 = x0.min(a.min(c));
+        x1 = x1.max(a.max(c));
+        y0 = y0.min(b.min(e));
+        y1 = y1.max(b.max(e));
     }
     if pn.is_empty() {
         (x0, y0, x1, y1) = (0.0, 0.0, 0.0, 0.0);
@@ -1271,13 +1563,17 @@ fn layout(d: &Diagram) -> Placed {
             *pt = (r(pt.0 + dx), r(pt.1 + dy));
         }
     }
+    for b in &mut bands {
+        *b = (b.0, r(b.1 + dx), r(b.2 + dy), r(b.3 + dx), r(b.4 + dy));
+    }
     Placed {
         w: r(x1 - x0 + 2.0 * MARGIN),
         h: r(y1 - y0 + 2.0 * MARGIN),
         nodes: pn,
         edges: edge_pts,
         back,
-        layers: nl,
+        layers,
+        bands,
     }
 }
 
@@ -1496,6 +1792,27 @@ pub(crate) fn render(
         s
     ));
 
+    // swimlanes (under everything): a tinted band per lane, its name on top
+    if !p.bands.is_empty() {
+        out.push_str("<g class=\"dp-lanes\" aria-hidden=\"true\">");
+        for &(l, x0, y0, x1, y1) in &p.bands {
+            out.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"6\" fill=\"{}\" fill-opacity=\"{}\" data-lane=\"{}\"/><text x=\"{}\" y=\"{}\" font-size=\"11\" font-weight=\"700\" fill=\"{}\">{}</text>",
+                f1(x0),
+                f1(y0),
+                f1(x1 - x0),
+                f1(y1 - y0),
+                hex(t.colors.line),
+                if l % 2 == 0 { "0.35" } else { "0.18" },
+                esc(&d.lanes[l]),
+                f1(x0 + 8.0),
+                f1(y0 + 13.0),
+                hex(t.colors.muted),
+                esc(&d.lanes[l])
+            ));
+        }
+        out.push_str("</g>");
+    }
     // edges (under the nodes)
     let muted = hex(t.colors.muted);
     let card = hex(t.colors.card);
@@ -1508,7 +1825,7 @@ pub(crate) fn render(
             _ => 1.6,
         };
         let width = match e.style {
-            EdgeStyle::Dots => width.clamp(3.0, 6.0),
+            EdgeStyle::Dots(_) => width.clamp(3.0, 6.0),
             _ => width,
         };
         let arrow = ARROW + width;
@@ -1526,14 +1843,22 @@ pub(crate) fn render(
         // health first (warn / bad), else a flowing edge in the brand colour
         let colour = match (e.status, e.style) {
             (Some(st @ (Status::Bad | Status::Warn)), _) => hex(st.color(t)),
-            (_, EdgeStyle::Flow | EdgeStyle::Dots) => hex(t.color(0)),
+            (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => hex(t.color(0)),
             _ => muted.clone(),
         };
         let dash = match e.style {
             EdgeStyle::Solid => "",
             EdgeStyle::Dashed => " stroke-dasharray=\"6 4\"",
-            EdgeStyle::Flow => " stroke-dasharray=\"6 4\" class=\"dp-flow\"",
-            EdgeStyle::Dots => " stroke-dasharray=\"0 10\" class=\"dp-flow dp-dots\"",
+            EdgeStyle::Flow(_) => " stroke-dasharray=\"6 4\" class=\"dp-flow\"",
+            EdgeStyle::Dots(_) => " stroke-dasharray=\"0 10\" class=\"dp-flow dp-dots\"",
+        };
+        // speed by volume: the busiest edge cycles in 0.6 s, a trickle in 2.4 s
+        let speed = match (e.style, e.value) {
+            (EdgeStyle::Flow(true) | EdgeStyle::Dots(true), Some(v)) if vmax > 0.0 => format!(
+                " style=\"animation-duration:{}s\"",
+                f1(2.4 - 1.8 * (v.max(0.0) / vmax).sqrt())
+            ),
+            _ => String::new(),
         };
         let width = f1(width);
         let status = e
@@ -1557,7 +1882,7 @@ pub(crate) fn render(
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{status}{}><title>{}</title></polyline>",
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash}{speed} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{status}{}><title>{}</title></polyline>",
             pts_attr(&pts),
             esc(&a.id),
             esc(&b.id),
@@ -1695,6 +2020,44 @@ pub(crate) fn render(
                 f1(bx + 15.0),
                 f1(by + 12.0),
                 esc(b)
+            ));
+            ty_ += 20.0;
+        }
+        // a mini trend along the bottom of the box
+        if nd.spark.len() >= 2 {
+            let (lo, hi) = nd
+                .spark
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                    (a.min(v), b.max(v))
+                });
+            let rng = if hi > lo { hi - lo } else { 1.0 };
+            let (sx0, sw) = (x + BOX_PAD_X, pn.w - 2.0 * BOX_PAD_X);
+            let (top, sh) = (ty_ - 8.0, SPARK_H - 8.0);
+            let last = nd.spark.len() - 1;
+            let pt = |i: usize, v: f64| {
+                (
+                    sx0 + sw * i as f64 / last as f64,
+                    top + sh - (v - lo) / rng * sh,
+                )
+            };
+            let pts: Vec<(f64, f64)> = nd
+                .spark
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| pt(i, v))
+                .collect();
+            let col = nd
+                .status
+                .filter(|s| *s == Status::Bad || *s == Status::Warn)
+                .map(|s| s.color(t))
+                .unwrap_or_else(|| t.color(0));
+            out.push_str(&format!(
+                "<polyline class=\"dp-node-spark\" points=\"{}\" fill=\"none\" stroke=\"{c}\" stroke-width=\"1.4\" stroke-linejoin=\"round\"/><circle cx=\"{}\" cy=\"{}\" r=\"2.2\" fill=\"{c}\"/>",
+                pts_attr(&pts),
+                f1(pts[last].0),
+                f1(pts[last].1),
+                c = hex(col)
             ));
         }
         out.push_str("</g>");
@@ -1836,7 +2199,7 @@ mod tests {
         let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
         assert_eq!(d.edges.len(), 8, "merged by (from, to)");
         let e = &d.edges[0];
-        assert_eq!((e.from, e.to, e.style), (0, 1, EdgeStyle::Flow));
+        assert_eq!((e.from, e.to, e.style), (0, 1, EdgeStyle::Flow(false)));
         assert_eq!(e.label.as_deref(), Some("9.8K records"));
         let codes: Vec<&str> = d.problems.iter().map(|p| p.code).collect();
         assert_eq!(codes, ["diagram/bad-edges", "diagram/unknown-node"]);
@@ -2109,7 +2472,7 @@ mod tests {
         };
         assert_eq!(
             style("ingest", "build"),
-            EdgeStyle::Dots,
+            EdgeStyle::Dots(false),
             "the row's ::LINESTYLE"
         );
         assert_eq!(
@@ -2179,6 +2542,103 @@ mod tests {
         assert!(edge("monitor&gt;calibrate").contains(r#"stroke-width="1.6""#));
         let root = &svg[..svg.find('>').unwrap()];
         assert!(root.contains(r#"data-transition="tween""#) && root.contains(" data-fit=\""));
+    }
+
+    /// M3: swimlanes keep each lane's nodes in one band (bands do not
+    /// overlap), `::XAXIS` pins a stage, `::XAXIS` + `::YAXIS` on every node
+    /// places it, a sparkline sits in its box, `'flow-volume'` speeds up with
+    /// the value.
+    #[test]
+    fn lanes_pins_sparklines_and_speed() {
+        let lane = |v: &[&str]| v.iter().map(|x| s(x)).collect();
+        let mut cols = pipeline();
+        cols.push(Column::new(
+            "c5",
+            Role::Lane,
+            lane(&["Data", "Twin", "Twin", "Twin", "Twin", "Stores", "Twin"]),
+        ));
+        cols.push(Column::new(
+            "c6",
+            Role::Value(Kind::Sparkline),
+            vec![
+                s("[1,3,2,5]"),
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+            ],
+        ));
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert_eq!(d.lanes, ["Data", "Twin", "Stores"]);
+        let p = layout(&d);
+        assert_eq!(p.bands.len(), 3);
+        for w in p.bands.windows(2) {
+            assert!(w[0].4 <= w[1].2, "bands overlap: {:?}", p.bands);
+        }
+        for (v, nd) in d.nodes.iter().enumerate() {
+            let (_, _, y0, _, y1) = p.bands[nd.lane.unwrap()];
+            assert!(
+                p.nodes[v].cy > y0 && p.nodes[v].cy < y1,
+                "{} outside its lane",
+                nd.id
+            );
+        }
+        let svg = render_with(&cols, 900, 500, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        assert!(svg.contains(r#"data-lane="Stores""#) && svg.contains(r#"class="dp-node-spark""#));
+
+        // ::XAXIS pins a stage: `step` forced to stage 4, an empty stage kept
+        let mut cols = pipeline();
+        let x = |v: usize| if v == 2 { Value::Float(4.0) } else { Value::Na };
+        cols.push(Column::new("c7", Role::X, (0..7).map(x).collect()));
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        let p = layout(&d);
+        assert_eq!(p.nodes[2].layer, 4);
+        assert!(d.problems.is_empty(), "{:?}", d.problems);
+
+        // ::XAXIS + ::YAXIS everywhere: drawn where placed, edges straight
+        let xy = |v: &[f64]| v.iter().map(|&f| Value::Float(f)).collect();
+        let cols = vec![
+            Column::new("c0", Role::Diagram, lane(&["a", "b", "c"])),
+            Column::new("c1", Role::X, xy(&[0.0, 2.0, 1.0])),
+            Column::new("c2", Role::Y, xy(&[0.0, 0.0, 1.0])),
+            Column::new("c3", Role::Upstream, vec![Value::Na, s("a"), s("a")]),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.explicit);
+        let p = layout(&d);
+        assert!(p.nodes[0].cx < p.nodes[2].cx && p.nodes[2].cx < p.nodes[1].cx);
+        assert!(p.nodes[0].cy == p.nodes[1].cy && p.nodes[2].cy > p.nodes[0].cy);
+        assert!(p.edges.iter().all(|e| e.len() == 2));
+        // some nodes pinned in x and y: a note, laid out by stages
+        let mut cols = cols;
+        cols[2].values[2] = Value::Na;
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(!d.explicit && d.problems.iter().any(|p| p.code == "diagram/partial-pins"));
+
+        // speed by volume
+        let mut cols = pipeline();
+        cols.push(Column::new(
+            "c8",
+            Role::Edges,
+            vec![
+                s(
+                    r#"[{"from":"ingest","to":"build","value":100,"style":"flow-volume"},
+                      {"from":"build","to":"step","value":1,"style":"flow-dots-volume"}]"#,
+                ),
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+            ],
+        ));
+        let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"style="animation-duration:0.6s" data-edge="ingest&gt;build""#));
+        assert!(svg.contains(r#"style="animation-duration:2.2s" data-edge="build&gt;step""#));
     }
 
     #[test]

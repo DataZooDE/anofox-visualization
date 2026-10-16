@@ -45,6 +45,7 @@ terminal.
 | `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
 | `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
 | `::UPSTREAM` | `::PARENTS` | encoding | a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node |
+| `::LANE` | `::SWIMLANE` | encoding | a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band |
 | `::EDGES` |  | encoding | a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
@@ -559,6 +560,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
+| `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
 | `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
@@ -979,6 +981,24 @@ FROM run_manifest ORDER BY seq;
   panel (`::HEIGHT` gives a large diagram room). On a phone the panel keeps
   the text readable and scrolls sideways instead. At most 150 nodes and 300
   edges are drawn (the first ones), with a note.
+- **Swimlanes, pins, sparklines.** `::LANE` puts each node into a named
+  band (lanes in first-appearance order; a lane's nodes stay together in
+  every stage, unlaned nodes go last, without a band). `::XAXIS` pins a node to
+  a stage (0, 1, …; the rest are laid out around it, empty stages kept, an
+  edge the pins make run within or against the stages is drawn straight);
+  `::XAXIS` **and** `::YAXIS` on every node place each box on a grid (x across,
+  y down, in box widths / heights; fractions allowed) with straight edges —
+  for a hand-placed explainer; on only some nodes `--check` notes
+  `diagram/partial-pins`. A `list(v ORDER BY t)::SPARKLINE` column draws a
+  mini trend at the bottom of the box (amber / red with the node's status).
+- **Speed by volume.** The styles `'flow-volume'` and `'flow-dots-volume'`
+  move faster the more an edge carries (the busiest edge cycles in 0.6 s, a
+  trickle in 2.4 s; with *reduce motion* nothing moves).
+- **From a contract table.** `anofox_plot_diagram(n, edges := (SELECT list(e)
+  FROM run_edges e))` draws the same diagram from a `graph` table (see
+  *Plotting model output*): `SELECT anofox_plot_diagram(m, edges := (SELECT
+  list(e) FROM run_edges e), mainstat := 'records_accepted') FROM
+  run_manifest m` reads inventory-rs's run manifest as written.
 - **Interaction.** A node is a mark like a bar: its tooltip shows its label,
   value and status, a click cross-filters (`getvariable('selected')` is the
   node id), `::SELECT_AS` names the selection and a `::LINK` column follows
@@ -1007,7 +1027,8 @@ FROM run_manifest ORDER BY seq;
 - `dashboard --check` reports `diagram/null-id`, `diagram/duplicate-node`,
   `diagram/unknown-node` (an edge to an id that is no row),
   `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction` and
-  `diagram/too-large`. A loop is no problem: it is drawn as an edge running
+  `diagram/too-large`, `diagram/bad-pin` (a non-numeric `::XAXIS` /
+  `::YAXIS`) and `diagram/partial-pins`. A loop is no problem: it is drawn as an edge running
   back and named in the summary.
 
 ### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)

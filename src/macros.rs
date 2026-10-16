@@ -282,6 +282,22 @@ to anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e)).",
         tags: &[("anofox.consumes", "events"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_diagram",
+        params: &["tbl"],
+        named: &[("edges", "NULL"), ("id", "NULL"), ("mainstat", "NULL"), ("format", "NULL"), ("source", "NULL"), ("target", "NULL"), ("value", "NULL"), ("direction", "NULL"), ("style", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "800"), ("height", "400")],
+        body: contract_body!("diagram", "'edges', edges, 'id', id, 'mainstat', mainstat, 'format', format, 'source', source, 'target', target, 'value', value, 'direction', direction, 'style', style"),
+        description: "A pipeline, lineage or process diagram from a `graph` table (one row per node: id, title, \
+mainstat, status, group, lane, story, x, y, sparkline, seq) and its edges := a LIST of edge STRUCTs (source, \
+target, value, label, style, status) — a subquery (SELECT list(e) FROM edges e). Grafana node-graph names; \
+producer spellings are read too (stage / label / from_stage / to_stage / count, …), or name the columns: \
+id :=, mainstat :=, source :=, target :=, value :=. format := 'compact' (default) | 'money' | \
+'percent' | 'metric' for mainstat; direction := 'LR' | 'TB'; style := the edges' default ('flow', \
+'flow-volume', …). Edges are as wide as their value and coloured by status; loops run back.",
+        example: "SELECT anofox_plot_diagram(n, edges := [{'source': 'a', 'target': 'b', 'value': 3}]) \
+FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
+        tags: &[("anofox.consumes", "graph"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot",
         params: &["tbl"],
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],

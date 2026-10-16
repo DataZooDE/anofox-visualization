@@ -49,3 +49,48 @@ SELECT anofox_render(json_object(
   'width', 800, 'height', 300)) LIKE '<svg%data-story="[{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]"%class="dp-flow dp-dots" data-edge="ingest&gt;build"%';
 ----
 true
+
+# The `graph` contract: anofox_plot_diagram reads a node table and a LIST of
+# edges — Grafana's node-graph names, or inventory-rs's run manifest as
+# written (stage / from_stage / to_stage / count), ordered by seq.
+statement ok
+CREATE TABLE run_manifest AS SELECT * FROM (VALUES
+  ('demo-42', 'stream', 4, 1440, 28),
+  ('demo-42', 'ingest', 1, 9133, 0),
+  ('demo-42', 'build_twin', 2, 12, 0),
+  ('demo-42', 'calibrate', 3, 1440, 0)
+) t(run_id, stage, seq, records_in, alarms);
+
+statement ok
+CREATE TABLE run_edges AS SELECT * FROM (VALUES
+  ('ingest', 'build_twin', 9128), ('build_twin', 'calibrate', 12), ('build_twin', 'stream', 12),
+  ('stream', 'calibrate', 3), ('calibrate', 'stream', 78)
+) t(from_stage, to_stage, count);
+
+query I
+SELECT anofox_plot_diagram(m, edges := (SELECT list(e) FROM run_edges e), mainstat := 'records_in')
+  LIKE '<svg%data-summary="4 steps in % stages, from ingest%; 5 connections; 1 loop (%'
+FROM run_manifest m;
+----
+true
+
+query I
+SELECT anofox_plot_diagram(n, edges := [{'source': 'a', 'target': 'b', 'value': 3, 'status': 'delayed', 'style': 'flow-volume'}],
+                           direction := 'TB')
+  LIKE '<svg%data-diagram="TB"%data-node="a"%'
+FROM (VALUES ('a', 'Load', 10, 'Ops'), ('b', 'Clean', 8, 'Data')) n(id, title, mainstat, lane);
+----
+true
+
+# Swimlanes and the edge's health / speed reach the SVG.
+query I
+SELECT anofox_plot_diagram(n, edges := [{'source': 'a', 'target': 'b', 'value': 3, 'status': 'delayed', 'style': 'flow-volume'}])
+  LIKE '%data-lane="Ops"%animation-duration:0.6s%data-status="warn"%'
+FROM (VALUES ('a', 'Load', 10, 'Ops'), ('b', 'Clean', 8, 'Data')) n(id, title, mainstat, lane);
+----
+true
+
+statement error
+SELECT anofox_plot_diagram(n) FROM (VALUES (1, 2)) n(what, ever);
+----
+an id column
