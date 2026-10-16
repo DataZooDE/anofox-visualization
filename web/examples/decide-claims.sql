@@ -20,7 +20,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/decide-claims/showcase.sql
 
 -- ── Header ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_decide · stored results'::BRAND;
+SELECT 'anofox_decide'::BRAND;
 SELECT 'Which claims can we fast-track, and which go to fraud review?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_decide answers and the fitted signal weights ──────
@@ -87,9 +87,7 @@ WITH c AS (
 SELECT arg_min(th, cost) AS best FROM c WHERE per_week <= cl_cap();
 
 SELECT 12::COL;
-SELECT ('**Asked by** the head of claims operations and the fraud team (SIU) lead. **The decision:** which new claims are paid at once (fast track), which go to an adjuster and which to fraud review — and what reading the claimant''s description adds to the four intake rules. '
-        || '**Stored results:** the answers were computed natively with **anofox_decide** `' || (SELECT extension_version FROM cl_provenance)
-        || '` and its local **laya-multilingual** model (ONNX Runtime, not available in the browser); the routing, costs and metrics on this page are computed live, in SQL, from those stored answers and the 320 investigated claims.')::MARKDOWN;
+SELECT ('**Asked by** the head of claims operations and the fraud team (SIU) lead. **The decision:** which new claims are paid at once (fast track), which go to an adjuster and which to fraud review — and what reading the claimant''s description adds to the four intake rules.')::MARKDOWN;
 
 SELECT 'Routing rules'::GROUP;
 SELECT 70 AS siu_at_pct ::NUMBER, 'Fraud review at P(fraud) ≥ (%)'::LABEL;

@@ -18,7 +18,7 @@
 -- Tabs: Overview · Match quality · Clusters · Review list.
 -- Natively, run from web/:  dashboard --check ../examples/tabular-dedup/showcase.sql
 
-SELECT 'anofox_tabular · stored results'::BRAND;
+SELECT 'anofox_tabular'::BRAND;
 SELECT 'How many duplicate customers do we have, and which should we merge?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_tabular results ──────────────────────────────────
@@ -51,12 +51,9 @@ SELECT t AS threshold,
        count(*) FILTER (WHERE 100 * score >= t AND truth = 'same household') AS household_pairs
 FROM dd_pairs, range(50, 100) r(t) GROUP BY t;
 
--- ── Header: the question, provenance, inputs, KPIs ───────────────────────────
+-- ── Header: the question, inputs, KPIs ───────────────────────────────────────
 SELECT 12::COL;
-SELECT ('**Who asks:** Grünwerk''s CRM owner, before the webshop, ERP and loyalty-card customers move into one CRM. Every duplicate is a double mailing and a split purchase history; every wrong merge mixes two people''s orders and addresses. The decision is the **match threshold** — and which pairs a steward checks by hand. '
-        || '**Stored results:** computed natively with anofox_tabular `' || (SELECT extension_version FROM dd_provenance)
-        || '` on DuckDB ' || (SELECT duckdb_version FROM dd_provenance)
-        || '; your browser only re-cuts the stored pair scores (the extension has no DuckDB-Wasm build).')::MARKDOWN;
+SELECT ('**Who asks:** Grünwerk''s CRM owner, before the webshop, ERP and loyalty-card customers move into one CRM. Every duplicate is a double mailing and a split purchase history; every wrong merge mixes two people''s orders and addresses. The decision is the **match threshold** — and which pairs a steward checks by hand.')::MARKDOWN;
 
 SELECT 'Inputs'::GROUP;
 SELECT 85 AS threshold ::NUMBER, 'Match threshold (%)' ::LABEL;

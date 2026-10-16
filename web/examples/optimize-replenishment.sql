@@ -18,7 +18,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/optimize-replenishment/showcase.sql
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox-forecast + anofox-optimize · stored results'::BRAND;
+SELECT 'anofox-forecast + anofox-optimize'::BRAND;
 SELECT 'What do we order this week, within budget, to sell the most over the next three weeks?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored results (CSV) ───────────────────────────────────────────
@@ -49,9 +49,7 @@ CREATE OR REPLACE MACRO ir_pl() AS TABLE
 -- ── Header: the question, who asks it, inputs, KPIs ──────────────────────────
 SELECT 12::COL;
 SELECT ('**The category buyer** of a cash & carry wholesaler places the weekly order on Monday 19 Oct 2026 for 12 SKUs. Goods arrive in two weeks and the next order goes out in one, so this order must cover **three weeks** — while summer lines fade and Christmas lines ramp up. Today the buyer orders three times the last four weeks'' sales and, when the budget runs short, funds the top sellers first. '
-        || 'Here **two anofox extensions** work in sequence: anofox-forecast forecasts each SKU (MFLES), then anofox-optimize (`opt_knapsack_exact`) picks the pallets that earn the most expected margin within the budget. '
-        || '**Stored results:** computed natively with ' || (SELECT string_agg(extension_name || ' `' || extension_version || '`', ' and ' ORDER BY extension_name) FROM ir_provenance)
-        || ' on DuckDB ' || (SELECT any_value(duckdb_version) FROM ir_provenance) || ' (`examples/optimize-replenishment/compute.sql`); the inputs pick among stored runs, nothing is re-solved in your browser.')::MARKDOWN;
+        || 'Here **two anofox extensions** work in sequence: anofox-forecast forecasts each SKU (MFLES), then anofox-optimize (`opt_knapsack_exact`) picks the pallets that earn the most expected margin within the budget.')::MARKDOWN;
 
 SELECT 'Planning inputs'::GROUP;
 SELECT 25000 AS budget_eur ::NUMBER, 'Purchasing budget this week (€, 10,000–60,000)'::LABEL;

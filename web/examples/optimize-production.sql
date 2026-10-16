@@ -17,7 +17,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/optimize-production/showcase.sql
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_optimize · stored results'::BRAND;
+SELECT 'anofox_optimize'::BRAND;
 SELECT 'Which run order gets week 43''s orders out on time with the least changeover?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_optimize runs (CSV) ──────────────────────────────
@@ -43,9 +43,7 @@ CREATE OR REPLACE MACRO pp_kpi() AS TABLE
 
 -- ── Header: the question, who asks it, inputs, KPIs ──────────────────────────
 SELECT 12::COL;
-SELECT ('**The production planner** of a soft-drinks bottler releases next week''s plan on Friday: 42 orders on three filling lines (glass, PET, cans), each with a truck slot; a quarter are key-account promotions that must not miss their truck. Today the lines run in due-date order — simple, but every flavour or bottle change costs a rinse, a full clean or a format change. The `opt_schedule_…` functions sequence each line against due dates and changeovers at once. '
-        || '**Stored results:** computed natively with anofox_optimize `' || (SELECT extension_version FROM pp_provenance) || '` on DuckDB ' || (SELECT duckdb_version FROM pp_provenance)
-        || ' (`examples/optimize-production/compute.sql`); the inputs below pick among stored runs, nothing is re-solved in your browser.')::MARKDOWN;
+SELECT ('**The production planner** of a soft-drinks bottler releases next week''s plan on Friday: 42 orders on three filling lines (glass, PET, cans), each with a truck slot; a quarter are key-account promotions that must not miss their truck. Today the lines run in due-date order — simple, but every flavour or bottle change costs a rinse, a full clean or a format change. The `opt_schedule_…` functions sequence each line against due dates and changeovers at once.')::MARKDOWN;
 
 SELECT 'Planning inputs'::GROUP;
 SELECT rule ::DROPDOWN, 'Sequencing rule (vs. today''s due-date order)'::LABEL

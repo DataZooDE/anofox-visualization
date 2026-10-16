@@ -18,7 +18,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/decide-showcase/showcase.sql
 
 -- ── Header ─────────────────────────────────────────────────────────────────────
-SELECT 'anofox_decide · stored results'::BRAND;
+SELECT 'anofox_decide'::BRAND;
 SELECT 'Can a decision model triage the support inbox?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_decide answers ───────────────────────────────────
@@ -43,9 +43,6 @@ CREATE OR REPLACE MACRO dc_verdict(p, y, t) AS
     CASE WHEN p >= t AND y THEN 'ok: caught' WHEN p < t AND NOT y THEN 'ok: no refund'
          WHEN y THEN 'failed: missed refund' ELSE 'review: false alarm' END;
 
-SELECT 12::COL;
-SELECT ('Stored results: the answers were computed natively with **anofox_decide** `' || (SELECT extension_version FROM dc_provenance)
-        || '` and its local **laya-multilingual** model (ONNX Runtime, not available in the browser); only the metrics on this page are computed live, in SQL, from those stored answers.')::MARKDOWN;
 
 SELECT 'Decision rules'::GROUP;
 SELECT 50 AS refund_at_pct ::NUMBER, 'Escalate as refund at P ≥ (%)'::LABEL;

@@ -18,7 +18,7 @@
 -- Natively, run from web/:  dashboard --check ../examples/tabular-showcase/showcase.sql
 
 -- ── Brand ────────────────────────────────────────────────────────────────────
-SELECT 'anofox_tabular · stored results'::BRAND;
+SELECT 'anofox_tabular'::BRAND;
 SELECT 'Can we switch on the new CRM?'::DASHBOARD_TITLE;
 
 -- ── Data: the stored anofox_tabular results ──────────────────────────────────
@@ -63,11 +63,7 @@ CREATE OR REPLACE MACRO tq_thr() AS coalesce(getvariable('min_score'), 70) / 100
 CREATE OR REPLACE MACRO tq_pick(v, kinds) AS
     coalesce(getvariable('selected'), '') = '' OR NOT list_contains(kinds, getvariable('selected')) OR getvariable('selected') = v;
 
--- ── Header: provenance, filters, KPIs ────────────────────────────────────────
-SELECT 12::COL;
-SELECT ('**Stored results.** Everything here was computed natively with anofox_tabular `' || (SELECT extension_version FROM tq_provenance)
-        || '` on DuckDB ' || (SELECT duckdb_version FROM tq_provenance)
-        || ' and is only re-sliced in your browser, not recomputed (the extension has no DuckDB-Wasm build).')::MARKDOWN;
+-- ── Header: filters, KPIs ────────────────────────────────────────────────────
 
 SELECT 'Filters'::GROUP;
 SELECT scope ::DROPDOWN, 'Checks on' ::LABEL FROM (VALUES (1, 'All tables'), (2, 'Orders'), (3, 'Customers')) t(k, scope) ORDER BY k;

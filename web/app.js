@@ -3774,16 +3774,15 @@ async function runOnce(fresh = true) {
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = isMap || role(s, "SPARKLINE") ? 460 : Math.max(300, span * 100);
-            holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), rw, ph, renderCtx(), "");
+            renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
             const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
             if (warn) console.warn(`panel ${t ? `"${t}"` : s.sql.slice(0, 60)}: ${warn}`);
             fig.appendChild(holder);
-            markAnim(holder, s.roles);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
-            fig._dp = { rows: rowsJson, roles: s.roles, ph, isMap };
+            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -3878,8 +3877,7 @@ async function runOnce(fresh = true) {
   creditLink.textContent = "DataZoo GmbH";
   credit.append("Powered by ", creditLink);
   dash.append(credit);
-  attachHover();
-  mountStories();
+  wireCharts();
   for (const [stmt, old] of Object.entries(tweens)) {
     const svg = document.querySelector(`.dash .panel[data-stmt="${stmt}"] .panel-svg > svg[data-transition="tween"]`);
     if (svg) dpAnim.tween(svg, old);
@@ -3913,12 +3911,36 @@ function animateIn() {
   });
 }
 
-// ::STORY steppers (web/anim.js) under every chart that has steps.
+// Render a chart's SVG into its holder — the dashboard run and every in-place
+// re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
+// Follow with wireCharts() once the holder is in the page.
+function renderChart(holder, rows, roles, w, ph, zoom = "") {
+  holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  markAnim(holder, roles);
+}
+
+// Wire freshly rendered charts: hover, selection, toolbox and accessibility
+// (attachHover), then the ::STORY steppers.
+function wireCharts() {
+  attachHover();
+  mountStories();
+}
+
+// ::STORY steppers (web/anim.js) under every chart that has steps. A chart
+// re-rendered in place keeps its step; one still showing its stepper's caption
+// is left as it is.
 let dpStorySteps = {}; // statement index → the step to restore after a re-run
 function mountStories() {
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     const svg = panel.querySelector(".panel-svg > svg[data-story]");
-    if (svg) panel._story = dpAnim.story(panel, svg, dpStorySteps[panel.dataset.stmt] || 0);
+    if (!svg) {
+      if (panel._story) panel.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link").forEach((e) => e.remove());
+      panel._story = null;
+      return;
+    }
+    if (panel._story && svg.parentElement.querySelector(":scope > .dp-story-cap")) return;
+    const step = panel._story ? panel._story.step() : dpStorySteps[panel.dataset.stmt] || 0;
+    panel._story = dpAnim.story(panel, svg, step);
   });
 }
 
@@ -7039,8 +7061,8 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
-      attachHover(); // re-wire hover + cross-filter clicks on the fresh marks
+      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
 
@@ -7196,7 +7218,22 @@ function attachHover() {
     el.setAttribute("data-series", series);
     el.setAttribute("data-tip", txt);
     el.classList.add("dp-hit");
-    el.style.cursor = "pointer";
+    // A reference rule (::XLINE, ::REFLINE, thresholds) keeps its tooltip but
+    // is no value to click: it neither selects, drills nor cross-filters.
+    const rule = el.hasAttribute("data-rule");
+    el.style.cursor = rule ? "default" : "pointer";
+    // A thin dashed rule is hard to hover (the pointer falls into its dash
+    // gaps or onto the axis below): a transparent, wider twin on top hands the
+    // pointer on to it.
+    if (rule) {
+      const pad = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      for (const [k, v] of [["points", el.getAttribute("points")], ["fill", "none"], ["stroke", "transparent"], ["stroke-width", "8"], ["aria-hidden", "true"]])
+        pad.setAttribute(k, v);
+      for (const type of ["mouseenter", "mousemove", "mouseleave"])
+        pad.addEventListener(type, (e) => el.dispatchEvent(new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY })));
+      pad.addEventListener("click", (e) => e.stopPropagation());
+      el.after(pad);
+    }
     el.addEventListener("mouseenter", () => {
       // The panel-level crosshair shows the tooltip — except for a mark focused
       // from the keyboard (a11y), which has no pointer to drive the crosshair.
@@ -7216,6 +7253,7 @@ function attachHover() {
     });
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (rule) return;
       const ia = el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
@@ -7305,8 +7343,10 @@ function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString(
   return out + (parts.length ? "; " + parts.join("; ") : "") + ".";
 }
 
+// A chart's data marks — not its reference rules (`data-rule`: ::XLINE,
+// ::REFLINE, thresholds), which keep their tooltip but are no data point.
 function chartMarks(svg) {
-  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip"));
+  return [...svg.querySelectorAll(".dp-hit")].filter((el) => el.getAttribute("data-tip") && !el.hasAttribute("data-rule"));
 }
 
 function attachChartA11y() {
@@ -7320,7 +7360,7 @@ function attachChartA11y() {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
       return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: markValue(el) };
     });
-    const summary = chartSummary(chartKind(fig._dp && fig._dp.roles), title, items, (v) => fmtTipValue(String(v)));
+    const summary = chartSummary(chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles)), title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -7353,13 +7393,35 @@ function attachChartA11y() {
       });
     });
     svg.addEventListener("keydown", (e) => chartKey(e, svg, fig));
+    // A click on a mark of the focused chart may re-run the dashboard too
+    // (capture phase: before the mark's own handler starts the run).
+    svg.addEventListener(
+      "click",
+      (e) => {
+        const m = e.target.closest?.(".dp-hit");
+        if (m && svg.contains(document.activeElement)) dpA11yFocus = markKey(fig, m);
+      },
+      true
+    );
   }
+  // After a re-run that replaced the chart, focus the same mark, else the
+  // chart, else (the chart came back empty) the panel's title or the panel.
+  // While the old chart still holds the focus the run is yet to come.
   if (dpA11yFocus) {
     const f = dpA11yFocus;
-    dpA11yFocus = null;
-    const svg = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"] .panel-svg > svg`);
-    const marks = svg ? chartMarks(svg) : [];
-    (marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0] || svg)?.focus();
+    const fig = document.querySelector(`.dash .panel[data-stmt="${f.stmt}"]`);
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (lost || !fig?.contains(document.activeElement)) dpA11yFocus = null;
+    if (fig && lost) {
+      const svg = fig.querySelector(".panel-svg > svg");
+      const marks = svg ? chartMarks(svg) : [];
+      let to = marks.find((m) => m.getAttribute("data-series") === f.series && (m.getAttribute("data-x") || "") === f.x) || marks[0];
+      if (!to) {
+        to = svg || fig.querySelector(".panel-title") || fig;
+        if (!to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+      }
+      to.focus();
+    }
   }
   applyAsTables();
   requestAnimationFrame(keyboardScrollers);
@@ -7399,6 +7461,11 @@ function markGrid(svg) {
   return [...by.values()].map((els) => els.map((el) => [cx(el), el]).sort((a, b) => a[0] - b[0]).map((p) => p[1]));
 }
 
+// What identifies a mark across re-runs (dpA11yFocus).
+function markKey(fig, el) {
+  return { stmt: fig.dataset.stmt, series: el.getAttribute("data-series"), x: el.getAttribute("data-x") || "" };
+}
+
 function chartKey(e, svg, fig) {
   const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "Escape"];
   if (!keys.includes(e.key)) return;
@@ -7418,7 +7485,7 @@ function chartKey(e, svg, fig) {
   e.stopPropagation();
   if (e.key === "Escape") return svg.focus();
   if (e.key === "Enter" || e.key === " ") {
-    dpA11yFocus = { stmt: fig.dataset.stmt, series: cur.getAttribute("data-series"), x: cur.getAttribute("data-x") || "" };
+    dpA11yFocus = markKey(fig, cur);
     cur.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }));
     return;
   }
@@ -7475,6 +7542,13 @@ function tipRow(info, fill) {
     `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(name)}</span><b>${escapeHtml(info.value)}</b></div>` +
     (info.detail ? `<div class="tip-row"><span>${escapeHtml(info.detail)}</span></div>` : "")
   );
+}
+
+// A reference rule's tooltip row: a dashed swatch, and where the rule sits
+// (its formatted value, or the date / x it was drawn at).
+function ruleRow(el) {
+  const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip") || "");
+  return `<div class="tip-row"><span><span class="tip-rule"></span>Reference line</span><b>${escapeHtml(info.value || info.x)}</b></div>`;
 }
 
 // ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
@@ -7561,8 +7635,9 @@ function toggleMagicType(panel) {
     const vi = dp.roles.findIndex((r) => magicSwap([r])); // first line/bar value role
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
-  holder.innerHTML = render_panel(dp.rows, JSON.stringify(use), 460, dp.ph, renderCtx(), "");
-  attachHover();
+  dp.drawn = use; // the roles on screen (the summary names the chart kind shown)
+  renderChart(holder, dp.rows, use, dp.rw, dp.ph);
+  wireCharts();
 }
 
 // A modal listing the panel's rows as a table (ECharts toolbox "data view").
@@ -8016,8 +8091,17 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
+      // Reference rules (data-rule) are no column value, but the crosshair names
+      // them: a vertical one (an ::XLINE, "Today") at the column nearest to it,
+      // a horizontal one (::REFLINE, a threshold) while the pointer is near it.
+      const uy = vb.y + (e.clientY - r.top) / scale;
+      const nearest = (x) => pts.reduce((a, p) => (Math.abs(p.cx - x) < Math.abs(a - x) ? p.cx : a), Infinity);
+      const rules = [...svg.querySelectorAll("[data-rule]")].filter((el) => {
+        const [x, y] = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
+        return el.getAttribute("data-rule") === "x" ? Math.round(nearest(x)) === best : Math.abs(y - uy) * scale <= 8;
+      });
       const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
-      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("");
+      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
@@ -8052,7 +8136,7 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
   if (!svg0 || svg0.getAttribute("data-flip") === "true") return;
   const full = svgDomain(svg0);
   if (!full) return; // not a continuous x/y chart → no zoom
-  const W = 460;
+  const W = svg0.viewBox.baseVal.width || 460; // the width the chart was drawn at
   let view = null; // null = auto (full extent)
   let raf = 0;
   let syncSlider = () => {}; // set up below once the slider DOM exists
@@ -8061,8 +8145,8 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      holder.innerHTML = render_panel(rowsJson, JSON.stringify(roles), W, ph, renderCtx(), zoom);
-      attachHover();
+      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      wireCharts();
       syncSlider();
     });
   };
