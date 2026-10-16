@@ -355,7 +355,9 @@ pub fn json_rows(
         out.push_str(r.first().and_then(|v| v.as_deref()).unwrap_or("null"));
     }
     out.push(']');
-    Ok(out)
+    // Non-finite doubles (a sum that overflowed, 'nan'::DOUBLE) come out of
+    // to_json as bare Infinity / NaN, which is not JSON: make them null.
+    Ok(anofox_visualization::sql::sanitize_json_numbers(&out).into_owned())
 }
 
 /// An owned database handle (closed on Drop — after all connections are gone).

@@ -316,7 +316,8 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
                 let body = if body.trim().is_empty() {
                     "[]".into()
                 } else {
-                    body.trim().to_string()
+                    // bare Infinity / NaN (non-finite doubles) → null
+                    sql::sanitize_json_numbers(body.trim()).into_owned()
                 };
                 respond(req, 200, "application/json", body.into_bytes())
             }

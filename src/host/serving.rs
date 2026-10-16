@@ -644,7 +644,13 @@ pub fn page_sql_inline(base: &str, p: &PageRequest) -> String {
 fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> String) -> String {
     let base = base.trim().trim_end_matches(';');
     // A value read as a number — through text, so any column type is fine.
-    let num = |c: &str| format!("TRY_CAST(CAST({c} AS VARCHAR) AS DOUBLE)");
+    // Text like an md5 "1e99…" reads as ±inf: only finite values count.
+    let num = |c: &str| {
+        format!(
+            "(CASE WHEN isfinite(TRY_CAST(CAST({c} AS VARCHAR) AS DOUBLE)) \
+             THEN TRY_CAST(CAST({c} AS VARCHAR) AS DOUBLE) END)"
+        )
+    };
     let mut conds = Vec::new();
     if let Some(f) = p.filter.as_ref().map(|f| f.trim()) {
         conds.push(format!(
@@ -962,7 +968,7 @@ mod tests {
         assert_eq!(
             sql,
             "SELECT * FROM (SELECT * FROM t) _dp WHERE CAST(\"re\"\"gion\" AS VARCHAR) = ? \
-             AND TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE) >= TRY_CAST(? AS DOUBLE) \
+             AND (CASE WHEN isfinite(TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE)) THEN TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE) END) >= TRY_CAST(? AS DOUBLE) \
              AND CAST(\"note\" AS VARCHAR) ILIKE '%' || ? || '%' ORDER BY \"amt\" ASC NULLS LAST LIMIT 20 OFFSET 0"
         );
         assert_eq!(params, vec!["EU", "10", "it's"]);
@@ -976,8 +982,8 @@ mod tests {
         assert!(sql.starts_with(
             "SELECT count(*) AS n, count(\"amt\") AS n0, approx_count_distinct(\"amt\") AS d0"
         ));
-        assert!(sql.contains("sum(TRY_CAST(CAST(\"region\" AS VARCHAR) AS DOUBLE)) AS s1"));
-        assert!(sql.contains("median(TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE)) AS md0"));
+        assert!(sql.contains("sum((CASE WHEN isfinite(TRY_CAST(CAST(\"region\" AS VARCHAR) AS DOUBLE)) THEN TRY_CAST(CAST(\"region\" AS VARCHAR) AS DOUBLE) END)) AS s1"));
+        assert!(sql.contains("median((CASE WHEN isfinite(TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE)) THEN TRY_CAST(CAST(\"amt\" AS VARCHAR) AS DOUBLE) END)) AS md0"));
         assert_eq!(params, vec!["5"]);
         // distinct ignores the column's own filter, keeps the others
         let p = page(
