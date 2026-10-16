@@ -60,13 +60,11 @@ CREATE OR REPLACE MACRO tq_short(n) AS
            WHEN 'Orders: order_id is unique' THEN 'unique order_id' WHEN 'Orders: mean amount 50–150 €' THEN 'mean amount 50–150 €'
            ELSE replace(n, 'Orders: ', '') END;
 CREATE OR REPLACE MACRO tq_thr() AS coalesce(getvariable('min_score'), 70) / 100.0;
-CREATE OR REPLACE MACRO tq_pick(v, kinds) AS
-    coalesce(getvariable('selected'), '') = '' OR NOT list_contains(kinds, getvariable('selected')) OR getvariable('selected') = v;
 
 -- ── Header: filters, KPIs ────────────────────────────────────────────────────
 
 SELECT 'Filters'::GROUP;
-SELECT scope ::DROPDOWN, 'Checks on' ::LABEL FROM (VALUES (1, 'All tables'), (2, 'Orders'), (3, 'Customers')) t(k, scope) ORDER BY k;
+SELECT scope ::BUTTONS, 'Checks on' ::LABEL FROM (VALUES (1, 'All tables'), (2, 'Orders'), (3, 'Customers')) t(k, scope) ORDER BY k;
 SELECT DISTINCT country ::MULTISELECT, 'Countries' ::LABEL FROM tq_validity ORDER BY country;
 SELECT min(day) AS from_day, max(day) AS to_day ::DATERANGE, 'Order dates' ::LABEL FROM tq_daily;
 SELECT 70 AS min_score ::NUMBER, 'Outlier cut-off (score %)' ::LABEL;
@@ -95,7 +93,7 @@ SELECT 'Overview'::TAB;
 SELECT 4::COL;
 SELECT 320::HEIGHT;
 SELECT round(100.0 * count(*) FILTER (WHERE status = 'pass') / count(*)) ::GAUGE, '0,100'::RANGE,
-       '#c93636,#b45309,#13803b'::COLORS, 'Check results passing (%) — not yet ready to switch'::TITLE
+       '<80:bad; <95:warn; good'::THRESHOLDS, 'Check results passing (%) — not yet ready to switch'::TITLE
 FROM tq_check_results WHERE tq_scope(table_name);
 
 SELECT 8::COL;
@@ -160,8 +158,13 @@ SELECT '**What to look for:** `rel_count_change` flags the **12 Aug** feed outag
 SELECT 8::COL;
 SELECT 320::HEIGHT;
 SELECT day ::XAXIS, CASE WHEN count_status = 'fail' THEN 'volume drift' ELSE 'normal' END ::CATEGORY,
-       orders ::BARCHART_STACKED, 'Orders per day — volume drift flagged on 12 and 18 Aug'::TITLE
+       orders ::BARCHART_STACKED, 'Orders per day — volume drift flagged on 12 and 18 Aug; the strip shows which check fired'::TITLE
 FROM tq_daily WHERE tq_days(day) ORDER BY day;
+SELECT day ::XAXIS, check_kind ::YAXIS, '#d64545' ::CATEGORY, 1 ::HEATMAP, check_kind || ' on ' || strftime(day, '%d %b') ::LABEL,
+       'Checks' ::TRACK
+FROM (SELECT day, 'volume drift' AS check_kind FROM tq_daily WHERE count_status = 'fail' AND tq_days(day)
+      UNION ALL SELECT day, 'revenue anomaly' FROM tq_daily WHERE revenue_status = 'fail' AND tq_days(day))
+ORDER BY day;
 
 SELECT 4::COL;
 SELECT 'Flagged days'::TITLE,
@@ -199,6 +202,7 @@ FROM tq_anomaly WHERE tq_days(order_date) GROUP BY ALL ORDER BY 1, 2;
 
 SELECT 4::COL;
 SELECT 360::HEIGHT;
+SELECT 'channel'::SELECT_AS;
 SELECT channel ::XAXIS, count(*) ::BARCHART, 'Flagged orders by channel — click to filter'::TITLE
 FROM tq_anomaly WHERE anomaly_score >= tq_thr() AND tq_days(order_date) GROUP BY ALL ORDER BY 2 DESC;
 
@@ -208,7 +212,7 @@ SELECT 'Flagged orders, with the outlier tree''s explanation'::TITLE,
        a.amount AS "Amount (€)" ::PLAIN, round(100 * a.anomaly_score) AS "Score" ::PLAIN,
        coalesce(regexp_replace(t.explanation, ' \(mean.*\)', ''), '—') AS "Outlier tree"
 FROM tq_anomaly a LEFT JOIN tq_outlier_tree t USING (order_id)
-WHERE a.anomaly_score >= tq_thr() AND tq_days(a.order_date) AND tq_pick(a.channel, ['web', 'app', 'marketplace'])
+WHERE a.anomaly_score >= tq_thr() AND tq_days(a.order_date) AND coalesce(getvariable('channel'), '') IN ('', a.channel)
 ORDER BY a.anomaly_score DESC;
 
 -- ── 5 · Profiles: columns and field validity ─────────────────────────────────
@@ -245,6 +249,7 @@ SELECT ('**What to look for:** ' || (SELECT count(*) FROM tq_diff WHERE diff_typ
 
 SELECT 4::COL;
 SELECT 300::HEIGHT;
+SELECT 'diff'::SELECT_AS;
 SELECT diff_type ::CATEGORY, count(*) ::DONUTCHART, 'Differing rows by type'::TITLE
 FROM tq_diff WHERE tq_cty(country) GROUP BY ALL ORDER BY 2 DESC;
 
@@ -262,5 +267,5 @@ SELECT 12::COL;
 SELECT 'Every differing row'::TITLE,
        diff_type AS "Diff" ::BADGE, customer_id AS "Customer" ::PLAIN, country AS "Country" ::TABLE, changed_fields AS "Changed",
        email_before AS "Email (legacy)", email_after AS "Email (new)"
-FROM tq_diff WHERE tq_cty(country) AND tq_pick(diff_type, ['added', 'removed', 'changed'])
+FROM tq_diff WHERE tq_cty(country) AND coalesce(getvariable('diff'), '') IN ('', diff_type)
 ORDER BY diff_type, customer_id;
