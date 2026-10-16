@@ -242,6 +242,39 @@ export function animKit(win) {
     for (const k in attrs) e.setAttribute(k, attrs[k]);
     return e;
   };
+  // Caption placement works on boxes [left, top, right, bottom] relative to
+  // the chart holder: a shape's bounding box, or for a line or band small
+  // boxes along its outline (its bounding box would cover the whole plot).
+  const CELL = 4;
+  const PAD = 4; // clearance around every mark and label
+  const nums = (pts) => (pts || "").trim().split(/[\s,]+/).map(Number);
+  const SHAPES = "rect,circle,ellipse,line,polyline,polygon,path";
+  const shapes = (el) => (el.matches(SHAPES) ? [el] : [...el.querySelectorAll(SHAPES)]);
+  function boxesOf(el, hb) {
+    const tag = el.tagName.toLowerCase();
+    if ((tag === "polyline" || tag === "polygon") && el.getScreenCTM) {
+      const m = el.getScreenCTM();
+      const v = nums(el.getAttribute("points"));
+      const pts = [];
+      for (let i = 0; i + 1 < v.length; i += 2) pts.push([m.a * v[i] + m.c * v[i + 1] + m.e - hb.left, m.b * v[i] + m.d * v[i + 1] + m.f - hb.top]);
+      if (tag === "polygon" && pts.length) pts.push(pts[0]);
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        const [x, y] = pts[i];
+        if (!Number.isFinite(x + y)) continue;
+        const [px, py] = i ? pts[i - 1] : pts[i];
+        const n = Math.max(1, Math.ceil(Math.hypot(x - px, y - py) / CELL));
+        for (let s = i ? 1 : n; s <= n; s++) {
+          const qx = px + ((x - px) * s) / n;
+          const qy = py + ((y - py) * s) / n;
+          out.push([qx - 1, qy - 1, qx + 1, qy + 1]);
+        }
+      }
+      return out;
+    }
+    const b = el.getBoundingClientRect();
+    return b.width || b.height ? [[b.left - hb.left, b.top - hb.top, b.right - hb.left, b.bottom - hb.top]] : [];
+  }
   // Build the stepper for a chart whose root <svg> carries data-story
   // ([{k, t}, …]) and data-story-by ("x" | "series"). Step 0 is the overview;
   // each step dims the other marks, shows its caption (an aria-live region)
@@ -294,37 +327,111 @@ export function animKit(win) {
       }
       return el.hasAttribute("data-x") ? sameX(el.getAttribute("data-x"), st.k) : false;
     };
+    // The caption goes to the free spot nearest the lit marks: inside the
+    // chart, over no mark and no text (an occupancy grid of CELL px, summed so
+    // each spot is one lookup). With no spot free it drops under the chart
+    // (.dp-story-cap-out) and the connector runs up to the lit marks.
     const place = () => {
       link.replaceChildren();
       if (!k) return;
-      const marks = [...dimmable(svg)].filter((el) => lit(el) === true);
-      const hb = holder.getBoundingClientRect();
-      const bs = marks.map((m) => m.getBoundingClientRect()).filter((b) => b.width || b.height);
-      if (!bs.length || !hb.width) return;
-      const l = Math.min(...bs.map((b) => b.left)) - hb.left;
-      const r = Math.max(...bs.map((b) => b.right)) - hb.left;
-      const t = Math.min(...bs.map((b) => b.top)) - hb.top;
+      const litEls = new Set([...dimmable(svg)].filter((el) => lit(el) === true).flatMap(shapes));
+      let hb = holder.getBoundingClientRect();
+      const sb = svg.getBoundingClientRect();
+      const litBs = [];
+      const others = [];
+      // legend swatches are the small rects that are no data mark
+      const swatches = [...svg.querySelectorAll("rect:not([data-x])")].filter((e) => {
+        const b = e.getBoundingClientRect();
+        return b.width < 24 && b.height < 24;
+      });
+      for (const el of new Set([...marksOf(svg), ...litEls, ...svg.querySelectorAll("text"), ...swatches])) {
+        const bs = boxesOf(el, hb);
+        if (litEls.has(el)) litBs.push(...bs);
+        else others.push(...bs);
+      }
+      if (!litBs.length || !hb.width) return;
+      const l = Math.min(...litBs.map((b) => b[0]));
+      const r = Math.max(...litBs.map((b) => b[2]));
+      const mx = (l + r) / 2;
+      cap.classList.remove("dp-story-cap-out");
       const cw = cap.offsetWidth;
       const ch = cap.offsetHeight;
-      const mx = (l + r) / 2;
-      let cx;
-      let cy = 2;
-      let path;
-      if (t > ch + 18) {
-        // above the lit marks, a short drop down to them
-        cx = Math.max(0, Math.min(hb.width - cw, mx - cw / 2));
-        path = `M${mx},${cy + ch} L${mx},${t - 4}`;
-      } else {
-        // the marks reach the top: beside them, a level run across
-        const right = r + 14 + cw <= hb.width;
-        cx = right ? r + 14 : Math.max(0, l - 14 - cw);
-        cy = Math.max(2, t);
-        path = right ? `M${cx},${cy + ch / 2} L${r + 3},${cy + ch / 2}` : `M${cx + cw},${cy + ch / 2} L${l - 3},${cy + ch / 2}`;
+      const busy = [...others, ...litBs];
+      // distance from a caption at (x, y) to the nearest lit mark
+      const gap = (x, y) => {
+        let g = Infinity;
+        for (const [a, b, c, d] of litBs) g = Math.min(g, Math.hypot(Math.max(a - x - cw, 0, x - c), Math.max(b - y - ch, 0, y - d)));
+        return g;
+      };
+      const x0 = Math.max(0, sb.left - hb.left);
+      const y0 = Math.max(0, sb.top - hb.top);
+      const W = Math.floor((Math.min(hb.width, sb.right - hb.left) - x0) / CELL);
+      const H = Math.floor((Math.min(hb.height, sb.bottom - hb.top) - y0) / CELL);
+      const cwN = Math.ceil(cw / CELL);
+      const chN = Math.ceil(ch / CELL);
+      let best = null;
+      if (W >= cwN && H >= chN) {
+        const sum = new Int32Array((W + 1) * (H + 1));
+        for (const [a, b, c, d] of busy) {
+          const i0 = Math.max(0, Math.floor((a - PAD - x0) / CELL));
+          const i1 = Math.min(W - 1, Math.floor((c + PAD - x0) / CELL));
+          const j0 = Math.max(0, Math.floor((b - PAD - y0) / CELL));
+          const j1 = Math.min(H - 1, Math.floor((d + PAD - y0) / CELL));
+          for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) sum[(j + 1) * (W + 1) + i + 1] = 1;
+        }
+        for (let j = 1; j <= H; j++) for (let i = 1; i <= W; i++) sum[j * (W + 1) + i] += sum[(j - 1) * (W + 1) + i] + sum[j * (W + 1) + i - 1] - sum[(j - 1) * (W + 1) + i - 1];
+        const at = (i, j) => sum[j * (W + 1) + i];
+        for (let j = 0; j + chN <= H; j++)
+          for (let i = 0; i + cwN <= W; i++) {
+            if (at(i + cwN, j + chN) - at(i, j + chN) - at(i + cwN, j) + at(i, j)) continue;
+            const x = x0 + i * CELL;
+            const y = y0 + j * CELL;
+            // a connector's length away, as centred on the lit marks as fits
+            const g = Math.abs(gap(x, y) - 16) + Math.abs(x + cw / 2 - mx) / 4;
+            if (!best || g < best.g) best = { x, y, g };
+          }
       }
-      cap.style.left = cx + "px";
-      cap.style.top = cy + "px";
+      let from;
+      let to;
+      if (best) {
+        cap.style.left = best.x + "px";
+        cap.style.top = best.y + "px";
+        // nearest lit point to the caption, and the caption edge facing it
+        const cx = best.x + cw / 2;
+        const cy = best.y + ch / 2;
+        let d = Infinity;
+        for (const [a, b, c, e] of litBs) {
+          const p = [Math.max(a, Math.min(c, cx)), Math.max(b, Math.min(e, cy))];
+          const q = [Math.max(best.x, Math.min(best.x + cw, p[0])), Math.max(best.y, Math.min(best.y + ch, p[1]))];
+          const n = Math.hypot(p[0] - q[0], p[1] - q[1]);
+          if (n < d) (d = n), (to = p), (from = q);
+        }
+      } else {
+        cap.classList.add("dp-story-cap-out");
+        cap.style.left = cap.style.top = "";
+        hb = holder.getBoundingClientRect();
+        const top = cap.getBoundingClientRect().top - hb.top;
+        // a column through the lit marks whose run down to the caption
+        // crosses nothing else, the one nearest their middle
+        let pick = null;
+        for (let x = Math.ceil(l) + 2; x <= r - 2; x += 2) {
+          const ys = litBs.filter((b) => b[0] <= x && x <= b[2]).map((b) => b[3]);
+          if (!ys.length) continue;
+          const y = Math.max(...ys);
+          const clear = !others.some((b) => b[0] <= x && x <= b[2] && b[3] > y && b[1] < top);
+          const s = (clear ? 0 : 1e6) + Math.abs(x - mx);
+          if (!pick || s < pick.s) pick = { x, y, s };
+        }
+        if (!pick) return;
+        from = [pick.x, top];
+        to = [pick.x, pick.y];
+      }
+      // stop 3px short of the marks
+      const len = Math.hypot(to[0] - from[0], to[1] - from[1]);
+      if (len < 6) return;
+      const end = [to[0] - ((to[0] - from[0]) * 3) / len, to[1] - ((to[1] - from[1]) * 3) / len];
       link.setAttribute("viewBox", `0 0 ${hb.width} ${hb.height}`);
-      link.append(svgEl("path", { d: path, class: "dp-flow" }));
+      link.append(svgEl("path", { d: `M${from[0]},${from[1]} L${end[0]},${end[1]}`, class: "dp-flow" }));
     };
     const show = (i) => {
       k = (i + steps.length + 1) % (steps.length + 1);
@@ -384,7 +491,6 @@ export function animKit(win) {
     for (const [k, el] of m) out.set(k, { clone: el.cloneNode(true), attrs: (GEOM[el.tagName.toLowerCase()] || []).map((a) => el.getAttribute(a)) });
     return { marks: out };
   }
-  const nums = (pts) => (pts || "").trim().split(/[\s,]+/).map(Number);
   // Move the new chart's marks from where `old` had them: bars and points
   // tween x/y/size, lines and bands their points when the counts match (else
   // cross-fade); new marks fade in, gone ones fade out. Above MANY marks the
