@@ -99,3 +99,35 @@ fn renders_contract_calls() {
     assert!(svg.contains("Coefficients — huber"));
     assert!(svg.contains("promo"));
 }
+
+// A provider answering every query with the same canned columns.
+struct Fixed(Vec<(String, Vec<Value>)>);
+impl DataProvider for Fixed {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+// #44: a DATE ::XLINE (the DuckDB CLI's JSON writes it as "2026-03-15") on a
+// date axis draws its dashed line instead of failing a DOUBLE cast.
+#[test]
+fn a_date_xline_draws_on_a_date_axis() {
+    let script = "SELECT d::XAXIS, v::LINECHART, DATE '2026-02-03'::XLINE FROM t;";
+    let days = [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04",
+        "2026-02-05",
+    ];
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&days)),
+        ("c1".into(), f(&[1.0, 3.0, 2.0, 5.0, 4.0])),
+        ("c2".into(), s(&["2026-02-03"; 5])),
+    ]);
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains("stroke-dasharray"), "no XLINE drawn");
+}

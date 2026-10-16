@@ -141,7 +141,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
       "horizontal reference line per distinct value"),
-    e("XLINE", &[], R::VLine, "annotation", true, "vertical reference line at an x"),
+    e("XLINE", &[], R::VLine, "annotation", true,
+      "vertical reference line at an x (a number, date or timestamp)"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,
       "Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p"),
     e("BAND_LOWER", &["BANDLOWER"], R::BandLower, "annotation", true,

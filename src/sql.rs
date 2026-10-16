@@ -102,13 +102,8 @@ pub fn columns_from_rows(
         .map(|(i, role)| {
             let key = format!("c{i}");
             let numeric = matches!(role, Role::Value(_));
-            let mut values: Vec<Value> = rows.iter().map(|r| jval(r.get(&key), numeric)).collect();
-            // An X axis whose values are all ISO dates/timestamps becomes a
-            // continuous datetime scale, so ggplot-rs picks sensible (e.g. yearly)
-            // breaks instead of drawing one overlapping label per value.
-            if matches!(role, Role::X) {
-                values = maybe_decimal(maybe_datetime(values));
-            }
+            let values: Vec<Value> = rows.iter().map(|r| jval(r.get(&key), numeric)).collect();
+            let values = coerce_for_role(*role, values);
             Column::new(key, *role, values)
         })
         .collect()
@@ -270,6 +265,33 @@ pub(crate) fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
             other => other,
         })
         .collect()
+}
+
+/// Role-specific value coercion shared by the browser and headless paths:
+/// - An X axis whose values are all ISO dates/timestamps becomes a continuous
+///   datetime scale, so ggplot-rs picks sensible (e.g. yearly) breaks instead
+///   of drawing one overlapping label per value.
+/// - An x *position* (`::XLINE`, `::MARKAREA`) is not cast to DOUBLE in SQL (a
+///   DATE has no such cast), so it arrives as a number, a numeric string
+///   (BIGINT/DECIMAL) or an ISO date — all become the x data's units (a date
+///   becomes epoch seconds, like a date x axis).
+pub(crate) fn coerce_for_role(role: Role, vals: Vec<Value>) -> Vec<Value> {
+    match role {
+        Role::X => maybe_decimal(maybe_datetime(vals)),
+        Role::VLine | Role::MarkArea => maybe_datetime(vals)
+            .into_iter()
+            .map(|v| match v {
+                Value::Str(s) => s
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|f| f.is_finite())
+                    .map_or(Value::Na, Value::Float),
+                other => other,
+            })
+            .collect(),
+        _ => vals,
+    }
 }
 
 /// If every non-null value is an ISO date/timestamp string, reinterpret the
@@ -546,7 +568,6 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 | Role::Delta
                 | Role::DeltaLowerGood
                 | Role::RefLine
-                | Role::VLine
                 | Role::BandLower
                 | Role::BandUpper
                 | Role::YMin
@@ -650,5 +671,47 @@ mod decimal_x_tests {
         assert_eq!(maybe_decimal(s(&["2019", "2020"])), s(&["2019", "2020"]));
         assert_eq!(maybe_decimal(s(&["1.5", "app"])), s(&["1.5", "app"]));
         assert_eq!(maybe_decimal(s(&["1e3", "2.0"])), s(&["1e3", "2.0"]));
+    }
+}
+
+#[cfg(test)]
+mod xline_date_tests {
+    use super::*;
+
+    // #44: a DATE/TIMESTAMP ::XLINE has no DOUBLE cast — it travels as text and
+    // becomes an x position in the date axis's units (epoch seconds).
+    #[test]
+    fn a_date_xline_is_not_cast_to_double() {
+        let (s, _, _) =
+            rewrite("SELECT d ::XAXIS, v ::LINECHART, DATE '2026-03-15' ::XLINE FROM t");
+        assert!(s.contains("DATE '2026-03-15' AS c2"), "{s}");
+        assert!(!s.contains("AS DOUBLE) AS c2"), "{s}");
+    }
+
+    #[test]
+    fn xline_values_become_x_positions() {
+        let vals = vec![
+            Value::Str("2026-03-15".into()),
+            Value::Na,
+            Value::Str("2026-03-15 12:00:00".into()),
+        ];
+        assert_eq!(
+            coerce_for_role(Role::VLine, vals),
+            vec![
+                Value::DateTime(1_773_532_800),
+                Value::Na,
+                Value::DateTime(1_773_576_000)
+            ]
+        );
+        // Numbers (BIGINT/DECIMAL arrive as strings) stay numbers.
+        let vals = vec![
+            Value::Str("12".into()),
+            Value::Float(3.5),
+            Value::Str("1.25".into()),
+        ];
+        assert_eq!(
+            coerce_for_role(Role::VLine, vals),
+            vec![Value::Float(12.0), Value::Float(3.5), Value::Float(1.25)]
+        );
     }
 }
