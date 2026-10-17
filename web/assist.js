@@ -13,12 +13,15 @@
 //   * the tools over DuckDB-Wasm, each in a scratch session (web/lint.js).
 // A pure ES module (no DOM): the panel (M1-3) drives it, and
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
-import { lintScript, rowsJson, scratchRunner } from "./lint.js";
+import { lintScript, rowsJson, scratchRunner, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
-// The SDK as an ES module, pinned (as DuckDB-Wasm is).
-export const SDK_URL = "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.135.0/+esm";
+// The SDK as one vendored ES module (web/vendor/, built by
+// scripts/vendor-anthropic-sdk.sh; its SHA-256 is in web/vendor/SHA256SUMS
+// and checked by tests/web/assist_test.mjs). Not a CDN build: it runs with
+// the user's key and the page's data, so what runs is what was reviewed.
+export const SDK_URL = new URL("./vendor/anthropic-sdk-0.135.0.mjs", import.meta.url).href;
 export const API_HOST = "https://api.anthropic.com";
 export const LIMITS = {
   turns: 12, // model calls per request
@@ -31,7 +34,11 @@ export const LIMITS = {
   topValues: 50, // a text column's common values are sent up to this many distinct
   runRows: 1000, // run_sql reads at most this many rows (it returns a profile)
   resultChars: 4000, // a tool result's text
-  timeoutMs: 10000, // run_sql
+  timeoutMs: 10000, // run_sql (cancelled in the worker when it is late)
+  checkQueryMs: 30000, // one query of a check
+  checkMs: 120000, // a whole check
+  callsPerTurn: 8, // tool calls of one model turn
+  calls: 30, // tool calls of a request
 };
 
 // ---- configuration and the key ----
@@ -98,7 +105,9 @@ export async function loadSdk(url = SDK_URL) {
   return (await import(url)).default;
 }
 
-// (a) The user's own key, straight from the browser. `dangerouslyAllowBrowser`
+// (a) The user's own key, straight from the browser. `baseURL` is for tests
+// only: the panel never passes one (a URL from a link or a dashboard would
+// send the key elsewhere). `dangerouslyAllowBrowser`
 // is the SDK's opt-in for a key in a page; it then sends the
 // `anthropic-dangerous-direct-browser-access: true` header the API needs to
 // answer a browser (CORS). Only the SDK's own headers go along (its version
@@ -142,49 +151,28 @@ export function describeError(e) {
 // dashboard and the catalog don't already use. run_sql takes class 1 only;
 // a dashboard with class 3 statements runs only after the user allows them.
 
-// The statements of a script, split on `;` outside literals and comments.
-export function splitStatements(sql) {
-  const out = [];
-  let cur = "";
-  const s = String(sql);
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    const two = s.slice(i, i + 2);
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < s.length && !(s[j] === c && s[j + 1] !== c)) j += s[j] === c ? 2 : 1;
-      cur += s.slice(i, j + 1);
-      i = j;
-    } else if (two === "--") {
-      const j = s.indexOf("\n", i);
-      const end = j < 0 ? s.length : j;
-      cur += s.slice(i, end);
-      i = end - 1;
-    } else if (two === "/*") {
-      const j = s.indexOf("*/", i + 2);
-      const end = j < 0 ? s.length : j + 2;
-      cur += s.slice(i, end);
-      i = end - 1;
-    } else if (c === "$" && /^\$[A-Za-z_]*\$/.test(s.slice(i))) {
-      const tag = s.slice(i).match(/^\$[A-Za-z_]*\$/)[0];
-      const j = s.indexOf(tag, i + tag.length);
-      const end = j < 0 ? s.length : j + tag.length;
-      cur += s.slice(i, end);
-      i = end - 1;
-    } else if (c === ";") {
-      if (code(cur).trim()) out.push(cur.trim());
-      cur = "";
-    } else cur += c;
-  }
-  if (code(cur).trim()) out.push(cur.trim());
-  return out;
-}
+export { splitStatements };
 
 // The statement without comments, its string literals kept apart.
 function code(sql) {
-  return String(sql).replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => (m[0] === "'" ? "''" : m[0] === '"' ? m : " "));
+  return String(sql).replace(LIT_OR_COMMENT, (m) => (m[0] === '"' ? m : /^--|^\/\*/.test(m) ? " " : "''"));
 }
-const literals = (sql) => [...String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ").matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+// String literals ('…', E'…' with backslash escapes, $$…$$), quoted
+// identifiers and comments, in one pass (so a quote inside one is not the
+// start of another).
+const LIT_OR_COMMENT = /(?<![\w$])[Ee]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"|\$([A-Za-z_]*)\$[\s\S]*?\$\1\$|--[^\n]*|\/\*[\s\S]*?\*\//g;
+// The string literals' texts and the quoted identifiers' names.
+function literals(sql) {
+  const out = [];
+  for (const m of String(sql).matchAll(LIT_OR_COMMENT)) {
+    const t = m[0];
+    if (t[0] === "'") out.push(t.slice(1, -1).replace(/''/g, "'"));
+    else if (/^[Ee]'/.test(t)) out.push(t.slice(2, -1).replace(/\\(.)/g, "$1").replace(/''/g, "'"));
+    else if (t[0] === '"') out.push(t.slice(1, -1).replace(/""/g, '"'));
+    else if (t[0] === "$") out.push(t.replace(/^\$[A-Za-z_]*\$|\$[A-Za-z_]*\$$/g, ""));
+  }
+  return out;
+}
 
 // A literal that names a file or a URL.
 export function looksLikePath(s) {
@@ -308,6 +296,81 @@ export function classifyScript(sql, opts) {
   return { all, danger: all.filter((s) => s.cls === 3) };
 }
 
+// ---- the parse tree: what a statement reads ----
+// DuckDB's parser (json_serialize_sql: parse only, nothing runs or binds)
+// gives every function and table a statement names. Never run for the
+// assistant, whatever the keyword class: a dynamic query (query,
+// query_table), a reader (read_*, *_scan, glob, …) of anything but a literal
+// path the dashboard already uses, a table named like a path or URL, and the
+// secrets and settings functions.
+const ALWAYS_DENIED = /^(query|query_table|getenv|duckdb_secrets|which_secret|current_setting|duckdb_settings|load_aws_credentials|http_\w+|httpfs_\w+)$/i;
+const READER = /^(read_\w+|\w+_scan|glob|sniff_csv|parquet_\w+|st_read\w*|iceberg_\w+|delta_\w+)$/i;
+
+// The parse-tree findings of one tree: [reason, …] (empty: nothing denied).
+export function treeDenials(tree, known = new Set()) {
+  const out = [];
+  const strings = (n) => {
+    if (n?.class === "CONSTANT") return n.value?.value != null && !n.value.is_null ? [String(n.value.value)] : [];
+    if (n?.class === "FUNCTION" && /^(list_value|list_pack)$/i.test(n.function_name)) {
+      const parts = (n.children || []).map(strings);
+      return parts.every((x) => x) ? parts.flat() : null;
+    }
+    return null; // computed
+  };
+  const walk = (n) => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (!n || typeof n !== "object") return;
+    if (typeof n.function_name === "string") {
+      const f = n.function_name;
+      if (ALWAYS_DENIED.test(f)) out.push(`${f}()`);
+      else if (READER.test(f)) {
+        const paths = strings((n.children || [])[0]);
+        if (!paths) out.push(`${f}() of a computed path`);
+        else for (const p of paths) if (!known.has(p)) out.push(`${f}('${p}'), a file the dashboard does not use`);
+      }
+    }
+    if (n.type === "BASE_TABLE")
+      for (const k of ["catalog_name", "schema_name", "table_name"]) if (n[k] && looksLikePath(n[k]) && !known.has(n[k])) out.push(`the file "${n[k]}"`);
+    for (const v of Object.values(n)) if (v && typeof v === "object") walk(v);
+  };
+  walk(tree);
+  return [...new Set(out)];
+}
+
+// The queries inside a statement that DuckDB can serialise: the statement
+// itself, a SET VARIABLE's value, a temp view / table / macro body.
+export function embeddedQueries(sql) {
+  const c = code(sql).trim();
+  if (/^(SELECT|FROM|WITH|VALUES|TABLE|PIVOT|UNPIVOT|\()/i.test(c)) return [sql];
+  let m = /^\s*SET\s+VARIABLE\s+("(?:[^"]|"")*"|\w+)\s*(?:=|TO)\s*([\s\S]+)$/i.exec(sql);
+  if (m) return [`SELECT ${m[2]}`];
+  m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(TABLE|VIEW|MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"(?:[^"]|"")*"|[\w.]+)\s*(\([^()]*\))?\s*AS\s+(TABLE\s+)?([\s\S]+)$/i.exec(sql);
+  if (m) return [m[1].toUpperCase() === "MACRO" || m[1].toUpperCase() === "FUNCTION" ? (m[3] ? m[4] : `SELECT ${m[4]}`) : m[4]];
+  if (/^\s*CREATE\s+(OR\s+REPLACE\s+)?TEMP(ORARY)?\s+TABLE\s+[^(]*\([^()]*\)\s*$/i.test(c)) return []; // columns only
+  if (/^\s*(SET|RESET|LOAD|USE)\b/i.test(c) && !/\b(SELECT|FROM)\b/i.test(c)) return [];
+  return null; // a body that can't be checked
+}
+
+// What DuckDB's parser finds in one statement: [] (fine) or the reasons it
+// must not run. `run` = a scratch runner.
+export async function inspect(sql, run, known = new Set()) {
+  const qs = embeddedQueries(sql);
+  if (qs === null) return ["a statement whose query can't be checked"];
+  const out = [];
+  for (const q of qs) {
+    let j;
+    try {
+      j = JSON.parse(JSON.parse(await run(`SELECT json_serialize_sql(${sqlLit(q)}) AS j`))[0]?.j || "{}");
+    } catch (e) {
+      return [`can't check it (${String(e?.message || e).split("\n")[0].slice(0, 80)})`];
+    }
+    if (j.error !== false) return [`DuckDB can't read it as a query (${String(j.error_message || "").slice(0, 80)})`];
+    if ((j.statements || []).length !== 1) return ["more than one statement"];
+    out.push(...treeDenials(j.statements, known));
+  }
+  return out;
+}
+
 // The definite read-only test for run_sql: DuckDB's own parser serialises
 // only SELECT-class statements (as src/host/policy.rs relies on). true /
 // false, or null when json_serialize_sql itself is not available (no json
@@ -371,7 +434,7 @@ export const TOOLS = [
   },
   {
     name: "run_sql",
-    description: `Run one read-only query (SELECT, FROM, WITH, VALUES, DESCRIBE …) in a scratch session and get a profile of its result: the columns with their types, the row count (up to ${LIMITS.runRows}), and per column the empty count, distinct count and min / max. The rows themselves are not returned. Anything that writes, installs, attaches or reads a new file is refused.`,
+    description: `Run one read-only query (SELECT, FROM, WITH, VALUES) in a scratch session and get the shape of its result: the columns with their types, the row count (up to ${LIMITS.runRows}), and per column the empty count, distinct count and the min / max of numbers and dates. No rows and no text values are returned. Anything that writes, installs, attaches, runs a dynamic query or reads a file the dashboard does not already use is refused.`,
     input_schema: obj({ sql: str("One read-only SQL statement"), purpose: str("What you want to learn from it, in a few words") }),
     strict: true,
   },
@@ -453,9 +516,9 @@ export async function prefixHash(prefix) {
 // Personal data: a column whose name or values look like it never sends its
 // values (only its counts and type).
 const PII_NAME =
-  /e_?mail|phone|mobile|fax|iban|bic|swift|ssn|social_?sec|passport|tax_?id|vat_?id|birth|dob|address|street|house_?n|postcode|zip|ip_?addr|^ip$|password|secret|token|salary|wage|(^|_)(first|last|full|given|family|sur|middle|maiden|nick|user|customer|contact|person|employee|patient|owner|author|sender|recipient|client)_?name$|^name$/i;
+  /kunde|kundin|vorname|nachname|familienname|telefon|handy|mobil|strasse|straße|hausnummer|^plz$|postleitzahl|anschrift|adresse|geburt|ansprechpartner|bankverbindung|konto|steuer_?(id|nr|nummer)|sozialvers|ausweis|gehalt|lohn|mitarbeiter_?name|e_?mail|phone|mobile|fax|iban|bic|swift|ssn|social_?sec|passport|tax_?id|vat_?id|birth|dob|address|street|house_?n|postcode|zip|ip_?addr|^ip$|password|secret|token|salary|wage|(^|_)(first|last|full|given|family|sur|middle|maiden|nick|user|customer|contact|person|employee|patient|owner|author|sender|recipient|client)_?name$|^name$/i;
 const PII_VALUE = [
-  /^[^\s@]+@[^\s@]+\.[^\s@]+$/, // e-mail
+  /[^\s@<>()"']+@[^\s@<>()"']+\.[a-z]{2,}/i, // an e-mail address, also inside text
   /^\+?[\d\s()./-]{7,}$/, // phone-like
   /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/i, // IBAN
   /^(\d{1,3}\.){3}\d{1,3}$/, // IPv4
@@ -464,7 +527,8 @@ export function personal(name, values = []) {
   if (PII_NAME.test(String(name))) return "name";
   if (idLike(name)) return "key";
   const vals = values.map(String).filter((v) => v.trim());
-  if (vals.some((v) => PII_VALUE.some((re) => re.test(v.replace(/\s+/g, " ").trim())))) return "value";
+  const looks = (v) => PII_VALUE.some((re) => re.test(v.replace(/\s+/g, " ").trim()) || re.test(v.replace(/\s+/g, "")));
+  if (vals.some(looks)) return "value";
   return null;
 }
 
@@ -498,7 +562,15 @@ export function buildContext({ mode = "new", tables = [], sql = "", spans = [], 
     columns: t.cards ? t.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues })) : undefined,
   }));
   if (tables.length > LIMITS.tables) ctx.more_tables = tables.slice(LIMITS.tables).map((t) => ({ name: t.name, rows: t.rows ?? undefined }));
-  if (mode !== "new" && sql.trim()) ctx.statements = spans.map(([a, b], i) => ({ n: i + 1, sql: sql.slice(a, b) }));
+  if (mode !== "new" && sql.trim()) {
+    let redacted = 0;
+    ctx.statements = spans.map(([a, b], i) => {
+      const r = redactSecrets(sql.slice(a, b));
+      redacted += r.redacted;
+      return { n: i + 1, sql: r.sql };
+    });
+    if (redacted) ctx.redacted = redacted;
+  }
   if (theme) ctx.theme = theme;
   if (locale) ctx.locale = locale;
   ctx.common_values = commonValues;
@@ -517,9 +589,35 @@ export function firstMessage(ctx, request) {
   };
 }
 
+// Secrets in the user's SQL stay home: a CREATE SECRET statement is left out,
+// and credentials in literals (URL query parameters such as token= / key= /
+// sig=, password=… / pwd=…, a KEY_ID / SECRET / TOKEN option's value) are
+// replaced by "***". Returns {sql, redacted} (the count).
+export function redactSecrets(sql) {
+  let redacted = 0;
+  const hit = (s) => (redacted++, s);
+  let out = String(sql);
+  if (/^\s*CREATE\s+(OR\s+REPLACE\s+)?(PERSISTENT\s+|TEMP(ORARY)?\s+)?SECRET\b/i.test(code(out))) return { sql: hit("-- (a CREATE SECRET statement: not sent)"), redacted };
+  out = out.replace(/([?&](?:[\w-]*(?:token|key|secret|sig|signature|password|pwd|auth|credential|session)[\w-]*)=)[^&'"\s]+/gi, (_, k) => hit(k + "***"));
+  out = out.replace(/\b((?:password|pwd|passwd|secret|token|api_?key)\s*[=:]\s*)(?!\*\*\*)[^\s;'",)]+/gi, (_, k) => hit(k + "***"));
+  out = out.replace(/\b(KEY_ID|SECRET|SESSION_TOKEN|TOKEN|PASSWORD|ACCESS_KEY|CLIENT_SECRET)(\s+)'(?:[^']|'')*'/gi, (_, k, sp) => hit(`${k}${sp}'***'`));
+  return { sql: out, redacted };
+}
+
+// Every reader, path and URL a proposal names — for Apply (M1-3) to list
+// prominently before the user's own session runs it.
+export function proposalReaders(sql) {
+  const out = new Set(pathsOf(sql));
+  for (const m of code(sql).matchAll(/\b(read_\w+|\w+_scan|glob|st_read\w*|query|query_table|iceberg_\w+|delta_\w+)\s*\(/gi)) out.add(`${m[1]}()`);
+  for (const m of code(sql).matchAll(/\b(ATTACH|COPY|INSTALL|LOAD|EXPORT|IMPORT)\b/gi)) out.add(m[1].toUpperCase());
+  return [...out];
+}
+
 // "What will be sent": the destination, the static reference by name and
 // size, the dynamic part in full, and a rough token count.
-export function payloadPreview({ prefix, ctx, request, destination = API_HOST }) {
+// The tool results (toolLog, as the loop sends them) are listed too: profiles,
+// query summaries and check results leave as well.
+export function payloadPreview({ prefix, ctx, request, destination = API_HOST, toolLog = [] }) {
   const msg = firstMessage(ctx, request);
   const dynamic = msg.content.map((c) => c.text).join("\n\n");
   const statics = [
@@ -528,7 +626,17 @@ export function payloadPreview({ prefix, ctx, request, destination = API_HOST })
     { name: "tools", bytes: JSON.stringify(prefix.tools).length },
   ];
   const chars = dynamic.length + statics.reduce((s, x) => s + x.bytes, 0);
-  return { destination, statics, dynamic, approxTokens: Math.round(chars / 4) };
+  const tools = toolLog.map((t) => ({ name: t.name, content: t.content }));
+  const redacted = ctx.redacted || 0;
+  return {
+    destination,
+    statics,
+    dynamic,
+    tools,
+    redacted,
+    note: "Then, while the assistant works: each tool result above (table profiles, query summaries without rows, check results).",
+    approxTokens: Math.round((chars + tools.reduce((s, t) => s + t.content.length, 0)) / 4),
+  };
 }
 
 // ---- the loop ----
@@ -543,11 +651,11 @@ const clip = (s, n = LIMITS.resultChars) => (s.length > n ? s.slice(0, n - 20) +
 
 // Run a request to its end. `tools` = {list_tables, profile_table, run_sql,
 // check(sql) → {ok, text, issues}, gate(sql) → {allowed, statements}}
-// (wasmTools builds them); `confirm(statements)` asks the user about class 3
-// statements and resolves true for "Allow once". Resolves to
+// (wasmTools builds them). `onToolResult({name, input, content})` sees every
+// tool result as it is sent (the panel's log of what leaves). Resolves to
 //   {kind: "proposal" | "reply" | "refusal" | "stopped" | "cancelled" | "error",
 //    text, proposal?: {sql, summary, panels, issues, passed}, reason?,
-//    turns, rounds, usage, messages}.
+//    turns, rounds, usage, messages, toolLog}.
 export async function runAssistant({
   transport,
   prefix,
@@ -562,6 +670,7 @@ export async function runAssistant({
   onStatus = () => {},
   onText,
   onProposalInput,
+  onToolResult,
 }) {
   const L = { ...LIMITS, ...limits };
   const messages = [...history, firstMessage(ctx, request)];
@@ -569,11 +678,17 @@ export async function runAssistant({
   let rounds = 0;
   let best = null; // the best rejected proposal (fewest issues)
   let text = "";
-  const done = (kind, extra = {}) => ({ kind, text: text.trim(), turns, rounds, usage, messages, ...extra });
+  const toolLog = []; // every tool result sent: [{name, input, content}]
+  let calls = 0;
+  let lastIn = 0; // the last call's input (for the budget check before a call)
+  const done = (kind, extra = {}) => ({ kind, text: text.trim(), turns, rounds, usage, messages, toolLog, ...extra });
   let turns = 0;
   const eff = effort || (ctx.mode === "new" ? "high" : "medium");
   while (turns < L.turns) {
     if (signal?.aborted) return done("cancelled");
+    // The budget before a call: what is spent, the input again, and the
+    // most this call could write.
+    if (turns && usage.spent + lastIn + 5 * L.maxTokens > L.tokens) return done("stopped", { reason: "The request reached its token budget.", proposal: best });
     turns++;
     onStatus({ phase: "thinking", turn: turns, round: rounds, maxRounds: L.rounds });
     let msg;
@@ -600,10 +715,11 @@ export async function runAssistant({
       );
     } catch (e) {
       if (isAbort(e, signal)) return done("cancelled");
-      return done("error", { reason: describeError(e), error: e });
+      return done("error", { reason: describeError(e), status: Number(e?.status) || 0 });
     }
     for (const k of ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]) usage[k] += msg.usage?.[k] || 0;
     usage.spent += spent(msg.usage);
+    lastIn = (msg.usage?.input_tokens || 0) + 0.1 * (msg.usage?.cache_read_input_tokens || 0) + 1.25 * (msg.usage?.cache_creation_input_tokens || 0);
     if (signal?.aborted) return done("cancelled");
     // The stop reason before the content: a refusal or a cut-off turn runs no tool.
     if (msg.stop_reason === "refusal") return done("refusal", { reason: msg.stop_details?.explanation || "The model declined this request.", proposal: null });
@@ -614,8 +730,12 @@ export async function runAssistant({
     if (!uses.length) return done("reply");
     const results = [];
     let finished = null;
-    for (const u of uses) {
+    for (const [i, u] of uses.entries()) {
       if (signal?.aborted) return done("cancelled");
+      if (i >= L.callsPerTurn || ++calls > L.calls) {
+        results.push({ type: "tool_result", tool_use_id: u.id, is_error: true, content: `Not run: at most ${L.callsPerTurn} tool calls per turn and ${L.calls} per request.` });
+        continue;
+      }
       const def = prefix.tools.find((t) => t.name === u.name);
       const bad = def ? validate(def.input_schema, u.input) : `unknown tool ${u.name}`;
       if (bad) {
@@ -651,6 +771,12 @@ export async function runAssistant({
       }
     }
     // All results in one user message (keeps parallel tool use working).
+    for (const r of results) {
+      const u = uses.find((x) => x.id === r.tool_use_id);
+      const entry = { name: u?.name, input: u?.input, content: r.content, error: !!r.is_error };
+      toolLog.push(entry);
+      onToolResult?.(entry);
+    }
     messages.push({ role: "user", content: results });
     if (finished) return done("proposal", { proposal: finished });
     if (usage.spent > L.tokens) return done("stopped", { reason: "The request reached its token budget.", proposal: best });
@@ -661,7 +787,7 @@ export async function runAssistant({
 // check_dashboard: the write gate, then the strict check.
 async function checkTool(sql, tools) {
   const g = await tools.gate(sql);
-  if (!g.allowed) return `Not run: the user did not allow these statements: ${g.statements.map((s) => s.sql.split("\n")[0].slice(0, 80)).join("; ")}. Use temporary objects and the existing tables instead.`;
+  if (!g.allowed) return `Not run: ${g.statements.map((s) => `${s.sql.split("\n")[0].slice(0, 80)} (${s.reason})`).join("; ")}. The assistant may only read the existing tables and the files the dashboard already uses, and create temporary objects.`;
   return (await tools.check(sql)).text;
 }
 
@@ -670,8 +796,8 @@ async function checkProposal(input, tools) {
   const proposal = { sql: input.sql, summary: input.summary, panels: input.panels, open_issues: input.open_issues };
   const g = await tools.gate(input.sql);
   if (!g.allowed) {
-    const issues = g.statements.map((s) => ({ stmt: 0, severity: "error", code: "not-allowed", message: `the user did not allow: ${s.sql.split("\n")[0].slice(0, 80)}` }));
-    return { passed: false, proposal, issues, text: "Not run: the user did not allow these statements. Use temporary objects and the existing tables instead:\n" + issues.map((i) => "- " + i.message).join("\n") };
+    const issues = g.statements.map((s) => ({ stmt: 0, severity: "error", code: "not-allowed", message: `${s.sql.split("\n")[0].slice(0, 80)}: ${s.reason}` }));
+    return { passed: false, proposal, issues, text: "Not run: the assistant may only read the existing tables and the files the dashboard already uses, and create temporary objects:\n" + issues.map((i) => "- " + i.message).join("\n") };
   }
   const r = await tools.check(input.sql);
   return { passed: r.ok, proposal: { ...proposal, check: r }, issues: r.issues, text: r.text };
@@ -683,12 +809,14 @@ async function checkProposal(input, tools) {
 // a scratch session (web/lint.js), so nothing the assistant runs changes the
 // page's tables or variables. `prepare` readies extensions and files (as
 // web/app.js's prepareSql); `lintStep`, `plan`, `pageSql` are the wasm exports;
-// `confirm(statements)` asks the user about class 3 statements; `known` = the
+// `sampleRows()` = the per-conversation opt-in (with the installation's
+// sample_rows_allowed): only then does run_sql return text values; `known` = the
 // paths and URLs the current SQL already reads.
-export function wasmTools({ db, prepare, lintStep, plan, pageSql, confirm = async () => false, known = new Set(), commonValues = () => true, timeoutMs = LIMITS.timeoutMs, profiles = new Map() }) {
-  const run = scratchRunner(db, { prepare });
+export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Set(), commonValues = () => true, sampleRows = () => false, timeoutMs = LIMITS.timeoutMs, checkQueryMs = LIMITS.checkQueryMs, checkMs = LIMITS.checkMs, profiles = new Map() }) {
+  const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs });
   const typed = scratchRunner(db, {
     prepare,
+    timeoutMs,
     toRows: (res) => ({ types: res.schema.fields.map((f) => [f.name, String(f.type)]), rows: JSON.parse(rowsJson(res)) }),
   });
   const rowsOf = async (sql) => JSON.parse(await run(sql));
@@ -712,11 +840,6 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, confirm = asyn
     if (hit.length !== 1) throw new Error(hit.length ? `"${name}" is ambiguous: name it as database.schema.table` : `no table or view "${name}" (list_tables shows them)`);
     return { ...hit[0], fq: `${qid(hit[0].db)}.${qid(hit[0].schema)}.${qid(hit[0].name)}`, display: display(hit[0], all) };
   };
-  const withTimeout = (p) => {
-    let timer;
-    const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`the query took longer than ${timeoutMs / 1000} s`)), timeoutMs)));
-    return Promise.race([p, late]).finally(() => clearTimeout(timer));
-  };
   const tools = {
     async list_tables({ filter = "" }) {
       const all = await tables();
@@ -730,21 +853,28 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, confirm = asyn
       const p = profiles.get(t.fq);
       return stableJson({ table: t.display, rows: p.total, sampled: p.sampled || undefined, columns: p.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues: commonValues() })) });
     },
+    // One read-only query, as DuckDB's own parser reads it: exactly one
+    // SELECT-class statement (json_serialize_sql), nothing denied in its
+    // tree; run as one prepared-checked statement with a cancelling timeout.
     async run_sql({ sql }) {
       const stmts = splitStatements(sql);
-      if (stmts.length !== 1) throw new Error("run_sql takes exactly one statement");
+      if (stmts.length !== 1) throw new Error("refused: run_sql takes exactly one statement");
       const s = stmts[0];
+      if (/^\s*(DESCRIBE|SHOW|SUMMARIZE|EXPLAIN)\b/i.test(code(s))) throw new Error("refused: use profile_table, or a SELECT, instead");
       const k = classifyStatement(s, { known });
       if (k.cls !== 1) throw new Error(`refused: run_sql runs read-only queries only (${k.reason || k.kind})`);
-      const meta = /^\s*(DESCRIBE|SHOW|SUMMARIZE|EXPLAIN)\b/i.test(code(s));
-      if (!meta && (await serializable(s, run)) === false) throw new Error("refused: DuckDB does not parse this as one read-only query");
-      const q = meta ? s : `SELECT * FROM (${s.replace(/;\s*$/, "")}) AS _q LIMIT ${LIMITS.runRows + 1}`;
-      const { types, rows } = await withTimeout(typed(q));
-      return resultProfile(types, rows, commonValues());
+      if ((await serializable(s, run)) !== true) throw new Error("refused: DuckDB does not read this as one read-only query");
+      const denied = await inspect(s, run, known);
+      if (denied.length) throw new Error(`refused: ${denied.join("; ")}`);
+      const q = `SELECT * FROM (${s.replace(/;\s*$/, "")}) AS _q LIMIT ${LIMITS.runRows + 1}`;
+      const { types, rows } = await typed(q);
+      return resultProfile(types, rows, { values: sampleRows() && commonValues() });
     },
     // The strict check of a whole script: {ok, text, issues}.
     async check(sql) {
-      const res = await lintScript(sql, { step: lintStep, run, strict: true });
+      const until = Date.now() + checkMs;
+      const res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => Date.now() > until });
+      if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
       const planned = JSON.parse(plan(sql));
       const answer = (p) => {
         for (const [q, a] of res.answers) if (q.endsWith(`${p.sql};`)) return a;
@@ -770,11 +900,22 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, confirm = asyn
       });
       return { ok: res.ok, text, issues, diagnostics: res.diagnostics, statements };
     },
-    // The write gate: class 3 statements need the user's "Allow once".
+    // The gate before anything of a script runs: every statement exactly as
+    // it will run (the plan), by keyword and by DuckDB's parse tree. A class 3
+    // statement, a reader of a new or computed path, a dynamic query or a
+    // secrets / settings function is not run during the loop at all: such a
+    // statement can only reach the user's session through Apply, where it is
+    // listed (proposalReaders) and confirmed.
     async gate(sql) {
-      const { danger } = classifyScript(sql, { known });
-      if (!danger.length) return { allowed: true, statements: [] };
-      return { allowed: !!(await confirm(danger)), statements: danger };
+      const refused = [];
+      for (const p of JSON.parse(plan(sql))) {
+        const k = classifyStatement(p.sql, { known });
+        let why = k.cls === 3 ? [k.reason || k.kind] : [];
+        for (const alt of (p.requires || []).flat(2)) if (typeof alt === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(alt)) why.push(`@requires ${alt}`);
+        if (!why.length) why = await inspect(p.sql, run, known);
+        if (why.length) refused.push({ sql: p.sql, reason: why.join("; ") });
+      }
+      return { allowed: !refused.length, statements: refused };
     },
   };
   return tools;
@@ -783,7 +924,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, confirm = asyn
 const INPUT_ROLES = new Set(["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"]);
 
 // A query result as the model gets it: no rows, a profile per column.
-export function resultProfile(types, rows, commonValues = true) {
+export function resultProfile(types, rows, { values = false } = {}) {
   const capped = rows.length > LIMITS.runRows;
   const data = capped ? rows.slice(0, LIMITS.runRows) : rows;
   const columns = types.map(([name, type]) => {
@@ -800,7 +941,7 @@ export function resultProfile(types, rows, commonValues = true) {
       const s = [...nonnull].sort();
       c.min = s[0];
       c.max = s[s.length - 1];
-    } else if (commonValues && nonnull.length && nonnull.every((v) => typeof v === "string") && distinct.size <= 10 && !personal(name, nonnull.slice(0, 50))) {
+    } else if (values && nonnull.length && nonnull.every((v) => typeof v === "string") && distinct.size <= 10 && !personal(name, nonnull.slice(0, 50))) {
       c.values = [...distinct].map((v) => JSON.parse(v)).slice(0, 10);
     }
     return c;
