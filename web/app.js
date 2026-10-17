@@ -993,6 +993,7 @@ const FILE_SAMPLES = [
   "examples/inventory-twin.sql",
   "examples/optimize-replenishment.sql",
   "examples/supplier-lead-times.sql",
+  "examples/delivery-coverage.sql",
   "examples/supply-chain.sql",
   "examples/optimize-showcase.sql",
   "examples/optimize-production.sql",
