@@ -217,9 +217,15 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
     e("SYNC_ZOOM", &["ZOOM_GROUP"], R::SyncZoom, "modifier", true,
       "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
+    e("PROJECTION", &["PROJ"], R::Projection, "modifier", true,
+      "map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y)"),
+    e("CLASSES", &["CLASS_BREAKS", "BINS"], R::Classes, "modifier", true,
+      "map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class"),
+    e("MIDPOINT", &[], R::Midpoint, "modifier", true,
+      "centre of a map's diverging colour ramp (default 0 when the values span it)"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
-    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'"),
+    e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
       "gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb)"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
@@ -738,6 +744,9 @@ mod tests {
             Role::Flip,
             Role::Alpha,
             Role::SyncZoom,
+            Role::Projection,
+            Role::Classes,
+            Role::Midpoint,
             Role::Tab,
             Role::SubTab,
             Role::Size,
@@ -852,6 +861,9 @@ mod tests {
                 | Role::Flip
                 | Role::Alpha
                 | Role::SyncZoom
+                | Role::Projection
+                | Role::Classes
+                | Role::Midpoint
                 | Role::Tab
                 | Role::SubTab
                 | Role::Size

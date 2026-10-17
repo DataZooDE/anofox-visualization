@@ -222,7 +222,11 @@ fn cmd_render(args: &[String]) {
             panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(text)));
             continue;
         }
-        let cols = sql::columns_from_rows(&rows, &p.roles);
+        let cols = anofox_visualization::name_columns(
+            sql::columns_from_rows(&rows, &p.roles),
+            &p.roles,
+            &p.names,
+        );
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
         while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {

@@ -284,15 +284,16 @@ SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ b
 SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
--- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
+-- (ST_Read → ST_AsText → WKT); the map writer projects and draws it (::MAP).
 SELECT 'Map'::TAB;
 
 SELECT 'World'::SUBTAB;
 SELECT 12::COL;
 SELECT ST_AsText(geom) ::MAP,
-       ln(POP_EST + 1) ::BARCHART,          -- fill = log population
+       POP_EST AS "Population" ::BARCHART,  -- fill = population (legend title)
+       'quantile 5'::CLASSES,               -- five classes of equal size
        NAME ::LABEL,                        -- hover tooltip
-       'World population by country — Natural Earth'::TITLE
+       'Where do most people live?'::TITLE
 FROM ST_Read('countries.geojson')
 WHERE NAME <> 'Antarctica';
 
@@ -301,7 +302,7 @@ SELECT 12::COL;
 -- Quake points coloured by magnitude, semi-transparent (::ALPHA) so overlaps
 -- read as density, over a grey country basemap. The two layers ride in disjoint
 -- rows: quakes fill ::MAP, countries fill ::BASEMAP.
-SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+SELECT ST_AsText(geom) ::MAP, mag AS "Magnitude" ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'USGS earthquakes (M≥2.5, past 30 days) — colour = magnitude'::TITLE
 FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
 UNION ALL
@@ -335,14 +336,14 @@ SELECT 'Two **linked maps** rendered from real GeoJSON (DuckDB''s spatial extens
 
 -- LEFT: world, filled by onshore-quake count per country. Click a country.
 SELECT 6::COL;
-SELECT c.wkt ::MAP, count(q.country) ::BARCHART, c.country ::LABEL,
+SELECT c.wkt ::MAP, count(q.country) AS "Earthquakes" ::BARCHART, c.country ::LABEL,
        'Quakes per country — click one'::TITLE
 FROM cgeo c LEFT JOIN qcty q ON q.country = c.country
 GROUP BY c.wkt, c.country;
 
 -- RIGHT: quakes inside the selected country (exact), semi-transparent, on a basemap.
 SELECT 6::COL;
-SELECT q.wkt ::MAP, q.mag ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+SELECT q.wkt ::MAP, q.mag AS "Magnitude" ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'Earthquakes in selection'::TITLE
 FROM qcty q
 WHERE getvariable('selected') = '' OR q.country = getvariable('selected')
@@ -7337,14 +7338,16 @@ async function runOnce(fresh = true) {
           } else {
             // a lone sparkline is a small strip; a ::DIAGRAM's are in its boxes
             const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM");
-            const ph = boxH || (spark ? 90 : 300); // ::HEIGHT, else default
             const isMap = s.roles.some((r) => r[1] === "MAP");
+            // a map without ::HEIGHT takes the height its shape needs
+            const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
+            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100)) : 300); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
-            const rw = isMap || spark ? 460 : Math.max(300, span * 100);
+            const rw = spark ? 460 : Math.max(300, span * 100);
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
@@ -7353,7 +7356,7 @@ async function runOnce(fresh = true) {
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
-            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap };
+            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap, mapAr };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -7890,7 +7893,7 @@ function fitCharts(watch = false) {
       holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
       widenDiagram(holder, w, (ww) => render_contract(dp.contract.macro, dp.rows, dp.contract.args, ww, dp.ph, renderCtx()));
     }
-    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
+    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph, holder._zoom || "");
     changed = true;
   });
   return changed;
@@ -11480,14 +11483,32 @@ function zoomFromShared(sv, aspect) {
 }
 
 // Scroll-to-zoom / drag-to-pan for a map panel. Re-renders the panel's SVG with
-// a lon/lat zoom window (double-click resets to auto-fit). The initial view is
-// seeded from the geometry bounds, padded to the panel's aspect so the first
-// zoom step doesn't jump. In a ::SYNC_ZOOM group a zoom, pan or reset of one
-// map is applied to every other map of the group, and a map that joins later
-// (a re-run) takes the group's current view.
+// a zoom window in the map's projected units, y up (double-click resets to
+// auto-fit). The initial view is the window the whole panel shows unzoomed
+// (map_bounds at the drawn size), so the first zoom step doesn't jump. In a
+// ::SYNC_ZOOM group a zoom, pan or reset of one map is applied to every other
+// map of the group, and a map that joins later (a re-run) takes the group's
+// current view.
+// A map's height / width as drawn (its projected box), 0 when unknown.
+function mapAspect(rowsJson, roles) {
+  try {
+    const [x0, x1, y0, y1] = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), 0, 0));
+    const ar = (y1 - y0) / (x1 - x0);
+    return Number.isFinite(ar) && ar > 0 ? ar : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+// The height a map of aspect `ar` needs at render width `w` (its margin and a
+// little room for the legend), within sensible bounds.
+function mapHeight(ar, w) {
+  return Math.round(Math.min(Math.max(w * ar * 1.1, 220), Math.max(320, w * 1.1), 640));
+}
+
 function attachMapZoom(holder, rowsJson, roles, ph) {
   const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
-  let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
+  const H = () => holder.querySelector("svg")?.viewBox.baseVal.height || ph; // … and its height
+  let view = null; // {x0,x1,y0,y1} in projected units; null = auto-fit
   let raf = 0;
   const gr = roles.find((r) => r[1] === "SYNC_ZOOM");
   const groupName = gr ? cellAt(rowsJson, gr[0]).trim() : "";
@@ -11505,12 +11526,12 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   const fit = () => {
     let b;
     try {
-      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles)));
+      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), W(), H()));
     } catch (_) {
       b = [];
     }
     if (b.length !== 4) return { x0: -180, x1: 180, y0: -90, y1: 90 };
-    const aspect = W() / ph;
+    const aspect = W() / H();
     let [x0, x1, y0, y1] = b;
     const w = x1 - x0,
       h = y1 - y0;
@@ -11533,7 +11554,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      renderChart(holder, rowsJson, roles, W(), ph, zoom);
+      renderChart(holder, rowsJson, roles, W(), H(), zoom);
       wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
@@ -11599,7 +11620,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   });
   if (group) {
     holder._dpZoomTo = (sv) => {
-      view = zoomFromShared(sv, W() / ph);
+      view = zoomFromShared(sv, W() / H());
       draw();
     };
     group.members.add(holder);
@@ -11684,7 +11705,7 @@ function attachHover() {
   // mark has given its <title> up already.
   const marks = [
     ...document.querySelectorAll(
-      ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline"
+      ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline,.panel svg[data-map]:not([data-hw]) path"
     ),
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
   document.querySelectorAll(".panel svg:not([data-hw])").forEach((svg) => svg.setAttribute("data-hw", ""));
@@ -11891,11 +11912,16 @@ function attachChartA11y() {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
       return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
     });
-    // A ::DIAGRAM brings its own summary (steps, stages, loops) from the renderer.
+    // A ::DIAGRAM or a ::MAP brings its own summary from the renderer (steps,
+    // stages, loops; regions, extremes, classes).
     const ds = svg.getAttribute("data-summary");
     const kind = svg._track ? "Strip under the chart" : chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles));
     const summary =
-      ds != null ? `Diagram${title ? `: ${title}` : ""}; ${ds}.` : chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
+      ds != null
+        ? svg.hasAttribute("data-map")
+          ? `Map${title ? `: ${title}` : ""}; ${ds}`
+          : `Diagram${title ? `: ${title}` : ""}; ${ds}.`
+        : chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -12119,8 +12145,11 @@ function applyAsTables() {
       view.className = "dp-astable-view";
       const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
       const dsvg = holder.querySelector(":scope > svg[data-diagram]");
+      const msvg = holder.querySelector(":scope > svg[data-map]");
       view.innerHTML = dsvg
         ? diagramTextHtml(dsvg, title)
+        : msvg
+        ? mapTableHtml(msvg, 200, title)
         : dataTableHtml(fig._dp, 200, title) +
           (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
       holder.after(view);
@@ -12314,6 +12343,51 @@ function diagramTextHtml(svg, caption) {
         .map((n) => `<tr><td>${esc(name.get(n.dataset.node))}</td><td>${esc(n.dataset.fvalue || "")}</td></tr>`)
         .join("")}</tbody></table>`;
   return `<ol class="dp-diagram-steps"${label}>${items.join("")}</ol>${table}`;
+}
+
+// A ::MAP as a table: one row per feature — its name (::LABEL, else its
+// series), series, value and class — sorted by value, highest first. No WKT.
+function mapTableHtml(svg, limit, caption) {
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
+  let classes = [];
+  try {
+    classes = JSON.parse(svg.getAttribute("data-classes") || "[]");
+  } catch (_) {}
+  const seen = new Set();
+  const rows = [];
+  for (const el of svg.querySelectorAll("[data-row]")) {
+    const r = el.getAttribute("data-row");
+    if (seen.has(r)) continue;
+    seen.add(r);
+    const label = el.getAttribute("data-label") || "";
+    const series = el.getAttribute("data-series") || "";
+    const raw = el.getAttribute("data-value");
+    const k = +el.getAttribute("data-class");
+    const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    rows.push({
+      name,
+      series: series && series !== label && series !== name ? series : "",
+      raw: raw == null || raw === "" ? null : Number(raw),
+      value: el.getAttribute("data-fvalue") || (raw != null ? fmtTipValue(raw) : ""),
+      cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
+    });
+  }
+  if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
+  const cols = [
+    ["name", "name"],
+    ["series", "series"],
+    ["value", "value"],
+    ["cls", "class"],
+  ].filter(([k]) => k === "name" || rows.some((r) => r[k]));
+  const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");
+  const body = rows
+    .slice(0, limit)
+    .map((r) => `<tr>${cols.map(([k]) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
+    .join("");
+  return (
+    `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}"` : ""}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (rows.length > limit ? `<div class="dp-modal-note">Showing ${limit} of ${rows.length} rows</div>` : "")
+  );
 }
 
 function dataTableHtml(dp, limit, caption) {

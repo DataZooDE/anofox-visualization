@@ -1248,7 +1248,11 @@ fn render_dashboard_page(
             panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(text)));
             continue;
         }
-        let cols = sql::columns_from_rows(&rows, &panel.roles);
+        let cols = anofox_visualization::name_columns(
+            sql::columns_from_rows(&rows, &panel.roles),
+            &panel.roles,
+            &panel.names,
+        );
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
         while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {

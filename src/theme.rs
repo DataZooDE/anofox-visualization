@@ -1040,7 +1040,7 @@ impl ResolvedTheme {
     }
 
     /// Swap the generic font families for the theme's.
-    fn with_font(&self, svg: String) -> String {
+    pub(crate) fn with_font(&self, svg: String) -> String {
         let font = format!(
             "font-family=\"{}\"",
             crate::format::escape_xml(&self.svg_font())
