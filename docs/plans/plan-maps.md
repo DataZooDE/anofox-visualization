@@ -1,6 +1,6 @@
 # Plan: maps — themed, projected and classed, with built-in boundaries
 
-Status: design note for owner review (2026-10-17), based on master `ba2eb9d`,
+Status: **approved by the owner (2026-10-17, "go on")**; decisions in §14, based on master `ba2eb9d`,
 ggplot-rs 0.19.0. No code yet. Issue: #149. Interactivity (click-to-highlight,
 cross-filter, `::LINK`, keyboard, `::SYNC_ZOOM`) is #147 and is **out of
 scope**; this note builds on the attributes #147 adds.
@@ -547,3 +547,17 @@ population figures, and Destatis figures can be added later under dl-de/by-2-0.
    enough, or should the panel refuse?
 8. Should label names follow the **dashboard locale** (`NAME_DE` / `NAME_EN`)
    or the data's `::LABEL` only?
+
+## 14. Decisions (2026-10-17)
+
+The owner approved the plan. Every decision in §12 takes its recommendation, and the open questions in §13 are settled as follows. The owner can still redirect any of them.
+
+1. **EU regions:** no NUTS in the pack. Ship `scripts/fetch-nuts.sh`, which users run themselves (they then hold the EuroGeographics licence) and which writes the same layer format. geoBoundaries ADM1 is not bundled. Someone still has to read the NUTS terms page before the script ships.
+2. **`world-50m`:** a separate optional layer, not in the default pack.
+3. **Water:** no fill; it keeps the card colour.
+4. **Borders:** the Natural Earth default view. A point-of-view option can come later.
+5. **North arrow:** print only, optional. **Spike symbols:** out for now.
+6. **`anofox_boundaries(layer)`:** not in M1. Revisit after M1b.
+7. **Mark cap:** a render warning above 100k marks, with the aggregation hint. The panel is not refused.
+8. **Labels:** built-in boundaries use the dashboard locale (`NAME_DE`/`NAME_EN`) when available, and `::LABEL` from the data always wins.
+9. **Tiles:** stay opt-in, per installation, raster and browser only.
