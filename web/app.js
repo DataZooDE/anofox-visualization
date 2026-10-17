@@ -250,9 +250,12 @@ SELECT 'Heatmap, calendar & candlestick'::TAB;
 -- Heatmap (::HEATMAP): x × y tiles; rows keep the SQL order (first on top),
 -- ::DATALABELS writes each value into its cell, a click cross-filters by the row.
 SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, ''::DATALABELS, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- Status colours: ::COLORSCALE (low = good), ::COLORSCALE_HIGH_GOOD or ::COLORSCALE_DIVERGING
+-- run green → yellow → red; '>=50:bad; >=20:warn; good'::THRESHOLDS colours in steps instead.
+SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, ''::COLORSCALE_HIGH_GOOD, ''::DATALABELS, 'Status colours — high is good'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
 -- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
-SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
-SELECT 12::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
+SELECT 4::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
+SELECT 8::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
 -- Calendar heatmap (::CALENDAR): a date axis + a daily value, laid out
 -- GitHub-style with month labels on top and weekday rows.
 SELECT 165::HEIGHT;
