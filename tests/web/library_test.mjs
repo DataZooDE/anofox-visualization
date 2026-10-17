@@ -45,6 +45,12 @@ for (const q of ["monthly", "weekly apac"]) assert.ok(!dashMatches(e, searchTerm
 assert.ok(dashMatches(e, [], ["kpi"]));
 assert.ok(dashMatches(e, [], ["kpi", "weekly"]));
 assert.ok(!dashMatches(e, [], ["kpi", "forecast"]), "all selected tags");
+// owner is searched; "certified only" needs a certification
+const c = { ...e, owner: "Finance Team", certified: "2026-10-15" };
+assert.ok(dashMatches(c, searchTerms("finance"), []));
+assert.ok(!dashMatches(e, searchTerms("finance"), []));
+assert.ok(dashMatches(c, [], [], true) && !dashMatches(e, [], [], true));
+assert.ok(dashMatches(e, [], [], false));
 // chips: selected first, then by use, at most 8 (more when more are selected)
 const many = [{ tags: ["a", "b"] }, { tags: ["b", "c"] }, { tags: ["b"] }, { tags: ["c", "z"] }];
 assert.deepEqual(tagsInView(many, []), ["b", "c", "a", "z"]);

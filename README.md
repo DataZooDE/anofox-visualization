@@ -78,7 +78,7 @@ the axes and colour series.
 
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
-- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot.
+- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot. The folder groups itself from header comments (`-- @group`, `-- @tags`, `-- @owner`, `-- @certified`): a grouped nav (a searchable menu above 8 dashboards) and `/` list with owners and a ✓ certified badge.
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks) and a `build-dashboard` agent skill that writes dashboards from a prompt.
 

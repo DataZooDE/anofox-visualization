@@ -95,7 +95,7 @@ async function save(name, sql) {
 // ── 1. Two dashboards of yours, tagged ──
 await page.goto(`${base}?mode=edit${q}`);
 await ran();
-await save("Weekly sales", "-- @group Sales\n-- @tags weekly, kpi\nSELECT 41 + 1 AS n ::METRIC, 'Orders'::LABEL;");
+await save("Weekly sales", "-- @group Sales\n-- @tags weekly, kpi\n-- @owner Sales controlling\n-- @certified 2026-10-15\nSELECT 41 + 1 AS n ::METRIC, 'Orders'::LABEL;");
 await save("Margin bridge", "-- @tags margin, finance\nSELECT 0.31 AS m ::PERCENT, 'Margin'::LABEL;");
 check(JSON.stringify(await mine()) === JSON.stringify(["Margin bridge", "Weekly sales"]), "two saved (ungrouped first)");
 
@@ -120,9 +120,21 @@ if (phone) check(await page.evaluate(() => document.body.classList.contains("sid
 await page.fill("#side-search", "sales");
 await shot("search");
 
+// ── 2b. Owner and certification ──
+await page.fill("#side-search", "");
+check((await page.textContent("#side-my-weekly-sales .s-owner")) === "Sales controlling", "the owner is a small line under the name");
+check((await page.textContent("#side-my-weekly-sales .s-cert")).includes("certified"), "✓ marks a certified dashboard (with text for screen readers)");
+check(/Certified on 2026-10-15/.test(await page.getAttribute("#side-my-weekly-sales", "title")), "…and the tooltip says when");
+await page.click("#side-chip-certified");
+check((await page.getAttribute("#side-chip-certified", "aria-pressed")) === "true" && JSON.stringify(await mine()) === JSON.stringify(["Weekly sales"]) && (await shownExamples()) === 0, "the ✓ certified chip keeps only certified dashboards");
+await page.click("#side-chip-clear");
+await page.fill("#side-search", "controlling");
+check(JSON.stringify(await mine()) === JSON.stringify(["Weekly sales"]), "the search finds the owner");
+await page.fill("#side-search", "");
+
 // ── 3. Tag chips ──
 await page.fill("#side-search", "");
-const chips = await page.$$eval("#side-chips .side-chip:not(.side-chip-clear)", (l) => l.map((b) => b.textContent));
+const chips = await page.$$eval("#side-chips .side-chip:not(.side-chip-clear):not(.side-chip-cert)", (l) => l.map((b) => b.textContent));
 check(chips.length > 0 && chips.length <= 8, `tag chips: ${chips.join(", ")}`);
 await page.fill("#side-search", "finance");
 await page.click("#side-chip-margin");
@@ -171,7 +183,7 @@ dl = await dl;
 const sqlPath = path.join(tmp, dl.suggestedFilename());
 await dl.saveAs(sqlPath);
 check(dl.suggestedFilename() === "weekly-sales.sql", "Download .sql: <id>.sql");
-check(readFileSync(sqlPath, "utf8").startsWith("-- @title Weekly sales\n-- @group Sales\n-- @tags weekly, kpi\n"), "…with its @title, @group and @tags");
+check(readFileSync(sqlPath, "utf8").startsWith("-- @title Weekly sales\n-- @group Sales\n-- @tags weekly, kpi\n-- @owner Sales controlling\n-- @certified 2026-10-15\n"), "…with its @title, @group, @tags, @owner and @certified");
 
 // ── 7. Export all ──
 dl = page.waitForEvent("download");

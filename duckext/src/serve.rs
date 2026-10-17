@@ -40,8 +40,8 @@ use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
-    self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
-    AuthoringGuard, RequestMeta,
+    self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
+    RequestMeta,
 };
 use include_dir::{include_dir, Dir};
 use std::collections::BTreeMap;
@@ -746,15 +746,15 @@ fn parse_search_path(p: &str) -> Result<Vec<(String, Option<String>)>, String> {
 
 struct Dash {
     id: String,
-    title: String,
     sql: String,
     /// Planned statements: (is_setup, sql), indexed like the client's plan().
     stmts: Vec<(bool, String)>,
     /// Per statement: a `::PAGED` table with an `::INFO` column (the only
     /// column a page request may leave out).
     info: Vec<bool>,
-    /// `-- @vars`: the variables a viewer may set (others are dropped).
-    vars: Option<Vec<String>>,
+    /// The header comments: title, `-- @vars` (the variables a viewer may
+    /// set; others are dropped), group, tags, owner, certified.
+    meta: sv::DashboardMeta,
 }
 
 /// A private, randomly named 0700 directory holding the snapshot files;
@@ -1251,11 +1251,10 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             .collect();
         out.push(Dash {
             id,
-            title: meta.title,
             sql,
             stmts,
             info,
-            vars: meta.vars,
+            meta,
         });
     }
     if out.is_empty() {
@@ -1856,7 +1855,7 @@ fn locked_panel(
         .ok_or((404, "no such dashboard".to_string()))?;
     let dash = &st.dashboards[di];
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
-    if let Some(allowed) = &dash.vars {
+    if let Some(allowed) = &dash.meta.vars {
         r.vars
             .retain(|(k, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(k)));
     }
@@ -2082,14 +2081,9 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
         .get_file("index.html")
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
         .unwrap_or_default();
-    let nav: Vec<serde_json::Value> = st
-        .dashboards
-        .iter()
-        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
-        .map(|d| serde_json::json!({ "id": d.id, "title": d.title }))
-        .collect();
     let mut cfg = serde_json::json!({
-        "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav, "locked": true,
+        "id": dash.id, "title": dash.meta.title, "sql": dash.sql,
+        "nav": nav_json(&st.dashboards, scope), "locked": true,
         "theme": st.opts.theme,
     });
     if let Some(s) = session {
@@ -2105,28 +2099,84 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
         .into_bytes()
 }
 
+/// The served nav: the dashboards the viewer may read (`scope`), each
+/// `{id, title, group, tags, owner, certified}` — the client groups them.
+fn nav_json(dashboards: &[Dash], scope: Option<&Scope>) -> Vec<serde_json::Value> {
+    dashboards
+        .iter()
+        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
+        .map(|d| d.meta.nav_json(&d.id))
+        .collect()
+}
+
+/// The `/` list: the readable dashboards, grouped (see
+/// `page::list_dashboards`), in the server's theme.
 fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
-    let items: String = st
+    let t = anofox_visualization::theme::resolve(st.opts.theme.as_deref().unwrap_or(""))
+        .map(|s| s.default_variant().clone())
+        .unwrap_or_default();
+    let items: Vec<(String, &sv::DashboardMeta)> = st
         .dashboards
         .iter()
         .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
-        .map(|d| {
-            format!(
-                "<li><a href=\"/d/{}\">{}</a></li>",
-                html_escape(&d.id),
-                html_escape(&d.title)
-            )
-        })
+        .map(|d| (format!("/d/{}", d.id), &d.meta))
         .collect();
-    format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Dashboards</title>\
-<body style=\"font:15px system-ui;padding:2rem\"><h1>Dashboards</h1><ul>{items}</ul>"
-    )
+    anofox_visualization::page::list_dashboards(&t, "Dashboards", &items)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dash(id: &str, script: &str) -> Dash {
+        Dash {
+            id: id.into(),
+            sql: script.into(),
+            stmts: vec![],
+            info: vec![],
+            meta: sv::parse_dashboard_meta(id, script),
+        }
+    }
+
+    #[test]
+    fn nav_keeps_groups_and_follows_the_scope() {
+        let ds = vec![
+            dash(
+                "sales",
+                "-- @title Weekly sales\n-- @group Sales / EMEA\n-- @tags kpi, weekly\n\
+                 -- @owner Finance\n-- @certified 2026-10-15\nSELECT 1;",
+            ),
+            dash("ops", "-- @group Ops\nSELECT 1;"),
+            dash("plain", "SELECT 1;"),
+        ];
+        let all = nav_json(&ds, None);
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all[0],
+            serde_json::json!({"id": "sales", "title": "Weekly sales", "group": "Sales / EMEA",
+                "tags": ["kpi", "weekly"], "owner": "Finance", "certified": "2026-10-15"})
+        );
+        assert_eq!(
+            all[2],
+            serde_json::json!({"id": "plain", "title": "plain", "group": null, "tags": [],
+                "owner": null, "certified": null})
+        );
+        // a scoped viewer sees only their dashboards — with their groups intact
+        let scope = Scope {
+            dashboards: Some(vec!["sales".into(), "plain".into()]),
+            vars: vec![],
+        };
+        let some = nav_json(&ds, Some(&scope));
+        let ids: Vec<&str> = some.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["sales", "plain"]);
+        assert_eq!(some[0]["group"], "Sales / EMEA");
+        assert_eq!(some[0]["certified"], "2026-10-15");
+        let none = Scope {
+            dashboards: Some(vec![]),
+            vars: vec![],
+        };
+        assert!(nav_json(&ds, Some(&none)).is_empty());
+    }
 
     #[test]
     fn options() {

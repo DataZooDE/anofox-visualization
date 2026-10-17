@@ -111,3 +111,8 @@ fn web_app_bar_settings_are_merged_and_checked() {
 fn web_sidebar_search_and_zip() {
     run_node("library_test.mjs");
 }
+
+#[test]
+fn web_served_nav_groups() {
+    run_node("served_nav_test.mjs");
+}

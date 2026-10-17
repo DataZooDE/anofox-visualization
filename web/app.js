@@ -1023,7 +1023,9 @@ function slugify(name) {
 function exampleEntry(sql, meta, fallback) {
   const name = String(meta?.title || "").trim() || fallback;
   const tags = Array.isArray(meta?.tags) ? meta.tags : [];
-  return { id: slugify(name), name, group: meta?.group || "", tags, source: "example", sql };
+  const owner = meta?.owner || "";
+  const certified = meta?.certified || "";
+  return { id: slugify(name), name, group: meta?.group || "", tags, owner, certified, source: "example", sql };
 }
 function addExample(sql, fallback) {
   let meta = null;
@@ -1771,7 +1773,7 @@ function initSideDrawer() {
     "keydown",
     (e) => {
       if (!isOpen() || e.target.closest?.(".side-menu, .side-toast, .side-rename, .dp-dialog")) return;
-      if (e.key === "Escape" && e.target.id === "side-search" && (e.target.value || sideFilter.tags.length)) return;
+      if (e.key === "Escape" && e.target.id === "side-search" && (e.target.value || sideFilter.tags.length || sideFilter.certified)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         open(false);
@@ -2022,11 +2024,13 @@ const foldText = (s) =>
 function searchTerms(q) {
   return foldText(q).split(/\s+/).filter(Boolean);
 }
-// Does an entry ({name, title, group, tags}) match every word (in its name,
-// page title, group or tags) and carry every selected tag?
-function dashMatches(e, terms, tags) {
+// Does an entry ({name, title, group, tags, owner, certified}) match every
+// word (in its name, page title, group, tags or owner), carry every selected
+// tag and — with `certified` — a certification?
+function dashMatches(e, terms, tags, certified = false) {
+  if (certified && !e.certified) return false;
   if (tags.length && !tags.every((t) => e.tags.includes(t))) return false;
-  const hay = foldText([e.name, e.title, e.group, ...(e.tags || [])].join("\n"));
+  const hay = foldText([e.name, e.title, e.group, e.owner, ...(e.tags || [])].join("\n"));
   return terms.every((t) => hay.includes(t));
 }
 // The tag chips for the entries in view: the selected ones first, then the
@@ -2146,7 +2150,7 @@ const curMyId = () => (curDash && curDash.startsWith("my:") ? curDash.slice(3) :
 // `focusId`: the control to focus once the list is rebuilt (a toggle or a
 // menu action that re-rendered it), so keyboard users keep their place.
 // The search field and the tag chips (sideFilter) narrow every section.
-const sideFilter = { q: "", tags: [] };
+const sideFilter = { q: "", tags: [], certified: false };
 function renderSidebar(focusId) {
   const nav = $("side-nav");
   nav.innerHTML = "";
@@ -2155,8 +2159,8 @@ function renderSidebar(focusId) {
   const lib = exLibState();
   const showEx = lib.hidden && EXAMPLES.length ? showExamplesButton(lib) : null;
   const terms = searchTerms(sideFilter.q);
-  const on = terms.length > 0 || sideFilter.tags.length > 0;
-  const match = (e) => !on || dashMatches(e, terms, sideFilter.tags);
+  const on = terms.length > 0 || sideFilter.tags.length > 0 || sideFilter.certified;
+  const match = (e) => !on || dashMatches(e, terms, sideFilter.tags, sideFilter.certified);
   const mineAll = list.map((d) => ({ ...dashMetaOf(d.sql), ...d }));
   const mine = mineAll.filter(match);
   const exAll = lib.hidden ? [] : EXAMPLES.map((e) => ({ ...e, title: e.name }));
@@ -2256,14 +2260,15 @@ function renderSidebar(focusId) {
   markActive();
   if (focusId) $(focusId)?.focus();
 }
-// A saved dashboard's header ({title, group, tags}), cached per SQL text.
+// A saved dashboard's header ({title, group, tags, owner, certified}), cached
+// per SQL text.
 const dashMetaCache = new Map();
 function dashMetaOf(sql) {
   if (!dashMetaCache.has(sql)) {
-    let m = { title: "", group: "", tags: [] };
+    let m = { title: "", group: "", tags: [], owner: "", certified: "" };
     try {
       const j = JSON.parse(dashboard_meta(sql));
-      m = { title: j.title || "", group: j.group || "", tags: j.tags || [] };
+      m = { title: j.title || "", group: j.group || "", tags: j.tags || [], owner: j.owner || "", certified: j.certified || "" };
     } catch (_) {
       /* unreadable header: ungrouped, untagged */
     }
@@ -2280,6 +2285,21 @@ function renderChips(entries) {
   if (!box) return;
   box.innerHTML = "";
   const tags = tagsInView(entries, sideFilter.tags);
+  // "✓ certified" first, when something in view is certified (or it is on)
+  if (sideFilter.certified || entries.some((e) => e.certified)) {
+    const c = document.createElement("button");
+    c.type = "button";
+    c.className = "side-chip side-chip-cert";
+    c.id = "side-chip-certified";
+    c.textContent = "✓ certified";
+    c.setAttribute("aria-pressed", String(sideFilter.certified));
+    c.title = sideFilter.certified ? "showing only certified dashboards — press to show all" : "show only certified dashboards";
+    c.onclick = () => {
+      sideFilter.certified = !sideFilter.certified;
+      renderSidebar(c.id);
+    };
+    box.appendChild(c);
+  }
   for (const t of tags) {
     const b = document.createElement("button");
     b.type = "button";
@@ -2295,14 +2315,14 @@ function renderChips(entries) {
     };
     box.appendChild(b);
   }
-  if (sideFilter.q.trim() || sideFilter.tags.length) {
+  if (sideFilter.q.trim() || sideFilter.tags.length || sideFilter.certified) {
     const x = document.createElement("button");
     x.type = "button";
     x.className = "side-chip side-chip-clear";
     x.id = "side-chip-clear";
     x.textContent = "×";
-    x.title = "clear the search and the tags";
-    x.setAttribute("aria-label", "Clear the search and the tags");
+    x.title = "clear the search and the filters";
+    x.setAttribute("aria-label", "Clear the search and the filters");
     x.onclick = () => clearSideFilter(true);
     box.prepend(x); // first: the row scrolls sideways
   }
@@ -2311,6 +2331,7 @@ function renderChips(entries) {
 function clearSideFilter(focus) {
   sideFilter.q = "";
   sideFilter.tags = [];
+  sideFilter.certified = false;
   const s = $("side-search");
   if (s) s.value = "";
   renderSidebar();
@@ -2340,7 +2361,7 @@ function renderRecent(nav, entries, open) {
   if (open)
     for (const e of entries) {
       const key = e.source === "example" ? "ex:" + e.id : myKey(e.id);
-      const it = sideItem(e.name, e.sql, key);
+      const it = sideItem(e.name, e.sql, key, e);
       it.classList.add("side-ex-item", "side-recent-item");
       if (e.source === "example") {
         const src = document.createElement("span");
@@ -2484,7 +2505,7 @@ function myRow(d, meta) {
   const row = document.createElement("div");
   row.className = "side-row";
   row.dataset.key = myKey(d.id);
-  const b = sideItem(d.name, d.sql, myKey(d.id));
+  const b = sideItem(d.name, d.sql, myKey(d.id), d);
   b.id = "side-my-" + d.id;
   b.draggable = true;
   b.ondragstart = (e) => {
@@ -2569,7 +2590,9 @@ function moveMenu(d) {
   ];
 }
 // `key`: "ex:<id>" for an example, "my:<id>" for a saved dashboard.
-function sideItem(name, sql, key) {
+// `info`: the entry's header ({owner, certified, tags}): the owner as a small
+// line under the name, ✓ when certified, both in the tooltip.
+function sideItem(name, sql, key, info = {}) {
   const b = document.createElement("button");
   b.className = "side-item";
   b.dataset.name = name;
@@ -2577,8 +2600,34 @@ function sideItem(name, sql, key) {
   const s = document.createElement("span");
   s.className = "s-name";
   s.textContent = name;
-  b.title = name; // long names are clamped in the sidebar
-  b.appendChild(s);
+  // long names are clamped in the sidebar: the full name is the tooltip
+  b.title = [
+    name,
+    info.owner ? `Owner: ${info.owner}` : "",
+    info.certified ? `Certified on ${info.certified}` : "",
+    info.tags?.length ? `Tags: ${info.tags.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (info.owner) {
+    const col = document.createElement("span");
+    col.className = "s-text";
+    const o = document.createElement("span");
+    o.className = "s-owner";
+    o.textContent = info.owner;
+    col.append(s, o);
+    b.appendChild(col);
+  } else b.appendChild(s);
+  if (info.certified) {
+    const c = document.createElement("span");
+    c.className = "s-cert";
+    c.textContent = "✓";
+    const sr = document.createElement("span");
+    sr.className = "sr-only";
+    sr.textContent = " certified";
+    c.appendChild(sr);
+    b.appendChild(c);
+  }
   // a saved dashboard is read when clicked (a menu action may have changed it)
   b.onclick = () => {
     const d = key.startsWith("my:") ? dashDB.get(key.slice(3)) : null;
@@ -3203,9 +3252,8 @@ function exRow(entry) {
   const row = document.createElement("div");
   row.className = "side-row side-ex-row";
   row.dataset.key = "ex:" + entry.id;
-  const it = sideItem(entry.name, entry.sql, "ex:" + entry.id);
+  const it = sideItem(entry.name, entry.sql, "ex:" + entry.id, entry);
   it.classList.add("side-ex-item"); // indent examples under their area
-  if (entry.tags.length) it.title = `${entry.name}\nTags: ${entry.tags.join(", ")}`;
   const more = document.createElement("button");
   more.className = "side-more";
   more.id = "side-ex-more-" + entry.id;
@@ -3350,7 +3398,7 @@ function wireImport() {
       renderSidebar();
     });
     s.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && (s.value || sideFilter.tags.length)) {
+      if (e.key === "Escape" && (s.value || sideFilter.tags.length || sideFilter.certified)) {
         e.preventDefault();
         e.stopPropagation();
         clearSideFilter(true);
@@ -6078,21 +6126,161 @@ function markPending(grid, stmts, fresh) {
 
 // Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
 // built from window.__served.nav. No-op unless there are 2+ dashboards.
+// The served nav's entries ({id, title, group, tags, owner, certified}) in
+// groups: the ungrouped first, then the groups by name — the order of the
+// server's `/` list. → [{group, items}] ("" = no group).
+function servedNavGroups(nav) {
+  const by = new Map();
+  for (const d of nav || []) {
+    const g = typeof d.group === "string" ? d.group : "";
+    if (!by.has(g)) by.set(g, []);
+    by.get(g).push(d);
+  }
+  return [...by.keys()]
+    .sort((a, b) => {
+      // the server's order (src/page.rs list_dashboards): case-insensitive,
+      // then as written
+      const [x, y] = [a.toLowerCase() + "\0" + a, b.toLowerCase() + "\0" + b];
+      return a === "" ? -1 : b === "" ? 1 : x < y ? -1 : x > y ? 1 : 0;
+    })
+    .map((group) => ({ group, items: by.get(group) }));
+}
+// The persistent nav of a served folder (2+ dashboards): the links, grouped;
+// above SERVED_NAV_MENU_MIN dashboards one button that opens a grouped,
+// searchable list instead. A certified dashboard shows ✓; the owner is in
+// the link's tooltip.
+const SERVED_NAV_MENU_MIN = 9;
+function servedNavLink(d, served) {
+  const a = document.createElement("a");
+  a.href = "/d/" + encodeURIComponent(d.id);
+  a.textContent = d.title || d.id;
+  if (d.id === served.id) {
+    a.className = "active"; // styled by web/theme-base.css (.served-nav)
+    a.setAttribute("aria-current", "page");
+  }
+  const tip = [d.owner ? `Owner: ${d.owner}` : "", d.certified ? `Certified on ${d.certified}` : "", (d.tags || []).length ? `Tags: ${d.tags.join(", ")}` : ""].filter(Boolean);
+  if (tip.length) a.title = tip.join("\n");
+  if (d.certified) {
+    const c = document.createElement("span");
+    c.className = "served-cert";
+    c.textContent = " ✓";
+    c.setAttribute("aria-label", ", certified");
+    a.appendChild(c);
+  }
+  return a;
+}
 function renderServedNav(served) {
   if (!served || !Array.isArray(served.nav) || served.nav.length < 2) return;
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
   nav.className = "served-nav";
-  for (const d of served.nav) {
-    const a = document.createElement("a");
-    a.href = "/d/" + encodeURIComponent(d.id);
-    a.textContent = d.title || d.id;
-    const active = d.id === served.id;
-    if (active) a.className = "active"; // styled by web/theme-base.css (.served-nav)
-    nav.appendChild(a);
-  }
+  nav.setAttribute("aria-label", "Dashboards");
+  const groups = servedNavGroups(served.nav);
+  if (served.nav.length < SERVED_NAV_MENU_MIN) {
+    for (const { group, items } of groups) {
+      if (!group) {
+        for (const d of items) nav.appendChild(servedNavLink(d, served));
+        continue;
+      }
+      // a group's label and links wrap together
+      const g = document.createElement("span");
+      g.className = "served-nav-grp";
+      const l = document.createElement("span");
+      l.className = "served-nav-group";
+      l.textContent = group;
+      g.appendChild(l);
+      for (const d of items) g.appendChild(servedNavLink(d, served));
+      nav.appendChild(g);
+    }
+  } else nav.appendChild(servedNavMenu(served, groups));
   const dash = document.querySelector(".dash");
   if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
+}
+// The served nav as one button and a grouped, searchable list of links.
+function servedNavMenu(served, groups) {
+  const wrap = document.createElement("div");
+  wrap.className = "served-nav-pickwrap";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "served-nav-pick";
+  btn.id = "served-nav-pick";
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-controls", "served-nav-menu");
+  const cur = served.nav.find((d) => d.id === served.id);
+  btn.textContent = `${cur?.title || served.title || "Dashboards"} ▾`;
+  btn.title = `${served.nav.length} dashboards — pick one`;
+  const pop = document.createElement("div");
+  pop.className = "served-nav-menu";
+  pop.id = "served-nav-menu";
+  pop.hidden = true;
+  const q = document.createElement("input");
+  q.type = "search";
+  q.className = "served-nav-q";
+  q.placeholder = "Search dashboards…";
+  q.setAttribute("aria-label", "Search dashboards");
+  q.autocomplete = "off";
+  pop.appendChild(q);
+  const lists = [];
+  for (const { group, items } of groups) {
+    const sec = document.createElement("section");
+    if (group) {
+      const h = document.createElement("h3");
+      h.textContent = group;
+      sec.appendChild(h);
+    }
+    const ul = document.createElement("ul");
+    for (const d of items) {
+      const li = document.createElement("li");
+      li.appendChild(servedNavLink(d, served));
+      if (d.owner) {
+        const o = document.createElement("span");
+        o.className = "served-owner";
+        o.textContent = d.owner;
+        li.appendChild(o);
+      }
+      li.dataset.q = foldText([d.title, d.id, group, d.owner, ...(d.tags || []), d.certified ? "certified" : ""].join(" "));
+      ul.appendChild(li);
+    }
+    sec.appendChild(ul);
+    pop.appendChild(sec);
+    lists.push(sec);
+  }
+  const none = document.createElement("p");
+  none.className = "served-nav-none";
+  none.textContent = "No dashboard matches.";
+  none.hidden = true;
+  pop.appendChild(none);
+  q.addEventListener("input", () => {
+    const words = searchTerms(q.value);
+    let shown = 0;
+    for (const sec of lists) {
+      let n = 0;
+      for (const li of sec.querySelectorAll("li")) {
+        li.hidden = !words.every((w) => li.dataset.q.includes(w));
+        if (!li.hidden) n++;
+      }
+      sec.hidden = !n;
+      shown += n;
+    }
+    none.hidden = shown > 0;
+  });
+  const open = (on, refocus = true) => {
+    pop.hidden = !on;
+    btn.setAttribute("aria-expanded", String(on));
+    if (on) q.focus();
+    else if (refocus) btn.focus();
+  };
+  btn.onclick = () => open(pop.hidden);
+  wrap.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !pop.hidden) {
+      e.preventDefault();
+      e.stopPropagation();
+      open(false);
+    }
+  });
+  document.addEventListener("pointerdown", (e) => !pop.hidden && !wrap.contains(e.target) && open(false, false));
+  wrap.append(btn, pop);
+  return wrap;
 }
 // ---- lazy tabs ----
 // A ::TAB / ::SUBTAB pane's panels run their queries and render only when the

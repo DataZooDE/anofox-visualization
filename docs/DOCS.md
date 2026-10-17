@@ -1376,6 +1376,8 @@ with the browser through wasm):
 -- @title  Weekly sales by region
 -- @group  Sales / EMEA
 -- @tags   weekly, kpi, emea
+-- @owner  Sales controlling
+-- @certified 2026-10-15
 -- @refresh 300
 ```
 
@@ -1384,15 +1386,20 @@ with the browser through wasm):
 | `-- @title <name>` | The dashboard's name: the sidebar entry of an example, the page title and nav entry on a server (without it, the file id). Name it as a plain business question. |
 | `-- @group <name>` | Where it sits: one group per dashboard, a ` / ` adds one level (`Sales / EMEA`, drawn as a sub-heading; deeper paths are kept as written and drawn flat). No `@group`, or an empty one, means ungrouped. |
 | `-- @tags a, b` | Free labels for finding it: trimmed, lower-cased, without duplicates, at most 10 (several `@tags` lines add up). |
+| `-- @owner <text>` | Who looks after it — a name, a team, an address. Shown as a small line under the name in the builder's sidebar, in the tooltip of a served nav link and on the `/` list. |
+| `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement: see *Loading, empty, error and "not available" panels*. |
 
 `dashboard --check` warns about an empty `@group` (`header/empty-group`), one
-longer than 80 characters (`header/long-group`) and more than 10 tags
-(`header/too-many-tags`), reported as statement 0. In this release the
-builder's examples library uses `@group` and `@tags`; the servers read them
-but don't show them yet.
+longer than 80 characters (`header/long-group`), more than 10 tags
+(`header/too-many-tags`), an empty `@owner` (`header/empty-owner`) and a
+`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`),
+reported as statement 0. `dashboard --check <folder>` lints every `.sql` of a
+served folder and adds what only the folder shows: two dashboards with the
+same title (`folder/duplicate-title`, ignoring case) and a file name the
+servers skip (`folder/bad-id`).
 
 ### Layout (from SQL)
 
@@ -1982,10 +1989,13 @@ The header's **⋯** sorts your dashboards — *manual* (drag, or Alt+↑/↓),
 
 **Search and tags.** The field under *New dashboard* (in the phone drawer too)
 filters every section at once — your dashboards, *Recently opened* and the
-examples — by name, page title, group and tags; every word has to match, and
-groups and areas with a match are shown open. Esc clears it. The tag chips
+examples — by name, page title, group, tags and owner; every word has to
+match, and groups and areas with a match are shown open. Esc clears it. The tag chips
 under it are the tags of what is in view: press one to show only dashboards
-with that tag (several: all of them); × clears both. **Recently opened** lists
+with that tag (several: all of them); *✓ certified* (shown when something in
+view is certified) keeps only dashboards with a `-- @certified` date; × clears
+them all. A dashboard's `-- @owner` is a small line under its name, and ✓
+marks a certified one. **Recently opened** lists
 the last 5 dashboards and examples you opened, per browser.
 
 Everything lives in this browser's `localStorage` (`dp_dashboards`, version
@@ -2283,6 +2293,20 @@ hold the data in the client and can't. Reference and threat model:
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
 pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
 files is a linked set, served with a shared cross-dashboard nav bar.
+
+**Grouped folders.** The folder stays flat (ids are file names, so the id,
+policy and path rules don't change); the header comments group it. The nav
+(`window.__served.nav`, items `{id, title, group, tags, owner, certified}`,
+only the dashboards the viewer's scope allows) shows the ungrouped dashboards
+first, then each `-- @group` under its name; a certified one carries ✓, and
+the owner, the certification date and the tags are in the link's tooltip.
+From 9 dashboards on, the nav is one button naming the open dashboard; it
+opens the grouped list with a search field (Enter opens it, Esc closes it).
+The `/` list page — the locked server's and `serve --dashboards`' — groups
+the same way (`Sales / EMEA`: a *EMEA* sub-heading under *Sales*), shows each
+dashboard's owner, **✓ certified** and tags, and gets a search field from 9
+dashboards on. Before serving a folder, `dashboard --check <folder>` finds
+duplicate titles.
 
 For the full trust model, the static-render alternative (`serve` bin), and
 deployment (reverse proxy, TLS, auth), see

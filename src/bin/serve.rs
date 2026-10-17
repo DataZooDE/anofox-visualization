@@ -1250,12 +1250,12 @@ fn list_page(dashboards: &[Dashboard], scope: Option<&Scope>) -> String {
     let t = anofox_visualization::theme::resolve(theme_default().unwrap_or(""))
         .map(|s| s.default_variant().clone())
         .unwrap_or_default();
-    let items: Vec<(String, String)> = dashboards
+    let items: Vec<(String, &sv::DashboardMeta)> = dashboards
         .iter()
         .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
-        .map(|d| (format!("/d/{}", d.id), d.meta.title.clone()))
+        .map(|d| (format!("/d/{}", d.id), &d.meta))
         .collect();
-    page::list(&t, "Dashboards", &items)
+    page::list_dashboards(&t, "Dashboards", &items)
 }
 /// Run the `duckdb` CLI with flags + a SQL string; stdout on success, stderr on
 /// error. The SQL is passed as one argv element after `-c` (no shell), and

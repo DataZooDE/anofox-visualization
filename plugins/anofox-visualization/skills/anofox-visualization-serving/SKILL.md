@@ -14,8 +14,8 @@ description: >
   memory_limit, duckdb_threads, bind, hosts, search_path, attach, load,
   refresh_s, data, path_vars, theme), the result cache, single-flight and
   cancelled requests, snapshot refresh, a live data folder, /healthz,
-  header comments (-- @title, -- @group, -- @tags, -- @load, -- @param,
-  -- @vars, -- @requires)
+  header comments (-- @title, -- @group, -- @tags, -- @owner, -- @certified,
+  -- @load, -- @param, -- @vars, -- @requires)
   and deployment (deploy/run-locked.sh, systemd, Docker, reverse proxy with
   TLS, replicas behind a load balancer, sizing). Use when the user wants to
   "share / publish / host / deploy a dashboard", "serve it to my team",
@@ -141,6 +141,8 @@ dashboard --svg file.sql [out.svg]                                    # the whol
 -- @title Which regions are behind plan?
 -- @group Sales / EMEA
 -- @tags  plan, regions
+-- @owner Sales controlling
+-- @certified 2026-10-15
 -- @load spatial
 -- @param region [EU, US, APAC] = EU
 -- @vars region, selected
@@ -149,7 +151,9 @@ SELECT month::XAXIS, sum(revenue)::LINECHART, 'Revenue'::TITLE
 FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY month;
 ```
 
-`@title` page title (a plain business question; provenance goes in other `--` comments, not on the page) · `@group` where it sits (one group, ` / ` for one sub-level; parsed by the servers, shown by the builder's library) · `@tags` labels (lower-cased, ≤10; `--check` warns about an empty or >80-character group and more tags) · `@load` an extension (identifiers only) · `@param` a static-mode whitelist with its default · `@vars` the variables a locked-server viewer may set · `@refresh` the page refresh interval · `-- @requires <path>` directly above one statement: a missing optional file shows "Not available" instead of an error.
+`@title` page title (a plain business question; provenance goes in other `--` comments, not on the page) · `@group` where it sits (one group, ` / ` for one sub-level; parsed by the servers, shown by the builder's library) · `@tags` labels (lower-cased, ≤10; `--check` warns about an empty or >80-character group and more tags) · `@owner` who looks after it (nav tooltip, `/` list, builder sidebar) · `@certified YYYY-MM-DD` the last check: a ✓ certified badge (a bad date counts as not certified; `--check` warns) · `@load` an extension (identifiers only) · `@param` a static-mode whitelist with its default · `@vars` the variables a locked-server viewer may set · `@refresh` the page refresh interval · `-- @requires <path>` directly above one statement: a missing optional file shows "Not available" instead of an error.
+
+A served folder groups itself from these headers: `window.__served.nav` items are `{id, title, group, tags, owner, certified}` (only what the viewer's scope allows); the nav shows the ungrouped first, then the groups, and becomes a searchable menu from 9 dashboards on; the `/` list (locked server and `serve --dashboards`) is grouped the same way with owners, ✓ certified and tags. Lint the whole folder first with `dashboard --check <folder>` (`folder/duplicate-title`, `folder/bad-id`).
 
 ## Gotchas
 

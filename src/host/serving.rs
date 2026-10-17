@@ -856,6 +856,49 @@ pub struct DashboardMeta {
     /// `-- @tags a, b`: free labels, trimmed, lower-cased, without duplicates,
     /// at most [`MAX_TAGS`].
     pub tags: Vec<String>,
+    /// `-- @owner <text>`: who looks after the dashboard (a name, a team, an
+    /// address); `None` when missing or empty.
+    pub owner: Option<String>,
+    /// `-- @certified <YYYY-MM-DD>`: the day it was last checked; `None` when
+    /// missing or not a valid date.
+    pub certified: Option<String>,
+}
+
+impl DashboardMeta {
+    /// A served folder's nav entry: `{id, title, group, tags, owner,
+    /// certified}` (`window.__served.nav`).
+    pub fn nav_json(&self, id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "title": self.title, "group": self.group, "tags": self.tags,
+            "owner": self.owner, "certified": self.certified,
+        })
+    }
+}
+
+/// A calendar date written `YYYY-MM-DD` (as `-- @certified` wants it).
+pub fn valid_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let t = &s[r];
+        t.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| t.parse().ok())?
+    };
+    let (Some(y), Some(m), Some(d)) = (num(0..4), num(5..7), num(8..10)) else {
+        return false;
+    };
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    y >= 1900 && (1..=days).contains(&d)
 }
 
 /// The most `-- @tags` a dashboard keeps (the rest are dropped; the linter
@@ -890,8 +933,8 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 }
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
-/// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`
-/// header comments (a repeated `@group` wins over the earlier one; `@tags`
+/// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`,
+/// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>` header comments (a repeated `@group` wins over the earlier one; `@tags`
 /// lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
@@ -906,6 +949,10 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.title = r.trim().to_string();
         } else if let Some(r) = header_value(l, "group") {
             m.group = normalize_group(r);
+        } else if let Some(r) = header_value(l, "owner") {
+            m.owner = Some(r.to_string()).filter(|o| !o.is_empty());
+        } else if let Some(r) = header_value(l, "certified") {
+            m.certified = Some(r.to_string()).filter(|d| valid_iso_date(d));
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -1350,6 +1397,38 @@ mod tests {
             "deeper paths are kept as written"
         );
         assert_eq!(header_value("-- @group", "group"), Some(""));
+        // owner and certification
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @owner  Finance team <fin@example.com> \n-- @certified 2026-10-15\nSELECT 1;",
+        );
+        assert_eq!(m.owner.as_deref(), Some("Finance team <fin@example.com>"));
+        assert_eq!(m.certified.as_deref(), Some("2026-10-15"));
+        let j = m.nav_json("s");
+        assert_eq!(j["owner"], "Finance team <fin@example.com>");
+        assert_eq!(j["certified"], "2026-10-15");
+        assert!(j["group"].is_null() && j["tags"].as_array().unwrap().is_empty());
+        let m = parse_dashboard_meta("s", "-- @owner\n-- @certified 15.10.2026\nSELECT 1;");
+        assert_eq!((m.owner, m.certified), (None, None));
+        for ok in ["2026-10-15", "2024-02-29", "2000-02-29", "1999-12-31"] {
+            assert!(valid_iso_date(ok), "{ok}");
+        }
+        for bad in [
+            "2026-13-01",
+            "2026-02-29",
+            "1900-02-29",
+            "2026-04-31",
+            "2026-10-1",
+            "2026/10/15",
+            "26-10-15",
+            "2026-10-15x",
+            "+026-10-15",
+            "1800-01-01",
+            "",
+            "2026-00-10",
+        ] {
+            assert!(!valid_iso_date(bad), "{bad}");
+        }
         assert_eq!(header_value("-- @title x", "group"), None);
     }
 
