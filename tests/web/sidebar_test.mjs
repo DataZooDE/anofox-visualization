@@ -27,7 +27,9 @@ assert.ok(handle, "side-resizer missing in index.html");
 for (const a of ['role="separator"', 'tabindex="0"', 'aria-valuemin="180"', 'aria-valuemax="480"', 'aria-valuenow="238"', 'aria-controls="sidebar"'])
   assert.ok(handle[0].includes(a), `side-resizer lacks ${a}`);
 assert.match(html, /\.sidebar\{width:var\(--side-w,238px\)/);
-const phone = html.match(/@media\(max-width:820px\)\{(.*)\n/);
+// Other sections keep their own ≤820px blocks (Explore has one), so pick the
+// one-line block that opens with the drawer rule rather than the first match.
+const phone = html.match(/@media\(max-width:820px\)\{(\.sidebar,.*)\n/);
 assert.ok(phone, "phone-width rule missing in index.html");
 assert.match(phone[1], /^\.sidebar,body\.side-collapsed \.sidebar\{[^}]*position:fixed;[^}]*width:min\(300px,86vw\);[^}]*visibility:hidden/);
 assert.match(phone[1], /body\.side-open \.sidebar\{transform:none;visibility:visible/);
