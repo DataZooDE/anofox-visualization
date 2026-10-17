@@ -3,7 +3,7 @@
 **Who asks:** the head of customer success of a SaaS company, planning the Q4
 retention budget after five quarters of rising churn. A live anofox_statistics
 use case; in the [live demo](https://datazoode.github.io/anofox-visualization/)
-it is "Drivers of churn".
+it is "Why do customers cancel?".
 
 `showcase.sql` is a link to `web/examples/statistics-churn-drivers.sql`, the
 single source the browser demo loads. The setup builds 5,000 synthetic
