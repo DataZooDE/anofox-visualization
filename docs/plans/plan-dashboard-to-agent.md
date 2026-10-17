@@ -418,14 +418,32 @@ design review (plan-ai-assistant §12.14) applies unchanged:
   They are not a way around the router: the tool call carries
   `question_id` + slots, which are validated exactly like a routed
   question.
-- **GDPR:** the operator duties of plan-ai-assistant §12.7 apply. A
-  published agent in Slack or Teams also carries the questions of
-  employees, so the `log_questions` question (§13, question 0 there) applies
-  here too.
+- **GDPR:** the operator duties of plan-ai-assistant §12.7 apply:
+  - Art. 13 / 14 information for the people in the panels;
+  - a DPIA where needed;
+  - pseudonymised data is still personal data;
+  - no DPA or transfer claims until they are checked against the
+    provider's dated terms.
+- **Logging:** **question text is not logged by default**
+  (`log_questions: false`, the owner's decision for served Ask). The
+  operator can switch it on, and the agent's notice in every channel then
+  says so. Token counts, the routed `question_id`, the slot names and the
+  outcome are always logged, with no question text and no data values. This
+  matters even more in Slack and Teams, where the askers are usually
+  employees (works-council co-determination, §87(1) Nr. 6 BetrVG).
+- **The catalog split also covers the manifest.** `GET /api/agent`
+  returns static source text only (questions, slots, names and literal
+  descriptions), never a computed value.
 
-Every serving PR of §10 gets an independent security review before merge,
-and the design of the declared mode (§3.3) gets its own design review before
-A2 starts.
+**Security-review gates:**
+- **Before any A-phase implementation (A1–A5):** an independent design
+  review of this note, especially §3.3 (the guard and routing), §4 (the
+  mappings in the snapshot), §7 (the drift job) and §8 (the channels, MCP,
+  A2UI), against `docs/secure-serving.md` and plan-ai-assistant §12.14. Its
+  required changes go into this note first.
+- **Every serving PR** (A2, A4, A5, and A3 where it touches serving) gets an
+  independent security review of its diff before merge, with the findings
+  fixed in the same PR.
 
 ## 9. The spike: "How reliable are our suppliers, and what does it cost us in stock?"
 
@@ -472,7 +490,8 @@ first.
 
 ## 10. Delivery (after the spike and after Ask M2)
 
-This depends on Ask (#195, plan-ai-assistant M2). It reuses its runtime, and
+This depends on Ask (#195, plan-ai-assistant M2) and starts only after the
+design security review of this note (§8.1). It reuses Ask's runtime, and
 every serving PR gets an independent security review, as there.
 
 | PR | Content | Effort |
