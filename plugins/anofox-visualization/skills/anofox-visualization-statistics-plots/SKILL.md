@@ -14,7 +14,8 @@ description: >
   anofox_plot_compare (box / violin / points with significance brackets),
   anofox_plot_partial (component + residual, added-variable),
   anofox_plot_events (alarm / parameter-change timeline; events := over a
-  forecast) and anofox_plot (auto), with every option (title, x_label,
+  forecast), anofox_plot_diagram (a process / pipeline graph from node and
+  edge tables) and anofox_plot (auto), with every option (title, x_label,
   y_label, highlight, lambda_min, lambda_1se, facet, reference, band, kind,
   events, base_rate, metrics,
   baseline, label_top, alpha, value, label, factor, tests, hide_ns, width,
@@ -24,14 +25,19 @@ description: >
   to plot a regression, coefficients, residual diagnostics, a forecast, a
   ROC curve, survival curves or test results, asks "how do I plot
   ols_tidy_by / ts_forecast_by / statsforecast output", or a contract plot
-  call errors.
-version: 2026.10.15
+  call errors. Also for results computed in Python or R: the anofox_viz
+  Python package (from_statsmodels, from_sklearn, from_estimator,
+  from_scipy, from_pingouin, from_lifelines, from_statsforecast,
+  from_prophet, plot), pandas / polars DataFrames in-process through the
+  duckdb package, Jupyter, R broom tables, and Parquet files into a
+  dashboard.
+version: 2026.10.17
 user-invocable: false
 ---
 
 # Anofox Visualization — Statistics Plots (contract macros) Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.15) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast` | **DuckDB:** v1.5.6
+**Extension:** `anofox_visualization` (CalVer 2026.10.16) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast` | **DuckDB:** v1.5.6
 
 anofox-statistics and anofox-forecast return plot-ready **long tables** with fixed columns (the anofox integration contract: `terms`, `summary`, `obs`, `prediction`, `curve`, `test`, `events`). One macro per schema renders such a table to SVG. The schemas and their producers are documented in the **anofox-statistics-plotting** skill of the anofox-statistics plugin; this skill is the consumer side.
 
@@ -62,6 +68,7 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_tests(t, …)` | **p_value \| p_adj \| statistic**, test_id, group1, group2, estimate, conf_low, conf_high, method | `alpha := 0.05` (significance colour), `value := 'estimate'` \| `'statistic'` \| `'p'` (measure; default estimate, else statistic, else −log10 p), `label := 'p'` (default: p and stars) \| `'stars'`. A STRUCT / LIST column (`tukey_hsd_agg(y, g) AS r`) is expanded |
 | `anofox_plot_compare(r, …)` | the raw rows | **`value := '<numeric col>'`, `factor := '<group col>'`**, `tests :=` a LIST of test STRUCTs (`(SELECT list(t) FROM tukey_hsd_by(…) t WHERE …)`, `tukey_hsd_agg(y, g)`, a two-sample STRUCT such as `t_test_agg(y, g)`), `kind := 'box'` \| `'violin'` \| `'points'`, `hide_ns :=` (drop p > 0.05; default true above 3 groups), `label := 'stars'` (default) \| `'p'` \| a template (`'{p.signif}'`, `'p = {p.adj}'`) |
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
+| `anofox_plot_diagram(n, …)` | **id** (or `stage`), title \| label, mainstat, status, group, lane, story, x, y, sparkline, seq | `edges :=` a LIST of **source, target** (or `from_stage` / `to_stage`), value \| count, label, style, status; `mainstat := '<col>'`, `format := 'compact'`, `direction := 'LR'` \| `'TB'`, `style :=` (default edge style). The `::DIAGRAM` panel from two tables (dashboards skill → *Diagrams*); 800 × 400 |
 | `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id → tests, kind \| severity + ds \| period → events. Only the common options |
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
@@ -105,6 +112,15 @@ FROM (SELECT p AS period, CASE WHEN p <= 8 THEN 20.0 - p END AS y, 20.0 - p AS y
 SELECT anofox_plot_events(e) FROM alarms e;   -- the timeline on its own
 ```
 
+**A pipeline from a node and an edge table** (`graph` schema; Grafana node-graph names):
+
+```sql
+CREATE TABLE stages AS SELECT * FROM (VALUES
+  ('ingest', 'Ingest', 10000, 'ok'), ('build', 'Build twin', 9800, 'ok'), ('monitor', 'Monitor', 412, 'alarm')) t(id, title, mainstat, status);
+CREATE TABLE flows AS SELECT * FROM (VALUES ('ingest', 'build', 9800), ('build', 'monitor', 412)) t(source, target, value);
+SELECT anofox_plot_diagram(n, edges := (SELECT list(e) FROM flows e)) FROM stages n;
+```
+
 **Other producers' column names are read as contract columns**, so raw statsmodels / R / broom / pingouin tables plot without renaming. Names compare with case, `.`, spaces and symbols ignored (`Std. Error` = `std.error` = `std_error`, broom's `.fitted` = `fitted`), plus these spellings (the first present wins; a column the contract name already has, or one an option names, is left alone; `anofox_plot_compare` reads its rows as given):
 
 | Contract column | Also read from |
@@ -125,12 +141,37 @@ In a table with `yhat`, the interval columns (`lower` / `upper`, `mean_ci_*`, `c
 - **statsforecast's wide forecast** (`unique_id, ds, AutoARIMA, AutoARIMA-lo-95, AutoARIMA-hi-95, …`, also mlforecast / neuralforecast): one row per model and level, so `anofox_plot_prediction(f)` draws a line per model and a nested fan. Without `level=` there are no `-lo-` columns: `UNPIVOT f ON COLUMNS(* EXCLUDE (unique_id, ds)) INTO NAME model_id VALUE yhat` first;
 - `unique_id` = `id` (panels).
 
-`anofox_plot_summary` marks the best model for metrics with a known direction: R², AUC, accuracy, F1, precision, recall (higher); RMSE, MSE, MAE, MAPE, sMAPE, MASE, CRPS, Brier score, log loss, AIC, BIC (lower). A statsmodels coefficient frame still needs its index as `term`:
+`anofox_plot_summary` marks the best model for metrics with a known direction: R², explained variance, AUC, average precision, accuracy, F1, precision, recall, MCC, Cohen's κ, Jaccard (higher); RMSE, MSE, MAE, MAPE, sMAPE, MASE, CRPS, Brier score, log loss, the hinge / pinball / Poisson / gamma / Tweedie losses, max error, AIC, BIC (lower). scikit-learn's long names (`mean_absolute_error`, `roc_auc_score`) work, and a scorer's `neg_` prefix flips the direction. In `anofox_plot_tests` a text column whose values are all numbers (pingouin's `BF10`) is a value, not a panel key. A statsmodels coefficient frame still needs its index as `term`:
 
 ```python
 tbl = res.summary2().tables[1].reset_index(names="term")   # Coef., Std.Err., t, P>|t|, [0.025, 0.975]
 duckdb.sql("SELECT anofox_plot_terms(t) FROM tbl t")
 ```
+
+## From Python (and R)
+
+The macros read any contract-shaped table, wherever it was computed (`docs/python-r.md`). In-process, the `duckdb` package scans a pandas / polars / Arrow frame by its variable name; the extension is unsigned, so allow that before `LOAD`:
+
+```python
+import duckdb
+con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+con.execute("LOAD './anofox_visualization.duckdb_extension'")
+svg = con.execute("SELECT anofox_plot_terms(r) FROM coefs AS r").fetchone()[0]   # coefs: a DataFrame
+```
+
+The **`anofox_viz` package** (`pip install "git+https://github.com/DataZooDE/anofox-visualization#subdirectory=python"`) does the reshaping and the round trip; `plot()` returns an SVG that Jupyter shows inline (`.save("x.svg")`):
+
+```python
+import anofox_viz as av
+av.connect("./anofox_visualization.duckdb_extension")   # or $ANOFOX_VIZ_EXTENSION
+t = av.from_statsmodels(res)                 # {"terms", "obs", "summary", "prediction"}
+av.plot(t, "diagnostics")                    # the plot.lm 2x2; options are macro arguments
+c = av.from_sklearn(y_true, y_score, model_id="logistic")   # {"curve", "summary"}
+roc = av.plot(c["curve"], "curve", by="curve_type")["roc"]
+av.plot(av.from_statsforecast(fc, level=95, history=hist), "prediction")
+```
+
+Converters: `from_statsmodels` (OLS, GLM, Logit, linearmodels; Tukey HSD), `from_estimator` (any fitted scikit-learn estimator), `from_sklearn`, `from_scipy` (`scipy.stats` tests), `from_pingouin`, `from_lifelines` (Kaplan–Meier), `from_statsforecast` (`forecast()` / `cross_validation()`), `from_prophet`. Without `chart`, `plot` uses `anofox_plot` (auto). R: `broom::tidy` / `augment` / `glance` tables plot as they are (`std.error`, `.fitted`, `.cooksd` are aliases). For dashboards and locked servers, write the tables to Parquet and read them in the dashboard SQL. End to end: `examples/python/plot-results.ipynb`.
 
 ## Producer → macro (anofox-statistics v0.11, anofox-forecast)
 

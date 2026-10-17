@@ -4,28 +4,31 @@ description: >
   Build an interactive SQL dashboard with anofox-visualization from a
   plain-text request (the build-dashboard workflow). Use when the user asks
   to "build / make / create a dashboard", "visualize this data", "turn this
-  query into a dashboard", or describes the charts, KPIs, tables or filters
-  they want. Covers the ::ROLE cast annotation model (each annotated SELECT
-  is a panel, unannotated statements are setup), every role token of the
-  registry (chart kinds, axes, intervals, facets, scales, reference lines,
-  KPIs and number formats, tables, inputs), layout (::COLUMNS, ::COL /
-  ::SPAN, ::HEIGHT, ::GROUP / ::ENDGROUP, ::TAB / ::SUBTAB), tables (toolbar,
-  ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT, ::SUBTOTAL, colour scales, ::PAGED),
-  heatmaps, inputs bound to DuckDB variables with getvariable(), click
-  cross-filter (getvariable('selected')) and opt-in row selection
-  (::ROWSELECT), themes / branding / locale, anofox_plot_* contract plots
-  as panels, the
-  `dashboard --describe` / `dashboard --check` generate-validate-repair loop
-  with its lint codes (sql-error, silent-setup, render-error,
-  render-warning, empty-panel, unknown-cast, design/*), the design contract,
-  templates and the authoring gotchas that silently break a panel.
-version: 2026.10.15
+  query into a dashboard", "explore this table", or describes the charts,
+  KPIs, tables, filters or a process diagram they want. Covers the ::ROLE
+  cast model (each annotated SELECT is a panel, unannotated statements are
+  setup), every role of the registry (charts, waterfall / bullet / funnel,
+  heatmaps, maps, intervals, facets, nested forecast fans, ::MARKAREA,
+  ::TRACK strips, event annotations, thresholds), KPI tiles with delta,
+  sparkline and goal, ::PERIOD comparisons, inputs (dropdown, multiselect,
+  ::BUTTONS, ::TOGGLE, dates) bound to getvariable(), cross-filter,
+  ::SELECT_AS, ::DRILL / ::LINK drill-down and drill-through, URL state,
+  ::ROWSELECT tables (toolbar, ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT,
+  ::SUBTOTAL, ::PAGED), ::DIAGRAM pipelines / lineage / process flows
+  (::UPSTREAM, ::EDGES, ::LANE, flow styles), motion (::ANIMATE, ::STORY,
+  ::TRANSITION, ::LINESTYLE 'flow'), Markdown with {{col:fmt}} values and
+  $LaTeX$, ::INFO / ::CALLOUT, ::ASOF, ::EMPTY / -- @requires panel states,
+  layout, themes / branding / locale, anofox_plot_* contract plots as
+  panels, the Explore data page, the `dashboard --describe` / `--check`
+  generate-validate-repair loop with its lint codes, the design contract
+  and the gotchas that silently break a panel.
+version: 2026.10.17
 user-invocable: false
 ---
 
 # Anofox Visualization — ::ROLE Dashboards (build-dashboard)
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.15) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
+**Extension:** `anofox_visualization` (CalVer 2026.10.16) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
 
 A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel (chart, KPI, table, input). Statements without a role (`CREATE TABLE`, `SET`, `LOAD`, …) run as setup, in order, on one session. Your output is one SQL script.
 
@@ -54,6 +57,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `track/no-chart` | warning | a `::TRACK` that does not directly follow a chart with a numeric / date `::XAXIS` (only a `::HEIGHT` may sit between): it is drawn as a panel of its own |
 | `annotation/unpaired` | warning | a label / range end without its partner, or unequal numbers of `::BAND_LOWER` and `::BAND_UPPER` |
 | `diagram/null-id`, `diagram/duplicate-node`, `diagram/unknown-node`, `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction`, `diagram/too-large` | warning | a `::DIAGRAM` row without an id; an id twice (the first row wins); an edge naming an id that is no row (not drawn); `::EDGES` that is not a list of `{from, to}` structs; an edge style that is not `solid`/`dashed`/`flow`; a `::DIRECTION` that is not `LR`/`TB`; more than 150 nodes / 300 edges (the first ones are drawn) |
+| `chart/needs-xaxis`, `input/many-buttons`, `thresholds/bad-rule`, `thresholds/no-column`, `thresholds/in-table`, `asof/unparseable`, `asof/bad-stale`, `callout/unknown`, `callout/no-text`, `markdown/unknown-placeholder`, `markdown/unknown-format`, `markdown/bad-math`, `diagram/bad-pin`, `diagram/partial-pins`, `policy/*` | mostly warning (`chart/needs-xaxis`: error) | a waterfall / bullet / funnel without `::XAXIS`; too many `::BUTTONS` options (use a dropdown); a malformed or misplaced `::THRESHOLDS`; an `::ASOF` that is no date / a bad `stale=`; a bad `::CALLOUT`; a `{{col}}` naming no column or an unknown `:fmt`; TeX KaTeX can't parse; diagram pins on only some nodes; with `--policy`: what an access policy refuses or hides (access-control skill) |
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
@@ -291,6 +295,74 @@ SELECT region AS "Region" ::TABLE, sum(amount) AS "Revenue" ::MONEY,
 FROM orders GROUP BY region ORDER BY "Revenue" DESC;
 ```
 
+```sql dashboard
+-- Will we run out of stock before Christmas? (history, nested fan from Today, events, strip, story)
+CREATE TABLE outlook AS
+SELECT DATE '2026-11-01' + INTERVAL (i) DAY AS day,
+       CASE WHEN i <= 20 THEN 'Actual' ELSE 'Forecast' END AS series,
+       400 - 9 * i + CASE WHEN i <= 20 THEN (hash(i) % 15)::INTEGER ELSE 0 END AS units,
+       CASE WHEN i > 20 THEN 400 - 9 * i - 3 * (i - 20) END AS lo95, CASE WHEN i > 20 THEN 400 - 9 * i + 3 * (i - 20) END AS hi95,
+       CASE WHEN i > 20 THEN 400 - 9 * i - (i - 20) END AS lo50, CASE WHEN i > 20 THEN 400 - 9 * i + (i - 20) END AS hi50
+FROM range(45) r(i);
+CREATE TABLE events AS SELECT * FROM (VALUES (DATE '2026-11-27', 'Black Friday')) t(day, note);
+CREATE TABLE promos AS SELECT * FROM (VALUES (DATE '2026-11-24'), (DATE '2026-11-27'), (DATE '2026-12-04')) t(day);
+
+SELECT 12::COL;
+SELECT o.day::XAXIS, o.series::CATEGORY, o.units::LINECHART,
+       o.lo95::BAND_LOWER, o.hi95::BAND_UPPER, o.lo50::BAND_LOWER, o.hi50::BAND_UPPER,
+       e.day::XBAND_FROM, e.day + INTERVAL 3 DAY::XBAND_TO, e.note::XBAND_LABEL,
+       CASE WHEN o.units < 50 THEN o.day END::MARKAREA,
+       DATE '2026-11-21'::XLINE, 'reveal'::ANIMATE,
+       CASE WHEN o.series = 'Forecast' THEN 'flow' END::LINESTYLE,
+       CASE o.day WHEN DATE '2026-11-21' THEN 'Today: 220 units left'
+                  WHEN DATE '2026-12-12' THEN 'Below 50 units from here — reorder now' END::STORY,
+       0::REFLINE, 'Stock runs low by mid-December'::TITLE
+FROM outlook o LEFT JOIN events e ON e.day = o.day ORDER BY o.day;
+SELECT day::XAXIS, 'Promotions'::TRACK FROM promos;
+```
+
+```sql dashboard
+-- Where did this quarter's profit come from? (as-of chip, switch, KPI with thresholds, bridge, bullet, funnel, drill-down, notes)
+CREATE TABLE loads AS SELECT TIMESTAMPTZ '2026-10-17 06:00:00+00' AS loaded_at;
+CREATE TABLE bridge AS SELECT * FROM (VALUES
+  (1, 'Budget', 1200.0), (2, 'Volume', 180.0), (3, 'Price', -60.0), (4, 'Mix', 25.0)) t(i, step, keur);
+CREATE TABLE attain AS SELECT * FROM (VALUES (1, 'North', 92.0), (2, 'South', 71.0), (3, 'West', 104.0)) t(i, region, pct);
+CREATE TABLE funnel AS SELECT * FROM (VALUES (1, 'Visits', 48000), (2, 'Sign-ups', 6200), (3, 'Trials', 4600), (4, 'Paid', 1150)) t(i, stage, n);
+CREATE TABLE sales AS SELECT * FROM (VALUES
+  ('EU', 'DE', 'Berlin', 410.0), ('EU', 'DE', 'Munich', 260.0), ('EU', 'FR', 'Paris', 330.0),
+  ('US', 'US', 'Boston', 520.0), ('US', 'US', 'Austin', 300.0)) t(region, country, city, revenue);
+
+SELECT loaded_at::ASOF, 'stale=24h' FROM loads;
+SELECT 'Revenue' AS metric ::BUTTONS UNION ALL SELECT 'Orders';
+SELECT false AS eu_only ::TOGGLE, 'EU only'::LABEL;
+
+SELECT 'This quarter'::GROUP;
+SELECT 1345.0::METRIC, 1200.0::DELTA, 'vs budget'::DELTA_LABEL, '<1200:bad; <1300:warn; good'::THRESHOLDS,
+       'Profit (k€)'::LABEL, 'Operating profit before tax, in thousand euros.'::INFO;
+SELECT 'Profit beat budget by **{{gap:money}}**; the margin rule is $m = \frac{p}{r}$.'::MARKDOWN,
+       'success'::CALLOUT, 145.0 AS gap;
+SELECT 1::ENDGROUP;
+
+SELECT 6::COL;
+SELECT step::XAXIS, keur::WATERFALL, '€'::YFORMAT, 'Volume carried the quarter'::TITLE FROM bridge ORDER BY i;
+SELECT 6::COL;
+SELECT region::XAXIS, pct::BULLET, 100::GOAL, '60,85,110'::RANGE, 'South is short of target'::TITLE FROM attain ORDER BY i;
+SELECT 6::COL;
+SELECT stage::XAXIS, n::FUNNEL, 'A quarter of sign-ups never start a trial'::TITLE FROM funnel ORDER BY i;
+SELECT 6::COL;
+SELECT 'region > country > city'::DRILL;
+SELECT CASE getvariable('drill_level') WHEN 'region' THEN region WHEN 'country' THEN country ELSE city END::XAXIS,
+       CASE getvariable('metric') WHEN 'Orders' THEN count(*)::DOUBLE ELSE sum(revenue) END::BARCHART,
+       'tween'::TRANSITION,
+       'US leads; click to drill into countries and cities'::TITLE
+FROM sales
+WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+  AND (NOT getvariable('eu_only') OR region = 'EU')
+GROUP BY ALL ORDER BY 2 DESC;
+```
+
+In the browser the Markdown placeholders and formula render, the drill chart drills on click and tweens when the buttons change; the static `--svg` / PNG output draws panels only.
+
 ## Design contract
 
 Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`design/*`).
@@ -320,6 +392,8 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 - **Don't dump raw rows**: aggregate or top-N a big detail table **[lint: raw-table]**.
 - **Placement** (`docs/dashboard-design.md` §7): default to 2-up (`6::COL`), full width for time series and tables; equalise a 2-up row with `::HEIGHT`; title 2-up panels with a `::TITLE` column (a lone `::LABEL` heading forces a new row); a `::GROUP` is always full width (use it for KPI strips and filter boxes, not for side by side); keep the top to one slim row (a bare `::DROPDOWN` filter, no banner repeating the KPIs).
 - **Colour is discrete**: band a continuous value with `CASE` before `::COLOR`.
+- **Name a dashboard by the business question it answers** (`'Which regions are behind plan?'::DASHBOARD_TITLE`, `-- @title`), never by method or technology. Where the numbers come from (stored model runs, the ETL job) goes in `--` header comments and the README, not as a note or banner on the page; freshness goes in an `::ASOF` chip.
+- **Default look**: the built-in graphite theme (`light`); add a `::THEME` only for a real brand.
 
 Complete references: `examples/dashboards/sales-overview.sql` (self-contained, lints clean), `examples/sp500-dashboard/sp500.sql` (cross-filtered), `web/examples/statistics-showcase.sql` (contract plots in ten tabs).
 
@@ -389,6 +463,10 @@ Use motion where it tells the story, not as decoration; `--svg`/PNG/PDF stay sta
 
 Charts are keyboard-navigable (Tab into a chart, arrows across marks, Enter = click, Esc leaves), each gets a generated screen-reader summary, a *Charts as tables* switch swaps every chart for its data, and reduced motion is honoured. The summary uses the panel's `::TITLE` — give every chart one (also `design/untitled-chart`).
 
+## Explore data (builder, before writing SQL)
+
+In the builder (`web/`, `serve <db>`, `anofox_serve`) the sidebar's **Explore data** page lists every table / view / added file (CSV, Parquet, JSON, `https://` URL); a table opens as column cards (type, empty %, distinct, histogram / top values / date range, quality hints, likely joins) over its `::PAGED` rows. **Chart this** previews a chart and **Add to dashboard** appends its annotated SQL; **New dashboard from this table** writes a starter (KPIs, `::ASOF`, `::PERIOD`, a filter, trend, top-N, distribution, rows); **Compare…** diffs two tables or two time ranges and writes a starter with `::DELTA`s; with `anofox_tabular` loaded each hint can **Run the check**. Locked servers have no Explore page. From a terminal, `dashboard --describe` gives the same grounding.
+
 ## Gotchas
 
 These silently break a panel (it renders wrong or vanishes):
@@ -412,8 +490,8 @@ These silently break a panel (it renders wrong or vanishes):
 | Where | How |
 |---|---|
 | Static HTML | `dashboard file.sql [out.html]` (inputs, tabs and directives are skipped) |
-| Browser builder | the live demo or `web/` (DuckDB-Wasm, no server): paste the script, **Run**; **Share** puts the SQL in the URL, **⤓ HTML** saves a standalone file |
+| Browser builder | the live demo or `web/` (DuckDB-Wasm, no server): paste the script, **Run**; **Explore data** profiles tables; **Share** puts the SQL and the view in the URL, **⤓ HTML** saves a standalone file |
 | Live DuckDB, authoring | `SELECT anofox_serve(8080);` (from-source build) or the `serve <db>` binary |
 | To consumers, locked | `SELECT anofox_serve_dashboards('<dir>', 8095);` — each `.sql` file of the folder is a page `/d/<name>` with a shared nav bar; `::TAB` pages deep-link via `?tab=<name>`; `?v.<variable>=<value>` pre-sets an input or a selection (validated against the input's options) |
 
-Trust model, options and limits: the serving skill.
+Modes, options, limits and deployment: the serving skill; login, row / column policies and embedding: the access-control skill.

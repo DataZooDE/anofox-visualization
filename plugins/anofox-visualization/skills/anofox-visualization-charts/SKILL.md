@@ -10,31 +10,32 @@ description: >
   jitter, histogram, density, boxplot, violin, QQ, pie, donut, radar,
   sparkline, heatmap, calendar), one SVG per GROUP BY group, saving the SVG
   to a file, the error messages, and the community (render-only) build versus
-  the from-source C-API build (render + serving). Use when the user wants "a
+  the full-toolkit C-API build (a GitHub release or from source: render +
+  serving). Use when the user wants "a
   chart from this query", "render an SVG in DuckDB", "plot these columns",
   "a bar / line / scatter chart in SQL", asks what anofox_render expects,
   how to install or load anofox_visualization, or why a chart call fails.
   For model output tables (coefficients, residuals, ROC, forecasts) see the
   statistics-plots skill; for ::ROLE dashboards the dashboards skill.
-version: 2026.10.15
+version: 2026.10.17
 user-invocable: false
 ---
 
 # Anofox Visualization — Charts in SQL Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.15) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
+**Extension:** `anofox_visualization` (CalVer 2026.10.16) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
 
 ## Install and builds
 
-| | Community build | From-source C-API build |
+| | Community build | Full toolkit: release file or from-source C-API build |
 |---|---|---|
-| Get it | `INSTALL anofox_visualization FROM community; LOAD anofox_visualization;` (once it is accepted; until then `make` gives the same binary) | `duckext/scripts/build-native.sh --release` → `/tmp/anofox_visualization.duckdb_extension` (`OUT=…` to change) |
+| Get it | `INSTALL anofox_visualization FROM community; LOAD anofox_visualization;` (once it is accepted; until then `make` gives the same binary) | the `anofox_visualization.<tag>.duckdb-v1.5.6.<platform>.duckdb_extension` asset of a GitHub release (with the `dashboard` / `serve` CLIs), or `duckext/scripts/build-native.sh --release` → `/tmp/anofox_visualization.duckdb_extension` (`OUT=…`; keep the file name: DuckDB derives the entry point from it) |
 | Rendering: `anofox_render`, column macros, `anofox_plot_*`, `anofox_contract_version` | yes | yes |
-| Serving: `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_stop` | **no** | yes (embeds the web builder) |
+| Serving: `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` | **no** | yes (embeds the web builder; serving skill) |
 | Macro descriptions / `tags` in `duckdb_functions()` | yes | no (the C API cannot attach them) |
 | DuckDB | exactly the pinned version | any DuckDB with C-API v1.2.0+ |
 
-Both local builds are unsigned: start `duckdb -unsigned` and `LOAD '/path/anofox_visualization.duckdb_extension';`.
+Release and local builds are unsigned: start `duckdb -unsigned` and `LOAD '/path/anofox_visualization.duckdb_extension';` (Python: `duckdb.connect(config={"allow_unsigned_extensions": "true"})`).
 
 ## Functions
 
@@ -45,6 +46,7 @@ Both local builds are unsigned: start `duckdb -unsigned` and `LOAD '/path/anofox
 | `anofox_xyc` | `anofox_xyc(x, y, series, kind := 'BARCHART_STACKED', width := 640, height := 400)` | as above, `series` = colour (`::CATEGORY`) |
 | `anofox_bar` / `anofox_line` / `anofox_scatter` / `anofox_area` | `(x, y)` — **no named options** | shorthand for `anofox_xy(x, y, kind := 'BARCHART' / 'LINECHART' / 'SCATTER' / 'AREACHART')` |
 | `anofox_contract_version` | `()` | `'1'` (see the statistics-plots skill) |
+| `anofox_plot_*` | `(row_alias, …)` | contract plots of model output, and `anofox_plot_diagram(nodes, edges := …)` for a process / pipeline graph — statistics-plots skill |
 
 The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deterministic, so `GROUP BY` gives one SVG per group.
 
