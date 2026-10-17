@@ -195,6 +195,7 @@ pub(super) fn pr(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
         if keep.len() >= 2 {
             *idx = keep;
         }
+        pr_order(idx, &x, &y);
     }
     // Base rate: `base_rate :=`, else the precision at the lowest threshold
     // with full recall (every case called positive).
@@ -254,6 +255,18 @@ pub(super) fn pr(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
         plot = plot.legend_position(ggplot_rs::theme::LegendPosition::None);
     }
     finish(plot, w, h, place)
+}
+
+/// Along recall, points tied on recall run from high to low precision (the
+/// threshold falling): sorted by (x, y) they would spike back up at full
+/// recall, the base rate first.
+fn pr_order(idx: &mut [usize], x: &[Value], y: &[Value]) {
+    let v = |c: &[Value], i: usize| fin(&c[i]).unwrap_or(0.0);
+    idx.sort_by(|&a, &b| {
+        v(x, a)
+            .total_cmp(&v(x, b))
+            .then(v(y, b).total_cmp(&v(y, a)))
+    });
 }
 
 pub(super) fn calibration(
@@ -489,5 +502,14 @@ mod tests {
     fn trapezoid_auc() {
         assert!((auc(&[(0.0, 0.0), (1.0, 1.0)]) - 0.5).abs() < 1e-12);
         assert!((auc(&[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)]) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pr_ties_on_recall_fall_in_precision() {
+        let f = |v: &[f64]| v.iter().map(|&n| Value::Float(n)).collect::<Vec<_>>();
+        let (x, y) = (f(&[1.0, 0.5, 1.0, 1.0]), f(&[0.25, 1.0, 0.43, 0.28]));
+        let mut idx = vec![0, 1, 2, 3];
+        pr_order(&mut idx, &x, &y);
+        assert_eq!(idx, [1, 2, 3, 0]);
     }
 }
