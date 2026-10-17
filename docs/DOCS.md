@@ -1912,7 +1912,10 @@ open while you have no dashboards of your own and closed once you have one;
 whatever you choose is remembered in this browser. **Hide** removes it, and
 **Show examples** under *My dashboards* brings it back. The toggles are buttons
 (`aria-expanded`) that keep the keyboard focus, on a phone too, where the
-sidebar is a drawer behind ☰.
+sidebar is a drawer behind ☰. Long names wrap to two lines; the full name is
+the tooltip. Without a link (`?dashboard=` or a Share hash) the builder
+reopens the dashboard you had open last in this browser, else your first saved
+dashboard, else the first example.
 
 Each example says where it belongs in its own header comments (`-- @title`,
 `-- @group`, `-- @tags`, see *Dashboard header comments*), so

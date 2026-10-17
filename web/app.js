@@ -1053,6 +1053,33 @@ function resolveDash(q, examples, saved) {
   if (ex) return { kind: "example", entry: ex };
   return names.includes(q) ? mine(q) : null;
 }
+// What opens without a link: `last` (the sidebar key open last in this
+// browser, see rememberDash) if it still exists, else the first saved
+// dashboard; null → the first example. Same result shape as resolveDash.
+function startDash(last, examples, saved) {
+  const names = Object.keys(saved || {});
+  const mine = (n) => ({ kind: "mine", name: n, sql: saved[n].sql });
+  const k = String(last || "");
+  if (k.startsWith("my:") && names.includes(k.slice(3))) return mine(k.slice(3));
+  const ex = k.startsWith("ex:") && examples.find((e) => e.id === k.slice(3));
+  if (ex) return { kind: "example", entry: ex };
+  return names.length ? mine(names[0]) : null;
+}
+const LAST_KEY = "dp_last_dashboard";
+function lastDash() {
+  try {
+    return localStorage.getItem(LAST_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+function rememberDash(key) {
+  try {
+    localStorage.setItem(LAST_KEY, key);
+  } catch (_) {
+    /* storage blocked: the next visit starts on the first example */
+  }
+}
 // The examples by area, in EX_AREAS order: [{area, items: [{sub, entry}]}].
 // A `-- @group A / B` sits in area A under the sub-heading B (a deeper path
 // is drawn flat, as written); no `@group` → "More examples".
@@ -1516,7 +1543,10 @@ async function boot() {
   const servedSql = served && typeof served.sql === "string" ? served.sql : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
-  const found = resolveDash(wantDash, EXAMPLES, dashStore().items);
+  const myDash = dashStore().items;
+  const linked = resolveDash(wantDash, EXAMPLES, myDash);
+  // no link: what this browser had open last (then its first saved dashboard)
+  const found = linked || (hashSql ? null : startDash(lastDash(), EXAMPLES, myDash));
   if (servedSql != null) {
     $("sql").value = servedSql;
     $("dash-name").value = served.title || "Dashboard";
@@ -1534,9 +1564,10 @@ async function boot() {
     $("sql").value = ex.sql;
     $("dash-name").value = ex.name;
     // a linked example shows in the sidebar, even in a closed library / area
-    if (found) revealExample(ex);
+    if (linked) revealExample(ex);
     else markActive();
   }
+  if (curDash && !servedSql && !hashSql) rememberDash(curDash);
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
   // 🌙: the viewer's light/dark choice — the builder chrome follows it, and so
@@ -2149,6 +2180,7 @@ function moveDash(name, group) {
 }
 function loadDash(name, sql, key) {
   curDash = key || null;
+  if (key) rememberDash(key);
   // A different dashboard starts clean — don't carry tab/filter/page state over.
   dpTab = null;
   dpTableUI = {};
@@ -2183,6 +2215,7 @@ function saveDash() {
   s.items[name] = { sql: $("sql").value, group };
   dashSaveStore(s);
   curDash = "my:" + name;
+  rememberDash(curDash);
   renderSidebar();
   status("saved ✓");
 }

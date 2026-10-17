@@ -345,7 +345,8 @@ await page.click(".dp-astable-btn");
 // The examples library (sidebar): one "Examples" section grouped by business
 // area, open on a first visit, "How it works" closed. Its toggles are buttons
 // with aria-expanded that keep the focus and survive a reload; Hide moves the
-// focus to "Show examples", which brings the section back. With --axe, axe
+// focus to "Show examples", which brings the section back; a visit without a
+// link reopens the dashboard open last. With --axe, axe
 // checks the sidebar (colour contrast included), light and dark.
 for (const scheme of ["light", "dark"]) {
   const lp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, colorScheme: scheme, reducedMotion: "reduce" });
@@ -396,6 +397,13 @@ for (const scheme of ["light", "dark"]) {
   await lp.keyboard.press("Enter");
   l = await lib();
   if (l.open !== "true" || l.show || l.focus !== "side-ex-toggle") fail(`${tag}: Show examples ${JSON.stringify(l)}`);
+  // Without a link, the next visit opens the dashboard open last.
+  await lp.click('.side-item[data-key="ex:why-do-customers-cancel"]');
+  await lp.goto(base);
+  await lp.waitForSelector("#side-ex-toggle", { timeout: 60000 });
+  l = await lib();
+  const nm = await lp.inputValue("#dash-name");
+  if (l.active !== "ex:why-do-customers-cancel" || nm !== "Why do customers cancel?") fail(`${tag}: last dashboard not reopened (${l.active}, ${nm})`);
   if (axe && existsSync(axe)) {
     await lp.addScriptTag({ path: axe });
     const res = await lp.evaluate(async () => window.axe.run("#sidebar", { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }));

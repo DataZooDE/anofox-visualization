@@ -25,11 +25,11 @@ const lib = new Function(
     grab(/^const EX_AREAS_CLOSED = .*;$/m, "EX_AREAS_CLOSED"),
     block("LEGACY_NAMES", "{", "}"),
     block("FILE_SAMPLES", "[", "]"),
-    ...["slugify", "exampleEntry", "resolveDash", "exampleAreas", "exLibOpen", "exAreaOpen"].map(fn),
-    "return { INLINE_SAMPLES, EX_AREAS, EX_AREAS_CLOSED, LEGACY_NAMES, FILE_SAMPLES, slugify, exampleEntry, resolveDash, exampleAreas, exLibOpen, exAreaOpen };",
+    ...["slugify", "exampleEntry", "resolveDash", "exampleAreas", "exLibOpen", "exAreaOpen", "startDash"].map(fn),
+    "return { INLINE_SAMPLES, EX_AREAS, EX_AREAS_CLOSED, LEGACY_NAMES, FILE_SAMPLES, slugify, exampleEntry, resolveDash, exampleAreas, exLibOpen, exAreaOpen, startDash };",
   ].join("\n")
 )();
-const { slugify, resolveDash, exampleAreas, exLibOpen, exAreaOpen } = lib;
+const { slugify, resolveDash, exampleAreas, exLibOpen, exAreaOpen, startDash } = lib;
 
 // slugs: lower-case, ASCII, dashes; "&" reads "and"; never empty
 assert.equal(slugify("Who should sales call first?"), "who-should-sales-call-first");
@@ -172,6 +172,18 @@ assert.equal(resolveDash("Who should sales call first?", EXAMPLES, saved).kind, 
 assert.equal(resolveDash("my:overview", EXAMPLES, saved), null);
 for (const miss of ["", null, "nope", "__proto__", "constructor", "my:", "my:__proto__"])
   assert.equal(resolveDash(miss, EXAMPLES, saved), null, String(miss));
+
+// Without a link: the dashboard open last, if it still exists; else the first
+// saved one; else null (the first example).
+assert.deepEqual(startDash("my:Weekly sales", EXAMPLES, saved), { kind: "mine", name: "Weekly sales", sql: "SELECT 1" });
+assert.equal(startDash("ex:why-do-customers-cancel", EXAMPLES, saved).entry.name, "Why do customers cancel?");
+assert.equal(startDash("ex:gone", EXAMPLES, saved).name, "Weekly sales");
+assert.equal(startDash("my:Deleted", EXAMPLES, saved).name, "Weekly sales");
+assert.equal(startDash(null, EXAMPLES, saved).name, "Weekly sales");
+assert.equal(startDash("ex:why-do-customers-cancel", EXAMPLES, {}).entry.id, "why-do-customers-cancel");
+assert.equal(startDash("my:Weekly sales", EXAMPLES, {}), null);
+assert.equal(startDash(null, EXAMPLES, {}), null);
+assert.equal(startDash("my:__proto__", EXAMPLES, {}), null);
 
 // dashboard_meta is the servers' parser: group levels, tag clean-up, the cap.
 const m = JSON.parse(wasm.dashboard_meta("-- @title  T\n-- @group Sales/EMEA\n-- @tags A, b ,a\nSELECT 1;"));

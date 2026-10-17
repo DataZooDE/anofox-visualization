@@ -101,15 +101,16 @@ body.side-collapsed .side-resizer,body.embed .side-resizer{display:none}
 .side-master .side-mini{font-weight:600;color:var(--ui-muted);letter-spacing:0;text-transform:none}
 .side-master .side-mini:hover{color:var(--ui-accent)}
 .side-section-row .side-mini{text-transform:none;letter-spacing:0}
-.side-item{display:flex;align-items:center;gap:.4rem;padding:.44rem .55rem;border-radius:9px;font-size:.85rem;font-weight:600;color:var(--ui-ink);cursor:pointer;border:0;background:none;text-align:left;width:100%;box-shadow:none}
+.side-item{display:flex;align-items:center;gap:.4rem;padding:.36rem .55rem;border-radius:9px;font-size:.85rem;font-weight:600;color:var(--ui-ink);cursor:pointer;border:0;background:none;text-align:left;width:100%;box-shadow:none}
 .side-item:hover{background:var(--ui-tint-2);transform:none;filter:none}
 .side-item.active{background:linear-gradient(135deg,var(--ui-accent),var(--ui-accent2));color:var(--ui-on-accent)}
-.side-item .s-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* long names (business questions) wrap to two lines; the full name is the tooltip */
+.side-item .s-name{flex:1;min-width:0;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;line-height:1.25;overflow-wrap:anywhere}
 .side-item .s-del{opacity:0;background:none;box-shadow:none;color:inherit;padding:0 .15rem;font-size:1rem;line-height:1}
 .side-item.in-group,.side-item.side-ex-item{padding-left:1.55rem}
 .side-item.side-ex-item{font-weight:500}
 .side-section-row{display:flex;align-items:center;justify-content:space-between;padding-right:.3rem}
-.side-section-row>span{white-space:nowrap}
+.side-section-row>span,.side-section-row .side-mini{white-space:nowrap}
 .side-mini{background:none;color:var(--ui-accent);box-shadow:none;padding:.05rem .35rem;font-size:.72rem;font-weight:700;border-radius:6px}
 .side-mini:hover{background:var(--ui-tint-3);transform:none;filter:none}
 .side-group{display:flex;align-items:center;gap:.3rem;padding:.36rem .5rem;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:700;color:var(--ui-ink);margin-top:.15rem}
