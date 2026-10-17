@@ -425,19 +425,41 @@ SELECT ('**What did this run do?** From ' || (SELECT records_in FROM it_manifest
         ' twins, ' || (SELECT sum(alarms) FROM it_manifest) || ' alarms, ' || (SELECT sum(proposals) FROM it_manifest) || ' calibration proposals (' ||
         (SELECT sum(proposals_applied) FROM it_manifest) || ' in effect) and a four-week projection. The loop from the stream back to calibration is the twin correcting itself.')::MARKDOWN;
 
+-- The run as a diagram, straight from the manifest and its edges in
+-- inventory-rs's own names (stage, seq, from_stage, to_stage, count) through
+-- the `graph` contract: anofox_plot_diagram. Lanes say what each stage is for
+-- (data in, the twin, its correction, the plan); a sparkline in each box shows
+-- the evidence behind the plan over the run (demand landed, alarms raised,
+-- counts the twin matched, corrections in effect, stockout risk ahead); edges
+-- move faster the more records they carry ('flow-volume'). Each box's
+-- number is named in its title; the line under it is its evidence per week.
 SELECT 12::COL;
-SELECT 300::HEIGHT;
-SELECT stage ::DIAGRAM,
-       CASE stage WHEN 'ingest' THEN 'Ingest' WHEN 'build_twin' THEN 'Build twins' WHEN 'calibrate' THEN 'Calibrate'
-                  WHEN 'stream' THEN 'Stream 120 days' WHEN 'replay_history' THEN 'Replay vs counts' WHEN 'project' THEN 'Project 4 weeks' END ::LABEL,
-       CASE stage WHEN 'ingest' THEN records_accepted WHEN 'calibrate' THEN proposals WHEN 'stream' THEN records_in
-                  WHEN 'replay_history' THEN records_in ELSE twins END ::COMPACT,
-       CASE WHEN stage = 'stream' AND alarms > 0 THEN 'alarm' WHEN records_rejected > 0 THEN 'warn' ELSE 'ok' END ::BADGE,
-       (SELECT list({'from': from_stage, 'to': to_stage, 'value': count, 'label': format('{:,}', count),
-                     'style': CASE WHEN from_stage = 'calibrate' THEN 'flow' END} ORDER BY from_stage, to_stage)
-        FROM it_edges) ::EDGES,
-       'One run, stage by stage: records in, proposals, twin-days streamed'::TITLE
-FROM it_manifest ORDER BY seq;
+SELECT 420::HEIGHT;
+SELECT anofox_plot_diagram(n, edges := (SELECT list(e) FROM it_edges e), style := 'flow-volume'),
+       'Can we trust the plan? What fed it, what checked it, what corrected it'::TITLE
+FROM (
+  SELECT m.stage, m.seq,
+         CASE m.stage WHEN 'ingest' THEN 'Ingest · records' WHEN 'build_twin' THEN 'Build twins' WHEN 'calibrate' THEN 'Calibrate · in effect'
+                      WHEN 'stream' THEN 'Stream · alarms' WHEN 'replay_history' THEN 'Replay · % counts matched' WHEN 'project' THEN 'Project 4 weeks' END AS title,
+         CASE m.stage WHEN 'ingest' THEN m.records_accepted WHEN 'calibrate' THEN m.proposals_applied WHEN 'stream' THEN m.alarms
+                      WHEN 'replay_history' THEN (SELECT round(100 * avg(within_tolerance::INTEGER)) FROM it_replay) ELSE m.twins END AS mainstat,
+         CASE m.stage WHEN 'ingest' THEN 'Data in' WHEN 'project' THEN 'The plan' WHEN 'calibrate' THEN 'Correction' ELSE 'The twin' END AS lane,
+         CASE WHEN m.stage = 'stream' AND m.alarms > 0 THEN 'alarm'
+              WHEN m.stage = 'replay_history' AND (SELECT avg(within_tolerance::INTEGER) FROM it_replay) < 0.9 THEN 'warn'
+              WHEN m.records_rejected > 0 THEN 'warn' ELSE 'ok' END AS status,
+         CASE m.stage
+           WHEN 'ingest' THEN (SELECT list(d ORDER BY w) FROM (SELECT period // 7 AS w, sum(demand) AS d FROM it_trajectory GROUP BY ALL))
+           WHEN 'stream' THEN (SELECT list(coalesce(a.n, 0) ORDER BY w.w) FROM (SELECT DISTINCT period // 7 AS w FROM it_trajectory) w
+                               LEFT JOIN (SELECT period // 7 AS w, count(*) AS n FROM it_alarms GROUP BY ALL) a USING (w))
+           WHEN 'replay_history' THEN (SELECT list(m ORDER BY w) FROM (SELECT period // 7 AS w, avg(within_tolerance::INTEGER) AS m FROM it_replay GROUP BY ALL))
+           WHEN 'calibrate' THEN (SELECT list(c ORDER BY w) FROM (SELECT w, sum(n) OVER (ORDER BY w) AS c
+                                  FROM (SELECT w.w, count(ch.period) AS n FROM (SELECT DISTINCT period // 7 AS w FROM it_trajectory) w
+                                        LEFT JOIN it_changes ch ON ch.period // 7 = w.w GROUP BY w.w)))
+           WHEN 'project' THEN (SELECT list(p ORDER BY period) FROM (SELECT period, avg(stockout_probability) AS p FROM it_projection
+                                WHERE stockout_probability IS NOT NULL GROUP BY ALL))
+         END AS sparkline
+  FROM it_manifest m
+) n;
 
 SELECT 12::COL;
 SELECT CASE stage WHEN 'ingest' THEN 'Ingest' WHEN 'build_twin' THEN 'Build twins' WHEN 'calibrate' THEN 'Calibrate'

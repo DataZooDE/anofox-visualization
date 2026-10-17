@@ -3853,6 +3853,7 @@ async function runOnce(fresh = true) {
           const data = contractCell(r, s.contract.rows, "[]");
           const args = contractCell(r, s.contract.args, "{}");
           holder.innerHTML = render_contract(s.contract.macro, data, args, rw, ph, renderCtx());
+          widenDiagram(holder, rw, (ww) => render_contract(s.contract.macro, data, args, ww, ph, renderCtx()));
           const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
           if (warn) console.warn(`${s.contract.macro}: ${warn}`);
           fig.appendChild(holder);
@@ -4444,20 +4445,24 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
   } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
   holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
-  // A ::DIAGRAM on a phone keeps a readable size: drawn at most ~1.4× smaller
-  // than its own size (data-fit), its panel scrolls sideways (theme-base.css).
-  const dg = holder.querySelector(":scope > svg[data-fit]");
-  if (dg && matchMedia("(max-width: 640px)").matches) {
-    const want = Math.round(+dg.getAttribute("data-fit") * 0.72);
-    if (want > w + 1) {
-      holder.innerHTML = render_panel(rows, JSON.stringify(roles), want, ph, renderCtx(), zoom);
-      const wide = holder.querySelector(":scope > svg");
-      if (wide) wide.style.minWidth = want + "px";
-    }
-    const now = holder.querySelector(":scope > svg");
-    if (now) now._dpAskW = w; // fitCharts compares against the width it asked for
-  }
+  widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, renderCtx(), zoom));
   markAnim(holder, roles);
+}
+
+// A ::DIAGRAM on a phone keeps a readable size: drawn at most ~1.4× smaller
+// than its own size (data-fit), its panel scrolls sideways (theme-base.css).
+// `draw(width)` renders the panel again (a role panel or a contract call).
+function widenDiagram(holder, w, draw) {
+  const dg = holder.querySelector(":scope > svg[data-fit]");
+  if (!dg || !matchMedia("(max-width: 640px)").matches) return;
+  const want = Math.round(+dg.getAttribute("data-fit") * 0.72);
+  if (want > w + 1) {
+    holder.innerHTML = draw(want);
+    const wide = holder.querySelector(":scope > svg");
+    if (wide) wide.style.minWidth = want + "px";
+  }
+  const now = holder.querySelector(":scope > svg");
+  if (now) now._dpAskW = w; // fitCharts compares against the width it asked for
 }
 
 // ::TRACK: add a strip under the chart in `holder` and redraw the stack.
@@ -4526,7 +4531,10 @@ function fitCharts(watch = false) {
     const w = fitWidth(holder, dp.rw);
     // hidden (a tab not shown, charts as tables): fitted once it shows
     if (!svg || !holder.clientWidth || Math.abs(w - (svg._dpAskW ?? svg.viewBox.baseVal.width)) < 2) return;
-    if (dp.contract) holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
+    if (dp.contract) {
+      holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
+      widenDiagram(holder, w, (ww) => render_contract(dp.contract.macro, dp.rows, dp.contract.args, ww, dp.ph, renderCtx()));
+    }
     else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
     changed = true;
   });
