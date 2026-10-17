@@ -215,6 +215,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
+    e("SYNC_ZOOM", &["ZOOM_GROUP"], R::SyncZoom, "modifier", true,
+      "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'"),
@@ -735,6 +737,7 @@ mod tests {
             Role::Basemap,
             Role::Flip,
             Role::Alpha,
+            Role::SyncZoom,
             Role::Tab,
             Role::SubTab,
             Role::Size,
@@ -848,6 +851,7 @@ mod tests {
                 | Role::Basemap
                 | Role::Flip
                 | Role::Alpha
+                | Role::SyncZoom
                 | Role::Tab
                 | Role::SubTab
                 | Role::Size

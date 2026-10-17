@@ -172,6 +172,101 @@ fn map_fill_by_value_and_category() {
     assert!(!s.contains("#619CFF"));
 }
 
+// ── A4b: map features carry their row, series, value and label ───────────
+/// The opening tags of the drawn map features (`<polygon`, `<polyline`,
+/// `<circle`) that carry a `data-row`.
+fn map_marks(svg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find(" data-row=\"") {
+        let start = rest[..i].rfind('<').unwrap();
+        let end = i + rest[i..].find('>').unwrap();
+        out.push(rest[start..=end].to_string());
+        rest = &rest[end..];
+    }
+    out
+}
+
+#[test]
+fn map_marks_carry_row_series_value_and_label() {
+    let wkt = strs(&[
+        "LINESTRING(0 0, 2 1, 3 3)",
+        "POINT(2 1)",
+        "POINT(3 3)",
+        "POLYGON((0 0,1 0,1 1,0 1,0 0))",
+    ]);
+    // By ::CATEGORY, with a multi-line ::LABEL: the series is the category,
+    // the label rides along (newlines as &#10;), the title is unchanged.
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt.clone()),
+        Column::new(
+            "c",
+            Role::Category,
+            strs(&["Van 1", "Van 1", "Van 2", "late \"stop\""]),
+        ),
+        Column::new(
+            "l",
+            Role::Label,
+            vec![
+                Value::Str("Van 1: 12 km".into()),
+                Value::Str("Bakery & Co\nstop #1".into()),
+                Value::Na,
+                Value::Str("late".into()),
+            ],
+        ),
+    ]);
+    assert!(s.starts_with("<svg") && s[..s.find('>').unwrap()].contains(" data-map=\"\""));
+    let m = map_marks(&s);
+    assert_eq!(m.len(), 4, "{m:?}");
+    assert!(
+        m[0].starts_with("<polyline ")
+            && m[0].contains(" data-row=\"0\" data-series=\"Van 1\" data-label=\"Van 1: 12 km\">")
+    );
+    assert!(
+        m[1].starts_with("<circle ")
+            && m[1].contains(
+                " data-row=\"1\" data-series=\"Van 1\" data-label=\"Bakery &amp; Co&#10;stop #1\">"
+            )
+    );
+    // no label text: the title is the plain series, as before
+    assert!(
+        m[2].contains(" data-row=\"2\" data-series=\"Van 2\">"),
+        "{}",
+        m[2]
+    );
+    assert!(s.contains("data-series=\"Van 2\"><title>Van 2</title>"));
+    assert!(
+        m[3].starts_with("<polygon ") && m[3].contains(" data-series=\"late &quot;stop&quot;\"")
+    );
+    assert!(s.contains("<title>Bakery &amp; Co\nstop #1: Van 1</title>"));
+    assert!(
+        !s.contains('\u{E000}') && !s.contains('\u{E001}'),
+        "no marker left behind"
+    );
+
+    // By a measure with a ::LABEL (a choropleth): the label is the series,
+    // the raw measure the value.
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt.clone()),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.5, 3.0, 4.0])),
+        Column::new("l", Role::Label, strs(&["A", "B", "C", "D"])),
+    ]);
+    let m = map_marks(&s);
+    assert!(
+        m[1].contains(" data-row=\"1\" data-series=\"B\" data-value=\"2.5\" data-label=\"B\""),
+        "{}",
+        m[1]
+    );
+    assert!(s.contains("<title>B: 2.5</title>"));
+
+    // Unfilled and unlabelled: rows only, and no tooltip (as before).
+    let s = svg(vec![Column::new("g", Role::Geometry, wkt)]);
+    let m = map_marks(&s);
+    assert_eq!(m.len(), 4);
+    assert!(m.iter().all(|t| t.ends_with("\"/>")), "{m:?}");
+    assert!(!s.contains("<title>"), "no empty tooltips");
+}
+
 // ── A5: violins and boxes have a brand-tinted body ───────────────────────
 #[test]
 fn violin_and_box_are_filled() {

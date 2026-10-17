@@ -34,6 +34,7 @@ pub mod inputs;
 pub mod kpi;
 pub mod lint;
 pub mod macros;
+mod mapmarks;
 pub mod math;
 pub mod page;
 pub mod period;
@@ -311,6 +312,9 @@ pub enum Role {
     /// Layer opacity 0..1 for a `::MAP` (`::ALPHA`) — e.g. semi-transparent
     /// earthquake points so overlaps read as density. Read from the first value.
     Alpha,
+    /// The zoom group of a `::MAP` (`::SYNC_ZOOM`): maps with the same name
+    /// zoom and pan together in the browser. Read from the first value.
+    SyncZoom,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -1270,6 +1274,9 @@ impl Panel {
                 };
                 svg.map(|(s, w)| {
                     let mut s = ticks::fit_x_labels(s);
+                    if attrs.iter().any(|(k, _)| *k == "data-map") {
+                        s = mapmarks::lift(s);
+                    }
                     for (k, v) in &attrs {
                         s = with_root_attr(s, k, v);
                     }
@@ -4732,6 +4739,18 @@ fn cell_num(v: &Value) -> Option<f64> {
     }
 }
 
+/// A cell as geom_sf writes it into a feature's `<title>` (its own
+/// formatting: floats to 3 decimals, nothing for dates / missing).
+fn sf_str(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Float(f) => format!("{}", (f * 1000.0).round() / 1000.0),
+        Value::Integer(i) => format!("{i}"),
+        Value::Bool(b) => format!("{b}"),
+        _ => String::new(),
+    }
+}
+
 /// A choropleth map from a WKT `::MAP` geometry column, filled by a numeric
 /// measure (light → brand gradient, viridis over a basemap), else by a
 /// `::CATEGORY` (theme palette), else in a light brand tint.
@@ -4784,11 +4803,43 @@ fn render_map(
         data.push(("fill".to_string(), f.values.clone()));
         aes = aes.fill("fill");
     }
-    let lab = label.or(fill_col).map(|l| l.values.clone());
-    if let Some(lv) = lab {
-        data.push(("label".to_string(), lv));
-        aes = aes.label("label");
-    }
+    // The hover label (geom_sf's `<title>`), each prefixed with the row's
+    // metadata — row index, series (the ::CATEGORY, else the ::LABEL), raw
+    // measure and ::LABEL text — which `mapmarks::lift` moves onto the mark as
+    // `data-*` attributes once rendered (the title text stays as it was).
+    let lab = label.or(fill_col);
+    let cell = |c: Option<&Column>, i: usize| match c.and_then(|c| c.values.get(i)) {
+        None | Some(Value::Na) => String::new(),
+        Some(v) => value_str(v),
+    };
+    let marked = (0..geom.values.len())
+        .map(|i| {
+            let label_text = cell(label, i);
+            let series = match cell(category, i) {
+                s if s.is_empty() => label_text.clone(),
+                s => s,
+            };
+            let value = measure
+                .and_then(|m| m.values.get(i))
+                .and_then(Value::as_f64)
+                .map(|f| f.to_string())
+                .unwrap_or_default();
+            let row = i.to_string();
+            Value::Str(mapmarks::marker(
+                &[
+                    ("row", &row),
+                    ("series", &series),
+                    ("value", &value),
+                    ("label", &label_text),
+                ],
+                &lab.and_then(|c| c.values.get(i))
+                    .map(sf_str)
+                    .unwrap_or_default(),
+            ))
+        })
+        .collect();
+    data.push(("label".to_string(), marked));
+    aes = aes.label("label");
     let mut plot = GGPlot::new(data).aes(aes);
     // Optional grey basemap (e.g. country outlines) drawn first, behind the data
     // layer — a separate no-fill geom_sf layer that shares the map's scales.
@@ -4830,7 +4881,13 @@ fn render_map(
             .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
             .legend_position(ggplot_rs::theme::LegendPosition::Top);
     }
-    Ok(Panel::plot(plot, width, height))
+    Ok(Panel::Plot {
+        plot: Box::new(plot),
+        width,
+        height,
+        // `data-map` also tells `Panel::finish` to lift the marks' metadata.
+        attrs: vec![("data-map", String::new())],
+    })
 }
 
 /// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
