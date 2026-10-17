@@ -58,10 +58,11 @@ for (const [role, label] of svgs) {
 console.log("summary:", svgs[0]?.[1]);
 
 // Each ::STORY chart's first step lights the marks at its key (some lit, the
-// rest dimmed) and draws the connector; then back to the overview.
+// rest dimmed) and draws the connector; then back to the overview. Only
+// charts on screen: one on a hidden tab has no layout to draw a connector in.
 const stories = await page.$$eval(".dash .panel", (ps) =>
   ps.flatMap((p, i) => {
-    if (!p.querySelector(".dp-story-next")) return [];
+    if (!p.querySelector(".dp-story-next") || !p.offsetWidth) return [];
     p.querySelector(".dp-story-next").click();
     const svg = p.querySelector(".panel-svg > svg[data-story]");
     const marks = [...svg.querySelectorAll("[data-x]")].filter((e) => !e.hasAttribute("data-rule") && !e.closest(".dp-ghost"));
@@ -182,7 +183,7 @@ else {
 // keeps its summary and keyboard marks, and a ::STORY chart its stepper,
 // caption and connector, on the step it was on.
 const swapIdx = await page.$$eval(".dash .panel", (ps) => {
-  const sw = (p) => p.querySelector('.dp-tool[title="Line / bar"]');
+  const sw = (p) => p.offsetWidth && p.querySelector('.dp-tool[title="Line / bar"]'); // on screen
   const i = ps.findIndex((p) => sw(p) && p.querySelector(".dp-story")); // a ::STORY chart first
   return i >= 0 ? i : ps.findIndex(sw);
 });

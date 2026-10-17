@@ -1,0 +1,8 @@
+supplier_id,start_date,end_date,kind,what
+SUP-05,2025-01-20,2025-02-16,shutdown,Lunar New Year: factory closed
+SUP-02,2025-08-04,2025-08-22,shutdown,Summer shutdown
+SUP-05,2025-10-27,2025-11-30,port congestion,Port congestion at the origin port
+SUP-03,2025-12-15,2026-01-09,shutdown,Year-end shutdown
+SUP-05,2026-02-09,2026-03-01,shutdown,Lunar New Year: factory closed
+SUP-04,2026-03-16,2026-07-31,capacity,Furnace relining: one of two lines down
+SUP-05,2026-08-10,2026-08-24,weather,Typhoon: port closed for 5 days

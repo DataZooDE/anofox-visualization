@@ -1,0 +1,7 @@
+supplier_id,name,region,promised_days
+SUP-01,Fasteners,domestic,7
+SUP-02,Packaging,domestic,10
+SUP-03,Valves,EU,18
+SUP-04,Castings,EU,14
+SUP-05,Motors,"Asia, sea freight",42
+SUP-06,Seals,domestic,5

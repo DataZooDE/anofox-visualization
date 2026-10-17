@@ -1011,6 +1011,11 @@ const FILE_SAMPLES = [
     name: "Where will stock run short, and can we trust the plan?",
     url: "examples/inventory-twin.sql",
   },
+  {
+    group: INVENTORY_GROUP,
+    name: "How reliable are our suppliers, and what does it cost us in stock?",
+    url: "examples/supplier-lead-times.sql",
+  },
 ];
 async function loadFileSamples() {
   // Fetch in parallel, register in FILE_SAMPLES order (stable sidebar order).
