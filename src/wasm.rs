@@ -24,6 +24,12 @@ use wasm_bindgen::prelude::*;
 /// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
 /// [`sql::contract_call`]), each result row's `c{rows}` / `c{args}` cells to
 /// [`render_contract`].
+/// The release version (CalVer, from Cargo.toml) for the sidebar footer.
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[wasm_bindgen]
 pub fn plan(script: &str) -> String {
     guard(|| Ok(plan_json(script))).unwrap_or_else(|_| "[]".into())

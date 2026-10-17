@@ -19,6 +19,7 @@ import init, {
   kpi_parts,
   threshold_rules,
   dashboard_meta,
+  version as wasmVersion,
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
@@ -1444,6 +1445,8 @@ function toIso(v, dateOnly) {
 
 async function boot() {
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
+  const sideVer = document.getElementById("side-ver");
+  if (sideVer) sideVer.textContent = "v" + wasmVersion();
   loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
