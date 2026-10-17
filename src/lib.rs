@@ -465,6 +465,9 @@ pub enum Role {
     Edges,
     /// A `::DIAGRAM`'s direction (`::DIRECTION`): `'LR'` (default) or `'TB'`.
     Direction,
+    /// A `::DIAGRAM` node's swimlane (`::LANE`): nodes of one lane share a
+    /// band across the layers.
+    Lane,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

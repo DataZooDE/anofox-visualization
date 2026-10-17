@@ -398,6 +398,20 @@ edge `status` (health colour); also `'tween'::TRANSITION` on diagrams (widths,
 colours and box contents change in place) and a phone layout that scrolls the
 diagram sideways at a readable size.
 
+**M3 status (branch `feat/issue-43-diagram-m3`):** implemented — `::LANE`
+swimlanes (a lane's nodes stay together in every stage, bands never overlap,
+LR and TB), `::XAXIS` stage pins (empty stages kept; an edge the pins make run
+within or against the stages is drawn straight) and `::XAXIS` + `::YAXIS` on
+every node as explicit grid positions with straight edges
+(`diagram/partial-pins`, `diagram/bad-pin`), `::SPARKLINE` in the box, edge
+styles `'flow-volume'` / `'flow-dots-volume'` (speed by value), and the
+`graph` contract with `anofox_plot_diagram(n, edges := …)` (Grafana names;
+inventory-rs's `stage` / `from_stage` / `to_stage` / `count` read as written;
+nodes in `seq` order). The graph names are a separate table in
+`src/contract/graph.rs`, not the shared `names.rs` aliases, so `stage` or
+`value` columns of the other schemas are never renamed. Text with XML-invalid
+control characters is cleaned at parse (a fuzz case found it).
+
 ## 5. Risks
 
 | Risk | Mitigation |

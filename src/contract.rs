@@ -20,6 +20,7 @@ use serde_json::{Map, Value as J};
 
 mod curves;
 mod events;
+mod graph;
 mod look;
 mod names;
 mod stats;
@@ -43,6 +44,7 @@ pub const PLOTS: &[&str] = &[
     "compare",
     "partial",
     "events",
+    "diagram",
     "auto",
 ];
 
@@ -100,7 +102,8 @@ fn render_plot(
     // columns; `compare` takes raw rows whose columns the options name.
     let mut renamed = Vec::new();
     let mut rename = |rows: &[Row]| match plot {
-        "compare" => None,
+        // `compare` reads its rows as given, `diagram` with its own names
+        "compare" | "diagram" => None,
         _ => names::normalize(rows, options, &mut renamed),
     };
     let normed;
@@ -187,6 +190,10 @@ fn render_plot(
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
+        "diagram" => {
+            let cols = graph::columns(rows, options).map_err(fail)?;
+            return crate::render_placed(&cols, place, w, h, o);
+        }
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());

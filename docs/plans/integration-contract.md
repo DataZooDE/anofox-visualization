@@ -34,6 +34,7 @@ Principles
 | `summary` (glance) | **model_id, metric, value**, conf_low, conf_high | statistics `glance()`, forecast accuracy metrics | model comparison dots/bars |
 | `test` | **method, statistic, p_value**, test_id, group1, group2, p_adj, df1, df2, estimate, conf_low, conf_high, effect_size, effect_name, alternative, alpha | all `*_test_agg`, post-hoc pairwise, Diebold–Mariano | p-value brackets, effect-size forest, critical-region plot |
 | `events` | **ds \| period, kind**, label, severity (`warning`/`alarm`), value, threshold, model_id, series | twin alarms (inventory-rs `Alarm`: tier → severity, category/name → kind/label, stream → series), parameter changes, calibration proposals | event timeline (`anofox_plot_events`), event lines over a forecast (`anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))`) |
+| `graph` (nodes + edges) | nodes: **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq, upstream; edges (a LIST passed as `edges :=`): **source, target**, value, label, style, status — Grafana node-graph names; also read: `stage`, `label`, `from_stage`, `to_stage`, `count`, … | pipeline run manifests (inventory-rs#28 `run_manifest` + `run_edges`), lineage, process mining | node/edge diagram (`anofox_plot_diagram(n, edges := (SELECT list(e) FROM run_edges e))`), the `::DIAGRAM` panel |
 
 `period` is an integer period index (a twin advancing by period); producers
 write `ds` instead when a calendar is configured. `level` is the interval's
