@@ -837,6 +837,7 @@ mod tests {
         let dir = tmp("stress");
         let file = dir.join("revoked.jsonl");
         let exp = super::super::jwt::now_s() + 600;
+        let mut missing = 0;
         for round in 0..rounds {
             let expired: String = (0..5)
                 .map(|i| format!("{}\n", json!({"sid": format!("x{i}"), "exp": 1})))
@@ -859,10 +860,9 @@ mod tests {
             t.join().unwrap();
             assert!(compactions > 0);
             let text = std::fs::read_to_string(&file).unwrap();
-            for sid in &sids {
-                assert!(text.contains(sid.as_str()), "round {round}: {sid} lost");
-            }
+            missing += sids.iter().filter(|s| !text.contains(s.as_str())).count();
         }
+        assert_eq!(missing, 0, "{missing} of {} logouts lost", rounds * 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
