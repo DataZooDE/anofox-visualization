@@ -35,7 +35,8 @@ use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
 use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
-use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
+use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
+use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
     self as sv, content_type, html_escape, json_for_script, quote_ident, sql_string_literal,
@@ -162,6 +163,23 @@ fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
         .with_header(header("X-Content-Type-Options", "nosniff"))
         .with_header(header("Cache-Control", "no-store"));
     let _ = req.respond(resp);
+}
+
+/// Send a reply of the login (redirects, cookies, login pages).
+fn send(req: Request, r: auth::Reply) -> u16 {
+    let mut resp = Response::from_data(r.body)
+        .with_status_code(r.status)
+        .with_header(header("Content-Type", r.content_type))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Referrer-Policy", "same-origin"));
+    for (k, v) in &r.headers {
+        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+            resp.add_header(h);
+        }
+    }
+    let _ = req.respond(resp);
+    r.status
 }
 
 /// A cached panel result as a response body (no copy of the JSON).
@@ -412,9 +430,10 @@ pub struct LockedOptions {
     /// Variables whose values name a file or folder inside `data`: each must
     /// be a plain name (`[A-Za-z0-9_.-]`, not starting with `.`).
     pub path_vars: Vec<String>,
-    /// `auth`: viewer identity from a trusted auth proxy (every request but
-    /// `/health` needs it; the claims become `__claim_*` variables).
-    pub auth: Option<ProxyAuth>,
+    /// `auth`: the viewer login — an auth proxy, JWT/OIDC, embed links, API
+    /// keys (every request but `/health` needs it; the claims become
+    /// `__claim_*` variables).
+    pub auth: Option<Arc<Auth>>,
     /// `log` (+ `log_vars`): JSON-lines request log.
     pub log: Option<Arc<RequestLog>>,
     /// Listen address (`bind`; default loopback). A specific address is also
@@ -497,6 +516,7 @@ impl LockedOptions {
             serde_json::from_str(json).map_err(|e| format!("options: bad JSON: {e}"))?;
         let m = v.as_object().ok_or("options must be a JSON object")?;
         let (mut log, mut log_vars) = (None, None);
+        let (mut auth_cfg, mut audit) = (None, None);
         for (k, val) in m {
             let num = || {
                 val.as_u64()
@@ -561,7 +581,8 @@ impl LockedOptions {
                         o.path_vars.push(v.to_string());
                     }
                 }
-                "auth" => o.auth = Some(ProxyAuth::from_json(val, |k| std::env::var(k).ok()).map_err(|e| format!("options.{e}"))?),
+                "auth" => auth_cfg = Some(val),
+                "audit" => audit = Some(val.as_str().ok_or("options.audit must be \"stderr\" or a file path")?),
                 "log" => log = Some(val.as_str().ok_or("options.log must be \"stderr\" or a file path")?),
                 "log_vars" => log_vars = Some(val.as_str().ok_or("options.log_vars must be none, names or values")?),
                 "bind" => {
@@ -602,7 +623,7 @@ impl LockedOptions {
                     let p = val.as_str().map(str::trim).ok_or("options.search_path must be a string like \"warehouse\" or \"warehouse.sales\"")?;
                     o.search_path = parse_search_path(p).map_err(|e| format!("options.search_path: {e}"))?;
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path)")),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.
@@ -611,6 +632,18 @@ impl LockedOptions {
             .min(o.max_inflight.max(crate::limits::FREE_BYTES));
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
+        }
+        if let Some(val) = auth_cfg {
+            let mut a = Auth::from_json(val, |k| std::env::var(k).ok())
+                .map_err(|e| format!("options.{e}"))?;
+            if let Some(path) = audit {
+                a.set_audit(Arc::new(
+                    AuditLog::new(path).map_err(|e| format!("options.{e}"))?,
+                ));
+            }
+            o.auth = Some(Arc::new(a));
+        } else if audit.is_some() {
+            return Err("options.audit needs options.auth".into());
         }
         match (log, log_vars) {
             (Some(l), v) => {
@@ -971,11 +1004,21 @@ pub fn start_locked(
         queries,
     });
     let auth_note = match &state.opts.auth {
-        Some(a) => format!(
-            "; login via auth proxy (trusted identity headers: {}; secret in {}) — the proxy must set or remove each of them on every request",
-            a.trusted_headers(),
-            a.secret_header
-        ),
+        Some(a) => {
+            let warn = a.prefetch();
+            format!(
+                "; login: {}{}",
+                a.describe(),
+                if warn.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (not reachable yet, requests fail closed until it is: {})",
+                        warn.join("; ")
+                    )
+                }
+            )
+        }
         None if !state.opts.bind.is_loopback() => format!(
             "; WARNING: bound to {} without auth — every viewer who can reach this address sees every dashboard; put an auth proxy in front",
             state.opts.bind
@@ -1403,6 +1446,8 @@ fn build_snapshot(
 #[derive(Default)]
 struct LogInfo {
     user: Option<String>,
+    /// The login method that signed the viewer in.
+    auth: Option<&'static str>,
     dashboard: Option<String>,
     panel: Option<usize>,
     cache: Option<&'static str>,
@@ -1453,6 +1498,7 @@ fn handle_locked(st: &Locked, req: Request) {
                 vars: &info.vars,
                 bytes: info.bytes,
                 deny: info.deny,
+                auth: info.auth,
             });
         }
     }
@@ -1485,34 +1531,59 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         return reply(req, 403, "forbidden: cross-origin request");
     }
     let health = req.method() == &Method::Get && (path == "/health" || path == "/healthz");
-    // Login: with `options.auth` every request but the health check carries
-    // the proxy's identity (and secret); without it, nobody gets anything.
-    // The health check answers anyone, but only signed-in callers see more
-    // than `status`.
-    let claims = match &st.opts.auth {
+    // Login: with `options.auth` every request but the health check (and,
+    // with embed links, the UI's code files) carries a credential; without
+    // one, nobody gets anything. The health check answers anyone, but only
+    // signed-in callers see more than `status`.
+    let ident = match &st.opts.auth {
         Some(auth) => {
             let headers: Vec<(&str, &str)> = req
                 .headers()
                 .iter()
                 .map(|h| (h.field.as_str().as_str(), h.value.as_str()))
                 .collect();
-            match auth.authenticate(req.remote_addr().map(|a| a.ip()), &headers) {
-                Ok(c) => {
-                    info.user = Some(c.user.clone());
-                    Some(c)
+            let method = req.method().to_string();
+            let r = auth::Req {
+                method: &method,
+                url: req.url(),
+                peer: req.remote_addr().map(|a| a.ip()),
+                headers: &headers,
+            };
+            // The OIDC login's own endpoints (/auth/*).
+            if let Some(rep) = auth.route(&r) {
+                return send(req, rep);
+            }
+            if auth.public_asset(&method, path) {
+                serve_asset(req, path);
+                return 200;
+            }
+            match auth.authenticate(&r) {
+                Ok(id) => {
+                    info.user = Some(id.claims.user.clone());
+                    info.auth = Some(id.method);
+                    Some(id)
                 }
                 Err(_) if health => None,
-                Err(e) => {
-                    info.deny = Some(e.reason());
+                Err(d) => {
+                    info.deny = Some(d.reason);
+                    info.auth = d.method;
+                    if let Some(rep) = auth.login_redirect(&r, &d) {
+                        return send(req, rep);
+                    }
                     return reply(req, 401, access::UNAUTHORIZED);
                 }
             }
         }
         None => None,
     };
+    let claims = ident.as_ref().map(|i| i.claims.clone());
+    let scope = ident.as_ref().map(|i| &i.scope);
     match (req.method(), path) {
         (&Method::Get, "/health") | (&Method::Get, "/healthz") => {
-            if st.opts.auth.is_some() && claims.is_none() {
+            // Without a login — or with a credential scoped to some
+            // dashboards (an embed page, an API key) — only the status.
+            let full = ident.as_ref().is_some_and(|i| i.scope.dashboards.is_none());
+            if st.opts.auth.is_some() && !full {
                 respond(req, 200, "application/json", &b"{\"status\":\"ok\"}"[..]);
                 return 200;
             }
@@ -1544,6 +1615,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 &body,
                 supersede.as_deref(),
                 claims.as_ref(),
+                scope,
                 info,
                 &mut charge,
             ) {
@@ -1574,16 +1646,36 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 req,
                 200,
                 "text/html; charset=utf-8",
-                list_page(st).into_bytes(),
+                list_page(st, scope).into_bytes(),
             );
             200
         }
         (&Method::Get, p) if p.starts_with("/d/") => {
             let id = p["/d/".len()..].trim_end_matches('/');
             match st.dashboards.iter().find(|d| d.id == id) {
+                // A scoped credential (embed link, API key) reads its own
+                // dashboards only.
+                Some(d) if !scope.is_none_or(|s| s.allows(&d.id)) => {
+                    info.dashboard = Some(d.id.clone());
+                    reply(req, 403, "forbidden: not in this credential's scope")
+                }
                 Some(d) => {
                     info.dashboard = Some(d.id.clone());
-                    respond(req, 200, "text/html; charset=utf-8", served_index(st, d));
+                    let page = ident.as_ref().and_then(|i| i.page_session.as_deref());
+                    let html = served_index(st, d, scope, page);
+                    if page.is_some() {
+                        // The page holds a session: never cached, never sent
+                        // to another site as a Referer (the link is in the URL).
+                        let resp = Response::from_data(html)
+                            .with_status_code(200)
+                            .with_header(header("Content-Type", "text/html; charset=utf-8"))
+                            .with_header(header("X-Content-Type-Options", "nosniff"))
+                            .with_header(header("Cache-Control", "no-store"))
+                            .with_header(header("Referrer-Policy", "same-origin"));
+                        let _ = req.respond(resp);
+                    } else {
+                        respond(req, 200, "text/html; charset=utf-8", html);
+                    }
                     200
                 }
                 None => reply(req, 404, "no such dashboard"),
@@ -1625,6 +1717,20 @@ fn limits_json(st: &Locked) -> serde_json::Value {
         "refused_inflight": st.inflight.refused(),
         "refused_queries": timed_out,
     })
+}
+
+/// Every variable of `vars` named in `path_vars` must hold a plain file or
+/// folder name.
+fn check_path_values(path_vars: &[String], vars: &[(String, String)]) -> Result<(), (u16, String)> {
+    for (name, lit) in vars {
+        if path_vars.iter().any(|v| v.eq_ignore_ascii_case(name)) && !valid_path_value(lit) {
+            return Err((
+                400,
+                format!("variable '{name}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.'"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `X-Anofox-Supersede: <viewer>/<panel>/<kind>` — a newer request with the
@@ -1681,13 +1787,14 @@ fn locked_panel(
     body: &str,
     supersede: Option<&str>,
     claims: Option<&Claims>,
+    scope: Option<&Scope>,
     info: &mut LogInfo,
     charge: &mut Charge,
 ) -> Result<(Arc<String>, String), (u16, String)> {
     let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
-    for (name, lit) in &r.vars {
+    for name in r.vars.iter().map(|(n, _)| n) {
         // (`__claim_*` and `anofox_data` are refused when the request is
         // parsed.) The policy's own names are reserved, too.
         if st.opts.policy.is_some()
@@ -1697,19 +1804,8 @@ fn locked_panel(
         {
             return Err((400, format!("variable '{name}' is set by the server")));
         }
-        if st
-            .opts
-            .path_vars
-            .iter()
-            .any(|v| v.eq_ignore_ascii_case(name))
-            && !valid_path_value(lit)
-        {
-            return Err((
-                400,
-                format!("variable '{name}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.'"),
-            ));
-        }
     }
+    check_path_values(&st.opts.path_vars, &r.vars)?;
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
@@ -1723,6 +1819,17 @@ fn locked_panel(
     if let Some(allowed) = &dash.vars {
         r.vars
             .retain(|(k, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(k)));
+    }
+    // A scoped credential: its dashboards only, and its locked variables
+    // replace the viewer's (set after them, part of the cache key).
+    if let Some(s) = scope {
+        if !s.allows(&dash.id) {
+            return Err((403, "forbidden: not in this credential's scope".into()));
+        }
+        s.lock_vars(&mut r.vars);
+        // A locked variable that names a path obeys the same rule as a
+        // viewer's (checked above for those).
+        check_path_values(&st.opts.path_vars, &s.vars)?;
     }
     info.vars = r.vars.clone();
     // Under a policy, the statements rewritten for this snapshot.
@@ -1917,7 +2024,10 @@ const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log 
 /// index.html with `window.__served = {id,title,sql,nav,locked}` injected
 /// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
 /// dashboard's SQL cannot break out).
-fn served_index(st: &Locked, dash: &Dash) -> Vec<u8> {
+/// The served page of `dash`. `scope` limits the navigation to the
+/// dashboards the viewer may read; `session` is an embed link's page session
+/// (the page sends it with each request, see `auth::SESSION_HEADER`).
+fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option<&str>) -> Vec<u8> {
     let html = WEB
         .get_file("index.html")
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
@@ -1925,12 +2035,17 @@ fn served_index(st: &Locked, dash: &Dash) -> Vec<u8> {
     let nav: Vec<serde_json::Value> = st
         .dashboards
         .iter()
+        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
         .map(|d| serde_json::json!({ "id": d.id, "title": d.title }))
         .collect();
-    let cfg = json_for_script(&serde_json::json!({
+    let mut cfg = serde_json::json!({
         "id": dash.id, "title": dash.title, "sql": dash.sql, "nav": nav, "locked": true,
         "theme": st.opts.theme,
-    }));
+    });
+    if let Some(s) = session {
+        cfg["session"] = serde_json::json!(s);
+    }
+    let cfg = json_for_script(&cfg);
     html.replacen("<head>", "<head><base href=\"/\">", 1)
         .replacen(
             "</head>",
@@ -1940,10 +2055,11 @@ fn served_index(st: &Locked, dash: &Dash) -> Vec<u8> {
         .into_bytes()
 }
 
-fn list_page(st: &Locked) -> String {
+fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
     let items: String = st
         .dashboards
         .iter()
+        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
         .map(|d| {
             format!(
                 "<li><a href=\"/d/{}\">{}</a></li>",
@@ -2394,7 +2510,10 @@ mod tests {
             r#"{{"auth":{{"mode":"proxy","shared_secret":"{secret}","trusted_proxies":["127.0.0.1"]}},"log":"stderr","log_vars":"none"}}"#
         )))
         .unwrap();
-        assert_eq!(o.auth.as_ref().unwrap().header_user, "X-Forwarded-User");
+        assert_eq!(
+            o.auth.as_ref().unwrap().proxy.as_ref().unwrap().header_user,
+            "X-Forwarded-User"
+        );
         assert!(o.log.is_some());
         // a broken auth config fails the start (fail closed), never serves open
         assert!(LockedOptions::parse(Some(r#"{"auth":{"mode":"proxy"}}"#)).is_err());
@@ -2411,6 +2530,62 @@ mod tests {
         )))
         .unwrap_err();
         assert!(!e.contains(secret), "{e}");
+        // P3: a list of methods and an audit log; audit needs auth
+        let esec = "embed-secret-0123456789abcdef0123456789";
+        let dir = SnapshotDir::create().unwrap();
+        let audit = dir.0.join("audit.jsonl");
+        let o = LockedOptions::parse(Some(&format!(
+            r#"{{"auth":[{{"mode":"proxy","shared_secret":"{secret}"}},{{"mode":"embed","secret":"{esec}"}}],"audit":{}}}"#,
+            serde_json::json!(audit.to_string_lossy())
+        )))
+        .unwrap();
+        assert_eq!(o.auth.as_ref().unwrap().methods(), ["proxy", "embed"]);
+        assert!(std::fs::read_to_string(&audit)
+            .unwrap()
+            .contains("\"audit\":\"start\""));
+        assert!(LockedOptions::parse(Some(r#"{"audit":"stderr"}"#)).is_err());
+        assert!(LockedOptions::parse(Some(&format!(
+            r#"{{"auth":{{"mode":"embed","secret":"{esec}"}},"audit":"/nonexistent-dir/a.jsonl"}}"#
+        )))
+        .is_err());
+    }
+
+    #[test]
+    fn locked_path_vars_are_checked_too() {
+        // An embed link locking a path variable gets the viewer's rule.
+        let pv = vec!["run".to_string()];
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![("RUN".into(), "'../../etc'".into())],
+        };
+        let mut vars = vec![("run".to_string(), "'run_a'".to_string())];
+        assert!(check_path_values(&pv, &vars).is_ok());
+        scope.lock_vars(&mut vars);
+        assert_eq!(check_path_values(&pv, &scope.vars).unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn locked_vars_follow_the_viewers_and_precede_the_claims() {
+        // An embed link's variables replace the viewer's and are set after
+        // them; the claims still come last.
+        let mut r = sv::parse_panel_request(
+            r#"{"dashboard":"d","panel":0,"vars":{"region":"US","q":"x"}}"#,
+        )
+        .unwrap();
+        let scope = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("REGION".into(), "'EU'".into())],
+        };
+        scope.lock_vars(&mut r.vars);
+        let claims = Claims {
+            user: "acme".into(),
+            ..Default::default()
+        };
+        let sets = request_sets(&r, Some(&claims), None);
+        let pos = |needle: &str| sets.iter().position(|s| s.contains(needle)).unwrap();
+        assert!(!sets.iter().any(|s| s.contains("'US'")), "{sets:?}");
+        assert!(pos("q =") < pos("REGION = 'EU'"));
+        assert!(pos("REGION = 'EU'") < pos("__claim_user"));
     }
 
     #[test]

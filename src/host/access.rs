@@ -49,9 +49,9 @@ pub const DEFAULT_GROUPS_HEADER: &str = "X-Forwarded-Groups";
 pub const DEFAULT_SECRET_HEADER: &str = "X-Anofox-Proxy-Secret";
 /// A shared secret must be at least this long (e.g. `openssl rand -hex 32`).
 pub const MIN_SECRET_LEN: usize = 32;
-const MAX_CLAIM_LEN: usize = 1024;
-const MAX_GROUPS: usize = 256;
-const MAX_ATTRS: usize = 16;
+pub const MAX_CLAIM_LEN: usize = 1024;
+pub const MAX_GROUPS: usize = 256;
+pub const MAX_ATTRS: usize = 16;
 
 /// A network range (`10.0.0.0/8`, `::1/128`, or a bare address).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,10 +262,7 @@ impl ProxyAuth {
                 return Err(format!("auth.claims: at most {MAX_ATTRS} claims"));
             }
             for (name, h) in c {
-                if !valid_ident(name)
-                    || name.len() > 32
-                    || ["user", "groups"].contains(&name.to_ascii_lowercase().as_str())
-                {
+                if !valid_claim_name(name) {
                     return Err(format!("auth.claims: invalid claim name '{name}'"));
                 }
                 let h = claim_header(&format!("claims.{name}"), h)?;
@@ -387,13 +384,7 @@ impl ProxyAuth {
             Ok(Some(s)) if ct_eq(s.trim(), &self.secret) => {}
             _ => return Err(AuthError::BadSecret),
         }
-        let clean = |v: &str| -> Result<String, AuthError> {
-            let v = v.trim();
-            if v.len() > MAX_CLAIM_LEN || v.chars().any(|c| c.is_control()) {
-                return Err(AuthError::Malformed);
-            }
-            Ok(v.to_string())
-        };
+        let clean = clean_claim;
         let user = match one(&self.header_user)? {
             Some(u) => clean(u)?,
             None => return Err(AuthError::NoUser),
@@ -439,6 +430,24 @@ impl ProxyAuth {
     }
 }
 
+/// One claim value as the server accepts it from any login method: trimmed,
+/// at most [`MAX_CLAIM_LEN`] bytes, no control characters.
+pub fn clean_claim(v: &str) -> Result<String, AuthError> {
+    let v = v.trim();
+    if v.len() > MAX_CLAIM_LEN || v.chars().any(|c| c.is_control()) {
+        return Err(AuthError::Malformed);
+    }
+    Ok(v.to_string())
+}
+
+/// Is `name` usable as a claim name (`__claim_<name>`)? An identifier of at
+/// most 32 characters; `user` and `groups` are the built-in claims.
+pub fn valid_claim_name(name: &str) -> bool {
+    valid_ident(name)
+        && name.len() <= 32
+        && !["user", "groups"].contains(&name.to_ascii_lowercase().as_str())
+}
+
 /// Why [`ProxyAuth::authenticate`] refused a request. Every reason is a `401`
 /// with the same body; the reason only goes to the request log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,6 +458,8 @@ pub enum AuthError {
     /// A claim configured `required` is absent or empty.
     MissingClaim,
     Malformed,
+    /// The user claim is an e-mail address the IdP has not verified (#115).
+    Unverified,
 }
 
 impl AuthError {
@@ -459,6 +470,7 @@ impl AuthError {
             AuthError::NoUser => "no_user",
             AuthError::MissingClaim => "missing_claim",
             AuthError::Malformed => "malformed_identity",
+            AuthError::Unverified => "email_unverified",
         }
     }
 }
@@ -548,6 +560,8 @@ pub struct LogEntry<'a> {
     pub bytes: Option<usize>,
     /// An [`AuthError::reason`] for a refused request.
     pub deny: Option<&'static str>,
+    /// The login method (`proxy`, `jwt`, `oidc`, `embed`, `api_key`).
+    pub auth: Option<&'static str>,
 }
 
 /// JSON-lines request log (`options.log` / `--log`).
@@ -617,6 +631,9 @@ impl RequestLog {
         if let Some(d) = e.deny {
             o.insert("deny".into(), json!(d));
         }
+        if let Some(a) = e.auth {
+            o.insert("auth".into(), json!(a));
+        }
         match self.vars {
             LogVars::None => {}
             LogVars::Names => {
@@ -654,7 +671,7 @@ impl RequestLog {
 /// Open the log for appending: created `0600`; a symlink at the path is
 /// refused (`O_NOFOLLOW`), and an existing file readable by others is
 /// tightened to `0600`.
-fn open_log(p: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub fn open_log(p: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut o = std::fs::OpenOptions::new();
     o.create(true).append(true);
     #[cfg(unix)]
@@ -1100,6 +1117,7 @@ mod tests {
             vars: &vars,
             bytes: Some(512),
             deny: None,
+            auth: Some("jwt"),
         };
         let log = RequestLog {
             sink: LogSink::Stderr,
@@ -1117,6 +1135,7 @@ mod tests {
         assert_eq!(v["ms"], 12);
         assert_eq!(v["cache"], "hit");
         assert_eq!(v["peer"], "127.0.0.1");
+        assert_eq!(v["auth"], "jwt");
         assert_eq!(v["vars"], json!(["q", "region"]));
         assert!(!line.contains("EU") && !line.contains("secret"), "{line}");
         let log = RequestLog {

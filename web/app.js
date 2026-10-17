@@ -1119,6 +1119,9 @@ async function servedRequest(sql, page, kind) {
     body.page = rest;
   }
   const headers = { "Content-Type": "application/json" };
+  // An embed link's page session (the server put it in the page): the
+  // credential of every panel request of this page.
+  if (window.__served.session) headers["X-Anofox-Session"] = window.__served.session;
   const slot = kind && `${idx}/${kind}`;
   const ac = slot && new AbortController();
   if (slot) {
@@ -1399,8 +1402,10 @@ async function boot() {
     }
   }
 
-  // Sidebar (dashboard list) + app-shell controls
-  await loadFileSamples();
+  // Sidebar (dashboard list) + app-shell controls. A served dashboard is
+  // the server's own: the bundled examples aren't fetched (an embedded page
+  // has no credential for them).
+  if (!window.__served) await loadFileSamples();
   renderSidebar();
   $("side-new").onclick = () => loadDash("", "");
   $("save").onclick = saveDash;
@@ -1441,6 +1446,13 @@ async function boot() {
   if (served) servedMode = true;
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
+  }
+  // An embed link was exchanged for this page's session: drop the link from
+  // the address (history, copies of the URL). A reload needs a fresh link.
+  if (served?.session && params.has("embed")) {
+    const u = new URL(location.href);
+    u.searchParams.delete("embed");
+    history.replaceState(history.state, "", u);
   }
   // Deep-link: activate the tab named in ?tab= on first render (loadDash resets
   // this only when switching dashboards, so it survives the initial run()).

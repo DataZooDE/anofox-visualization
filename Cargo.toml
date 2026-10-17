@@ -39,6 +39,15 @@ wasm-bindgen = { version = "0.2", optional = true }
 tiny_http = { version = "0.12", optional = true }
 include_dir = { version = "0.7", optional = true }
 open = { version = "5", optional = true }
+# `auth` feature (native only, part of `serve`; the extension enables it):
+# built-in login — JWT/OIDC, signed embed links, API keys (src/host/auth/).
+# One crypto backend, aws-lc-rs: JWT signatures (jsonwebtoken), HMAC/SHA-256
+# and randomness, and TLS for the JWKS/OIDC fetches (rustls through ureq).
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"], optional = true }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"], optional = true }
+base64 = { version = "0.22", optional = true }
 
 # The request log opens its file with O_NOFOLLOW (src/host/access.rs).
 [target.'cfg(unix)'.dependencies]
@@ -49,7 +58,9 @@ default = []
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
 wasm = ["dep:wasm-bindgen"]
 # `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.
-serve = ["dep:tiny_http", "dep:include_dir", "dep:open"]
+serve = ["dep:tiny_http", "dep:include_dir", "dep:open", "auth"]
+# Built-in authentication for the dashboard servers (no HTTP server of its own).
+auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base64"]
 
 [[bin]]
 name = "serve"

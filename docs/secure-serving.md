@@ -350,7 +350,7 @@ otherwise it refuses to start.
 
 | `auth` key | Default | Meaning |
 |---|---|---|
-| `mode` | (required) | `"proxy"` — the only mode in P1 |
+| `mode` | (required) | `"proxy"` (the other modes — `jwt`, `oidc`, `embed`, `api_keys` — are under [Built-in login](#built-in-login-access-control-p3)) |
 | `shared_secret` / `shared_secret_env` | (one is required) | The secret the proxy sends on every request; ≥ 32 printable characters (`openssl rand -hex 32`). Prefer `shared_secret_env` (the name of an environment variable of the DuckDB process): a literal in the SQL ends up in shell history and query logs |
 | `secret_header` | `X-Anofox-Proxy-Secret` | Header carrying the secret |
 | `trusted_proxies` | key absent: any peer | Addresses / CIDR ranges (`10.0.0.0/8`, `::1`) the proxy connects from; any other peer is refused even with the right secret. An empty list is an error. Write IPv4 ranges as IPv4 (`::ffff:…` forms are rejected; IPv4-mapped peers are matched as IPv4) |
@@ -555,7 +555,253 @@ every refused request (static assets are not logged):
   (a newline is written as `\n`), so only the request log writes lines that
   start with `{`. A request target containing a control character is `400`.
 
-### Threat model (P1)
+## Built-in login (access control P3)
+
+The server can sign viewers in without an auth proxy. `auth` takes one method
+object or a **list** of them (each `mode` at most once). Every method ends in
+the same claims as the proxy (`__claim_user`, `__claim_groups`,
+`__claim_<name>`), set the same way and in the same order, so panels,
+policies, the per-viewer cache and the request log don't care how a viewer
+signed in.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "hosts": ["dash.example.com"],
+  "auth": [
+    {"mode": "oidc", "issuer": "https://login.example.com", "client_id": "dashboards",
+     "client_secret_env": "OIDC_CLIENT_SECRET",
+     "redirect_url": "https://dash.example.com/auth/callback",
+     "groups_claim": "groups", "claims": {"tenant": "tid"},
+     "session_secret_env": "ANOFOX_SESSION_SECRET"},
+    {"mode": "jwt", "issuer": "https://login.example.com", "audience": "dashboards-api"},
+    {"mode": "embed", "secret_env": "ANOFOX_EMBED_SECRET", "claims": ["tenant"]},
+    {"mode": "api_keys", "file": "/etc/anofox/keys.json"}
+  ],
+  "policy": "/etc/anofox/policy.json",
+  "audit": "/var/log/anofox/audit.jsonl",
+  "log": "/var/log/anofox/requests.jsonl"
+}');
+```
+
+**Which credential counts.** Exactly one per request, the first present of:
+an embed link (`GET /d/<id>?embed=<token>`), the proxy's secret header, an
+`Authorization` header, an embed page session (`X-Anofox-Session`), the login
+cookie, a JWT cookie. A credential that is present but invalid is refused
+(`401`) — the server never falls back to the next one. Without any
+credential a page view (`/`, `/d/…`) is sent to `/auth/login` when `oidc` is
+configured, everything else is `401`. With `proxy` as the only method,
+behaviour is exactly P1. A broken `auth` (an unknown key, a missing or short
+secret, one secret used for two roles, an `http://` issuer, an `HS*` or `none`
+algorithm, an unreadable key file, …) fails the server start. Every secret
+plays one role: the embed link secret, the proxy's shared secret and the
+session secrets must all differ (the OIDC and embed session secrets may be
+the same value; their keys are derived per use).
+
+### JWT bearer tokens (`"mode": "jwt"`)
+
+| key | default | meaning |
+|---|---|---|
+| `issuer` | (required) | The IdP's issuer URL, `https://` only; a token's `iss` must equal it exactly |
+| `audience` | (required) | This server's audience (string or list); `aud` must contain one |
+| `jwks_url` | discovered | The key set; otherwise `jwks_uri` from `<issuer>/.well-known/openid-configuration` (whose `issuer` must match). `https://` only |
+| `algorithms` | `["RS256", "ES256", "EdDSA"]` | Allowed: `RS256/384/512`, `PS256/384/512`, `ES256`, `ES384`, `EdDSA`. `HS*` and `none` are rejected at startup |
+| `leeway_s` | `60` | Clock skew for `exp`, `nbf`, `iat` (at most 300) |
+| `max_age_s` | — | Refuse tokens issued longer ago (requires `iat`) |
+| `jwks_ttl_s` | `3600` | Key-set cache lifetime (60–86400) |
+| `user_claim` | `sub` | Token field → `__claim_user`. If it is `email`, the token must also carry `email_verified: true` (`deny: email_unverified`): an address the IdP did not verify is no identity (nOAuth) |
+| `groups_claim` | off | Token field (list or string) → `__claim_groups`; `{"field": …, "required": true}` makes it mandatory |
+| `claims` | — | `{name: "field"}` → `__claim_<name>`; dotted paths (`realm_access.roles`) and namespaced fields (`https://example.com/tenant`) work |
+| `cookie` | — | Also read the token from this cookie |
+| `accept_id_tokens` | `false` | Accept OIDC ID tokens (a `nonce`, `at_hash`, `c_hash` or `token_use: "id"` claim) as bearer tokens. Off: an ID token is a login receipt for one client, not an API credential (`deny: id_token`). With `oidc` configured too, an `audience` equal to its `client_id` fails the start unless this is set |
+| `ca_file` | Mozilla roots | PEM roots for an internal IdP (replaces the public roots) |
+
+How a token is checked: compact JWS only; the header's `alg` must be one of
+`algorithms` (asymmetric only: a token signed with `HS256` — e.g. with the
+public key as the secret — is refused before a key is looked at); a `crit`
+header is refused; `jku`, `x5u` and an embedded `jwk` are ignored, keys come
+only from the configured key set. The `kid` must name a key of the set (a
+token without `kid` is accepted only while the set has exactly one key), and
+each key verifies only the algorithms of its own type and curve (and its JWK
+`alg`, if given); symmetric (`oct`) JWKs, RSA keys under 2048 bits and keys
+with `"use": "enc"` are never loaded. `exp`, `iss` and `aud` are required; `nbf`
+and `iat` must not be in the future. The key set is fetched over HTTPS (no
+redirects, 10 s timeout, 1 MiB cap), cached for `jwks_ttl_s`, refetched for an
+unknown `kid` at most every 30 s (so random `kid`s can't make the server
+hammer the IdP), and dropped when it could not be refreshed for 24 h — then
+every token is refused until the IdP is back (fail closed). The variable
+names come from the configuration; a token supplies only values, which are
+length-checked, refused when they contain control characters, and bound as
+typed literals — a field called `__claim_user` in a token is just
+an unknown field.
+
+### OIDC login (`"mode": "oidc"`)
+
+The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
+(`issuer`, `algorithms`, `leeway_s`, `jwks_url`, …; the audience is the
+`client_id`) plus:
+
+| key | default | meaning |
+|---|---|---|
+| `client_id` | (required) | The client registered at the IdP |
+| `client_secret_env` / `client_secret` | — | A confidential client's secret (sent with HTTP Basic); omit for a public client (PKCE only) |
+| `redirect_url` | (required) | `https://<this server>/auth/callback` — register it at the IdP. `http://` only for `127.0.0.1` / `localhost` |
+| `scopes` | `["openid", "email", "profile"]` | Must include `openid` |
+| `user_claim` | `email` | as for `jwt` (also `groups_claim`, `claims`); `email` requires `email_verified: true` in the ID token, else the login fails (`email_unverified`) |
+| `session_ttl_s` | `28800` (8 h) | Session lifetime, 60 s … 7 days |
+| `session_secret_env` | random per start | ≥ 32 characters; sign sessions with it so they survive a restart and work on every replica (#22). Without it, a restart signs everyone out |
+| `post_logout_url` | `/auth/logged-out` | Where `POST /auth/logout` sends the browser |
+| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink): they survive a restart, and replicas sharing the file see each other's within 2 s |
+
+1. `GET /auth/login?next=/d/sales` creates a random `state`, `nonce` and PKCE
+   verifier, keeps them in a signed `HttpOnly; Secure; SameSite=Lax` cookie
+   (`__Host-anofox_oidc`, 10 minutes) and redirects to the IdP (S256
+   challenge). `next` must be a local path (`/…`, never `//host` or a scheme):
+   no open redirect.
+2. `GET /auth/callback` checks `state` against the cookie (constant time),
+   exchanges the code (with the verifier and the client secret, HTTPS only),
+   verifies the ID token like a bearer token (`aud` = `client_id`, `azp` when
+   there are several audiences) and its `nonce` against the cookie. The state
+   cookie is cleared: a callback URL can't be replayed.
+3. The session is a server-signed token (HS256, `session_secret_env` or a
+   random key) holding the claims, a random session id and the expiry, in
+   `__Host-anofox_session` (`HttpOnly; Secure; SameSite=Lax; Path=/`). The
+   expiry is checked by the server on every request. Two session cookies in
+   one request (cookie tossing from a sibling domain) are refused. Replicas
+   stay stateless.
+4. `POST /auth/logout` (same-origin only; `GET` shows a button, so a link on
+   another site can't sign anyone out) revokes the session id and clears the
+   cookie. Without `revocation_file`, a revocation is held in memory by the
+   replica that handled it: a restart forgets it and other replicas accept
+   the session until it expires. With it, logouts are durable and shared by
+   the replicas that use the same file. Keep `session_ttl_s` short either
+   way: a session token is valid until it expires everywhere it isn't
+   revoked.
+
+Cookies are `Secure`: serve over HTTPS (TLS at the reverse proxy); browsers
+also accept them on `http://localhost`.
+
+### Signed embed links (`"mode": "embed"`)
+
+A host application embeds a dashboard for its own signed-in user without a
+second login (like Metabase static embedding or Superset guest tokens). It
+signs, with a secret it shares with this server (HS256, any JWT library):
+
+```json
+{"dashboard": "sales", "user": "acme:42", "groups": ["viewer"],
+ "claims": {"tenant": "acme"}, "vars": {"region": "EU"},
+ "exp": 1792152300, "jti": "8c1f…"}
+```
+
+and links to `/d/sales?embed=<token>` (e.g. as an iframe's `src`).
+
+| key | default | meaning |
+|---|---|---|
+| `secret_env` / `secret` | (required) | ≥ 32 characters, shared with the host application only |
+| `claims` | `[]` | Claim names a link may set (`__claim_<name>`); any other name is refused |
+| `max_link_ttl_s` | `300` | A link's `exp` may be at most this far ahead (≤ 1 day) |
+| `session_ttl_s` | `3600` | The page session's lifetime (≤ 1 day) |
+| `one_time` | `false` | Accept a link (it must carry a `jti`) once per server process |
+| `leeway_s` | `30` | Clock skew |
+| `session_secret_env` | random per start | Signs page sessions. Must differ from `secret` (the host must not be able to mint sessions) |
+
+The server checks the signature (constant time), requires `exp`, refuses
+links valid for longer than `max_link_ttl_s`, unknown fields, claim names not
+in `claims`, and variable names that are not identifiers or are reserved
+(`__claim_*`, `anofox_data`). The link must name **this** dashboard. It is then
+exchanged for a **page session** scoped to that one dashboard:
+
+- The page gets the session in its config and sends it as `X-Anofox-Session`
+  on each `/api/panel` request — no third-party cookie, so it works in a
+  cross-site iframe in every browser. The page then removes the link from its
+  address (`history.replaceState`); a reload needs a fresh link. The page is `Cache-Control: no-store`
+  and `Referrer-Policy: same-origin` (the link is in its URL: never sent to
+  another site).
+- **Scope can't be widened from the URL.** The session reads only its
+  dashboard (others: `403`; the navigation lists only it); the link's `vars`
+  are **locked** — the viewer's values for them are dropped and the link's are
+  set after the viewer's variables (before the claims), so `?v.region=US` or a
+  crafted panel request changes nothing. The session's scope and claims are
+  signed by the server.
+- The UI's code files (`.js`, `.css`, `.wasm`, fonts) are served without a
+  credential when `embed` is configured — they are the open-source viewer, no
+  data. Pages, `/api/panel` and data files still need one.
+- `serve --dashboards` (no script) exchanges the link once and keeps the page
+  session in the page's form (`?embed_session=`, accepted on `GET /d/…`
+  only), so `one_time` links work there too.
+- `/healthz` answers a scoped credential (an embed page, an API key limited
+  to dashboards) with `{"status":"ok"}` only, like a request without login.
+- A locked variable listed in `path_vars` must be a plain file or folder name,
+  like a viewer's.
+
+**Replay.** Whoever has a link can use it until it expires, and a page
+session until it expires: mint links per page view, keep `max_link_ttl_s` at
+minutes and `session_ttl_s` at what a viewing needs, and serve over HTTPS.
+`one_time: true` with a `jti` stops a second exchange of the same link on one
+server process (with several replicas, a link can be used once per replica;
+a page reload then needs a new link).
+
+### API keys (`"mode": "api_keys"`)
+
+For scripts and server-to-server clients: `Authorization: Bearer afx_<id>_<secret>`
+(12 hex digits of id, 256 random bits of secret).
+
+```sh
+serve api-key new --file /etc/anofox/keys.json --user svc-etl --groups etl \
+  --claim tenant=acme --dashboards sales,stock --expires-days 90 --audit audit.jsonl
+# prints the key ONCE; the file stores only its SHA-256
+serve api-key revoke --file /etc/anofox/keys.json --id 3f9c0a1b2c3d
+serve api-key list --file /etc/anofox/keys.json
+```
+
+Without the `serve` binary, a key and its entry can be made by hand:
+
+```sh
+id=$(openssl rand -hex 6); key="afx_${id}_$(openssl rand -hex 32)"
+printf %s "$key" | sha256sum   # → "sha256" of the entry {"id": "$id", "sha256": …, "user": …}
+```
+
+- The key file (`{"keys": [{"id", "sha256", "user", "groups", "claims",
+  "dashboards", "expires", "revoked", "note", "created"}]}`) must not be
+  writable by group or others; it holds hashes only (a 256-bit key needs no
+  slow hash). Keys are scoped to `dashboards` (absent = all) and expire at
+  `expires` (Unix seconds).
+- The id selects the entry, the hash is compared in constant time (also
+  against a dummy for an unknown id).
+- The server re-reads the file when it changes (checked at most every 2 s):
+  a revocation takes effect without a restart. A file that stops parsing, or
+  becomes group/world-writable, disables **every** key until it is fixed (fail
+  closed) and is audited.
+- A key never appears in a log; the audit log names its id.
+
+### Audit log
+
+`"audit": "/var/log/anofox/audit.jsonl"` (`serve`: `--audit`; `"stderr"`
+works too) appends one JSON object per authentication event and admin
+action. It uses the request log's file handling (`0600`, `O_NOFOLLOW`,
+reopened per line for rename-based rotation, one `write` per line).
+
+```json
+{"ts":"2026-10-17T09:12:03.120Z","audit":"start","outcome":"ok","detail":"oidc,embed,api_keys"}
+{"ts":"2026-10-17T09:12:41.882Z","audit":"login","outcome":"ok","method":"oidc","user":"alice@example.com","sid":"T3x…","peer":"127.0.0.1"}
+{"ts":"2026-10-17T09:13:02.004Z","audit":"embed","outcome":"ok","method":"embed","user":"acme:42","dashboard":"sales","sid":"q9…","peer":"127.0.0.1"}
+{"ts":"2026-10-17T09:13:15.551Z","audit":"auth","outcome":"deny","method":"api_key","reason":"revoked","key_id":"3f9c0a1b2c3d","path":"/api/panel","peer":"10.0.0.7"}
+{"ts":"2026-10-17T09:14:00.310Z","audit":"logout","outcome":"ok","method":"oidc","user":"alice@example.com","sid":"T3x…"}
+{"ts":"2026-10-17T09:15:00.000Z","audit":"api_key_revoked","outcome":"ok","key_id":"3f9c0a1b2c3d","user":"svc-etl","detail":"/etc/anofox/keys.json"}
+```
+
+Events: `start`, `login`, `logout`, `embed` (a link exchanged), `auth` with
+`outcome: "ok"` (each bearer token, API key or session the first time it is
+used, then at most every 10 minutes per credential), `auth` with
+`outcome: "deny"` (any refused credential, with its `reason`: `expired`, `not_yet_valid`,
+`bad_signature`, `bad_alg`, `bad_issuer`, `bad_audience`, `unknown_kid`,
+`missing_claim`, `malformed_token`, `revoked`, `unknown_key`, `out_of_scope`,
+`email_unverified`, `id_token`, `session_ttl`,
+`link_ttl`, `replayed`, `bad_state`, `bad_nonce`, …), `api_key_created`,
+`api_key_revoked`, `api_keys_reloaded`. Never logged: tokens, keys, cookies,
+authorization codes, secrets. The request log gains `"auth"`: the method that
+signed the request in.
+
+### Threat model (P1 + P3)
 
 | Threat | Mitigation |
 |---|---|
@@ -576,11 +822,28 @@ every refused request (static assets are not logged):
 | Log injection / personal data in logs | JSON-escaped lines; diagnostics on the same stderr escape control characters, and a URL with one is `400`; variable values only with `log_vars: "values"`; the log file is `0600` and never opened through a symlink |
 | Many viewers fill the static server's `--cache` | Capped at 1,024 pages / 64 MiB, expired pages purged |
 | DNS rebinding, CSRF, SQL from the client | Unchanged: Host allowlist (`421`), same-origin `POST`s, no SQL endpoint |
+| **P3:** a JWT with `alg: none`, or `HS256` signed with the IdP's public key (algorithm confusion) | Only asymmetric algorithms can be configured; the header's `alg` must be allowed before any key is used; `oct` JWKs are never loaded; each key verifies only its own type/curve (`alg` pinned when the JWK names one) |
+| A token signed by a key the attacker controls (`jku`, `x5u`, embedded `jwk`) | Never followed: keys come only from the configured HTTPS key set |
+| Expired, not-yet-valid, foreign (`iss`/`aud`) or replayed-across-services tokens | `exp`, `iss`, `aud` required; `nbf`/`iat` checked; leeway ≤ 5 min; `iss` exact; `max_age_s` optional |
+| Unknown `kid`s to make the server hammer the IdP; a key set that can't be refreshed | Refetch at most every 30 s; HTTPS only, no redirects, 10 s / 1 MiB caps; a set stale for 24 h is dropped (fail closed) |
+| A token supplies `__claim_*` names, SQL or control characters | Variable names come only from the configuration; values are length- and control-character-checked and bound as typed literals |
+| OIDC login CSRF / fixation, code interception, ID-token replay, open redirect after login | `state` (constant-time) and PKCE S256 in a signed `HttpOnly` cookie; `nonce` in the ID token; `azp` with several audiences; the state cookie is cleared on use; `next` must be a local path |
+| A stolen or forged session cookie | Server-signed (HS256), `HttpOnly; Secure; SameSite=Lax; __Host-`; server-side expiry; logout revokes the id (durable and shared with `revocation_file`, else per replica); two session cookies → `401` |
+| Someone claims a victim's e-mail at the IdP without verifying it (nOAuth, #115) | An `email` identity needs `email_verified: true` |
+| A client's OIDC ID token replayed as an API bearer token | Refused unless `accept_id_tokens`; a `jwt` audience equal to the OIDC `client_id` fails the start |
+| A tampered or expired embed link; a link for one dashboard used on another; `?v.*` or a panel request overriding the link's variables | HMAC check in constant time; `exp` required and ≤ `max_link_ttl_s`; the link must name the dashboard; the page session is server-signed and scoped; locked variables replace the viewer's and are set after them (unit-tested order) |
+| A replayed embed link | Short `max_link_ttl_s`; `one_time` with `jti` (per process); documented: a link is a bearer credential until it expires |
+| The host application mints server sessions (#114) | The embed link `secret` must differ from every other configured secret — both session secrets and the proxy's — or the start fails; a session claiming a longer life (`exp - iat`) than its method's `session_ttl_s` is refused |
+| A leaked API key file; a guessed key; a revoked key still working | Only SHA-256 hashes of 256-bit keys; constant-time hash compare; the file is re-read on change (≤ 2 s); revoked/expired keys refused; a broken or group/world-writable file disables every key |
+| Keys, tokens or codes in logs | Never logged; the audit log names key ids and session ids only (unit-tested) |
+| A credential plus another to confuse the server | Exactly one credential counts per request, in a fixed order; an invalid one is refused, never skipped |
 
-**Out of scope for P1** (see #50): verifying JWTs/OIDC tokens itself; signed
-embed links; API keys. On its own, P1 relies on the dashboard author writing
-the claim filter into every panel; [P2 policies](#row-and-column-policies-access-control-p2)
-enforce it regardless of the panel SQL.
+**Out of scope for P1 and P3:** on its own, a login relies on the dashboard
+author writing the claim filter into every panel;
+[P2 policies](#row-and-column-policies-access-control-p2) enforce it
+regardless of the panel SQL. Not in P3: per-tenant snapshots, rate limiting of
+failed logins (put it in the reverse proxy), refresh tokens / silent re-login
+(a session ends at `session_ttl_s`).
 
 **What can never enforce access:** a static HTML export or the browser /
 DuckDB-Wasm demo (the data is in the client, whoever opens it can read all of

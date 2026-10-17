@@ -174,8 +174,9 @@ docker exec dash sh -c 'echo "SELECT anofox_serve_refresh(8080);" > /tmp/control
 
 ## 3. Reverse proxy: TLS, authentication, `Host`
 
-The server speaks plain HTTP and has no authentication, so put a proxy in front
-of it that terminates TLS and authenticates viewers. The server checks two
+The server speaks plain HTTP, so put a proxy in front of it that terminates
+TLS (and authenticates viewers, unless the server's own login does — see
+below). The server checks two
 headers on every request:
 
 - **`Host`** must be a loopback name on its port, the `bind` address, or a
@@ -223,6 +224,14 @@ for the options and tested proxy recipes. Things that matter for deployment:
 - The cache and the single-flight key include each viewer's claims. Panels
   that depend on the user are therefore cached per user, so the hit rates in
   §7 apply per user and per group of identical claims.
+
+The server can also sign viewers in itself — JWT bearer tokens, an OIDC
+login, signed embed links and API keys
+([Built-in login](secure-serving.md#built-in-login-access-control-p3)). With
+several replicas give every replica the same `session_secret_env` (OIDC and
+embed sessions are signed, not stored, so any replica accepts them) and the
+same API key file; a logout revokes the session on the replica that handled
+it only, so keep `session_ttl_s` short.
 
 To give groups different dashboards without `auth`, run separate servers
 (directories, ports) and route them at the proxy.

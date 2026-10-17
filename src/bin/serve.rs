@@ -17,7 +17,8 @@
 //! See `docs/secure-serving.md`.
 
 use anofox_visualization::format::Locale;
-use anofox_visualization::host::access::{self, Claims, LogEntry, ProxyAuth, RequestLog};
+use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
+use anofox_visualization::host::auth::{self, apikey, audit::AuditLog, Auth, Identity, Scope};
 use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
@@ -56,8 +57,9 @@ struct Opts {
     /// `--allow-host` (repeatable): extra `Host` names accepted besides the
     /// loopback names; `*` disables the check.
     allow_hosts: Vec<String>,
-    /// `--auth <json | @file>`: viewer login via a trusted auth proxy.
-    auth: Option<ProxyAuth>,
+    /// `--auth <json | @file>`: viewer login (auth proxy, JWT/OIDC, embed
+    /// links, API keys).
+    auth: Option<Auth>,
     /// `--log <path | stderr>` (+ `--log-vars`): JSON-lines request log.
     log: Option<RequestLog>,
 }
@@ -68,7 +70,7 @@ fn theme_default() -> Option<&'static str> {
     THEME.get().and_then(|t| t.as_deref())
 }
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login via an auth proxy, see docs/secure-serving.md)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -92,7 +94,7 @@ fn parse_args() -> Opts {
         auth: None,
         log: None,
     };
-    let (mut log, mut log_vars) = (None, None);
+    let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
         v.and_then(|v| v.parse().ok())
@@ -159,7 +161,7 @@ fn parse_args() -> Opts {
                 let val: serde_json::Value = serde_json::from_str(&json)
                     .unwrap_or_else(|e| usage(&format!("--auth: bad JSON: {e}")));
                 o.auth = Some(
-                    ProxyAuth::from_json(&val, |k| std::env::var(k).ok())
+                    Auth::from_json(&val, |k| std::env::var(k).ok())
                         .unwrap_or_else(|e| usage(&format!("--{e}"))),
                 );
             }
@@ -167,6 +169,12 @@ fn parse_args() -> Opts {
                 log = Some(
                     args.next()
                         .unwrap_or_else(|| usage("--log needs a path or stderr")),
+                )
+            }
+            "--audit" => {
+                audit = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage("--audit needs a path or stderr")),
                 )
             }
             "--log-vars" => {
@@ -190,16 +198,164 @@ fn parse_args() -> Opts {
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
     }
+    match (&mut o.auth, audit) {
+        (Some(a), Some(p)) => a.set_audit(Arc::new(
+            AuditLog::new(&p).unwrap_or_else(|e| usage(&format!("--{e}"))),
+        )),
+        (None, Some(_)) => usage("--audit needs --auth"),
+        _ => {}
+    }
     o
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("api-key") {
+        api_key_cli(std::env::args().skip(2).collect());
+    }
     let mut o = parse_args();
     let _ = THEME.set(o.theme.clone());
     match o.dashboards_dir.clone() {
         Some(dir) => serve_dashboards(&dir, &mut o),
         None => authoring_mode(&o),
     }
+}
+
+/// `serve api-key new|revoke|list --file KEYS.json …`: manage the API keys of
+/// `{"mode": "api_keys"}`. A new key is printed once; the file keeps its hash.
+fn api_key_cli(args: Vec<String>) -> ! {
+    let fail = |m: &str| -> ! {
+        eprintln!("error: {m}");
+        std::process::exit(2)
+    };
+    let mut it = args.into_iter();
+    let cmd = it.next().unwrap_or_default();
+    let (mut file, mut user, mut id, mut note, mut audit) = (None, None, None, None, None);
+    let (mut groups, mut claims, mut dashboards, mut days) = (Vec::new(), Vec::new(), None, None);
+    while let Some(a) = it.next() {
+        let mut val = || {
+            it.next()
+                .unwrap_or_else(|| fail(&format!("{a} needs a value")))
+        };
+        match a.as_str() {
+            "--file" => file = Some(PathBuf::from(val())),
+            "--user" => user = Some(val()),
+            "--id" => id = Some(val()),
+            "--note" => note = Some(val()),
+            "--audit" => audit = Some(val()),
+            "--groups" => {
+                groups = val()
+                    .split(',')
+                    .map(|g| g.trim().to_string())
+                    .filter(|g| !g.is_empty())
+                    .collect()
+            }
+            "--claim" => {
+                let v = val();
+                let (k, x) = v
+                    .split_once('=')
+                    .unwrap_or_else(|| fail("--claim needs name=value"));
+                claims.push((k.to_string(), serde_json::json!(x)));
+            }
+            "--dashboards" => {
+                dashboards = Some(
+                    val()
+                        .split(',')
+                        .map(|d| d.trim().to_string())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            "--expires-days" => {
+                days = Some(
+                    val()
+                        .parse::<u64>()
+                        .unwrap_or_else(|_| fail("--expires-days needs a number")),
+                )
+            }
+            _ => fail(&format!("unknown option {a}")),
+        }
+    }
+    let file = file.unwrap_or_else(|| fail("--file KEYS.json is required"));
+    let audit = audit.map(|p| AuditLog::new(&p).unwrap_or_else(|e| fail(&e)));
+    let log = |event: &str, outcome: &str, key_id: Option<&str>, user: Option<&str>| {
+        if let Some(a) = &audit {
+            a.write(&auth::audit::Event {
+                event,
+                outcome,
+                key_id,
+                user,
+                detail: Some(&file.display().to_string()),
+                ..Default::default()
+            });
+        }
+    };
+    let mut entries = apikey::file_entries(&file).unwrap_or_else(|e| fail(&e));
+    match cmd.as_str() {
+        "new" => {
+            let user = user.unwrap_or_else(|| fail("--user is required"));
+            let (key, kid, hash) = apikey::new_key();
+            let mut e = serde_json::json!({"id": kid, "sha256": hash, "user": user});
+            if !groups.is_empty() {
+                e["groups"] = serde_json::json!(groups);
+            }
+            if !claims.is_empty() {
+                e["claims"] = serde_json::Value::Object(claims.into_iter().collect());
+            }
+            if let Some(d) = dashboards {
+                e["dashboards"] = serde_json::json!(d);
+            }
+            if let Some(d) = days {
+                e["expires"] = serde_json::json!(auth::jwt::now_s() + d * 86400);
+            }
+            if let Some(n) = note {
+                e["note"] = serde_json::json!(n);
+            }
+            e["created"] = serde_json::json!(access::rfc3339(std::time::SystemTime::now()));
+            entries.push(e);
+            // Validate the whole file before writing it.
+            let text = serde_json::json!({"keys": entries}).to_string();
+            apikey::parse_file(&text).unwrap_or_else(|e| fail(&e));
+            apikey::write_file(&file, &entries).unwrap_or_else(|e| fail(&e));
+            log("api_key_created", "ok", Some(&kid), Some(&user));
+            eprintln!(
+                "API key {kid} for '{user}' added to {} — shown once, store it now:",
+                file.display()
+            );
+            println!("{key}");
+        }
+        "revoke" => {
+            let id = id.unwrap_or_else(|| fail("--id is required"));
+            let Some(e) = entries.iter_mut().find(|e| e["id"] == id.as_str()) else {
+                log("api_key_revoked", "error", Some(&id), None);
+                fail(&format!("no key with id {id}"))
+            };
+            e["revoked"] = serde_json::json!(true);
+            let user = e["user"].as_str().map(str::to_string);
+            apikey::write_file(&file, &entries).unwrap_or_else(|e| fail(&e));
+            log("api_key_revoked", "ok", Some(&id), user.as_deref());
+            println!(
+                "revoked {id} (servers pick it up within {} s)",
+                apikey::RELOAD_EVERY.as_secs()
+            );
+        }
+        "list" => {
+            for e in &entries {
+                println!(
+                    "{}  {}  {}{}",
+                    e["id"].as_str().unwrap_or(""),
+                    e["user"].as_str().unwrap_or(""),
+                    e.get("dashboards")
+                        .map_or("all dashboards".to_string(), |d| d.to_string()),
+                    if e["revoked"] == true {
+                        "  REVOKED"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        _ => fail("usage: serve api-key new|revoke|list --file KEYS.json …"),
+    }
+    std::process::exit(0)
 }
 
 // ---------- shared helpers ----------
@@ -225,12 +381,31 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    // same-origin: a page URL can carry an embed page session.
     let resp = Response::from_data(body.into())
         .with_status_code(status)
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
-        .with_header(header("Cache-Control", "no-store"));
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Referrer-Policy", "same-origin"));
     let _ = req.respond(resp);
+}
+
+/// Send a reply of the login (redirects, cookies, login pages).
+fn send(req: Request, r: auth::Reply) -> u16 {
+    let mut resp = Response::from_data(r.body)
+        .with_status_code(r.status)
+        .with_header(header("Content-Type", r.content_type))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Referrer-Policy", "same-origin"));
+    for (k, v) in &r.headers {
+        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+            resp.add_header(h);
+        }
+    }
+    let _ = req.respond(resp);
+    r.status
 }
 
 fn text(req: Request, status: u16, msg: &str) {
@@ -443,7 +618,7 @@ struct ServeState {
     cache: RenderCache,
     max_rows: usize,
     timeout: Duration,
-    auth: Option<ProxyAuth>,
+    auth: Option<Auth>,
     log: Option<RequestLog>,
 }
 
@@ -489,11 +664,12 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         dashboards.len()
     );
     match (&o.auth, sv::is_loopback_bind(&o.bind)) {
-        (Some(a), _) => println!(
-            "  login: auth proxy (trusted identity headers: {}; secret in {})\n  the proxy must set or remove each of these headers on every request",
-            a.trusted_headers(),
-            a.secret_header
-        ),
+        (Some(a), _) => {
+            println!("  login: {}", a.describe());
+            for w in a.prefetch() {
+                eprintln!("  WARNING: {w} — requests fail closed until it is reachable");
+            }
+        }
         (None, false) => eprintln!(
             "  WARNING: bound to {} WITHOUT --auth — every viewer who can reach this address sees every dashboard; \
              put a TLS/auth proxy in front and pass --auth (docs/secure-serving.md)",
@@ -529,9 +705,18 @@ fn handle_serve(st: &ServeState, req: Request) {
     let peer = req.remote_addr().map(|a| a.ip());
     let mut user = None;
     let mut deny = None;
+    let mut how = None;
     let mut dashboard = None;
     let mut params = Vec::new();
-    let status = route_serve(st, req, &mut user, &mut deny, &mut dashboard, &mut params);
+    let status = route_serve(
+        st,
+        req,
+        &mut user,
+        &mut deny,
+        &mut how,
+        &mut dashboard,
+        &mut params,
+    );
     if let Some(log) = &st.log {
         log.write(&LogEntry {
             method: &method,
@@ -543,6 +728,7 @@ fn handle_serve(st: &ServeState, req: Request) {
             dashboard: dashboard.as_deref(),
             vars: &params,
             deny,
+            auth: how,
             ..Default::default()
         });
     }
@@ -618,6 +804,7 @@ fn route_serve(
     req: Request,
     user: &mut Option<String>,
     deny: &mut Option<&'static str>,
+    how: &mut Option<&'static str>,
     dashboard: &mut Option<String>,
     params: &mut Vec<(String, String)>,
 ) -> u16 {
@@ -635,27 +822,51 @@ fn route_serve(
             "misdirected request: unknown Host — start the server with --allow-host <name>",
         );
     }
-    // Login (--auth): the proxy's identity + secret on every request.
-    let claims: Option<Claims> = match &st.auth {
+    // CSRF: the only non-GET request (the OIDC logout) must be same-origin.
+    if req.method() != &Method::Get
+        && !sv::origin_matches_host(req_header(&req, "Origin"), req_header(&req, "Host"))
+    {
+        return reply(req, 403, "forbidden: cross-origin request");
+    }
+    // Login (--auth): a credential on every request.
+    let ident: Option<Identity> = match &st.auth {
         Some(auth) => {
             let headers: Vec<(&str, &str)> = req
                 .headers()
                 .iter()
                 .map(|h| (h.field.as_str().as_str(), h.value.as_str()))
                 .collect();
-            match auth.authenticate(req.remote_addr().map(|a| a.ip()), &headers) {
-                Ok(c) => {
-                    *user = Some(c.user.clone());
-                    Some(c)
+            let method = req.method().to_string();
+            let r = auth::Req {
+                method: &method,
+                url: &url,
+                peer: req.remote_addr().map(|a| a.ip()),
+                headers: &headers,
+            };
+            // The OIDC login's own endpoints (/auth/*).
+            if let Some(rep) = auth.route(&r) {
+                return send(req, rep);
+            }
+            match auth.authenticate(&r) {
+                Ok(id) => {
+                    *user = Some(id.claims.user.clone());
+                    *how = Some(id.method);
+                    Some(id)
                 }
-                Err(e) => {
-                    *deny = Some(e.reason());
+                Err(d) => {
+                    *deny = Some(d.reason);
+                    *how = d.method;
+                    if let Some(rep) = auth.login_redirect(&r, &d) {
+                        return send(req, rep);
+                    }
                     return reply(req, 401, access::UNAUTHORIZED);
                 }
             }
         }
         None => None,
     };
+    let claims = ident.as_ref().map(|i| &i.claims);
+    let scope = ident.as_ref().map(|i| &i.scope);
     if req.method() != &Method::Get {
         return reply(req, 405, "method not allowed");
     }
@@ -664,7 +875,7 @@ fn route_serve(
             req,
             200,
             "text/html; charset=utf-8",
-            list_page(&st.dashboards).into_bytes(),
+            list_page(&st.dashboards, scope).into_bytes(),
         );
         return 200;
     }
@@ -677,18 +888,34 @@ fn route_serve(
         return reply(req, 404, "no such dashboard");
     };
     *dashboard = Some(dash.id.clone());
+    // A scoped credential (embed link, API key) reads its own dashboards only.
+    if !scope.is_none_or(|s| s.allows(&dash.id)) {
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
     // Validate params against the whitelist (unknown/disallowed → 400).
-    let resolved = match resolve_params(dash, &sv::parse_query(&url)) {
+    let mut resolved = match resolve_params(dash, &sv::parse_query(&url)) {
         Ok(r) => r,
         Err(e) => return reply(req, 400, &e),
     };
+    // An embed link's locked variables replace the viewer's choice.
+    if let Some(s) = scope {
+        resolved.retain(|(n, _)| !s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n)));
+    }
     params.clone_from(&resolved);
-    let key = cache_key(&dash.id, &resolved, claims.as_ref());
+    // This server renders plain pages (no script): an embed link is
+    // exchanged once, and the page session rides along in the page's form
+    // (`embed_session`), so a `one_time` link is not needed again.
+    let embed_link = match ident.as_ref() {
+        Some(i) if i.page_session.is_some() => i.page_session.clone(),
+        Some(i) if i.method == "embed" => sv::parse_query(&url).get("embed_session").cloned(),
+        _ => None,
+    };
+    let key = cache_key(&dash.id, &resolved, ident.as_ref(), embed_link.as_deref());
     if let Some(html) = st.cache.get(&key, Instant::now()) {
         respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
         return 200; // no DB touched
     }
-    match render_dashboard_page(st, dash, &resolved, claims.as_ref()) {
+    match render_dashboard_page(st, dash, &resolved, claims, scope, embed_link.as_deref()) {
         Ok(html) => {
             st.cache.insert(key, html.clone(), Instant::now());
             respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
@@ -720,9 +947,23 @@ fn resolve_params(
 }
 
 /// The render cache key: dashboard, params and — with a login — the viewer's
-/// claims, so one viewer's page is never served to another.
-fn cache_key(id: &str, resolved: &[(String, String)], claims: Option<&Claims>) -> String {
-    format!("{:?}", (id, resolved, claims.map(Claims::key)))
+/// claims and locked variables, so one viewer's page is never served to
+/// another. (An embed link's page carries the link: keyed by it too.)
+fn cache_key(
+    id: &str,
+    resolved: &[(String, String)],
+    ident: Option<&Identity>,
+    embed_link: Option<&str>,
+) -> String {
+    format!(
+        "{:?}",
+        (
+            id,
+            resolved,
+            ident.map(|i| (i.claims.key(), &i.scope.vars)),
+            embed_link
+        )
+    )
 }
 
 /// Render one dashboard to a view-only HTML page: binds the (whitelisted)
@@ -734,6 +975,8 @@ fn render_dashboard_page(
     dash: &Dashboard,
     resolved: &[(String, String)],
     claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    embed_link: Option<&str>,
 ) -> Result<String, String> {
     let value_of = |name: &str| -> String {
         resolved
@@ -752,6 +995,10 @@ fn render_dashboard_page(
             "SET VARIABLE {name} = {}; ",
             sql_string_literal(val)
         ));
+    }
+    // An embed link's locked variables (typed literals), after the params.
+    for (name, lit) in scope.map(|s| s.vars.clone()).unwrap_or_default() {
+        prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
     }
     // The login's claims (a @param can't name them: parse_dashboard_meta
     // ignores `__claim_*` params).
@@ -776,8 +1023,14 @@ fn render_dashboard_page(
         String::new()
     } else {
         format!(
-            "<form class=\"controls\" method=\"get\" action=\"/d/{}\">{selects}</form>",
-            esc(&dash.id)
+            "<form class=\"controls\" method=\"get\" action=\"/d/{}\">{selects}{}</form>",
+            esc(&dash.id),
+            embed_link
+                .map(|l| format!(
+                    "<input type=\"hidden\" name=\"embed_session\" value=\"{}\">",
+                    esc(l)
+                ))
+                .unwrap_or_default()
         )
     };
 
@@ -923,12 +1176,13 @@ fn render_dashboard_page(
     }))
 }
 
-fn list_page(dashboards: &[Dashboard]) -> String {
+fn list_page(dashboards: &[Dashboard], scope: Option<&Scope>) -> String {
     let t = anofox_visualization::theme::resolve(theme_default().unwrap_or(""))
         .map(|s| s.default_variant().clone())
         .unwrap_or_default();
     let items: Vec<(String, String)> = dashboards
         .iter()
+        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
         .map(|d| (format!("/d/{}", d.id), d.meta.title.clone()))
         .collect();
     page::list(&t, "Dashboards", &items)
@@ -1032,18 +1286,34 @@ mod tests {
     #[test]
     fn cache_keys_are_per_viewer() {
         let r = vec![("region".to_string(), "EU".to_string())];
-        let alice = Claims {
-            user: "alice".into(),
-            ..Default::default()
+        let id = |user: &str, vars: Vec<(String, String)>| Identity {
+            claims: Claims {
+                user: user.into(),
+                ..Default::default()
+            },
+            method: "proxy",
+            scope: Scope {
+                dashboards: None,
+                vars,
+            },
+            page_session: None,
+            ref_id: None,
         };
-        let bob = Claims {
-            user: "bob".into(),
-            ..Default::default()
-        };
+        let (alice, bob) = (id("alice", vec![]), id("bob", vec![]));
         assert_ne!(
-            cache_key("d", &r, Some(&alice)),
-            cache_key("d", &r, Some(&bob))
+            cache_key("d", &r, Some(&alice), None),
+            cache_key("d", &r, Some(&bob), None)
         );
-        assert_ne!(cache_key("d", &r, Some(&alice)), cache_key("d", &r, None));
+        assert_ne!(
+            cache_key("d", &r, Some(&alice), None),
+            cache_key("d", &r, None, None)
+        );
+        // the same claims with other locked variables (two embed links)
+        let eu = id("embed", vec![("region".into(), "'EU'".into())]);
+        let us = id("embed", vec![("region".into(), "'US'".into())]);
+        assert_ne!(
+            cache_key("d", &r, Some(&eu), None),
+            cache_key("d", &r, Some(&us), None)
+        );
     }
 }
