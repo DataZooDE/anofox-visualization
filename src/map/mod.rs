@@ -1,11 +1,15 @@
 //! Maps: the extension's own SVG writer for `::MAP` panels.
 //!
-//! A map panel's rows carry WKT (`::MAP`), optionally a backdrop
-//! (`::BASEMAP`), a measure or a `::CATEGORY` to colour by, a `::LABEL`, a
-//! layer opacity (`::ALPHA`) and the map modifiers `::PROJECTION`,
-//! `::CLASSES`, `::MIDPOINT` and `::RANGE`. The writer:
+//! A map panel's rows carry WKT (`::MAP`), a region code looked up in the
+//! built-in boundary pack (`::REGION`, see [`boundaries`]) or a point
+//! (`::LAT` / `::LON`); optionally a backdrop (`::BASEMAP`: WKT or a pack
+//! layer such as `'world'`), a measure or a `::CATEGORY` to colour by, a
+//! `::LABEL`, a layer opacity (`::ALPHA`), labels on the map (`::LABEL_TOP`,
+//! `::DATALABELS`) and the map modifiers `::PROJECTION`, `::CLASSES`,
+//! `::MIDPOINT`, `::RANGE` and `::BOUNDARIES`. The writer:
 //!
-//! 1. parses each row's WKT once (`ggplot_rs::spatial::parse_wkt`),
+//! 1. resolves each row's geometry once (WKT via
+//!    `ggplot_rs::spatial::parse_wkt`, a pack region, or a point),
 //! 2. resolves the projection (`'auto'` by the data's extent) and projects
 //!    every vertex, densifying long edges where the projection curves them,
 //! 3. fits the projected box into the panel (or the browser's zoom window),
@@ -14,8 +18,9 @@
 //!    and `<circle>`s for points,
 //! 5. colours by a themed sequential or diverging ramp (continuous, or in
 //!    classes with a stepped legend and counts), or by the theme palette,
-//! 6. writes a legend strip, a hatch for rows without a value and a
-//!    one-sentence summary (`<desc>` and `data-summary`).
+//! 6. writes a legend, haloed labels that don't collide, a scale bar, the
+//!    attribution a pack layer requires, a hatch for rows without a value
+//!    and a one-sentence summary (`<desc>` and `data-summary`).
 //!
 //! Features are drawn in row order. Each carries `data-row`, `data-series`
 //! (its `::CATEGORY`, else its `::LABEL`), `data-value` (the raw measure),
@@ -23,7 +28,9 @@
 //! classed, `data-class` (1-based), plus a `<title>`; the root carries
 //! `data-map`, `data-proj` and `data-classes` (the class labels as JSON).
 
+pub(crate) mod boundaries;
 pub(crate) mod classes;
+mod labels;
 pub(crate) mod project;
 mod write;
 
@@ -52,14 +59,14 @@ const POINT_R: f64 = 3.0;
 
 /// One drawable part of a feature, in lon/lat or projected units.
 #[derive(Clone, Debug)]
-enum Shape {
+pub(crate) enum Shape {
     /// One polygon: its exterior ring, then its holes.
     Area(Vec<Vec<[f64; 2]>>),
     Line(Vec<[f64; 2]>),
     Point([f64; 2]),
 }
 
-fn shapes(g: &Geometry, out: &mut Vec<Shape>) {
+pub(crate) fn shapes(g: &Geometry, out: &mut Vec<Shape>) {
     match g {
         Geometry::Empty => {}
         Geometry::Point(c) => out.push(Shape::Point(*c)),
@@ -136,6 +143,171 @@ fn parse_column(c: Option<&Column>, n: usize) -> Vec<Vec<Shape>> {
         .collect()
 }
 
+/// Whether the columns make a map: WKT, region codes or a lat/lon pair.
+pub(crate) fn is_map(cols: &[Column]) -> bool {
+    let has =
+        |r: Role| find_role(cols, r).is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
+    geometry(cols).is_some() || has(Role::Region) || (has(Role::Lat) && has(Role::Lon))
+}
+
+/// A `::REGION` column's codes (trimmed text; `None` when missing).
+pub(crate) fn region_codes(c: &Column) -> Vec<Option<String>> {
+    c.values
+        .iter()
+        .map(|v| match v {
+            Value::Na => None,
+            v => Some(value_str(v).trim().to_string()).filter(|s| !s.is_empty()),
+        })
+        .collect()
+}
+
+/// The pack layer a `::BOUNDARIES` / `::BASEMAP` value names, if any.
+pub(crate) fn layer_name(s: &str) -> Option<&'static str> {
+    let k = s.trim().to_ascii_lowercase();
+    boundaries::LAYERS.iter().copied().find(|l| *l == k)
+}
+
+/// The pack layers a panel draws from (the browser fetches them before it
+/// renders): its `::BOUNDARIES`, a named `::BASEMAP`, else the layers its
+/// region codes look like.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn needed_layers(cols: &[Column]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let forced = role_str(cols, Role::Boundaries).and_then(|s| layer_name(&s));
+    if let Some(r) = find_role(cols, Role::Region) {
+        match forced {
+            Some(f) => out.push(f),
+            None => out.extend(boundaries::guess_layers(&region_codes(r))),
+        }
+    }
+    if let Some(b) = role_str(cols, Role::Basemap).and_then(|s| layer_name(&s)) {
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// The rows' geometry from the map's input — WKT, region codes or lat/lon —
+/// with each row's pack name ("" without one) and the pack layer used.
+struct Input {
+    features: Vec<Vec<Shape>>,
+    names: Vec<String>,
+    layer: Option<String>,
+}
+
+fn input(cols: &[Column], german: bool) -> Option<Input> {
+    if let Some(g) = geometry(cols) {
+        let n = g.values.len();
+        return Some(Input {
+            features: parse_column(Some(g), n),
+            names: vec![String::new(); n],
+            layer: None,
+        });
+    }
+    if let Some(r) = find_role(cols, Role::Region) {
+        let codes = region_codes(r);
+        let forced = role_str(cols, Role::Boundaries).and_then(|s| layer_name(&s));
+        let m = boundaries::match_codes(&codes, forced)?;
+        let features = m
+            .rows
+            .iter()
+            .map(|ids| {
+                ids.iter()
+                    .flat_map(|i| m.layer.regions[*i].shapes.iter().cloned())
+                    .collect()
+            })
+            .collect();
+        let names = m
+            .rows
+            .iter()
+            .zip(&codes)
+            .map(|(ids, c)| match ids.as_slice() {
+                [i] => m.layer.regions[*i].name(german).to_string(),
+                [] => String::new(),
+                // a union (a German NUTS 2 code): its code
+                _ => c.clone().unwrap_or_default(),
+            })
+            .collect();
+        return Some(Input {
+            features,
+            names,
+            layer: Some(m.layer.name.clone()),
+        });
+    }
+    let (lat, lon) = (find_role(cols, Role::Lat)?, find_role(cols, Role::Lon)?);
+    let n = lat.values.len().min(lon.values.len());
+    let features = (0..n)
+        .map(
+            |i| match (cell_num(&lat.values[i]), cell_num(&lon.values[i])) {
+                (Some(y), Some(x)) => vec![Shape::Point([x, y])],
+                _ => Vec::new(),
+            },
+        )
+        .collect();
+    Some(Input {
+        features,
+        names: vec![String::new(); n],
+        layer: None,
+    })
+}
+
+/// A feature without its far-off parts: polygons under a tenth of its
+/// largest one and more than 15° away from it (overseas territories).
+fn core_parts(f: &[Shape]) -> Vec<Shape> {
+    let boxed: Vec<Option<(f64, [f64; 2])>> = f
+        .iter()
+        .map(|s| match s {
+            Shape::Area(r) => {
+                let mut e = Extent::new();
+                r[0].iter().for_each(|c| e.add(*c));
+                (!e.is_empty()).then(|| {
+                    (
+                        (e.x1 - e.x0) * (e.y1 - e.y0),
+                        [(e.x0 + e.x1) / 2.0, (e.y0 + e.y1) / 2.0],
+                    )
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    let Some((big, at)) = boxed
+        .iter()
+        .flatten()
+        .copied()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+    else {
+        return f.to_vec();
+    };
+    f.iter()
+        .zip(&boxed)
+        .filter(|(_, b)| match b {
+            Some((a, c)) => !(*a < big * 0.1 && (c[0] - at[0]).hypot(c[1] - at[1]) > 15.0),
+            None => true,
+        })
+        .map(|(s, _)| s.clone())
+        .collect()
+}
+
+/// The backdrop: a pack layer named by `::BASEMAP` (a world backdrop leaves
+/// Antarctica out), else the column's WKT.
+fn backdrop(cols: &[Column], rows: usize) -> (Vec<Vec<Shape>>, Option<String>) {
+    let b = find_role(cols, Role::Basemap);
+    if let Some(l) = role_str(cols, Role::Basemap)
+        .and_then(|s| layer_name(&s))
+        .and_then(boundaries::layer)
+    {
+        let regions = l
+            .regions
+            .iter()
+            .filter(|r| !(l.name.starts_with("world") && r.key == "ATA"))
+            .map(|r| r.shapes.clone())
+            .collect();
+        return (regions, Some(l.name.clone()));
+    }
+    (parse_column(b, rows), None)
+}
+
 /// What a map is coloured by.
 enum Fill {
     /// A measure: per-row values and the colour scale.
@@ -204,6 +376,15 @@ struct Model<'a> {
     rows: usize,
     features: Vec<Vec<Shape>>,
     base: Vec<Vec<Shape>>,
+    /// Each row's name from the pack (its `::LABEL` wins).
+    names: Vec<String>,
+    /// The features without their far-off parts, when some have them (the
+    /// map is fitted to these).
+    core: Option<Vec<Vec<Shape>>>,
+    /// The pack layers drawn (they need an attribution line).
+    layers: Vec<String>,
+    /// The lon/lat extent (for the scale bar).
+    lonlat: Extent,
     label: Option<&'a Column>,
     category: Option<&'a Column>,
     alpha: f64,
@@ -233,12 +414,12 @@ fn range_of(cols: &[Column]) -> Option<(f64, f64)> {
 
 /// The measure column of a map: a chart-kind column, or a numeric second
 /// `::MAP`/`::CHOROPLETH` column (`region::MAP, sales::CHOROPLETH`).
-fn measure_of(cols: &[Column], geom: &Column) -> Option<Column> {
+fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
     let numeric_geometry = cols
         .iter()
         .find(|c| {
             c.role == Role::Geometry
-                && !std::ptr::eq(*c, geom)
+                && geom.is_none_or(|g| !std::ptr::eq(*c, g))
                 && c.values.iter().any(|v| cell_num(v).is_some())
                 && c.values
                     .iter()
@@ -261,19 +442,41 @@ fn measure_of(cols: &[Column], geom: &Column) -> Option<Column> {
 
 impl<'a> Model<'a> {
     fn new(o: &RenderOptions, cols: &'a [Column]) -> Option<Model<'a>> {
-        let geom = geometry(cols)?;
-        let rows = geom.values.len();
-        let features = parse_column(Some(geom), rows);
-        let base = parse_column(find_role(cols, Role::Basemap), rows);
+        let german = o.locale.tag.starts_with("de");
+        let inp = input(cols, german)?;
+        let rows = inp.features.len();
+        let (base, base_layer) = backdrop(cols, rows);
+        let layers: Vec<String> = inp.layer.iter().chain(&base_layer).cloned().collect();
+        let features = inp.features;
         // an unknown name draws as 'auto' (lint: map/unknown-projection)
         let projection = role_str(cols, Role::Projection)
             .and_then(|s| Projection::parse(&s))
             .unwrap_or(Projection::Auto);
+        // a pack region's far-off parts (French Guiana for France) are drawn
+        // but don't stretch the map
+        let core: Option<Vec<Vec<Shape>>> = inp.layer.as_ref().and_then(|_| {
+            let core: Vec<Vec<Shape>> = features.iter().map(|f| core_parts(f)).collect();
+            (core.iter().map(Vec::len).sum::<usize>()
+                < features.iter().map(Vec::len).sum::<usize>())
+            .then_some(core)
+        });
         let mut extent = Extent::new();
-        for s in features.iter().chain(&base).flatten() {
+        for s in core
+            .as_ref()
+            .unwrap_or(&features)
+            .iter()
+            .chain(&base)
+            .flatten()
+        {
             for_coords(s, &mut |c| extent.add(c));
         }
         let (projection, proj) = Proj::setup(projection, &extent);
+        let core = core.map(|c| {
+            c.iter()
+                .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
+                .collect()
+        });
+        let lonlat = extent;
         let features = features
             .iter()
             .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
@@ -282,7 +485,7 @@ impl<'a> Model<'a> {
             .iter()
             .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
             .collect();
-        let measure = measure_of(cols, geom);
+        let measure = measure_of(cols, geometry(cols));
         let category =
             find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
         let has_base = find_role(cols, Role::Basemap).is_some();
@@ -295,6 +498,10 @@ impl<'a> Model<'a> {
             rows,
             features,
             base,
+            names: inp.names,
+            core,
+            layers,
+            lonlat,
             label: find_role(cols, Role::Label),
             category,
             alpha: role_num(cols, Role::Alpha)
@@ -309,10 +516,19 @@ impl<'a> Model<'a> {
     /// The projected box of everything drawn (data and backdrop).
     fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
         let mut e = Extent::new();
-        for s in self.features.iter().chain(&self.base).flatten() {
+        let features = self.core.as_ref().unwrap_or(&self.features);
+        for s in features.iter().chain(&self.base).flatten() {
             for_coords(s, &mut |c| e.add(c));
         }
         (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
+    }
+
+    /// A row's label: its `::LABEL`, else its name from the pack.
+    fn label_of(&self, i: usize) -> String {
+        match self.text(self.label, i) {
+            l if l.is_empty() => self.names.get(i).cloned().unwrap_or_default(),
+            l => l,
+        }
     }
 
     fn text(&self, c: Option<&Column>, i: usize) -> String {
@@ -873,8 +1089,9 @@ fn frame_of(
     lg: &LegendBox,
     w: f64,
     h: f64,
+    foot: f64,
 ) -> Option<(Frame, (f64, f64))> {
-    let (auto, at) = layout(m, lg, w, h)?;
+    let (auto, at) = layout(m, lg, w, h - foot)?;
     if let Some(((x0, x1), (y0, y1))) = o.zoom {
         if [x0, x1, y0, y1].iter().all(|f| f.is_finite()) && x1 > x0 && y1 > y0 {
             return Some((Frame::fit((x0, y0, x1, y1), (0.0, 0.0, w, h)), at));
@@ -894,7 +1111,8 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
     }
     let (w, h) = (w as f64, h as f64);
     let lg = legend_of(o, &m, w);
-    layout(&m, &lg, w, h).map(|(f, _)| f.window(w, h))
+    let ft = foot_of(o, &m, w);
+    layout(&m, &lg, w, h - ft.h).map(|(f, _)| f.window(w, h))
 }
 
 /// Render a map panel's body (`None` when no row has geometry).
@@ -903,7 +1121,8 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let (w, h) = (width as f64, height as f64);
     let lg = legend_of(o, &m, w);
     let nodata = lg.nodata;
-    let (frame, legend_at) = frame_of(&m, o, &lg, w, h)?;
+    let ft = foot_of(o, &m, w);
+    let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h)?;
     let t = &o.theme;
     let id = id_of(cols, width, height);
     let card = t.colors.card;
@@ -982,7 +1201,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         if f.is_empty() {
             continue;
         }
-        let label = m.text(m.label, i);
+        let label = m.label_of(i);
         let cat = m.text(m.category, i);
         let series = if cat.is_empty() {
             label.clone()
@@ -1120,8 +1339,28 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         ));
     }
 
+    // ---- labels on the map
+    let legend_box = (
+        legend_at.0,
+        legend_at.1,
+        legend_at.0 + lg.w,
+        legend_at.1 + lg.h,
+    );
+    out.push_str(&labels_svg(
+        o,
+        cols,
+        &m,
+        &frame,
+        &[legend_box, (0.0, h - ft.h, w, h)],
+        (w, h),
+        &font,
+    ));
+
     // ---- the legend, on a card-coloured backing
     out.push_str(&legend_svg(o, &lg, &id, legend_at, &font));
+
+    // ---- the scale bar and the attribution the pack layers require
+    out.push_str(&foot_svg(o, &m, &ft, &frame, (w, h), &font));
 
     // ---- summary and root attributes
     let summary = summary(o, &m);
@@ -1349,6 +1588,298 @@ fn legend_svg(
     g
 }
 
+/// The attribution (and scale bar) strip at the bottom of a map.
+struct Foot {
+    /// Lines of `(text, link)` runs.
+    lines: Vec<Vec<(String, Option<&'static str>)>>,
+    size: f64,
+    h: f64,
+    /// Room for a scale bar on the left.
+    scale: bool,
+}
+
+/// The BKG's source list (part of its required source note).
+const BKG_SOURCES: &str =
+    "https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf";
+
+/// The attribution a map's pack layers require: "Made with Natural Earth"
+/// for the world layers; for the BKG layers the source note "© BKG (year)
+/// dl-de/by-2-0, Datenquellen: <list>" (BKG and the licence linked, as its
+/// terms ask on a web page) and the note that the geometry was modified.
+/// Sized to fit the panel's width.
+fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
+    let german = o.locale.tag.starts_with("de");
+    let mut lines: Vec<Vec<(String, Option<&'static str>)>> = Vec::new();
+    if m.layers.iter().any(|l| l.starts_with("world")) {
+        lines.push(vec![(
+            "Made with Natural Earth".into(),
+            Some("https://www.naturalearthdata.com"),
+        )]);
+    }
+    if m.layers.iter().any(|l| l.starts_with("de-")) {
+        lines.push(vec![
+            ("© ".into(), None),
+            ("BKG".into(), Some("https://www.bkg.bund.de")),
+            (format!(" ({}) ", boundaries::BKG_YEAR), None),
+            (
+                "dl-de/by-2-0".into(),
+                Some("https://www.govdata.de/dl-de/by-2-0"),
+            ),
+            (", Datenquellen:".into(), None),
+        ]);
+        lines.push(vec![
+            (BKG_SOURCES.into(), Some(BKG_SOURCES)),
+            (
+                if german {
+                    " · Geometrie verändert (vereinfacht)"
+                } else {
+                    " · geometry modified (simplified)"
+                }
+                .into(),
+                None,
+            ),
+        ]);
+    }
+    if m.layers.iter().any(|l| l.starts_with("nuts")) {
+        // GISCO's terms: this notice in the legend of every map
+        lines.push(vec![(
+            if german {
+                "© EuroGeographics bezüglich der Verwaltungsgrenzen"
+            } else {
+                "© EuroGeographics for the administrative boundaries"
+            }
+            .into(),
+            None,
+        )]);
+    }
+    let scale = !matches!(m.proj, Proj::Identity) && span_km(m).is_some_and(|k| k < 3000.0);
+    let room = (w - 8.0 - if scale { 70.0 } else { 0.0 }).max(40.0);
+    let widest = lines
+        .iter()
+        .map(|l| {
+            let t: String = l.iter().map(|(s, _)| s.as_str()).collect();
+            crate::ticks::text_width(&t, 1.0)
+        })
+        .fold(0.0, f64::max);
+    let size = if widest > 0.0 {
+        (room / widest).min(6.5)
+    } else {
+        6.5
+    };
+    let h = if lines.is_empty() {
+        if scale {
+            16.0
+        } else {
+            0.0
+        }
+    } else {
+        (lines.len() as f64 * size * 1.3 + 4.0).max(if scale { 16.0 } else { 0.0 })
+    };
+    Foot {
+        lines,
+        size,
+        h,
+        scale,
+    }
+}
+
+/// The data's east-west span in km (lon/lat data only).
+fn span_km(m: &Model) -> Option<f64> {
+    let e = &m.lonlat;
+    if e.is_empty() || matches!(m.proj, Proj::Identity) {
+        return None;
+    }
+    let lat = ((e.y0 + e.y1) / 2.0).to_radians();
+    Some((e.x1 - e.x0) * 111.32 * lat.cos())
+}
+
+/// The scale bar and the attribution lines (right-aligned, small, muted).
+fn foot_svg(
+    o: &RenderOptions,
+    m: &Model,
+    ft: &Foot,
+    frame: &Frame,
+    (w, h): (f64, f64),
+    font: &str,
+) -> String {
+    if ft.h <= 0.0 {
+        return String::new();
+    }
+    let t = &o.theme;
+    let muted = hex(t.chart_text());
+    let mut g = String::from("<g class=\"dp-map-foot\">");
+    if ft.scale {
+        if let Some((px, label)) = scale_bar(m, frame) {
+            let (x, y) = (6.0, h - 5.0);
+            g.push_str(&format!(
+                "<path d=\"M{x:.1} {:.1}v3h{px:.1}v-3\" fill=\"none\" stroke=\"{muted}\" stroke-width=\"1\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"7.5\" fill=\"{muted}\">{}</text>",
+                y - 3.0,
+                x + px / 2.0,
+                y - 5.0,
+                esc(&label)
+            ));
+        }
+    }
+    let lh = ft.size * 1.3;
+    let n = ft.lines.len() as f64;
+    for (k, line) in ft.lines.iter().enumerate() {
+        let y = h - 3.0 - (n - 1.0 - k as f64) * lh;
+        g.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{y:.1}\" text-anchor=\"end\" font-family=\"{font}\" font-size=\"{:.2}\" fill=\"{muted}\">",
+            w - 4.0,
+            ft.size
+        ));
+        for (s, link) in line {
+            match link {
+                Some(u) => g.push_str(&format!(
+                    "<a href=\"{u}\" target=\"_blank\"><tspan text-decoration=\"underline\">{}</tspan></a>",
+                    esc(s)
+                )),
+                // spaces at a run's ends would collapse: keep them
+                None => g.push_str(&format!("<tspan>{}</tspan>", esc(s).replace(' ', "\u{a0}"))),
+            }
+        }
+        g.push_str("</text>");
+    }
+    g.push_str("</g>");
+    g
+}
+
+/// A scale bar for the map's centre: `(length in px, "50 km")` — a "nice"
+/// 1/2/5 × 10ⁿ distance at most 90 px long.
+fn scale_bar(m: &Model, frame: &Frame) -> Option<(f64, String)> {
+    let e = &m.lonlat;
+    let (lon, lat) = ((e.x0 + e.x1) / 2.0, (e.y0 + e.y1) / 2.0);
+    let dlon = 1.0 / (111.32 * lat.to_radians().cos().max(0.01));
+    let a = m.proj.forward([lon, lat])?;
+    let b = m.proj.forward([lon + dlon, lat])?;
+    let px_km = ((b[0] - a[0]).hypot(b[1] - a[1])) * frame.s;
+    if px_km.is_nan() || px_km <= 0.0 || !px_km.is_finite() {
+        return None;
+    }
+    let max_km = 90.0 / px_km;
+    let mag = 10f64.powf(max_km.log10().floor());
+    let km = [5.0, 2.0, 1.0]
+        .iter()
+        .map(|f| f * mag)
+        .find(|k| *k <= max_km)
+        .unwrap_or(mag);
+    let px = km * px_km;
+    if px < 12.0 {
+        return None;
+    }
+    let label = if km >= 1.0 {
+        format!("{} km", km.round() as i64)
+    } else {
+        format!("{} m", (km * 1000.0).round() as i64)
+    };
+    Some((px, label))
+}
+
+/// Labels on the map (`::LABEL_TOP n`: the n most important; `::DATALABELS`:
+/// all that fit): each region's name at its pole of inaccessibility, a
+/// point's to its right, in the ink with a card-coloured halo; by `::RANK`,
+/// else |value|, else area; none overlapping, none wider than its region.
+fn labels_svg(
+    o: &RenderOptions,
+    cols: &[Column],
+    m: &Model,
+    frame: &Frame,
+    blocked: &[(f64, f64, f64, f64)],
+    size: (f64, f64),
+    font: &str,
+) -> String {
+    let top = role_num(cols, Role::LabelTop).map(|n| n.max(0.0) as usize);
+    if top.is_none() && find_role(cols, Role::DataLabels).is_none() {
+        return String::new();
+    }
+    let rank = find_role(cols, Role::Rank);
+    let mut cands = Vec::new();
+    for (i, f) in m.features.iter().enumerate() {
+        let text = m
+            .label_of(i)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() || f.is_empty() {
+            continue;
+        }
+        let value = match &m.fill {
+            Fill::Measure(s) => s.values[i],
+            _ => None,
+        };
+        // the largest polygon on screen, else the first point
+        let mut best: Option<(f64, Vec<Vec<labels::Pt>>)> = None;
+        for s in f {
+            if let Shape::Area(rings) = s {
+                let scr: Vec<Vec<labels::Pt>> = rings
+                    .iter()
+                    .map(|r| {
+                        let step = (r.len() / 1500).max(1);
+                        r.iter().step_by(step).map(|p| frame.at(*p)).collect()
+                    })
+                    .collect();
+                let a = labels::area(&scr[0]);
+                if best.as_ref().is_none_or(|b| a > b.0) {
+                    best = Some((a, scr));
+                }
+            }
+        }
+        let (at, room, area) = match best {
+            Some((a, rings)) => {
+                let Some((p, _)) = labels::polylabel(&rings, 1.0) else {
+                    continue;
+                };
+                let (x0, x1) = rings[0]
+                    .iter()
+                    .fold((f64::MAX, f64::MIN), |(a, b), q| (a.min(q.0), b.max(q.0)));
+                (p, Some(x1 - x0), a)
+            }
+            None => match f.iter().find_map(|s| match s {
+                Shape::Point(p) => Some(frame.at(*p)),
+                _ => None,
+            }) {
+                Some(p) => (p, None, 0.0),
+                None => continue,
+            },
+        };
+        let priority = rank
+            .and_then(|r| r.values.get(i))
+            .and_then(cell_num)
+            .or(value.map(f64::abs))
+            .unwrap_or(area);
+        cands.push(labels::Candidate {
+            at,
+            text,
+            priority,
+            room,
+        });
+    }
+    let placed = labels::place(cands, top, blocked, size, FONT);
+    if placed.is_empty() {
+        return String::new();
+    }
+    let t = &o.theme;
+    let mut g = format!(
+        "<g class=\"dp-map-labels\" font-family=\"{font}\" font-size=\"{FONT}\" font-weight=\"600\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2.4\" stroke-linejoin=\"round\" paint-order=\"stroke\" pointer-events=\"none\">",
+        hex(t.colors.ink),
+        hex(t.colors.card)
+    );
+    for p in placed {
+        g.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>",
+            p.x,
+            p.y,
+            if p.start { "start" } else { "middle" },
+            esc(&p.text)
+        ));
+    }
+    g.push_str("</g>");
+    g
+}
+
 /// One sentence for screen readers: what the map shows, its projection,
 /// the highest and lowest feature, the classes and their counts, and how
 /// many rows have no value.
@@ -1389,7 +1920,7 @@ fn summary(o: &RenderOptions, m: &Model) -> String {
     };
     let mut out = format!("{n} {what} ({})", m.projection.describe());
     let name = |i: usize| {
-        let l = m.text(m.label, i);
+        let l = m.label_of(i);
         if !l.is_empty() {
             l.lines().next().unwrap_or("").to_string()
         } else {

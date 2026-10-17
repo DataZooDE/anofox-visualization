@@ -162,8 +162,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "minimal trend line (no axes); a list() column in a table"),
     e("MAP", &["GEOMETRY", "GEO", "CHOROPLETH"], R::Geometry, "chart", true,
       "WKT-geometry map, coloured by a measure"),
+    e("REGION", &["REGION_CODE", "ISO_CODE"], R::Region, "chart", true,
+      "a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name"),
+    e("LAT", &["LATITUDE"], R::Lat, "chart", true, "a map point's latitude (degrees, WGS84), with ::LON"),
+    e("LON", &["LONGITUDE", "LNG"], R::Lon, "chart", true, "a map point's longitude (degrees, WGS84), with ::LAT"),
     e("BASEMAP", &["MAPBASE", "BACKDROP"], R::Basemap, "chart", true,
-      "grey WKT backdrop layer under a ::MAP"),
+      "a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts'"),
     e("DIAGRAM", &["NODE"], R::Diagram, "chart", true,
       "node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES)"),
     // ── annotations on a chart ─────────────────────────────────────────────
@@ -223,6 +227,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class"),
     e("MIDPOINT", &[], R::Midpoint, "modifier", true,
       "centre of a map's diverging colour ramp (default 0 when the values span it)"),
+    e("BOUNDARIES", &["REGION_SET"], R::Boundaries, "modifier", true,
+      "the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match)"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),
@@ -747,6 +753,10 @@ mod tests {
             Role::Projection,
             Role::Classes,
             Role::Midpoint,
+            Role::Region,
+            Role::Lat,
+            Role::Lon,
+            Role::Boundaries,
             Role::Tab,
             Role::SubTab,
             Role::Size,
@@ -864,6 +874,10 @@ mod tests {
                 | Role::Projection
                 | Role::Classes
                 | Role::Midpoint
+                | Role::Region
+                | Role::Lat
+                | Role::Lon
+                | Role::Boundaries
                 | Role::Tab
                 | Role::SubTab
                 | Role::Size

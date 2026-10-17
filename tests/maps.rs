@@ -673,3 +673,158 @@ fn the_map_fills_the_panel_and_the_legend_overlays_a_free_corner() {
     };
     assert!(lx <= 4.0 + 1e-9 && ly <= 4.0 + 1e-9, "top-left: {lx},{ly}");
 }
+
+// ── M1b: built-in boundaries, region codes, lat/lon, labels, furniture ────
+
+fn codes(v: &[&str]) -> Column {
+    Column::new("code", Role::Region, strs(v))
+}
+
+#[test]
+fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
+    let mut v = Column::new("v", Role::Value(Kind::Bar), nums(&[820.0, 700.0, 310.0]));
+    v.name = "Orders".into();
+    let s = svg(vec![codes(&["DE-BY", "DE-BW", "DE-BE"]), v]);
+    let f = features(&s);
+    assert_eq!(f.len(), 3);
+    // the pack's (English) name is the label, the series and the title
+    assert!(f[0].contains(" data-series=\"Bavaria\"") && f[0].contains(" data-label=\"Bavaria\""));
+    assert!(s.contains("<title>Bavaria: 820</title>"));
+    // the BKG's source note with its links and the note of modification
+    assert!(s.contains("<a href=\"https://www.bkg.bund.de\" target=\"_blank\"><tspan text-decoration=\"underline\">BKG</tspan></a>"));
+    assert!(s.contains("<a href=\"https://www.govdata.de/dl-de/by-2-0\""));
+    assert!(s.contains(">https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf</tspan>"));
+    assert!(s.contains("(2026)") && s.contains("geometry\u{a0}modified\u{a0}(simplified)"));
+    assert!(!s.contains("Natural Earth"));
+    // a scale bar (a state-sized map)
+    assert!(s.contains("km</text>"), "scale bar");
+
+    // the German locale names in German and notes the modification in German
+    let o = RenderOptions {
+        locale: anofox_visualization::format::Locale::DE_DE,
+        ..RenderOptions::default()
+    };
+    let s = draw(
+        vec![
+            codes(&["DE-BY"]),
+            Column::new("v", Role::Value(Kind::Bar), nums(&[1.0])),
+        ],
+        &o,
+    );
+    assert!(s.contains("data-label=\"Bayern\"") && s.contains("Geometrie\u{a0}verändert"));
+    // ::LABEL from the data wins
+    let s = svg(vec![
+        codes(&["DE-BY"]),
+        Column::new("l", Role::Label, strs(&["Süd"])),
+    ]);
+    assert!(s.contains("data-label=\"Süd\"") && !s.contains("Bavaria"));
+}
+
+#[test]
+fn country_codes_and_names_and_the_world_layer() {
+    let s = svg(vec![
+        codes(&["FR", "DEU", "it", "XX"]),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0, 4.0])),
+    ]);
+    // three countries; the unknown code draws nothing
+    let rows: Vec<&str> = features(&s)
+        .iter()
+        .map(|t| attr(t, "data-row").unwrap())
+        .collect();
+    assert_eq!(rows, ["0", "1", "2"]);
+    assert!(s.contains("data-label=\"France\"") && s.contains(">Made with Natural Earth</tspan>"));
+    // France's overseas part (French Guiana) doesn't stretch the map: the
+    // three countries fill the panel's height
+    let r = root(&s);
+    assert_eq!(attr(r, "data-proj"), Some("conic"));
+    // by name, when no code matches
+    let s = svg(vec![codes(&["Bayern", "Hessen"])]);
+    assert_eq!(features(&s).len(), 2);
+    // ::BOUNDARIES forces the layer: '09' is a state, '11000' a district
+    let s = svg(vec![
+        codes(&["11000"]),
+        Column::new("b", Role::Boundaries, strs(&["de-districts"])),
+    ]);
+    assert!(s.contains("data-label=\"Berlin\""));
+    // a German NUTS 2 code is the union of its districts, named by its code
+    let s = svg(vec![codes(&["DE21"])]);
+    let f = features(&s);
+    assert_eq!(f.len(), 1);
+    assert!(attr(f[0], "d").unwrap().matches('M').count() >= 23);
+    assert!(s.contains("data-label=\"DE21\""));
+    // an AGS read as a number keeps working (9162 → 09162)
+    let s = svg(vec![Column::new("code", Role::Region, nums(&[9162.0]))]);
+    assert!(s.contains("data-label=\"München\""));
+}
+
+#[test]
+fn lat_lon_points_over_a_named_backdrop() {
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[52.52, 48.137])),
+        Column::new("lon", Role::Lon, nums(&[13.405, 11.575])),
+        Column::new("l", Role::Label, strs(&["Berlin", "München"])),
+        Column::new("b", Role::Basemap, strs(&["de-states", "de-states"])),
+    ]);
+    let f = features(&s);
+    assert!(f.iter().all(|t| t.starts_with("<circle ")) && f.len() == 2);
+    // the backdrop is the 16 states, and its credit is shown
+    let base = &s[s.find("class=\"dp-basemap\"").unwrap()..];
+    let base = &base[..base.find("</g>").unwrap()];
+    assert_eq!(base.matches("<path ").count(), 16);
+    assert!(s.contains("dl-de/by-2-0"));
+    // a world backdrop leaves Antarctica out
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[0.0, 10.0])),
+        Column::new("lon", Role::Lon, nums(&[1.0, 20.0])),
+        Column::new("b", Role::Basemap, strs(&["world", "world"])),
+    ]);
+    let base = &s[s.find("class=\"dp-basemap\"").unwrap()..];
+    assert_eq!(
+        base[..base.find("</g>").unwrap()].matches("<path ").count(),
+        176
+    );
+    assert_eq!(attr(root(&s), "data-proj"), Some("equal-earth"));
+}
+
+#[test]
+fn labels_go_where_they_fit_with_a_halo() {
+    let all = &[
+        "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW",
+        "DE-RP", "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH",
+    ];
+    let vals: Vec<f64> = (1..=16).map(f64::from).collect();
+    let cols = |extra: Column| {
+        vec![
+            codes(all),
+            Column::new("v", Role::Value(Kind::Bar), nums(&vals)),
+            extra,
+        ]
+    };
+    let labels = |s: &str| -> Vec<String> {
+        let Some(i) = s.find("class=\"dp-map-labels\"") else {
+            return Vec::new();
+        };
+        let g = &s[i..s[i..].find("</g>").unwrap() + i];
+        g.split("<text ")
+            .skip(1)
+            .map(|t| t[t.find('>').unwrap() + 1..t.find("</text>").unwrap()].to_string())
+            .collect()
+    };
+    // the 3 most important (largest value first): Thuringia is 16
+    let s = draw(
+        cols(Column::new("t", Role::LabelTop, nums(&[3.0; 16]))),
+        &RenderOptions::default(),
+    );
+    let l = labels(&s);
+    assert!(l.len() <= 3 && !l.is_empty(), "{l:?}");
+    assert!(s.contains("paint-order=\"stroke\""), "a halo");
+    // ::DATALABELS: all that fit, none overlapping
+    let s = draw(
+        cols(Column::new("d", Role::DataLabels, strs(&[""; 16]))),
+        &RenderOptions::default(),
+    );
+    let l = labels(&s);
+    assert!(l.len() > 3, "{l:?}");
+    // Berlin, Hamburg and Bremen are too small for their names at this size
+    assert!(!l.contains(&"Bremen".to_string()), "{l:?}");
+}

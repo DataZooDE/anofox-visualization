@@ -12,3 +12,6 @@
 /dist
 /.cache
 /web/app-config.json
+
+# EU NUTS layers a user fetches for themselves (scripts/fetch-nuts.sh): never committed
+web/data/boundaries/nuts*.csv
