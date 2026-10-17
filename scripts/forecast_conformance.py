@@ -40,8 +40,9 @@ import sys
 
 sys.dont_write_bytecode = True  # scripts/__pycache__ is tracked
 # The anofox extensions send usage telemetry unless this is set; every duckdb
-# process the harness starts inherits it.
-os.environ.setdefault("DATAZOO_DISABLE_TELEMETRY", "1")
+# process the harness starts inherits it (forced: an inherited 0 must not
+# re-enable it). Each session also turns the extension's setting off.
+os.environ["DATAZOO_DISABLE_TELEMETRY"] = "1"
 from statistics_conformance import montage, svgs_of  # noqa: E402
 
 # ── demo data ────────────────────────────────────────────────────────────────
@@ -367,7 +368,7 @@ KNOWN: dict[str, dict[str, str]] = {
 
 
 def run(duckdb: str, ext: str, sql: str, pre: str, mode: str = "-list") -> tuple[bool, str]:
-    script = f"{pre}LOAD anofox_forecast; LOAD '{ext}';\n{sql};"
+    script = f"{pre}LOAD anofox_forecast; SET anofox_telemetry_enabled = false; LOAD '{ext}';\n{sql};"
     p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
                        capture_output=True, text=True, timeout=600)
     out = (p.stdout or "") + (p.stderr or "")
