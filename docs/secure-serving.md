@@ -179,6 +179,26 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
   the start. The check needs DuckDB's `json` extension (loaded into the
   snapshot automatically; without it the server refuses to start).
+- **`-- @requires` paths** ([DOCS](DOCS.md), *Not available*) are checked
+  on the server before a statement runs: a setup statement whose input is
+  missing is skipped, a panel answers `400` *optional input missing: no files
+  found …*, which the page shows as *Not available* (also under an access
+  policy: the message carries no data). The rule for a path:
+  - `${name}` takes the request's value of a **server-side** variable only:
+    `anofox_data`, a `path_vars` variable (already a plain name), a
+    credential's locked variable, a login claim, or one the dashboard's own
+    statements set (`SET VARIABLE rd = getvariable('anofox_data') || '/' ||
+    getvariable('run')`). A variable the viewer sets that is none of these, or
+    an unset one, is not expanded: that alternative counts as missing.
+  - The expanded path, resolved against the folder when relative, must stay
+    inside it: no `..` segment, no `~`, no URL, no backslash or control
+    character, no absolute path outside the folder — such an alternative counts
+    as missing without touching the file system (the log says why). Patterns
+    (`*`, `**`, `[…]`) match inside the folder only.
+  - The viewer learns only *available / not available*, about files in the
+    folder, which every viewer may read anyway. Without a data folder the
+    snapshot can open no files, and nothing is checked in advance: the
+    statement's own error decides, as before.
 - Error messages sent to viewers show the folder as `<data>`; the log keeps
   the full path.
 - Files appear live: a new run is readable as soon as it is written, without a

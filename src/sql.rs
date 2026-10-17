@@ -32,6 +32,7 @@
 
 pub mod contract_call;
 pub mod lex;
+pub mod requires;
 
 pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
@@ -53,10 +54,13 @@ pub struct Panel {
     /// A contract plot call (`SELECT anofox_plot_terms(t) FROM … t`), rewritten
     /// to return the rows + arguments as JSON — see [`contract_call`].
     pub contract: Option<ContractPanel>,
-    /// Optional inputs (`-- @requires <path>` comment lines above the
-    /// statement): when one is missing the statement is skipped and its panel
-    /// reads "Not available" instead of an error.
-    pub requires: Vec<String>,
+    /// Optional inputs (`-- @requires <path> | <alternative>, …` comment
+    /// lines above the statement, see [`requires`]): when one is missing the
+    /// statement is skipped and its panel reads "Not available" instead of an
+    /// error.
+    pub requires: Vec<requires::Requirement>,
+    /// What is malformed in those lines (`dashboard --check` reports it).
+    pub requires_issues: Vec<(&'static str, String)>,
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
@@ -64,7 +68,8 @@ pub fn plan(script: &str) -> Vec<Panel> {
     split_statements(script)
         .into_iter()
         .filter_map(|raw| {
-            let requires = requires_of(&raw);
+            let requires = requires::parse(&raw);
+            let requires_issues = requires::issues(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
             if stmt.is_empty() {
@@ -72,6 +77,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
             }
             if let Some((mut panel, _)) = contract_call::plan_contract(stmt) {
                 panel.requires = requires;
+                panel.requires_issues = requires_issues;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -83,6 +89,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     names: Vec::new(),
                     contract: None,
                     requires,
+                    requires_issues,
                 }
             } else {
                 Panel {
@@ -92,23 +99,10 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     names,
                     contract: None,
                     requires,
+                    requires_issues,
                 }
             })
         })
-        .collect()
-}
-
-/// The paths named by `-- @requires <path>[, <path>…]` comment lines in one
-/// raw statement (quotes optional).
-pub fn requires_of(raw: &str) -> Vec<String> {
-    raw.lines()
-        .filter_map(|l| l.trim().strip_prefix("--"))
-        .filter_map(|l| l.trim().strip_prefix("@requires"))
-        .filter(|rest| rest.starts_with(char::is_whitespace))
-        .flat_map(|rest| rest.split([',', ' ', '\t']))
-        .map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"'))
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
         .collect()
 }
 
@@ -781,7 +775,10 @@ mod requires_tests {
         );
         assert_eq!(p.len(), 3);
         assert!(p[0].requires.is_empty());
-        assert_eq!(p[1].requires, vec!["data/run/x.parquet", "data/run/y.csv"]);
+        assert_eq!(
+            p[1].requires,
+            vec![vec!["data/run/x.parquet"], vec!["data/run/y.csv"]]
+        );
         assert!(p[2].requires.is_empty());
         assert!(!p[1].sql.contains("@requires"));
     }

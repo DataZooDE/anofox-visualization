@@ -43,6 +43,7 @@ use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
     RequestMeta,
 };
+use anofox_visualization::sql::requires::{self as rq, Requirement};
 use include_dir::{include_dir, Dir};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -777,6 +778,8 @@ struct Dash {
     meta: sv::DashboardMeta,
     /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
     updated: Option<String>,
+    /// Each statement's `-- @requires` (indexed like `stmts`).
+    requires: Vec<Vec<Requirement>>,
 }
 
 /// A private, randomly named 0700 directory holding the snapshot files;
@@ -1274,10 +1277,10 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
                 has(Role::PagedTable) && has(Role::Info)
             })
             .collect();
-        let stmts = planned
+        let (stmts, requires) = planned
             .into_iter()
-            .map(|p| (p.setup, p.sql.trim().to_string()))
-            .collect();
+            .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
+            .unzip();
         out.push(Dash {
             id,
             sql,
@@ -1285,6 +1288,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             info,
             meta,
             updated: sv::file_date(&p),
+            requires,
         });
     }
     if out.is_empty() {
@@ -1914,6 +1918,17 @@ fn locked_panel(
         check_path_values(&st.opts.path_vars, &s.vars)?;
     }
     info.vars = r.vars.clone();
+    // The variables whose values the viewer chose (not a path variable, not
+    // locked by the credential): a `${name}` in `-- @requires` may not name
+    // one.
+    let viewer_set: Vec<String> = r
+        .vars
+        .iter()
+        .map(|(n, _)| n)
+        .filter(|n| !st.opts.path_vars.iter().any(|p| p.eq_ignore_ascii_case(n)))
+        .filter(|n| scope.is_none_or(|s| !s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n))))
+        .cloned()
+        .collect();
     // Under a policy, the statements rewritten for this snapshot.
     let script = gen.snap.policy.as_ref().map(|p| &p.scripts[di]);
     let stmts = script.map_or(&dash.stmts, |s| &s.stmts);
@@ -1954,7 +1969,17 @@ fn locked_panel(
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
-            st, &gen, &dash.id, stmts, script, panel_sql, &r, claims, abort, charge,
+            st,
+            &gen,
+            dash,
+            stmts,
+            script,
+            panel_sql,
+            &r,
+            &viewer_set,
+            claims,
+            abort,
+            charge,
         )
     });
     info.cache = Some(match how {
@@ -2009,15 +2034,17 @@ fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Pat
 fn run_panel(
     st: &Locked,
     gen: &Generation<Snapshot>,
-    dash_id: &str,
+    dash: &Dash,
     stmts: &[(bool, String)],
     script: Option<&Script>,
     panel_sql: &str,
     r: &sv::PanelRequest,
+    viewer_set: &[String],
     claims: Option<&Claims>,
     abort: &crate::panel_cache::Abort,
     charge: &mut Charge,
 ) -> Result<String, (u16, String)> {
+    let dash_id = dash.id.as_str();
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
     let Some(_slot) = st
         .queries
@@ -2063,8 +2090,21 @@ fn run_panel(
                 c.exec(&v)?;
             }
         }
-        for (setup, sql) in &stmts[..r.panel] {
+        // With a data folder, a statement whose `-- @requires` input is
+        // missing is skipped (setup) or reads "Not available" (the panel).
+        let met = |c: &Conn, i: usize| -> Result<bool, String> {
+            match (st.opts.data.as_deref(), dash.requires.get(i)) {
+                (Some(data), Some(reqs)) if !reqs.is_empty() => {
+                    requires_met(c, reqs, &data.to_string_lossy(), viewer_set)
+                }
+                _ => Ok(true),
+            }
+        };
+        for (i, (setup, sql)) in stmts[..r.panel].iter().enumerate() {
             if *setup {
+                if !met(c, i)? {
+                    continue;
+                }
                 // Best effort, like the browser: a failing setup statement is
                 // reported in the log, the panel still runs.
                 if let Err(e) = c.execute_prepared(sql, &[]) {
@@ -2079,6 +2119,9 @@ fn run_panel(
         if abort.abandoned() {
             return Err(SUPERSEDED.1.to_string());
         }
+        if !met(c, r.panel)? {
+            return Err(REQUIRES_MISSING.to_string());
+        }
         match &r.page {
             Some(p) => {
                 let (q, params) = sv::page_sql(panel_sql, p);
@@ -2091,6 +2134,9 @@ fn run_panel(
     .map_err(|e| {
         if abort.abandoned() {
             cancelled()
+        } else if e == REQUIRES_MISSING {
+            // (no data in it: also the message under a policy)
+            (400, e)
         } else if e == crate::limits::BUSY {
             (503, e)
         } else if e.contains("row limit") || e.contains("size limit") {
@@ -2108,6 +2154,69 @@ fn run_panel(
             (400, redact(e, st.opts.data.as_deref()))
         }
     })
+}
+
+/// The error of a panel whose `-- @requires` input is missing: the client
+/// reads it as "Not available" (it names a missing input: "no files found").
+const REQUIRES_MISSING: &str =
+    "optional input missing: no files found for this panel's -- @requires";
+
+/// Is every `-- @requires` requirement of a statement met, on this request's
+/// connection (its variables, the setup before it)? A requirement is met when
+/// one of its alternatives matches a file. Each `${name}` takes the variable's
+/// value here; a name the viewer chose (`viewer_set`: not a `path_vars`
+/// variable, not locked by the credential) or an unset one makes that
+/// alternative missing, and so does an expanded path that would leave the
+/// data folder ([`rq::confine`]: no `..`, `~`, URL or absolute path outside
+/// it). The viewer learns only met / not met, about files inside the folder,
+/// which every viewer may read anyway.
+fn requires_met(
+    c: &Conn,
+    reqs: &[Requirement],
+    data: &str,
+    viewer_set: &[String],
+) -> Result<bool, String> {
+    let names = rq::all_vars(reqs);
+    let values: Vec<Option<String>> = if names.is_empty() {
+        Vec::new()
+    } else {
+        let mut res = c.query(&rq::vars_sql(&names))?;
+        res.string_rows(1)?.into_iter().next().unwrap_or_default()
+    };
+    let lookup = |name: &str| -> Option<String> {
+        if viewer_set.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            return None;
+        }
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+        values.get(i).cloned().flatten()
+    };
+    for req in reqs {
+        let mut found = false;
+        for alt in req {
+            let Ok(path) = rq::expand(alt, lookup).map_err(|_| ()).and_then(|p| {
+                rq::confine(&p, data).map_err(|e| {
+                    eprintln!("[anofox-serve] -- @requires path refused ({e}): {alt}");
+                })
+            }) else {
+                continue;
+            };
+            let mut res = c.query(&rq::glob_sql(&path))?;
+            let n = res.string_rows(1)?;
+            if n.first()
+                .and_then(|r| r.first())
+                .cloned()
+                .flatten()
+                .is_some_and(|n| n != "0")
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// What a viewer sees when a panel fails under an access policy.
@@ -2184,6 +2293,7 @@ mod tests {
             sql: script.into(),
             stmts: vec![],
             info: vec![],
+            requires: vec![],
             meta: sv::parse_dashboard_meta(id, script),
             updated: None,
         }

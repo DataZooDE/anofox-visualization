@@ -1463,7 +1463,7 @@ Every panel carries its own state — there is no full-page spinner:
   message and the SQL behind *Details*. The other panels keep rendering.
 - **Not available.** One dashboard often serves many runs or projects whose
   outputs are optional. Name the optional file in a `-- @requires <path>`
-  comment line directly above the statement (several: comma-separated):
+  comment line directly above the statement:
 
   ```sql
   -- @requires data/run/anomalies.parquet
@@ -1476,9 +1476,46 @@ Every panel carries its own state — there is no full-page spinner:
   error; a `-- @requires` setup statement is skipped. Any other error is still an
   error card. This works the same in the browser, `serve`, the locked server
   (`serve --dashboards`, `anofox_serve_dashboards`) and the extension.
-  `dashboard --check` checks the paths with DuckDB's `glob()` and reports a
-  missing one as a **note** (`optional/missing`), not an error — `--strict`
-  still passes.
+
+  The paths:
+
+  - **Several inputs**, all needed: separate them with commas (or spaces), or
+    write several lines.
+  - **Alternatives**: `a.parquet | b.parquet` is met when either exists
+    (producers name the same output differently). The message names them all:
+    *This run has no a.parquet or b.parquet*.
+  - **Variables**: `${name}` is the value of the DuckDB variable `name`
+    (`getvariable('name')`) where the statement runs: a `SET VARIABLE` above
+    it, an input, a `?v.name=` link, or `anofox_data` (the data folder a locked
+    server sets). Patterns (`*`, `**`, `?`) work, as in `glob()`.
+  - **Relative paths** resolve against `getvariable('anofox_data')` when it is
+    set, else where DuckDB resolves the statement's own relative paths (the
+    working directory).
+
+  ```sql
+  SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+  -- @requires ${rd}/_anofox_meta_forecasts.parquet | ${rd}/forecasts.parquet
+  SELECT ds::XAXIS, yhat::LINECHART FROM read_parquet(getvariable('rd') || '/*forecasts.parquet');
+  ```
+
+  `dashboard --check` and a locked server with a data folder check the paths
+  before the statement runs (DuckDB's `glob()`, after expanding the variables
+  with the values the statement would see): a requirement none of whose
+  alternatives exists skips the statement. `--check --data <dir>` sets
+  `anofox_data` as the locked server does. On the locked server a `${name}`
+  must be a server-side value (`anofox_data`, a `path_vars` variable, a
+  credential's locked variable, the login's claims, or what the dashboard's own
+  statements set), and the expanded path must stay inside the data folder —
+  see *A live data folder* in [secure serving](secure-serving.md).
+  Elsewhere (the builder, `serve`) the statement's own missing-input error
+  decides.
+
+  `dashboard --check` reports a missing input as a **note** (`optional/missing`),
+  not an error — `--strict` still passes. It warns about a `${name}` with no
+  value (`requires/unknown-variable`: the path counts as missing), an empty
+  alternative (`requires/empty-alternative`: `a |`, `a || b`, a line with no
+  path) and a malformed `${…}` (`requires/bad-variable`); `--strict` fails on
+  these warnings.
 
 ### Interactivity
 

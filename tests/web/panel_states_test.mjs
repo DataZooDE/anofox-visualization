@@ -12,10 +12,15 @@ const grab = (name) => {
 };
 const varsOfSrc = src.match(/^const varsOf = .*$/m);
 assert.ok(varsOfSrc, "varsOf not found");
-const { shortError, errorDetail, isMissingInputError, varsOf } = new Function(
+const reqTextSrc = src.match(/^const requiresText = .*$/m);
+assert.ok(reqTextSrc, "requiresText not found");
+const dpVarNow = {};
+const { shortError, errorDetail, isMissingInputError, varsOf, requiresText, requiresName } = new Function(
+  "dpVarNow",
   `${grab("shortError")}\n${grab("errorDetail")}\n${grab("isMissingInputError")}\n${varsOfSrc[0]}\n` +
-    `return { shortError, errorDetail, isMissingInputError, varsOf };`
-)();
+    `${reqTextSrc[0]}\n${grab("requiresName")}\n` +
+    `return { shortError, errorDetail, isMissingInputError, varsOf, requiresText, requiresName };`
+)(dpVarNow);
 
 // The short line: the cause, no "Error:" prefix, no LINE pointer, capped.
 const duck = 'Error: Binder Error: Referenced column "revnue" not found in FROM clause!\nCandidate bindings: "revenue"\n\nLINE 1: SELECT revnue\n               ^';
@@ -37,6 +42,16 @@ for (const m of [
   assert.ok(isMissingInputError(m), m);
 for (const m of ['Binder Error: Referenced column "y" not found', "Parser Error: syntax error at or near"])
   assert.ok(!isMissingInputError(m), m);
+
+// `-- @requires` requirements (alternatives within one) and the file a path names.
+assert.equal(requiresText([["a.parquet", "b.parquet"], ["c.csv"]]), "a.parquet | b.parquet, c.csv");
+assert.equal(requiresText(undefined), "");
+Object.assign(dpVarNow, { run: "'r1'", n: "3", rd: "getvariable('anofox_data') || '/r1'" });
+assert.equal(requiresName("${rd}/forecasts.parquet"), "forecasts.parquet");
+assert.equal(requiresName("${rd}/${run}.parquet"), "r1.parquet");
+assert.equal(requiresName("${rd}/part_${n}.csv"), "part_3.csv");
+assert.equal(requiresName("${unset}"), "${unset}");
+assert.equal(requiresName("${rd}"), "${rd}"); // an expression: not shown as a value
 
 // Which variables a panel reads (its re-query trigger).
 assert.deepEqual(varsOf("SELECT 1 WHERE a = getvariable('region') AND list_contains(GETVARIABLE( 'channel' ), c)"), ["region", "channel"]);

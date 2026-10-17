@@ -27,6 +27,7 @@ const USAGE: &str = "usage:\n  \
      dashboard --check <folder> [--json]     …every .sql of a served folder, plus duplicate\n  \
                                              titles and file names the servers skip\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
+               [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
@@ -381,10 +382,13 @@ fn cmd_check(args: &[String]) {
     let mut path = None;
     let mut design = true; // --no-design turns off the design/* advisory pass
     let mut strict = false; // --strict makes design/* warnings fail the exit code
+                            // --data <dir>: the data root a locked server sets as anofox_data.
+    let mut data: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().cloned(),
+            "--data" => data = it.next().cloned(),
             "--policy" => policy = it.next().cloned(),
             "--json" => {}
             "--no-design" => design = false,
@@ -396,7 +400,7 @@ fn cmd_check(args: &[String]) {
     let Some(path) = path else {
         eprintln!(
             "usage: dashboard --check <file.sql | folder> [--json] [--db prebuilt.duckdb] \
-             [--policy policy.json] [--strict] [--no-design]"
+             [--policy policy.json] [--data dir] [--strict] [--no-design]"
         );
         std::process::exit(2);
     };
@@ -410,12 +414,27 @@ fn cmd_check(args: &[String]) {
             std::process::exit(2);
         })
     };
+    // `SET VARIABLE anofox_data = '<dir>'` opens every session (as on a
+    // locked server, before the dashboard's own statements).
+    let data_set = match &data {
+        Some(d) => {
+            let abs = std::fs::canonicalize(d).unwrap_or_else(|e| {
+                eprintln!("--data {d}: {e}");
+                std::process::exit(2);
+            });
+            format!(
+                "SET VARIABLE anofox_data = '{}';\n",
+                abs.to_string_lossy().replace('\'', "''")
+            )
+        }
+        None => String::new(),
+    };
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
         // Each call runs a full script (prelude + one statement) in a fresh session
         // (in-memory, or read-only against --db) — the linter replays session state.
         let mut diags = lint::check_opts(
             script,
-            |sql| run_query(db.as_deref(), sql),
+            |sql| run_query(db.as_deref(), &format!("{data_set}{sql}")),
             lint::LintOptions { design },
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
@@ -463,8 +482,11 @@ fn cmd_check(args: &[String]) {
 
     let all = || files.iter().flat_map(|(_, d)| d.iter());
     let errors = all().filter(|d| d.severity == Severity::Error).count();
-    // --strict: a design/* advisory also fails the exit code (for CI gating).
-    let design_hits = all().filter(|d| d.code.starts_with("design/")).count();
+    // --strict: a design/* advisory or a requires/* warning also fails the
+    // exit code (for CI gating).
+    let design_hits = all()
+        .filter(|d| d.code.starts_with("design/") || d.code.starts_with("requires/"))
+        .count();
     let failed = errors > 0 || (strict && design_hits > 0);
     let json = |diags: &[lint::Diagnostic]| -> String {
         let items: Vec<String> = diags

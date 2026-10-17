@@ -6356,7 +6356,7 @@ function lazyFlushSetup(L, upto, at) {
       try {
         await runSetup(L.stmts[k].sql);
       } catch (e) {
-        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${L.stmts[k].requires.join(", ")}`);
+        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(L.stmts[k].requires)}`);
         else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
       }
     }
@@ -6703,7 +6703,7 @@ async function runOnce(fresh = true) {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${s.requires.join(", ")}`);
+      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(s.requires)}`);
       else newGrid.appendChild(mkErrorCard(e, s.sql, true));
     }
   }
@@ -8456,6 +8456,20 @@ const isOptionalMissing = (s, e) => !!(s && s.requires && s.requires.length) && 
 function isMissingInputError(msg) {
   return /no files found|cannot open file|no such file|does not exist|http 404|couldn't fetch/i.test(String(msg));
 }
+// `-- @requires` as planned: [[path, alternative, …], …] — every
+// requirement must be met, any alternative meets it.
+const requiresText = (reqs) => (reqs || []).map((r) => [].concat(r).join(" | ")).join(", ");
+// The file a `-- @requires` path names, for the viewer: `${name}` filled in
+// when the variable holds a plain value this run (a locked server's data
+// folder never reaches the page), then just the last path segment.
+function requiresName(p) {
+  const full = String(p).replace(/\$\{([A-Za-z_]\w*)\}/g, (m, n) => {
+    const lit = String(dpVarNow[n] ?? "").trim();
+    if (/^'(?:[^']|'')*'$/.test(lit)) return lit.slice(1, -1).replace(/''/g, "'");
+    return /^-?\d+(\.\d+)?$/.test(lit) ? lit : m;
+  });
+  return full.split("/").pop();
+}
 function mkNotAvailable(s) {
   const fig = document.createElement("figure");
   fig.className = "panel dp-na";
@@ -8465,7 +8479,11 @@ function mkNotAvailable(s) {
   const b = document.createElement("strong");
   b.textContent = "Not available";
   const why = document.createElement("span");
-  why.textContent = "This run has no " + s.requires.map((p) => p.split("/").pop()).join(", ");
+  why.textContent =
+    "This run has no " +
+    s.requires
+      .map((r) => [...new Set([].concat(r).map(requiresName))].join(" or "))
+      .join(", ");
   d.append(b, why);
   fig.appendChild(d);
   return fig;

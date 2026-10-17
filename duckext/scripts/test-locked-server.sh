@@ -10,6 +10,8 @@
 #     and a dashboard's own defaulting `SET VARIABLE` (#151) — plus, with
 #     NODE_PATH (Playwright), the same in a real browser (locked-vars-e2e.mjs,
 #     also ::INFO in a ::PAGED table, #152).
+#   * `-- @requires` with `${var}` and alternatives over a data folder, and
+#     the path rule: an expanded path stays inside the folder (#156).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -60,9 +62,12 @@ stop() {
   wait "${PIDS[-1]}" 2>/dev/null || true
   unset 'PIDS[-1]'
 }
+# panel <index> [vars JSON] [dashboard]
 panel() {
+  local vars="${2:-}"
+  [ -n "$vars" ] || vars='{}'
   curl -s -o "$T/body" -D "$T/headers" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
-    -d "{\"dashboard\":\"t\",\"panel\":$1,\"vars\":{}}"
+    -d "{\"dashboard\":\"${3:-t}\",\"panel\":$1,\"vars\":$vars}"
 }
 serve() { echo "SELECT anofox_serve_dashboards($(q "$T/dash"), $PORT, $(q "$1"));"; }
 
@@ -177,3 +182,47 @@ else
   echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
 fi
 stop
+
+# 5. `-- @requires` over a data folder (#156): `${var}` expands to the
+# request's value, `a | b` is met by either, and an expanded path must stay
+# inside the folder — a viewer's own variable, `..`, an absolute path outside
+# or `~` never reach the file system.
+mkdir -p "$T/runs/r1" "$T/runs/r2" "$T/runs/r3" "$T/outside" "$T/rdash"
+"$DUCKDB" -c "COPY (SELECT 1 AS v) TO $(q "$T/runs/r1/forecasts.parquet");
+  COPY (SELECT 2 AS v) TO $(q "$T/runs/r2/_anofox_meta_forecasts.parquet");
+  COPY (SELECT 3 AS v) TO $(q "$T/outside/f.parquet");" >/dev/null
+cat > "$T/rdash/r.sql" <<'SQL'
+SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+-- @requires ${rd}/_anofox_meta_forecasts.parquet | ${rd}/forecasts.parquet
+SELECT count(*)::BIGINT AS n ::METRIC FROM read_parquet(getvariable('rd') || '/*forecasts.parquet');
+-- @requires ${rd}/extra.parquet
+CREATE OR REPLACE TEMP VIEW extra AS SELECT * FROM read_parquet(getvariable('rd') || '/extra.parquet');
+SELECT 1::BIGINT AS one ::METRIC;
+-- @requires ${x}/forecasts.parquet
+SELECT 2::BIGINT AS two ::METRIC;
+-- @requires ../outside/f.parquet
+SELECT 3::BIGINT AS three ::METRIC;
+-- @requires /etc/passwd | ~/.profile
+SELECT 4::BIGINT AS four ::METRIC;
+-- @requires ${run}/forecasts.parquet
+SELECT 5::BIGINT AS five ::METRIC;
+SQL
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rdash"), $PORT,
+  json_object('data', $(q "$T/runs"), 'path_vars', ['run']));" || fail "data-folder server"
+na() { [ "$1" = 400 ] && grep -q "no files found" "$T/body" || fail "$2: expected Not available, got $1 $(cat "$T/body")"; }
+[ "$(panel 1 '{"run":"r1"}' r)" = 200 ] && grep -q '"c0":1' "$T/body" || fail "second alternative: $(cat "$T/body")"
+[ "$(panel 1 '{"run":"r2"}' r)" = 200 ] && grep -q '"c0":1' "$T/body" || fail "first alternative: $(cat "$T/body")"
+na "$(panel 1 '{"run":"r3"}' r)" "no alternative"
+# A skipped setup statement (its file is missing) doesn't fail the next panel.
+[ "$(panel 3 '{"run":"r1"}' r)" = 200 ] || fail "after a skipped setup: $(cat "$T/body")"
+grep -q "setup statement failed" "$T/out" && fail "the missing setup input was run: $(cat "$T/out")"
+# `${x}` set by the viewer (not a path variable): never expanded.
+na "$(panel 4 '{"run":"r1","x":"r1"}' r)" "a viewer variable in the path"
+na "$(panel 5 '{"run":"r1"}' r)" "a .. path"
+na "$(panel 6 '{"run":"r1"}' r)" "an absolute path outside / ~"
+grep -q "@requires path refused" "$T/out" || fail "refused paths are not logged: $(cat "$T/out")"
+# A relative path resolves against the data folder.
+[ "$(panel 7 '{"run":"r1"}' r)" = 200 ] || fail "relative path: $(cat "$T/body")"
+na "$(panel 7 '{"run":"r3"}' r)" "relative path, missing"
+stop
+echo "OK: -- @requires: \${var}, alternatives, and paths confined to the data folder"
