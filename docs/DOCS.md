@@ -724,8 +724,9 @@ best model: higher is better for R² (`r2`), adjusted / pseudo R², explained
 variance, AUC (`roc_auc`), average precision, accuracy, balanced accuracy,
 F1, precision, recall, Matthews correlation (`matthews_corrcoef`, `mcc`),
 Cohen's kappa, Jaccard and log-likelihood; lower for RMSE, MSE, MAE, MAPE,
-sMAPE, MASE, RMSSE, CRPS, Brier score, log loss, hamming / zero-one / hinge
-loss, pinball loss, max error, the mean Poisson / gamma / Tweedie deviance,
+sMAPE, MASE, RMSSE, CRPS, Brier score, expected calibration error (`ece`,
+anofox-decide's `decide_ece`), log loss, hamming / zero-one / hinge loss,
+pinball loss, max error, the mean Poisson / gamma / Tweedie deviance,
 residual SE, sigma, AIC, AICc, BIC and deviance. scikit-learn's long names
 (`mean_absolute_error`, `brier_score_loss`, `roc_auc_score`, …) count too, and
 a scorer's `neg_` prefix flips the direction (`neg_mean_squared_error`: higher
@@ -927,7 +928,8 @@ that are not in the rows are not drawn and reported as a render warning
 
 `examples/regression/anofox_statistics.sql` renders one example per family;
 `scripts/statistics_conformance.py` renders the output of every producer
-(see the README).
+(see the README); `scripts/decide_conformance.py` does the same for
+anofox-decide's outputs, through the SQL that makes them contract tables.
 
 ### Heatmaps
 

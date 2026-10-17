@@ -264,6 +264,66 @@ jobs:
           path: ${{ runner.temp }}/optimize-conformance
           if-no-files-found: ignore
 
+  decide-conformance:
+    # anofox-decide tags no contract producer yet: every decide output goes
+    # through the SQL bridge to a contract schema (metrics → summary,
+    # probabilities → ROC / PR / calibration curves) and on to anofox_plot(...)
+    # and its specific macro; the raw outputs that no schema takes must fail
+    # cleanly; a tagged producer without a recipe fails the job. Answers come
+    # from decide's built-in stub model (offline, deterministic). anofox_decide
+    # from the community repository (signed), anofox_statistics from get.erpl.io
+    # for its curve producers; DuckDB pinned to v1.5.6.
+    name: anofox-decide conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DATAZOO_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install DuckDB CLI v1.5.6
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/duckdb"
+          "$HOME/.local/bin/duckdb" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install anofox_decide (community) and anofox_statistics (get.erpl.io)
+        run: |
+          for i in 1 2 3; do
+            duckdb -c "FORCE INSTALL anofox_decide FROM community" && break
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          for i in 1 2 3; do
+            duckdb -unsigned -c "FORCE INSTALL anofox_statistics FROM 'https://get.erpl.io'" && break
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          duckdb -c "LOAD anofox_decide;
+            SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'anofox_decide';"
+
+      - name: Build the C-API extension
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh --release
+
+      - name: Conformance (every decide output → anofox_plot + specific macro)
+        run: |
+          python3 scripts/decide_conformance.py --duckdb duckdb \
+            --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" \
+            --out "$RUNNER_TEMP/decide-conformance" --statistics yes --jobs 4 --no-montage
+
+      - name: Upload the SVGs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decide-conformance-svgs
+          path: ${{ runner.temp }}/decide-conformance
+          if-no-files-found: ignore
+
   skills-sql:
     # Every ```sql block of the Claude Code plugin's skills
     # (plugins/anofox-visualization/skills/*/SKILL.md) runs against the C-API

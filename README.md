@@ -291,12 +291,34 @@ montage when `rsvg-convert` and Pillow are installed) to `--out`:
 
 ```bash
 duckdb -unsigned -c "INSTALL anofox_statistics FROM 'https://get.erpl.io'"   # DuckDB v1.5.6
-SKIP_WASM=1 OUT=/tmp/viz.duckdb_extension duckext/scripts/build-native.sh --release
-python3 scripts/statistics_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/stats-viz
+SKIP_WASM=1 OUT=/tmp/anofox_visualization.duckdb_extension duckext/scripts/build-native.sh --release
+python3 scripts/statistics_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/stats-viz
 ```
 
 CI runs it on every push (`.github/workflows/ci.yml`, job *anofox-statistics
 conformance*).
+
+### Conformance with anofox-decide
+
+[anofox-decide](https://github.com/DataZooDE/anofox-decide) tags no contract
+producer yet: its answers are per-row probabilities, choices and scores, its
+quality metrics single numbers. `scripts/decide_conformance.py` runs every
+decide output through the SQL that makes it a contract table (metrics →
+`summary`, probabilities → ROC / PR / calibration `curve`, also through
+anofox-statistics' `roc_curve_by` / `pr_curve_by` / `calibration_curve_by`),
+hands it to `anofox_plot(...)` and to the specific macro, and fails on a SQL
+error, a missing SVG or an unexpected render warning. The raw outputs no schema
+takes (`decide_table`, `decide_answers`) must fail with the clean "match no
+plottable schema" error, and a tagged decide producer without a recipe fails
+the run. The answers come from decide's built-in `stub` model (offline);
+`--model laya-multilingual` adds a real local model:
+
+```bash
+duckdb -c "INSTALL anofox_decide FROM community"                             # DuckDB v1.5.6
+python3 scripts/decide_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/decide-viz
+```
+
+CI runs it on every push (job *anofox-decide conformance*).
 
 ## Claude Code plugin
 
