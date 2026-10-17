@@ -750,10 +750,11 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
                 )
             })
             .collect();
-        // `v` breaks ties between top values with the same count, so the
-        // rows come back in one order (the client shows them in it).
+        // By position (c, t, k, n DESC, v): `v` breaks ties between top
+        // values with the same count, so the rows come back in one order
+        // (the client shows them in it).
         return format!(
-            "WITH _f AS (SELECT * {from}) {} ORDER BY c, t, k, n DESC, v",
+            "WITH _f AS (SELECT * {from}) {} ORDER BY 1, 2, 3, 5 DESC, 4",
             parts.join(" UNION ALL ")
         );
     }
