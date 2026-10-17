@@ -101,3 +101,8 @@ fn web_examples_library_keeps_old_links() {
 fn web_my_dashboards_store() {
     run_node("dash_store_test.mjs");
 }
+
+#[test]
+fn web_app_bar_settings_are_merged_and_checked() {
+    run_node("app_brand_test.mjs");
+}

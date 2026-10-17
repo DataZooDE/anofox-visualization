@@ -50,7 +50,7 @@ Rule of thumb: explore your own data → authoring; hand a dashboard to others �
 
 | Function | Behaviour |
 |---|---|
-| `anofox_serve(port)` | the builder on `http://127.0.0.1:<port>/?token=…` over the **current session** (its tables, attached databases, loaded extensions); opens the browser |
+| `anofox_serve(port[, options])` | the builder on `http://127.0.0.1:<port>/?token=…` over the **current session** (its tables, attached databases, loaded extensions); opens the browser. `options`: the app bar's JSON — `name`, `tagline` (`""` hides it), `logo`, `link`, `favicon`, `name_visible` (`false` = wordmark logo alone; needs a logo); images as `https://` or `data:image/…` (a file: `'data:image/svg+xml;base64,' \|\| to_base64(content) FROM read_blob('logo.svg')`) |
 | `anofox_serve_dashboards(dir, port[, options])` | every `.sql` file of `dir`: `/` lists them, `/d/<id>` opens one; snapshots the session, checks every statement, then binds |
 | `anofox_serve_refresh(port)` | rebuilds the snapshot from the session's committed data and swaps it in atomically; returns `… now serves snapshot epoch N` |
 | `anofox_serve_stop(port)` | stops that server, deletes its snapshot; `nothing is serving on port N` if none |
@@ -125,6 +125,7 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 ```sh
 serve mydata.duckdb [--port 8080] [--no-open] [--theme dark]          # authoring on a database file
+      [--app-name "Acme Insights"] [--app-tagline TEXT] [--app-logo logo.svg|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]
 serve --dashboards dash/ --init init.sql [--db data.duckdb] [--bind 127.0.0.1] [--port 8080] \
       [--max-rows 100000] [--timeout 30] [--threads 4] [--cache 60] [--theme T] \
       [--allow-host dash.example.com] [--auth @auth.json] [--log stderr] [--audit audit.jsonl]   # static render (B)
@@ -158,4 +159,5 @@ FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY month;
 4. **Unqualified names don't resolve** after `USE warehouse`: pass `search_path`, qualify the tables, or create views in the main database.
 5. **Inputs, tabs, cross-filter, `::PAGED` and downloads** work in authoring and A; the static `dashboard` HTML and mode B render panels only.
 6. **Themes**: `--theme` / `options.theme` is only a default; a dashboard's `::THEME` wins. A `read_text` theme file must be readable when the snapshot is taken. The "Powered by DataZoo GmbH" credit cannot be hidden.
+   **App bar** (the builder's name / tagline / logo per installation, not a dashboard's `::BRAND`): `--app-*` flags, `anofox_serve(port, options)`, or `app-config.json` next to `index.html` for static hosting (`web/app-config.example.json`). `--app-logo` files must be PNG/JPEG/GIF/WebP/SVG ≤ 512 KB; `--app-hide-name` needs `--app-logo`. Binaries never serve a `web/app-config.json` (flags / options only). Locked servers have no app bar, so `serve --dashboards` refuses `--app-*`.
 7. **Lint before serving**: `dashboard --check dir/file.sql` (dashboards skill), plus `--policy policy.json` with an access policy.

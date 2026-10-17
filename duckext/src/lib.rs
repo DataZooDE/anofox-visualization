@@ -246,7 +246,8 @@ mod serve_fns {
         Ok(())
     }
 
-    /// `anofox_serve(port)` → start the authoring builder on the live session.
+    /// `anofox_serve(port[, options])` → start the authoring builder on the
+    /// live session (`options`: the app bar's JSON).
     pub(super) unsafe extern "C" fn anofox_serve_fn(
         info: duckdb_function_info,
         input: duckdb_data_chunk,
@@ -254,8 +255,14 @@ mod serve_fns {
     ) {
         guarded(info, || {
             let ctx = ctx(info)?;
-            per_row(input, output, 1, |d, i| {
-                serve::start_authoring(ctx.clone(), port_at(d[0], i)?)
+            let ncols = capi!(duckdb_data_chunk_get_column_count)(input);
+            per_row(input, output, ncols, |d, i| {
+                let opts = if ncols > 1 {
+                    Some(str_at(d[1], i)?)
+                } else {
+                    None
+                };
+                serve::start_authoring(ctx.clone(), port_at(d[0], i)?, opts.as_deref())
             })
         })
     }
@@ -512,7 +519,10 @@ unsafe fn init(
         let ok = register_scalar(
             raw,
             c"anofox_serve",
-            &[&[DUCKDB_TYPE_INTEGER]],
+            &[
+                &[DUCKDB_TYPE_INTEGER],
+                &[DUCKDB_TYPE_INTEGER, DUCKDB_TYPE_VARCHAR],
+            ],
             serve_fns::anofox_serve_fn,
             true,
             Some(&make),
