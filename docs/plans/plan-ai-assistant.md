@@ -1194,3 +1194,30 @@ release bundle, and the channels. They are #194's design note
    an hour per server (about $4–5 an hour at most). Revisit Haiku 4.5 in M3
    after the eval. Before enabling Ask on customer data, the operator needs a
    DPA with the provider (§12.7).
+
+### 13.1 Decisions (2026-10-18)
+
+The owner said "go with recommendation", so each open question takes its
+recommendation:
+
+1. **Question text is logged by default** (`log_questions: true`). The viewer
+   notice says that questions are logged by the operator, and operators can
+   turn logging off. Answers are not logged by default, and data values never
+   are.
+2. **Embed links:** Ask is off unless the host application opts in
+   (`ask.embed: true`). API keys never get Ask.
+3. **The static render server (B)** stays in M2 (M2-6). It is the first item
+   to move to M3 if the security reviews take longer.
+4. **Masking:** `mask: "auto"` is on whenever Ask is enabled.
+5. **Defaults for served Ask:**
+   - Sonnet 5 at effort `medium`;
+   - 10 questions an hour and 30 a day per viewer;
+   - 2 M tokens an hour per server;
+   - Haiku 4.5 evaluated in M3.
+
+   A data processing agreement with the provider is required before Ask runs
+   on customer data.
+
+**Implementation stays gated** on the independent security review of the
+design (M2-0, §12.12), which is running now. Its required changes will be
+folded into this note in a follow-up amendment before M2-3 starts.
