@@ -1550,12 +1550,19 @@ Every panel carries its own state — there is no full-page spinner:
   Elsewhere (the builder, `serve`) the statement's own missing-input error
   decides.
 
+  A statement skipped for a missing input is skipped for whoever picked that
+  run: never put `@requires` on a setup statement whose effect narrows what a
+  viewer sees (a `SET VARIABLE region = 'EU'`, a filtering view). Put it on the
+  statement that reads the file.
+
   `dashboard --check` reports a missing input as a **note** (`optional/missing`),
   not an error — `--strict` still passes. It warns about a `${name}` with no
   value (`requires/unknown-variable`: the path counts as missing), an empty
   alternative (`requires/empty-alternative`: `a |`, `a || b`, a line with no
-  path) and a malformed `${…}` (`requires/bad-variable`); `--strict` fails on
-  these warnings.
+  path), a malformed `${…}` (`requires/bad-variable`) and `@requires` on a
+  setup statement that reads no file (`requires/on-setup`); `--strict` fails
+  on these warnings. On the locked server a pattern (`*`, `?`, `[…]`) counts
+  only in the `@requires` text itself, not in a variable's value.
 
 ### Interactivity
 

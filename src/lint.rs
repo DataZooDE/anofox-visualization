@@ -181,6 +181,22 @@ where
                 sql: short.clone(),
             });
         }
+        // `-- @requires` on a setup statement that reads no file: a viewer who
+        // picks a run without that file skips it (and keeps their own value
+        // of what it sets).
+        if p.setup && !p.requires.is_empty() && !reads_a_file(&p.sql) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "requires/on-setup",
+                message: "`-- @requires` on a setup statement that reads no file: a viewer can \
+                          skip it by choosing a run without that file, so nothing it sets may \
+                          narrow what a viewer sees — move the `@requires` to the statement \
+                          that reads the file"
+                    .into(),
+                sql: short.clone(),
+            });
+        }
         // An optional input that is missing: the statement is skipped (setup
         // never reaches the prelude) and its panel reads "Not available".
         let unmet = unmet_requirement(&mut run_query, &prelude, &p.requires);
@@ -1896,6 +1912,30 @@ fn sql_error(
     }
 }
 
+/// Does a statement read a file: a `read_…` / `glob` / `parquet_…` table
+/// function, or a quoted path with a data-file extension (`FROM 'x.parquet'`)?
+/// (`requires/on-setup`; a `SET VARIABLE` that builds a path reads nothing.)
+fn reads_a_file(sql: &str) -> bool {
+    let code = sql.to_ascii_lowercase();
+    if code.trim_start().starts_with("set ") {
+        return false;
+    }
+    ["read_", "glob(", "parquet_", "sniff_csv("]
+        .iter()
+        .any(|f| code.contains(f))
+        || [
+            ".parquet'",
+            ".csv'",
+            ".json'",
+            ".jsonl'",
+            ".tsv'",
+            ".xlsx'",
+            ".ndjson'",
+        ]
+        .iter()
+        .any(|e| code.contains(e))
+}
+
 /// The outcome of a statement's `-- @requires` lines.
 #[derive(Default)]
 struct Unmet {
@@ -2161,6 +2201,30 @@ mod design_tests {
         // … unless another alternative is met.
         let d = lint("${nope}/a | ${rd}/a", &vars, &["/srv/runs/r1/a"]);
         assert_eq!(codes(&d), ["requires/unknown-variable"]);
+        // On a setup statement that reads no file: a warning; one that
+        // reads the file is fine.
+        let set = |stmt: &str| {
+            check_opts(
+                &format!("-- @requires ${{rd}}/a\n{stmt}"),
+                requires_session(&vars, &["/srv/runs/r1/a"], &globbed),
+                LintOptions { design: false },
+            )
+        };
+        assert_eq!(
+            codes(&set("SET VARIABLE region = 'EU';")),
+            ["requires/on-setup"]
+        );
+        assert_eq!(
+            codes(&set(
+                "CREATE TEMP VIEW v AS SELECT * FROM t WHERE r = 'EU';"
+            )),
+            ["requires/on-setup"]
+        );
+        assert!(set(
+            "CREATE TEMP VIEW v AS SELECT * FROM read_parquet(getvariable('rd') || '/a');"
+        )
+        .is_empty());
+        assert!(set("CREATE TEMP VIEW v AS SELECT * FROM 'data/a.parquet';").is_empty());
         // Malformed lines.
         let d = lint("${rd}/a |", &vars, &["/srv/runs/r1/a"]);
         assert_eq!(codes(&d), ["requires/empty-alternative"]);

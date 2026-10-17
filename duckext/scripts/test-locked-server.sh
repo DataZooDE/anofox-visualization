@@ -206,7 +206,18 @@ SELECT 3::BIGINT AS three ::METRIC;
 SELECT 4::BIGINT AS four ::METRIC;
 -- @requires ${run}/forecasts.parquet
 SELECT 5::BIGINT AS five ::METRIC;
+SET VARIABLE qd = getvariable('anofox_data') || '/' || coalesce(getvariable('q'), 'r1');
+-- @requires ${qd}
+SELECT 9::BIGINT AS nine ::METRIC;
+-- @requires */secret.parquet
+SELECT 10::BIGINT AS ten ::METRIC;
+-- @requires ${qd}/forecasts.parquet
+SELECT 11::BIGINT AS eleven ::METRIC;
+-- @requires */forecasts.parquet
+SELECT 12::BIGINT AS twelve ::METRIC;
 SQL
+ln -s ../outside "$T/runs/lnk"
+cp "$T/outside/f.parquet" "$T/outside/secret.parquet"
 start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rdash"), $PORT,
   json_object('data', $(q "$T/runs"), 'path_vars', ['run']));" || fail "data-folder server"
 na() { [ "$1" = 400 ] && grep -q "no files found" "$T/body" || fail "$2: expected Not available, got $1 $(cat "$T/body")"; }
@@ -220,9 +231,25 @@ grep -q "setup statement failed" "$T/out" && fail "the missing setup input was r
 na "$(panel 4 '{"run":"r1","x":"r1"}' r)" "a viewer variable in the path"
 na "$(panel 5 '{"run":"r1"}' r)" "a .. path"
 na "$(panel 6 '{"run":"r1"}' r)" "an absolute path outside / ~"
-grep -q "@requires path refused" "$T/out" || fail "refused paths are not logged: $(cat "$T/out")"
+grep -q "@requires refused" "$T/out" || fail "refused paths are not logged: $(cat "$T/out")"
 # A relative path resolves against the data folder.
 [ "$(panel 7 '{"run":"r1"}' r)" = 200 ] || fail "relative path: $(cat "$T/body")"
 na "$(panel 7 '{"run":"r3"}' r)" "relative path, missing"
+# A dashboard variable can carry a viewer's value (`qd` from `q`): it is
+# never read as a pattern, nothing outside the folder is observable through
+# the `lnk -> ../outside` symlink, and a failing check leaks no error or path.
+[ "$(panel 11 '{"run":"r1","q":"r1"}' r)" = 200 ] || fail "dashboard variable, plain value: $(cat "$T/body")"
+for q in '*' 'r?' '[r]1' '*/secret.parquet' 'l?k/s*' 'lnk' 'lnk/secret.parquet' '**/**/nomatch' 'big/**'; do
+  code="$(panel 9 "{\"run\":\"r1\",\"q\":\"$q\"}" r)"
+  na "$code" "q=$q"
+  grep -qiE "error|permission|$T" "$T/body" && fail "q=$q leaks: $(cat "$T/body")"
+done
+[ "$(panel 11 '{"run":"r1","q":"r*"}' r)" = 400 ] || fail "a pattern in a value was expanded"
+grep -q "a pattern character in a variable's value" "$T/out" || fail "pattern refusal not logged"
+# An author's own pattern matches inside the folder, but does not count a
+# match through the symlink.
+[ "$(panel 12 '{"run":"r1"}' r)" = 200 ] || fail "an author's pattern: $(cat "$T/body")"
+na "$(panel 10 '{"run":"r1"}' r)" "a match outside the folder through a symlink"
 stop
 echo "OK: -- @requires: \${var}, alternatives, and paths confined to the data folder"
+echo "OK: -- @requires: no patterns from values, no matches through symlinks, no leaked errors"

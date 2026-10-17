@@ -886,6 +886,8 @@ struct Locked {
     /// Memory bounds: results in flight, queries at once.
     inflight: Inflight,
     queries: Queries,
+    /// Recent `-- @requires` answers (see [`requires_met`]).
+    requires_cache: rq::ExistsCache,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -1061,6 +1063,8 @@ pub fn start_locked(
         server_id: sv::random_token()[..8].to_string(),
         inflight,
         queries,
+        // A few seconds: files appear live, a rescan per request is avoided.
+        requires_cache: rq::ExistsCache::new(Duration::from_secs(5), 4096),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -2092,17 +2096,17 @@ fn run_panel(
         }
         // With a data folder, a statement whose `-- @requires` input is
         // missing is skipped (setup) or reads "Not available" (the panel).
-        let met = |c: &Conn, i: usize| -> Result<bool, String> {
+        let met = |c: &Conn, i: usize| -> bool {
             match (st.opts.data.as_deref(), dash.requires.get(i)) {
                 (Some(data), Some(reqs)) if !reqs.is_empty() => {
-                    requires_met(c, reqs, &data.to_string_lossy(), viewer_set)
+                    requires_met(c, reqs, data, viewer_set, &st.requires_cache)
                 }
-                _ => Ok(true),
+                _ => true,
             }
         };
         for (i, (setup, sql)) in stmts[..r.panel].iter().enumerate() {
             if *setup {
-                if !met(c, i)? {
+                if !met(c, i) {
                     continue;
                 }
                 // Best effort, like the browser: a failing setup statement is
@@ -2119,7 +2123,7 @@ fn run_panel(
         if abort.abandoned() {
             return Err(SUPERSEDED.1.to_string());
         }
-        if !met(c, r.panel)? {
+        if !met(c, r.panel) {
             return Err(REQUIRES_MISSING.to_string());
         }
         match &r.page {
@@ -2163,25 +2167,49 @@ const REQUIRES_MISSING: &str =
 
 /// Is every `-- @requires` requirement of a statement met, on this request's
 /// connection (its variables, the setup before it)? A requirement is met when
-/// one of its alternatives matches a file. Each `${name}` takes the variable's
-/// value here; a name the viewer chose (`viewer_set`: not a `path_vars`
-/// variable, not locked by the credential) or an unset one makes that
-/// alternative missing, and so does an expanded path that would leave the
-/// data folder ([`rq::confine`]: no `..`, `~`, URL or absolute path outside
-/// it). The viewer learns only met / not met, about files inside the folder,
-/// which every viewer may read anyway.
+/// one of its alternatives matches a file inside the data folder. The rule:
+/// * `${name}` takes the variable's value here, unless the viewer chose it
+///   (`viewer_set`: not a `path_vars` variable, not locked by the credential)
+///   or it is unset;
+/// * a pattern (`*`, `?`, `[…]`) may come only from the author's literal
+///   text: a value with one is refused (a dashboard variable may carry a
+///   viewer's value: `SET VARIABLE rd = … || getvariable('q')`);
+/// * the expanded path must stay inside the data folder ([`rq::confine`]: no
+///   `..`, `~`, URL or absolute path outside it);
+/// * a match counts only if its real path (symlinks resolved) is inside the
+///   folder too: `glob` lists through a link pointing out of it.
+///
+/// Anything refused, unset or failing makes that alternative missing; the
+/// reason (and any DuckDB error) goes to the log only. Answers are remembered
+/// briefly per expanded path (`cache`). The viewer learns only met / not met,
+/// about files inside the folder, which every viewer may read anyway.
 fn requires_met(
     c: &Conn,
     reqs: &[Requirement],
-    data: &str,
+    data: &Path,
     viewer_set: &[String],
-) -> Result<bool, String> {
+    cache: &rq::ExistsCache,
+) -> bool {
+    let log = |what: &str, alt: &str| {
+        eprintln!(
+            "[anofox-serve] -- @requires {}: {alt}",
+            redact(what.to_string(), Some(data))
+        )
+    };
     let names = rq::all_vars(reqs);
     let values: Vec<Option<String>> = if names.is_empty() {
         Vec::new()
     } else {
-        let mut res = c.query(&rq::vars_sql(&names))?;
-        res.string_rows(1)?.into_iter().next().unwrap_or_default()
+        match c
+            .query(&rq::vars_sql(&names))
+            .and_then(|mut r| r.string_rows(1))
+        {
+            Ok(rows) => rows.into_iter().next().unwrap_or_default(),
+            Err(e) => {
+                log(&format!("variables unreadable ({e})"), "");
+                Vec::new()
+            }
+        }
     };
     let lookup = |name: &str| -> Option<String> {
         if viewer_set.iter().any(|v| v.eq_ignore_ascii_case(name)) {
@@ -2190,33 +2218,48 @@ fn requires_met(
         let i = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
         values.get(i).cloned().flatten()
     };
-    for req in reqs {
-        let mut found = false;
-        for alt in req {
-            let Ok(path) = rq::expand(alt, lookup).map_err(|_| ()).and_then(|p| {
-                rq::confine(&p, data).map_err(|e| {
-                    eprintln!("[anofox-serve] -- @requires path refused ({e}): {alt}");
-                })
-            }) else {
-                continue;
-            };
-            let mut res = c.query(&rq::glob_sql(&path))?;
-            let n = res.string_rows(1)?;
-            if n.first()
-                .and_then(|r| r.first())
-                .cloned()
-                .flatten()
-                .is_some_and(|n| n != "0")
-            {
-                found = true;
-                break;
+    let root = std::fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
+    let data_text = data.to_string_lossy();
+    let alternative_met = |alt: &str| -> bool {
+        let mut patterned = false;
+        let expanded = rq::expand(alt, |name| {
+            let v = lookup(name)?;
+            patterned |= rq::has_glob(&v);
+            Some(v)
+        });
+        let path = match expanded {
+            Ok(_) if patterned => {
+                log("refused (a pattern character in a variable's value)", alt);
+                return false;
             }
-        }
-        if !found {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let path = match rq::confine(&path, &data_text) {
+            Ok(p) => p,
+            Err(e) => {
+                log(&format!("refused ({e})"), alt);
+                return false;
+            }
+        };
+        cache.exists(&path, || {
+            match c
+                .query(&rq::files_sql(&path))
+                .and_then(|mut r| r.string_rows(rq::MAX_MATCHES))
+            {
+                Ok(rows) => rows
+                    .iter()
+                    .filter_map(|r| r.first().cloned().flatten())
+                    .any(|f| rq::inside_canonical(&f, &root)),
+                Err(e) => {
+                    log(&format!("check failed ({e})"), alt);
+                    false
+                }
+            }
+        })
+    };
+    reqs.iter()
+        .all(|req| req.iter().any(|alt| alternative_met(alt)))
 }
 
 /// What a viewer sees when a panel fails under an access policy.

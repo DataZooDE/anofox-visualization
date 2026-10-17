@@ -230,6 +230,82 @@ pub fn glob_sql(path: &str) -> String {
     )
 }
 
+/// The glob pattern characters (DuckDB's `*`, `?`, `[…]`, plus `{` for
+/// safety).
+pub const GLOB_CHARS: &[char] = &['*', '?', '[', ']', '{', '}'];
+
+/// Does `s` contain a glob pattern character? On a locked server a pattern may
+/// come only from the author's literal `@requires` text: a variable's value
+/// with one is refused, so no viewer-influenced value is read as a pattern.
+pub fn has_glob(s: &str) -> bool {
+    s.contains(GLOB_CHARS)
+}
+
+/// At most this many matches of a pattern are looked at (each is
+/// canonicalised, see [`files_sql`]).
+pub const MAX_MATCHES: usize = 64;
+
+/// The query that lists the files matching `path`, as text in column `f`:
+/// one row is enough for a plain path, up to [`MAX_MATCHES`] for a pattern
+/// (a match whose real path lies outside the data folder doesn't count).
+pub fn files_sql(path: &str) -> String {
+    let limit = if has_glob(path) { MAX_MATCHES } else { 1 };
+    format!(
+        "SELECT CAST(file AS VARCHAR) AS f FROM glob('{}') LIMIT {limit}",
+        path.replace('\'', "''")
+    )
+}
+
+/// Does a file `glob` listed lie inside the data folder once symlinks are
+/// resolved? (`glob` lists through a link that points out of the folder;
+/// DuckDB refuses only the read.) `root` must be canonical.
+pub fn inside_canonical(file: &str, root: &std::path::Path) -> bool {
+    std::fs::canonicalize(file).is_ok_and(|real| real.starts_with(root))
+}
+
+/// A short-lived memory of `@requires` answers (also "missing"), keyed by the
+/// expanded path: a recursive pattern is not rescanned by every request.
+/// Bounded: when full, expired entries go, then everything.
+pub struct ExistsCache {
+    ttl: std::time::Duration,
+    cap: usize,
+    map: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>>,
+}
+
+impl ExistsCache {
+    pub fn new(ttl: std::time::Duration, cap: usize) -> ExistsCache {
+        ExistsCache {
+            ttl,
+            cap: cap.max(1),
+            map: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The cached answer for `path`, else `probe()` (remembered).
+    pub fn exists(&self, path: &str, probe: impl FnOnce() -> bool) -> bool {
+        let now = std::time::Instant::now();
+        {
+            let map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(&(at, yes)) = map.get(path) {
+                if now.duration_since(at) < self.ttl {
+                    return yes;
+                }
+            }
+        }
+        let yes = probe();
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        if map.len() >= self.cap && !map.contains_key(path) {
+            let ttl = self.ttl;
+            map.retain(|_, (at, _)| now.duration_since(*at) < ttl);
+            if map.len() >= self.cap {
+                map.clear();
+            }
+        }
+        map.insert(path.to_string(), (now, yes));
+        yes
+    }
+}
+
 /// The query that reads the variables `names` as text: one row, column `v{i}`
 /// for `names[i]` (NULL when unset). Names must pass [`vars`] (identifiers).
 pub fn vars_sql(names: &[String]) -> String {
@@ -348,6 +424,58 @@ mod tests {
             assert!(confine(bad, root).is_err(), "{bad:?}");
         }
         assert!(confine("f", "").is_err());
+    }
+
+    #[test]
+    fn patterns_matches_and_the_cache() {
+        assert!(has_glob("r*") && has_glob("a?") && has_glob("[ab]") && has_glob("{a,b}"));
+        assert!(!has_glob("r1/forecasts.parquet"));
+        assert!(files_sql("/d/r1/f.parquet").ends_with("LIMIT 1"));
+        assert!(files_sql("/d/*/f.parquet").ends_with(&format!("LIMIT {MAX_MATCHES}")));
+        assert!(files_sql("/d/a'b").contains("glob('/d/a''b')"));
+
+        // A link inside the folder that points out of it never counts.
+        let base = std::env::temp_dir().join(format!("afx-req-{}", std::process::id()));
+        let (data, outside) = (base.join("data"), base.join("outside"));
+        std::fs::create_dir_all(data.join("r1")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(data.join("r1/f.parquet"), b"x").unwrap();
+        std::fs::write(outside.join("secret.parquet"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, data.join("lnk")).unwrap();
+        let root = std::fs::canonicalize(&data).unwrap();
+        assert!(inside_canonical(
+            &data.join("r1/f.parquet").to_string_lossy(),
+            &root
+        ));
+        #[cfg(unix)]
+        assert!(!inside_canonical(
+            &data.join("lnk/secret.parquet").to_string_lossy(),
+            &root
+        ));
+        assert!(!inside_canonical(
+            &data.join("nope").to_string_lossy(),
+            &root
+        ));
+        std::fs::remove_dir_all(&base).unwrap();
+
+        // A miss is remembered for the TTL: no second scan.
+        let cache = ExistsCache::new(std::time::Duration::from_secs(60), 2);
+        let probes = std::cell::Cell::new(0);
+        let probe = |yes: bool| {
+            probes.set(probes.get() + 1);
+            yes
+        };
+        assert!(!cache.exists("/d/**/x", || probe(false)));
+        assert!(!cache.exists("/d/**/x", || probe(true)));
+        assert_eq!(probes.get(), 1);
+        // Bounded: a third key evicts, the cache keeps working.
+        assert!(cache.exists("/d/a", || probe(true)));
+        assert!(cache.exists("/d/b", || probe(true)));
+        assert_eq!(probes.get(), 3);
+        let expired = ExistsCache::new(std::time::Duration::ZERO, 4);
+        assert!(!expired.exists("/d/x", || probe(false)));
+        assert!(expired.exists("/d/x", || probe(true)));
     }
 
     #[test]

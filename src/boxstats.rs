@@ -360,6 +360,9 @@ pub(crate) fn with_tips(mut svg: String, cols: &[Column], o: &RenderOptions) -> 
     let fmt = crate::value_fmt(cols, Kind::Boxplot, median.map_or(&[][..], |c| &c.values));
     let f = |v: f64| fmt.full(v, &o.locale);
     let r = |v: f64| (v * 100.0).round() / 100.0;
+    // Engine tooltip → ours, both as they appear in the SVG (escaped); then
+    // one pass over the `<title>`s (a replace per box would be quadratic).
+    let mut tips: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for b in &all {
         let (Some(m), Some(q1), Some(q3)) = (b.median, b.q1, b.q3) else {
             continue;
@@ -385,13 +388,34 @@ pub(crate) fn with_tips(mut svg: String, cols: &[Column], o: &RenderOptions) -> 
         if !b.x.is_empty() {
             tip = format!("{}: {tip}", b.x);
         }
-        // (The engine titles every part of a box: body, median, whiskers.)
-        svg = svg.replace(
-            &format!("<title>{}</title>", format::escape_xml(&engine)),
-            &format!("<title>{}</title>", format::escape_xml(&tip)),
-        );
+        // (The first box of an engine text wins, as a replace would.)
+        tips.entry(format::escape_xml(&engine))
+            .or_insert_with(|| format::escape_xml(&tip));
     }
+    svg = replace_titles(&svg, &tips);
     strip_mean_tips(svg)
+}
+
+/// Every `<title>t</title>` whose `t` is a key of `tips` gets its value, in
+/// one pass over `svg`.
+fn replace_titles(svg: &str, tips: &std::collections::HashMap<String, String>) -> String {
+    if tips.is_empty() {
+        return svg.to_string();
+    }
+    let mut out = String::with_capacity(svg.len() + svg.len() / 4);
+    let mut rest = svg;
+    while let Some(i) = rest.find("<title>") {
+        let start = i + "<title>".len();
+        let Some(len) = rest[start..].find("</title>") else {
+            break;
+        };
+        let text = &rest[start..start + len];
+        out.push_str(&rest[..start]);
+        out.push_str(tips.get(text).map_or(text, String::as_str));
+        rest = &rest[start + len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A mean dot is drawn as `<circle … data-…><title>⁣mean: 4.4</title></circle>`:
@@ -530,6 +554,44 @@ mod tests {
         cols[1] = col(Role::Q1, &[1.0, 1.0, 1.0]);
         cols[4] = col(Role::WhiskerLow, &[0.0, 0.0, 0.0]);
         assert!(issues(&cols).is_empty());
+    }
+
+    #[test]
+    fn many_boxes_take_linear_time() {
+        // 5,000 boxes, each titled on its 6 parts: one pass, not one per box.
+        let n = 5000;
+        let names: Vec<String> = (0..n).map(|i| format!("b{i}")).collect();
+        let xs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let v = |k: f64| (0..n).map(|i| i as f64 + k).collect::<Vec<_>>();
+        let cols = vec![
+            x(&xs),
+            col(Role::Q1, &v(1.0)),
+            col(Role::Value(Kind::Boxplot), &v(2.0)),
+            col(Role::Q3, &v(3.0)),
+        ];
+        let mut svg = String::from("<svg>");
+        for i in 0..n {
+            for _ in 0..6 {
+                svg.push_str(&format!(
+                    "<rect x=\"1\"><title>b{i}: median {} ({}–{})</title></rect>",
+                    i + 2,
+                    i + 1,
+                    i + 3
+                ));
+            }
+        }
+        svg.push_str("</svg>");
+        let t0 = std::time::Instant::now();
+        let out = with_tips(svg, &cols, &RenderOptions::default());
+        let took = t0.elapsed();
+        assert!(
+            out.contains("<title>b4999: median 5,001 · Q1 5,000 · Q3 5,002</title>"),
+            "{}",
+            &out[out.len() - 300..]
+        );
+        assert!(!out.contains("(1–3)"), "every engine title replaced");
+        // (Quadratic took ~4 s for 2,000 boxes; a debug build does this in ms.)
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     #[test]
