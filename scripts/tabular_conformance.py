@@ -13,7 +13,8 @@ The adapters name the columns they read, so an upstream rename fails here.
 
 Per producer:
   raw      `anofox_plot(t)` on the output as it comes — expected to match no
-           schema; one that renders is reported as NOTE (time to tag it)
+           schema; one that renders is XPASS and fails the run (time to
+           tag it and add a contract case), as in decide_conformance.py
   auto     `anofox_plot(t)` on the adapted table (contract adapters only)
   specific the schema's macro on the adapted table
   generic  a chart macro (`anofox_bar`, `anofox_xyc`, …) for shapes no
@@ -48,6 +49,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+# anofox_tabular sends usage telemetry unless this is set; every process here inherits it.
+os.environ["DATAZOO_DISABLE_TELEMETRY"] = "1"
 
 # ── demo data ────────────────────────────────────────────────────────────────
 # 120 orders over a month plus two duplicated rows; planted problems: NULL
@@ -301,9 +305,8 @@ def run(duckdb: str, ext: str, sql: str, mode: str = "-list", ext_dir: str | Non
     pre = f"SET extension_directory = '{ext_dir}'; " if ext_dir else ""
     script = (f"{pre}LOAD anofox_tabular; LOAD '{ext}'; SET anofox_telemetry_enabled = false; "
               f"SET anofox_pii_enabled_types = '{PII_TYPES}';\n{SETUP}\n{sql};")
-    env = {**os.environ, "DATAZOO_DISABLE_TELEMETRY": "1"}
     p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
-                       capture_output=True, text=True, timeout=600, env=env)
+                       capture_output=True, text=True, timeout=600)
     # anofox_tabular logs its module registration ("[anofox] [info] …") to stderr.
     err = "\n".join(l for l in (p.stderr or "").splitlines() if not l.startswith("[anofox] [info]"))
     return p.returncode == 0 and not err.strip(), (p.stdout or "") + err
@@ -339,11 +342,11 @@ def check_out(ok: bool, out: str) -> tuple[str, list[str], str]:
 
 
 def check_raw(ok: bool, out: str) -> tuple[str, list[str], str]:
-    """The raw output: no schema is the expected answer, a render a NOTE."""
+    """The raw output: no schema is the expected answer, a render an XPASS."""
     if not ok and NO_SCHEMA in out:
         return "NOSCHEMA", [], ""
     status, svgs, msg = check_out(ok, out)
-    return ("NOTE" if status == "OK" else status), svgs, msg or "raw output renders: tag it and add a contract case"
+    return ("XPASS" if status == "OK" else status), svgs, msg or "raw output renders: tag it and add a contract case"
 
 
 def montage(out_dir: str, names: list[str]) -> str | None:
@@ -454,7 +457,7 @@ def main() -> int:
         good = sum(1 for r in mine if r[1] == "OK")
         print(f"{key:40s} {mine[0][4]['schema']:10s} {good}/{len(mine):<4d} "
               f"{'no schema' if raw.get(key) == 'NOSCHEMA' else raw.get(key)}")
-    failed = [r for r in results if r[1] not in ("OK", "NOSCHEMA", "NOTE")]
+    failed = [r for r in results if r[1] not in ("OK", "NOSCHEMA")]
     passed = sum(1 for r in results if r[1] == "OK" and r[4]["which"] != "raw")
     total = sum(1 for r in results if r[4]["which"] != "raw")
     covered = len({c["name"] for c in todo if not c.get("missing")})
