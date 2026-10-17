@@ -1,0 +1,2 @@
+source,seed,generator,schema
+synthetic,7,examples/supplier-lead-times/synthetic.py,inventory-rs contract v1 po_history / po_receipt

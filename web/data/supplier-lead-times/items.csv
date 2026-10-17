@@ -1,0 +1,16 @@
+sku_id,supplier_id,description,demand_mean,demand_std_dev,unit_cost,review_days
+SKU-101,SUP-01,Hex bolt M8,420.0,130.0,0.08,7
+SKU-102,SUP-01,Washer 8 mm,610.0,200.0,0.02,7
+SKU-103,SUP-01,Lock nut M10,180.0,70.0,0.15,10
+SKU-201,SUP-02,Carton 40x30,95.0,30.0,0.9,14
+SKU-202,SUP-02,Pallet wrap,22.0,8.0,6.5,14
+SKU-301,SUP-03,Ball valve DN25,14.0,5.0,38.0,21
+SKU-302,SUP-03,Check valve DN40,6.0,2.6,74.0,21
+SKU-401,SUP-04,Pump housing,9.0,3.0,112.0,14
+SKU-402,SUP-04,Impeller cover,12.0,4.0,46.0,14
+SKU-403,SUP-04,Bearing bracket,18.0,6.0,21.0,14
+SKU-501,SUP-05,Motor 2.2 kW,4.0,1.6,240.0,14
+SKU-502,SUP-05,Motor 5.5 kW,2.5,1.1,410.0,14
+SKU-601,SUP-06,O-ring 32 mm,260.0,90.0,0.35,7
+SKU-602,SUP-06,Shaft seal 25 mm,40.0,15.0,4.2,7
+SKU-603,SUP-06,Gasket set,15.0,6.0,9.8,10
