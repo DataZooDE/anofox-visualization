@@ -456,7 +456,7 @@ fn themes_paint_the_map_with_their_own_tokens() {
         );
         // the legend sits on the card and writes in the chart label ink
         assert!(s.contains(&format!(
-            "fill=\"{}\" fill-opacity=\".88\"",
+            "fill=\"{}\" fill-opacity=\".85\"",
             theme::hex(t.colors.card)
         )));
         // no remap: a feature's fill is the ramp colour of this variant
@@ -600,4 +600,76 @@ fn districts_render_within_budget() {
     if !cfg!(debug_assertions) {
         assert!(ms < 50.0, "{ms:.1} ms");
     }
+}
+
+#[test]
+fn the_legend_names_the_measure_and_formats_its_ticks() {
+    let wkt: Vec<Value> = (0..4)
+        .map(|i| Value::Str(format!("POINT({} 50)", 10 + i)))
+        .collect();
+    let mut v = Column::new(
+        "v",
+        Role::Value(Kind::Bar),
+        nums(&[1_200.0, 45_000.0, 380_000.0, 1_400_000.0]),
+    );
+    v.name = "Revenue".into();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt.clone()),
+        v.clone(),
+        Column::new("f", Role::YFormat, konst("€", 4)),
+    ]);
+    let legend = &s[s.find("class=\"dp-legend\"").unwrap()..];
+    assert!(legend.contains(">Revenue (€)</text>"), "{legend}");
+    // nice, compact, in the panel's format: €500K, €1M (not 1200 … 1400000)
+    assert!(
+        legend.contains(">€500K</text>") && legend.contains(">€1M</text>"),
+        "{legend}"
+    );
+    assert!(!legend.contains("1400000") && !legend.contains("1200<"));
+    // a generated column name (c1) is no title
+    v.name = "c1".into();
+    let s = svg(vec![Column::new("g", Role::Geometry, wkt), v]);
+    assert!(!s.contains("font-weight=\"600\""), "no title");
+}
+
+#[test]
+fn the_map_fills_the_panel_and_the_legend_overlays_a_free_corner() {
+    // a wide strip of regions: the map spans the panel's width, and the
+    // legend sits over a corner with nothing under it (no band above)
+    let wkt: Vec<Value> = (0..8)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let mut cols = vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new(
+            "v",
+            Role::Value(Kind::Bar),
+            nums(&[1., 2., 3., 4., 5., 6., 7., 8.]),
+        ),
+        Column::new("p", Role::Projection, konst("none", 8)),
+    ];
+    cols[1].name = "Sales".into();
+    let s = draw(cols, &RenderOptions::default());
+    let f = features(&s);
+    let x_of = |t: &str| -> f64 {
+        let d = attr(t, "d").unwrap();
+        d[1..].split([' ', '-']).next().unwrap().parse().unwrap()
+    };
+    // first region starts near the left edge, so the map spans the width
+    assert!(x_of(f[0]) < 30.0, "{}", f[0]);
+    let tag = "class=\"dp-legend\" transform=\"translate(";
+    let g = &s[s.find(tag).unwrap() + tag.len()..];
+    let (lx, ly): (f64, f64) = {
+        let t = &g[..g.find(')').unwrap()];
+        let mut p = t.split(',').map(|n| n.parse::<f64>().unwrap());
+        (p.next().unwrap(), p.next().unwrap())
+    };
+    assert!(lx <= 4.0 + 1e-9 && ly <= 4.0 + 1e-9, "top-left: {lx},{ly}");
 }

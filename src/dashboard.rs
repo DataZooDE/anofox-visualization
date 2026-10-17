@@ -87,6 +87,16 @@ fn column_at(result: &[(String, Vec<Value>)], i: usize) -> Option<&(String, Vec<
 /// Map a query result (columns in SELECT order) to typed [`Column`]s by the
 /// role's output index.
 fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Vec<Column> {
+    columns_named(result, roles, &[])
+}
+
+/// [`columns_from_result`], each measure named as the query names it
+/// (`sum(x) AS "Revenue"` → "Revenue"; the plan's `names`), as in the browser.
+fn columns_named(
+    result: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+) -> Vec<Column> {
     roles
         .iter()
         .filter_map(|(i, role)| {
@@ -95,7 +105,11 @@ fn columns_from_result(result: &[(String, Vec<Value>)], roles: &[(usize, Role)])
                 // ::XLINE an x position, as in the browser
                 // (`sql::columns_from_rows`).
                 let vals = sql::coerce_for_role(*role, vals.clone());
-                Column::new(name.clone(), *role, vals)
+                let name = names
+                    .iter()
+                    .find(|(j, _)| j == i)
+                    .map_or_else(|| name.clone(), |(_, n)| n.clone());
+                Column::new(name, *role, vals)
             })
         })
         .collect()
@@ -471,6 +485,7 @@ fn render_inner(
         let inner = render_panel_svg(
             rows,
             roles,
+            &panel.names,
             Place::At(x, row_y),
             cw,
             ch,
@@ -617,6 +632,7 @@ fn json_rows(result: &[(String, Vec<Value>)]) -> Vec<serde_json::Map<String, ser
 fn render_panel_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
+    names: &[(usize, String)],
     place: Place,
     w: f64,
     h: f64,
@@ -624,7 +640,7 @@ fn render_panel_svg(
     kpi_top: bool,
     tracks: &[(Vec<Column>, u32)],
 ) -> String {
-    let cols = columns_from_result(rows, roles);
+    let cols = columns_named(rows, roles, names);
     // Title bar (::TITLE) eats a strip off the top.
     let title = roles
         .iter()

@@ -990,6 +990,13 @@ and `<circle>`s for points. Features are drawn in row order.
   (levels sorted, `#rrggbb` levels in their own colour); with neither, a light
   brand tint. Rows with geometry but no value get a hatch and a "No data (n)"
   legend entry.
+- **Legend**: in the theme's legend typography, titled with the measure's
+  name and unit (`sales AS "Revenue"` with `'€'::YFORMAT` → "Revenue (€)"),
+  ticks at nice values in the panel's format (`€500K`, `1.4B`). It sits over
+  a corner of the map that covers no data, else beside or above the map.
+- **Size**: the map fills its panel at its own aspect; without `::HEIGHT` a
+  map panel takes the height its shape needs (a world map is wide and low, a
+  country tall).
 - **Classes** (`::CLASSES`): `'quantile n'` (equal counts; ties give fewer
   classes), `'jenks n'` (Fisher-Jenks natural breaks; above 2,000 values on an
   even sample), `'equal n'` (equal width) — n from 2 to 9, default 5 — or

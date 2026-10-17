@@ -1065,6 +1065,21 @@ pub fn columns_from_entries(
     cols
 }
 
+/// Name `cols` (built one per role, as [`sql::columns_from_rows`] does) as
+/// the query names its measures — the plan's `names`.
+pub fn name_columns(
+    mut cols: Vec<Column>,
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+) -> Vec<Column> {
+    for (c, (i, _)) in cols.iter_mut().zip(roles) {
+        if let Some((_, n)) = names.iter().find(|(j, _)| j == i) {
+            c.name = n.clone();
+        }
+    }
+    cols
+}
+
 /// Clamp a requested size into `MIN_DIM..=MAX_DIM`.
 pub fn clamp_dim(v: u64) -> u32 {
     v.clamp(MIN_DIM as u64, MAX_DIM as u64) as u32

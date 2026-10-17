@@ -282,15 +282,16 @@ SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ b
 SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
 
 -- Maps read real GeoJSON in the browser via DuckDB's spatial extension
--- (ST_Read → ST_AsText → WKT), then ggplot-rs draws the geometry (::MAP).
+-- (ST_Read → ST_AsText → WKT); the map writer projects and draws it (::MAP).
 SELECT 'Map'::TAB;
 
 SELECT 'World'::SUBTAB;
 SELECT 12::COL;
 SELECT ST_AsText(geom) ::MAP,
-       ln(POP_EST + 1) ::BARCHART,          -- fill = log population
+       POP_EST AS "Population" ::BARCHART,  -- fill = population (legend title)
+       'quantile 5'::CLASSES,               -- five classes of equal size
        NAME ::LABEL,                        -- hover tooltip
-       'World population by country — Natural Earth'::TITLE
+       'Where do most people live?'::TITLE
 FROM ST_Read('countries.geojson')
 WHERE NAME <> 'Antarctica';
 
@@ -299,7 +300,7 @@ SELECT 12::COL;
 -- Quake points coloured by magnitude, semi-transparent (::ALPHA) so overlaps
 -- read as density, over a grey country basemap. The two layers ride in disjoint
 -- rows: quakes fill ::MAP, countries fill ::BASEMAP.
-SELECT ST_AsText(geom) ::MAP, mag ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+SELECT ST_AsText(geom) ::MAP, mag AS "Magnitude" ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'USGS earthquakes (M≥2.5, past 30 days) — colour = magnitude'::TITLE
 FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
 UNION ALL
@@ -333,14 +334,14 @@ SELECT 'Two **linked maps** rendered from real GeoJSON (DuckDB''s spatial extens
 
 -- LEFT: world, filled by onshore-quake count per country. Click a country.
 SELECT 6::COL;
-SELECT c.wkt ::MAP, count(q.country) ::BARCHART, c.country ::LABEL,
+SELECT c.wkt ::MAP, count(q.country) AS "Earthquakes" ::BARCHART, c.country ::LABEL,
        'Quakes per country — click one'::TITLE
 FROM cgeo c LEFT JOIN qcty q ON q.country = c.country
 GROUP BY c.wkt, c.country;
 
 -- RIGHT: quakes inside the selected country (exact), semi-transparent, on a basemap.
 SELECT 6::COL;
-SELECT q.wkt ::MAP, q.mag ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+SELECT q.wkt ::MAP, q.mag AS "Magnitude" ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
        'Earthquakes in selection'::TITLE
 FROM qcty q
 WHERE getvariable('selected') = '' OR q.country = getvariable('selected')
@@ -7237,14 +7238,16 @@ async function runOnce(fresh = true) {
           } else {
             // a lone sparkline is a small strip; a ::DIAGRAM's are in its boxes
             const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM");
-            const ph = boxH || (spark ? 90 : 300); // ::HEIGHT, else default
             const isMap = s.roles.some((r) => r[1] === "MAP");
+            // a map without ::HEIGHT takes the height its shape needs
+            const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
+            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100)) : 300); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
-            const rw = isMap || spark ? 460 : Math.max(300, span * 100);
+            const rw = spark ? 460 : Math.max(300, span * 100);
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
@@ -7253,7 +7256,7 @@ async function runOnce(fresh = true) {
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
-            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap };
+            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap, mapAr };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -7790,7 +7793,7 @@ function fitCharts(watch = false) {
       holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
       widenDiagram(holder, w, (ww) => render_contract(dp.contract.macro, dp.rows, dp.contract.args, ww, dp.ph, renderCtx()));
     }
-    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
+    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph, holder._zoom || "");
     changed = true;
   });
   return changed;
@@ -11386,8 +11389,25 @@ function zoomFromShared(sv, aspect) {
 // ::SYNC_ZOOM group a zoom, pan or reset of one map is applied to every other
 // map of the group, and a map that joins later (a re-run) takes the group's
 // current view.
+// A map's height / width as drawn (its projected box), 0 when unknown.
+function mapAspect(rowsJson, roles) {
+  try {
+    const [x0, x1, y0, y1] = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), 0, 0));
+    const ar = (y1 - y0) / (x1 - x0);
+    return Number.isFinite(ar) && ar > 0 ? ar : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+// The height a map of aspect `ar` needs at render width `w` (its margin and a
+// little room for the legend), within sensible bounds.
+function mapHeight(ar, w) {
+  return Math.round(Math.min(Math.max(w * ar * 1.1, 220), Math.max(320, w * 1.1), 640));
+}
+
 function attachMapZoom(holder, rowsJson, roles, ph) {
   const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
+  const H = () => holder.querySelector("svg")?.viewBox.baseVal.height || ph; // … and its height
   let view = null; // {x0,x1,y0,y1} in projected units; null = auto-fit
   let raf = 0;
   const gr = roles.find((r) => r[1] === "SYNC_ZOOM");
@@ -11406,12 +11426,12 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   const fit = () => {
     let b;
     try {
-      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), W(), ph));
+      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), W(), H()));
     } catch (_) {
       b = [];
     }
     if (b.length !== 4) return { x0: -180, x1: 180, y0: -90, y1: 90 };
-    const aspect = W() / ph;
+    const aspect = W() / H();
     let [x0, x1, y0, y1] = b;
     const w = x1 - x0,
       h = y1 - y0;
@@ -11434,7 +11454,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
-      renderChart(holder, rowsJson, roles, W(), ph, zoom);
+      renderChart(holder, rowsJson, roles, W(), H(), zoom);
       wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
     });
   };
@@ -11500,7 +11520,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   });
   if (group) {
     holder._dpZoomTo = (sv) => {
-      view = zoomFromShared(sv, W() / ph);
+      view = zoomFromShared(sv, W() / H());
       draw();
     };
     group.members.add(holder);
