@@ -2,7 +2,8 @@
 // Tab into a chart, walk its marks with the arrow keys, Enter selects (the
 // dashboard re-runs and the focus comes back), Esc leaves; every chart SVG has
 // a summary; "Charts as tables" swaps each chart for a table. With axe-core on
-// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard. A
+// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard and on
+// Explore data (a table's cards, a chart preview, a query result). A
 // ::STORY chart's first step must light some marks, dim the rest and draw
 // its connector.
 //
@@ -346,6 +347,33 @@ if (axe && existsSync(axe)) {
   for (const v of res.violations) console.log(`axe ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help}`);
   const bad = res.violations.filter((v) => /^(aria-|svg-img-alt|role-img-alt|nested-interactive|button-name)/.test(v.id));
   if (bad.length) fail(`axe: ${bad.map((v) => v.id).join(", ")}`);
+  // Explore data (#97): the catalog, a table's column cards, a chart preview
+  // and a query result, keyboard-reachable and labelled — in light and dark.
+  for (const scheme of ["light", "dark"]) {
+    const xp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, colorScheme: scheme, reducedMotion: "reduce" });
+    xp.on("pageerror", (e) => errs.push(String(e)));
+    await xp.goto(`${base}?dashboard=${encodeURIComponent("Period & KPIs")}`);
+    await xp.waitForFunction(() => document.querySelector(".dash .panel") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+    await xp.click("#side-explore");
+    await xp.waitForSelector('.cat-table[data-fq$=\'"shop"\']');
+    // keyboard: the table is a button in the catalog list
+    await xp.focus('.cat-table[data-fq$=\'"shop"\']');
+    await xp.keyboard.press("Enter");
+    await xp.waitForFunction(() => document.querySelector(".xp-progress.done") && !document.querySelector("#xq-detail[aria-busy]"), null, { timeout: 120000 });
+    await xp.focus('.xp-card[data-col="orders"] .xp-chartbtn');
+    await xp.keyboard.press("Enter");
+    await xp.waitForSelector(".xp-chart-svg > svg[aria-label]", { timeout: 60000 });
+    if (!(await xp.evaluate(() => document.activeElement?.closest(".xp-chart")))) fail("explore: the chart preview does not take the focus");
+    await xp.click("#xq-run");
+    await xp.waitForSelector("#xq-tools button", { timeout: 60000 });
+    await xp.addScriptTag({ path: axe });
+    const xres = await xp.evaluate(async () => window.axe.run("#explore", { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }));
+    for (const v of xres.violations) console.log(`axe explore ${scheme} ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help} — ${v.nodes[0]?.target}`);
+    const xbad = xres.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+    if (xbad.length) fail(`axe explore ${scheme}: ${xbad.map((v) => v.id).join(", ")}`);
+    else console.log(`axe explore ${scheme}: ${xres.passes.length} rules pass, no serious violation`);
+    await xp.close();
+  }
 } else console.log("axe-core not given (--axe): skipped");
 if (errs.length) fail("page errors: " + errs.join(" | "));
 await browser.close();

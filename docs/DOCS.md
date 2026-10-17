@@ -1918,6 +1918,38 @@ request needs. See [`secure-serving.md`](secure-serving.md).
 The UI **auto-detects**: if a `/query` bridge answers it uses live DuckDB,
 otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
 
+#### Explore data
+
+**🔍 Explore data** (sidebar) works on either engine:
+
+- **Catalog**: every table, view and added file with its row and column
+  counts. Add a CSV / Parquet / JSON file (pick or drop it; in the browser
+  engine) or an `https://` address — each becomes a view. The last table you
+  picked comes back next time (per browser).
+- **A table at a glance**: one card per column — type, empty %, distinct
+  values, a mini histogram (numbers), the top values (text), the first / last
+  date and rows per day / week / month (dates), min / p05 / median / mean /
+  p95 / max, and data-quality hints (mostly empty, constant, mixed numbers and
+  text, extreme values, repeated keys). Above 200,000 rows it profiles a
+  100,000-row sample and says so. Picking another table cancels the running
+  profile. Below the cards: likely joins (same-named keys whose values match)
+  and the rows in the `::PAGED` table.
+- **Chart this** on a card previews a histogram, box plot, top-value bars, a
+  line over time or a scatter; **Add to dashboard** appends its annotated SQL
+  to the dashboard editor. **New dashboard from this table** writes a starter
+  dashboard: KPI tiles, the data's latest date (`::ASOF`), a `::PERIOD` and a
+  `::BUTTONS` / `::DROPDOWN` filter, a line over time, top-N bars, the main
+  measure's distribution and the paged rows.
+- **Queries**: the SQL box highlights, completes `::` roles, runs on
+  Ctrl/⌘+Enter, keeps your recent queries and shows errors at their line and
+  column. A result shows its rows and time, downloads as CSV / Excel /
+  Parquet (Parquet in the browser engine), and **Chart this result** picks a
+  chart for it. A click on a column name inserts it; a click on a top value
+  adds a `WHERE`.
+
+A locked server (`serve --dashboards`, `anofox_serve_dashboards`) has no
+Explore page.
+
 ### c) DuckDB extension — launch the UI *from a DuckDB session*
 
 The `anofox-visualization` C-API extension (in `duckext/`) adds

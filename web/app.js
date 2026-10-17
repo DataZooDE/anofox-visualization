@@ -20,6 +20,7 @@ import init, {
   threshold_rules,
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
+import * as xp from "./explore.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1412,15 +1413,7 @@ async function boot() {
   $("mode-edit").onclick = () => setMode("edit");
   $("mode-view").onclick = () => setMode("view");
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
-  $("cat-refresh").onclick = loadCatalog;
-  $("cat-search").oninput = () => filterCatalog($("cat-search").value);
-  $("xq-run").onclick = runExplore;
-  $("xq-sql").addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      runExplore();
-    }
-  });
+  wireExplore();
   // URL params — for embedding / theming:
   //   ?embed=1        hide the header + sidebar + toolbar (dashboard only)
   //   ?primary=RRGGBB brand accent colour (UI + chart primary)
@@ -2001,6 +1994,7 @@ function bodyMode() {
   return c.contains("mode-explore") ? "explore" : c.contains("mode-view") ? "view" : "edit";
 }
 function setMode(m) {
+  if (m === "explore" && servedMode) m = "view"; // a locked server never exposes Explore (no SQL endpoint)
   document.body.classList.remove("mode-view", "mode-explore");
   if (m === "view") document.body.classList.add("mode-view");
   else if (m === "explore") document.body.classList.add("mode-explore");
@@ -2011,162 +2005,1104 @@ function setMode(m) {
   if (m === "explore") loadCatalog();
 }
 
-// ---- Data exploration: catalog browser + table preview + column stats ----
-const qid = (s) => `"${String(s).replace(/"/g, '""')}"`;
+// ---- Explore data (#97): catalog, column cards, charts, starter dashboards ----
+// The SQL and the models live in web/explore.js (pure, unit-tested); this is
+// the page around them. Nothing runs while typing (the catalog filter only
+// hides entries; queries run on Run, a click or a pick), and every pick or Run
+// carries a token: a newer one supersedes it, and the old work stops before
+// its next query.
+const qid = xp.qid;
 const fqn = (db, sc, t) => `${qid(db)}.${qid(sc)}.${qid(t)}`;
+const XP_LAST = "dp_explore_last"; // the last picked table (per viewer)
+const XP_HIST = "dp_explore_hist"; // recent queries (per viewer)
+const xpState = {
+  tok: 0, // the table pick in progress
+  qtok: 0, // the query run in progress
+  cur: null, // the picked table {db, sc, t, fq, kind, n, cols}
+  tables: [],
+  cols: null, // fq -> [{name, kind}] of every table (for the joins), loaded once per catalog
+  files: new Set(), // fq of the views over added files
+  charts: [], // [{holder, sql}] previews to redraw when light/dark changes
+};
+const lsGet = (k, d) => {
+  try {
+    const v = localStorage.getItem(k);
+    return v == null ? d : JSON.parse(v);
+  } catch (_) {
+    return d;
+  }
+};
+const lsSet = (k, v) => {
+  try {
+    localStorage.setItem(k, JSON.stringify(v));
+  } catch (_) {}
+};
+const xpRows = async (sql) => JSON.parse(await runSql(sql));
+const xpHist = () => {
+  const h = lsGet(XP_HIST, []);
+  return Array.isArray(h) ? h.filter((x) => typeof x === "string") : [];
+};
+const xpEl = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+const xpBtn = (label, cls, onclick, aria) => {
+  const b = xpEl("button", cls, label);
+  b.type = "button";
+  if (aria) b.setAttribute("aria-label", aria);
+  b.onclick = onclick;
+  return b;
+};
+let xpUid = 0;
+
+function wireExplore() {
+  $("cat-refresh").onclick = loadCatalog;
+  $("cat-search").oninput = () => filterCatalog($("cat-search").value);
+  $("xq-run").onclick = runExplore;
+  const ta = $("xq-sql");
+  ta.addEventListener("input", () => {
+    xqHL();
+    xqComplete();
+  });
+  ta.addEventListener("scroll", () => {
+    $("xq-hl").scrollTop = ta.scrollTop;
+    $("xq-hl").scrollLeft = ta.scrollLeft;
+  });
+  ta.addEventListener("keydown", xqKey);
+  ta.addEventListener("blur", () => setTimeout(() => xqCloseAc(), 150));
+  $("xq-hist").onchange = () => {
+    const v = $("xq-hist").value;
+    if (v !== "") setXqSql(xpHist()[Number(v)] || "");
+    $("xq-hist").value = "";
+    ta.focus();
+  };
+  xqHistory();
+  xqHL();
+  // Files: pick, drop or a URL (each becomes a view to explore).
+  $("cat-file").onclick = () => $("cat-file-input").click();
+  $("cat-file-input").onchange = () => {
+    xpAddFiles([...$("cat-file-input").files]);
+    $("cat-file-input").value = "";
+  };
+  const cat = $("cat");
+  cat.addEventListener("dragover", (e) => {
+    if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+    e.preventDefault();
+    cat.classList.add("drop");
+  });
+  cat.addEventListener("dragleave", (e) => {
+    if (!cat.contains(e.relatedTarget)) cat.classList.remove("drop");
+  });
+  cat.addEventListener("drop", (e) => {
+    e.preventDefault();
+    cat.classList.remove("drop");
+    xpAddFiles([...(e.dataTransfer?.files || [])]);
+  });
+  $("cat-url-form").onsubmit = (e) => {
+    e.preventDefault();
+    xpAddUrl($("cat-url").value.trim());
+  };
+  // The chart previews follow the viewer's light/dark switch.
+  let dark = document.body.classList.contains("dark");
+  new MutationObserver(() => {
+    const d = document.body.classList.contains("dark");
+    if (d === dark) return;
+    dark = d;
+    xpState.charts = xpState.charts.filter((c) => c.holder.isConnected);
+    for (const c of xpState.charts) xpDrawChart(c.holder, c.sql).catch(() => {});
+  }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+}
+
+// ---- catalog ----
 async function loadCatalog() {
   const tree = $("cat-tree");
-  tree.innerHTML = '<div class="cat-empty">Loading…</div>';
+  tree.setAttribute("aria-busy", "true");
+  if (!xpState.tables.length) tree.innerHTML = '<div class="cat-empty">Loading…</div>';
   let rows;
   try {
-    rows = JSON.parse(
-      await runSql(
-        "SELECT database_name, schema_name, table_name FROM duckdb_tables() " +
-          "UNION ALL SELECT database_name, schema_name, view_name FROM duckdb_views() " +
-          "WHERE NOT internal ORDER BY 1,2,3"
-      )
-    );
+    rows = await xpRows(xp.CATALOG_SQL);
   } catch (_) {
     try {
-      rows = JSON.parse(
-        await runSql(
-          "SELECT table_catalog AS database_name, table_schema AS schema_name, table_name FROM information_schema.tables ORDER BY 1,2,3"
-        )
+      rows = await xpRows(
+        "SELECT table_catalog AS database_name, table_schema AS schema_name, table_name, " +
+          "CASE WHEN table_type = 'VIEW' THEN 'view' ELSE 'table' END AS kind, NULL AS n, NULL AS cols " +
+          "FROM information_schema.tables ORDER BY 1, 2, 3"
       );
     } catch (e) {
+      tree.removeAttribute("aria-busy");
       tree.innerHTML = `<div class="cat-empty">${escapeHtml(String(e))}</div>`;
       return;
     }
   }
-  if (!rows.length) {
-    tree.innerHTML = '<div class="cat-empty">No tables yet. Create one in Edit mode, or connect MotherDuck.</div>';
+  xpState.tables = rows.map((r) => {
+    const fq = fqn(r.database_name, r.schema_name, r.table_name);
+    return { db: r.database_name, sc: r.schema_name, t: r.table_name, fq, kind: xpState.files.has(fq) ? "file" : r.kind, n: r.n, cols: r.cols };
+  });
+  xpState.cols = null;
+  renderCatalog();
+  // Pick the last table again (once per visit: not over the one shown).
+  const last = lsGet(XP_LAST, null);
+  const e = last && xpState.tables.find((x) => x.fq === last);
+  if (e && (!xpState.cur || !$("xq-detail").childElementCount)) previewTable(e);
+}
+function renderCatalog() {
+  const tree = $("cat-tree");
+  tree.removeAttribute("aria-busy");
+  if (!xpState.tables.length) {
+    tree.innerHTML = '<div class="cat-empty">No tables yet. Add a file below, create one in Edit mode, or connect MotherDuck.</div>';
     return;
   }
-  const groups = {};
-  for (const r of rows) {
-    const db = r.database_name,
-      sc = r.schema_name,
-      t = r.table_name;
-    (groups[db] ??= {})[sc] ??= [];
-    groups[db][sc].push(t);
-  }
   tree.innerHTML = "";
-  for (const db of Object.keys(groups)) {
-    const dn = document.createElement("div");
-    dn.className = "cat-node cat-db";
-    dn.textContent = "🗄 " + db;
-    tree.appendChild(dn);
-    for (const sc of Object.keys(groups[db])) {
-      const sn = document.createElement("div");
-      sn.className = "cat-node cat-schema";
-      sn.textContent = sc;
-      tree.appendChild(sn);
-      for (const t of groups[db][sc]) {
-        const tn = document.createElement("div");
-        tn.className = "cat-node cat-table";
-        tn.textContent = t;
-        tn.dataset.fq = fqn(db, sc, t);
-        tn.onclick = () => previewTable(db, sc, t, tn);
-        tree.appendChild(tn);
+  const groups = {};
+  for (const e of xpState.tables) ((groups[e.db] ??= {})[e.sc] ??= []).push(e);
+  const KIND = { table: ["▦", "table"], view: ["◇", "view"], file: ["▤", "file"] };
+  for (const dbn of Object.keys(groups)) {
+    tree.appendChild(xpEl("div", "cat-node cat-db", dbn));
+    for (const sc of Object.keys(groups[dbn])) {
+      tree.appendChild(xpEl("div", "cat-node cat-schema", sc));
+      const ul = xpEl("ul", "cat-list");
+      ul.setAttribute("aria-label", `${dbn}.${sc}`);
+      for (const e of groups[dbn][sc]) {
+        const [icon, word] = KIND[e.kind] || KIND.table;
+        const n = e.n != null && e.kind === "table" ? Number(e.n) : null;
+        const meta = [n != null ? xp.fmtCount(n) : "", e.cols != null ? `${e.cols} col` : ""].filter(Boolean).join(" · ");
+        const b = xpBtn("", "cat-node cat-table", () => previewTable(e));
+        b.dataset.fq = e.fq;
+        b.innerHTML = `<span class="cat-ico" aria-hidden="true">${icon}</span><span class="cat-name">${escapeHtml(e.t)}</span><span class="cat-meta" aria-hidden="true">${escapeHtml(meta)}</span>`;
+        const full = [word, n != null ? `${n.toLocaleString("en-US")} rows` : "", e.cols != null ? `${e.cols} columns` : ""].filter(Boolean).join(", ");
+        b.setAttribute("aria-label", `${e.t}, ${full}`);
+        b.title = `${e.t} — ${full}`;
+        if (xpState.cur && xpState.cur.fq === e.fq) {
+          b.classList.add("active");
+          b.setAttribute("aria-current", "true");
+        }
+        const li = xpEl("li");
+        li.appendChild(b);
+        ul.appendChild(li);
       }
+      tree.appendChild(ul);
     }
   }
+  filterCatalog($("cat-search").value);
 }
 function filterCatalog(q) {
   q = q.trim().toLowerCase();
   const tree = $("cat-tree");
-  tree.querySelectorAll(".cat-table").forEach((tn) => {
-    tn.style.display = !q || tn.textContent.toLowerCase().includes(q) ? "" : "none";
-  });
-  tree.querySelectorAll(".cat-schema").forEach((sn) => {
-    let any = false;
-    for (let el = sn.nextElementSibling; el && el.classList.contains("cat-table"); el = el.nextElementSibling)
-      if (el.style.display !== "none") any = true;
-    sn.style.display = any ? "" : "none";
+  tree.querySelectorAll(".cat-table").forEach((b) => (b.parentElement.style.display = !q || b.querySelector(".cat-name").textContent.toLowerCase().includes(q) ? "" : "none"));
+  tree.querySelectorAll(".cat-list").forEach((ul) => {
+    const any = [...ul.children].some((li) => li.style.display !== "none");
+    ul.style.display = any ? "" : "none";
+    ul.previousElementSibling.style.display = any ? "" : "none";
   });
   tree.querySelectorAll(".cat-db").forEach((dn) => {
     let any = false;
     for (let el = dn.nextElementSibling; el && !el.classList.contains("cat-db"); el = el.nextElementSibling)
-      if (el.classList.contains("cat-table") && el.style.display !== "none") any = true;
+      if (el.classList.contains("cat-list") && el.style.display !== "none") any = true;
     dn.style.display = any ? "" : "none";
   });
 }
-// Run whatever is in the explore SQL editor and show the result table.
-async function runExplore() {
-  $("xq-detail").innerHTML = ""; // a manual query clears the table-stats card
-  await renderExploreResult($("xq-sql").value.trim());
+
+// Add files (DuckDB-Wasm: registered with the engine) or an https URL as views.
+function catMsg(t, err = false) {
+  const m = $("cat-msg");
+  m.textContent = t;
+  m.classList.toggle("err", err);
 }
-async function renderExploreResult(sql) {
-  const info = $("xq-info"),
-    res = $("xq-results");
-  if (!sql) {
-    res.innerHTML = '<div class="explore-empty">Pick a table on the left, or write a query above and Run.</div>';
-    info.textContent = "";
+async function xpAddFiles(files) {
+  if (!files.length) return;
+  if (backend === "live" || !db) {
+    catMsg("A file is added in the in-browser engine. On a live DuckDB, query it by its path: SELECT * FROM 'data.csv'.", true);
     return;
   }
-  info.textContent = "Running…";
-  res.innerHTML = "";
-  try {
-    const rows = JSON.parse(await runSql(sql));
-    info.textContent = `${rows.length.toLocaleString()} row${rows.length === 1 ? "" : "s"}`;
-    res.appendChild(renderTable(rows));
-  } catch (e) {
-    info.textContent = "";
-    res.innerHTML = `<div class="err">${escapeHtml(String(e))}</div>`;
-  }
-}
-async function previewTable(db, sc, t, node) {
-  document.querySelectorAll(".cat-table").forEach((el) => el.classList.toggle("active", el === node));
-  const fq = fqn(db, sc, t);
-  const path = `${escapeHtml(db)}.${escapeHtml(sc)}`;
-  $("xq-sql").value = `SELECT * FROM ${fq} LIMIT 100`;
-  const detail = $("xq-detail");
-  detail.innerHTML = '<div class="explore-empty">Loading…</div>';
-  renderExploreResult(`SELECT * FROM ${fq} LIMIT 100`);
-  try {
-    const stats = JSON.parse(await runSql(`SUMMARIZE FROM ${fq}`));
-    let total = null;
+  let lastFq = null;
+  for (const f of files) {
+    const { view, reader } = xp.fileView(f.name);
+    if (!reader) {
+      catMsg(`${f.name}: not a CSV, Parquet or JSON file`, true);
+      continue;
+    }
+    const path = `explore/${f.name}`;
     try {
-      total = Number(JSON.parse(await runSql(`SELECT count(*) AS n FROM ${fq}`))[0].n);
-    } catch (_) {}
-    detail.innerHTML = "";
-    const h = document.createElement("div");
-    h.className = "explore-head";
-    const meta = `${total != null ? total.toLocaleString() + " rows" : ""} · ${stats.length} columns`;
-    h.innerHTML = `<div><h3>${escapeHtml(t)}</h3><div class="explore-sub">${path} — ${meta}</div></div>`;
-    const open = document.createElement("button");
-    open.className = "btn2";
-    open.textContent = "＋ New dashboard from this table";
-    open.onclick = () =>
-      openTableAsDashboard(
-        t,
-        fq,
-        stats.map((r) => r.column_name)
-      );
-    h.appendChild(open);
-    detail.appendChild(h);
-    const sec = document.createElement("div");
-    sec.className = "explore-sec";
-    sec.textContent = `Columns (${stats.length})`;
-    detail.appendChild(sec);
-    detail.appendChild(renderTable(stats));
+      catMsg(`Reading ${f.name}…`);
+      try {
+        await db.registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
+      } catch (_) {
+        await db.registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
+      }
+      await runSql(xp.fileViewSql(view, reader, path));
+      lastFq = fqn("memory", "main", view);
+      xpState.files.add(lastFq);
+      catMsg(`Added ${f.name} as the view ${view}.`);
+    } catch (e) {
+      catMsg(`${f.name}: ${shortError(e)}`, true);
+    }
+  }
+  if (lastFq) await xpShowNew(lastFq);
+}
+async function xpAddUrl(url) {
+  if (!/^https:\/\/[^\s'"]+$/i.test(url)) return catMsg("Enter an https:// address of a CSV, Parquet or JSON file.", true);
+  const { view, reader } = xp.fileView(new URL(url).pathname);
+  catMsg("Opening…");
+  try {
+    await runSql(xp.fileViewSql(view, reader || "read_csv_auto", url));
+    const fq = fqn("memory", "main", view);
+    xpState.files.add(fq);
+    catMsg(`Added the view ${view}.`);
+    $("cat-url").value = "";
+    await xpShowNew(fq);
   } catch (e) {
-    detail.innerHTML = `<div class="err">${escapeHtml(String(e))}</div>`;
+    catMsg(`${shortError(e)} (the server must allow cross-origin reads)`, true);
   }
 }
-// Explore → build: prewrite a paged dashboard querying the picked table.
-function openTableAsDashboard(name, fq, colNames) {
-  const cols = (colNames || []).filter(Boolean);
-  let sql;
-  if (cols.length) {
-    const items = cols.map((c, i) => (i === cols.length - 1 ? `${qid(c)} ::PAGED` : qid(c))).join(", ");
-    sql = `-- Paged view of ${fq}\nSELECT ${items} FROM ${fq};`;
-  } else {
-    sql = `SELECT * FROM ${fq} LIMIT 100 ::TABLE;`;
+async function xpShowNew(fq) {
+  await loadCatalog();
+  const e = xpState.tables.find((x) => x.fq === fq) || xpState.tables.find((x) => x.t === fq.split(".").pop().replace(/"/g, ""));
+  if (e) previewTable(e);
+}
+
+// ---- a table: header, column cards, likely joins, the paged rows ----
+async function previewTable(e) {
+  const tok = ++xpState.tok;
+  const alive = () => tok === xpState.tok;
+  xpState.cur = e;
+  lsSet(XP_LAST, e.fq);
+  document.querySelectorAll(".cat-table").forEach((b) => {
+    const on = b.dataset.fq === e.fq;
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "true");
+    else b.removeAttribute("aria-current");
+  });
+  setXqSql(`SELECT * FROM ${e.fq}\nLIMIT 100`);
+  xqClearResult();
+  const detail = $("xq-detail");
+  detail.innerHTML = "";
+  detail.setAttribute("aria-busy", "true");
+  const head = xpEl("div", "explore-head");
+  const left = xpEl("div");
+  const h = xpEl("h2", "xp-h", e.t);
+  h.tabIndex = -1;
+  const sub = xpEl("div", "explore-sub", `${e.db}.${e.sc} · ${e.kind === "file" ? "file" : e.kind}`);
+  const prog = xpEl("div", "xp-progress", "Counting rows…");
+  prog.setAttribute("role", "status");
+  left.append(h, sub, prog);
+  const acts = xpEl("div", "xp-acts");
+  const mk = xpBtn("＋ New dashboard from this table", "", () => openTableAsDashboard(e, xpState.cards || []));
+  mk.disabled = true;
+  mk.title = "A starter dashboard: KPIs, filters, a chart per kind of column and the rows";
+  acts.append(mk);
+  head.append(left, acts);
+  const chartSlot = xpEl("div", "xp-chart-slot");
+  const colsSec = xpEl("section", "xp-sec");
+  const colsH = xpEl("h3", "explore-sec", "Columns");
+  colsH.id = "xp-cols-h";
+  const cards = xpEl("ul", "xp-cards");
+  cards.setAttribute("aria-labelledby", "xp-cols-h");
+  colsSec.append(colsH, cards);
+  const joinSec = xpEl("section", "xp-sec xp-joins");
+  joinSec.hidden = true;
+  const rowsSec = xpEl("section", "xp-sec");
+  const rowsH = xpEl("h3", "explore-sec", "Rows");
+  const fig = xpEl("figure", "panel xp-rows");
+  const rowsBox = xpEl("div");
+  fig.appendChild(rowsBox);
+  rowsSec.append(rowsH, fig);
+  detail.append(head, chartSlot, colsSec, joinSec, rowsSec);
+  xpState.cards = null;
+  xpPaged(rowsBox, `SELECT * FROM ${e.fq}`, e.t, null, !(e.n != null && Number(e.n) <= xp.SAMPLE_OVER));
+  const paint = (stage, st) => {
+    if (!alive()) return;
+    xpState.cards = st.cards;
+    const total = Number(st.total) || 0;
+    const words = {
+      columns: `${st.cards.length} columns · counting values…`,
+      stats: "Building distributions…",
+      dist: "Percentiles and date ranges…",
+      extras: "Rows over time…",
+      done: !total
+        ? "The table is empty."
+        : st.sampled
+          ? `Profiled on a sample of ${xp.SAMPLE_ROWS.toLocaleString("en-US")} of ${xp.fmtCount(total)} rows.`
+          : `Profiled all ${total.toLocaleString("en-US")} rows.`,
+    };
+    sub.textContent = `${e.db}.${e.sc} · ${e.kind} · ${total.toLocaleString("en-US")} rows · ${st.cards.length} columns`;
+    prog.textContent = words[stage] || "";
+    prog.classList.toggle("done", stage === "done");
+    colsH.textContent = `Columns (${st.cards.length})`;
+    xpPaintCards(cards, st.cards, e, chartSlot);
+  };
+  try {
+    await xp.profileTable(xpRows, page_sql, e.fq, { alive, onStage: paint });
+  } catch (err) {
+    if (err && err.name === "Superseded") return;
+    if (!alive()) return;
+    prog.textContent = "";
+    detail.removeAttribute("aria-busy");
+    colsSec.appendChild(mkErrorBody(err, ""));
+    return;
   }
+  if (!alive()) return;
+  detail.removeAttribute("aria-busy");
+  mk.disabled = false;
+  xpJoins(e, xpState.cards, joinSec, alive).catch(() => {});
+}
+
+// The cards, rebuilt per profile stage; the focus stays on the same control.
+function xpPaintCards(ul, cards, e, chartSlot) {
+  const act = document.activeElement;
+  let keep = null;
+  if (act && ul.contains(act)) {
+    const li = act.closest(".xp-card");
+    const cls = [...act.classList].find((c) => c.startsWith("xp-"));
+    keep = { col: li.dataset.col, cls, idx: [...li.querySelectorAll("." + cls)].indexOf(act) };
+  }
+  ul.replaceChildren(...cards.map((c) => xpCard(c, cards, e, chartSlot)));
+  if (keep) {
+    const li = [...ul.children].find((x) => x.dataset.col === keep.col);
+    const el = li && li.querySelectorAll("." + keep.cls)[keep.idx];
+    if (el) el.focus();
+  }
+}
+
+const KIND_WORD = { num: "number", date: "date", time: "timestamp", bool: "yes / no", text: "text", other: "other" };
+function xpCard(c, cards, e, chartSlot) {
+  const li = xpEl("li", "xp-card" + (c.pending ? " pending" : ""));
+  li.dataset.col = c.name;
+  li.dataset.kind = c.kind;
+  const head = xpEl("div", "xp-card-head");
+  const h = xpEl("h4");
+  h.appendChild(xpBtn(c.name, "xp-col", () => xqInsert(qid(c.name)), `${c.name}: insert into the query`));
+  const ty = xpEl("span", "xp-type", c.type);
+  ty.title = KIND_WORD[c.kind];
+  head.append(h, ty);
+  li.appendChild(head);
+  if (c.pending) {
+    const sk = xpEl("div", "xp-skel");
+    sk.setAttribute("aria-hidden", "true");
+    li.appendChild(sk);
+    return li;
+  }
+  const dist = c.distinct != null ? `${c.distinct > 1000 ? "≈ " : ""}${xp.fmtStat(c.distinct)} distinct` : "";
+  li.appendChild(xpEl("div", "xp-meta", [`${xp.fmtStat(c.nullPct, 2)}% empty`, dist].filter(Boolean).join(" · ")));
+  const viz = xpMini(c);
+  if (viz) li.appendChild(viz);
+  // the most common values: a click filters the query to one
+  if (c.top && c.top.length && c.kind !== "num") {
+    const ul = xpEl("ul", "xp-top");
+    ul.setAttribute("aria-label", `Most common values of ${c.name}`);
+    const max = Math.max(...c.top.map((t) => t.n), 1);
+    for (const t of c.top) {
+      const pct = c.nonnull ? (100 * t.n) / c.nonnull : 0;
+      const b = xpBtn("", "xp-val", () => xqFilter(e, c, t.v), `Filter the query to ${c.name} = ${t.v} (${t.n.toLocaleString("en-US")} rows, ${xp.fmtStat(pct, 2)}%)`);
+      b.style.setProperty("--w", `${Math.max(2, (100 * t.n) / max)}%`);
+      b.innerHTML = `<span class="xp-val-v">${escapeHtml(t.v)}</span><span class="xp-val-n">${escapeHtml(xp.fmtStat(t.n))}</span>`;
+      b.title = `${t.v}: ${t.n.toLocaleString("en-US")} rows — click to filter the query`;
+      const it = xpEl("li");
+      it.appendChild(b);
+      ul.appendChild(it);
+    }
+    li.appendChild(ul);
+  }
+  const stats =
+    c.kind === "num"
+      ? [["min", c.min], ["p05", c.p05], ["median", c.median], ["mean", c.mean], ["p95", c.p95], ["max", c.max]].map(([k, v]) => [k, xp.fmtStat(v)])
+      : c.kind === "date" || c.kind === "time"
+        ? [["first", c.tmin || "–"], ["last", c.tmax || "–"]]
+        : [];
+  if (stats.length) {
+    const dl = xpEl("dl", "xp-stats");
+    for (const [k, v] of stats) {
+      const d = xpEl("div");
+      d.append(xpEl("dt", "", k), xpEl("dd", "", String(v)));
+      dl.appendChild(d);
+    }
+    li.appendChild(dl);
+  }
+  if (c.hints && c.hints.length) {
+    const ul = xpEl("ul", "xp-hints");
+    ul.setAttribute("aria-label", "Data-quality hints");
+    for (const hn of c.hints) {
+      const it = xpEl("li", "xp-hint", hn.text);
+      it.dataset.code = hn.code;
+      ul.appendChild(it);
+    }
+    li.appendChild(ul);
+  }
+  const choices = xp.chartChoices(c, cards);
+  if (choices.length) li.appendChild(xpBtn("Chart this", "btn2 xp-chartbtn", () => xpColumnChart(c, cards, e, chartSlot), `Chart ${c.name}`));
+  return li;
+}
+
+// A card's mini chart: a 10-bin histogram of a measure, or rows over time.
+const SVGNS = "http://www.w3.org/2000/svg";
+function xpMini(c) {
+  const W = 200,
+    H = 40;
+  let bars = null,
+    label = "";
+  if (c.kind === "num" && c.hist && c.hist.some((n) => n > 0) && c.min != null) {
+    bars = c.hist;
+    const k = bars.indexOf(Math.max(...bars));
+    const w = (c.max - c.min) / 10;
+    label = `Histogram of ${c.name} from ${xp.fmtStat(c.min)} to ${xp.fmtStat(c.max)}; most values between ${xp.fmtStat(c.min + k * w)} and ${xp.fmtStat(c.min + (k + 1) * w)}.`;
+  } else if ((c.kind === "date" || c.kind === "time") && c.series && c.series.length) {
+    const s = c.series;
+    const top = s.reduce((a, b) => (b.n > a.n ? b : a));
+    label = `Rows per ${c.grain} from ${s[0].b} to ${s[s.length - 1].b}; most in ${top.b} (${top.n.toLocaleString("en-US")}).`;
+    if (s.length < 3) bars = s.map((x) => x.n);
+    else {
+      const max = Math.max(...s.map((x) => x.n), 1);
+      const pts = s.map((x, i) => `${((i / (s.length - 1)) * (W - 2) + 1).toFixed(1)},${(H - 2 - (x.n / max) * (H - 4)).toFixed(1)}`).join(" ");
+      const svg = document.createElementNS(SVGNS, "svg");
+      svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.setAttribute("class", "xp-mini");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", label);
+      svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
+      return svg;
+    }
+  }
+  if (!bars) return null;
+  const max = Math.max(...bars, 1);
+  const bw = W / bars.length;
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "xp-mini");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", label);
+  svg.innerHTML = bars
+    .map((n, i) => {
+      const h = n ? Math.max(1.5, (n / max) * (H - 2)) : 0;
+      return `<rect x="${(i * bw + 1).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="currentColor"/>`;
+    })
+    .join("");
+  return svg;
+}
+
+// ---- charts: a live preview of an annotated statement ----
+const xpCtx = () => JSON.stringify({ theme: "", variant: document.body.classList.contains("dark") ? "dark" : "light" });
+const CHART_ROLE = /^(BARCHART|LINECHART|AREACHART|SCATTER|HISTOGRAM|BOXPLOT)/;
+async function xpDrawChart(holder, sql) {
+  const s = JSON.parse(plan(sql)).find((x) => !x.setup);
+  if (!s) throw new Error("no chart statement");
+  const rowsJson = await runSql(s.sql);
+  const rows = JSON.parse(rowsJson);
+  const w = Math.round(Math.max(300, Math.min(960, holder.clientWidth || 640)));
+  holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), w, 300, xpCtx(), "");
+  const svg = holder.querySelector(":scope > svg");
+  const at = (name) => (s.roles.find((r) => r[1] === name) || [])[0];
+  const ti = at("TITLE");
+  const title = ti != null && rows[0] ? String(rows[0]["c" + ti] ?? "") : "";
+  const vr = s.roles.find((r) => CHART_ROLE.test(r[1]));
+  const kind = chartKind(s.roles);
+  let summary;
+  if (vr && /^(HISTOGRAM|BOXPLOT)/.test(vr[1])) {
+    const vals = rows.map((r) => Number(r["c" + vr[0]])).filter(Number.isFinite);
+    summary = `${kind}: ${title}; ${vals.length.toLocaleString("en-US")} values${vals.length ? ` from ${xp.fmtStat(Math.min(...vals))} to ${xp.fmtStat(Math.max(...vals))}` : ""}.`;
+  } else {
+    const xi = at("XAXIS"),
+      ci = at("CATEGORY");
+    const items = rows.slice(0, 500).map((r) => ({
+      series: ci != null ? r["c" + ci] : "",
+      x: xi != null ? String(r["c" + xi] ?? "") : "",
+      value: vr ? Number(r["c" + vr[0]]) : null,
+    }));
+    summary = chartSummary(kind, title, items);
+  }
+  if (svg) {
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", summary);
+  }
+  const reg = xpState.charts.find((c) => c.holder === holder);
+  if (reg) reg.sql = sql;
+  else xpState.charts.push({ holder, sql });
+  return { title, rows: rows.length };
+}
+
+// A chart preview panel: pickers (`controls`: [{key, label, options:
+// [{value, label}], value, when?(values)}]), the chart, its SQL and "Add to
+// dashboard".
+// `sqlFor(values)` writes the statement.
+function xpChartPanel(slot, heading, controls, sqlFor) {
+  slot.innerHTML = "";
+  const sec = xpEl("section", "panel xp-chart");
+  const hid = "xp-chart-h" + ++xpUid;
+  sec.setAttribute("aria-labelledby", hid);
+  const bar = xpEl("div", "xp-chart-bar");
+  const h = xpEl("h3", "", heading);
+  h.id = hid;
+  h.tabIndex = -1;
+  bar.appendChild(h);
+  const vals = {};
+  const labs = [];
+  for (const c of controls) {
+    if (!c.options.length) continue;
+    const lab = xpEl("label", "xp-pick");
+    lab.appendChild(xpEl("span", "", c.label));
+    const sel = xpEl("select");
+    for (const o of c.options) {
+      const op = xpEl("option", "", o.label);
+      op.value = o.value;
+      sel.appendChild(op);
+    }
+    sel.value = vals[c.key] = c.value ?? c.options[0].value;
+    sel.onchange = () => {
+      vals[c.key] = sel.value;
+      shown();
+      draw();
+    };
+    lab.appendChild(sel);
+    bar.appendChild(lab);
+    labs.push([lab, c]);
+  }
+  // a picker that only matters for some charts (`when`) hides for the others
+  const shown = () => labs.forEach(([lab, c]) => (lab.hidden = !!c.when && !c.when(vals)));
+  shown();
+  bar.appendChild(xpEl("span", "xp-flex"));
+  const add = xpBtn("＋ Add to dashboard", "", () => {
+    addToDashboard(cur, msg);
+  });
+  add.title = "Append this statement to the dashboard editor";
+  const close = xpBtn("✕", "btn2 icon", () => {
+    slot.innerHTML = "";
+  }, "Close the chart");
+  bar.append(add, close);
+  const tEl = xpEl("div", "panel-title xp-chart-title");
+  const holder = xpEl("div", "panel-svg xp-chart-svg");
+  const det = xpEl("details", "xp-sql");
+  det.appendChild(xpEl("summary", "", "SQL"));
+  const pre = xpEl("pre");
+  det.appendChild(pre);
+  const msg = xpEl("div", "xp-chart-msg");
+  msg.setAttribute("role", "status");
+  sec.append(bar, tEl, holder, det, msg);
+  slot.appendChild(sec);
+  let cur = "";
+  let seq = 0;
+  const draw = async () => {
+    const my = ++seq;
+    cur = sqlFor(vals);
+    pre.innerHTML = highlightSQL(cur);
+    msg.textContent = "Drawing…";
+    add.disabled = !cur;
+    if (!cur) {
+      holder.innerHTML = "";
+      tEl.textContent = "";
+      msg.textContent = "This chart needs another column.";
+      return;
+    }
+    try {
+      const r = await xpDrawChart(holder, cur);
+      if (my !== seq) return;
+      tEl.textContent = r.title;
+      msg.textContent = r.rows ? "" : "The query returned no rows.";
+    } catch (e) {
+      if (my !== seq) return;
+      holder.replaceChildren(mkErrorBody(e, cur));
+      msg.textContent = "";
+    }
+  };
+  sec.scrollIntoView({ block: "nearest" });
+  h.focus({ preventScroll: true });
+  draw();
+  return sec;
+}
+function xpColumnChart(c, cards, e, slot) {
+  const choices = xp.chartChoices(c, cards);
+  const nums = cards.filter((x) => x.kind === "num" && x.name !== c.name && !xp.idLike(x.name));
+  const controls = [{ key: "kind", label: "Chart", options: choices.map((o) => ({ value: o.id, label: o.label })) }];
+  if (choices.some((o) => o.id === "scatter")) controls.push({ key: "vs", label: "Against", options: nums.map((x) => ({ value: x.name, label: x.name })), when: (v) => v.kind === "scatter" });
+  xpChartPanel(slot, `Chart: ${c.name}`, controls, (v) => xp.columnChartSql(e.fq, c, v.kind, cards, { vs: v.vs }));
+}
+function addToDashboard(sql, msg) {
+  if (!sql) return;
+  const ed = $("sql");
+  const cur = ed.value.replace(/\s*$/, "");
+  ed.value = (cur ? cur + "\n\n" : "") + sql.trim() + "\n";
+  syncHL();
+  msg.replaceChildren(document.createTextNode("Added to the dashboard editor. "));
+  msg.appendChild(
+    xpBtn("Open the dashboard", "xp-link", () => {
+      setMode("edit");
+      run();
+    })
+  );
+}
+
+// ---- likely joins: same-named keys whose values overlap ----
+async function xpJoins(e, cards, sec, alive) {
+  if (!xpState.cols) {
+    const map = new Map();
+    for (const r of await xpRows(xp.COLUMNS_SQL)) {
+      const fq = fqn(r.database_name, r.schema_name, r.table_name);
+      if (!map.has(fq)) map.set(fq, []);
+      map.get(fq).push({ name: String(r.column_name), kind: xp.colKind(r.data_type) });
+    }
+    xpState.cols = map;
+  }
+  if (!alive()) return;
+  const others = xpState.tables.filter((o) => o.fq !== e.fq).map((o) => ({ fq: o.fq, name: o.t, cols: xpState.cols.get(o.fq) || [] }));
+  const cands = xp.joinCandidates({ fq: e.fq, name: e.t, cols: cards.map((c) => ({ name: c.name, kind: c.kind })) }, others);
+  const found = [];
+  for (const c of cands) {
+    if (!alive()) return;
+    try {
+      const r = (await xpRows(xp.overlapSql(e.fq, c.a, c.other.fq, c.b)))[0];
+      const share = Number(r.n) ? Number(r.hit) / Number(r.n) : 0;
+      if (share >= 0.3) found.push({ ...c, share });
+    } catch (_) {}
+  }
+  if (!alive() || !found.length) return;
+  found.sort((a, b) => b.share - a.share);
+  sec.hidden = false;
+  const hid = "xp-joins-h" + ++xpUid;
+  const h = xpEl("h3", "explore-sec", "Likely joins");
+  h.id = hid;
+  const ul = xpEl("ul", "xp-joinlist");
+  ul.setAttribute("aria-labelledby", hid);
+  for (const j of found) {
+    const li = xpEl("li");
+    const txt = xpEl("span", "xp-join-txt");
+    txt.innerHTML = `<code>${escapeHtml(e.t)}.${escapeHtml(j.a)}</code> → <code>${escapeHtml(j.other.name)}.${escapeHtml(j.b)}</code> <span class="xp-join-share">${Math.round(100 * j.share)}% of the values match</span>`;
+    li.append(
+      txt,
+      xpBtn("Join these", "btn2", () => {
+        setXqSql(xp.joinSql(e.fq, j.a, j.other.fq, j.b));
+        runExplore();
+      }, `Join ${e.t} with ${j.other.name} on ${j.a}`)
+    );
+    ul.appendChild(li);
+  }
+  sec.replaceChildren(h, ul);
+}
+
+// ---- the paged rows: the ::PAGED renderer over any SELECT ----
+// Its own small state; the same page_sql requests a dashboard's ::PAGED makes.
+// `light`: count the rows but skip the per-column statistics (a big table).
+function xpPaged(holder, base, caption, onFirst, light = false) {
+  const st = { colEq: {}, colQ: {}, colRange: {}, view: "pages" };
+  let page = 0,
+    pageSize = 10,
+    sort = null,
+    text = "",
+    stats = null,
+    unfiltered = null,
+    seq = 0,
+    lastTyped = 0;
+  const search = document.createElement("input");
+  search.className = "tbl-search";
+  search.type = "search";
+  search.placeholder = "Search all rows…";
+  search.setAttribute("aria-label", "Search all rows");
+  const colFilters = () => {
+    const out = [];
+    for (const [col, v] of Object.entries(st.colEq)) out.push({ col, op: "eq", value: String(v) });
+    for (const [col, v] of Object.entries(st.colQ)) {
+      const m = String(v).match(/^([<>]=?)\s*(-?\d+(?:\.\d+)?)$/);
+      if (m) out.push({ col, op: { ">": "gt", ">=": "ge", "<": "lt", "<=": "le" }[m[1]], value: m[2] });
+      else out.push({ col, op: "contains", value: String(v) });
+    }
+    for (const [col, [lo, hi]] of Object.entries(st.colRange)) {
+      if (lo != null) out.push({ col, op: "ge", value: String(lo) });
+      if (hi != null) out.push({ col, op: "le", value: String(hi) });
+    }
+    return out;
+  };
+  const req = async (extra, withFilters = true) => {
+    const p = { ...extra };
+    if (withFilters) {
+      if (text.trim()) p.filter = text.trim();
+      const fl = colFilters();
+      if (fl.length) p.filters = fl;
+    }
+    const sql = page_sql(base, JSON.stringify(p));
+    if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
+    return xpRows(sql);
+  };
+  const sortPart = () => (sort ? { sort: sort.col, desc: sort.dir < 0 } : {});
+  const load = async () => {
+    const my = ++seq;
+    const scroll = st.view === "scroll";
+    let rows;
+    try {
+      rows = await req({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() });
+      if (!stats) {
+        const cols = rows.length ? Object.keys(rows[0]) : st.cols || [];
+        st.cols = cols;
+        stats = cols.length && !light ? (await req({ stats: cols.slice(0, 64) }))[0] || { n: 0 } : (await req({ count: true }))[0];
+        stats._cols = cols.slice(0, 64);
+      }
+      const filtering = text.trim() || colFilters().length;
+      if (unfiltered == null || !filtering) unfiltered = filtering ? Number((await req({ count: true }, false))[0].n) : Number(stats.n);
+    } catch (e) {
+      if (my !== seq) return;
+      holder.replaceChildren(mkErrorBody(e, base));
+      onFirst?.(null, e);
+      onFirst = null;
+      return;
+    }
+    if (my !== seq) return; // a newer load renders
+    const reload = () => {
+      stats = null;
+      page = 0;
+      load();
+    };
+    const server = {
+      search,
+      total: Number(stats.n) || 0,
+      unfiltered,
+      stats,
+      statCols: stats._cols,
+      colState: st,
+      view: st.view,
+      page,
+      pageSize,
+      sortCol: sort ? sort.col : null,
+      sortDir: sort ? sort.dir : 1,
+      onPage: (p) => {
+        page = Math.max(0, p);
+        load();
+      },
+      onSort: (col) => {
+        sort = { col, dir: sort && sort.col === col ? -sort.dir : 1 };
+        page = 0;
+        load();
+      },
+      onPageSize: (n) => {
+        pageSize = n;
+        page = 0;
+        load();
+      },
+      onView: (v) => {
+        st.view = v;
+        page = 0;
+        load();
+      },
+      onColFilters: reload,
+      distinct: (col) => req({ distinct: col }).then((rs) => rs.map((r) => r.v)),
+      profile: () => (stats._prof ||= req({ profile: stats._cols })),
+      fetchRows: (offset, limit) => req({ limit, offset, ...sortPart() }),
+    };
+    holder.replaceChildren(renderTable(rows, -1, {}, server, null, { caption }));
+    onFirst?.({ rows, total: server.total });
+    onFirst = null;
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (Date.now() - lastTyped < 4000 && lost) {
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }
+  };
+  let timer = null;
+  search.addEventListener("input", () => {
+    lastTyped = Date.now();
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      text = search.value;
+      stats = null;
+      page = 0;
+      load();
+    }, 300);
+  });
+  load();
+}
+
+// ---- the query editor: highlighting, ::ROLE completion, history, errors ----
+function setXqSql(sql) {
+  $("xq-sql").value = sql;
+  xqErr(null);
+  xqHL();
+}
+function xqHL(errAt = -1) {
+  const ta = $("xq-sql");
+  const code = ta.value;
+  const hl = $("xq-hl");
+  if (errAt >= 0 && errAt <= code.length) {
+    const ch = code.slice(errAt, errAt + 1);
+    const mark = ch && ch !== "\n" ? escapeHtml(ch) : " ";
+    hl.innerHTML =
+      highlightSQL(code.slice(0, errAt)).replace(/\n$/, "") +
+      `<mark class="xq-errmark">${mark}</mark>` +
+      highlightSQL(code.slice(errAt + (ch && ch !== "\n" ? 1 : 0)));
+  } else hl.innerHTML = highlightSQL(code);
+  hl.scrollTop = ta.scrollTop;
+  hl.scrollLeft = ta.scrollLeft;
+}
+function xqInsert(text) {
+  const ta = $("xq-sql");
+  const a = ta.selectionStart ?? ta.value.length,
+    b = ta.selectionEnd ?? a;
+  const before = ta.value.slice(0, a);
+  const pad = before && !/[\s(,.]$/.test(before) ? " " : "";
+  ta.value = before + pad + text + ta.value.slice(b);
+  const at = a + pad.length + text.length;
+  ta.focus();
+  ta.setSelectionRange(at, at);
+  xqHL();
+}
+// A click on a top value: filter the editor's query of this table (or a
+// fresh one) and run it.
+function xqFilter(e, c, v) {
+  const cond = xp.valueCond(c, v);
+  const cur = $("xq-sql").value;
+  const sql = cur.includes(e.fq) ? xp.addWhere(cur, cond) : `SELECT * FROM ${e.fq}\nWHERE ${cond}\nLIMIT 100`;
+  setXqSql(sql);
+  runExplore();
+}
+function xqHistory() {
+  const sel = $("xq-hist");
+  const list = xpHist();
+  sel.innerHTML = `<option value="">Recent queries${list.length ? ` (${list.length})` : ""}</option>`;
+  list.forEach((q, i) => {
+    const o = xpEl("option", "", q.replace(/\s+/g, " ").slice(0, 90));
+    o.value = String(i);
+    sel.appendChild(o);
+  });
+  sel.disabled = !list.length;
+}
+function xqErr(e, sql) {
+  const box = $("xq-err");
+  if (!e) {
+    box.hidden = true;
+    box.textContent = "";
+    if ($("xq-hl").querySelector(".xq-errmark")) xqHL();
+    return;
+  }
+  const msg = String(e && e.message ? e.message : e);
+  const loc = xp.errorLocation(msg);
+  box.hidden = false;
+  box.replaceChildren(xpEl("strong", "", shortError(msg)));
+  if (loc) {
+    const at = xp.offsetOf(sql, loc.line, loc.col);
+    box.append(
+      " ",
+      xpBtn(`Line ${loc.line}, column ${loc.col}`, "xp-link", () => {
+        const ta = $("xq-sql");
+        ta.focus();
+        ta.setSelectionRange(at, Math.min(at + 1, ta.value.length));
+      }, `Go to line ${loc.line}, column ${loc.col}`)
+    );
+    xqHL(at);
+  }
+  const det = xpEl("details");
+  det.append(xpEl("summary", "", "Details"), xpEl("pre", "", msg));
+  box.appendChild(det);
+}
+// `::` + letters: the matching roles (the Rust registry's names and summaries).
+let xqRoles = null;
+function xqComplete() {
+  const ta = $("xq-sql");
+  const m = /::([A-Za-z_]*)$/.exec(ta.value.slice(0, ta.selectionStart));
+  if (!m) return xqCloseAc();
+  if (!xqRoles) {
+    try {
+      xqRoles = JSON.parse(roles_json()).roles.map((r) => ({ token: r.token, summary: r.summary || "" }));
+    } catch (_) {
+      xqRoles = [];
+    }
+  }
+  const q = m[1].toUpperCase();
+  const hits = xqRoles.filter((r) => r.token.startsWith(q)).slice(0, 8);
+  if (!hits.length || (hits.length === 1 && hits[0].token === q)) return xqCloseAc();
+  const ac = $("xq-ac");
+  ac.replaceChildren(
+    ...hits.map((r, i) => {
+      const li = xpEl("li");
+      li.id = "xq-ac-" + i;
+      li.setAttribute("role", "option");
+      li.dataset.token = r.token;
+      li.innerHTML = `<b>::${escapeHtml(r.token)}</b> <span>${escapeHtml(r.summary)}</span>`;
+      li.onmousedown = (ev) => {
+        ev.preventDefault();
+        xqAccept(r.token);
+      };
+      return li;
+    })
+  );
+  ac.hidden = false;
+  ta.setAttribute("aria-expanded", "true");
+  xqAcMove(0);
+}
+function xqAcMove(i) {
+  const items = [...$("xq-ac").children];
+  if (!items.length) return;
+  const k = (i + items.length) % items.length;
+  items.forEach((li, j) => li.setAttribute("aria-selected", j === k ? "true" : "false"));
+  $("xq-sql").setAttribute("aria-activedescendant", items[k].id);
+  items[k].scrollIntoView({ block: "nearest" });
+}
+function xqCloseAc() {
+  const ac = $("xq-ac");
+  if (ac.hidden) return;
+  ac.hidden = true;
+  ac.replaceChildren();
+  $("xq-sql").setAttribute("aria-expanded", "false");
+  $("xq-sql").removeAttribute("aria-activedescendant");
+}
+function xqAccept(token) {
+  const ta = $("xq-sql");
+  const a = ta.selectionStart;
+  const m = /::([A-Za-z_]*)$/.exec(ta.value.slice(0, a));
+  const start = a - (m ? m[1].length : 0);
+  ta.value = ta.value.slice(0, start) + token + ta.value.slice(a);
+  ta.setSelectionRange(start + token.length, start + token.length);
+  xqCloseAc();
+  xqHL();
+}
+function xqKey(e) {
+  const ac = $("xq-ac");
+  if (!ac.hidden) {
+    const items = [...ac.children];
+    const k = items.findIndex((li) => li.getAttribute("aria-selected") === "true");
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      return xqAcMove(k + (e.key === "ArrowDown" ? 1 : -1));
+    }
+    if ((e.key === "Enter" || e.key === "Tab") && !e.metaKey && !e.ctrlKey && k >= 0) {
+      e.preventDefault();
+      return xqAccept(items[k].dataset.token);
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      return xqCloseAc();
+    }
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    runExplore();
+  }
+}
+
+// ---- Run: the result, its downloads and "Chart this result" ----
+const selectLike = (sql) => {
+  const s = xp.stripSemi(sql);
+  const bare = s.replace(/'(?:[^']|'')*'/g, "''").replace(/--[^\n]*/g, "");
+  return /^\s*(SELECT|FROM|WITH|VALUES|TABLE)\b|^\s*\(/i.test(bare) && !bare.includes(";");
+};
+function xqClearResult() {
+  $("xq-info").textContent = "";
+  $("xq-tools").replaceChildren();
+  $("xq-chart-slot").replaceChildren();
+  $("xq-results").replaceChildren();
+}
+async function runExplore() {
+  const sql = $("xq-sql").value.trim();
+  if (!sql) return;
+  xqCloseAc();
+  const tok = ++xpState.qtok;
+  const alive = () => tok === xpState.qtok;
+  lsSet(XP_HIST, xp.pushHistory(xpHist(), sql));
+  xqHistory();
+  xqErr(null);
+  xqClearResult();
+  const info = $("xq-info"),
+    res = $("xq-results");
+  info.textContent = "Running…";
+  const t0 = performance.now();
+  const took = () => {
+    const ms = performance.now() - t0;
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+  };
+  const done = (rows, total) => {
+    if (!alive()) return;
+    info.textContent = `${total.toLocaleString("en-US")} row${total === 1 ? "" : "s"} · ${took()}`;
+    xqTools(sql, rows);
+    $("xq-result").scrollIntoView({ block: "nearest" });
+  };
+  if (selectLike(sql)) {
+    const fig = xpEl("figure", "panel xp-rows");
+    const box = xpEl("div");
+    fig.appendChild(box);
+    res.appendChild(fig);
+    xpPaged(box, xp.stripSemi(sql), "Query result", (r, err) => {
+      if (!alive()) return;
+      if (err) {
+        info.textContent = "";
+        res.replaceChildren();
+        xqErr(err, sql);
+      } else done(r.rows, r.total);
+    });
+    return;
+  }
+  try {
+    const rows = await xpRows(sql);
+    if (!alive()) return;
+    res.appendChild(renderTable(rows));
+    done(rows, rows.length);
+    // a CREATE / ATTACH may have changed the catalog
+    if (/^\s*(CREATE|DROP|ALTER|ATTACH|DETACH|INSERT|COPY)\b/i.test(sql)) loadCatalog();
+  } catch (e) {
+    if (!alive()) return;
+    info.textContent = "";
+    xqErr(e, sql);
+  }
+}
+function xqTools(sql, rows) {
+  const tools = $("xq-tools");
+  tools.replaceChildren();
+  if (!selectLike(sql)) return;
+  const cols = rows.length ? Object.keys(rows[0]) : [];
+  const full = async () => xpRows(xp.stripSemi(sql));
+  const dl = (label, aria, fn) => {
+    const b = xpBtn(label, "btn2", async () => {
+      b.disabled = true;
+      try {
+        await fn();
+      } catch (e) {
+        xqErr(e, sql);
+      } finally {
+        b.disabled = false;
+      }
+    }, aria);
+    return b;
+  };
+  tools.append(
+    dl("⤓ CSV", "Download the result as CSV", async () => {
+      const r = await full();
+      download(new Blob([csvOfRows(r, r.length ? Object.keys(r[0]) : cols)], { type: "text/csv" }), "query.csv");
+    }),
+    dl("⤓ Excel", "Download the result as an Excel workbook", async () => {
+      const r = await full();
+      download(new Blob([xlsxOfRows(r, r.length ? Object.keys(r[0]) : cols)], { type: XLSX_TYPE }), "query.xlsx");
+    })
+  );
+  if (backend !== "live" && db && !servedMode)
+    tools.append(
+      dl("⤓ Parquet", "Download the result as Parquet", async () => {
+        const name = "explore-result.parquet";
+        await runSql(`COPY (${xp.stripSemi(sql)}) TO '${name}' (FORMAT parquet)`);
+        const buf = await db.copyFileToBuffer(name);
+        await db.dropFile(name).catch(() => {});
+        download(new Blob([buf], { type: "application/vnd.apache.parquet" }), "query.parquet");
+      })
+    );
+  if (cols.length)
+    tools.append(
+      xpBtn("Chart this result", "", () => {
+        const { x, y } = xp.resultAxes(cols, rows);
+        const opt = cols.map((c) => ({ value: c, label: c }));
+        xpChartPanel(
+          $("xq-chart-slot"),
+          "Chart the result",
+          [
+            { key: "kind", label: "Chart", options: xp.RESULT_CHARTS.map((k) => ({ value: k.id, label: k.label })) },
+            { key: "x", label: "X", options: opt, value: x, when: (v) => v.kind !== "hist" },
+            { key: "y", label: "Y", options: opt, value: y },
+          ],
+          (v) => xp.resultChartSql(sql, v.kind, v.x, v.y)
+        );
+      })
+    );
+}
+
+// Explore → build: a starter dashboard from the table's profile (web/explore.js).
+function openTableAsDashboard(e, cards) {
+  const sql = cards.length ? xp.starterDashboard({ name: e.t, fq: e.fq, cards }) : `SELECT * FROM ${e.fq} LIMIT 100 ::TABLE;\n`;
   setMode("edit");
-  loadDash(name, sql);
-  $("dash-name").value = name;
+  loadDash(e.t, sql);
+  $("dash-name").value = e.t;
 }
 
 // ---------- MotherDuck ----------
