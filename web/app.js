@@ -1579,6 +1579,46 @@ function clampSideW(w) {
 // is inert and Tab stays inside it; Esc, the scrim or picking an entry closes
 // it. Wider screens: ☰ collapses / restores the sidebar in place.
 const SIDE_DRAWER = "(max-width: 820px)";
+// Phones (#84): the header's secondary actions fold behind ⋯ (a disclosure:
+// focus goes in, Esc / an outside click / leaving it closes, focus comes back).
+function initHeaderMenu() {
+  const actions = $("actions"),
+    more = $("more");
+  const isOpen = () => more.getAttribute("aria-expanded") === "true";
+  const open = (on, refocus = true) => {
+    document.querySelector("header").classList.toggle("more-open", on);
+    more.setAttribute("aria-expanded", String(on));
+    if (on) [...actions.querySelectorAll("button, select")].find((el) => el.getClientRects().length)?.focus();
+    else if (refocus) more.focus();
+  };
+  more.onclick = () => open(!isOpen());
+  // A finished action closes the menu; focus returns to ⋯ unless the action
+  // moved it on (the MotherDuck dialog).
+  actions.addEventListener("click", (e) => {
+    if (!isOpen() || !e.target.closest("button")) return;
+    const el = document.activeElement;
+    open(false, !el || el === document.body || actions.contains(el));
+  });
+  document.querySelector("header").addEventListener("focusout", (e) => {
+    const to = e.relatedTarget;
+    if (isOpen() && to && !actions.contains(to) && to !== more) open(false, false);
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (isOpen() && !actions.contains(e.target) && !more.contains(e.target)) open(false, false);
+  });
+  // Capture, so the dashboard's own Esc (clear selections) doesn't also fire.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || !isOpen()) return;
+      e.preventDefault();
+      open(false);
+    },
+    true
+  );
+  matchMedia("(max-width: 640px)").addEventListener?.("change", () => isOpen() && open(false, false));
+}
+
 function initSideDrawer() {
   const side = $("sidebar"),
     btn = $("side-toggle");
@@ -1588,6 +1628,9 @@ function initSideDrawer() {
     document.body.classList.toggle("side-open", on);
     btn.setAttribute("aria-expanded", String(on));
     rest.forEach((el) => el && (el.inert = on));
+    // a modal while open (#84); a plain landmark otherwise
+    if (on) side.setAttribute("role", "dialog"), side.setAttribute("aria-modal", "true");
+    else side.removeAttribute("role"), side.removeAttribute("aria-modal");
     if (on) side.querySelector("button")?.focus();
     else if (refocus) btn.focus();
   };
@@ -10964,4 +11007,5 @@ document.addEventListener("keydown", (e) => {
 // Before boot, so a remembered sidebar width applies without a jump.
 initSideResizer();
 initSideDrawer();
+initHeaderMenu();
 boot().catch((e) => status("boot failed: " + e));

@@ -31,7 +31,7 @@ assert.match(html, /\.sidebar\{width:var\(--side-w,238px\)/);
 // one-line block that opens with the drawer rule rather than the first match.
 const phone = html.match(/@media\(max-width:820px\)\{(\.sidebar,.*)\n/);
 assert.ok(phone, "phone-width rule missing in index.html");
-assert.match(phone[1], /^\.sidebar,body\.side-collapsed \.sidebar\{[^}]*position:fixed;[^}]*width:min\(300px,86vw\);[^}]*visibility:hidden/);
+assert.match(phone[1], /^\.sidebar,body\.side-collapsed \.sidebar\{[^}]*position:fixed;[^}]*width:min\(85vw,320px\);[^}]*visibility:hidden/);
 assert.match(phone[1], /body\.side-open \.sidebar\{transform:none;visibility:visible/);
 assert.match(phone[1], /\.side-resizer\{display:none\}/);
 assert.match(html, /<button id="side-toggle"[^>]*aria-controls="sidebar" aria-expanded=/);

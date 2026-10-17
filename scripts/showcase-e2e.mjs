@@ -16,7 +16,13 @@
 //                the sidebar is collapsed) and fail if a chart's toolbox
 //                (shown or not) covers its title; on phones (≤820 px) also
 //                if the page scrolls sideways or the sidebar squeezes the
-//                dashboard (it must be a closed drawer), and (≤760 px, where
+//                dashboard (it must be a closed drawer); at any width the
+//                builder must not scroll sideways in Edit or View, toolbar
+//                controls stay on screen and header actions on screen or
+//                behind ⋯ (keyboard: Enter opens, Esc closes); on phones the
+//                drawer is ≤ min(85vw, 320px), modal (role, inert), keeps
+//                Tab inside, and Esc / a tap outside / picking a dashboard
+//                close it, focus back on ☰; and (≤760 px, where
 //                charts are drawn at their shown width) if a chart's largest
 //                text is below 8 px (ggplot-rs draws axis and legend text at
 //                8.8 px; less means the chart was rendered wider than shown),
@@ -56,6 +62,87 @@ if (sqlFile) {
 } else {
   await page.goto(`${base}?dashboard=${encodeURIComponent(dash)}${q ? "&" + q : ""}`);
 }
+async function builderChrome() {
+  const onScreen = (sel) =>
+    page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      const r = el && el.getBoundingClientRect();
+      return !!r && r.width > 0 && r.left >= -1 && r.right <= innerWidth + 1 && getComputedStyle(el).visibility !== "hidden";
+    }, sel);
+  const focusIn = (sel) => page.evaluate((sel) => !!document.activeElement?.closest(sel), sel);
+  const expanded = (sel) => page.getAttribute(sel, "aria-expanded");
+  for (const mode of ["edit", "view"]) {
+    await page.click(`#mode-${mode}`);
+    await page.waitForTimeout(300);
+    const { sw, iw } = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth }));
+    if (sw > iw) problems.push(`builder (${mode}): the page is ${sw} px wide at ${iw} px`);
+    for (const sel of ["#side-toggle", "#run", "#dash-name", "#save", "#mode-edit", "#mode-view"])
+      if (!(await onScreen(sel))) problems.push(`builder (${mode}): ${sel} is off screen`);
+  }
+  // header actions: shown, or behind a disclosure button (Enter opens, Esc closes)
+  const acts = await page.$$eval("header .actions > *", (els) => els.map((e) => "#" + e.id));
+  const hidden = [];
+  for (const sel of acts) if (!(await onScreen(sel))) hidden.push(sel);
+  if (hidden.length) {
+    const menu = 'header [aria-controls="actions"]';
+    if (!(await page.$(menu)) || !(await onScreen(menu))) problems.push(`builder: ${hidden.join(", ")} off screen and no menu`);
+    else {
+      await page.focus(menu);
+      await page.keyboard.press("Enter");
+      for (const sel of acts) if (!(await onScreen(sel))) problems.push(`builder: ${sel} off screen with the menu open`);
+      if ((await expanded(menu)) !== "true" || !(await focusIn("header .actions")))
+        problems.push("builder: the ⋯ menu does not open by keyboard (aria-expanded / focus)");
+      await page.keyboard.press("Escape");
+      if ((await expanded(menu)) !== "false" || !(await focusIn(menu)) || (await onScreen(acts[0])))
+        problems.push("builder: Esc does not close the ⋯ menu and return focus");
+    }
+  }
+  const side = await page.evaluate(() => {
+    const s = document.getElementById("sidebar");
+    return { w: s.getBoundingClientRect().width, fixed: getComputedStyle(s).position === "fixed" };
+  });
+  if (width > 820) return;
+  // phones: the sidebar is a drawer, closed by default, min(85vw, 320px) wide
+  if (Math.round(side.w) > Math.min(Math.round(width * 0.85), 320)) problems.push(`builder: the drawer is ${side.w} px wide`);
+  if (!side.fixed || (await onScreen("#sidebar"))) return problems.push(`builder: the sidebar takes ${side.w} px instead of being a closed drawer`);
+  await page.focus("#side-toggle");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  if (!(await onScreen("#sidebar")) || !(await focusIn("#sidebar")) || (await expanded("#side-toggle")) !== "true")
+    problems.push("builder: ☰ does not open the sidebar drawer by keyboard");
+  const modal = await page.evaluate(() => ({
+    dialog: document.getElementById("sidebar").getAttribute("role") === "dialog" && document.getElementById("sidebar").getAttribute("aria-modal") === "true",
+    inert: document.querySelector("header").inert && document.querySelector(".main").inert,
+  }));
+  if (!modal.dialog || !modal.inert) problems.push(`builder: the open drawer is not modal (${JSON.stringify(modal)})`);
+  if (await onScreen("#side-resizer")) problems.push("builder: the sidebar resize handle shows in the drawer");
+  const n = await page.$$eval("#sidebar button, #sidebar a[href]", (els) => els.filter((e) => e.getClientRects().length).length);
+  for (const key of ["Tab", "Shift+Tab"]) {
+    for (let i = 0; i < n + 2; i++) await page.keyboard.press(key);
+    if (!(await focusIn("#sidebar"))) problems.push(`builder: ${key} leaves the open sidebar drawer`);
+  }
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  if ((await onScreen("#sidebar")) || !(await focusIn("#side-toggle")) || (await expanded("#side-toggle")) !== "false")
+    problems.push("builder: Esc does not close the sidebar drawer and return focus to ☰");
+  // a tap outside closes it (focus back on ☰); so does picking a dashboard
+  await page.click("#side-toggle");
+  await page.waitForTimeout(300);
+  await page.mouse.click(width - 10, 500);
+  await page.waitForTimeout(300);
+  if ((await onScreen("#sidebar")) || !(await focusIn("#side-toggle"))) problems.push("builder: a tap outside does not close the drawer");
+  if (!(await page.$("#sidebar .side-item.active"))) return; // --sql: nothing to pick
+  await page.click("#side-toggle");
+  await page.waitForTimeout(300);
+  await page.click("#sidebar .side-item.active"); // reloads this dashboard
+  await page.waitForTimeout(300);
+  if (await onScreen("#sidebar")) problems.push("builder: picking a dashboard does not close the drawer");
+  await page.waitForFunction(
+    () => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"),
+    null,
+    { timeout: 240000 }
+  );
+}
 // Done when the status shows the panel count and the page is no longer loading.
 try {
   await page.waitForFunction(
@@ -73,8 +160,9 @@ try {
   process.exit(1);
 }
 console.log(`loaded in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${await page.textContent("#status")}`);
-await page.click("#mode-view").catch(() => {});
 const problems = [];
+if (width) await builderChrome();
+await page.click("#mode-view").catch(() => {});
 if (width && width <= 820) {
   await page.waitForTimeout(400); // charts re-fit to the view mode's panel width
   const shell = await page.evaluate(() => ({

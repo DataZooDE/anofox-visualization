@@ -245,7 +245,7 @@ await page.click(".dp-astable-btn");
 
 // Resizable sidebar (issue #59), in the builder (not embed): a focusable
 // separator with its bounds; ←/→ step, the width survives a reload,
-// double-click resets, charts follow, and phone widths keep the fixed sidebar.
+// double-click resets, charts follow, and phones get a closed drawer instead.
 // Always on "Overview" (it has charts), whatever --dashboard is.
 {
   const bp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
@@ -309,8 +309,9 @@ await page.click(".dp-astable-btn");
   await bp.dblclick("#side-resizer");
   const s3 = await side();
   if (s3.w !== 238) fail(`sidebar double-click reset: ${JSON.stringify(s3)}`);
-  // Phone width: the sidebar is a closed drawer (the stored width ignored, the
-  // handle gone); ☰ opens it with focus inside, Esc closes it back onto ☰.
+  // Phone width: the sidebar is a closed drawer, min(85vw, 320px) wide (the
+  // stored width ignored, the handle gone); ☰ opens it as a modal dialog with
+  // focus inside, Esc closes it back onto ☰.
   await bp.focus("#side-resizer");
   await bp.keyboard.press("End");
   await bp.setViewportSize({ width: 390, height: 844 });
@@ -323,14 +324,15 @@ await page.click(".dp-astable-btn");
       now: Number(document.getElementById("side-resizer").getAttribute("aria-valuenow")),
       expanded: document.getElementById("side-toggle").getAttribute("aria-expanded"),
       focus: document.activeElement.id,
+      modal: document.getElementById("sidebar").getAttribute("aria-modal"),
     }));
   const phone = await drawer();
-  if (phone.now !== 480 || phone.w !== 300 || phone.shown || phone.handle !== "none" || phone.expanded !== "false")
+  if (phone.now !== 480 || phone.w !== Math.min(Math.round(390 * 0.85), 320) || phone.shown || phone.handle !== "none" || phone.expanded !== "false")
     fail(`sidebar on a phone: ${JSON.stringify(phone)}`);
   await bp.click("#side-toggle");
   await bp.waitForTimeout(300);
   const opened = await drawer();
-  if (!opened.shown || opened.expanded !== "true" || opened.focus !== "side-new") fail(`phone drawer open: ${JSON.stringify(opened)}`);
+  if (!opened.shown || opened.expanded !== "true" || opened.modal !== "true" || opened.focus !== "side-new") fail(`phone drawer open: ${JSON.stringify(opened)}`);
   await bp.keyboard.press("Escape");
   await bp.waitForTimeout(300);
   const closed = await drawer();
