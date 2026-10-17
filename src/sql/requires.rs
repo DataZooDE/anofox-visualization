@@ -241,9 +241,11 @@ pub fn has_glob(s: &str) -> bool {
     s.contains(GLOB_CHARS)
 }
 
-/// At most this many matches of a pattern are looked at (each is
-/// canonicalised, see [`files_sql`]).
-pub const MAX_MATCHES: usize = 64;
+/// At most this many matches of a pattern are looked at (canonicalised one by
+/// one until one lies inside the data folder, see [`files_sql`]). A pattern
+/// whose first this-many matches all lead out of the folder (symlinks) counts
+/// as missing: it fails closed.
+pub const MAX_MATCHES: usize = 1024;
 
 /// The query that lists the files matching `path`, as text in column `f`:
 /// one row is enough for a plain path, up to [`MAX_MATCHES`] for a pattern
@@ -281,8 +283,11 @@ impl ExistsCache {
         }
     }
 
-    /// The cached answer for `path`, else `probe()` (remembered).
-    pub fn exists(&self, path: &str, probe: impl FnOnce() -> bool) -> bool {
+    /// The cached answer for `path`, else `probe()`. Only a definite answer
+    /// (`Some`) is remembered: a probe that failed or was interrupted (`None`,
+    /// e.g. a viewer superseding their own request) counts as missing for
+    /// this call only, never for other viewers.
+    pub fn exists(&self, path: &str, probe: impl FnOnce() -> Option<bool>) -> bool {
         let now = std::time::Instant::now();
         {
             let map = self.map.lock().unwrap_or_else(|p| p.into_inner());
@@ -292,7 +297,9 @@ impl ExistsCache {
                 }
             }
         }
-        let yes = probe();
+        let Some(yes) = probe() else {
+            return false;
+        };
         let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
         if map.len() >= self.cap && !map.contains_key(path) {
             let ttl = self.ttl;
@@ -464,7 +471,7 @@ mod tests {
         let probes = std::cell::Cell::new(0);
         let probe = |yes: bool| {
             probes.set(probes.get() + 1);
-            yes
+            Some(yes)
         };
         assert!(!cache.exists("/d/**/x", || probe(false)));
         assert!(!cache.exists("/d/**/x", || probe(true)));
@@ -473,6 +480,12 @@ mod tests {
         assert!(cache.exists("/d/a", || probe(true)));
         assert!(cache.exists("/d/b", || probe(true)));
         assert_eq!(probes.get(), 3);
+        // A failed / interrupted probe is "missing" for that call only: the
+        // next caller (another viewer) probes again and sees the file.
+        let c = ExistsCache::new(std::time::Duration::from_secs(60), 8);
+        assert!(!c.exists("/d/slow/**/x", || None));
+        assert!(c.exists("/d/slow/**/x", || probe(true)));
+        assert!(c.exists("/d/slow/**/x", || panic!("now cached")));
         let expired = ExistsCache::new(std::time::Duration::ZERO, 4);
         assert!(!expired.exists("/d/x", || probe(false)));
         assert!(expired.exists("/d/x", || probe(true)));

@@ -2180,8 +2180,9 @@ const REQUIRES_MISSING: &str =
 ///   folder too: `glob` lists through a link pointing out of it.
 ///
 /// Anything refused, unset or failing makes that alternative missing; the
-/// reason (and any DuckDB error) goes to the log only. Answers are remembered
-/// briefly per expanded path (`cache`). The viewer learns only met / not met,
+/// reason (and any DuckDB error) goes to the log only. Definite answers are
+/// remembered briefly per expanded path (`cache`); a failed or interrupted
+/// check is not, so no viewer can make a file "missing" for others. The viewer learns only met / not met,
 /// about files inside the folder, which every viewer may read anyway.
 fn requires_met(
     c: &Conn,
@@ -2242,18 +2243,26 @@ fn requires_met(
                 return false;
             }
         };
+        // (A failed or interrupted probe answers None: missing for this
+        // request only, never cached for other viewers.)
         cache.exists(&path, || {
             match c
                 .query(&rq::files_sql(&path))
                 .and_then(|mut r| r.string_rows(rq::MAX_MATCHES))
             {
-                Ok(rows) => rows
-                    .iter()
-                    .filter_map(|r| r.first().cloned().flatten())
-                    .any(|f| rq::inside_canonical(&f, &root)),
+                Ok(rows) => {
+                    let inside = rows
+                        .iter()
+                        .filter_map(|r| r.first().cloned().flatten())
+                        .any(|f| rq::inside_canonical(&f, &root));
+                    if !inside && rows.len() >= rq::MAX_MATCHES {
+                        log("missing: the first matches all lie outside the folder", alt);
+                    }
+                    Some(inside)
+                }
                 Err(e) => {
                     log(&format!("check failed ({e})"), alt);
-                    false
+                    None
                 }
             }
         })

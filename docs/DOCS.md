@@ -1552,8 +1552,9 @@ Every panel carries its own state — there is no full-page spinner:
 
   A statement skipped for a missing input is skipped for whoever picked that
   run: never put `@requires` on a setup statement whose effect narrows what a
-  viewer sees (a `SET VARIABLE region = 'EU'`, a filtering view). Put it on the
-  statement that reads the file.
+  viewer sees (a `SET VARIABLE region = 'EU'`, a filtering view — also one that
+  reads a file *and* filters rows, which `requires/on-setup` cannot detect).
+  Put it on the statement that reads the file, and keep filtering elsewhere.
 
   `dashboard --check` reports a missing input as a **note** (`optional/missing`),
   not an error — `--strict` still passes. It warns about a `${name}` with no

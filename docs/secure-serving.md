@@ -201,20 +201,30 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     as missing without touching the file system (the log says why).
   - **Matches are confined too.** `glob()` lists *through* a symlink that
     points out of the folder (DuckDB refuses only the read), so the server
-    resolves every match (at most 64 per pattern) and counts only those whose
-    real path is inside the folder.
-  - Any error of the check (a refused path, a glob DuckDB rejects) counts as
-    missing; the details go to the server log only, never to the viewer.
-  - Answers (also "missing") are remembered for 5 seconds per expanded path
-    (at most 4,096), so a recursive pattern is not rescanned by every request.
+    resolves the matches one by one (at most 1,024 per pattern, stopping at
+    the first) and counts only one whose real path is inside the folder. A
+    pattern whose first 1,024 matches all lead out of the folder counts as
+    missing (fails closed; the log says so).
+  - Any error of the check (a refused path, a glob DuckDB rejects, a timeout,
+    a request superseded mid-check) counts as missing for that request; the
+    details go to the server log only, never to the viewer.
+  - Definite answers (also "missing") are remembered for 5 seconds per
+    expanded path (at most 4,096), so a recursive pattern is not rescanned by
+    every request. A failed or interrupted check is never remembered, so no
+    viewer can make a file "missing" for the others. The memory is shared:
+    from the response time a viewer may tell whether someone checked the same
+    path in the last 5 seconds (as with the panel cache) — only for paths that
+    viewer can build themselves.
   - The viewer learns only *available / not available*, about files in the
     folder, which every viewer may read anyway. Without a data folder the
     snapshot can open no files, and nothing is checked in advance: the
     statement's own error decides, as before.
   - **A viewer can skip a setup statement that carries `@requires`** (by
     picking a run without the file). Never guard a statement that narrows what
-    a viewer sees with it; `dashboard --check` warns about `@requires` on a
-    setup statement that reads no file (`requires/on-setup`). Access policy
+    a viewer sees with it — neither a statement that reads no file
+    (`dashboard --check` warns: `requires/on-setup`) nor one that reads a file
+    *and* filters rows (`CREATE TEMP VIEW v AS … WHERE r IN (SELECT … FROM
+    read_csv('allowed.csv'))`: no warning, the lint can't tell). Access policy
     views are unaffected: the server creates them before any dashboard SQL.
 - Error messages sent to viewers show the folder as `<data>`; the log keeps
   the full path.

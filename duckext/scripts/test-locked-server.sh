@@ -215,9 +215,15 @@ SELECT 10::BIGINT AS ten ::METRIC;
 SELECT 11::BIGINT AS eleven ::METRIC;
 -- @requires */forecasts.parquet
 SELECT 12::BIGINT AS twelve ::METRIC;
+-- @requires cap/*/f.parquet
+SELECT 13::BIGINT AS thirteen ::METRIC;
 SQL
+# 70 links out of the folder listed before the one real match (zz/).
+mkdir -p "$T/runs/cap/zz"
+for i in $(seq -w 0 69); do ln -s ../../outside "$T/runs/cap/a$i"; done
 ln -s ../outside "$T/runs/lnk"
 cp "$T/outside/f.parquet" "$T/outside/secret.parquet"
+cp "$T/outside/f.parquet" "$T/runs/cap/zz/f.parquet"
 start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rdash"), $PORT,
   json_object('data', $(q "$T/runs"), 'path_vars', ['run']));" || fail "data-folder server"
 na() { [ "$1" = 400 ] && grep -q "no files found" "$T/body" || fail "$2: expected Not available, got $1 $(cat "$T/body")"; }
@@ -250,6 +256,8 @@ grep -q "a pattern character in a variable's value" "$T/out" || fail "pattern re
 # match through the symlink.
 [ "$(panel 12 '{"run":"r1"}' r)" = 200 ] || fail "an author's pattern: $(cat "$T/body")"
 na "$(panel 10 '{"run":"r1"}' r)" "a match outside the folder through a symlink"
+# Matches through outward links don't hide a real one listed after them.
+[ "$(panel 13 '{"run":"r1"}' r)" = 200 ] || fail "a real match after 70 outward links: $(cat "$T/body")"
 stop
 echo "OK: -- @requires: \${var}, alternatives, and paths confined to the data folder"
 echo "OK: -- @requires: no patterns from values, no matches through symlinks, no leaked errors"
