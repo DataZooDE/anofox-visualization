@@ -6365,7 +6365,7 @@ function lazyFlushSetup(L, upto, at) {
       try {
         await runSetup(L.stmts[k].sql);
       } catch (e) {
-        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(L.stmts[k].requires)}`);
+        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(L.stmts[k]))}`);
         else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
       }
     }
@@ -6440,7 +6440,9 @@ async function lazyRunJob(job, inline = false) {
       try {
         addTrack(out.lastChart, { rows: await panelSql(ts.sql), roles: ts.roles, height: t.height });
       } catch (e) {
-        frag.appendChild(mkErrorCard(e, ts.sql));
+        // A strip whose optional input is missing is left out (#162).
+        if (isOptionalMissing(ts, e)) console.info(`track skipped (optional input missing): ${requiresText(reqsOf(ts))}`);
+        else frag.appendChild(mkErrorCard(e, ts.sql));
       }
     } else await L.panelBody(t.i, ts, { ...base, nextSpan: 0, nextHeight: t.height, nextRowSelect: "", nextTableOpts: {}, nextIa: {}, nextEmpty: "" });
     tag(t.i);
@@ -6712,7 +6714,7 @@ async function runOnce(fresh = true) {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(s.requires)}`);
+      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(s))}`);
       else newGrid.appendChild(mkErrorCard(e, s.sql, true));
     }
   }
@@ -7262,7 +7264,12 @@ async function runOnce(fresh = true) {
     } catch (e) {
       // A failing panel becomes a card in its own grid slot — the others keep
       // rendering. An optional input (`-- @requires`) that is missing reads
-      // "Not available" instead.
+      // "Not available" instead; a ::TRACK strip with one is left out
+      // (#162: never a card of its own).
+      if (role(s, "TRACK") && isOptionalMissing(s, e)) {
+        console.info(`track skipped (optional input missing): ${requiresText(reqsOf(s))}`);
+        return { lastChart, panels };
+      }
       const card = isOptionalMissing(s, e) ? mkNotAvailable(s) : mkErrorCard(e, s.sql);
       if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
       container.appendChild(card);
@@ -7271,10 +7278,23 @@ async function runOnce(fresh = true) {
   };
   if (lazy) lazy.panelBody = panelBody;
   let lastYield = performance.now();
+  let hiding = null; // "TAB" | "SUBTAB": the section of a hidden tab, left out
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
+    // A ::TAB / ::SUBTAB whose `-- @requires` input is missing is hidden —
+    // no button, no pane — with every statement up to the next ::TAB (a
+    // sub-tab: the next ::SUBTAB or ::TAB). (Chrome directives were applied
+    // in the pre-pass.)
+    if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
+    if (hiding) continue;
+    if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s))) {
+      console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
+      hiding = d;
+      lastChart = null;
+      continue;
+    }
     // A ::TRACK (optionally after a ::HEIGHT) follows its chart directly.
     const trackHost = role(s, "TRACK") ? lastChart : null;
     if (d !== "HEIGHT" && !role(s, "TRACK")) lastChart = null;
@@ -8459,9 +8479,14 @@ function mkErrorCard(e, sql, wide = false) {
   return fig;
 }
 
-// An optional input (`-- @requires <path>` above the statement) whose file /
-// table is missing: the query failed with a missing-input error.
-const isOptionalMissing = (s, e) => !!(s && s.requires && s.requires.length) && isMissingInputError(String(e));
+// A statement's `-- @requires`: its own and its ::TAB / ::SUBTAB's (planned
+// as tab_requires; a setup statement in a hidden tab's section still runs,
+// and reading the missing input it fails as expected).
+const reqsOf = (s) => [...((s && s.requires) || []), ...((s && s.tab_requires) || [])];
+// An optional input (`-- @requires <path>` above the statement, or above its
+// tab) whose file / table is missing: the query failed with a missing-input
+// error.
+const isOptionalMissing = (s, e) => reqsOf(s).length > 0 && isMissingInputError(String(e));
 function isMissingInputError(msg) {
   return /no files found|cannot open file|no such file|does not exist|http 404|couldn't fetch/i.test(String(msg));
 }
@@ -8490,12 +8515,61 @@ function mkNotAvailable(s) {
   const why = document.createElement("span");
   why.textContent =
     "This run has no " +
-    s.requires
+    (s.requires && s.requires.length ? s.requires : reqsOf(s))
       .map((r) => [...new Set([].concat(r).map(requiresName))].join(" or "))
       .join(", ");
   d.append(b, why);
   fig.appendChild(d);
   return fig;
+}
+
+// Is a ::TAB / ::SUBTAB shown: is each requirement of its own `-- @requires`
+// met (one alternative exists)? Served, the server decides: it answers the
+// tab's statement with "optional input missing" when not (and never runs the
+// panels of a hidden tab). Otherwise, as `dashboard --check` does: `${name}`
+// is the variable's value now (unset: that alternative is missing), a
+// relative path resolves against `anofox_data` when it is set, and DuckDB's
+// glob() looks for it (a glob that fails: missing).
+async function tabShown(s) {
+  if (!s.requires || !s.requires.length) return true;
+  if (servedMode) {
+    try {
+      await runSql(s.sql);
+      return true;
+    } catch (e) {
+      if (isOptionalMissing(s, e)) return false;
+      console.warn("tab check failed", e); // shown: its panels report their own errors
+      return true;
+    }
+  }
+  const lit = (v) => "'" + String(v).replace(/'/g, "''") + "'";
+  const names = ["anofox_data"];
+  for (const p of s.requires.flat()) for (const m of String(p).matchAll(/\$\{([A-Za-z_]\w*)\}/g)) if (!names.some((n) => n.toLowerCase() === m[1].toLowerCase())) names.push(m[1]);
+  let row = {};
+  try {
+    row = JSON.parse(await runSql("SELECT " + names.map((n, i) => `CAST(getvariable(${lit(n)}) AS VARCHAR) AS v${i}`).join(", ")))[0] || {};
+  } catch (_) {}
+  const val = (n) => row["v" + names.findIndex((x) => x.toLowerCase() === n.toLowerCase())] ?? null;
+  const root = val("anofox_data");
+  const absolute = (p) => /^[\/\\]|:\/\/|^[A-Za-z]:/.test(p);
+  for (const req of s.requires) {
+    let met = false;
+    for (const alt of [].concat(req)) {
+      let unset = false;
+      const p = String(alt).replace(/\$\{([A-Za-z_]\w*)\}/g, (_, n) => val(n) ?? ((unset = true), ""));
+      if (unset || p.includes("${")) continue;
+      const full = root && !absolute(p) ? root.replace(/\/+$/, "") + "/" + p.replace(/^\.\//, "") : p;
+      try {
+        const r = JSON.parse(await runSql(`SELECT CAST(count(*) AS VARCHAR) AS n FROM glob(${lit(full)})`));
+        if (Number(r[0] && r[0].n) > 0) {
+          met = true;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!met) return false;
+  }
+  return true;
 }
 
 // ::THRESHOLDS rules, parsed by the wasm `threshold_rules` (src/thresholds.rs):

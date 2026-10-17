@@ -127,7 +127,29 @@ fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
 fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, DashboardChrome) {
     let mut chrome = DashboardChrome::default();
     let mut steps = Vec::new();
+    let mut sections = sql::requires::Sections::default();
     for panel in sql::plan(script) {
+        // A ::TAB whose `-- @requires` input is missing is hidden: none of
+        // its panels are drawn (the tabs themselves are flattened here).
+        let hidden = sections.step(&panel, |reqs| {
+            sql::requires::check(reqs, |q, _| {
+                let cols = provider.query(q)?;
+                Ok(cols
+                    .into_iter()
+                    .map(|(name, vals)| {
+                        let v = vals
+                            .first()
+                            .filter(|v| !matches!(v, Value::Na))
+                            .map(value_str);
+                        (name, v)
+                    })
+                    .collect())
+            })
+            .missing
+        });
+        if hidden.is_some() {
+            continue;
+        }
         if panel.setup {
             provider.execute(&panel.sql).ok();
             continue;
@@ -406,12 +428,12 @@ fn render_inner(
                 if r.iter().any(|(_, r)| *r == Role::Height) {
                     h = first().unwrap_or(0.0).clamp(0.0, 2000.0) as u32;
                 } else if crate::track::is_track(r) {
-                    let cols = st
-                        .rows
-                        .as_ref()
-                        .map(|rows| columns_from_result(rows, r))
-                        .unwrap_or_default();
-                    tracks.push((cols, std::mem::take(&mut h)));
+                    // A track that failed (its optional input is missing) is
+                    // left out.
+                    let h = std::mem::take(&mut h);
+                    if let Ok(rows) = &st.rows {
+                        tracks.push((columns_from_result(rows, r), h));
+                    }
                 } else {
                     break;
                 }

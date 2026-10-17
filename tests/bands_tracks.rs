@@ -380,3 +380,64 @@ fn wasm_render_stack_returns_the_chart_and_its_tracks() {
     assert_eq!(svgs.len(), 2);
     assert_eq!(plot_rect(&svgs[0])[0], plot_rect(&svgs[1])[0]);
 }
+
+/// [`Db`], with `-- @requires` files: `glob('here')` finds one, anything else
+/// none, and a query reading `missing` fails as DuckDB does.
+struct Files;
+impl DataProvider for Files {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        if sql.contains("FROM glob(") {
+            let n = if sql.contains("glob('here')") {
+                "1"
+            } else {
+                "0"
+            };
+            return Ok(vec![("n".into(), vec![Value::Str(n.into())])]);
+        }
+        if sql.contains("getvariable(") {
+            return Ok(vec![("v0".into(), vec![Value::Na])]);
+        }
+        if sql.contains("FROM missing") {
+            return Err("IO Error: No files found that match the pattern \"missing\"".into());
+        }
+        Db.query(sql)
+    }
+}
+
+#[test]
+fn the_headless_dashboard_leaves_out_hidden_tabs_and_missing_strips() {
+    let opts = DashboardOptions::default();
+    let cards = |svg: &str| svg.matches(" rx=\"").count();
+    // #162: a strip whose input is missing is left out, its chart stays.
+    let svg = render_dashboard_svg(
+        "SELECT day::XAXIS, n::LINECHART FROM sales;\n\
+         -- @requires here\nSELECT day::XAXIS, 'Promotions'::TRACK FROM promos;\n\
+         -- @requires missing\nSELECT day::XAXIS, 'Missing'::TRACK FROM missing;",
+        &mut Files,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(svg.split("data-track=\"true\"").count() - 1, 1, "one strip");
+    assert!(!svg.contains("No files found"), "no error drawn");
+    // #163: a tab whose input is missing: none of its panels are drawn.
+    let one = "SELECT day::XAXIS, n::BARCHART FROM sales;";
+    // (the shown ones: before the tabs, in Shown, in Kept)
+    let three = render_dashboard_svg(&format!("{one}\n{one}\n{one}"), &mut Files, &opts).unwrap();
+    let svg = render_dashboard_svg(
+        &format!(
+            "{one}\n-- @requires missing\nSELECT 'Hidden'::TAB;\n{one}\n{one}\n\
+             SELECT 'Sub'::SUBTAB;\n{one}\n\
+             -- @requires here\nSELECT 'Shown'::TAB;\n{one}\n\
+             -- @requires missing\nSELECT 'Gone'::SUBTAB;\n{one}\n\
+             SELECT 'Kept'::SUBTAB;\n{one}"
+        ),
+        &mut Files,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(cards(&svg), cards(&three));
+    assert!(cards(&three) > cards(&render_dashboard_svg(one, &mut Files, &opts).unwrap()));
+}

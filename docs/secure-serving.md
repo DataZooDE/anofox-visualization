@@ -219,6 +219,13 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     folder, which every viewer may read anyway. Without a data folder the
     snapshot can open no files, and nothing is checked in advance: the
     statement's own error decides, as before.
+  - **A tab's `@requires`** (above a `::TAB` / `::SUBTAB`) applies to every
+    panel in its section: the tab's statement and each of its panels answer
+    *Not available* when it is not met, so a hidden tab's panels never run —
+    also when a viewer asks for them directly. Setup statements in the
+    section run as before (only their own `@requires` can skip them). A
+    viewer learns from a hidden tab only what a panel's *Not available*
+    tells: whether the tab's files exist, by the same rule and check.
   - **A viewer can skip a setup statement that carries `@requires`** (by
     picking a run without the file). Never guard a statement that narrows what
     a viewer sees with it — neither a statement that reads no file

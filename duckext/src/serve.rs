@@ -778,7 +778,8 @@ struct Dash {
     meta: sv::DashboardMeta,
     /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
     updated: Option<String>,
-    /// Each statement's `-- @requires` (indexed like `stmts`).
+    /// Each statement's `-- @requires`, with its tab's (indexed like
+    /// `stmts`, see [`anofox_visualization::sql::Panel::all_requires`]).
     requires: Vec<Vec<Requirement>>,
 }
 
@@ -1281,9 +1282,15 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
                 has(Role::PagedTable) && has(Role::Info)
             })
             .collect();
+        // A statement in a ::TAB / ::SUBTAB section runs under the tab's
+        // `-- @requires` too (setup only under its own): a hidden tab's panels
+        // never run, also when a viewer asks for them directly.
         let (stmts, requires) = planned
             .into_iter()
-            .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
+            .map(|p| {
+                let reqs = p.all_requires();
+                ((p.setup, p.sql.trim().to_string()), reqs)
+            })
             .unzip();
         out.push(Dash {
             id,
