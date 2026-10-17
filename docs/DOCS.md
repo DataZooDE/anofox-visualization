@@ -36,6 +36,13 @@ terminal.
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
 | `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size |
+| `::Q1` | `::QUARTILE1`, `::LOWER_QUARTILE` | encoding | a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT) |
+| `::MEDIAN` | `::Q2` | encoding | the median line of a box from statistics (see ::Q1) |
+| `::Q3` | `::QUARTILE3`, `::UPPER_QUARTILE` | encoding | the upper quartile of a box from statistics (see ::Q1) |
+| `::WHISKER_LOW` | `::WHISKER_LOWER`, `::LOWER_WHISKER` | encoding | the lower whisker end of a box from statistics (without it: none) |
+| `::WHISKER_HIGH` | `::WHISKER_UPPER`, `::UPPER_WHISKER` | encoding | the upper whisker end of a box from statistics |
+| `::MEAN` | `::AVERAGE` | encoding | a box's mean from statistics, drawn as a dot |
+| `::OUTLIERS` | `::OUTLIER_LIST` | encoding | a box's outliers from statistics: a list of numbers, drawn as open circles |
 | `::YMIN` | `::Y_MIN` | encoding | lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars |
 | `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
 | `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
@@ -396,6 +403,39 @@ can map a mark's numeric `data-x` back to its level.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).
+
+#### Box plots from statistics
+
+`::BOXPLOT` computes the box from raw rows, which must all reach the page
+(`max_rows`). For a whole population (every series of every method) compute the
+numbers in SQL and send one row per box:
+
+```sql
+SELECT method::XAXIS,
+       quantile_cont(abs_err, 0.25)::Q1, median(abs_err)::MEDIAN,
+       quantile_cont(abs_err, 0.75)::Q3,
+       quantile_cont(abs_err, 0.05)::WHISKER_LOW,
+       quantile_cont(abs_err, 0.95)::WHISKER_HIGH,
+       avg(abs_err)::MEAN,
+       'Absolute error by method'::TITLE
+FROM backtest GROUP BY method ORDER BY median(abs_err);
+```
+
+- `::Q1`, `::MEDIAN` and `::Q3` are required, and no chart measure: the
+  statement draws a box plot by itself. `::WHISKER_LOW` / `::WHISKER_HIGH`
+  (a pair) are the whisker ends — your rule: the 5 / 95 % quantiles, min / max,
+  or Tukey's 1.5 × IQR fences; without them there are no whiskers.
+- `::MEAN` adds a dot; `::OUTLIERS` (a list of numbers, e.g.
+  `list(v) FILTER (WHERE v > hi)`) draws open circles like a raw box plot's.
+- The box looks like a raw-rows `::BOXPLOT` (theme, dark mode, `::CATEGORY`
+  fill, `::FLIP`, `::YFORMAT`, `::YSCALE`, `::FACET`, reference lines); its
+  tooltip names every number (*ets: median 4.1 · Q1 3 · Q3 5.2 · whiskers 1 –
+  8 · mean 4.4 · 2 outliers*), and the screen-reader summary and *charts as
+  tables* read the rows.
+- `dashboard --check` reports a missing quartile role, unpaired whiskers or a
+  chart measure beside them (`box/missing`, an error), a box where
+  Q1 ≤ median ≤ Q3 does not hold or a whisker ends inside the box
+  (`box/unordered`), and a box with a NULL quartile (`box/null`, not drawn).
 
 ### Annotations from data (events, ranges, callouts)
 

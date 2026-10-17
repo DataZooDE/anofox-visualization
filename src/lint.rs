@@ -50,7 +50,11 @@ pub struct Diagnostic {
     /// `transition/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
-    /// (warnings) | `optional/missing` (a note: a
+    /// (warnings) | `box/missing` (error: a box from statistics without
+    /// ::Q1 / ::MEDIAN / ::Q3, unpaired whiskers, no ::XAXIS, or beside a chart
+    /// measure) | `box/unordered` | `box/null` (warnings) |
+    /// `requires/unknown-variable` | `requires/empty-alternative` |
+    /// `requires/bad-variable` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
@@ -819,7 +823,29 @@ where
         // Let the render engine validate the role/column combination (this
         // catches missing required aesthetics, e.g. a bar chart with no x).
         let cols = sql::columns_from_rows(&rows, &p.roles);
+        // A box plot from statistics: its roles (else it cannot render),
+        // then its numbers.
+        let box_roles = crate::boxstats::prepare(cols.clone());
+        match &box_roles {
+            Err(e) => diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt,
+                code: "box/missing",
+                message: e.clone(),
+                sql: short.clone(),
+            }),
+            Ok(_) => diags.extend(crate::boxstats::issues(&cols).into_iter().map(
+                |(code, message)| Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                },
+            )),
+        }
         match render_with_warnings(&cols, 460, 300, &RenderOptions::default()) {
+            Err(_) if box_roles.is_err() => {}
             Err(e) => diags.push(Diagnostic {
                 severity: Severity::Error,
                 stmt,
@@ -2054,6 +2080,34 @@ mod design_tests {
                 .unwrap()
                 .clone()])
         }
+    }
+
+    #[test]
+    fn box_statistics_are_checked() {
+        let row = |q1: f64, m: f64, q3: f64| {
+            json!({ "c0": "a", "c1": q1, "c2": m, "c3": q3, "c4": 0.0, "c5": 9.0 })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let sql = "SELECT g::XAXIS, a::Q1, b::MEDIAN, c::Q3, lo::WHISKER_LOW, hi::WHISKER_HIGH, \
+                   'Error by method'::TITLE FROM t;";
+        let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
+        assert!(lint_one(sql, vec![row(1.0, 2.0, 3.0)]).is_empty());
+        let d = lint_one(sql, vec![row(1.0, 4.0, 3.0)]);
+        assert_eq!(codes(&d), ["box/unordered"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        let d = lint_one(sql, vec![row(-1.0, 2.0, 3.0)]);
+        assert_eq!(codes(&d), ["box/unordered"], "{d:?}");
+        assert!(d[0].message.contains("whisker"), "{}", d[0].message);
+        // A missing quartile: one error, not a render error as well.
+        let d = lint_one(
+            "SELECT g::XAXIS, a::Q1, b::MEDIAN FROM t;",
+            vec![row(1.0, 2.0, 3.0)],
+        );
+        assert_eq!(codes(&d), ["box/missing"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("::Q3"), "{}", d[0].message);
     }
 
     #[test]

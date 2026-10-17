@@ -316,6 +316,21 @@ pub(crate) fn maybe_decimal(vals: Vec<Value>) -> Vec<Value> {
 pub(crate) fn coerce_for_role(role: Role, vals: Vec<Value>) -> Vec<Value> {
     match role {
         Role::X => maybe_decimal(maybe_datetime(vals)),
+        // A box from statistics: numbers (DuckDB's JSON prints DECIMAL /
+        // HUGEINT as strings).
+        Role::Q1 | Role::Median | Role::Q3 | Role::WhiskerLow | Role::WhiskerHigh | Role::Mean => {
+            vals.into_iter()
+                .map(|v| match v {
+                    Value::Str(s) => s
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|f| f.is_finite())
+                        .map_or(Value::Na, Value::Float),
+                    other => other,
+                })
+                .collect()
+        }
         Role::VLine | Role::MarkArea | Role::XBandFrom | Role::XBandTo => maybe_datetime(vals)
             .into_iter()
             .map(|v| match v {

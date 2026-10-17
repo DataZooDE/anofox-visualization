@@ -53,6 +53,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `render-warning` | warning | renders, but the engine dropped data: non-finite values (`NaN`, `±Inf`, `log` of ≤ 0), a stat layer with too little data (density of one value, smooth on two points). Filter in SQL (`WHERE isfinite(x)`, `NULLIF`) |
 | `empty-panel` | warning | 0 rows: a blank card (often a filter on an unset variable); not raised after an `::EMPTY` message |
 | `optional/missing` | note | a `-- @requires <path>` input is missing: the panel reads "Not available" (not a failure, `--strict` passes) |
+| `box/missing`, `box/unordered`, `box/null` | error / warning / warning | a box from statistics without `::Q1`/`::MEDIAN`/`::Q3`, with one whisker, without `::XAXIS` or beside a chart measure; Q1 ≤ median ≤ Q3 broken or a whisker inside the box; a NULL quartile (not drawn) |
 | `requires/unknown-variable`, `requires/empty-alternative`, `requires/bad-variable` | warning (`--strict` fails) | a `${name}` in `-- @requires` with no value here (that path counts as missing; `--check --data <dir>` sets `anofox_data`); `a \|` / `a \|\| b` / a line with no path; a malformed `${…}` |
 | `animate/unknown`, `animate/reveal-no-xline`, `linestyle/unknown`, `story/bad-by`, `transition/unknown` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from; a `::LINESTYLE` that is not `flow`/`dashed`/`solid`; a `::STORY_BY` that is not `x`/`series` (or `series` without a `::CATEGORY`); a `::TRANSITION` that is not `tween`/`none` |
 | `track/no-chart` | warning | a `::TRACK` that does not directly follow a chart with a numeric / date `::XAXIS` (only a `::HEIGHT` may sit between): it is drawn as a panel of its own |
@@ -72,6 +73,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 |---|---|
 | Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::WATERFALL` `::BULLET` `::FUNNEL` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` `::BASEMAP` (WKT) · `::DIAGRAM` (on the node id, see *Diagrams*) |
 | Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble) · `::OPEN` `::HIGH` `::LOW` (candles) |
+| Box plot from statistics (one row per box, no `::BOXPLOT`) | `::Q1` `::MEDIAN` `::Q3` (required) · `::WHISKER_LOW` + `::WHISKER_HIGH` · `::MEAN` (a dot) · `::OUTLIERS` (a list) — e.g. `quantile_cont(v, 0.25)::Q1, median(v)::MEDIAN, quantile_cont(v, 0.75)::Q3` with `GROUP BY` the `::XAXIS`, for populations too large to send as raw rows |
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` (number, date or timestamp) · `::BAND_LOWER` + `::BAND_UPPER` (several pairs, in column order = a nested fan: 95 / 80 / 50 %) · `CASE WHEN flag THEN day END::MARKAREA` (a shaded region per run of flagged days) · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
 | Annotations from data (per row — `LEFT JOIN events ON events.day = t.day`) | `::XLINE` + `::XLINE_LABEL` (labelled event line) · `::XBAND_FROM` + `::XBAND_TO` + `::XBAND_LABEL` (labelled shaded range) · `::REFLINE` + `::REFLINE_LABEL` · `::ANNOTATE` (text callout at the row's x, y; NULL = none) |
@@ -373,7 +375,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | one headline number | `::METRIC` / `::MONEY` / `::PERCENT` + a `::LABEL` caption |
 | a number over time | `::LINECHART` (+ `::SMOOTH` for a trend); ≤ ~6 series |
 | a number by a discrete category | `::BARCHART` sorted by value; part of whole → `::BARCHART_STACKED` or `::DONUTCHART` (≤ 6 slices) |
-| a distribution | `::HISTOGRAM`, or `::BOXPLOT` / `::VIOLIN` by a category |
+| a distribution | `::HISTOGRAM`, or `::BOXPLOT` / `::VIOLIN` by a category; too many rows to send → a box from statistics (`::Q1` `::MEDIAN` `::Q3`, computed in SQL) |
 | two numbers | `::SCATTER` (third as `::BUBBLE` / `::SIZE`) |
 | two categories + a measure | `::HEATMAP` |
 | a forecast with its uncertainty | `::LINECHART` + one `::BAND_LOWER` / `::BAND_UPPER` pair per level (pivot long quantiles with `max(lower) FILTER (WHERE level = 0.95)`) |

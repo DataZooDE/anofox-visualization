@@ -18,6 +18,9 @@ const { chartSummary, chartKind } = new Function(
 assert.equal(chartKind([[0, "XAXIS", ""], [1, "BARCHART_STACKED", ""]]), "Bar chart");
 assert.equal(chartKind([[0, "XAXIS", ""], [1, "LINECHART", "sales"]]), "Line chart");
 assert.equal(chartKind([]), "Chart");
+// A box plot from statistics carries no ::BOXPLOT: its quartile roles name it.
+assert.equal(chartKind([[0, "XAXIS", ""], [1, "Q1", ""], [2, "MEDIAN", ""], [3, "Q3", ""]]), "Box plot");
+assert.equal(chartKind([[0, "XAXIS", ""], [1, "BOXPLOT", "err"]]), "Box plot");
 
 const fmt = (v) => String(v);
 // Multi-series: kind, title, series, x range, extremes with where they are.

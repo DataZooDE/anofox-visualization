@@ -22,6 +22,7 @@
 pub use ggplot_rs::prelude::Value;
 use ggplot_rs::prelude::*;
 
+mod boxstats;
 pub mod contract;
 pub mod dashboard;
 pub mod diagram;
@@ -363,6 +364,24 @@ pub enum Role {
     High,
     /// Candlestick low price (`::LOW`).
     Low,
+    /// A box plot from statistics, one row per box: the lower quartile
+    /// (`::Q1`). With [`Role::Median`] and [`Role::Q3`] the statement draws a
+    /// box plot without the raw rows.
+    Q1,
+    /// A pre-computed box's median line (`::MEDIAN`), see [`Role::Q1`].
+    Median,
+    /// A pre-computed box's upper quartile (`::Q3`), see [`Role::Q1`].
+    Q3,
+    /// A pre-computed box's lower whisker end (`::WHISKER_LOW`); without it the
+    /// whisker stops at the box.
+    WhiskerLow,
+    /// A pre-computed box's upper whisker end (`::WHISKER_HIGH`).
+    WhiskerHigh,
+    /// A pre-computed box's mean, drawn as a dot (`::MEAN`).
+    Mean,
+    /// A pre-computed box's outliers, a list of numbers (`::OUTLIERS`), drawn
+    /// as open circles.
+    Outliers,
     /// Lower end of a y interval (`::YMIN`): a point measure becomes a
     /// pointrange, any other measure gets error bars.
     YMin,
@@ -1395,6 +1414,7 @@ fn render_placed(
             return Ok((o.theme.finish_svg(svg), Vec::new()));
         }
         let cols = downsample::prepare(cols, o);
+        let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
         let draw = |fit: Option<track::Fit>| {
             render_inner(&cols, w, h, o)
                 .map(|p| p.localized(o, &cols))
@@ -1417,6 +1437,9 @@ fn render_placed(
         let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
         let svg = with_line_styles(with_rule_marks(with_xline_dates(svg, &cols)), &cols);
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        if boxstats::is_stats(&cols) {
+            svg = boxstats::with_tips(svg, &cols, o);
+        }
         if find_role(&cols, Role::Track).is_some() {
             svg = track::lane_tips(svg);
         }
@@ -1762,7 +1785,7 @@ pub(crate) fn panel_plot(
     o: &RenderOptions,
 ) -> Result<Option<GGPlot>, String> {
     let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
-    let cols = downsample::prepare(cols, o);
+    let cols = boxstats::prepare(downsample::prepare(cols, o))?;
     Ok(match render_inner(&cols, w, h, o)?.localized(o, &cols) {
         Panel::Plot { plot, .. } => Some(*plot),
         Panel::Own { .. } => None,
@@ -1938,7 +1961,12 @@ fn render_inner(
             height,
         ));
     }
-    let need = min_values(kind);
+    // (A box from statistics is one row per box.)
+    let need = if boxstats::is_stats(cols) {
+        1
+    } else {
+        min_values(kind)
+    };
     if n_ok < need {
         return Ok(note_svg(
             title.as_deref(),
@@ -2379,6 +2407,11 @@ fn cartesian(
         data.push((band_key("bandlo", k), lo.values.clone()));
         data.push((band_key("bandhi", k), hi.values.clone()));
     }
+    // A box from statistics: its quartiles, whiskers and outliers.
+    let box_stats = kind == Kind::Boxplot && boxstats::is_stats(cols);
+    if box_stats {
+        data.extend(boxstats::data_columns(cols));
+    }
     // Censoring marks on a step curve (`::CENSOR`).
     let censor = kind == Kind::Step
         && find_role(cols, Role::Censor)
@@ -2781,6 +2814,44 @@ fn cartesian(
         Kind::Jitter => plot.geom_jitter(),
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
+        Kind::Boxplot if box_stats => {
+            let mut p = plot
+                .geom_boxplot_with(GeomBoxplot {
+                    fill: body_fill,
+                    color: o.theme.chart_label(),
+                    width: 0.6,
+                    alpha: 1.0,
+                })
+                .stat(boxstats::StatBoxStats)
+                .layer_aes(boxstats::layer_aes());
+            // The outliers and means lie beyond the whiskers the y scale sees.
+            let (ex, ey) = boxstats::extent_rows(cols);
+            if !ex.is_empty() {
+                p = p
+                    .geom_blank()
+                    .layer_data(vec![("x".to_string(), ex), ("y".to_string(), ey)])
+                    .layer_aes(Aes::new().x("x").y("y"));
+            }
+            if let Some(mean) = find_role(cols, Role::Mean) {
+                let n = mean.values.len();
+                p = p
+                    .geom_point_with(GeomPoint {
+                        size: 2.6,
+                        color: o.theme.chart_label(),
+                        alpha: 1.0,
+                    })
+                    .layer_data(vec![
+                        ("x".to_string(), x.values.clone()),
+                        ("y".to_string(), mean.values.clone()),
+                        (
+                            "label".to_string(),
+                            vec![Value::Str(boxstats::MEAN_LABEL.into()); n],
+                        ),
+                    ])
+                    .layer_aes(Aes::new().x("x").y("y").label("label"));
+            }
+            p
+        }
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
             fill: body_fill,
             color: o.theme.chart_label(),

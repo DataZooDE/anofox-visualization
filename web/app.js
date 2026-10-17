@@ -210,6 +210,15 @@ SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
+-- A box plot from statistics: one row per box, the numbers computed in SQL —
+-- for a population too large to send as rows (::Q1 / ::MEDIAN / ::Q3, no ::BOXPLOT).
+SELECT 12::COL; SELECT channel::XAXIS, q1::Q1, med::MEDIAN, q3::Q3, lo::WHISKER_LOW, hi::WHISKER_HIGH, mean::MEAN,
+       list(value ORDER BY value) FILTER (WHERE value < lo OR value > hi)::OUTLIERS,
+       'Box plot from statistics — one row per box, 5–95 % whiskers (::Q1, ::MEDIAN, ::Q3)'::TITLE
+FROM m JOIN (SELECT channel, quantile_cont(value, 0.25) AS q1, median(value) AS med, quantile_cont(value, 0.75) AS q3,
+                    quantile_cont(value, 0.05) AS lo, quantile_cont(value, 0.95) AS hi, round(avg(value), 1) AS mean
+             FROM m GROUP BY channel) s USING (channel)
+GROUP BY ALL ORDER BY channel;
 
 SELECT 'Pie, gauge & radar'::TAB;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
@@ -11568,7 +11577,7 @@ const CHART_KINDS = [
   [/^RADAR/, "Radar chart"],
   [/^HISTOGRAM/, "Histogram"],
   [/^DENSITY/, "Density plot"],
-  [/^BOXPLOT/, "Box plot"],
+  [/^BOXPLOT|^(Q1|MEDIAN|Q3)$/, "Box plot"], // (raw rows, or one row of statistics per box)
   [/^VIOLIN/, "Violin plot"],
   [/^QQ/, "Q-Q plot"],
   [/^HEATMAP/, "Heatmap"],
@@ -12074,7 +12083,18 @@ function dataTableHtml(dp, limit, caption) {
     return !r || !SKIP.has(r[1]);
   });
   // Header names: the role's display name, else a friendly role name, else key.
-  const FRIENDLY = { XAXIS: "x", YAXIS: "y", CATEGORY: "series" };
+  const FRIENDLY = {
+    XAXIS: "x",
+    YAXIS: "y",
+    CATEGORY: "series",
+    Q1: "Q1",
+    MEDIAN: "median",
+    Q3: "Q3",
+    WHISKER_LOW: "whisker low",
+    WHISKER_HIGH: "whisker high",
+    MEAN: "mean",
+    OUTLIERS: "outliers",
+  };
   const nameFor = (k) => {
     const r = roleFor(k);
     if (r && r[2]) return r[2];
