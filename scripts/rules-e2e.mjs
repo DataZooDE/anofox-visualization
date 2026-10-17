@@ -47,6 +47,8 @@ async function sweep(dash) {
   for (let t = 0; t < Math.max(1, tabs); t++) {
     if (tabs) {
       await page.locator(".tab-btn").nth(t).evaluate((e) => e.click());
+      // lazy tabs: the tab's panels render once it is shown
+      await page.waitForFunction(() => ![...document.querySelectorAll(".dash .dp-lazy")].some((e) => e.offsetParent !== null), null, { timeout: 120000 });
       await page.waitForTimeout(1500);
     }
     const rules = page.locator(".dash .panel-svg > svg [data-rule]");

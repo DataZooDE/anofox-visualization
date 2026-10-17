@@ -20,7 +20,10 @@ Nussbaumer Knaflic (*Storytelling with Data*), and Datawrapper.
 - **Most important, top-left.** Eyes enter top-left and scan in an F/Z pattern —
   put the highest-stakes number/chart there, not a filter or a logo. **[guide]**
 - **≤ ~7 panels per view.** Past that, a page can't be scanned — split topics
-  across `::TAB` pages. **[lint: too-many-panels]**
+  across `::TAB` pages. **[lint: too-many-panels]** Tabs are also faster: in
+  the browser a tab's queries run when it is first opened, and setup
+  statements placed inside a tab's section run only then too — put a heavy
+  `CREATE TABLE` that only one tab needs under that tab.
 - **2-up is the default; full-width earns it.** Panels default to half-width;
   reserve `::COL 12` for time series, heatmaps, and wide multi-series scatter.
   Two related charts side by side beat two stacked. **[guide]**

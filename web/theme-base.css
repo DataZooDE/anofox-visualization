@@ -107,11 +107,11 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel.dp-pending::after{content:"";position:absolute;inset:0;z-index:3;border-radius:inherit;pointer-events:none;opacity:0;background:linear-gradient(100deg,transparent 35%,color-mix(in srgb,var(--ax-card) 55%,transparent) 50%,transparent 65%) 0 0/250% 100%,var(--ax-veil);animation:dp-veil-in .2s .15s forwards,dp-shimmer 1.3s linear infinite}
 /* a drill-through opens its tab at once: the veil shows without the delay */
 .dp-switching .panel.dp-pending::after{animation-delay:0s,0s}
-.dp-skel{min-height:220px;display:flex;flex-direction:column;gap:.8rem}
-.dp-skel.dp-skel-kpi{min-height:96px}
-.dp-skel i{display:block;height:.8rem;width:40%;border-radius:6px;background:var(--ax-spinner-track);animation:dp-pulse 1.4s ease-in-out infinite}
-.dp-skel i:nth-child(2){width:70%;animation-delay:.15s}
-.dp-skel i:nth-child(3){flex:1;width:100%;animation-delay:.3s}
+.dp-skel,.dp-lazy{min-height:220px;display:flex;flex-direction:column;gap:.8rem}
+.dp-skel.dp-skel-kpi,.dp-lazy.dp-skel-kpi{min-height:96px}
+.dp-skel i,.dp-lazy i{display:block;height:.8rem;width:40%;border-radius:6px;background:var(--ax-spinner-track);animation:dp-pulse 1.4s ease-in-out infinite}
+.dp-skel i:nth-child(2),.dp-lazy i:nth-child(2){width:70%;animation-delay:.15s}
+.dp-skel i:nth-child(3),.dp-lazy i:nth-child(3){flex:1;width:100%;animation-delay:.3s}
 .dp-skel-kpi i:nth-child(3){flex:0 0 1.6rem;width:55%}
 @keyframes dp-veil-in{to{opacity:1}}
 @keyframes dp-shimmer{from{background-position:100% 0,0 0}to{background-position:-150% 0,0 0}}
@@ -169,7 +169,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg.dp-emph-fade [data-series],.panel svg.dp-emph-fade [data-x]{transition:opacity .25s,filter .12s}
 @media print{.dp-story{display:none}}
 .panel svg .dp-ghost{pointer-events:none}
-@media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
+@media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i,.dp-lazy i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
 .group-body .panel .panel-title{border-bottom:0;padding-bottom:.2rem}
