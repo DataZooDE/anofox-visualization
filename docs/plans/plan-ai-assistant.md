@@ -1,6 +1,6 @@
 # Plan: an AI assistant in the builder — a dashboard from a plain-language request
 
-Status: **design note for owner review (2026-10-17)**, based on master `ba2eb9d`.
+Status: **approved by the owner (2026-10-17, "go on")**; decisions in §11, based on master `ba2eb9d`.
 No product code yet. Issue: #145. Related: Explore data and the starter
 dashboards (#97, #110, #127), the app bar config (#146), My dashboards
 ([plan-sidebar.md](plan-sidebar.md), #148), the Claude Code plugin skills.
@@ -655,3 +655,13 @@ README feature list.
    $10 per run (manual, plus before a release that touches the assistant) the
    right spend? *Recommendation:* a dedicated workspace key with a monthly
    limit of about $100, used only by `assist-eval.yml`.
+
+## 11. Decisions (2026-10-17)
+
+The owner approved the plan. Each open question in §10 takes its recommendation, and the owner can still redirect any of them:
+
+1. **Demo:** (a) on the demo uses the `sessionStorage` default and the warning. The assistant stays **off** on static hosting, including the demo, unless `app-config.json` enables it. It is enabled on the demo only after the demo moves to its own domain, which is the owner's call.
+2. **Teams:** one key per author machine, or a company gateway via `--assist-base-url`. Hosted authoring is a separate issue, opened only on demand.
+3. **Common values:** sent by default for low-cardinality columns, behind one visible toggle and the PII masking.
+4. **Model:** Sonnet 5 at effort `high` by default, Opus 5.5 as *Try harder*. Re-decide after the M1 eval seed (the 70 % rule).
+5. **Live eval:** a dedicated workspace key with a monthly limit of about $100, used only by `assist-eval.yml`. The owner provides the key; until then the live eval is manual and local.
