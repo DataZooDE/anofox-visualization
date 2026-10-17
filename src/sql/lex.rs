@@ -259,6 +259,24 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     split_on(sql, ';', false)
 }
 
+/// Byte spans `(start, end)` in `sql` of the statements
+/// `split_statements(strip_comments(sql))` yields, empty ones left out (so
+/// the n-th span is statement n of [`crate::sql::plan`]): from the first to
+/// the end of the last token that is not a comment or whitespace.
+pub fn statement_spans(sql: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut span: Option<(usize, usize)> = None;
+    for t in tokenize(sql) {
+        if t.is_punct(sql, ';') {
+            out.extend(span.take());
+        } else if !t.is_trivia() {
+            span = Some((span.map_or(t.start, |s| s.0), t.end));
+        }
+    }
+    out.extend(span);
+    out
+}
+
 /// Split a select list (or any comma list) on top-level commas — outside
 /// literals/comments and `()`/`[]`/`{}` nesting.
 pub fn split_top_commas(s: &str) -> Vec<String> {

@@ -125,17 +125,6 @@ jobs:
         run: |
           for i in 1 2 3; do scripts/fetch-wasm-extensions.sh && break; echo "fetch attempt $i failed; retrying"; sleep 10; done
 
-      - name: Run tests/web/*.mjs (no skips)
-        run: |
-          status=0
-          for t in tests/web/*.mjs; do
-            echo "== $t"
-            out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; continue; }
-            echo "$out"
-            if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
-          done
-          exit $status
-
       # Explore data's starter dashboards (#97): every sample table's starter
       # passes `dashboard --check --strict` (profiled with web/explore.js and
       # the wasm page_sql, linted against the native DuckDB CLI).
@@ -148,11 +137,25 @@ jobs:
           chmod +x "$d/duckdb"
           echo "$d" >> "$GITHUB_PATH"
 
+      # (tests/web/lint_test.mjs compares the browser's Check with the CLI's)
+      - name: Build the dashboard CLI
+        run: cargo build --locked --bin dashboard
+
+      - name: Run tests/web/*.mjs (no skips)
+        run: |
+          status=0
+          for t in tests/web/*.mjs; do
+            echo "== $t"
+            out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; continue; }
+            echo "$out"
+            if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
+          done
+          exit $status
+
       - name: Explore starter dashboards pass --check --strict
         run: |
           # the hints' anofox_tabular checks run when the extension installs (#111)
           duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'" || echo "anofox_tabular not installed"
-          cargo build --locked --bin dashboard
           node scripts/explore-starters.mjs --dashboard target/debug/dashboard --out "$RUNNER_TEMP/explore-starters"
 
   statistics-conformance:
