@@ -292,9 +292,87 @@ pub fn table_json(spec: &str) -> String {
     .to_string()
 }
 
+/// The colour a `::COLORS` level map gives a `::CATEGORY` level: a status
+/// (the theme's semantic colour, so dark mode and the colour-blind theme
+/// follow) or a fixed `#rrggbb`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LevelColor {
+    Status(Status),
+    Hex(Rgb),
+}
+
+impl LevelColor {
+    pub fn rgb(self, t: &ResolvedTheme) -> Rgb {
+        match self {
+            LevelColor::Status(s) => s.color(t),
+            LevelColor::Hex(c) => c,
+        }
+    }
+}
+
+/// True when a `::COLORS` value is a level map (`'Critical:bad; …'`) rather
+/// than a gauge's comma-separated zone colours.
+pub fn is_level_map(spec: &str) -> bool {
+    spec.contains(':')
+}
+
+/// A `::COLORS` level map: `'Critical:bad; Watch:warn; OK:good'` (`;` or `,`
+/// between entries) → `(level, colour)` in the written order, which is also
+/// the legend order. A colour is a status word (`good` / `warn` / `bad` /
+/// `neutral` and their aliases) or `#rrggbb`.
+pub fn parse_level_colors(spec: &str) -> Result<Vec<(String, LevelColor)>, String> {
+    let mut out = Vec::new();
+    for entry in spec
+        .split([';', ','])
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let Some((level, colour)) = entry.rsplit_once(':') else {
+            return Err(format!(
+                "::COLORS entry '{entry}' needs 'level:status', e.g. 'Critical:bad'"
+            ));
+        };
+        let c = colour.trim();
+        let lc = match Status::parse(c) {
+            Some(s) => LevelColor::Status(s),
+            None => LevelColor::Hex(hex(c).ok_or_else(|| {
+                format!(
+                    "::COLORS '{entry}': '{c}' is no status (good, warn, bad, neutral) or #rrggbb"
+                )
+            })?),
+        };
+        out.push((level.trim().to_string(), lc));
+    }
+    if out.is_empty() {
+        return Err("::COLORS is empty — e.g. 'Critical:bad; Watch:warn; OK:good'".into());
+    }
+    Ok(out)
+}
+
+fn hex(s: &str) -> Option<Rgb> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some((p(0)?, p(2)?, p(4)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_colors_map_levels_to_states() {
+        let m = parse_level_colors("Critical:bad; Watch:warn, OK:good; Other:#112233").unwrap();
+        assert_eq!(m[0], ("Critical".into(), LevelColor::Status(Status::Bad)));
+        assert_eq!(m[1], ("Watch".into(), LevelColor::Status(Status::Warn)));
+        assert_eq!(m[2], ("OK".into(), LevelColor::Status(Status::Good)));
+        assert_eq!(m[3], ("Other".into(), LevelColor::Hex((0x11, 0x22, 0x33))));
+        assert!(parse_level_colors("Critical:purple").is_err());
+        assert!(parse_level_colors("Critical").is_err());
+        assert!(is_level_map("a:bad") && !is_level_map("#ff0000,#00ff00"));
+    }
 
     #[test]
     fn first_match_wins() {

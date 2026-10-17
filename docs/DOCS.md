@@ -35,7 +35,7 @@ terminal.
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
-| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area) |
+| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size |
 | `::YMIN` | `::Y_MIN` | encoding | lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars |
 | `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
 | `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
@@ -105,7 +105,7 @@ terminal.
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
-| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex |
+| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
@@ -532,6 +532,26 @@ SELECT region::TABLE, margin AS "Margin %", accuracy FROM regions;
   `thresholds/bad-rule`, `thresholds/no-column` (a table rule set without a
   column) and `thresholds/in-table` (`::THRESHOLDS` inside the `::TABLE`
   statement, where it would be shown as a column).
+
+#### Status colours for categories (`::COLORS` level map)
+
+A chart's `::CATEGORY` levels take the same status colours when a `::COLORS`
+column maps them: `'level:status'` entries separated by `;` (or `,`), the
+status `good` / `warn` / `bad` / `neutral` (or an alias, or `#rrggbb`). The
+named levels are drawn in the theme's `positive` / `warning` / `negative` /
+`muted` colours — dark mode and the colour-blind theme follow — and the legend
+lists them by name, in the written order; levels the map does not name keep
+their palette colours.
+
+```sql
+SELECT days::XAXIS, chance::SCATTER, status::CATEGORY,
+       'Critical:bad; Watch:warn; OK:good'::COLORS
+FROM items;
+```
+
+`dashboard --check` reports `colors/bad-map` (an entry without a status) and
+`colors/no-category` (a level map on a chart without a `::CATEGORY`). Without
+a `:` the value is still a gauge's comma-separated zone colours.
 
 ### Plotting model output (contract macros)
 
@@ -1676,7 +1696,8 @@ choice is kept per table), **Stats** (a strip under the header: a 10-bin
 histogram with min and max for each number column, the top 3 values with their
 share for the others, "all N values distinct" for ids and names, empty counts —
 over the matching rows), **Columns** (show / hide),
-**Pages | Scroll**, **Compact | Comfortable** row density (compact by default
+**Pages | Scroll** (a table of up to 20 rows opens with all of them on one
+page, a longer one pages by 10), **Compact | Comfortable** row density (compact by default
 above 50 rows) and **⤓ Export**: CSV (the matching rows, visible columns, raw
 values) or Excel (the same rows as an `.xlsx` that reads like the table: the headers
 with their units, the grouped header, each column's number format — scaled units

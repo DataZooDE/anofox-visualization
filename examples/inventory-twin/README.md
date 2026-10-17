@@ -36,8 +36,12 @@ One rule, the macro `it_crit()` in the SQL, at the plan level chosen:
 
 Most critical first: Critical, Watch, OK; within each, the earliest day the
 item can run out, then the chance. Separately, **plan trust**: *alarm* when a
-drift detector is latched in alarm now, *review* when a recalibration waits for
-the planner or a stock count did not match the twin, else *ok*. In this run
+drift detector is latched in alarm now, *review* when a stock count did not
+match the twin or a recalibration needs the planner (an escalated proposal, or
+any waiting for a class A / B item), else *ok*. Class C proposals always wait
+for the planner by design; they are listed as routine and do not make an item
+*review*. The risk map colours each item by status with
+`'Critical:bad; Watch:warn; OK:good'::COLORS` (the theme's status colours). In this run
 SKU-033, SKU-021, SKU-019, SKU-003 and SKU-002 are Critical (SKU-033's twin is
 in alarm), six items are on Watch and SKU-004 is OK.
 
@@ -49,7 +53,7 @@ the plan level (`::BUTTONS` 90 / 80 / 50 %, the projection's quantile band).
 | Tab | Shows | Export table | inventory-rs issue |
 |---|---|---|---|
 | header | the answer (the critical items) and fleet KPIs with thresholds | all | |
-| Overview (opens first) | every item in one view: a risk map (days until it can run out × chance out in 4 weeks, threshold lines at 20 / 50 %, a click selects the item), when each item runs out (`::HEATMAP` item × next 28 days of cumulative stockout chance), the watch list most critical first (status, chance, by when, units short, plan trust, days of cover, projected stock `::SPARKLINE`, a link to the item) | `projection`, `trajectory`, `detector_status`, `parameter_changes`, `proposals`, `replay_deviation` | [#22](https://github.com/DataZooDE/inventory-rs/issues/22), [#23](https://github.com/DataZooDE/inventory-rs/issues/23) |
+| Overview (opens first) | every item in one view: a risk map (days until it can run out × chance out in 4 weeks, coloured by status, threshold lines at 20 / 50 %, a click selects the item), when each item runs out (`::HEATMAP` item × next 28 days of cumulative stockout chance), the watch list most critical first (status, chance, by when, units short, plan trust, days of cover, projected stock `::SPARKLINE`, a link to the item) | `projection`, `trajectory`, `detector_status`, `parameter_changes`, `proposals`, `replay_deviation` | [#22](https://github.com/DataZooDE/inventory-rs/issues/22), [#23](https://github.com/DataZooDE/inventory-rs/issues/23) |
 | Stock & pipeline | on hand / on order (`::STEP`), stockout spells (`::MARKAREA`), the incident story, strips (`::TRACK`) for alarms, orders and deliveries, parameter changes; served vs lost demand | `trajectory`, `alarms`, `parameter_changes` | [#22](https://github.com/DataZooDE/inventory-rs/issues/22), [#23](https://github.com/DataZooDE/inventory-rs/issues/23) |
 | Risk | nested quantile fan (three `::BAND_LOWER` / `::BAND_UPPER` pairs), daily and cumulative stockout probability, every item's risk at the plan level (a link opens its fan) | `projection` | [#22](https://github.com/DataZooDE/inventory-rs/issues/22) |
 | Monitoring | alarms by detector and class · shape (`::HEATMAP`), per week; CUSUM and Page-Hinkley paths with their thresholds (`::REFLINE`), shaded while in alarm; every detector's status | `alarms`, `detector_trace`, `detector_status` | [#23](https://github.com/DataZooDE/inventory-rs/issues/23), [#26](https://github.com/DataZooDE/inventory-rs/issues/26) |

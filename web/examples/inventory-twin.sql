@@ -97,8 +97,9 @@ WHERE c.status IN ('escalated', 'proposed')
 --   OK        below 20 %.
 -- Most critical first: status, then the day it can run out, then the chance.
 -- Trust is separate: 'alarm' when a detector is latched in alarm now,
--- 'review' when a recalibration waits for the planner or a stock count did
--- not match the twin, else 'ok'.
+-- 'review' when a stock count did not match the twin or a recalibration needs
+-- the planner (escalated, or any waiting for a class A / B item; class C
+-- proposals always wait by design and stay routine), else 'ok'.
 CREATE OR REPLACE MACRO it_crit() AS TABLE
 WITH base AS (
     SELECT r.sku, i.cohort, i.shape, r.p_out_4w, r.short_by, r.units_short,
@@ -107,7 +108,11 @@ WITH base AS (
            n.on_hand_now / nullif((SELECT avg(demand) FROM it_trajectory t WHERE t.sku = r.sku
                                    AND t.period > (SELECT max(period) FROM it_trajectory) - 28), 0) AS cover_days,
            (SELECT string_agg(DISTINCT it_detector(test), ', ') FROM it_status s WHERE s.sku = r.sku AND s.state = 'alarm') AS alarm_now,
-           (SELECT count(*) FROM it_waiting() w WHERE w.sku = r.sku) AS waiting,
+           -- Class C items never change on their own: their proposals wait for
+           -- the planner by design (routine). Escalated ones, and any waiting
+           -- for class A / B, need a decision.
+           (SELECT count(*) FROM it_waiting() w WHERE w.sku = r.sku AND (w.status = 'escalated' OR i.cohort IN ('A', 'B'))) AS waiting,
+           (SELECT count(*) FROM it_waiting() w WHERE w.sku = r.sku) AS waiting_all,
            (SELECT count(*) FROM it_replay x WHERE x.sku = r.sku) AS counts,
            (SELECT count(*) FILTER (WHERE NOT within_tolerance) FROM it_replay x WHERE x.sku = r.sku) AS counts_missed
     FROM it_risk() r JOIN it_items i USING (sku) JOIN it_runs() n USING (sku)),
@@ -119,6 +124,7 @@ graded AS (
                 WHEN waiting > 0 OR counts_missed > 0 THEN 'review' ELSE 'ok' END AS trust,
            concat_ws(' · ', CASE WHEN alarm_now IS NOT NULL THEN alarm_now || ' alarm' END,
                      CASE WHEN waiting > 0 THEN waiting || ' waiting' END,
+                     CASE WHEN waiting_all > waiting THEN (waiting_all - waiting) || ' routine (class C)' END,
                      CASE WHEN counts_missed > 0 THEN counts_missed || '/' || counts || ' counts off' END) AS trust_why
     FROM base)
 SELECT *, CASE status WHEN 'Critical' THEN 1 WHEN 'Watch' THEN 2 ELSE 3 END AS grade,
@@ -207,21 +213,22 @@ SELECT ('**Which items need attention first?** ' ||
         (SELECT count(*) FROM it_crit() WHERE status = 'Watch') || ' on *Watch*. ' ||
         '**Critical** means a chance of 50 % or more of running out in the next four weeks, and the item can run out within a week (planning for the ' || it_level_txt() ||
         ' band) or it is a class A top seller. **Watch**: a chance of 20 % or more. **OK**: below. ' ||
-        '*Plan trust* (watch list): *alarm* = a drift detector is in alarm now, *review* = a recalibration waits or a stock count missed. ' ||
+        '*Plan trust* (watch list): *alarm* = a drift detector is in alarm now, *review* = a recalibration needs a decision or a stock count missed. ' ||
         'Click an item to show it on the other tabs (now: **' || it_sku() || '**).')::MARKDOWN;
 
 SELECT 6::COL;
 SELECT 380::HEIGHT;
 SELECT x AS "Days until it can run out" ::XAXIS, 100 * p_out_4w AS "Chance out in 4 weeks (%)" ::SCATTER,
-       sku || ' · ' || round(units_short)::INTEGER || ' short' || CASE WHEN sku = it_sku() THEN ' ◂' ELSE '' END ::LABEL, 12 ::LABEL_TOP, 100 - rnk ::RANK,
+       status ::CATEGORY, 'Critical:bad; Watch:warn; OK:good' ::COLORS, 4.5 ::SIZE,
+       sku || CASE WHEN sku = it_sku() THEN ' ◂' ELSE '' END ::LABEL, 12 ::LABEL_TOP, 100 - rnk ::RANK,
        '>=50:bad; >=20:warn; good' ::THRESHOLDS,
        CASE rnk WHEN 1 THEN 0 WHEN 2 THEN 28.5 END ::XBAND_FROM,
        CASE rnk WHEN 1 THEN 7 WHEN 2 THEN 31.5 END ::XBAND_TO,
-       CASE rnk WHEN 2 THEN 'not in 4 weeks' END ::XBAND_LABEL,
+       CASE rnk WHEN 2 THEN '> 4 weeks' END ::XBAND_LABEL,
        '?v.sku=' || sku ::LINK,
        'percent' ::YFORMAT,
        ('Risk map: how likely, how soon, how much (' || it_level_txt() || ' plan)')::TITLE,
-       'One point per item. Right: the days until the plan band''s lower edge first reaches zero, i.e. the item can run out then (shaded on the left: within a week); items that cannot within four weeks sit in the band at the right edge. Up: the chance of at least one day out of stock in the next 28 days, from 400 simulated futures; red line: 50 %, amber: 20 %. Next to each item: the expected units short over the 28 days. Click a point to select the item (◂ marks the selected one).'::INFO
+       'One point per item. Right: the days until the plan band''s lower edge first reaches zero, i.e. the item can run out then (shaded on the left: within a week); items that cannot within four weeks sit in the band at the right edge. Up: the chance of at least one day out of stock in the next 28 days, from 400 simulated futures; red line: 50 %, amber: 20 %. Colour: the item''s status (Critical, Watch, OK). Click a point to select the item (◂ marks the selected one).'::INFO
 FROM (SELECT *, coalesce(days_left, 29) + 0.4 * (row_number() OVER (PARTITION BY coalesce(days_left, 29) ORDER BY rnk) - 1) AS x
       FROM it_crit())
 ORDER BY rnk;
@@ -250,7 +257,7 @@ SELECT c.sku AS "Item" ::TABLE, c.status AS "Status" ::BADGE,
        (SELECT list(yhat ORDER BY ds) FROM it_projection p WHERE p.model_id = c.sku AND p.level = it_level()) AS "Projected stock (median)" ::SPARKLINE,
        c.cohort || ' · ' || c.shape AS "Class · demand",
        ('Watch list: every item, most critical first (' || it_level_txt() || ' plan)')::TITLE,
-       'Days of cover: units on hand / average daily demand of the last 28 days. Can run out by: the first day the plan band''s lower edge reaches zero. Expected units short: demand the simulated futures could not serve, on average, over the next 28 days. Plan trust: alarm = a drift detector is latched in alarm now; review = recalibrations wait for the planner (n waiting), or stock counts did not match the twin (missed / counted).'::INFO
+       'Days of cover: units on hand / average daily demand of the last 28 days. Can run out by: the first day the plan band''s lower edge reaches zero. Expected units short: demand the simulated futures could not serve, on average, over the next 28 days. Plan trust: alarm = a drift detector is latched in alarm now; review = a recalibration needs the planner (n waiting: escalated, or any for a class A / B item; class C proposals always wait and count as routine), or stock counts did not match the twin (missed / counted).'::INFO
 FROM it_crit() c ORDER BY c.rnk;
 
 -- ── 1 · Stock & pipeline ────────────────────────────────────────────────────

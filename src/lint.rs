@@ -616,6 +616,37 @@ where
                 }
             }
         }
+        // A ::COLORS level map ('Critical:bad; …') must parse and needs a
+        // ::CATEGORY to colour.
+        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
+            let spec = rows.first().and_then(|row| {
+                row.get(&format!("c{idx}"))
+                    .or_else(|| row.values().nth(*idx))
+                    .and_then(|v| v.as_str())
+            });
+            if let Some(spec) = spec.filter(|s| crate::thresholds::is_level_map(s)) {
+                let mut warn = |severity, code, message: String| {
+                    diags.push(Diagnostic {
+                        severity,
+                        stmt,
+                        code,
+                        message,
+                        sql: short.clone(),
+                    })
+                };
+                if let Err(e) = crate::thresholds::parse_level_colors(spec) {
+                    warn(Severity::Error, "colors/bad-map", e);
+                } else if !p.roles.iter().any(|(_, r)| *r == Role::Category) {
+                    warn(
+                        Severity::Warning,
+                        "colors/no-category",
+                        "a ::COLORS level map colours the ::CATEGORY levels it names — \
+                         add the column: status::CATEGORY, 'Critical:bad; OK:good'::COLORS"
+                            .into(),
+                    );
+                }
+            }
+        }
         if p.roles
             .iter()
             .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
@@ -1704,6 +1735,30 @@ mod design_tests {
             rows(2, |i| json!({ "region": "N", "m": i, "x": "<0:bad" })),
         );
         assert!(has(&d, "thresholds/in-table"), "{d:?}");
+    }
+
+    #[test]
+    fn a_colors_level_map_must_parse_and_name_a_category() {
+        let data = |spec: &str| {
+            rows(
+                2,
+                |i| json!({ "c0": i, "c1": i, "c2": "Critical", "c3": spec }),
+            )
+        };
+        let sql =
+            "SELECT x::XAXIS, y::SCATTER, s::CATEGORY, 'Critical:bad; OK:good'::COLORS FROM t;";
+        let ok = lint_one(sql, data("Critical:bad; OK:good"));
+        assert!(
+            !has(&ok, "colors/bad-map") && !has(&ok, "colors/no-category"),
+            "{ok:?}"
+        );
+        let d = lint_one(sql, data("Critical:purple"));
+        assert!(has(&d, "colors/bad-map"), "{d:?}");
+        let d = lint_one(
+            "SELECT x::XAXIS, y::SCATTER, 'Critical:bad'::COLORS FROM t;",
+            rows(2, |i| json!({ "c0": i, "c1": i, "c2": "Critical:bad" })),
+        );
+        assert!(has(&d, "colors/no-category"), "{d:?}");
     }
 
     #[test]
