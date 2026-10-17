@@ -1,6 +1,7 @@
 -- @title Can we switch on the new CRM?
 -- @group Data quality
 -- @tags  tabular, data quality, migration
+-- @description Whether the migrated CRM data is good enough to switch over: checks, profiles and open issues.
 --
 -- Tabular showcase — a data-quality report with anofox_tabular.
 --

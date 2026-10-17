@@ -1,6 +1,7 @@
 -- @title How reliable are our suppliers, and what does it cost us in stock?
 -- @group Logistics & production
 -- @tags  inventory, suppliers, lead time
+-- @description How reliable each supplier is, who is getting slower, and the safety stock it costs.
 --
 -- Supplier lead times: how reliable each supplier is, whether one is getting
 -- slower, and what the unreliability costs in safety stock and fill rate.

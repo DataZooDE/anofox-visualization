@@ -1,6 +1,7 @@
 -- @title How is our German branch doing this year?
 -- @group How it works
 -- @tags  theming, locale, german
+-- @description Revenue of a German branch this year, by month, product group and weekday, in German formats.
 --
 -- Locale de-DE: a German branch report. KPIs, tables, chart axes, legends and
 -- month names use German conventions (1.234.567,5 · 12.400 € · 12,5 % ·

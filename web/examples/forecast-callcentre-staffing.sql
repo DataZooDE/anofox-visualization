@@ -1,6 +1,7 @@
 -- @title How many agents do we need per half-hour?
 -- @group Service & operations
 -- @tags  forecast, staffing, call centre
+-- @description Forecast calls per half-hour for three weeks and the agents needed to meet the service level.
 --
 -- Call-centre staffing — how many agents do we need, every half-hour, for the
 -- next three weeks? Live anofox_forecast in the browser.

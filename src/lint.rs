@@ -56,7 +56,9 @@ pub struct Diagnostic {
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Header comments ([`header_diags`], warnings): `header/empty-group` |
-    /// `header/long-group` | `header/too-many-tags`.
+    /// `header/long-group` | `header/too-many-tags` | `header/empty-owner` |
+    /// `header/bad-certified` | `header/long-description`. A served folder ([`folder_diags`], warnings):
+    /// `folder/duplicate-title` | `folder/bad-id`.
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -1068,11 +1070,20 @@ pub fn check_policy(
     diags
 }
 
-/// The header comments that place a dashboard (`-- @group`, `-- @tags`): an
-/// empty or over-long group, more tags than are kept. Reported as statement 0
-/// (the header comes before the first statement).
+/// The longest `-- @description` (characters, its lines joined) the linter
+/// takes without a warning.
+pub const MAX_DESCRIPTION_CHARS: usize = 160;
+
+/// The header comments that place and describe a dashboard (`-- @group`,
+/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`): an empty or
+/// over-long group, more tags than are kept, a description over
+/// [`MAX_DESCRIPTION_CHARS`], an empty owner, a certification date that
+/// isn't `YYYY-MM-DD`. Reported as statement 0 (the header comes before the first
+/// statement).
 pub fn header_diags(script: &str) -> Vec<Diagnostic> {
-    use crate::host::serving::{header_value, split_tags, MAX_GROUP_CHARS, MAX_TAGS};
+    use crate::host::serving::{
+        header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_TAGS,
+    };
     let mut diags = Vec::new();
     let mut warn = |code, message: String, line: &str| {
         diags.push(Diagnostic {
@@ -1085,6 +1096,7 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     };
     let mut tags: Vec<String> = Vec::new();
     let mut tags_line = "";
+    let (mut desc, mut desc_warned) = (0usize, false);
     for line in script.lines() {
         if let Some(g) = header_value(line, "group") {
             if g.split('/').all(|p| p.trim().is_empty()) {
@@ -1104,6 +1116,35 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                     line,
                 );
             }
+        } else if let Some(d) = header_value(line, "description") {
+            desc += d.chars().count() + usize::from(desc > 0);
+            if desc > MAX_DESCRIPTION_CHARS && !desc_warned {
+                desc_warned = true;
+                warn(
+                    "header/long-description",
+                    format!(
+                        "`-- @description` is over {MAX_DESCRIPTION_CHARS} characters — keep it to \
+                         one line (the landing page shows two lines of it)"
+                    ),
+                    line,
+                );
+            }
+        } else if header_value(line, "owner") == Some("") {
+            warn(
+                "header/empty-owner",
+                "`-- @owner` names nobody — write who looks after this dashboard, or drop the line"
+                    .into(),
+                line,
+            );
+        } else if let Some(d) = header_value(line, "certified").filter(|d| !valid_iso_date(d)) {
+            warn(
+                "header/bad-certified",
+                format!(
+                    "`-- @certified {d}` is not a date written YYYY-MM-DD (e.g. 2026-10-17) — \
+                     the dashboard is shown as not certified"
+                ),
+                line,
+            );
         } else if let Some(t) = header_value(line, "tags") {
             for t in split_tags(t) {
                 if !tags.contains(&t) {
@@ -1125,6 +1166,56 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
         );
     }
     diags
+}
+
+/// The files of a served folder, linted together: each `(file name, script)`
+/// gets the diagnostics only the folder shows — a `-- @title` another file
+/// has too (the nav and the `/` list would show the same name twice), and a
+/// file name the servers skip (its id must be `[A-Za-z0-9_.-]`, at most 128,
+/// not starting with `.`). Returned with the file each belongs to.
+pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
+    use crate::host::serving::{parse_dashboard_meta, valid_dashboard_id};
+    let mut out = Vec::new();
+    let id_of = |f: &str| f.strip_suffix(".sql").unwrap_or(f).to_string();
+    let mut titles: Vec<(String, String)> = Vec::new(); // (title, file)
+    for (file, script) in files {
+        let id = id_of(file);
+        if !valid_dashboard_id(&id) {
+            out.push((
+                file.clone(),
+                Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: 0,
+                    code: "folder/bad-id",
+                    message: format!(
+                        "`{file}` is not served: a dashboard id (the file name) may only use \
+                         letters, digits, `_`, `-` and `.`"
+                    ),
+                    sql: String::new(),
+                },
+            ));
+            continue;
+        }
+        let title = parse_dashboard_meta(&id, script).title;
+        if let Some((_, first)) = titles.iter().find(|(t, _)| t.eq_ignore_ascii_case(&title)) {
+            out.push((
+                file.clone(),
+                Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: 0,
+                    code: "folder/duplicate-title",
+                    message: format!(
+                        "`{title}` is also the title of `{first}` — viewers can't tell the two \
+                         apart in the nav; give each its own `-- @title`"
+                    ),
+                    sql: String::new(),
+                },
+            ));
+        } else {
+            titles.push((title, file.clone()));
+        }
+    }
+    out
 }
 
 /// A one-line summary: `N error(s), M warning(s)` (`, K note(s)`); empty script-clean message.
@@ -1833,6 +1924,47 @@ mod design_tests {
         assert!(!has(&d, "empty-panel"), "{d:?}");
         let d = lint_one("SELECT a ::XAXIS, b ::BARCHART FROM t;", vec![]);
         assert!(has(&d, "empty-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn owner_certified_and_folders_are_checked() {
+        let codes = |script: &str| -> Vec<&'static str> {
+            header_diags(script).iter().map(|d| d.code).collect()
+        };
+        assert!(codes("-- @owner Finance\n-- @certified 2026-10-15\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @owner \nSELECT 1;"), ["header/empty-owner"]);
+        assert_eq!(
+            codes("-- @certified 2026-02-30\n"),
+            ["header/bad-certified"]
+        );
+        assert_eq!(codes("-- @certified\n"), ["header/bad-certified"]);
+        assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
+        let long = format!(
+            "-- @description {}\n-- @description {}\n",
+            "x".repeat(100),
+            "y".repeat(100)
+        );
+        assert_eq!(codes(&long), ["header/long-description"]);
+        let f = |n: &str, s: &str| (n.to_string(), s.to_string());
+        let d = folder_diags(&[
+            f("a.sql", "-- @title Sales\nSELECT 1;"),
+            f("b.sql", "-- @title sales\nSELECT 1;"),
+            f("c.sql", "SELECT 1;"),
+            f("c2.sql", "-- @title c\nSELECT 1;"),
+            f("bad name.sql", "-- @title Other\nSELECT 1;"),
+            f(".hidden.sql", "SELECT 1;"),
+        ]);
+        let got: Vec<(&str, &str)> = d.iter().map(|(f, d)| (f.as_str(), d.code)).collect();
+        assert_eq!(
+            got,
+            [
+                ("b.sql", "folder/duplicate-title"),
+                ("c2.sql", "folder/duplicate-title"),
+                ("bad name.sql", "folder/bad-id"),
+                (".hidden.sql", "folder/bad-id"),
+            ]
+        );
+        assert!(d[0].1.message.contains("a.sql"), "{}", d[0].1.message);
     }
 
     #[test]

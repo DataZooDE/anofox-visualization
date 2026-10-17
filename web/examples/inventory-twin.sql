@@ -1,6 +1,7 @@
 -- @title Where will stock run short, and can we trust the plan?
 -- @group Demand & stock
 -- @tags  inventory, digital twin, monitoring
+-- @description Which items will run short and when, how sure the plan is, and whether the model has drifted.
 --
 -- Inventory digital twin: stock, risk, monitoring, calibration and replay of
 -- one twin run of inventory-rs (DataZooDE/inventory-rs, private).

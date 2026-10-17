@@ -19,6 +19,12 @@ fn read(rel: &str) -> String {
 /// renders before wasm loads); regenerate with `dashboard --theme-css light`.
 #[test]
 fn index_html_default_tokens_are_in_sync() {
+    let landing = read("web/landing.css");
+    assert_eq!(
+        literal_hits(&landing),
+        Vec::<String>::new(),
+        "web/landing.css"
+    );
     let html = read("web/index.html");
     let a = html.find("/* ax-theme:start */\n").expect("start marker") + 21;
     let b = html.find("/* ax-theme:end */").expect("end marker");

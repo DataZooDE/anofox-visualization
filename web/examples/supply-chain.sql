@@ -1,6 +1,7 @@
 -- @title Where does our supply chain amplify demand, and what would stabilise it?
 -- @group Logistics & production
 -- @tags  inventory, simulation, bullwhip
+-- @description How orders swing more at each stage of a four-stage chain, and which policy calms them.
 --
 -- Where does our supply chain amplify demand, and what would stabilise it?
 --

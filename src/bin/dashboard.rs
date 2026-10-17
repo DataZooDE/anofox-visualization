@@ -24,6 +24,8 @@ const USAGE: &str = "usage:\n  \
      dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]\n  \
                                              render the whole dashboard headless to one SVG\n  \
      dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
+     dashboard --check <folder> [--json]     …every .sql of a served folder, plus duplicate\n  \
+                                             titles and file names the servers skip\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
@@ -364,7 +366,10 @@ fn cmd_themes() {
 }
 
 /// Lint a dashboard: report panels that error, render wrong, are silently
-/// dropped to setup, or return no rows. Exit 1 if there are errors.
+/// dropped to setup, or return no rows. Exit 1 if there are errors. A folder
+/// (a served folder) lints each `.sql` in it, plus the folder checks
+/// (`lint::folder_diags`: a duplicate `-- @title`, a file name the servers
+/// skip).
 fn cmd_check(args: &[String]) {
     let json_out = args.iter().any(|a| a == "--json");
     // --db <file>: validate against a prebuilt (read-only) database — its views
@@ -390,42 +395,78 @@ fn cmd_check(args: &[String]) {
     }
     let Some(path) = path else {
         eprintln!(
-            "usage: dashboard --check <file.sql> [--json] [--db prebuilt.duckdb] \
+            "usage: dashboard --check <file.sql | folder> [--json] [--db prebuilt.duckdb] \
              [--policy policy.json] [--strict] [--no-design]"
         );
         std::process::exit(2);
     };
-    let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("read {path}: {e}");
+    if policy.is_some() && db.is_none() {
+        eprintln!("--policy needs --db <the database the server snapshots>");
         std::process::exit(2);
-    });
-
-    // Each call runs a full script (prelude + one statement) in a fresh session
-    // (in-memory, or read-only against --db) — the linter replays session state.
-    let mut diags = lint::check_opts(
-        &script,
-        |sql| run_query(db.as_deref(), sql),
-        lint::LintOptions { design },
-    );
-    if let Some(p) = &policy {
-        let Some(db) = db.as_deref() else {
-            eprintln!("--policy needs --db <the database the server snapshots>");
+    }
+    let read = |p: &str| {
+        std::fs::read_to_string(p).unwrap_or_else(|e| {
+            eprintln!("read {p}: {e}");
             std::process::exit(2);
-        };
-        diags.extend(policy_diags(&script, db, p));
+        })
+    };
+    let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
+        // Each call runs a full script (prelude + one statement) in a fresh session
+        // (in-memory, or read-only against --db) — the linter replays session state.
+        let mut diags = lint::check_opts(
+            script,
+            |sql| run_query(db.as_deref(), sql),
+            lint::LintOptions { design },
+        );
+        if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
+            diags.extend(policy_diags(script, db, p));
+        }
+        diags
+    };
+    // (file, its diagnostics): one entry for a file, one per .sql for a folder
+    let mut files: Vec<(String, Vec<lint::Diagnostic>)> = Vec::new();
+    let folder = std::path::Path::new(&path).is_dir();
+    if folder {
+        let mut names: Vec<String> = std::fs::read_dir(&path)
+            .unwrap_or_else(|e| {
+                eprintln!("read {path}: {e}");
+                std::process::exit(2);
+            })
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.ends_with(".sql"))
+            .collect();
+        names.sort();
+        if names.is_empty() {
+            eprintln!("no .sql dashboards in {path}");
+            std::process::exit(2);
+        }
+        let scripts: Vec<(String, String)> = names
+            .iter()
+            .map(|n| {
+                (
+                    n.clone(),
+                    read(&format!("{}/{n}", path.trim_end_matches('/'))),
+                )
+            })
+            .collect();
+        let extra = lint::folder_diags(&scripts);
+        for (n, script) in &scripts {
+            let mut d = lint_one(script);
+            d.extend(extra.iter().filter(|(f, _)| f == n).map(|(_, d)| d.clone()));
+            files.push((n.clone(), d));
+        }
+    } else {
+        let script = read(&path);
+        files.push((path.clone(), lint_one(&script)));
     }
 
-    let errors = diags
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .count();
+    let all = || files.iter().flat_map(|(_, d)| d.iter());
+    let errors = all().filter(|d| d.severity == Severity::Error).count();
     // --strict: a design/* advisory also fails the exit code (for CI gating).
-    let design_hits = diags
-        .iter()
-        .filter(|d| d.code.starts_with("design/"))
-        .count();
+    let design_hits = all().filter(|d| d.code.starts_with("design/")).count();
     let failed = errors > 0 || (strict && design_hits > 0);
-    if json_out {
+    let json = |diags: &[lint::Diagnostic]| -> String {
         let items: Vec<String> = diags
             .iter()
             .map(|d| {
@@ -439,23 +480,40 @@ fn cmd_check(args: &[String]) {
                 )
             })
             .collect();
-        println!(
-            "{{\"ok\":{},\"diagnostics\":[{}]}}",
-            !failed,
-            items.join(",")
-        );
-    } else {
-        for d in &diags {
+        items.join(",")
+    };
+    if json_out {
+        if folder {
+            let per: Vec<String> = files
+                .iter()
+                .map(|(f, d)| format!("{{\"file\":{f:?},\"diagnostics\":[{}]}}", json(d)))
+                .collect();
+            println!("{{\"ok\":{},\"files\":[{}]}}", !failed, per.join(","));
+        } else {
             println!(
-                "{}: [stmt {}] {} — {}\n    {}",
-                d.severity.label(),
-                d.stmt,
-                d.code,
-                d.message,
-                d.sql
+                "{{\"ok\":{},\"diagnostics\":[{}]}}",
+                !failed,
+                json(&files[0].1)
             );
         }
-        println!("\n{}", lint::summary(&diags));
+    } else {
+        for (f, diags) in &files {
+            if folder {
+                println!("== {f}: {}", lint::summary(diags));
+            }
+            for d in diags {
+                println!(
+                    "{}: [stmt {}] {} — {}\n    {}",
+                    d.severity.label(),
+                    d.stmt,
+                    d.code,
+                    d.message,
+                    d.sql
+                );
+            }
+        }
+        let flat: Vec<lint::Diagnostic> = all().cloned().collect();
+        println!("\n{}", lint::summary(&flat));
     }
     if failed {
         std::process::exit(1);

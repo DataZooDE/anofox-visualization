@@ -1,6 +1,7 @@
 -- @title Will any substation exceed its capacity next week?
 -- @group Service & operations
 -- @tags  forecast, energy, capacity
+-- @description Next week's load per substation against its firm capacity, with an alarm threshold you set.
 --
 -- Energy / load forecasting — will any substation exceed its firm capacity
 -- next week? Live anofox_forecast in the browser.

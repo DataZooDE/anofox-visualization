@@ -1,6 +1,7 @@
 -- @title How will demand develop after today?
 -- @group Demand & stock
 -- @tags  forecast, motion, story
+-- @description A weekly demand outlook with its uncertainty, told step by step from the past into the forecast.
 --
 -- How will demand develop after today? A weekly demand outlook whose charts
 -- move with the story they tell:

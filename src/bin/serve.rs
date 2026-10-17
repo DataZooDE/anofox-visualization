@@ -66,8 +66,11 @@ struct Opts {
     auth: Option<Auth>,
     /// `--log <path | stderr>` (+ `--log-vars`): JSON-lines request log.
     log: Option<RequestLog>,
-    /// `--app-name/-tagline/-logo/-link/-favicon/-hide-name`: the builder's app bar.
+    /// `--app-name/-tagline/-logo/-link/-favicon/-hide-name`: the builder's
+    /// app bar; with `--dashboards`, the landing page's header.
     app: AppBrand,
+    /// `--home <id>` (with `--dashboards`): `/` redirects to that dashboard.
+    home: Option<String>,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -79,7 +82,7 @@ fn theme_default() -> Option<&'static str> {
 /// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
 static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -103,6 +106,7 @@ fn parse_args() -> Opts {
         auth: None,
         log: None,
         app: AppBrand::default(),
+        home: None,
     };
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut args = std::env::args().skip(1);
@@ -184,6 +188,15 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|e| usage(&format!("--app-{e}")));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
+            "--home" => {
+                let h = args
+                    .next()
+                    .unwrap_or_else(|| usage("--home needs a dashboard id"));
+                if !sv::valid_dashboard_id(&h) {
+                    usage("--home: a dashboard id is its file name without .sql");
+                }
+                o.home = Some(h);
+            }
             "--log" => {
                 log = Some(
                     args.next()
@@ -220,8 +233,8 @@ fn parse_args() -> Opts {
     if o.app.check().is_err() {
         usage("--app-hide-name needs --app-logo (the bar would be empty)");
     }
-    if o.dashboards_dir.is_some() && !o.app.is_empty() {
-        usage("--app-* style the authoring builder (locked dashboards show no app bar)");
+    if o.dashboards_dir.is_none() && o.home.is_some() {
+        usage("--home applies to --dashboards serving");
     }
     match (&mut o.auth, audit) {
         (Some(a), Some(p)) => a.set_audit(Arc::new(
@@ -613,6 +626,8 @@ struct Dashboard {
     id: String,
     meta: sv::DashboardMeta,
     script: String,
+    /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
+    updated: Option<String>,
 }
 
 fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
@@ -634,6 +649,7 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
                         meta: sv::parse_dashboard_meta(&id, &script),
                         id,
                         script,
+                        updated: sv::file_date(&p),
                     });
                 }
             }
@@ -645,6 +661,9 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
 
 struct ServeState {
     port: u16,
+    /// `--app-*`: the landing page's header; `--home`: `/` redirects there.
+    app: AppBrand,
+    home: Option<String>,
     allow_hosts: Vec<String>,
     db: String,
     dashboards: Vec<Dashboard>,
@@ -682,6 +701,11 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         println!("  init applied: {init}");
     }
     let dashboards = load_dashboards(Path::new(dir));
+    if let Some(h) = &o.home {
+        if !dashboards.iter().any(|d| &d.id == h) {
+            usage(&format!("--home: no dashboard '{h}' in {dir}"));
+        }
+    }
     let addr = format!("{}:{}", o.bind, o.port);
     let server = Server::http(&addr).unwrap_or_else(|e| {
         eprintln!("error: bind {addr}: {e}");
@@ -715,6 +739,8 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
     }
     let st = ServeState {
         port: o.port,
+        app: o.app.clone(),
+        home: o.home.clone(),
         // the --allow-host names, plus the bind address itself (direct access
         // by IP) unless it is a wildcard address
         allow_hosts: o
@@ -937,11 +963,23 @@ fn route_serve(
         return reply(req, 405, "method not allowed");
     }
     if path == "/" {
+        // --home: straight to that dashboard (if this viewer may read it)
+        if let Some(h) = st
+            .home
+            .as_deref()
+            .filter(|h| scope.is_none_or(|s| s.allows(h)))
+        {
+            let resp = Response::empty(302)
+                .with_header(header("Location", &format!("/d/{h}")))
+                .with_header(header("Cache-Control", "no-store"));
+            let _ = req.respond(resp);
+            return 302;
+        }
         respond(
             req,
             200,
             "text/html; charset=utf-8",
-            list_page(&st.dashboards, scope).into_bytes(),
+            list_page(st, scope).into_bytes(),
         );
         return 200;
     }
@@ -1246,16 +1284,25 @@ fn render_dashboard_page(
     }))
 }
 
-fn list_page(dashboards: &[Dashboard], scope: Option<&Scope>) -> String {
-    let t = anofox_visualization::theme::resolve(theme_default().unwrap_or(""))
-        .map(|s| s.default_variant().clone())
-        .unwrap_or_default();
-    let items: Vec<(String, String)> = dashboards
-        .iter()
-        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
-        .map(|d| (format!("/d/{}", d.id), d.meta.title.clone()))
-        .collect();
-    page::list(&t, "Dashboards", &items)
+/// The `/` landing page: the dashboards the viewer may read, as cards in
+/// groups, in the `--theme`, with the `--app-*` header (`page::landing`).
+fn list_page(st: &ServeState, scope: Option<&Scope>) -> String {
+    let set = anofox_visualization::theme::resolve(theme_default().unwrap_or(""))
+        .unwrap_or_else(|_| anofox_visualization::theme::resolve("").expect("the default theme"));
+    page::landing(&page::Landing {
+        theme: &set,
+        app: (!st.app.is_empty()).then_some(&st.app),
+        items: st
+            .dashboards
+            .iter()
+            .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
+            .map(|d| page::LandingItem {
+                href: format!("/d/{}", d.id),
+                meta: &d.meta,
+                updated: d.updated.clone(),
+            })
+            .collect(),
+    })
 }
 /// Run the `duckdb` CLI with flags + a SQL string; stdout on success, stderr on
 /// error. The SQL is passed as one argv element after `-c` (no shell), and

@@ -1,6 +1,7 @@
 -- @title Can a model triage the support inbox?
 -- @group Service & operations
 -- @tags  decide, support, triage
+-- @description How well a decision model sorts support tickets, and what its mistakes would cost.
 --
 -- Decide showcase — natural-language decisions with anofox_decide.
 --
