@@ -2187,6 +2187,7 @@ function loadDash(name, sql, key) {
   dpSubTab = {};
   dpFilter = "";
   dpSelected = null;
+  dpZoomGroups = {};
   dpXf = {};
   dpUrlSeed = {};
   dpVarDefault = {};
@@ -4124,6 +4125,7 @@ let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
 let dpVarLast = {}; // … and at the end of the last completed run
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
+let dpZoomGroups = {}; // ::SYNC_ZOOM: group name → {view: {cx, cy, w} | null, members: Set<map holder>}
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
 let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
 let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
@@ -4674,7 +4676,10 @@ function chartLink(link, el, key, series) {
   const x = el.getAttribute("data-x") || "";
   const ds = el.getAttribute("data-series");
   const str = (v) => (v == null ? "" : String(v).replace(/^"|"$/g, ""));
+  // A mark that names its row (a ::MAP feature's data-row) follows that row's link.
+  const dr = el.getAttribute("data-row");
   const row =
+    (dr != null && /^\d+$/.test(dr) && rows[+dr]) ||
     rows.find((r) => (!xr || str(r["c" + xr[0]]) === x) && (!cr || ds == null || str(r["c" + cr[0]]) === ds)) ||
     rows.find((r) => (xr && str(r["c" + xr[0]]) === key) || (cr && str(r["c" + cr[0]]) === key)) ||
     rows[0] ||
@@ -9791,14 +9796,41 @@ function showError(grid, msg) {
   grid.appendChild(d);
 }
 
+// Synced map zoom (`'name'::SYNC_ZOOM`): maps of one group share a view —
+// its centre and width; each map keeps its own aspect.
+// The view to share from a map's {x0,x1,y0,y1} window (null = auto-fit).
+function sharedZoom(view) {
+  return view ? { cx: (view.x0 + view.x1) / 2, cy: (view.y0 + view.y1) / 2, w: view.x1 - view.x0 } : null;
+}
+// A shared view as a window for a map drawn at `aspect` (width / height).
+function zoomFromShared(sv, aspect) {
+  if (!sv || !(sv.w > 0) || !(aspect > 0)) return null;
+  const h = sv.w / aspect;
+  return { x0: sv.cx - sv.w / 2, x1: sv.cx + sv.w / 2, y0: sv.cy - h / 2, y1: sv.cy + h / 2 };
+}
+
 // Scroll-to-zoom / drag-to-pan for a map panel. Re-renders the panel's SVG with
 // a lon/lat zoom window (double-click resets to auto-fit). The initial view is
 // seeded from the geometry bounds, padded to the panel's aspect so the first
-// zoom step doesn't jump.
+// zoom step doesn't jump. In a ::SYNC_ZOOM group a zoom, pan or reset of one
+// map is applied to every other map of the group, and a map that joins later
+// (a re-run) takes the group's current view.
 function attachMapZoom(holder, rowsJson, roles, ph) {
   const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
   let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
   let raf = 0;
+  const gr = roles.find((r) => r[1] === "SYNC_ZOOM");
+  const groupName = gr ? cellAt(rowsJson, gr[0]).trim() : "";
+  const group = groupName ? (dpZoomGroups[groupName] ||= { view: null, members: new Set() }) : null;
+  // Hand this map's view to the rest of its group.
+  const share = () => {
+    if (!group) return;
+    group.view = sharedZoom(view);
+    for (const h of group.members) {
+      if (!h.isConnected) group.members.delete(h);
+      else if (h !== holder) h._dpZoomTo(group.view);
+    }
+  };
 
   const fit = () => {
     let b;
@@ -9853,6 +9885,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
         y1: py + (view.y1 - py) * k,
       };
       draw();
+      share();
     },
     { passive: false }
   );
@@ -9871,6 +9904,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     const dy = ((e.clientY - drag.y) / r.height) * (drag.v.y1 - drag.v.y0);
     view = { x0: drag.v.x0 - dx, x1: drag.v.x1 - dx, y0: drag.v.y0 + dy, y1: drag.v.y1 + dy };
     draw();
+    share();
   });
   window.addEventListener("mouseup", () => {
     if (drag && drag.moved) holder._panned = true; // suppress the trailing click
@@ -9891,7 +9925,16 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   holder.addEventListener("dblclick", () => {
     view = null;
     draw();
+    share();
   });
+  if (group) {
+    holder._dpZoomTo = (sv) => {
+      view = zoomFromShared(sv, W() / ph);
+      draw();
+    };
+    group.members.add(holder);
+    if (group.view) holder._dpZoomTo(group.view);
+  }
 }
 
 // A mark's tooltip value for display: ggplot-rs writes `data-value` raw, so
@@ -9927,6 +9970,21 @@ function markInfo(attr, tip) {
   const fx = attr("data-fx") || "";
   const x = attr("data-x") || "";
   return { series, value, x: fx || x, fx: !!fx, own: series === x, detail: plain ? "" : tip };
+}
+
+// Hover metadata of a ::MAP feature. The renderer writes `data-series` (its
+// ::CATEGORY, else its ::LABEL), `data-value` / `data-fvalue` (the measure) and
+// `data-label` (the ::LABEL text, newlines kept), so the tooltip heads with the
+// label and names the series and value under it — not the raw "label: series"
+// title. `own` when the label is the series (a choropleth's region name).
+function mapMarkInfo(attr, tip) {
+  const series = attr("data-series") || "";
+  const label = attr("data-label") || "";
+  const dv = attr("data-value");
+  const fv = attr("data-fvalue");
+  const value = fv ? fv : dv !== null && dv !== "" ? fmtTipValue(dv) : "";
+  const own = series !== "" && series === label;
+  return { series: series || tip, value, x: label, fx: true, own, detail: "" };
 }
 
 // A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
@@ -9988,7 +10046,9 @@ function attachHover() {
   marks.forEach((el) => {
     const t = el.querySelector("title");
     const txt = t.textContent;
-    const info = markInfo((k) => el.getAttribute(k), txt);
+    const attr = (k) => el.getAttribute(k);
+    const isMapMark = el.hasAttribute("data-row") && !!el.closest("svg[data-map]");
+    const info = isMapMark ? mapMarkInfo(attr, txt) : markInfo(attr, txt);
     if (!info.fx) info.x = xTickLabel(el, info.x);
     const series = info.series;
     el.removeChild(t);
@@ -10020,7 +10080,13 @@ function attachHover() {
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
-      tip.innerHTML = (info.x ? `<div class="tip-head">${escapeHtml(info.x)}</div>` : "") + tipRow(info, fill);
+      // A map feature's ::LABEL may run over several lines: the first is the
+      // heading, the rest follow as they are.
+      const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
+      tip.innerHTML =
+        (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "") +
+        (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
+        tipRow(info, fill);
       tip.classList.add("show");
     });
     el.addEventListener("mousemove", (e) => {

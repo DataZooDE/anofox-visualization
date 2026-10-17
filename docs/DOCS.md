@@ -103,6 +103,7 @@ terminal.
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
+| `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1593,6 +1594,44 @@ SELECT city::TABLE, sum(revenue) AS revenue ::MONEY,
 FROM orders GROUP BY ALL ORDER BY revenue DESC;
 ```
 
+#### Maps
+
+A `::MAP` panel takes part in all of the above. Each feature (a region, a
+route, a point) is a mark keyed by its **`::CATEGORY`** — or, without one, by
+its **`::LABEL`** (a choropleth's region name):
+
+- **Hover** shows the feature's `::LABEL` as the heading (several lines with
+  `chr(10)`), then its series and measure. The plain `<title>` is unchanged.
+- **Click** highlights every feature of that key and dims the rest, linked
+  across panels like any series — clicking `Van 3` on one map picks out van 3
+  on every map (and every chart) that has it. It sets `getvariable('selected')`
+  and honours `::SELECT_AS`, `::DRILL` and `::LINK` like other charts; a
+  `::LINK` follows the template of the row the feature was drawn from. Click
+  empty space (or **Esc**) to clear.
+- **Keyboard**: Tab into the map, arrows walk the features (series by series),
+  Enter / Space click the focused one.
+- **Zoom**: scroll, drag to pan, double-click resets. Maps that carry the
+  same **`::SYNC_ZOOM`** value zoom and pan together (same centre and scale,
+  each in its own aspect); a map that comes back after a re-run takes the
+  group's view.
+
+```sql
+-- Two plans side by side: routes and stops coloured by van, hover text per
+-- feature, zoom linked. A click on a van highlights it on both maps.
+SELECT wkt::MAP, 'Van ' || van ::CATEGORY, hover ::LABEL, 'routes'::SYNC_ZOOM,
+       'Today'::TITLE
+FROM today_layers ORDER BY van;
+SELECT wkt::MAP, 'Van ' || van ::CATEGORY, hover ::LABEL, 'routes'::SYNC_ZOOM,
+       'Plan'::TITLE
+FROM plan_layers ORDER BY van;
+```
+
+Features are drawn grouped by colour (in the order of the legend), so a layer
+meant to sit on top — a marker around some points — needs a key that sorts
+after the others, and should leave the point it marks uncovered (a ring rather
+than a disc) so the point stays clickable. The brush and the ◧ value filter
+are not offered on maps. See *"Which van serves which stop tomorrow?"*.
+
 #### Viewer state in the URL
 
 The URL carries the view: `?tab=<name>` opens a tab and `?v.<name>=<value>`
@@ -2164,7 +2203,10 @@ the CLI output and the browser builder attach a small hover layer that shows a
 styled tooltip (`web: 22`) and highlights the mark; the browser keys its
 cross-filter / series highlight / legend toggle on `data-series` and reads the
 value from `data-value`, falling back to the `"series: value"` title text only
-for marks without them (map features). The root `<svg>` carries the drawn
+for marks without them. Map features carry `data-row` (the row they were drawn
+from), `data-series` (their `::CATEGORY`, else their `::LABEL`), `data-value`
+(the measure) and `data-label` (the `::LABEL` text), and a map's root `<svg>`
+carries `data-map`. The root `<svg>` carries the drawn
 domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
 `data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
 runtime, works on static HTML.
@@ -2255,6 +2297,9 @@ duckext/      DuckDB C-API extension (native + wasm side-module)
 
 - `::MAP` uses `::LABEL` as the per-feature hover label, so a map panel has no
   in-SVG title — use `::TITLE` (the panel title bar) instead.
+- Maps take clicks, the keyboard, cross-filter, `::SELECT_AS`, `::DRILL` and
+  `::LINK`, but not the brush or the value filter; `::SYNC_ZOOM` (like all
+  zooming) is a browser feature — the static renderers draw the full extent.
 - `::MARKDOWN`, inputs, downloads, tabs and other directives are interactive
   features of the browser builder / `serve`; the static CLI and headless SVG
   renderers skip them.

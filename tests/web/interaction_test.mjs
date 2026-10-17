@@ -31,4 +31,47 @@ for (const bad of ["region", "a > ", "a > b c", "x y: a > b", "a > b; DROP", ""]
 assert.equal(fillLink("#City detail?v.c={value}", { value: "New York" }), "#City detail?v.c=New%20York");
 assert.equal(fillLink("/d/x?v.a={a}&v.b={b}", { a: "x&y=1" }), "/d/x?v.a=x%26y%3D1&v.b=");
 assert.equal(fillLink("https://w.org/wiki/{value}", { value: "a/../b" }), "https://w.org/wiki/a%2F..%2Fb");
+// ::MAP features (#map interactivity): the hover reads the renderer's
+// data-series / data-value / data-label, not the "label: series" title.
+const { mapMarkInfo, sharedZoom, zoomFromShared, chartLink } = new Function(
+  "dpIa",
+  "dpDrill",
+  `const fmtTipValue = (v) => String(Math.round(Number(v) * 1000) / 1000);\n` +
+    `${grab("fillLink")}\n${grab("mapMarkInfo")}\n${grab("sharedZoom")}\n${grab("zoomFromShared")}\n${grab("chartLink")}\n` +
+    `return { mapMarkInfo, sharedZoom, zoomFromShared, chartLink };`
+)({}, {});
+const attrs = (o) => (k) => (k in o ? o[k] : null);
+const stop = mapMarkInfo(attrs({ "data-row": "7", "data-series": "Van 2", "data-label": "Bakery\nVan 2, stop #3" }), "Bakery\nVan 2, stop #3: Van 2");
+assert.deepEqual(stop, { series: "Van 2", value: "", x: "Bakery\nVan 2, stop #3", fx: true, own: false, detail: "" });
+// a choropleth: the region is both label and series; the value is the measure
+const region = mapMarkInfo(attrs({ "data-series": "Peru", "data-label": "Peru", "data-value": "12.34567" }), "Peru: 12.346");
+assert.equal(region.own, true);
+assert.equal(region.value, "12.346");
+assert.equal(mapMarkInfo(attrs({ "data-series": "Peru", "data-value": "3", "data-fvalue": "3 quakes" }), "").value, "3 quakes");
+// no metadata (an SVG from an older renderer): the title is the series
+assert.equal(mapMarkInfo(attrs({}), "Van 1: Van 1").series, "Van 1: Van 1");
+
+// ::SYNC_ZOOM: a shared view is a centre and a width; each map keeps its aspect.
+assert.equal(sharedZoom(null), null);
+const sv = sharedZoom({ x0: -10, x1: 10, y0: -5, y1: 5 });
+assert.deepEqual(sv, { cx: 0, cy: 0, w: 20 });
+assert.deepEqual(zoomFromShared(sv, 2), { x0: -10, x1: 10, y0: -5, y1: 5 });
+assert.deepEqual(zoomFromShared({ cx: 1, cy: 2, w: 8 }, 0.5), { x0: -3, x1: 5, y0: -6, y1: 10 });
+for (const bad of [null, { cx: 0, cy: 0, w: 0 }, { cx: 0, cy: 0, w: NaN }]) assert.equal(zoomFromShared(bad, 1), null);
+assert.equal(zoomFromShared(sv, 0), null);
+
+// A map feature follows the ::LINK of its own row (data-row), not the first
+// row of its series.
+const el = (a) => ({ getAttribute: (k) => (k in a ? a[k] : null) });
+const link = {
+  idx: 2,
+  roles: [[0, "MAP"], [1, "CATEGORY"], [2, "LINK"]],
+  rows: JSON.stringify([
+    { c0: "POINT(0 0)", c1: "late stop", c2: "#Stop list?v.van=Van 1" },
+    { c0: "POINT(1 1)", c1: "late stop", c2: "#Stop list?v.van=Van 3" },
+  ]),
+};
+assert.equal(chartLink(link, el({ "data-row": "1", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 3");
+assert.equal(chartLink(link, el({ "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
+assert.equal(chartLink(link, el({ "data-row": "9", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
 console.log("interaction_test: ok");

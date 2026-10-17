@@ -418,6 +418,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-tip .tip-dot{display:inline-block;width:.55rem;height:.55rem;border-radius:50%;margin-right:.45rem;vertical-align:middle}
 .dp-tip .tip-rule{display:inline-block;width:.75rem;border-top:2px dashed currentColor;margin-right:.45rem;vertical-align:middle}
 .dp-tip .tip-head{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head);font-size:.78rem}
+.dp-tip .tip-lines{white-space:pre-line;line-height:1.4;margin:-.2rem 0 .4rem}
 .dp-tip .tip-row{display:flex;align-items:center;justify-content:space-between;gap:1.4rem;line-height:1.65}
 .dp-tip .tip-row b{font-variant-numeric:tabular-nums;color:var(--ax-tip-head);font-weight:700}
 .dp-cross{position:fixed;width:0;border-left:1px dashed var(--ax-cross);pointer-events:none;z-index:49;display:none}
