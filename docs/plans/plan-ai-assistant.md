@@ -1,8 +1,9 @@
 # Plan: an AI assistant — build a dashboard from a request, and ask questions about one
 
 Status: **approved by the owner (2026-10-17, "go on")**; decisions in §11, based on master `ba2eb9d`.
-**Amended 2026-10-18 (for owner review):** a second mode, *Ask* (§12), also for viewers of
-served dashboards; §8 is re-cut so that Ask fits into M2.
+**Amended 2026-10-18 (for owner review):** a second mode, *Ask* (§12, issue #195), also for
+viewers of served dashboards; §8 is re-cut so that Ask fits into M2. Follow-up that Ask must not
+block: #194, publishing a dashboard as a guarded agent (§12.13).
 No product code yet. Issue: #145. Related: Explore data and the starter
 dashboards (#97, #110, #127), the app bar config (#146), My dashboards
 ([plan-sidebar.md](plan-sidebar.md), #148), the Claude Code plugin skills.
@@ -696,7 +697,7 @@ The owner approved the plan. Each open question in §10 takes its recommendation
 4. **Model:** Sonnet 5 at effort `high` by default, Opus 5.5 as *Try harder*. Re-decide after the M1 eval seed (the 70 % rule).
 5. **Live eval:** a dedicated workspace key with a monthly limit of about $100, used only by `assist-eval.yml`. The owner provides the key; until then the live eval is manual and local.
 
-## 12. Ask mode: questions about the dashboard on screen (amendment, 2026-10-18)
+## 12. Ask mode: questions about the dashboard on screen (amendment, 2026-10-18, #195)
 
 **Owner decision (2026-10-18).** The assistant has two modes:
 
@@ -1130,6 +1131,42 @@ blocking findings are fixed.
   independent security review of the diff, with the findings fixed in the
   same PR, as for #160. The threat-model rows above go into
   `docs/secure-serving.md` in M2-4.
+
+### 12.13 The follow-up Ask must not block: a dashboard published as an agent (#194)
+
+In #194 a dashboard is published as a guarded agent: the locked server, plus
+Ask, plus declared questions, with chat, Slack and Teams as channels. Ask is
+built so that #194 adds to it and changes nothing in it:
+
+- **One runtime.** `src/host/ask.rs` is a library: `ask(conversation,
+  question, view, viewer) → answer`. It has no HTTP in it, and panel access
+  goes through a `PanelRunner` trait, implemented for A, for B and for tests.
+  `/api/ask` is only the first channel; a Slack or Teams adapter is another
+  caller of the same function, with the same policies, claims, limits and
+  log.
+- **Panels are already named, reviewed queries.** `get_panel` runs a
+  dashboard statement with validated parameters and never model-written SQL.
+  That is the "named queries" contract of #194. Its tool description is
+  generated from the catalog (title, `::INFO`, `@description`), so
+  `capabilities.md` can be generated from the same source.
+- **There is room for a guard.** `ask.mode` defaults to `"open"`, which
+  means any question about the dashboard. #194 adds `"declared"`: only
+  questions that match a `-- @question` line are answered, and their slots
+  are bound to the declared input. The answer schema keeps the `scope` field,
+  so a refusal outside the declarations is just another `not_on_dashboard`.
+  We reserve `-- @question` now (the lint knows the name and ignores it), so
+  dashboards written today stay valid.
+- **The answers can be checked.** The Ask eval's truth queries (§12.9) are
+  the same idea as #194's "expected answers computed by the panel SQL". The
+  eval runner takes its cases from a file, so `@question` lines can generate
+  cases later.
+- **Provenance.** The catalog already carries `::ASOF`, `@owner` and
+  `@certified`, so #194's provenance footer can be built from data the Ask
+  runtime already holds.
+
+Not in this plan: the canonical schema and its per-customer mapping, the
+release bundle, and the channels. They are #194's design note
+(`docs/plans/plan-dashboard-to-agent.md`).
 
 ## 13. Open questions for the owner (Ask)
 
