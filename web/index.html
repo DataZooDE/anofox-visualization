@@ -360,6 +360,28 @@ body.mode-explore #run,body.mode-explore #save,body.mode-explore #cols,body.mode
 .code textarea{color:transparent;background:transparent;caret-color:var(--ui-ink);resize:none;outline:0;z-index:1}
 .hl{color:var(--ui-hl-ink);z-index:0;pointer-events:none;user-select:none}
 .hl .kw{color:var(--ui-hl-kw);font-weight:600}
+/* Check (#145): the lint of dashboard --check, listed above the editor */
+.lint{border-bottom:1px solid var(--ui-line);font-size:.8rem;display:flex;flex-direction:column;min-height:0;max-height:40vh;flex:none}
+.lint-bar{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.45rem .7rem}
+.lint-bar button{padding:.3rem .8rem}
+.lint-opt{display:inline-flex;align-items:center;gap:.3rem;color:var(--ui-ink);cursor:pointer}
+.lint-status{color:var(--ui-muted);flex:1 1 12rem;min-width:0}
+.lint-status .lint-pass{color:var(--ui-ok-ink);font-weight:600}
+.lint-status .lint-fail{color:var(--ui-err-ink);font-weight:600}
+.lint.stale .lint-list{opacity:.6}
+.lint-list{list-style:none;margin:0;padding:0 .5rem .5rem;overflow:auto;min-height:0}
+.lint-list li{margin:0}
+.lint-go{all:unset;box-sizing:border-box;display:grid;grid-template-columns:auto 1fr;gap:.1rem .5rem;width:100%;padding:.35rem .45rem;border-radius:8px;cursor:pointer;color:var(--ui-ink)}
+.lint-go:hover{background:var(--ui-btn2-hover)}
+.lint-go:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
+.lint-sev{font-weight:700;text-transform:uppercase;font-size:.68rem;letter-spacing:.03em;padding:.05rem .35rem;border-radius:5px;align-self:start;border:1px solid var(--ui-line);border-left-width:4px;color:var(--ui-ink)}
+.lint-error .lint-sev{border-color:var(--ui-err-ink);color:var(--ui-err-ink)}
+.lint-warning .lint-sev{border-color:var(--ui-warn)}
+.lint-note .lint-sev{border-color:var(--ui-muted);color:var(--ui-muted)}
+.lint-where{color:var(--ui-muted)}
+.lint-where code{font-size:.74rem}
+.lint-msg{grid-column:2;overflow-wrap:anywhere}
+.hl .lint-mark{background:var(--ui-tint-4);border-radius:3px}
 .hl .str{color:var(--ui-hl-str)}
 .hl .com{color:var(--ui-hl-com);font-style:italic}
 .hl .role{color:var(--ui-hl-role);font-weight:700}
@@ -503,6 +525,16 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
     </div>
     <div class="workspace">
       <div class="editor">
+        <section class="lint" id="lint" aria-labelledby="lint-run">
+          <div class="lint-bar">
+            <button id="lint-run" class="btn2" type="button" disabled aria-describedby="lint-about">Check</button>
+            <label class="lint-opt" title="--strict: design advice and @requires warnings fail the check too"><input type="checkbox" id="lint-strict"> Strict</label>
+            <label class="lint-opt" title="the design/* advice (off: --no-design)"><input type="checkbox" id="lint-design" checked> Design advice</label>
+            <span id="lint-status" class="lint-status" role="status"></span>
+          </div>
+          <span id="lint-about" class="sr-only">Runs every statement in a scratch session and lists what dashboard --check would report.</span>
+          <ol id="lint-list" class="lint-list" aria-label="Check results" hidden></ol>
+        </section>
         <div class="code">
           <pre class="hl" id="hl" aria-hidden="true"></pre>
           <textarea id="sql" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>

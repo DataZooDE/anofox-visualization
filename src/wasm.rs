@@ -436,6 +436,20 @@ pub fn dashboard_meta(script: &str) -> String {
     })
 }
 
+/// One step of the lint `dashboard --check` runs, for the builder's *Check*
+/// ([`crate::lint::step_json`]). The lint runs queries synchronously and
+/// DuckDB-Wasm answers asynchronously, so it is resumable: call with the
+/// answers so far (`known_json`, `{}` at first); while the result has
+/// `done: false`, run each query in `need` in a fresh session, add its rows
+/// or error to `known_json` and call again. `opts_json` = `{"design",
+/// "strict"}`. Returns `{done, need, diagnostics, ok, summary}`, or
+/// `{"error"}`.
+#[wasm_bindgen]
+pub fn lint_step(script: &str, known_json: &str, opts_json: &str) -> String {
+    guard(|| Ok(crate::lint::step_json(script, known_json, opts_json)))
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }).to_string())
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

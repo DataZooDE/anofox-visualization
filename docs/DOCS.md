@@ -2025,6 +2025,16 @@ The app opens in **View** (the dashboard); **✎ Edit** — or `?mode=edit` in t
 URL — shows the SQL editor, and makes the dashboard name and logo in the header
 editable in place (see *Themes, dark mode, branding and locale*).
 
+**Check** (above the editor) lints the SQL in the page with the same
+diagnostics as `dashboard --check`: each statement runs in a scratch session of
+DuckDB-Wasm (its own in-memory database, so the page's tables are never
+changed; tables you added stay readable). The list shows each finding's
+severity, statement and code; a click or Enter selects that statement in the
+editor. *Strict* is `--strict` (a `design/*` advisory or a `requires/*` warning
+fails the check too) and unticking *Design advice* is `--no-design`. An edit
+dims the list until the next Check. On a live backend (`serve`,
+`anofox_serve`) Check is not shown yet: use `dashboard --check` there.
+
 **The sidebar.** *My dashboards* comes first: what you saved in this browser
 (**Save**), in your own groups. Below it, one **Examples** section groups the
 examples by business area: *Start here*, *Demand & stock*, *Logistics &

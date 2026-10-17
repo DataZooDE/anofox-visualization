@@ -1304,6 +1304,151 @@ pub fn summary(diags: &[Diagnostic]) -> String {
     }
 }
 
+/// Whether a lint passes, as `dashboard --check` decides its exit code: no
+/// error, and with `strict` also no `design/*` advisory and no `requires/*`
+/// warning (for CI gating).
+pub fn passes(diags: &[Diagnostic], strict: bool) -> bool {
+    !diags.iter().any(|d| {
+        d.severity == Severity::Error
+            || (strict && (d.code.starts_with("design/") || d.code.starts_with("requires/")))
+    })
+}
+
+impl Diagnostic {
+    /// `{severity, stmt, code, message, sql}`, as `dashboard --check --json`.
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "severity": self.severity.label(),
+            "stmt": self.stmt,
+            "code": self.code,
+            "message": self.message,
+            "sql": self.sql,
+        })
+    }
+}
+
+/// The answers [`check_step`] replays: a query's text → its rows, or its
+/// DuckDB error.
+pub type Known = std::collections::HashMap<String, Result<Vec<Map<String, Value>>, String>>;
+
+/// One step of [`check_opts`] for a caller whose queries are asynchronous
+/// (the browser: DuckDB-Wasm can't answer a synchronous `run_query`).
+#[derive(Debug, Clone)]
+pub struct Step {
+    /// Every query the lint ran was answered from `known`: the diagnostics
+    /// are final.
+    pub done: bool,
+    /// The queries `known` had no answer for, in order (empty when done).
+    pub need: Vec<String>,
+    /// The diagnostics (empty until done).
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Run [`check_opts`] answering each query from `known`. A query that isn't
+/// there is recorded in [`Step::need`] and answered with no rows (as a setup
+/// statement that succeeds), so the lint goes on and asks for the later
+/// queries too — up to the first unknown query of an input or a
+/// `::SELECT_AS` / `::DRILL`: the variables its rows set are in the prelude
+/// of every later query, so those are asked for in the next step. The caller
+/// runs the needed queries (each in a fresh session, as for [`check`]), adds
+/// the answers to `known` and calls again, until `done`. The queries depend
+/// only on the script and the earlier answers, so this ends, after about one
+/// step per input or selection.
+pub fn check_step(script: &str, known: &Known, opts: LintOptions) -> Step {
+    // The statements whose rows set variables for the rest of the script: an
+    // input's default, a ::SELECT_AS / ::DRILL's initial selection.
+    let binders: Vec<String> = sql::plan(script)
+        .iter()
+        .filter(|p| {
+            !p.setup
+                && (input_kind(&p.roles).is_some()
+                    || p.roles
+                        .iter()
+                        .any(|(_, r)| matches!(r, Role::SelectAs | Role::Drill)))
+        })
+        .map(|p| format!("{};", p.sql))
+        .collect();
+    let mut need: Vec<String> = Vec::new();
+    let mut settled = true; // no unknown binder query yet: the prelude is right
+    let diags = check_opts(
+        script,
+        |q| match known.get(q) {
+            Some(answer) => answer.clone(),
+            None => {
+                if settled && !need.iter().any(|n| n == q) {
+                    need.push(q.to_string());
+                    settled = !binders.iter().any(|b| q.ends_with(b.as_str()));
+                }
+                Ok(Vec::new())
+            }
+        },
+        opts,
+    );
+    let done = need.is_empty();
+    Step {
+        done,
+        need,
+        diagnostics: if done { diags } else { Vec::new() },
+    }
+}
+
+/// [`check_step`] with JSON in and out (the wasm `lint_step`).
+/// `known_json` = `{"<query>": {"rows": "<the rows as JSON text>"} |
+/// {"error": "<DuckDB error>"}}` (`rows` is the same text `render_panel`
+/// takes; bare `NaN` / `Infinity` are fine); `opts_json` = `{"design": bool,
+/// "strict": bool}` (`--no-design`, `--strict`; both optional). Returns
+/// `{"done", "need": […], "diagnostics": [{severity, stmt, code, message,
+/// sql}], "ok", "summary", "spans": [[start, end], …]}`: `ok` and `summary`
+/// as `dashboard --check` (its exit code and last line), meaningful once
+/// `done`; `spans[n - 1]` is where statement `n` is in `script`, in UTF-16
+/// code units (JavaScript string offsets), for jumping to it. A bad argument
+/// comes back as `{"error": "…"}`.
+pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
+    let parse = |s: &str, what: &str| -> Result<Map<String, Value>, String> {
+        if s.trim().is_empty() {
+            return Ok(Map::new());
+        }
+        match serde_json::from_str(s) {
+            Ok(Value::Object(m)) => Ok(m),
+            Ok(_) => Err(format!("{what}: not a JSON object")),
+            Err(e) => Err(format!("{what}: {e}")),
+        }
+    };
+    let (known, opts) = match (parse(known_json, "known"), parse(opts_json, "opts")) {
+        (Ok(k), Ok(o)) => (k, o),
+        (Err(e), _) | (_, Err(e)) => return serde_json::json!({ "error": e }).to_string(),
+    };
+    let flag = |k: &str, d: bool| opts.get(k).and_then(Value::as_bool).unwrap_or(d);
+    let mut answers = Known::new();
+    for (q, a) in known {
+        let answer = match (a.get("rows").and_then(Value::as_str), a.get("error")) {
+            (Some(rows), _) => sql::parse_rows_json(rows),
+            (None, Some(e)) => Err(e.as_str().map_or_else(|| e.to_string(), str::to_string)),
+            (None, None) => Err("lint_step: an answer needs `rows` or `error`".into()),
+        };
+        answers.insert(q, answer);
+    }
+    let step = check_step(
+        script,
+        &answers,
+        LintOptions {
+            design: flag("design", true),
+        },
+    );
+    serde_json::json!({
+        "done": step.done,
+        "need": step.need,
+        "diagnostics": step.diagnostics.iter().map(Diagnostic::to_json).collect::<Vec<_>>(),
+        "ok": passes(&step.diagnostics, flag("strict", false)),
+        "summary": summary(&step.diagnostics),
+        "spans": sql::lex::statement_spans(script).iter().map(|&(a, b)| {
+            let utf16 = |i: usize| script[..i].encode_utf16().count();
+            [utf16(a), utf16(b)]
+        }).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
 fn looks_like_query(sql: &str) -> bool {
     let u = sql.trim_start().to_ascii_uppercase();
     u.starts_with("SELECT") || u.starts_with("WITH") || u.starts_with('(') || u.starts_with("FROM ")

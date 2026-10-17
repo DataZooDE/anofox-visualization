@@ -481,13 +481,9 @@ fn cmd_check(args: &[String]) {
     }
 
     let all = || files.iter().flat_map(|(_, d)| d.iter());
-    let errors = all().filter(|d| d.severity == Severity::Error).count();
     // --strict: a design/* advisory or a requires/* warning also fails the
     // exit code (for CI gating).
-    let design_hits = all()
-        .filter(|d| d.code.starts_with("design/") || d.code.starts_with("requires/"))
-        .count();
-    let failed = errors > 0 || (strict && design_hits > 0);
+    let failed = !files.iter().all(|(_, d)| lint::passes(d, strict));
     let json = |diags: &[lint::Diagnostic]| -> String {
         let items: Vec<String> = diags
             .iter()

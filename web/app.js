@@ -19,10 +19,12 @@ import init, {
   kpi_parts,
   threshold_rules,
   dashboard_meta,
+  lint_step,
   version as wasmVersion,
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
+import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from "./lint.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1162,6 +1164,7 @@ function highlightSQL(code) {
 function syncHL() {
   const hl = $("hl");
   if (!hl) return;
+  lintStale();
   hl.innerHTML = highlightSQL($("sql").value);
   hl.scrollTop = $("sql").scrollTop;
   hl.scrollLeft = $("sql").scrollLeft;
@@ -1404,11 +1407,7 @@ async function runSql(sql, page, kind, setup) {
 async function runSqlInner(sql, page, kind, setup) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
-  const code = sqlCode(sql); // (the data/… file check below reads the strings)
-  if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
-  if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
-  if (STATS_RE.test(code)) await ensureExtension("anofox_statistics");
-  if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
+  await prepareSql(sql);
   if (servedMode) {
     // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
     // own SET VARIABLEs are not viewer values: the server re-runs them after
@@ -1426,47 +1425,19 @@ async function runSqlInner(sql, page, kind, setup) {
     if (!r.ok) throw new Error(await r.text());
     return (await r.text()) || "[]";
   }
-  const res = await conn.query(sql);
-  // DuckDB-Wasm returns DATE/TIMESTAMP as epoch numbers; convert those columns
-  // back to ISO strings so date variables and date axes read as YYYY-MM-DD.
-  const dateCols = new Map(); // name -> "date" | "time"
-  const decCols = new Map(); // name -> scale (DECIMAL comes back as the unscaled mantissa)
-  try {
-    for (const f of res.schema.fields) {
-      const t = String(f.type);
-      if (/date/i.test(t)) dateCols.set(f.name, "date");
-      else if (/timestamp/i.test(t)) dateCols.set(f.name, "time");
-      else if (/decimal/i.test(t)) decCols.set(f.name, Number(f.type.scale) || 0);
-    }
-  } catch (_) {}
-  const rows = res.toArray().map((row) => {
-    const o = row.toJSON();
-    for (const [c, kind] of dateCols) {
-      if (o[c] != null) o[c] = toIso(o[c], kind === "date");
-    }
-    for (const [c, scale] of decCols) {
-      if (o[c] != null && scale > 0) o[c] = Number(o[c]) / 10 ** scale;
-    }
-    return o;
-  });
-  return JSON.stringify(rows, (_, v) => (typeof v === "bigint" ? Number(v) : v));
+  // (DATE / TIMESTAMP / DECIMAL back to what the CLI's JSON reads: web/lint.js)
+  return rowsJson(await conn.query(sql));
 }
 
-// Normalise a DuckDB-Wasm date/time value (Date, or epoch as days/ms/µs) to an
-// ISO string — YYYY-MM-DD for dates, "YYYY-MM-DD HH:MM:SS" for timestamps.
-function toIso(v, dateOnly) {
-  let d;
-  if (v instanceof Date) d = v;
-  else {
-    let n = Number(v);
-    if (!isFinite(n)) return String(v);
-    if (Math.abs(n) < 1e11) n *= 86400000; // days -> ms
-    else if (Math.abs(n) > 1e14) n = Math.round(n / 1000); // µs -> ms
-    d = new Date(n);
-  }
-  if (isNaN(d.getTime())) return String(v);
-  const iso = d.toISOString();
-  return dateOnly ? iso.slice(0, 10) : iso.replace("T", " ").slice(0, 19);
+// What a statement needs in DuckDB-Wasm before it runs: the map files, an
+// anofox extension, the forecast parquet, the stored data files (each a no-op
+// on a live backend).
+async function prepareSql(sql) {
+  const code = sqlCode(sql); // (the data/… file check below reads the strings)
+  if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
+  if (STATS_RE.test(code)) await ensureExtension("anofox_statistics");
+  if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
 }
 
 async function boot() {
@@ -1658,6 +1629,7 @@ async function boot() {
 
   $("run").disabled = false;
   $("run").onclick = () => run();
+  wireLint();
 
   // SQL editor: highlight overlay + scroll sync
   $("sql").addEventListener("input", syncHL);
@@ -1690,6 +1662,134 @@ async function boot() {
 
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
+}
+
+// ---- Check (#145): the lint of `dashboard --check`, in the browser ----
+// web/lint.js drives the wasm lint_step; each query runs in a scratch session
+// of DuckDB-Wasm (its own in-memory database), so checking never changes the
+// page's tables. A live backend has no scratch session yet (an authoring
+// server keeps one connection): there the Check is hidden.
+const lintState = { tok: 0, script: null, spans: [] };
+function wireLint() {
+  const box = $("lint");
+  if (!box) return;
+  if (backend === "live" || servedMode) {
+    box.hidden = true;
+    return;
+  }
+  $("lint-run").disabled = false;
+  $("lint-run").onclick = () => runLint();
+}
+async function runLint() {
+  const tok = ++lintState.tok;
+  const script = $("sql").value;
+  const btn = $("lint-run");
+  const say = (html) => ($("lint-status").innerHTML = html);
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  say("Checking…");
+  try {
+    const run = scratchRunner(db, { prepare: prepareSql });
+    const res = await lintScript(script, {
+      step: lint_step,
+      run,
+      strict: $("lint-strict").checked,
+      design: $("lint-design").checked,
+      onStep: (n, q) => tok === lintState.tok && say(`Checking… ${q} quer${q === 1 ? "y" : "ies"}`),
+      cancelled: () => tok !== lintState.tok,
+    });
+    if (!res || tok !== lintState.tok) return;
+    lintState.script = script;
+    lintState.spans = res.spans || [];
+    lintShow(res);
+  } catch (e) {
+    if (tok !== lintState.tok) return;
+    say(`<span class="lint-fail">The check failed:</span> ${escapeHtml(shortError(String((e && e.message) || e)))}`);
+    $("lint-list").hidden = true;
+  } finally {
+    if (tok === lintState.tok) {
+      btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+    }
+  }
+}
+function lintShow(res) {
+  const diags = sortDiagnostics(res.diagnostics || []);
+  const counts = countsText(diags);
+  const strict = $("lint-strict").checked ? " (strict)" : "";
+  $("lint").classList.remove("stale");
+  $("lint-status").innerHTML = res.ok
+    ? `<span class="lint-pass">Passes${strict}</span>${counts ? ` · ${escapeHtml(counts)}` : " · every panel plans, runs and renders"}`
+    : `<span class="lint-fail">Fails${strict}</span> · ${escapeHtml(counts)}`;
+  const list = $("lint-list");
+  list.replaceChildren();
+  list.hidden = !diags.length;
+  const word = { error: "Error", warning: "Warning", note: "Note" };
+  for (const d of diags) {
+    const li = document.createElement("li");
+    li.className = `lint-${d.severity}`;
+    const where = d.stmt > 0 ? `Statement ${d.stmt}` : "Script";
+    const parts = [xpEl("span", "lint-sev", word[d.severity] || d.severity), xpEl("span", "lint-where", where + " · ")];
+    parts[1].appendChild(xpEl("code", "", d.code));
+    const msg = xpEl("span", "lint-msg", d.message);
+    if (d.stmt > 0) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "lint-go";
+      b.title = `Go to statement ${d.stmt}`;
+      b.append(...parts, msg);
+      b.onclick = () => lintJump(d.stmt);
+      li.appendChild(b);
+    } else {
+      const div = xpEl("div", "lint-go");
+      div.append(...parts, msg);
+      li.appendChild(div);
+    }
+    list.appendChild(li);
+  }
+}
+// The editor changed since the check: the list stays, dimmed, until the next one.
+function lintStale() {
+  if (lintState.script == null || !$("lint")) return;
+  const stale = $("sql").value !== lintState.script;
+  $("lint").classList.toggle("stale", stale);
+  const st = $("lint-status");
+  if (stale && !st.querySelector(".lint-again")) st.insertAdjacentHTML("beforeend", '<span class="lint-again"> · edited since — Check again</span>');
+}
+// Select statement `n` in the editor, scroll it into view and mark it.
+function lintJump(n) {
+  const ta = $("sql");
+  const code = ta.value;
+  // After an edit the check's offsets are old: plan the current text instead.
+  let spans = lintState.spans;
+  if (code !== lintState.script) {
+    try {
+      spans = JSON.parse(lint_step(code, "{}", "{}")).spans || [];
+    } catch (_) {
+      spans = [];
+    }
+  }
+  const sp = spans[n - 1];
+  if (!sp) return;
+  const [a, b] = sp;
+  ta.focus();
+  ta.setSelectionRange(a, b);
+  // Where the statement starts in the highlight overlay (the same layout as
+  // the textarea): scroll there, a little below the top.
+  const hl = $("hl");
+  hl.innerHTML =
+    highlightSQL(code.slice(0, a)).replace(/\n$/, "") +
+    `<mark class="lint-mark">${highlightSQL(code.slice(a, b)).replace(/\n$/, "")}</mark>` +
+    highlightSQL(code.slice(b));
+  const mark = hl.querySelector(".lint-mark");
+  if (mark) ta.scrollTop = Math.max(0, mark.offsetTop - 24);
+  hl.scrollTop = ta.scrollTop;
+  hl.scrollLeft = ta.scrollLeft;
+  // (the editor can be taller than the window: the page scrolls to it too)
+  if (mark) {
+    mark.scrollIntoView({ block: "center" });
+    ta.scrollTop = hl.scrollTop;
+  }
 }
 
 // Resizable sidebar (issue #59): the handle on its right edge is a focusable
