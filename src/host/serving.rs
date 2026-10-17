@@ -727,6 +727,10 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
         }
         return format!("SELECT {} {from}", sel.join(", "));
     }
+    // Each column's histogram (10 bins over its numeric values) and top 3
+    // values. Every profiled column groups all of its values, so the browser
+    // asks for one column per request (#118): asking for all at once runs
+    // those aggregates together and multiplies the peak memory.
     if !p.profile.is_empty() {
         let parts: Vec<String> = p
             .profile
@@ -746,8 +750,10 @@ fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> St
                 )
             })
             .collect();
+        // `v` breaks ties between top values with the same count, so the
+        // rows come back in one order (the client shows them in it).
         return format!(
-            "WITH _f AS (SELECT * {from}) {} ORDER BY c, t, k, n DESC",
+            "WITH _f AS (SELECT * {from}) {} ORDER BY c, t, k, n DESC, v",
             parts.join(" UNION ALL ")
         );
     }
