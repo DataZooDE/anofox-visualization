@@ -23,7 +23,7 @@ user-invocable: false
 
 # Anofox Visualization — Charts in SQL Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.16) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
+**Extension:** `anofox_visualization` (CalVer 2026.10.17) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
 
 ## Install and builds
 
