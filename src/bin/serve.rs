@@ -37,6 +37,9 @@ use tiny_http::{Header, Method, Request, Response, Server};
 // web/pkg` first.
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/web");
 
+/// Max body of an embedded page's form post.
+const MAX_FORM: u64 = 16 << 10;
+
 /// Max authoring `/query` body.
 const MAX_BODY: usize = 4 << 20;
 
@@ -666,6 +669,9 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
     match (&o.auth, sv::is_loopback_bind(&o.bind)) {
         (Some(a), _) => {
             println!("  login: {}", a.describe());
+            println!(
+                "  no row/column policies here (only anofox_serve_dashboards has them): every panel must filter on getvariable('__claim_*') itself"
+            );
             for w in a.prefetch() {
                 eprintln!("  WARNING: {w} — requests fail closed until it is reachable");
             }
@@ -801,7 +807,7 @@ impl RenderCache {
 
 fn route_serve(
     st: &ServeState,
-    req: Request,
+    mut req: Request,
     user: &mut Option<String>,
     deny: &mut Option<&'static str>,
     how: &mut Option<&'static str>,
@@ -828,6 +834,29 @@ fn route_serve(
     {
         return reply(req, 403, "forbidden: cross-origin request");
     }
+    // An embedded page posts its form: the page session and the params come
+    // in the body (never in a URL, a history entry or a proxy log line).
+    let form = match &st.auth {
+        Some(a)
+            if a.embed.is_some() && req.method() == &Method::Post && path.starts_with("/d/") =>
+        {
+            let urlencoded = req_header(&req, "Content-Type").is_some_and(|c| {
+                c.trim()
+                    .to_ascii_lowercase()
+                    .starts_with("application/x-www-form-urlencoded")
+            });
+            let mut body = String::new();
+            let read = (&mut req as &mut Request)
+                .as_reader()
+                .take(MAX_FORM + 1)
+                .read_to_string(&mut body);
+            if !urlencoded || read.is_err() || body.len() as u64 > MAX_FORM {
+                return reply(req, 400, "bad request: expected a small form");
+            }
+            Some(sv::parse_query(&format!("?{body}")))
+        }
+        _ => None,
+    };
     // Login (--auth): a credential on every request.
     let ident: Option<Identity> = match &st.auth {
         Some(auth) => {
@@ -847,7 +876,11 @@ fn route_serve(
             if let Some(rep) = auth.route(&r) {
                 return send(req, rep);
             }
-            match auth.authenticate(&r) {
+            let res = match &form {
+                Some(f) => auth.page_session(f.get("embed_session").map(String::as_str), &r),
+                None => auth.authenticate(&r),
+            };
+            match res {
                 Ok(id) => {
                     *user = Some(id.claims.user.clone());
                     *how = Some(id.method);
@@ -856,6 +889,9 @@ fn route_serve(
                 Err(d) => {
                     *deny = Some(d.reason);
                     *how = d.method;
+                    if let Some(rep) = d.unavailable() {
+                        return send(req, rep);
+                    }
                     if let Some(rep) = auth.login_redirect(&r, &d) {
                         return send(req, rep);
                     }
@@ -867,7 +903,7 @@ fn route_serve(
     };
     let claims = ident.as_ref().map(|i| &i.claims);
     let scope = ident.as_ref().map(|i| &i.scope);
-    if req.method() != &Method::Get {
+    if req.method() != &Method::Get && form.is_none() {
         return reply(req, 405, "method not allowed");
     }
     if path == "/" {
@@ -893,7 +929,8 @@ fn route_serve(
         return reply(req, 403, "forbidden: not in this credential's scope");
     }
     // Validate params against the whitelist (unknown/disallowed → 400).
-    let mut resolved = match resolve_params(dash, &sv::parse_query(&url)) {
+    let chosen = form.clone().unwrap_or_else(|| sv::parse_query(&url));
+    let mut resolved = match resolve_params(dash, &chosen) {
         Ok(r) => r,
         Err(e) => return reply(req, 400, &e),
     };
@@ -907,7 +944,9 @@ fn route_serve(
     // (`embed_session`), so a `one_time` link is not needed again.
     let embed_link = match ident.as_ref() {
         Some(i) if i.page_session.is_some() => i.page_session.clone(),
-        Some(i) if i.method == "embed" => sv::parse_query(&url).get("embed_session").cloned(),
+        Some(i) if i.method == "embed" => {
+            form.as_ref().and_then(|f| f.get("embed_session").cloned())
+        }
         _ => None,
     };
     let key = cache_key(&dash.id, &resolved, ident.as_ref(), embed_link.as_deref());
@@ -1023,7 +1062,8 @@ fn render_dashboard_page(
         String::new()
     } else {
         format!(
-            "<form class=\"controls\" method=\"get\" action=\"/d/{}\">{selects}{}</form>",
+            "<form class=\"controls\" method=\"{}\" action=\"/d/{}\">{selects}{}</form>",
+            if embed_link.is_some() { "post" } else { "get" },
             esc(&dash.id),
             embed_link
                 .map(|l| format!(

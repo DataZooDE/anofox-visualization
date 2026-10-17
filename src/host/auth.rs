@@ -59,7 +59,9 @@ pub struct Scope {
 pub fn lockable_var(name: &str) -> bool {
     crate::host::serving::valid_ident(name)
         && !access::is_reserved_var(name)
-        && !name.to_ascii_lowercase().starts_with("__anofox")
+        && !name
+            .to_ascii_lowercase()
+            .starts_with(crate::host::policy::RESERVED_PREFIX)
 }
 
 impl Scope {
@@ -100,6 +102,20 @@ pub struct Denied {
     pub method: Option<&'static str>,
     /// Already written to the audit log (with more detail).
     pub audited: bool,
+}
+
+impl Denied {
+    /// The refusal is the server's (its revocation file can't be trusted
+    /// right now): `503` with `Retry-After`, no login redirect.
+    pub fn unavailable(&self) -> Option<Reply> {
+        (self.reason == "revocations_unavailable").then(|| {
+            Reply::text(
+                503,
+                "service unavailable: sign-in state can't be checked right now",
+            )
+            .header("Retry-After", "10")
+        })
+    }
 }
 
 /// One request, as authentication sees it.
@@ -207,13 +223,21 @@ pub struct JwtAuth {
     pub accept_id_tokens: bool,
 }
 
-/// Does a verified payload look like an OIDC ID token (`nonce`, `at_hash`,
-/// `c_hash`, or Cognito's `token_use: "id"`)?
-fn is_id_token(p: &Value) -> bool {
+/// Does a verified token look like an OIDC ID token? Not when its header
+/// says `at+jwt` (an RFC 9068 access token); otherwise yes with `nonce`,
+/// `at_hash`, `c_hash`, Cognito's `token_use: "id"` or Keycloak's `typ: "ID"`.
+fn is_id_token(header_typ: Option<&str>, p: &Value) -> bool {
+    if header_typ.is_some_and(|t| {
+        t.eq_ignore_ascii_case("at+jwt") || t.eq_ignore_ascii_case("application/at+jwt")
+    }) {
+        return false;
+    }
+    let field = |k: &str| p.get(k).and_then(Value::as_str);
     ["nonce", "at_hash", "c_hash"]
         .iter()
         .any(|k| p.get(*k).is_some())
-        || p.get("token_use").and_then(Value::as_str) == Some("id")
+        || field("token_use") == Some("id")
+        || field("typ").is_some_and(|t| t.eq_ignore_ascii_case("id"))
 }
 
 /// Refuse a configuration in which one secret plays two roles (#114): the
@@ -496,6 +520,9 @@ impl Auth {
             detail: Some(&self.methods().join(",")),
             ..Default::default()
         });
+        if let Some(o) = &self.oidc {
+            o.sessions.set_audit(log.clone());
+        }
         self.audit = Some(log);
     }
 
@@ -643,6 +670,40 @@ impl Auth {
     /// counts). A refusal is audited.
     pub fn authenticate(&self, r: &Req) -> Result<Identity, Denied> {
         let res = self.credential(r);
+        self.audited(r, res)
+    }
+
+    /// An embed page session posted in a form (`serve --dashboards`, whose
+    /// pages have no script: `POST /d/<id>` with `embed_session` in an
+    /// `application/x-www-form-urlencoded` body — never in a URL).
+    pub fn page_session(&self, token: Option<&str>, r: &Req) -> Result<Identity, Denied> {
+        let res = match (&self.embed, token) {
+            (Some(e), Some(t)) => e
+                .sessions
+                .verify("embed", t.trim())
+                .map(|sess| Identity {
+                    claims: sess.claims,
+                    method: "embed",
+                    scope: sess.scope,
+                    page_session: None,
+                    ref_id: Some(sess.sid),
+                })
+                .map_err(|reason| Denied {
+                    reason,
+                    method: Some("embed"),
+                    audited: false,
+                }),
+            _ => Err(Denied {
+                reason: "no_credentials",
+                method: None,
+                audited: false,
+            }),
+        };
+        self.audited(r, res)
+    }
+
+    /// Audit the outcome of an authentication and pass it on.
+    fn audited(&self, r: &Req, res: Result<Identity, Denied>) -> Result<Identity, Denied> {
         if let Ok(id) = &res {
             // Logins and embed exchanges are audited where they happen; each
             // other credential's use once per AUDIT_OK_EVERY.
@@ -785,17 +846,9 @@ impl Auth {
                 return self.jwt_identity(j, token);
             }
         }
-        // 4. An embedded page's session: the header, or (a page of `serve
-        // --dashboards`, which has no script) `?embed_session=` on GET /d/.
+        // 4. An embedded page's session (a header only, never the URL).
         if let Some(e) = &self.embed {
-            let mut s: Vec<String> = r
-                .all(SESSION_HEADER)
-                .iter()
-                .map(|v| v.to_string())
-                .collect();
-            if s.is_empty() && r.method == "GET" && path.starts_with("/d/") {
-                s = r.query_all("embed_session");
-            }
+            let s = r.all(SESSION_HEADER);
             if !s.is_empty() {
                 let [s] = s.as_slice() else {
                     return Err(deny("embed")("malformed_token"));
@@ -880,8 +933,8 @@ impl Auth {
             method: Some("jwt"),
             audited: false,
         };
-        let payload = j.verifier.verify(token).map_err(d)?;
-        if !j.accept_id_tokens && is_id_token(&payload) {
+        let (payload, typ) = j.verifier.verify_typed(token).map_err(d)?;
+        if !j.accept_id_tokens && is_id_token(typ.as_deref(), &payload) {
             return Err(d("id_token"));
         }
         let claims = j.map.claims(&payload).map_err(|e| d(e.reason()))?;

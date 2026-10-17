@@ -166,7 +166,7 @@ impl Embed {
         if p.get("dashboard").and_then(Value::as_str) != Some(id) {
             return Err("out_of_scope");
         }
-        let claims = self.claims_of(&p).map_err(|e| e.reason())?;
+        let claims = self.claims_of(&p, id).map_err(|e| e.reason())?;
         let mut vars = Vec::new();
         if let Some(vs) = p.get("vars") {
             let vs = vs.as_object().ok_or("bad_vars")?;
@@ -198,9 +198,18 @@ impl Embed {
         ))
     }
 
-    fn claims_of(&self, p: &Value) -> Result<Claims, AuthError> {
+    fn claims_of(&self, p: &Value, id: &str) -> Result<Claims, AuthError> {
         let user = match p.get("user") {
-            None | Some(Value::Null) => "embed".to_string(),
+            // Not one shared user: `embed:<dashboard>`, a form no other
+            // login method produces (see `access::RESERVED_USER_PREFIX`).
+            None | Some(Value::Null) => {
+                format!("{}{id}", crate::host::access::RESERVED_USER_PREFIX)
+            }
+            // An explicit user may not take the reserved form either: a link
+            // for one dashboard can't pose as another's default user.
+            Some(Value::String(s)) if crate::host::access::is_reserved_user(s.trim()) => {
+                return Err(AuthError::Malformed)
+            }
             Some(Value::String(s)) => clean_claim(s)?,
             Some(_) => return Err(AuthError::Malformed),
         };
@@ -387,6 +396,42 @@ mod tests {
             p[k] = v;
             assert_eq!(e.verify_link(&link(p), "sales"), Err(why), "{k}");
         }
+    }
+
+    #[test]
+    fn a_link_without_user_is_not_a_shared_user() {
+        // Not "embed" for everyone: per dashboard, in a form no IdP account,
+        // proxy header or API key can produce.
+        let e = embed(json!({}));
+        let mut p = good();
+        p.as_object_mut().unwrap().remove("user");
+        let (c, _) = e.verify_link(&link(p), "sales").unwrap();
+        assert_eq!(c.user, "embed:sales");
+        // ...and a link can't name that form itself
+        for u in ["embed:payroll", "EMBED:sales", " embed:x"] {
+            let mut p = good();
+            p["user"] = json!(u);
+            assert_eq!(
+                e.verify_link(&link(p), "sales"),
+                Err("malformed_identity"),
+                "{u}"
+            );
+        }
+        let proxy = crate::host::access::ProxyAuth::from_json(
+            &json!({"mode": "proxy", "shared_secret": "0123456789abcdef0123456789abcdef"}),
+            |_| None,
+        )
+        .unwrap();
+        let h = [
+            ("X-Anofox-Proxy-Secret", "0123456789abcdef0123456789abcdef"),
+            ("X-Forwarded-User", "EMBED:sales"),
+        ];
+        assert!(proxy.authenticate(None, &h).is_err());
+        let m = super::super::jwt::ClaimMap::from_json(&serde_json::Map::new(), "sub").unwrap();
+        assert!(m.claims(&json!({"sub": "embed:sales"})).is_err());
+        let h = "a".repeat(64);
+        let keys = json!({"keys": [{"id": "0123456789ab", "sha256": h, "user": "embed:sales"}]});
+        assert!(super::super::apikey::parse_file(&keys.to_string()).is_err());
     }
 
     #[test]

@@ -171,6 +171,18 @@ fn each_method_yields_the_same_claims_shape() {
     assert!(a
         .login_redirect(&req("GET", "/d/sales", &[]), &expired_link)
         .is_none());
+    // a broken revocation file: 503 + Retry-After, never the login loop
+    let down = Denied {
+        reason: "revocations_unavailable",
+        method: Some("oidc"),
+        audited: false,
+    };
+    assert!(a
+        .login_redirect(&req("GET", "/d/sales", &[]), &down)
+        .is_none());
+    let r = down.unavailable().unwrap();
+    assert_eq!((r.status, r.header_value("Retry-After")), (503, Some("10")));
+    assert!(expired_link.unavailable().is_none());
     let ended = Denied {
         reason: "expired",
         method: Some("oidc"),
@@ -224,6 +236,7 @@ fn id_tokens_are_not_bearer_tokens() {
         json!({"nonce": "n"}),
         json!({"at_hash": "x"}),
         json!({"token_use": "id"}),
+        json!({"typ": "ID"}),
     ] {
         let t = sign(&k, Some("k1"), &jwt_payload(extra.clone()));
         let h = format!("Bearer {t}");
@@ -232,6 +245,9 @@ fn id_tokens_are_not_bearer_tokens() {
             .unwrap_err();
         assert_eq!(d.reason, "id_token", "{extra}");
     }
+    // an RFC 9068 access token (header typ at+jwt) is no ID token
+    assert!(!is_id_token(Some("at+jwt"), &json!({"nonce": "n"})));
+    assert!(is_id_token(Some("JWT"), &json!({"typ": "ID"})));
     // a jwt audience equal to the oidc client_id fails the start
     let f = idp(&[]);
     let fetch = move |_: Option<&std::path::Path>| -> Result<Arc<dyn http::Fetch>, String> {
@@ -320,17 +336,22 @@ fn embed_links_become_scoped_page_sessions() {
         a.authenticate(&req("GET", &two, &[])).unwrap_err().reason,
         "malformed_token"
     );
-    // a page without script (serve --dashboards) carries the page session
-    // in its URL instead; it is checked like the header, on /d/ only
+    // never from the URL (#112 review): a query parameter is no credential
     let q = format!("/d/sales?embed_session={page}");
     assert_eq!(
-        a.authenticate(&req("GET", &q, &[])).unwrap().scope,
-        id.scope
-    );
-    let q = format!("/api/panel?embed_session={page}");
-    assert_eq!(
-        a.authenticate(&req("POST", &q, &[])).unwrap_err().reason,
+        a.authenticate(&req("GET", &q, &[])).unwrap_err().reason,
         "no_credentials"
+    );
+    // serve --dashboards posts it in a form body instead
+    let id3 = a
+        .page_session(Some(&page), &req("POST", "/d/sales", &[]))
+        .unwrap();
+    assert_eq!(id3.scope, id.scope);
+    assert_eq!(
+        a.page_session(Some("x.y.z"), &req("POST", "/d/sales", &[]))
+            .unwrap_err()
+            .reason,
+        "malformed_token"
     );
     // the page session is not a login cookie (another key and audience)
     let c = format!("{}={page}", oidc::SESSION_COOKIE);

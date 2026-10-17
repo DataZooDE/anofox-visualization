@@ -7,7 +7,8 @@
 #
 # <extension>: a native build (duckext/scripts/build-native.sh). Needs the
 # `serve` binary (cargo build --features serve --bin serve), node, openssl and
-# DuckDB 1.5 (DUCKDB, default `duckdb`). Ports: PORT (8950), IDP_PORT (8953).
+# DuckDB 1.5 (DUCKDB, default `duckdb`). Ports: PORT (8950), IDP_PORT (8953),
+# BIN_PORT (8954, the `serve` binary).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -58,4 +59,12 @@ PIDS+=("$(cat feeder.pid)")
 for _ in $(seq 60); do curl -fsS "http://127.0.0.1:$PORT/healthz" > /dev/null 2>&1 && break; sleep 0.5; done
 
 node "$HERE/p3.mjs"
+
+# serve --dashboards (no script): the embed flow with a one-time link.
+export BIN_PORT="${BIN_PORT:-8954}"
+"$SERVE" --dashboards "$HERE/bindash" --db "$WORK/bin.duckdb" --init /dev/null --port "$BIN_PORT" --no-open \
+  --auth '{"mode":"embed","secret_env":"EMBED_SECRET","one_time":true}' --log "$WORK/bin-req.jsonl" > bin.out 2>&1 &
+PIDS+=($!)
+for _ in $(seq 40); do curl -s -o /dev/null "http://127.0.0.1:$BIN_PORT/d/p" && break; sleep 0.25; done
+node "$HERE/bin.mjs"
 echo "auth e2e ok — logs and screenshots in $WORK"

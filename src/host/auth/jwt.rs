@@ -461,7 +461,11 @@ impl ClaimMap {
         // An e-mail address as the identity only when the IdP verified it:
         // on IdPs where users can set their own address, an unverified one
         // would let anyone become anyone (nOAuth, #115).
-        if self.user.eq_ignore_ascii_case("email") && !verified(payload.get("email_verified")) {
+        if crate::host::access::is_reserved_user(&user) {
+            return Err(AuthError::Malformed);
+        }
+        let unverified = !verified(payload.get("email_verified"));
+        if unverified && is_email_field(&self.user) {
             return Err(AuthError::Unverified);
         }
         let mut groups = Vec::new();
@@ -496,6 +500,11 @@ impl ClaimMap {
                 Some(_) => return Err(AuthError::Malformed),
             }
             .filter(|v| !v.is_empty());
+            // A claim taken from an e-mail field (a policy may key on it)
+            // obeys the same rule as the user.
+            if v.is_some() && unverified && is_email_field(f) {
+                return Err(AuthError::Unverified);
+            }
             if *required && v.is_none() {
                 return Err(AuthError::MissingClaim);
             }
@@ -507,6 +516,14 @@ impl ClaimMap {
             attrs,
         })
     }
+}
+
+/// Is token field `f` an e-mail address: `email`, or a path or namespaced
+/// name ending in it (`profile.email`, `https://example.com/email`)?
+fn is_email_field(f: &str) -> bool {
+    f.rsplit(['.', '/', ':'])
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case("email"))
 }
 
 /// `email_verified` is `true` (some IdPs send the string `"true"`).
@@ -591,6 +608,11 @@ pub struct Verifier {
 impl Verifier {
     /// Verify `token`; returns its payload, or the reason it was refused.
     pub fn verify(&self, token: &str) -> Result<Value, &'static str> {
+        self.verify_typed(token).map(|(p, _)| p)
+    }
+
+    /// [`Verifier::verify`], also returning the header's `typ`.
+    pub fn verify_typed(&self, token: &str) -> Result<(Value, Option<String>), &'static str> {
         if !looks_like_jwt(token) {
             return Err("malformed_token");
         }
@@ -623,7 +645,7 @@ impl Verifier {
             return Err("bad_issuer");
         }
         check_iat(&payload, self.leeway, self.max_age)?;
-        Ok(payload)
+        Ok((payload, header.typ))
     }
 }
 
@@ -1192,6 +1214,36 @@ mod tests {
             Err(AuthError::Malformed)
         );
         assert_eq!(m.claims(&json!({"sub": "x"})), Err(AuthError::NoUser));
+        // #115: an e-mail identity needs email_verified = true
+        for ev in [json!(false), json!("false"), json!(null), json!(1)] {
+            assert_eq!(
+                m.claims(&json!({"email": "victim@example.com", "email_verified": ev})),
+                Err(AuthError::Unverified),
+                "{ev}"
+            );
+        }
+        assert_eq!(
+            m.claims(&json!({"email": "victim@example.com"})),
+            Err(AuthError::Unverified)
+        );
+        assert!(m
+            .claims(&json!({"email": "v@example.com", "email_verified": "true"}))
+            .is_ok());
+        // a path or namespaced field ending in email, and a claim mapped from one
+        for o in [
+            json!({"user_claim": "profile.email"}),
+            json!({"user_claim": "https://example.com/email"}),
+            json!({"claims": {"mail": "email"}}),
+        ] {
+            let m = ClaimMap::from_json(o.as_object().unwrap(), "sub").unwrap();
+            let p = json!({"sub": "s1", "email": "victim@example.com",
+                "profile": {"email": "victim@example.com"},
+                "https://example.com/email": "victim@example.com"});
+            assert_eq!(m.claims(&p), Err(AuthError::Unverified), "{o}");
+            let mut p = p;
+            p["email_verified"] = json!(true);
+            assert!(m.claims(&p).is_ok(), "{o}");
+        }
         let many: Vec<String> = (0..300).map(|i| i.to_string()).collect();
         assert_eq!(
             m.claims(
