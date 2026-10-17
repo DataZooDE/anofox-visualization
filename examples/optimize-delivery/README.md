@@ -59,17 +59,32 @@ cd web && ../target/release/dashboard --check --strict examples/optimize-deliver
 
 ## Inputs and tabs
 
-Inputs: plan (deadline-aware / shortest route, compared with today) and vans
-on the road (4–6) as buttons, the van to drill into, and the cost per km, per driver hour and
-per van day — the cost inputs re-price the stored plans.
+Inputs: the new plan to compare with today's (deadline-aware / shortest route)
+and the vans on the road (4–6) as buttons, the van for the stop list, and the
+cost per km, per driver hour and per van day — the cost inputs re-price the
+stored plans. "Today's plan" is the stored plan `today: districts, order list`.
+The KPI row compares the selected plan with today's plan at the same van count:
+stops on time, kilometres, driver hours and cost per day.
 
-1. **Map** — today's districts next to the selected plan (`::MAP` of WKT lines
-   and points in km).
+Every number the dashboard shows beyond the stored tables (first and last
+arrival per van, minutes late, the legs and arrowheads of the maps) is derived
+in SQL from `dr_route`; nothing was regenerated for this layout.
+
+1. **Map** — today's plan next to the new one (`::MAP` of WKT in km): routes
+   with an arrowhead per leg pointing the way the van drives, the depot as a
+   grey square, a red ring around every late stop (`::COLORS` pins the depot
+   and late-stop colours; the vans keep the palette). Hovering a route, arrow
+   or stop lights that van up on both maps; a click picks it out in the van
+   table below (km, hours on the road, return time and late stops, today vs
+   plan, the plan's first and last stop, and a link to the stop list).
 2. **Vans** — cages per van against capacity, hours on the road, van-by-van
    table; a click on a van's bar opens its stop list.
-3. **Stop list** — the driver's list for one van: arrival, deadline, slack.
+3. **Stop list** — one van's route as a `::STORY` on the map (`::XAXIS` = stop
+   number: ▶ Play steps leg by leg with arrival and deadline), the minutes to
+   spare per stop, and the driver's list.
 4. **Van count** — late stops, daily cost and kilometres for every plan × van
    count (the cost bars move to their new values as the cost inputs change).
-5. **Decision** — the cheapest stored plan that serves every stop on time, and
-   a bridge of where it saves per day against today's districts (kilometres,
-   driver hours, van day rates).
+5. **Decision** — the cheapest stored plan that serves every stop on time,
+   against today's plan with as many vans: the recommendation as a share of
+   today's plan, and a bridge of where it saves per day (kilometres, driver
+   hours).

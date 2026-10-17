@@ -24,7 +24,8 @@
 //!
 //! Features are drawn in row order. Each carries `data-row`, `data-series`
 //! (its `::CATEGORY`, else its `::LABEL`), `data-value` (the raw measure),
-//! `data-label`, `data-x` (its key when it has no label: the row) and, when
+//! `data-label`, `data-x` (its `::XAXIS` — a `::STORY` step key — else, when it
+//! has no label, the row) and, when
 //! classed, `data-class` (1-based), plus a `<title>`; the root carries
 //! `data-map`, `data-proj` and `data-classes` (the class labels as JSON).
 
@@ -491,7 +492,7 @@ impl<'a> Model<'a> {
         let has_base = find_role(cols, Role::Basemap).is_some();
         let fill = match (&measure, category) {
             (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
-            (None, Some(c)) => category_fill(o, c, rows),
+            (None, Some(c)) => category_fill(o, cols, c, rows),
             (None, None) => Fill::Plain(crate::wash(o, o.brand(), 0.55)),
         };
         Some(Model {
@@ -654,18 +655,37 @@ fn value_scale(
 
 /// Colours by `::CATEGORY`: the theme palette over the levels in sorted
 /// order (so a level keeps its colour across charts); a level that is
-/// itself `#rrggbb` is drawn in that colour.
-fn category_fill(o: &RenderOptions, c: &Column, rows: usize) -> Fill {
+/// itself `#rrggbb` is drawn in that colour. A `::COLORS` level map
+/// (`'depot:neutral; late stop:bad'`) pins the levels it names to their
+/// status colour or `#rrggbb`, first in the legend in the written order;
+/// the other levels follow, sorted, in palette order — slot 0 up, as if the
+/// named levels weren't there, so a named level that is missing from one
+/// map doesn't shift the colours of the rest.
+fn category_fill(o: &RenderOptions, cols: &[Column], c: &Column, rows: usize) -> Fill {
     let levels = crate::distinct_labels(c);
     let levels: Vec<String> = levels.into_iter().filter(|l| !l.is_empty()).collect();
-    let colors: Vec<(String, Rgb)> = levels
+    let named: Vec<(String, crate::thresholds::LevelColor)> = find_role(cols, Role::GaugeColors)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .filter(|s| crate::thresholds::is_level_map(s))
+        .and_then(|s| crate::thresholds::parse_level_colors(&s).ok())
+        .unwrap_or_default();
+    let mut colors: Vec<(String, Rgb)> = named
         .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            let col = crate::parse_rgb(l).unwrap_or_else(|| o.theme.color(i));
-            (l.clone(), col)
-        })
+        .filter(|(l, _)| levels.contains(l))
+        .map(|(l, lc)| (l.clone(), lc.rgb(&o.theme)))
         .collect();
+    colors.extend(
+        levels
+            .iter()
+            .filter(|l| !named.iter().any(|(m, _)| m == *l))
+            .enumerate()
+            .map(|(i, l)| {
+                let col = crate::parse_rgb(l).unwrap_or_else(|| o.theme.color(i));
+                (l.clone(), col)
+            }),
+    );
+    let levels: Vec<String> = colors.iter().map(|(l, _)| l.clone()).collect();
     let of_row = (0..rows)
         .map(|i| {
             let v = c.values.get(i).map(value_str).unwrap_or_default();
@@ -1197,6 +1217,8 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         "<g class=\"dp-features\" fill-rule=\"evenodd\" stroke=\"{}\" stroke-width=\".6\" stroke-linejoin=\"round\" stroke-linecap=\"round\">",
         hex(edge)
     ));
+    // an ::XAXIS keys the features for a ::STORY (a route stop by stop)
+    let step_x = find_role(cols, Role::X);
     for (i, f) in m.features.iter().enumerate() {
         if f.is_empty() {
             continue;
@@ -1249,7 +1271,12 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         // the key (when no label names it) and class first, then the row
         // metadata the browser reads
         let mut data = String::new();
-        if label.is_empty() {
+        if let Some(x) = step_x
+            .and_then(|c| c.values.get(i))
+            .and_then(crate::mark_key_text)
+        {
+            data.push_str(&format!(" data-x=\"{}\"", attr(&x)));
+        } else if label.is_empty() {
             data.push_str(&format!(" data-x=\"{i}\""));
         }
         if let Some(k) = class {

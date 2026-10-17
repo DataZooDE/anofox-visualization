@@ -233,7 +233,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),
     e("COLORS", &["COLOURS"], R::GaugeColors, "modifier", true,
-      "gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb)"),
+      "gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb)"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
       "gauge zone labels, comma-separated (drawn at each zone)"),
     e("DIRECTION", &[], R::Direction, "modifier", true,
