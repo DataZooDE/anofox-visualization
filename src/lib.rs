@@ -42,6 +42,7 @@ pub mod sql;
 pub mod table;
 pub mod theme;
 pub mod thresholds;
+pub mod ticks;
 pub mod track;
 mod variance;
 #[cfg(feature = "wasm")]
@@ -1191,7 +1192,8 @@ impl Panel {
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map(|(mut s, w)| {
+                svg.map(|(s, w)| {
+                    let mut s = ticks::fit_x_labels(s);
                     for (k, v) in &attrs {
                         s = with_root_attr(s, k, v);
                     }
@@ -1725,7 +1727,7 @@ pub(crate) fn finish_grid(
             .render_svg_native_at(x, y, w, h)
             .map(|s| (s, Vec::new())),
     }
-    .map(|(s, warnings)| (strip_nonfinite_marks(s), warnings))
+    .map(|(s, warnings)| (ticks::fit_x_labels(strip_nonfinite_marks(s)), warnings))
     .map_err(|e| format!("render failed: {e:?}"))
 }
 
