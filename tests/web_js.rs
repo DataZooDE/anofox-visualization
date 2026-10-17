@@ -91,3 +91,8 @@ fn web_diagram_text_alternative() {
 fn web_story_keys_match_marks() {
     run_node("anim_test.mjs");
 }
+
+#[test]
+fn web_examples_library_keeps_old_links() {
+    run_node("examples_lib_test.mjs");
+}

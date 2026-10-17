@@ -1,3 +1,7 @@
+-- @title How is our German branch doing this year?
+-- @group How it works
+-- @tags  theming, locale, german
+--
 -- Locale de-DE: a German branch report. KPIs, tables, chart axes, legends and
 -- month names use German conventions (1.234.567,5 · 12.400 € · 12,5 % ·
 -- 1,2 Mio. · 15.10.2026 · Okt. 2026), in the default look with an ink-black

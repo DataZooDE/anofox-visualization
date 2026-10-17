@@ -1338,6 +1338,34 @@ Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`)
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
   file (interactive hover + tabs, no server).
 
+### Dashboard header comments
+
+A dashboard file can start with `-- @…` comment lines. They are not SQL; the
+builder and the servers read them (`parse_dashboard_meta`, one parser, shared
+with the browser through wasm):
+
+```sql skip
+-- @title  Weekly sales by region
+-- @group  Sales / EMEA
+-- @tags   weekly, kpi, emea
+-- @refresh 300
+```
+
+| Line | Meaning |
+|---|---|
+| `-- @title <name>` | The dashboard's name: the sidebar entry of an example, the page title and nav entry on a server (without it, the file id). Name it as a plain business question. |
+| `-- @group <name>` | Where it sits: one group per dashboard, a ` / ` adds one level (`Sales / EMEA`, drawn as a sub-heading; deeper paths are kept as written and drawn flat). No `@group`, or an empty one, means ungrouped. |
+| `-- @tags a, b` | Free labels for finding it: trimmed, lower-cased, without duplicates, at most 10 (several `@tags` lines add up). |
+| `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
+| `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
+| `-- @requires <path>` | Directly above one statement: see *Loading, empty, error and "not available" panels*. |
+
+`dashboard --check` warns about an empty `@group` (`header/empty-group`), one
+longer than 80 characters (`header/long-group`) and more than 10 tags
+(`header/too-many-tags`), reported as statement 0. In this release the
+builder's examples library uses `@group` and `@tags`; the servers read them
+but don't show them yet.
+
 ### Layout (from SQL)
 
 The grid is a **12-column bootstrap grid**; panel widths are spans out of 12.
@@ -1569,7 +1597,7 @@ Only variable **values** travel, never SQL: on a locked server
 (`anofox_serve_dashboards`, `/d/<id>?v.region=EU`) they are bound as typed
 literals like any input change, so an embedding app or another dashboard can
 open a dashboard pre-filtered. Example:
-`?dashboard=Filters%20%26%20inputs&tab=Cross-filter&v.sku=SKU-A&v.market=EU`.
+`?dashboard=how-do-filters-change-what-we-see&tab=Cross-filter&v.sku=SKU-A&v.market=EU`.
 
 ### Motion: entrances, flow lines, stories and transitions
 
@@ -1873,24 +1901,40 @@ The app opens in **View** (the dashboard); **✎ Edit** — or `?mode=edit` in t
 URL — shows the SQL editor, and makes the dashboard name and logo in the header
 editable in place (see *Themes, dark mode, branding and locale*).
 
-**Examples in the sidebar** (open one directly with `?dashboard=<name>`):
+**The sidebar.** *My dashboards* comes first: what you saved in this browser
+(**Save**), in your own groups. Below it, one **Examples** section groups the
+examples by business area: *Start here*, *Demand & stock*, *Logistics &
+production*, *Sales & customers*, *Service & operations*, *Data quality* and
+*How it works* (the feature tours: charts, inputs, selections and drill,
+tables, layout, theming and a de-DE locale). Each area folds open and shut and
+shows how many examples it has; *How it works* starts closed. The section is
+open while you have no dashboards of your own and closed once you have one;
+whatever you choose is remembered in this browser. **Hide** removes it, and
+**Show examples** under *My dashboards* brings it back. The toggles are buttons
+(`aria-expanded`) that keep the keyboard focus, on a phone too, where the
+sidebar is a drawer behind ☰. Long names wrap to two lines; the full name is
+the tooltip. Without a link (`?dashboard=` or a Share hash) the builder
+reopens the dashboard you had open last in this browser, else your first saved
+dashboard, else the first example.
 
-- **Examples** — the core feature tour: *Start here*, *Charts*,
-  *Interactivity*, *Tables*, *Layout* and *Theming* ("A sales cockpit in your
-  brand", "A German branch report"; sources in `examples/theming/`).
-- **anofox extensions** — one group per anofox DuckDB extension:
-  - *Statistics* — "What sets the price of a home?", computed live by the
-    anofox_statistics wasm extension;
-  - *Forecast* — "How much will each item sell next year?" and "Which forecast
-    method fits our demand?", live anofox_forecast;
-  - *Tabular*, *Optimize*, *Decide* — one dashboard per business question
-    (e.g. "Can we switch on the new CRM?", "Which van serves which stop
-    tomorrow?", "Can a model triage the support inbox?"); the sidebar names
-    are the questions, each dashboard says on the page that its results are
-    stored. These extensions can't run in DuckDB-Wasm (no loadable wasm
-    build, or a native model runtime), so the results were computed natively
-    (`examples/<ext>-showcase/compute.sql` → `scripts/gen-showcase-data.sh` →
-    `web/data/<ext>/*.csv`) and the dashboards only read them — each page says so.
+Each example says where it belongs in its own header comments (`-- @title`,
+`-- @group`, `-- @tags`, see *Dashboard header comments*), so
+`web/examples/*.sql` is the single source of truth for the library. Open one
+directly with `?dashboard=<id>`: the id is the slug of its name
+(`?dashboard=who-should-sales-call-first`). The name works too, and so do the
+names the examples had before they were grouped (`?dashboard=Overview`,
+`?dashboard=Chart%20gallery`, …), so old links keep opening the same example.
+Examples are looked up first, then your saved dashboards by name;
+`?dashboard=my:<id>` (the slug of a saved dashboard's name) opens only one of
+yours. A linked example shows its area in the sidebar, even when the section
+is closed.
+
+Some examples run an anofox extension live in the browser (statistics,
+forecast); others (tabular, optimize, decide) read results computed natively,
+because those extensions can't run in DuckDB-Wasm (no loadable wasm build, or
+a native model runtime): `examples/<ext>-showcase/compute.sql` →
+`scripts/gen-showcase-data.sh` → `web/data/<ext>/*.csv`, and the dashboards
+only read them.
 
 The live extensions are fetched by `scripts/fetch-wasm-extensions.sh` into
 `web/localext/` and loaded on first use; a statement that reads

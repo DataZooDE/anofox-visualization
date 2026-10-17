@@ -1,3 +1,7 @@
+-- @title Which line runs which order, with the least changeover?
+-- @group Logistics & production
+-- @tags  optimize, scheduling
+--
 -- Production scheduling with changeovers — anofox_optimize on a bottler's week.
 --
 -- STORED RESULTS, NOT LIVE. The schedules below were computed natively with

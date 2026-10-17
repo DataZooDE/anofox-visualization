@@ -409,6 +409,23 @@ pub fn threshold_rules(spec: &str) -> String {
     crate::thresholds::table_json(spec)
 }
 
+/// A dashboard's header comments as `{"title","group","tags","refresh"}`,
+/// read by the parser the servers use
+/// ([`crate::host::serving::parse_dashboard_meta`]), so the builder's sidebar
+/// and a served folder place a dashboard alike. `title` is "" without
+/// `-- @title`, `group` is null without `-- @group`.
+#[wasm_bindgen]
+pub fn dashboard_meta(script: &str) -> String {
+    guard(|| {
+        let m = crate::host::serving::parse_dashboard_meta("", script);
+        Ok(serde_json::json!({
+            "title": m.title, "group": m.group, "tags": m.tags, "refresh": m.refresh,
+        })
+        .to_string())
+    })
+    .unwrap_or_else(|_| r#"{"title":"","group":null,"tags":[],"refresh":0}"#.into())
+}
+
 #[wasm_bindgen]
 pub fn roles_json() -> String {
     roles::roles_json()

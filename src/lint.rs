@@ -55,6 +55,8 @@ pub struct Diagnostic {
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
+    /// Header comments ([`header_diags`], warnings): `header/empty-group` |
+    /// `header/long-group` | `header/too-many-tags`.
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -97,7 +99,7 @@ pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<D
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
-    let mut diags = Vec::new();
+    let mut diags = header_diags(script);
     let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
@@ -1011,6 +1013,65 @@ pub fn check_policy(
     diags
 }
 
+/// The header comments that place a dashboard (`-- @group`, `-- @tags`): an
+/// empty or over-long group, more tags than are kept. Reported as statement 0
+/// (the header comes before the first statement).
+pub fn header_diags(script: &str) -> Vec<Diagnostic> {
+    use crate::host::serving::{header_value, split_tags, MAX_GROUP_CHARS, MAX_TAGS};
+    let mut diags = Vec::new();
+    let mut warn = |code, message: String, line: &str| {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: 0,
+            code,
+            message,
+            sql: one_line(line.trim()),
+        })
+    };
+    let mut tags: Vec<String> = Vec::new();
+    let mut tags_line = "";
+    for line in script.lines() {
+        if let Some(g) = header_value(line, "group") {
+            if g.split('/').all(|p| p.trim().is_empty()) {
+                warn(
+                    "header/empty-group",
+                    "`-- @group` has no name — the dashboard is shown ungrouped".into(),
+                    line,
+                );
+            } else if g.chars().count() > MAX_GROUP_CHARS {
+                warn(
+                    "header/long-group",
+                    format!(
+                        "`-- @group` is {} characters long — keep it to {MAX_GROUP_CHARS} or fewer \
+                         (it is a sidebar heading)",
+                        g.chars().count()
+                    ),
+                    line,
+                );
+            }
+        } else if let Some(t) = header_value(line, "tags") {
+            for t in split_tags(t) {
+                if !tags.contains(&t) {
+                    tags.push(t);
+                }
+            }
+            tags_line = line;
+        }
+    }
+    if tags.len() > MAX_TAGS {
+        warn(
+            "header/too-many-tags",
+            format!(
+                "{} tags in `-- @tags` — only the first {MAX_TAGS} are kept ({} dropped)",
+                tags.len(),
+                tags[MAX_TAGS..].join(", ")
+            ),
+            tags_line,
+        );
+    }
+    diags
+}
+
 /// A one-line summary: `N error(s), M warning(s)` (`, K note(s)`); empty script-clean message.
 pub fn summary(diags: &[Diagnostic]) -> String {
     let e = diags
@@ -1681,6 +1742,39 @@ mod design_tests {
         assert!(!has(&d, "empty-panel"), "{d:?}");
         let d = lint_one("SELECT a ::XAXIS, b ::BARCHART FROM t;", vec![]);
         assert!(has(&d, "empty-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn header_group_and_tags_are_checked() {
+        let codes = |script: &str| -> Vec<&'static str> {
+            header_diags(script).iter().map(|d| d.code).collect()
+        };
+        assert!(codes("-- @group Sales / EMEA\n-- @tags a, b\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @group\nSELECT 1;"), ["header/empty-group"]);
+        assert_eq!(codes("-- @group  / \n"), ["header/empty-group"]);
+        let long = format!("-- @group {}\n", "x".repeat(81));
+        assert_eq!(codes(&long), ["header/long-group"]);
+        assert!(codes(&format!("-- @group {}\n", "ä".repeat(80))).is_empty());
+        let tags: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
+        let d = header_diags(&format!("-- @tags {}\nSELECT 1;", tags.join(", ")));
+        assert_eq!(d.len(), 1);
+        assert_eq!((d[0].code, d[0].stmt), ("header/too-many-tags", 0));
+        assert!(d[0].message.contains("t10"), "{}", d[0].message);
+        // two lines add up; duplicates (any case) count once
+        let a = (0..6)
+            .map(|i| format!("T{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let b = (3..10)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(codes(&format!("-- @tags {a}\n-- @tags {b}\n")).is_empty());
+        // …and check() reports them too
+        assert!(has(
+            &check("-- @group\nSELECT 1;", |_| Ok(vec![])),
+            "header/empty-group"
+        ));
     }
 
     #[test]

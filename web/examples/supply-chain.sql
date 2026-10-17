@@ -1,3 +1,7 @@
+-- @title Where does our supply chain amplify demand, and what would stabilise it?
+-- @group Logistics & production
+-- @tags  inventory, simulation, bullwhip
+--
 -- Where does our supply chain amplify demand, and what would stabilise it?
 --
 -- A four-stage supply chain simulated for 52 weeks: consumers buy from a

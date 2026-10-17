@@ -1,3 +1,7 @@
+-- @title Which duplicate customers should we merge?
+-- @group Data quality
+-- @tags  tabular, data quality, deduplication
+--
 -- How many duplicate customers do we have, and which should we merge? —
 -- duplicate / entity matching with anofox_tabular.
 --

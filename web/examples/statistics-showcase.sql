@@ -1,3 +1,7 @@
+-- @title What sets the price of a home?
+-- @group Sales & customers
+-- @tags  statistics, regression, pricing
+--
 -- Statistics showcase — every anofox_statistics plot, in modelling order.
 --
 -- A property market in a made-up mid-sized city asks: what sets the price of a

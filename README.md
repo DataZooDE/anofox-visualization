@@ -24,21 +24,21 @@ SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
 ```
 
 **[▶ Live demo](https://datazoode.github.io/anofox-visualization/)** — the full
-builder running in your browser on DuckDB-Wasm. Its sidebar has two areas:
-
-- **Examples** — the feature tour: charts, interactivity, tables, layout and
-  theming (corporate branding, a de-DE locale).
-- **anofox extensions** — a showcase per anofox DuckDB extension:
-  [statistics](examples/statistics-showcase/) and forecast computed **live** in
-  the browser by their wasm builds; [tabular](examples/tabular-showcase/)
-  (a data-quality report), [optimize](examples/optimize-showcase/)
-  (decisions at a distribution centre) and [decide](examples/decide-showcase/)
-  (support-ticket triage with a decision model) as **stored results** computed
-  natively, because those extensions can't run in DuckDB-Wasm yet; and an
-  [inventory digital twin](examples/inventory-twin/) (stock, risk, drift
-  monitoring, calibration and replay of inventory-rs twins) with a
-  [supplier lead-time](examples/supplier-lead-times/) companion (reliability,
-  drift and what lead-time variability costs in safety stock).
+builder running in your browser on DuckDB-Wasm. Its sidebar keeps your own
+dashboards first, then one **Examples** library grouped by business area (start
+here, demand & stock, logistics & production, sales & customers, service &
+operations, data quality, and the feature tours under *how it works*). Each
+example places itself with `-- @group` / `-- @tags` header comments. Among
+them: [statistics](examples/statistics-showcase/) and forecast computed **live**
+in the browser by their wasm builds; [tabular](examples/tabular-showcase/)
+(a data-quality report), [optimize](examples/optimize-showcase/)
+(decisions at a distribution centre) and [decide](examples/decide-showcase/)
+(support-ticket triage with a decision model) read results computed natively,
+because those extensions can't run in DuckDB-Wasm yet; and an
+[inventory digital twin](examples/inventory-twin/) (stock, risk, drift
+monitoring, calibration and replay of inventory-rs twins) with a
+[supplier lead-time](examples/supplier-lead-times/) companion (reliability,
+drift and what lead-time variability costs in safety stock).
 
 ## Features
 

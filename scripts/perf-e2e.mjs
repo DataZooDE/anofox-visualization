@@ -10,7 +10,7 @@
 //
 //   python3 serve_nocache.py 8791 &
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/perf-e2e.mjs \
-//       [--url http://127.0.0.1:8791/] [--dashboard "Chart gallery"] [--rounds 3]
+//       [--url http://127.0.0.1:8791/] [--dashboard "Which chart fits which question?"] [--rounds 3]
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
@@ -20,7 +20,7 @@ const arg = (k, d) => {
   return i > 0 ? process.argv[i + 1] : d;
 };
 const base = arg("--url", "http://127.0.0.1:8791/");
-const dash = arg("--dashboard", "Chart gallery");
+const dash = arg("--dashboard", "Which chart fits which question?");
 const rounds = Math.max(1, Number(arg("--rounds", "3")) || 1);
 
 const browser = await chromium.launch();
@@ -92,7 +92,7 @@ for (const [label, q] of [["lazy", ""], ["eager (?lazy=0)", "&lazy=0"]]) {
   const runs = [];
   for (let r = 0; r < rounds; r++) {
     runs.push(await measure(page));
-    await page.click('.side-item[data-name="Overview"]');
+    await page.click('.side-item[data-name="Where do our sessions come from?"]');
     await idle(page);
   }
   const m = {

@@ -1,3 +1,7 @@
+-- @title Can a model triage the support inbox?
+-- @group Service & operations
+-- @tags  decide, support, triage
+--
 -- Decide showcase — natural-language decisions with anofox_decide.
 --
 -- STORED RESULTS, NOT LIVE. The model answers below were computed natively

@@ -1,3 +1,7 @@
+-- @title Is today's supplier feed safe to load?
+-- @group Data quality
+-- @tags  tabular, data quality, monitoring
+--
 -- Is today's supplier feed safe to load? — monitoring an incoming data feed
 -- with anofox_tabular.
 --

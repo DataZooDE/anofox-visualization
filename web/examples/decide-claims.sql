@@ -1,3 +1,7 @@
+-- @title Which claims can we fast-track?
+-- @group Service & operations
+-- @tags  decide, insurance, claims
+--
 -- Decide use case — insurance claim routing with anofox_decide.
 --
 -- STORED RESULTS, NOT LIVE. The model's answers were computed natively with

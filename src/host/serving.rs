@@ -793,10 +793,49 @@ pub struct DashboardMeta {
     /// `-- @vars a, b`: the only variables a viewer may set on a locked server
     /// (others are dropped); `None` = any (not reserved) variable.
     pub vars: Option<Vec<String>>,
+    /// `-- @group Sales / EMEA`: where the dashboard sits in a sidebar or nav,
+    /// with ` / ` between the levels; `None` = ungrouped.
+    pub group: Option<String>,
+    /// `-- @tags a, b`: free labels, trimmed, lower-cased, without duplicates,
+    /// at most [`MAX_TAGS`].
+    pub tags: Vec<String>,
+}
+
+/// The most `-- @tags` a dashboard keeps (the rest are dropped; the linter
+/// warns).
+pub const MAX_TAGS: usize = 10;
+/// A `-- @group` longer than this (in characters) is linted.
+pub const MAX_GROUP_CHARS: usize = 80;
+
+/// The value of a `-- @<name>` header line (`None` when `line` is something
+/// else). The value may be empty: `-- @group` alone gives `Some("")`.
+pub fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let r = line.trim().strip_prefix("-- @")?.strip_prefix(name)?;
+    (r.is_empty() || r.starts_with(char::is_whitespace)).then(|| r.trim())
+}
+
+/// A `-- @group` value with its levels trimmed and joined by ` / `
+/// (`Sales/EMEA` → `Sales / EMEA`); `None` when nothing is left.
+pub fn normalize_group(raw: &str) -> Option<String> {
+    let parts: Vec<&str> = raw
+        .split('/')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" / "))
+}
+
+/// The labels of a `-- @tags` value: trimmed, lower-cased, non-empty.
+pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
+    raw.split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
 }
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
-/// `-- @load <extension>`, `-- @vars a, b` header comments. A `@param` or
+/// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`
+/// header comments (a repeated `@group` wins over the earlier one; `@tags`
+/// lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
@@ -808,6 +847,14 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
         let l = line.trim();
         if let Some(r) = l.strip_prefix("-- @title ") {
             m.title = r.trim().to_string();
+        } else if let Some(r) = header_value(l, "group") {
+            m.group = normalize_group(r);
+        } else if let Some(r) = header_value(l, "tags") {
+            for t in split_tags(r) {
+                if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
+                    m.tags.push(t);
+                }
+            }
         } else if let Some(r) = l.strip_prefix("-- @refresh ") {
             m.refresh = r.trim().parse().unwrap_or(0);
         } else if let Some(r) = l.strip_prefix("-- @load ") {
@@ -1178,6 +1225,38 @@ mod tests {
             m.vars,
             Some(vec!["region".to_string(), "selected".to_string()])
         );
+    }
+
+    #[test]
+    fn dashboard_meta_group_and_tags() {
+        let m = parse_dashboard_meta("s", "SELECT 1;");
+        assert_eq!((m.group, m.tags.len()), (None, 0));
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @title  Weekly sales\n-- @group  Sales/ EMEA \n-- @tags weekly, KPI , ,emea\n\
+             --  @tags kpi, Margin\nSELECT 1;",
+        );
+        assert_eq!(m.title, "Weekly sales");
+        assert_eq!(m.group.as_deref(), Some("Sales / EMEA"));
+        // `--  @tags` (two spaces) is not a header line
+        assert_eq!(m.tags, ["weekly", "kpi", "emea"]);
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @group Ops\n-- @group  \n-- @groups x\n-- @tagsx y\n-- @tags k, kpi\nSELECT 1;",
+        );
+        assert_eq!(m.group, None, "an empty @group later ungroups");
+        assert_eq!(m.tags, ["k", "kpi"]);
+        let many: Vec<String> = (0..14).map(|i| format!("t{i}")).collect();
+        let m = parse_dashboard_meta("s", &format!("-- @tags {}\n", many.join(",")));
+        assert_eq!(m.tags.len(), MAX_TAGS);
+        assert_eq!(m.tags[9], "t9");
+        assert_eq!(
+            normalize_group("a / b / c").as_deref(),
+            Some("a / b / c"),
+            "deeper paths are kept as written"
+        );
+        assert_eq!(header_value("-- @group", "group"), Some(""));
+        assert_eq!(header_value("-- @title x", "group"), None);
     }
 
     #[test]

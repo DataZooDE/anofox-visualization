@@ -1,3 +1,7 @@
+-- @title Will any substation exceed its capacity next week?
+-- @group Service & operations
+-- @tags  forecast, energy, capacity
+--
 -- Energy / load forecasting — will any substation exceed its firm capacity
 -- next week? Live anofox_forecast in the browser.
 --

@@ -1,3 +1,7 @@
+-- @title Why do customers cancel?
+-- @group Sales & customers
+-- @tags  statistics, churn
+--
 -- Drivers of churn — why do customers cancel, and which lever pays off?
 --
 -- LIVE: every number below is computed when the dashboard runs. The script

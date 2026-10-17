@@ -2,8 +2,8 @@
 // Tab into a chart, walk its marks with the arrow keys, Enter selects (the
 // dashboard re-runs and the focus comes back), Esc leaves; every chart SVG has
 // a summary; "Charts as tables" swaps each chart for a table. With axe-core on
-// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard and on
-// Explore data (a table's cards, a chart preview, a query result). A
+// disk (--axe path/to/axe.min.js) it also runs axe on the dashboard, on the
+// sidebar's examples library and on Explore data (a table's cards, a chart preview, a query result). A
 // ::STORY chart's first step must light some marks, dim the rest and draw
 // its connector.
 //
@@ -340,6 +340,80 @@ await page.click(".dp-astable-btn");
   if (closed.shown || closed.expanded !== "false" || closed.focus !== "side-toggle") fail(`phone drawer Esc: ${JSON.stringify(closed)}`);
   console.log("sidebar:", s0.w, "→", s1.w, "→ drag", s2.w, "→ reset", s3.w, "· chart", s0.chart, "→", s2.chart, "· phone", JSON.stringify(phone));
   await bp.close();
+}
+
+// The examples library (sidebar): one "Examples" section grouped by business
+// area, open on a first visit, "How it works" closed. Its toggles are buttons
+// with aria-expanded that keep the focus and survive a reload; Hide moves the
+// focus to "Show examples", which brings the section back; a visit without a
+// link reopens the dashboard open last. With --axe, axe
+// checks the sidebar (colour contrast included), light and dark.
+for (const scheme of ["light", "dark"]) {
+  const lp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, colorScheme: scheme, reducedMotion: "reduce" });
+  lp.on("pageerror", (e) => errs.push(String(e)));
+  await lp.goto(`${base}?dashboard=Overview`);
+  await lp.waitForSelector("#side-ex-toggle", { timeout: 60000 });
+  const lib = () =>
+    lp.evaluate(() => ({
+      open: document.getElementById("side-ex-toggle")?.getAttribute("aria-expanded"),
+      listHidden: document.getElementById("side-ex")?.hidden,
+      areas: [...document.querySelectorAll(".side-area")].map((b) => [
+        b.querySelector(".g-name").textContent,
+        b.getAttribute("aria-expanded"),
+        document.getElementById(b.getAttribute("aria-controls"))?.hidden,
+      ]),
+      focus: document.activeElement?.id,
+      active: document.querySelector(".side-item.active")?.dataset.key,
+      show: !!document.getElementById("side-show-ex"),
+    }));
+  const tag = `examples library (${scheme})`;
+  let l = await lib();
+  if (l.open !== "true" || l.listHidden || l.active !== "ex:where-do-our-sessions-come-from") fail(`${tag}: first visit ${JSON.stringify(l)}`);
+  if (l.areas[0]?.[0] !== "Start here" || l.areas.at(-1)?.[0] !== "How it works") fail(`${tag}: area order ${JSON.stringify(l.areas)}`);
+  for (const [name, exp, hidden] of l.areas)
+    if (exp !== String(name !== "How it works") || hidden !== (exp === "false")) fail(`${tag}: area ${name} expanded=${exp} hidden=${hidden}`);
+  await lp.focus("#side-area-how-it-works");
+  await lp.keyboard.press("Enter");
+  l = await lib();
+  if (l.areas.at(-1)[1] !== "true" || l.areas.at(-1)[2] || l.focus !== "side-area-how-it-works") fail(`${tag}: Enter on an area ${JSON.stringify(l)}`);
+  await lp.focus("#side-ex-toggle");
+  await lp.keyboard.press("Space");
+  l = await lib();
+  if (l.open !== "false" || !l.listHidden || l.focus !== "side-ex-toggle") fail(`${tag}: Space on the library ${JSON.stringify(l)}`);
+  // (without ?dashboard=: a linked example opens its library and area for that page)
+  await lp.goto(base);
+  await lp.waitForSelector("#side-ex-toggle", { timeout: 60000 });
+  l = await lib();
+  if (l.open !== "false" || l.areas.at(-1)[1] !== "true") fail(`${tag}: choices not kept across a reload ${JSON.stringify(l)}`);
+  await lp.focus("#side-ex-toggle");
+  await lp.keyboard.press("Enter");
+  await lp.focus("#side-hide-ex");
+  await lp.keyboard.press("Enter");
+  l = await lib();
+  if (l.open !== undefined || !l.show || l.focus !== "side-show-ex") fail(`${tag}: Hide ${JSON.stringify(l)}`);
+  await lp.reload();
+  await lp.waitForSelector("#side-show-ex", { state: "attached", timeout: 60000 });
+  await lp.focus("#side-show-ex");
+  await lp.keyboard.press("Enter");
+  l = await lib();
+  if (l.open !== "true" || l.show || l.focus !== "side-ex-toggle") fail(`${tag}: Show examples ${JSON.stringify(l)}`);
+  // Without a link, the next visit opens the dashboard open last.
+  await lp.click('.side-item[data-key="ex:why-do-customers-cancel"]');
+  await lp.goto(base);
+  await lp.waitForSelector("#side-ex-toggle", { timeout: 60000 });
+  l = await lib();
+  const nm = await lp.inputValue("#dash-name");
+  if (l.active !== "ex:why-do-customers-cancel" || nm !== "Why do customers cancel?") fail(`${tag}: last dashboard not reopened (${l.active}, ${nm})`);
+  if (axe && existsSync(axe)) {
+    await lp.addScriptTag({ path: axe });
+    const res = await lp.evaluate(async () => window.axe.run("#sidebar", { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }));
+    for (const v of res.violations) console.log(`axe sidebar ${scheme} ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help} — ${v.nodes[0]?.target}`);
+    const bad = res.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+    if (bad.length) fail(`axe sidebar ${scheme}: ${bad.map((v) => v.id).join(", ")}`);
+    else console.log(`axe sidebar ${scheme}: ${res.passes.length} rules pass, no serious violation`);
+  }
+  console.log(`${tag}: ${l.areas.map((a) => a[0]).join(" · ")}`);
+  await lp.close();
 }
 
 if (axe && existsSync(axe)) {

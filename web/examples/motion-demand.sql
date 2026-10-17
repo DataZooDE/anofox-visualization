@@ -1,3 +1,7 @@
+-- @title How will demand develop after today?
+-- @group Demand & stock
+-- @tags  forecast, motion, story
+--
 -- How will demand develop after today? A weekly demand outlook whose charts
 -- move with the story they tell:
 --   * the outlook chart wipes in up to "Today", pauses, then the forecast fan
