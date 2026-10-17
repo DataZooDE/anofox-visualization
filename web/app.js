@@ -3362,7 +3362,11 @@ function shapeOf(roots) {
   const attr = (el) => (el.matches(".tab-btn") ? "class" : "style");
   const was = tabs.map((el) => el.getAttribute(attr(el)));
   tabs.forEach((el) => (el.matches(".tab-btn") ? el.classList.remove("active") : el.style.removeProperty("display")));
+  // (nor whether a pane still waits for lazily rendered panels)
+  const busy = tabs.filter((el) => el.hasAttribute("aria-busy"));
+  busy.forEach((el) => el.removeAttribute("aria-busy"));
   const html = roots.map((r) => (r ? r.outerHTML : "")).join("");
+  busy.forEach((el) => el.setAttribute("aria-busy", "true"));
   tabs.forEach((el, k) => (was[k] == null ? el.removeAttribute(attr(el)) : el.setAttribute(attr(el), was[k])));
   holes.forEach((i, k) => i.replaceWith(slots[k]));
   return html;
@@ -3505,16 +3509,42 @@ async function runSetup(sql) {
 
 // Run the deferred setup statements that come before statement `upto` (all of
 // them for Infinity), in order. A failing one shows its error card before `at`.
-async function lazyFlushSetup(L, upto, at) {
-  while (L.setup.length && L.setup[0] < upto) {
-    const k = L.setup.shift();
-    try {
-      await runSetup(L.stmts[k].sql);
-    } catch (e) {
-      if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${L.stmts[k].requires.join(", ")}`);
-      else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
+// Calls queue up (panels load in parallel in served mode): a panel's query
+// starts only once the setup before it has finished.
+function lazyFlushSetup(L, upto, at) {
+  L.setupTail = (L.setupTail || Promise.resolve()).then(async () => {
+    while (L.setup.length && L.setup[0] < upto) {
+      const k = L.setup.shift();
+      try {
+        await runSetup(L.stmts[k].sql);
+      } catch (e) {
+        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${L.stmts[k].requires.join(", ")}`);
+        else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
+      }
     }
-  }
+  });
+  return L.setupTail;
+}
+
+// Panels fetched at once: a locked server answers /api/panel requests in
+// parallel (six, the browser's per-host connection limit); DuckDB-Wasm and the
+// authoring server run one query at a time anyway.
+const lazyWidth = () => (servedMode ? 6 : 1);
+// Run `jobs` with up to lazyWidth() of them in flight; each fills its own
+// placeholder, so the page order never depends on which answer comes first.
+async function lazyPool(jobs, inline) {
+  let next = 0;
+  let last = performance.now();
+  const worker = async () => {
+    while (next < jobs.length) {
+      await lazyRunJob(jobs[next++], inline);
+      if (performance.now() - last > 40) {
+        await yieldTask(); // keep the page responsive between panels
+        last = performance.now();
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(lazyWidth(), jobs.length) }, worker));
 }
 
 // A panel's query, cached per (statement, the variables it reads, setup epoch)
@@ -3574,6 +3604,9 @@ async function lazyRunJob(job, inline = false) {
   job.ph.replaceWith(frag);
   if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane") === pane)) pane.removeAttribute("aria-busy");
   if (inline) return;
+  // The output a re-run's patch compares with (patchSlots), as the swap
+  // records it for the panels it brings: before wiring.
+  for (const p of made) if (!p.parentElement.closest(SLOTS)) p._sig = p.outerHTML;
   // Wired at once (hover, a11y summary, toolbox…): a panel is never on the
   // page without its summary.
   const t0 = performance.now();
@@ -3604,7 +3637,8 @@ async function lazyPump() {
         job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j));
       }
       if (!job) break;
-      const step = dpLazy.tail.then(() => lazyRunJob(job));
+      const shown = paneShown(job.ph) ? open().filter((j) => paneShown(j.ph)).slice(0, lazyWidth()) : [job];
+      const step = dpLazy.tail.then(() => lazyPool(shown, false));
       dpLazy.tail = step.catch((e) => console.error(e));
       await dpLazy.tail;
       await yieldTask();
@@ -4532,9 +4566,14 @@ async function runOnce(fresh = true) {
         trackHost.lazy.tracks.push({ i, height: nextHeight || 0 });
         nextHeight = 0;
         continue;
-      } else if (lazy && curGrid !== newGrid && !role(s, "RELOAD")) {
-        // Inside a ::TAB / ::SUBTAB pane: a placeholder now; the query runs and
-        // the panel renders when the pane is shown (lazyRun).
+      } else if (
+        lazy &&
+        !role(s, "RELOAD") &&
+        (curGrid !== newGrid || !(isHeading(s) || ["SECTION", "HEADER_IMAGE", "FOOTER_LINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_PDF"].some((r) => role(s, r))))
+      ) {
+        // A placeholder now; the query runs and the panel renders once the
+        // layout is built — the shown panes' panels in this run (in parallel
+        // on a locked server), a hidden pane's when it is shown (lazyPump).
         const span = Math.min(12, nextSpan || defaultSpan);
         const ph = document.createElement("div");
         const kpi = !!metricRole(s) && !role(s, "TABLE");
@@ -4606,17 +4645,12 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
-  // Lazy tabs: render the panels of the panes on show now (off-screen, like
-  // the rest); the hidden panes' jobs wait for lazyPump().
-  if (lazy) {
-    for (const job of lazy.jobs) {
-      if (!paneShown(job.ph)) continue;
-      await lazyRunJob(job, true);
-      if (performance.now() - lastYield > 40) {
-        await yieldTask();
-        lastYield = performance.now();
-      }
-    }
+  // The shown panes' panels: rendered off-screen here, like the rest — or,
+  // on a first load (nothing but skeletons on screen), after the swap, each
+  // as it arrives. The hidden panes' jobs wait for lazyPump().
+  const progressive = !!lazy && fresh && !document.querySelector(".dash .panel:not(.dp-skel)");
+  if (lazy && !progressive) {
+    await lazyPool(lazy.jobs.filter((j) => paneShown(j.ph)), true);
     lazy.jobs = lazy.jobs.filter((j) => !j.done);
   }
   // A re-run keeps each chart's ::STORY step (a full run starts at the overview).
@@ -4703,6 +4737,10 @@ async function runOnce(fresh = true) {
     runQueued = runQueued ?? false;
   }
   if (fresh) animateIn(); // entrance animation on load/Run only — cross-filter stays instant
+  if (progressive) {
+    await lazyPool(lazy.jobs.filter((j) => paneShown(j.ph)), false);
+    lazy.jobs = lazy.jobs.filter((j) => !j.done);
+  }
   status(`${panels} panel${panels === 1 ? "" : "s"}`);
   grid.removeAttribute("aria-busy");
   dpVarLast = { ...dpVarNow };
