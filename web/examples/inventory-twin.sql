@@ -19,7 +19,7 @@
 -- every sale and delivery, projects the next four weeks, watches its own
 -- forecast for drift and recalibrates itself.
 --
--- Tabs: Stock & pipeline · Risk · Monitoring · Calibration · Replay · Pipeline.
+-- Tabs: Overview · Stock & pipeline · Risk · Monitoring · Calibration · Replay · Pipeline.
 -- Natively, run from web/:  dashboard --check ../examples/inventory-twin/showcase.sql
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
@@ -88,6 +88,44 @@ WHERE c.status IN ('escalated', 'proposed')
   AND c.proposal_id NOT IN (SELECT proposal_id FROM it_changes WHERE status = 'approved')
   AND c.period = (SELECT max(period) FROM it_changes x WHERE x.sku = c.sku AND x.parameter = c.parameter AND x.origin = 'calibration');
 
+-- Criticality, written down once. Per item at the plan level:
+--   Critical  a chance of 50 % or more of at least one day out of stock in
+--             the next 4 weeks, and it can run out within 7 days (the plan
+--             band's lower edge reaches zero) or it is a class A item (a top
+--             seller: the export has no prices, the class stands for value);
+--   Watch     a chance of 20 % or more (the Risk tab's thresholds);
+--   OK        below 20 %.
+-- Most critical first: status, then the day it can run out, then the chance.
+-- Trust is separate: 'alarm' when a detector is latched in alarm now,
+-- 'review' when a recalibration waits for the planner or a stock count did
+-- not match the twin, else 'ok'.
+CREATE OR REPLACE MACRO it_crit() AS TABLE
+WITH base AS (
+    SELECT r.sku, i.cohort, i.shape, r.p_out_4w, r.short_by, r.units_short,
+           (r.short_by - it_today())::INTEGER AS days_left,
+           n.on_hand_now, n.on_order_now,
+           n.on_hand_now / nullif((SELECT avg(demand) FROM it_trajectory t WHERE t.sku = r.sku
+                                   AND t.period > (SELECT max(period) FROM it_trajectory) - 28), 0) AS cover_days,
+           (SELECT string_agg(DISTINCT it_detector(test), ', ') FROM it_status s WHERE s.sku = r.sku AND s.state = 'alarm') AS alarm_now,
+           (SELECT count(*) FROM it_waiting() w WHERE w.sku = r.sku) AS waiting,
+           (SELECT count(*) FROM it_replay x WHERE x.sku = r.sku) AS counts,
+           (SELECT count(*) FILTER (WHERE NOT within_tolerance) FROM it_replay x WHERE x.sku = r.sku) AS counts_missed
+    FROM it_risk() r JOIN it_items i USING (sku) JOIN it_runs() n USING (sku)),
+graded AS (
+    SELECT *,
+           CASE WHEN p_out_4w >= 0.5 AND (days_left <= 7 OR cohort = 'A') THEN 'Critical'
+                WHEN p_out_4w >= 0.2 THEN 'Watch' ELSE 'OK' END AS status,
+           CASE WHEN alarm_now IS NOT NULL THEN 'alarm'
+                WHEN waiting > 0 OR counts_missed > 0 THEN 'review' ELSE 'ok' END AS trust,
+           concat_ws(' · ', CASE WHEN alarm_now IS NOT NULL THEN alarm_now || ' alarm' END,
+                     CASE WHEN waiting > 0 THEN waiting || ' waiting' END,
+                     CASE WHEN counts_missed > 0 THEN counts_missed || '/' || counts || ' counts off' END) AS trust_why
+    FROM base)
+SELECT *, CASE status WHEN 'Critical' THEN 1 WHEN 'Watch' THEN 2 ELSE 3 END AS grade,
+       row_number() OVER (ORDER BY CASE status WHEN 'Critical' THEN 1 WHEN 'Watch' THEN 2 ELSE 3 END,
+                                   short_by NULLS LAST, p_out_4w DESC, sku) AS rnk
+FROM graded;
+
 -- The selected item's incident, step by step (the story on the stock chart):
 -- the first warning and alarm, the longest stockout, the first escalated
 -- calibration and the first approval. Any item gets its own story.
@@ -122,7 +160,8 @@ SELECT 12::COL;
 SELECT ('**The replenishment planner** of a wholesaler runs a digital twin for each of ' || (SELECT count(*) FROM it_items) ||
         ' items: it replays every sale and delivery, projects the stock four weeks ahead, watches its own forecast for drift and recalibrates itself. ' ||
         'It is the evening of **' || strftime(it_today(), '%-d %b %Y') || '**. Which items will run short before the next deliveries, and is the twin behind that answer still right? ' ||
-        '**Answer:** ' || (SELECT count(*) FROM it_risk() WHERE p_out_4w >= 0.5) || ' items run out in the next four weeks with a chance of 50 % or more (tab *Risk*); ' ||
+        '**Answer:** ' || coalesce((SELECT CASE count(*) WHEN 1 THEN '1 item is' ELSE count(*) || ' items are' END || ' critical — ' || string_agg('**' || sku || '**', ', ' ORDER BY rnk) FROM it_crit() WHERE status = 'Critical'), 'no item is critical') ||
+        ' — likely to run out in the next four weeks, and soon or a top seller (tab *Overview*); ' ||
         (SELECT CASE count(DISTINCT sku) WHEN 1 THEN '1 twin is' ELSE count(DISTINCT sku) || ' twins are' END FROM it_status WHERE state = 'alarm') || ' in alarm now (*Monitoring*); ' ||
         (SELECT count(*) FROM it_waiting()) ||
         ' recalibrations wait for a decision (*Calibration*); the twins match ' ||
@@ -154,6 +193,65 @@ SELECT (SELECT 100 * avg(within_tolerance::INTEGER) FROM it_replay)::PERCENT, 'S
        '<95:bad; <99:warn; good'::THRESHOLDS,
        'Counted stock vs the twin''s on-hand on the same day; a match is within max(1 unit, 2 % of the count).'::INFO;
 SELECT 1::ENDGROUP;
+
+-- ── 0 · Overview ─────────────────────────────────────────────────────────────
+SELECT 'Overview'::TAB;
+
+SELECT 12::COL;
+SELECT ('**Which items need attention first?** ' ||
+        coalesce((SELECT CASE count(*) WHEN 1 THEN '1 item is' ELSE count(*) || ' items are' END || ' **Critical**: ' ||
+                         string_agg('**' || sku || '** (' || round(100 * p_out_4w)::INTEGER || ' %, can run out ' ||
+                                    CASE days_left WHEN 1 THEN 'tomorrow' ELSE 'by ' || strftime(short_by, '%a %-d %b') END ||
+                                    CASE trust WHEN 'alarm' THEN ', its twin in alarm' ELSE '' END || ')', ', ' ORDER BY rnk)
+                  FROM it_crit() WHERE status = 'Critical'), 'No item is **Critical**') || '; ' ||
+        (SELECT count(*) FROM it_crit() WHERE status = 'Watch') || ' on *Watch*. ' ||
+        '**Critical** means a chance of 50 % or more of running out in the next four weeks, and the item can run out within a week (planning for the ' || it_level_txt() ||
+        ' band) or it is a class A top seller. **Watch**: a chance of 20 % or more. **OK**: below. ' ||
+        '*Plan trust* (watch list): *alarm* = a drift detector is in alarm now, *review* = a recalibration waits or a stock count missed. ' ||
+        'Click an item to show it on the other tabs (now: **' || it_sku() || '**).')::MARKDOWN;
+
+SELECT 6::COL;
+SELECT 380::HEIGHT;
+SELECT x AS "Days until it can run out" ::XAXIS, 100 * p_out_4w AS "Chance out in 4 weeks (%)" ::SCATTER,
+       sku || ' · ' || round(units_short)::INTEGER || ' short' || CASE WHEN sku = it_sku() THEN ' ◂' ELSE '' END ::LABEL, 12 ::LABEL_TOP, 100 - rnk ::RANK,
+       '>=50:bad; >=20:warn; good' ::THRESHOLDS,
+       CASE rnk WHEN 1 THEN 0 WHEN 2 THEN 28.5 END ::XBAND_FROM,
+       CASE rnk WHEN 1 THEN 7 WHEN 2 THEN 31.5 END ::XBAND_TO,
+       CASE rnk WHEN 2 THEN 'not in 4 weeks' END ::XBAND_LABEL,
+       '?v.sku=' || sku ::LINK,
+       'percent' ::YFORMAT,
+       ('Risk map: how likely, how soon, how much (' || it_level_txt() || ' plan)')::TITLE,
+       'One point per item. Right: the days until the plan band''s lower edge first reaches zero, i.e. the item can run out then (shaded on the left: within a week); items that cannot within four weeks sit in the band at the right edge. Up: the chance of at least one day out of stock in the next 28 days, from 400 simulated futures; red line: 50 %, amber: 20 %. Next to each item: the expected units short over the 28 days. Click a point to select the item (◂ marks the selected one).'::INFO
+FROM (SELECT *, coalesce(days_left, 29) + 0.4 * (row_number() OVER (PARTITION BY coalesce(days_left, 29) ORDER BY rnk) - 1) AS x
+      FROM it_crit())
+ORDER BY rnk;
+
+SELECT 6::COL;
+SELECT 380::HEIGHT;
+SELECT p.ds ::XAXIS, c.rnk || '. ' || p.model_id || ' · ' || c.status ::YAXIS, 100 * p.cumulative_stockout_probability ::HEATMAP,
+       'percent' ::YFORMAT,
+       'When: the chance each item has run out by that day (%)'::TITLE,
+       'The share of the 400 simulated futures in which the item has had at least one day out of stock by that day, over the next 28 days. Rows: most critical first.'::INFO
+FROM it_projection p JOIN it_crit() c ON c.sku = p.model_id
+WHERE p.level = it_level()
+ORDER BY c.rnk, p.ds;
+
+SELECT 12::COL;
+SELECT 'Chance out in 4 weeks %: >=50:bad; >=20:warn; good | Days of cover: <7:bad; <14:warn; good'::THRESHOLDS;
+SELECT c.sku AS "Item" ::TABLE, c.status AS "Status" ::BADGE,
+       round(100 * c.p_out_4w) AS "Chance out in 4 weeks %",
+       coalesce(strftime(c.short_by, '%a %-d %b') || ' (' || c.days_left || ' d)', 'not in 4 weeks') AS "Can run out by",
+       '#Stock & pipeline?v.sku={value}' AS "Open" ::LINK,
+       round(c.units_short) AS "Expected units short",
+       c.trust AS "Plan trust" ::BADGE,
+       coalesce(nullif(c.trust_why, ''), '—') AS "Trust: why",
+       round(c.cover_days) AS "Days of cover",
+       c.on_hand_now || ' + ' || c.on_order_now AS "On hand + on order",
+       (SELECT list(yhat ORDER BY ds) FROM it_projection p WHERE p.model_id = c.sku AND p.level = it_level()) AS "Projected stock (median)" ::SPARKLINE,
+       c.cohort || ' · ' || c.shape AS "Class · demand",
+       ('Watch list: every item, most critical first (' || it_level_txt() || ' plan)')::TITLE,
+       'Days of cover: units on hand / average daily demand of the last 28 days. Can run out by: the first day the plan band''s lower edge reaches zero. Expected units short: demand the simulated futures could not serve, on average, over the next 28 days. Plan trust: alarm = a drift detector is latched in alarm now; review = recalibrations wait for the planner (n waiting), or stock counts did not match the twin (missed / counted).'::INFO
+FROM it_crit() c ORDER BY c.rnk;
 
 -- ── 1 · Stock & pipeline ────────────────────────────────────────────────────
 SELECT 'Stock & pipeline'::TAB;
