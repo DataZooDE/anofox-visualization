@@ -4438,6 +4438,19 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
   } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
   holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
+  // A ::DIAGRAM on a phone keeps a readable size: drawn at most ~1.4× smaller
+  // than its own size (data-fit), its panel scrolls sideways (theme-base.css).
+  const dg = holder.querySelector(":scope > svg[data-fit]");
+  if (dg && matchMedia("(max-width: 640px)").matches) {
+    const want = Math.round(+dg.getAttribute("data-fit") * 0.72);
+    if (want > w + 1) {
+      holder.innerHTML = render_panel(rows, JSON.stringify(roles), want, ph, renderCtx(), zoom);
+      const wide = holder.querySelector(":scope > svg");
+      if (wide) wide.style.minWidth = want + "px";
+    }
+    const now = holder.querySelector(":scope > svg");
+    if (now) now._dpAskW = w; // fitCharts compares against the width it asked for
+  }
   markAnim(holder, roles);
 }
 
@@ -4506,7 +4519,7 @@ function fitCharts(watch = false) {
     const svg = holder.querySelector(":scope > svg");
     const w = fitWidth(holder, dp.rw);
     // hidden (a tab not shown, charts as tables): fitted once it shows
-    if (!svg || !holder.clientWidth || Math.abs(w - svg.viewBox.baseVal.width) < 2) return;
+    if (!svg || !holder.clientWidth || Math.abs(w - (svg._dpAskW ?? svg.viewBox.baseVal.width)) < 2) return;
     if (dp.contract) holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
     else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.ph, holder._zoom || "");
     changed = true;
@@ -6990,7 +7003,7 @@ function badgeHtml(text) {
   // English and German status words (a dashboard may be localised)
   if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low|grow(ing|th)?|ris(e|ing)|improv(ed|ing)|correct|right|met|achieved|erreicht|gut|aktiv|erledigt)\b/.test(t))
     cls = "badge-good";
-  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|knapp|prüfen|offen)\b/.test(t))
+  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|delayed|slow|knapp|prüfen|offen|verzögert)\b/.test(t))
     cls = "badge-warn";
   else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
     cls = "badge-bad";

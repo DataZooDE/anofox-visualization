@@ -536,8 +536,62 @@ export function animKit(win) {
     return m;
   }
   // Remember a chart's marks before it is replaced (null for many marks).
+  // A ::DIAGRAM's state for a re-run tween: what each edge, arrowhead and
+  // node carries (width, colour, the box contents) and where each node sits.
+  function diagramState(svg) {
+    const st = new Map();
+    const at = (el, ...a) => a.map((k) => el.getAttribute(k));
+    for (const e of svg.querySelectorAll("polyline[data-edge]")) st.set("e|" + e.getAttribute("data-edge"), at(e, "stroke-width", "stroke"));
+    for (const a of svg.querySelectorAll("polygon[data-from]")) st.set(`a|${a.getAttribute("data-from")}>${a.getAttribute("data-to")}`, at(a, "fill", "points"));
+    for (const n of svg.querySelectorAll("rect[data-node]")) st.set("n|" + n.getAttribute("data-node"), at(n, "stroke", "x", "y"));
+    for (const g of svg.querySelectorAll("g[data-of]")) st.set("g|" + g.getAttribute("data-of"), [g.innerHTML, g.cloneNode(true)]);
+    return st;
+  }
+  // The same diagram with other numbers (a run picker, a cross-filter): edges
+  // change width and colour in place, node borders their colour, and a box
+  // whose contents changed cross-fades them. A different set or placement of
+  // nodes cross-fades the whole diagram.
+  function tweenDiagram(svg, old, dur) {
+    const nodes = [...svg.querySelectorAll("rect[data-node]")];
+    const same =
+      nodes.length === [...old.keys()].filter((k) => k.startsWith("n|")).length &&
+      nodes.every((n) => {
+        const o = old.get("n|" + n.getAttribute("data-node"));
+        return o && o[1] === n.getAttribute("x") && o[2] === n.getAttribute("y");
+      });
+    const anim = (el, from, to) => can(el) && el.animate([from, to], { duration: dur, easing: EASE, fill: "backwards" });
+    if (!same) return anim(svg, { opacity: 0.35 }, { opacity: 1 });
+    for (const e of svg.querySelectorAll("polyline[data-edge]")) {
+      const o = old.get("e|" + e.getAttribute("data-edge"));
+      if (!o) anim(e, { opacity: 0 }, { opacity: 1 });
+      else if (o[0] !== e.getAttribute("stroke-width") || o[1] !== e.getAttribute("stroke"))
+        anim(e, { strokeWidth: o[0], stroke: o[1] }, { strokeWidth: e.getAttribute("stroke-width"), stroke: e.getAttribute("stroke") });
+    }
+    for (const a of svg.querySelectorAll("polygon[data-from]")) {
+      const o = old.get(`a|${a.getAttribute("data-from")}>${a.getAttribute("data-to")}`);
+      if (!o || o[1] !== a.getAttribute("points")) anim(a, { opacity: 0 }, { opacity: 1 });
+      else if (o[0] !== a.getAttribute("fill")) anim(a, { fill: o[0] }, { fill: a.getAttribute("fill") });
+    }
+    for (const n of nodes) {
+      const o = old.get("n|" + n.getAttribute("data-node"));
+      if (o[0] !== n.getAttribute("stroke")) anim(n, { stroke: o[0] }, { stroke: n.getAttribute("stroke") });
+    }
+    for (const g of svg.querySelectorAll("g[data-of]")) {
+      const o = old.get("g|" + g.getAttribute("data-of"));
+      if (!o || o[0] === g.innerHTML) continue;
+      const ghost = o[1];
+      ghost.classList.add("dp-ghost");
+      g.after(ghost);
+      const out = can(ghost) && ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur, easing: EASE, fill: "forwards" });
+      if (out && out.finished) out.finished.then(() => ghost.remove(), () => ghost.remove());
+      else ghost.remove();
+      anim(g, { opacity: 0 }, { opacity: 1 });
+    }
+  }
+
   function geom(svg) {
     if (!svg) return null;
+    if (svg.hasAttribute("data-diagram")) return { diagram: diagramState(svg) };
     const m = keyed(svg);
     if (m.size > MANY) return { many: true };
     const out = new Map();
@@ -550,6 +604,7 @@ export function animKit(win) {
   // whole chart cross-fades.
   function tween(svg, old, dur = 300) {
     if (!svg || !old || still()) return;
+    if (old.diagram) return svg.hasAttribute("data-diagram") ? tweenDiagram(svg, old.diagram, dur * 2) : undefined;
     const fresh = keyed(svg);
     if (old.many || fresh.size > MANY) {
       if (can(svg)) svg.animate([{ opacity: 0.35 }, { opacity: 1 }], { duration: dur, easing: EASE });

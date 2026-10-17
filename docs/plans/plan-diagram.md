@@ -392,8 +392,11 @@ use (`::SELECT_AS` and `::LINK` key on the node id), its numbers are in its
 tooltip, the summary and the connections table, and a thin polyline is a poor
 click target next to the boxes it joins. Revisit if a use case needs an edge
 selection (e.g. "show the records moved on this edge") — that would be a new
-`'edge'::SELECT_AS` variant setting `<name>_from` / `<name>_to`. wasm growth:
-+5.7 KB raw / +2.9 KB gzip.
+`'edge'::SELECT_AS` variant setting `<name>_from` / `<name>_to`. Pulled
+forward from M3 for the showcase: edge width by value (sqrt, 1.4–7 px) and an
+edge `status` (health colour); also `'tween'::TRANSITION` on diagrams (widths,
+colours and box contents change in place) and a phone layout that scrolls the
+diagram sideways at a readable size.
 
 ## 5. Risks
 
