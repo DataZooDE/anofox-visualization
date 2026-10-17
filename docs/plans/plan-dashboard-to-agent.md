@@ -95,8 +95,14 @@ answering panel:
 - **Parameters:** the variables the panel reads (from the AST:
   `getvariable('x')`), each tied to the input that sets it. The type and
   domain come from that input (§3.2).
-- **Description:** the panel's title and `::LABEL`, the `::INFO` definitions
-  of its measures, its tab, and the dashboard's `@description`.
+- **Description:** taken from **source text only**, following the Ask
+  security review H1 (plan-ai-assistant §12.14): the panel's title and
+  `::LABEL`, and the `::INFO` definitions of its measures, but only when
+  they are string literals in the SQL. A value computed by the query is
+  data, not description, and reaches the model only through the panel call.
+  It also includes the tab and the dashboard's `@description`. The lint
+  check `agent/computed-description` (a warning) points at computed titles
+  and definitions, which a published agent can't describe.
 - **Output:** the result columns with their display names and roles.
 
 **Execution is unchanged.** A named query runs through `locked_panel`, with
@@ -384,6 +390,42 @@ A release with a regression doesn't ship.
   and any OpenAI-compatible endpoint (#145 M3). Routing and answering are
   small calls: Sonnet 5 at `low` / `medium`, and the template match makes
   many questions model-free.
+
+## 8.1 Security: what the agent inherits from the Ask review
+
+The published agent is Ask in `declared` mode, so every change from the Ask
+design review (plan-ai-assistant §12.14) applies unchanged:
+
+- **The static prefix:** the manifest and the tool descriptions are
+  generated from source text only, byte-identical for every caller (H1).
+- **Capacity:** its own worker pool, 1 question per caller, a query-slot
+  sub-limit, and one deadline per question (H2).
+- **Login is always required.** Channels authenticate with a verified
+  bearer (M1). Budgets are per caller in tokens, and `ask.allow` limits
+  which groups may use the agent (M2).
+- **Slots are stricter than Ask's vars:** a value must resolve in the
+  declared input's option domain, computed under the caller's policy (M3).
+- **Citations** are verified as panel + row + column + value, and the
+  channel surface builds the chip and button text from the manifest, not
+  from model text (M4).
+- **Output:** `renderAnswer`-equivalent escaping on every channel (A2UI
+  text, Slack and Teams markup are escaped for their own syntax, with no
+  links from model output), and the provenance footer is built by the
+  server (M5).
+- **Masking** is the shared best-effort module, described as minimisation
+  (M6). The upstream request allowlist applies (M7).
+- **MCP tools** (one per `@question`) sit behind the same auth and limits.
+  They are not a way around the router: the tool call carries
+  `question_id` + slots, which are validated exactly like a routed
+  question.
+- **GDPR:** the operator duties of plan-ai-assistant §12.7 apply. A
+  published agent in Slack or Teams also carries the questions of
+  employees, so the `log_questions` question (§13, question 0 there) applies
+  here too.
+
+Every serving PR of §10 gets an independent security review before merge,
+and the design of the declared mode (§3.3) gets its own design review before
+A2 starts.
 
 ## 9. The spike: "How reliable are our suppliers, and what does it cost us in stock?"
 
