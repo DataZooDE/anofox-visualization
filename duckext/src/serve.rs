@@ -36,7 +36,7 @@ use crate::generation::{Current, Generation};
 use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
-use anofox_visualization::host::app_brand::AppBrand;
+use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
@@ -242,7 +242,11 @@ fn serve_asset(req: Request, path: &str, head: &str) {
     } else {
         asset
     };
-    match WEB.get_file(asset) {
+    // app-config.json is the static-hosting file: the extension takes options only.
+    match WEB
+        .get_file(asset)
+        .filter(|_| asset != app_brand::STATIC_CONFIG)
+    {
         Some(f) if asset == "index.html" && !head.is_empty() => {
             let html = String::from_utf8_lossy(f.contents());
             let html = html.replacen("</head>", &format!("{head}</head>"), 1);

@@ -1998,6 +1998,7 @@ header: a dashboard still brands itself with `::BRAND`, `::DASHBOARD_TITLE`,
 | `logo`    | An image left of the name, 28 px high (24 px on phones). |
 | `link`    | Where the name and logo go when clicked (opens in a new tab). |
 | `favicon` | The tab icon while the open dashboard sets no `::FAVICON`. |
+| `name_visible` | `false` shows the logo alone, for a logo that already spells the name (a wordmark); the name becomes the logo's alt text and stays the tab title. Needs a `logo`, so the bar is never empty. |
 
 `logo` and `favicon` take an `https://` (or `http://`) address or a
 `data:image/png|jpeg|gif|webp|svg+xml` URI. In `app-config.json` they can also
@@ -2014,8 +2015,9 @@ Where the settings come from, later wins:
    Pages, any web server). Copy
    [`web/app-config.example.json`](../web/app-config.example.json) to
    `web/app-config.json` and edit it. The builder loads it at start; without
-   the file it uses the defaults. `web/app-config.json` is in `.gitignore`;
-   it is built into `serve` and the extension when it is there at build time.
+   the file it uses the defaults. `web/app-config.json` is in `.gitignore`,
+   and `serve` and the extension never serve it, even when it was in `web/`
+   at build time: a binary is configured by its flags or options only.
 3. **the serving process**: `serve --app-name …` (see *b2*) or
    `anofox_serve(port, options)` (see *c*).
 
@@ -2052,6 +2054,7 @@ Your name and logo in the app bar (see *Your name and logo in the app bar*):
 ./target/debug/serve mydata.duckdb --app-name "Acme Insights" \
     --app-tagline "Sales and stock, every morning" --app-logo brand/logo.svg \
     --app-link https://intranet.acme.example/   # also --app-favicon FILE|URL
+# a logo that spells the name: --app-logo wordmark.svg --app-hide-name
 ```
 
 `--app-logo` and `--app-favicon` take an image file (read once and put in the
@@ -2127,7 +2130,7 @@ SELECT anofox_serve_stop(8080);               -- stop it again
 
 `anofox_serve(port, options)` sets the app bar (see *Your name and logo in
 the app bar*): a JSON object with `name`, `tagline`, `logo`, `link`,
-`favicon`. The extension doesn't open files itself; read a logo with DuckDB,
+`favicon` and `name_visible` (`true` / `false`). The extension doesn't open files itself; read a logo with DuckDB,
 so its file access settings apply:
 
 ```sql

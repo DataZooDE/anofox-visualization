@@ -10,6 +10,11 @@
 
 use serde_json::{Map, Value};
 
+/// The builder's settings file for static hosting. `include_dir!` embeds
+/// whatever is in `web/` at build time, so the servers refuse to serve it:
+/// a binary is configured by its flags / options only.
+pub const STATIC_CONFIG: &str = "app-config.json";
+
 /// Largest logo / favicon *file* the CLI inlines.
 pub const MAX_IMAGE_BYTES: usize = 512 << 10;
 /// Longest image value (a 512 KiB file as a base64 `data:` URI, plus the prefix).
@@ -17,11 +22,13 @@ const MAX_IMAGE_CHARS: usize = (MAX_IMAGE_BYTES / 3 + 1) * 4 + 64;
 const MAX_NAME: usize = 80;
 const MAX_TAGLINE: usize = 160;
 
-/// The keys, in the order the builder documents them.
+/// The text keys, in the order the builder documents them (plus the boolean
+/// `name_visible`).
 pub const KEYS: [&str; 5] = ["name", "tagline", "logo", "link", "favicon"];
 
-/// Validated app-bar settings; `None` = not set here (the builder's default or
-/// `app-config.json` applies). An empty tagline hides it.
+/// Validated app-bar settings; `None` = not set here (the builder's default
+/// applies). An empty tagline hides it; `name_visible: false` shows the logo
+/// alone (a wordmark), with the name as its alt text.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct AppBrand {
     pub name: Option<String>,
@@ -29,6 +36,7 @@ pub struct AppBrand {
     pub logo: Option<String>,
     pub link: Option<String>,
     pub favicon: Option<String>,
+    pub name_visible: Option<bool>,
 }
 
 fn has_control(s: &str) -> bool {
@@ -174,22 +182,47 @@ impl AppBrand {
                     self.favicon = Some(url);
                 }
             }
-            other => return Err(format!("unknown key '{other}' ({})", KEYS.join(", "))),
+            "name_visible" => {
+                self.name_visible = Some(match v {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("name_visible must be true or false".into()),
+                })
+            }
+            other => {
+                return Err(format!(
+                    "unknown key '{other}' ({}, name_visible)",
+                    KEYS.join(", ")
+                ))
+            }
         }
         Ok(())
     }
 
-    /// From a JSON object of string values (the extension's options).
+    /// The bar must never be empty: hiding the name needs a logo.
+    pub fn check(&self) -> Result<(), String> {
+        if self.name_visible == Some(false) && self.logo.as_deref().unwrap_or("").is_empty() {
+            return Err("name_visible: false needs a logo (the bar would be empty)".into());
+        }
+        Ok(())
+    }
+
+    /// From a JSON object (the extension's options): strings, and a boolean
+    /// `name_visible`.
     pub fn from_json(json: &str) -> Result<AppBrand, String> {
         let v: Value = serde_json::from_str(json).map_err(|e| format!("bad JSON: {e}"))?;
         let m = v.as_object().ok_or("options must be a JSON object")?;
         let mut b = AppBrand::default();
         for (k, val) in m {
-            let s = val
-                .as_str()
-                .ok_or_else(|| format!("{k} must be a string"))?;
-            b.set(k, s, false)?;
+            let s = match (k.as_str(), val) {
+                ("name_visible", Value::Bool(on)) => on.to_string(),
+                ("name_visible", _) => return Err("name_visible must be true or false".into()),
+                (_, Value::String(s)) => s.clone(),
+                _ => return Err(format!("{k} must be a string")),
+            };
+            b.set(k, &s, false)?;
         }
+        b.check()?;
         Ok(b)
     }
 
@@ -210,6 +243,9 @@ impl AppBrand {
             if let Some(v) = v {
                 m.insert((*k).into(), Value::String(v.clone()));
             }
+        }
+        if let Some(on) = self.name_visible {
+            m.insert("name_visible".into(), Value::Bool(on));
         }
         Value::Object(m)
     }
@@ -308,6 +344,15 @@ mod tests {
             .unwrap_err()
             .contains("unknown key"));
         assert!(AppBrand::from_json(r#"{"name":3}"#).is_err());
+        // a wordmark: the logo alone, never an empty bar
+        let w =
+            AppBrand::from_json(r#"{"name":"Acme","logo":"https://x/l.svg","name_visible":false}"#)
+                .unwrap();
+        assert!(w.script().contains(r#""name_visible":false"#));
+        let e = AppBrand::from_json(r#"{"name":"Acme","name_visible":false}"#).unwrap_err();
+        assert!(e.contains("needs a logo"), "{e}");
+        assert!(AppBrand::from_json(r#"{"logo":"","name_visible":false}"#).is_err());
+        assert!(AppBrand::from_json(r#"{"name_visible":"no"}"#).is_err());
         assert!(AppBrand::from_json("[]").is_err());
     }
 }

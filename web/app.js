@@ -9653,7 +9653,7 @@ function safeUrl(u, { image = false } = {}) {
 // (static hosting) → window.__anofoxApp from the serving process (serve
 // --app-*, anofox_serve(port, options); checked by src/host/app_brand.rs).
 // The "Powered by DataZoo GmbH" credit and the sidebar footer stay as they are.
-const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "" };
+const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "", name_visible: true };
 let appBrand = { ...APP_BRAND_DEFAULT };
 let pageBrand = {}; // the open dashboard's brand (applyTheme)
 // An image the app bar may draw: data:image/(png|jpeg|gif|webp|svg+xml),
@@ -9676,13 +9676,15 @@ function appLinkOk(u) {
 // The layers merged over the defaults. A value that isn't valid is skipped
 // (with a console warning), so a bad entry never blanks the bar; an empty
 // name keeps the previous one, an empty tagline / logo / link clears it.
+// name_visible: false (a wordmark logo) needs a logo, else the name shows.
 function appBrandMerge(...layers) {
   const out = { ...APP_BRAND_DEFAULT };
   const plain = (v, max) => v.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
   for (const l of layers) {
     if (!l || typeof l !== "object" || Array.isArray(l)) continue;
+    if (typeof l.name_visible === "boolean") out.name_visible = l.name_visible;
     for (const k of Object.keys(out)) {
-      if (typeof l[k] !== "string") continue;
+      if (typeof l[k] !== "string" || k === "name_visible") continue;
       const v = l[k].trim();
       if (k === "name" || k === "tagline") {
         const p = plain(v, k === "name" ? 80 : 160);
@@ -9691,6 +9693,10 @@ function appBrandMerge(...layers) {
       else console.warn(`app bar: ${k} ignored — ${k === "link" ? "an http(s) URL" : "an image URL or data:image/ URI"} expected`);
     }
   }
+  if (!out.name_visible && !out.logo) {
+    console.warn("app bar: name_visible: false needs a logo — the name is shown");
+    out.name_visible = true;
+  }
   return out;
 }
 // Draw the bar (text via textContent, the logo as an <img>) and reveal it.
@@ -9698,22 +9704,23 @@ function appBrandApply(cfg) {
   appBrand = cfg;
   const h1 = $("app-brand");
   const kids = [];
+  const name = document.createElement("span");
+  name.className = "app-name";
+  name.textContent = cfg.name;
   if (cfg.logo) {
     const img = document.createElement("img");
     img.className = "app-logo";
-    img.alt = ""; // the name is written next to it
+    // the name next to it, or (a wordmark, name_visible: false) as its alt text
+    img.alt = cfg.name_visible ? "" : cfg.name;
     img.decoding = "async";
     img.onerror = () => {
-      img.remove();
+      img.replaceWith(...(cfg.name_visible ? [] : [name]));
       h1.classList.remove("has-logo");
     };
     img.src = cfg.logo;
     kids.push(img);
   }
-  const name = document.createElement("span");
-  name.className = "app-name";
-  name.textContent = cfg.name;
-  kids.push(name);
+  if (cfg.name_visible) kids.push(name);
   if (cfg.link) {
     const a = document.createElement("a");
     a.href = cfg.link;

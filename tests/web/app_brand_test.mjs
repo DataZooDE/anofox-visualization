@@ -27,6 +27,7 @@ assert.deepEqual(appBrandMerge(), {
   logo: "",
   link: "",
   favicon: "",
+  name_visible: true,
 });
 assert.deepEqual(appBrandMerge(null, undefined, [], "x", 3), APP_BRAND_DEFAULT);
 
@@ -39,6 +40,7 @@ assert.deepEqual(appBrandMerge(file, server), {
   logo: "brand/logo.svg",
   link: "https://intranet.acme.example/",
   favicon: "",
+  name_visible: true,
 });
 // an empty name keeps the previous one; an empty logo clears it
 assert.equal(appBrandMerge(file, { name: "  " }).name, "Acme Insights");
@@ -97,9 +99,17 @@ for (const bad of ["javascript:alert(1)", "mailto:a@b.example", "/home", "https:
   assert.ok(!appLinkOk(bad), bad);
 assert.equal(appBrandMerge({ link: "javascript:alert(1)" }).link, "");
 
+// name_visible: false (a wordmark) only with a logo — the bar is never empty
+assert.equal(appBrandMerge(file, { name_visible: false }).name_visible, false);
+assert.equal(appBrandMerge({ name_visible: false }).name_visible, true);
+assert.equal(appBrandMerge(file, { name_visible: false }, { logo: "" }).name_visible, true);
+assert.equal(appBrandMerge(file, { name_visible: "false" }).name_visible, true); // booleans only
+assert.equal(warnings.length, 6, warnings.join("\n"));
+
 // the bar renders text with textContent only and draws the logo as an <img>
 const apply = grab("appBrandApply");
 assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(apply), "appBrandApply must not parse markup");
+assert.ok(/img\.alt = cfg\.name_visible \? "" : cfg\.name/.test(apply), "a wordmark logo carries the name as alt");
 assert.ok(/createElement\("img"\)/.test(apply) && !/createElementNS|<svg/.test(apply), "the logo is an <img>");
 // the mandatory credits are not driven by the settings
 const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
