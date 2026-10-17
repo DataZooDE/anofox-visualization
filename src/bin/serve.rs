@@ -18,6 +18,7 @@
 
 use anofox_visualization::format::Locale;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
+use anofox_visualization::host::app_brand::AppBrand;
 use anofox_visualization::host::auth::{self, apikey, audit::AuditLog, Auth, Identity, Scope};
 use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
@@ -65,6 +66,8 @@ struct Opts {
     auth: Option<Auth>,
     /// `--log <path | stderr>` (+ `--log-vars`): JSON-lines request log.
     log: Option<RequestLog>,
+    /// `--app-name/-tagline/-logo/-link/-favicon`: the builder's app bar.
+    app: AppBrand,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -73,7 +76,10 @@ fn theme_default() -> Option<&'static str> {
     THEME.get().and_then(|t| t.as_deref())
 }
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+/// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
+static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-link URL] [--app-favicon FILE|URL]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -96,6 +102,7 @@ fn parse_args() -> Opts {
         allow_hosts: Vec::new(),
         auth: None,
         log: None,
+        app: AppBrand::default(),
     };
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut args = std::env::args().skip(1);
@@ -168,6 +175,14 @@ fn parse_args() -> Opts {
                         .unwrap_or_else(|e| usage(&format!("--{e}"))),
                 );
             }
+            "--app-name" | "--app-tagline" | "--app-logo" | "--app-link" | "--app-favicon" => {
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| usage(&format!("{a} needs a value")));
+                o.app
+                    .set(&a["--app-".len()..], &v, true)
+                    .unwrap_or_else(|e| usage(&format!("--app-{e}")));
+            }
             "--log" => {
                 log = Some(
                     args.next()
@@ -201,6 +216,9 @@ fn parse_args() -> Opts {
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
     }
+    if o.dashboards_dir.is_some() && !o.app.is_empty() {
+        usage("--app-* style the authoring builder (locked dashboards show no app bar)");
+    }
     match (&mut o.auth, audit) {
         (Some(a), Some(p)) => a.set_audit(Arc::new(
             AuditLog::new(&p).unwrap_or_else(|e| usage(&format!("--{e}"))),
@@ -217,6 +235,7 @@ fn main() {
     }
     let mut o = parse_args();
     let _ = THEME.set(o.theme.clone());
+    let _ = APP.set(o.app.script());
     match o.dashboards_dir.clone() {
         Some(dir) => serve_dashboards(&dir, &mut o),
         None => authoring_mode(&o),
@@ -559,17 +578,20 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         asset
     };
     match WEB.get_file(asset) {
-        // index.html carries the --theme default for the builder.
-        Some(f) if asset == "index.html" && theme_default().is_some() => {
+        // index.html carries the --theme default and the --app-* bar for the builder.
+        Some(f)
+            if asset == "index.html"
+                && (theme_default().is_some() || APP.get().is_some_and(|a| !a.is_empty())) =>
+        {
             let html = String::from_utf8_lossy(f.contents()).into_owned();
-            let spec = serde_json::to_string(theme_default().unwrap_or(""))
-                .unwrap_or_default()
-                .replace('<', "\\u003c");
-            let html = html.replacen(
-                "</head>",
-                &format!("<script>window.__anofoxTheme={spec};</script></head>"),
-                1,
-            );
+            let mut head = APP.get().cloned().unwrap_or_default();
+            if let Some(t) = theme_default() {
+                let spec = serde_json::to_string(t)
+                    .unwrap_or_default()
+                    .replace('<', "\\u003c");
+                head.push_str(&format!("<script>window.__anofoxTheme={spec};</script>"));
+            }
+            let html = html.replacen("</head>", &format!("{head}</head>"), 1);
             respond(req, 200, sv::content_type(asset), html.into_bytes())
         }
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),

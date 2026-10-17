@@ -36,6 +36,7 @@ use crate::generation::{Current, Generation};
 use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
+use anofox_visualization::host::app_brand::AppBrand;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
@@ -233,7 +234,8 @@ fn read_body(req: &mut Request, limit: usize) -> Result<String, (u16, String)> {
     String::from_utf8(buf).map_err(|_| (400, "request body is not UTF-8".to_string()))
 }
 
-fn serve_asset(req: Request, path: &str) {
+/// `head`: markup put before `</head>` of index.html (the authoring app bar).
+fn serve_asset(req: Request, path: &str, head: &str) {
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
         "index.html"
@@ -241,6 +243,11 @@ fn serve_asset(req: Request, path: &str) {
         asset
     };
     match WEB.get_file(asset) {
+        Some(f) if asset == "index.html" && !head.is_empty() => {
+            let html = String::from_utf8_lossy(f.contents());
+            let html = html.replacen("</head>", &format!("{head}</head>"), 1);
+            respond(req, 200, content_type(asset), html.into_bytes())
+        }
         Some(f) => respond(req, 200, content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
     }
@@ -252,10 +259,22 @@ struct Authoring {
     ctx: Arc<DbCtx>,
     guard: AuthoringGuard,
     max_body: usize,
+    /// `options` of `anofox_serve(port, options)`: the app bar's `<script>`.
+    app: String,
 }
 
-/// `anofox_serve(port)`: start the authoring server on 127.0.0.1:`port`.
-pub fn start_authoring(ctx: Arc<DbCtx>, port: u16) -> Result<String, String> {
+/// `anofox_serve(port[, options])`: start the authoring server on
+/// 127.0.0.1:`port`; `options` sets the builder's app bar (name, tagline,
+/// logo, link, favicon — see `AppBrand`).
+pub fn start_authoring(
+    ctx: Arc<DbCtx>,
+    port: u16,
+    options: Option<&str>,
+) -> Result<String, String> {
+    let app = match options {
+        Some(json) => AppBrand::from_json(json).map_err(|e| format!("options: {e}"))?,
+        None => AppBrand::default(),
+    };
     let mut servers = lock_servers();
     if servers.contains_key(&port) {
         return Err(format!(
@@ -272,6 +291,7 @@ pub fn start_authoring(ctx: Arc<DbCtx>, port: u16) -> Result<String, String> {
         ctx,
         guard: AuthoringGuard::new(port),
         max_body: 4 << 20,
+        app: app.script(),
     });
     let url = state.guard.login_url("127.0.0.1");
     let stop = Arc::new(AtomicBool::new(false));
@@ -337,7 +357,7 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
-    serve_asset(req, &path);
+    serve_asset(req, &path, &st.app);
 }
 
 /// Authoring `/query`: run the body on the live connection. Statements are
@@ -1554,7 +1574,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 return send(req, rep);
             }
             if auth.public_asset(&method, path) {
-                serve_asset(req, path);
+                serve_asset(req, path, "");
                 return 200;
             }
             match auth.authenticate(&r) {
@@ -1686,7 +1706,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         }
         (&Method::Get, p) => {
             let found = WEB.get_file(p.trim_start_matches('/')).is_some() || p == "/";
-            serve_asset(req, p);
+            serve_asset(req, p, "");
             if found {
                 200
             } else {

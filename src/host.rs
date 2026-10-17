@@ -10,8 +10,11 @@
 //! * [`serving`] — HTTP/serving helpers (escaping, request-origin checks,
 //!   tokens, typed SQL literals, dashboard header parsing) shared by
 //!   `src/bin/serve.rs` and the extension's `anofox_serve*` functions.
+//! * [`app_brand`] — the builder's app bar per installation (name, tagline,
+//!   logo), validated for `serve --app-*` and `anofox_serve(port, options)`.
 
 pub mod access;
+pub mod app_brand;
 #[cfg(feature = "auth")]
 pub mod auth;
 pub mod policy;

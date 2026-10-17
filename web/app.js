@@ -1449,6 +1449,7 @@ function toIso(v, dateOnly) {
 }
 
 async function boot() {
+  appBrandLoad(); // the app bar (in parallel; the bar shows when it's known)
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
   const sideVer = document.getElementById("side-ver");
   if (sideVer) sideVer.textContent = "v" + wasmVersion();
@@ -4408,11 +4409,19 @@ function applyDashboardTheme() {
   if (el && el.textContent !== v.css) el.textContent = v.css;
   document.documentElement.dataset.axVariant = dpTheme.variant;
   // Author branding: <title>, favicon (the builder keeps its product header).
-  const b = v.brand || {};
-  if (b.title) document.title = b.title + (b.title_suffix || "");
+  pageBrand = v.brand || {};
+  applyPageBrand();
+  return err;
+}
+// <title> and favicon: the dashboard's own (::DASHBOARD_TITLE, ::FAVICON),
+// else the installation's (appBrand).
+function applyPageBrand() {
+  const b = pageBrand;
+  document.title = b.title ? b.title + (b.title_suffix || "") : appBrand.name + (appBrand.tagline ? " — " + appBrand.tagline : "");
   let icon = document.querySelector("link[rel=icon]");
-  if (b.favicon) {
-    const href = safeUrl(b.favicon, { image: true });
+  const fav = b.favicon || appBrand.favicon;
+  if (fav) {
+    const href = safeUrl(fav, { image: true });
     if (href) {
       if (!icon) {
         icon = document.createElement("link");
@@ -4422,7 +4431,6 @@ function applyDashboardTheme() {
       icon.href = href;
     }
   } else if (icon) icon.remove();
-  return err;
 }
 function defaultThemeSpec() {
   const sv = window.__served;
@@ -9639,6 +9647,104 @@ function safeUrl(u, { image = false } = {}) {
   if (["http", "https", "mailto"].includes(m[1])) return s;
   if (image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);/.test(probe)) return s;
   return "";
+}
+// ---- the app bar, per installation: name, tagline, logo, link, favicon ----
+// Layers, later wins: these defaults → app-config.json next to index.html
+// (static hosting) → window.__anofoxApp from the serving process (serve
+// --app-*, anofox_serve(port, options); checked by src/host/app_brand.rs).
+// The "Powered by DataZoo GmbH" credit and the sidebar footer stay as they are.
+const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "" };
+let appBrand = { ...APP_BRAND_DEFAULT };
+let pageBrand = {}; // the open dashboard's brand (applyTheme)
+// An image the app bar may draw: data:image/(png|jpeg|gif|webp|svg+xml),
+// http(s):, or a path relative to the page; no quotes, brackets, spaces or
+// control characters.
+function appImageOk(u) {
+  const t = String(u ?? "");
+  if (!t || t.length > 700000 || /["'<>()\\`\s\u0000-\u001f\u007f-\u009f]/.test(t)) return false;
+  const low = t.toLowerCase();
+  if (low.startsWith("data:")) return /^data:image\/(png|jpe?g|gif|webp|svg\+xml)[;,]/.test(low);
+  if (low.startsWith("//")) return false; // protocol-relative: write https://
+  const i = low.indexOf(":");
+  return i < 0 || low.slice(0, i).includes("/") || /^https?:\/\/[^/]/.test(low);
+}
+// Where the name / logo link to: an absolute http(s) URL only.
+function appLinkOk(u) {
+  const t = String(u ?? "");
+  return t.length <= 2048 && /^https?:\/\/[^/]/i.test(t) && !/["'<>\\`\s\u0000-\u001f\u007f-\u009f]/.test(t);
+}
+// The layers merged over the defaults. A value that isn't valid is skipped
+// (with a console warning), so a bad entry never blanks the bar; an empty
+// name keeps the previous one, an empty tagline / logo / link clears it.
+function appBrandMerge(...layers) {
+  const out = { ...APP_BRAND_DEFAULT };
+  const plain = (v, max) => v.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+  for (const l of layers) {
+    if (!l || typeof l !== "object" || Array.isArray(l)) continue;
+    for (const k of Object.keys(out)) {
+      if (typeof l[k] !== "string") continue;
+      const v = l[k].trim();
+      if (k === "name" || k === "tagline") {
+        const p = plain(v, k === "name" ? 80 : 160);
+        if (p || k === "tagline") out[k] = p;
+      } else if (!v || (k === "link" ? appLinkOk(v) : appImageOk(v))) out[k] = v;
+      else console.warn(`app bar: ${k} ignored — ${k === "link" ? "an http(s) URL" : "an image URL or data:image/ URI"} expected`);
+    }
+  }
+  return out;
+}
+// Draw the bar (text via textContent, the logo as an <img>) and reveal it.
+function appBrandApply(cfg) {
+  appBrand = cfg;
+  const h1 = $("app-brand");
+  const kids = [];
+  if (cfg.logo) {
+    const img = document.createElement("img");
+    img.className = "app-logo";
+    img.alt = ""; // the name is written next to it
+    img.decoding = "async";
+    img.onerror = () => {
+      img.remove();
+      h1.classList.remove("has-logo");
+    };
+    img.src = cfg.logo;
+    kids.push(img);
+  }
+  const name = document.createElement("span");
+  name.className = "app-name";
+  name.textContent = cfg.name;
+  kids.push(name);
+  if (cfg.link) {
+    const a = document.createElement("a");
+    a.href = cfg.link;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.append(...kids);
+    h1.replaceChildren(a);
+  } else h1.replaceChildren(...kids);
+  h1.classList.toggle("has-logo", !!cfg.logo);
+  const tag = $("app-tag");
+  tag.textContent = cfg.tagline;
+  tag.hidden = !cfg.tagline;
+  applyPageBrand();
+  document.body.classList.add("brand-ready");
+}
+async function appBrandLoad() {
+  let file = null;
+  // A locked server has no app-config.json (and no app bar).
+  if (!window.__served) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 1500);
+    try {
+      const r = await fetch("app-config.json", { cache: "no-cache", signal: ctl.signal });
+      if (r.ok) file = await r.json();
+    } catch (e) {
+      if (e instanceof SyntaxError) console.warn("app-config.json is not valid JSON — ignored");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  appBrandApply(appBrandMerge(file, window.__anofoxApp));
 }
 // An image URL ::LOGO / ::FAVICON accept — the rules of safe_url in
 // src/theme.rs (lint chrome/bad-url): relative, http(s): or data:image/, no

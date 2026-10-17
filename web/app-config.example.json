@@ -1,0 +1,7 @@
+{
+  "name": "Acme Insights",
+  "tagline": "Sales and stock, every morning",
+  "logo": "https://intranet.acme.example/brand/logo.svg",
+  "link": "https://intranet.acme.example/",
+  "favicon": "https://intranet.acme.example/brand/favicon.png"
+}
