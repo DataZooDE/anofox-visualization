@@ -650,7 +650,7 @@ The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
 | `session_ttl_s` | `28800` (8 h) | Session lifetime, 60 s … 7 days |
 | `session_secret_env` | random per start | ≥ 32 characters; sign sessions with it so they survive a restart and work on every replica (#22). Without it, a restart signs everyone out |
 | `post_logout_url` | `/auth/logged-out` | Where `POST /auth/logout` sends the browser |
-| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink; expired lines are dropped at start): they survive a restart, and replicas sharing the file see each other's within 2 s. If the file disappears, can't be read or becomes writable by group or others, every login session is refused until it is fixed (fail closed, reported on stderr) |
+| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink; expired lines are dropped at start): they survive a restart, and replicas sharing the file see each other's within 2 s. If the file disappears, can't be read or becomes writable by group or others, every login session is refused until it is fixed (fail closed; reported on stderr and as `revocation_file` / `error` in the audit log) |
 
 1. `GET /auth/login?next=/d/sales` creates a random `state`, `nonce` and PKCE
    verifier, keeps them in a signed `HttpOnly; Secure; SameSite=Lax` cookie
@@ -726,9 +726,14 @@ exchanged for a **page session** scoped to that one dashboard:
   credential when `embed` is configured — they are the open-source viewer, no
   data. Pages, `/api/panel` and data files still need one.
 - `serve --dashboards` (no script) exchanges the link once and keeps the page
-  session in the page's form (`?embed_session=`, accepted on `GET /d/…` by
-  that server only; its pages are `Referrer-Policy: same-origin`), so
-  `one_time` links work there too.
+  session in a hidden field of the page's form, which it `POST`s to `/d/<id>`
+  (`application/x-www-form-urlencoded`, same-origin only, answered
+  `no-store`): the session never appears in a URL, a history entry or a
+  request/proxy log line, and `one_time` links work there too. A page session
+  is never accepted from a query string (by either server).
+- A link without `user` signs in as `embed:<dashboard>` — not one shared
+  user, and a form no proxy header, token or API key may claim (they are
+  refused), so no IdP account can collide with it.
 - `/healthz` answers a scoped credential (an embed page, an API key limited
   to dashboards) with `{"status":"ok"}` only, like a request without login.
 - A locked variable listed in `path_vars` must be a plain file or folder name,

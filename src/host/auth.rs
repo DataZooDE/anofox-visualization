@@ -271,9 +271,6 @@ pub struct Auth {
     pub embed: Option<embed::Embed>,
     pub keys: Option<apikey::ApiKeys>,
     pub audit: Option<Arc<AuditLog>>,
-    /// Accept an embed page session as `?embed_session=` on `GET /d/…` —
-    /// only `serve --dashboards` (pages without script) turns this on.
-    pub query_sessions: bool,
     /// When each credential's last successful use was audited (sampling).
     audited_ok: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
@@ -509,6 +506,9 @@ impl Auth {
             detail: Some(&self.methods().join(",")),
             ..Default::default()
         });
+        if let Some(o) = &self.oidc {
+            o.sessions.set_audit(log.clone());
+        }
         self.audit = Some(log);
     }
 
@@ -656,6 +656,40 @@ impl Auth {
     /// counts). A refusal is audited.
     pub fn authenticate(&self, r: &Req) -> Result<Identity, Denied> {
         let res = self.credential(r);
+        self.audited(r, res)
+    }
+
+    /// An embed page session posted in a form (`serve --dashboards`, whose
+    /// pages have no script: `POST /d/<id>` with `embed_session` in an
+    /// `application/x-www-form-urlencoded` body — never in a URL).
+    pub fn page_session(&self, token: Option<&str>, r: &Req) -> Result<Identity, Denied> {
+        let res = match (&self.embed, token) {
+            (Some(e), Some(t)) => e
+                .sessions
+                .verify("embed", t.trim())
+                .map(|sess| Identity {
+                    claims: sess.claims,
+                    method: "embed",
+                    scope: sess.scope,
+                    page_session: None,
+                    ref_id: Some(sess.sid),
+                })
+                .map_err(|reason| Denied {
+                    reason,
+                    method: Some("embed"),
+                    audited: false,
+                }),
+            _ => Err(Denied {
+                reason: "no_credentials",
+                method: None,
+                audited: false,
+            }),
+        };
+        self.audited(r, res)
+    }
+
+    /// Audit the outcome of an authentication and pass it on.
+    fn audited(&self, r: &Req, res: Result<Identity, Denied>) -> Result<Identity, Denied> {
         if let Ok(id) = &res {
             // Logins and embed exchanges are audited where they happen; each
             // other credential's use once per AUDIT_OK_EVERY.
@@ -798,17 +832,9 @@ impl Auth {
                 return self.jwt_identity(j, token);
             }
         }
-        // 4. An embedded page's session: the header, or (a page of `serve
-        // --dashboards`, which has no script) `?embed_session=` on GET /d/.
+        // 4. An embedded page's session (a header only, never the URL).
         if let Some(e) = &self.embed {
-            let mut s: Vec<String> = r
-                .all(SESSION_HEADER)
-                .iter()
-                .map(|v| v.to_string())
-                .collect();
-            if s.is_empty() && self.query_sessions && r.method == "GET" && path.starts_with("/d/") {
-                s = r.query_all("embed_session");
-            }
+            let s = r.all(SESSION_HEADER);
             if !s.is_empty() {
                 let [s] = s.as_slice() else {
                     return Err(deny("embed")("malformed_token"));

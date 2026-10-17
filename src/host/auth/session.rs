@@ -257,6 +257,13 @@ impl Sessions {
         }
     }
 
+    /// Report a broken revocation file to the audit log too.
+    pub fn set_audit(&self, log: std::sync::Arc<super::audit::AuditLog>) {
+        if let Some(f) = &self.revocations {
+            let _ = f.audit.set(log);
+        }
+    }
+
     fn is_revoked(&self, sid: &str) -> bool {
         if let Some(f) = &self.revocations {
             f.reload(&self.revoked);
@@ -299,6 +306,7 @@ impl Sessions {
             path: path.clone(),
             stamp: Mutex::new((None, None)),
             broken: std::sync::atomic::AtomicBool::new(false),
+            audit: std::sync::OnceLock::new(),
         };
         f.reload(&self.revoked);
         if f.is_broken() {
@@ -322,6 +330,8 @@ pub struct Revocations {
     stamp: Mutex<ReloadState>,
     /// The file can't be trusted right now: every session is refused.
     broken: std::sync::atomic::AtomicBool,
+    /// Where a broken file is also reported.
+    audit: std::sync::OnceLock<std::sync::Arc<super::audit::AuditLog>>,
 }
 
 impl Revocations {
@@ -395,6 +405,15 @@ impl Revocations {
         use std::sync::atomic::Ordering;
         if let Some(e) = &e {
             if !self.broken.swap(true, Ordering::SeqCst) {
+                if let Some(a) = self.audit.get() {
+                    a.write(&super::audit::Event {
+                        event: "revocation_file",
+                        outcome: "error",
+                        reason: Some("unusable"),
+                        detail: Some(e),
+                        ..Default::default()
+                    });
+                }
                 eprintln!(
                     "[anofox-serve] revocation file {}: {} — refusing every login session until it is fixed",
                     self.path.display(),
@@ -546,7 +565,16 @@ mod tests {
         let (t2, _) = b.issue("login", 60, &claims(), &Scope::default());
         std::fs::remove_file(&file).unwrap();
         b.revocations.as_ref().unwrap().stamp.lock().unwrap().1 = None;
+        let audit = dir.join("audit.jsonl");
+        b.set_audit(std::sync::Arc::new(
+            super::super::audit::AuditLog::new(audit.to_str().unwrap()).unwrap(),
+        ));
         assert_eq!(b.verify("login", &t2), Err("revoked"));
+        let a = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            a.contains("\"audit\":\"revocation_file\"") && a.contains("\"outcome\":\"error\""),
+            "{a}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

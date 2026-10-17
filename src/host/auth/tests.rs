@@ -294,7 +294,7 @@ fn an_invalid_credential_never_falls_back() {
 #[test]
 fn embed_links_become_scoped_page_sessions() {
     let dir = tmpdir();
-    let (mut a, _) = all_methods(idp(&[]), &dir);
+    let (a, _) = all_methods(idp(&[]), &dir);
     let link = embed_link(json!({"dashboard": "sales", "user": "acme-1",
         "claims": {"tenant": "acme"}, "vars": {"region": "EU"}, "exp": now_s() + 60}));
     let url = format!("/d/sales?embed={link}");
@@ -324,23 +324,22 @@ fn embed_links_become_scoped_page_sessions() {
         a.authenticate(&req("GET", &two, &[])).unwrap_err().reason,
         "malformed_token"
     );
-    // a page without script (serve --dashboards) carries the page session
-    // in its URL instead; it is checked like the header, on /d/ only
+    // never from the URL (#112 review): a query parameter is no credential
     let q = format!("/d/sales?embed_session={page}");
-    // (only where the server turned it on: serve --dashboards)
     assert_eq!(
         a.authenticate(&req("GET", &q, &[])).unwrap_err().reason,
         "no_credentials"
     );
-    a.query_sessions = true;
+    // serve --dashboards posts it in a form body instead
+    let id3 = a
+        .page_session(Some(&page), &req("POST", "/d/sales", &[]))
+        .unwrap();
+    assert_eq!(id3.scope, id.scope);
     assert_eq!(
-        a.authenticate(&req("GET", &q, &[])).unwrap().scope,
-        id.scope
-    );
-    let q = format!("/api/panel?embed_session={page}");
-    assert_eq!(
-        a.authenticate(&req("POST", &q, &[])).unwrap_err().reason,
-        "no_credentials"
+        a.page_session(Some("x.y.z"), &req("POST", "/d/sales", &[]))
+            .unwrap_err()
+            .reason,
+        "malformed_token"
     );
     // the page session is not a login cookie (another key and audience)
     let c = format!("{}={page}", oidc::SESSION_COOKIE);
