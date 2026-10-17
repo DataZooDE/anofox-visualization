@@ -393,6 +393,59 @@ if (ret.tab !== "Drill-through" || ret.label !== origin) fail(`drill-through-key
   fail(`stopped: ${String(e).split("\n")[0]}`);
 }
 
+// (d) Esc back to the origin of a drill-through whose tab is re-rendered while
+// hidden — lazily (#120) drawn again only once shown — or is not (?lazy=0)
+// (#132): a chart mark on the first tab of the energy-load forecast and a
+// table link on a later tab.
+const ENERGY = "Will any substation exceed its capacity next week?";
+for (const lazy of ["", "&lazy=0"]) {
+  const p2 = await browser.newPage({ viewport: { width: Number(arg("--width", "1280")), height: 640 }, reducedMotion: motion });
+  p2.on("pageerror", (e) => errs.push(String(e)));
+  const done = () =>
+    p2.waitForFunction(
+      () => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading") && !document.querySelector(".dash .tabpane:not([style*='none']) .dp-lazy"),
+      null,
+      { timeout: 180000 }
+    );
+  const back = async (label, tab, sel) => {
+    await p2.click(`.dash .tabbar .tab-btn:has-text('${tab}')`);
+    await done();
+    const origin = await p2.evaluate((sel) => {
+      const pane = [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].find((p) => p.style.display !== "none");
+      const all = [...pane.querySelectorAll(sel)];
+      const m = all[1] || all[0];
+      if (!m) return null;
+      m.focus();
+      return { label: m.getAttribute("aria-label") || m.textContent, i: all.indexOf(m) };
+    }, sel);
+    if (!origin) return fail(`${label}: no linked element on ${tab}`);
+    await p2.keyboard.press("Enter");
+    await done();
+    const to = await p2.evaluate(() => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent);
+    if (to === tab) return fail(`${label}: the link did not switch tabs`);
+    await p2.keyboard.press("Escape");
+    await done();
+    await p2.waitForTimeout(300);
+    const ret = await p2.evaluate((sel) => {
+      const ae = document.activeElement;
+      const pane = [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].find((p) => p.style.display !== "none");
+      return { tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent, label: ae.getAttribute("aria-label") || ae.textContent, i: [...(pane?.querySelectorAll(sel) || [])].indexOf(ae) };
+    }, sel);
+    console.log(`${label}: ${tab} → ${to}, Esc → ${ret.tab} / ${ret.label} (#${ret.i})`);
+    if (ret.tab !== tab || ret.label !== origin.label || ret.i !== origin.i) fail(`${label}: Esc did not return to the origin (${ret.tab}, ${ret.label}, #${ret.i})`);
+  };
+  try {
+    await p2.goto(`${base}?embed=1&dashboard=${encodeURIComponent(ENERGY)}${lazy}`);
+    await done();
+    const tag = lazy ? "lazy off" : "lazy";
+    await back(`return chart mark, first tab (${tag})`, "Capacity risk", ".panel.dp-linked .panel-svg > svg .dp-hit");
+    await back(`return table link, later tab (${tag})`, "Decision", ".dp-link");
+  } catch (e) {
+    fail(`return (${lazy || "lazy"}): stopped: ${String(e).split("\n")[0]}`);
+  }
+  await p2.close();
+}
+
 // Run times against the plain re-run of this session (without one: --bound).
 const baseline = base1 && base2 ? Math.max(base1.runMs, base2.runMs) : 0;
 const allowed = Math.max(bound, Math.round(2.5 * baseline));
