@@ -1274,9 +1274,9 @@ configuration, so it is not offered in M2.
 | SQL from the client or the model | Neither exists: the client sends a question and view state, and the model calls `get_panel` with a panel index, vars and a page, all validated like `/api/panel` |
 | A forged conversation history | The history is kept on the server only, keyed by user + page session + 128-bit id |
 | Prompt injection through data or dashboard text | No side-effect tools; answers are escaped text without links or images; navigation only through validated citation chips the viewer clicks |
-| Exfiltration to a third party | No URLs, images or HTML are rendered from model output; the server makes no outbound calls except to the configured model endpoint |
+| Exfiltration to a third party | `renderAnswer` renders no links, images or HTML from model output (M5); the upstream request allowlist (M7); the server makes no outbound calls except to the configured model endpoint |
 | One viewer's data in another's answer | Conversations are per user + session; the panel cache is keyed by claims (unchanged); viewer data never sits in the shared prompt-cache prefix |
-| Spending the operator's key (abuse, a scripted client) | Login required beyond loopback (start check); per-viewer and per-server limits; API keys refused; concurrency cap; Ask waits for query slots like a panel request |
+| Spending the operator's key (abuse, a scripted client) | Login always required (start check, M1); per-viewer question and token budgets, a per-question ceiling, `ask.allow` (M2); API keys refused; its own worker pool, 1 question per viewer, and a slot sub-limit (H2) |
 | Personal data sent to the provider | Panels on demand, the caps, `@ask skip`, `mask: "auto"`, no identity in requests, the viewer notice |
 | Personal data in logs | No panel data in logs; answer text off by default; question text on by default but switchable; `log_vars` rules unchanged |
 | The viewer trusts a wrong answer | "AI-generated" labelling, checked citations that open the panel, `scope: "partly"`, the eval |
