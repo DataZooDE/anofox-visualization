@@ -142,6 +142,37 @@ const os = xp.starterDashboard({ name: "odd", fq: '"odd"', cards: odd });
 assert.match(os, /"it's ""x"""/);
 assert.match(os, /'It''s "x"'::LABEL/);
 
+// ---- anofox_tabular checks and comparisons (#111) ----
+const dupHint = { code: "duplicate-keys" };
+assert.deepEqual(xp.hintCheck('"t"', oid, dupHint), { table: '"t"', column: "order_id", params: null, lower: null, upper: 0, type: "duplicate_count" });
+assert.equal(xp.hintCheck('"t"', amount, { code: "outliers" }).params.expression, `"amount" IS NULL OR (CASE WHEN isfinite(TRY_CAST("amount" AS DOUBLE)) THEN TRY_CAST("amount" AS DOUBLE) END) BETWEEN -172 AND 234`);
+assert.equal(xp.hintCheck('"t"', region, { code: "nope" }), null);
+const ts = xp.tabularChecksSql([xp.hintCheck('"t"', oid, dupHint)], true);
+assert.match(ts, /^LOAD anofox_tabular;\nATTACH IF NOT EXISTS ':memory:' AS xp_checks \(READ_WRITE\);/);
+assert.match(ts, /\('1 duplicate_count order_id', 'duplicate_count', '"t"', 'order_id', CAST\(NULL AS VARCHAR\), CAST\(NULL AS DOUBLE\), CAST\(0 AS DOUBLE\), false/);
+assert.match(ts, /FROM run_checks\('xp_checks\.main\.checks'\)/);
+assert.deepEqual(xp.halves("2026-01-01", "2026-01-31"), [["2026-01-01", "2026-01-16"], ["2026-01-17", "2026-01-31"]]);
+assert.equal(xp.halves("2026-01-01", "2026-01-01"), null);
+assert.match(xp.rangeSide('"t"', "day", "2026-01-01", "2026-01-16"), /^\(SELECT \* FROM "t" WHERE CAST\("day" AS DATE\) BETWEEN DATE '2026-01-01' AND DATE '2026-01-16'\) _r$/);
+const cA = [
+  { name: "id", type: "INTEGER", kind: "num", n: 10, nonnull: 10, distinct: 10, nullPct: 0, mean: 5, median: 5 },
+  { name: "v", type: "INTEGER", kind: "num", n: 10, nonnull: 10, distinct: 4, nullPct: 0, mean: 10, median: 10 },
+  { name: "gone", type: "VARCHAR", kind: "text", n: 10, nonnull: 10, distinct: 2, nullPct: 0 },
+];
+const cB = [
+  { name: "id", type: "INTEGER", kind: "num", n: 12, nonnull: 12, distinct: 12, nullPct: 0, mean: 6, median: 6 },
+  { name: "v", type: "DOUBLE", kind: "num", n: 12, nonnull: 6, distinct: 4, nullPct: 50, mean: 20, median: 10 },
+  { name: "new", type: "DATE", kind: "date", n: 12, nonnull: 12, distinct: 12, nullPct: 0 },
+];
+const cc = xp.compareCards(cA, cB);
+assert.deepEqual(cc.map((r) => [r.name, r.change]), [["id", "same"], ["v", "retyped"], ["gone", "removed"], ["new", "added"]]);
+assert.deepEqual(cc[1].shifts, ["empty 0% → 50%", "mean 10 → 20 (+100%)"]);
+assert.equal(xp.compareKey(cA, cB), "id");
+assert.equal(xp.compareKey(cA.slice(1), cB.slice(1)), null);
+const kd = xp.keyDiffSql('"a"', '"b"', "id", [{ name: "id" }, { name: "v", num: true }]);
+assert.match(kd, /md5\(CAST\(row\(CAST\("v" AS DOUBLE\)\) AS VARCHAR\)\)/, "numbers compare as numbers across a retype");
+assert.match(xp.overlaySql("SELECT * FROM a", "SELECT * FROM b", [{ i: 1, name: "v", lo: 0, hi: 20 }]), /SELECT 1 AS c, 'a' AS s, least\(9, floor\(\(_x - 0\) \/ 20 \* 10\)\)::INTEGER AS k/);
+
 console.log("explore_test (pure): ok");
 
 // ---- in DuckDB-Wasm: real profiles, the starters run, 1 M rows in time ----
@@ -222,4 +253,17 @@ await assert.rejects(
   (e) => e.name === "Superseded"
 );
 assert.equal(calls, 2);
+// a comparison by key, in DuckDB-Wasm, and its dashboard runs there
+q(`CREATE TABLE v1 AS SELECT i AS customer_id, 'n' || i AS name, i * 10 AS score FROM range(1, 301) t(i)`);
+q(`CREATE TABLE v2 AS SELECT i AS customer_id, CASE WHEN i % 25 = 0 THEN 'x' || i ELSE 'n' || i END AS name, (i * 10)::DOUBLE AS score, i % 2 = 0 AS active FROM range(20, 341) t(i)`);
+const sideA = { src: '"memory"."main"."v1"', label: "v1" },
+  sideB = { src: '"memory"."main"."v2"', label: "v2" };
+const cmp = await xp.compareTables(run, pageSql, sideA, sideB);
+assert.equal(cmp.key, "customer_id");
+assert.deepEqual([cmp.diff.added, cmp.diff.removed, cmp.diff.changed], [40, 19, 12]);
+assert.deepEqual(cmp.cols.filter((r) => r.change !== "same").map((r) => `${r.name} ${r.change}`), ["score retyped", "active added"]);
+const ov = cmp.overlay.get("score");
+assert.equal(ov.a.reduce((x, y) => x + y), 300);
+assert.equal(ov.b.reduce((x, y) => x + y), 321);
+for (const s of JSON.parse(wasm.plan(xp.compareDashboard({ a: sideA, b: sideB, cmp })))) q(s.sql);
 console.log(`explore_test (DuckDB-Wasm): ok — 1 M rows profiled in ${ms} ms`);

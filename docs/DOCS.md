@@ -1947,6 +1947,19 @@ otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
   chart for it. A click on a column name inserts it; a click on a top value
   adds a `WHERE`.
 
+- **Data-quality checks**: when `anofox_tabular` is loaded in the session
+  (the native engine; a DuckDB-Wasm build once there is one), each hint offers
+  **Run the check** — its `run_checks` check (`null_rate`, `distinct_count`,
+  `duplicate_count`, or `compliance` for mixed types and extreme values) —
+  and shows the value and pass / fail. The checks table lives in an attached
+  in-memory database, so a read-only database works too.
+- **Compare…** a table with another table, or two time ranges of it (split in
+  halves by default): the row-count change, schema differences (added,
+  removed, retyped), per column the empty %, distinct, mean and median shifts
+  with both distributions on one scale and, when both sides share a unique
+  key, the rows added, removed and changed. **New dashboard from this
+  comparison** writes a starter with B against A as `::DELTA`s.
+
 A locked server (`serve --dashboards`, `anofox_serve_dashboards`) has no
 Explore page.
 

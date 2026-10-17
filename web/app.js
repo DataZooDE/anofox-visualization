@@ -2023,6 +2023,8 @@ const xpState = {
   cols: null, // fq -> [{name, kind}] of every table (for the joins), loaded once per catalog
   files: new Set(), // fq of the views over added files
   charts: [], // [{holder, sql}] previews to redraw when light/dark changes
+  ctok: 0, // the comparison in progress
+  checks: new Map(), // "fq|column|hint" -> the anofox_tabular check result
 };
 const lsGet = (k, d) => {
   try {
@@ -2141,6 +2143,7 @@ async function loadCatalog() {
     return { db: r.database_name, sc: r.schema_name, t: r.table_name, fq, kind: xpState.files.has(fq) ? "file" : r.kind, n: r.n, cols: r.cols };
   });
   xpState.cols = null;
+  xpTab = null; // a refresh may have loaded anofox_tabular
   renderCatalog();
   // Pick the last table again (once per visit: not over the one shown).
   const last = lsGet(XP_LAST, null);
@@ -2291,9 +2294,13 @@ async function previewTable(e) {
   const mk = xpBtn("＋ New dashboard from this table", "", () => openTableAsDashboard(e, xpState.cards || []));
   mk.disabled = true;
   mk.title = "A starter dashboard: KPIs, filters, a chart per kind of column and the rows";
-  acts.append(mk);
+  const cmpBtn = xpBtn("Compare…", "btn2", () => xpCompareForm(e, cmpSlot, alive));
+  cmpBtn.disabled = true;
+  cmpBtn.title = "Compare with another table, or two time ranges of this one";
+  acts.append(cmpBtn, mk);
   head.append(left, acts);
   const chartSlot = xpEl("div", "xp-chart-slot");
+  const cmpSlot = xpEl("div", "xp-chart-slot");
   const colsSec = xpEl("section", "xp-sec");
   const colsH = xpEl("h3", "explore-sec", "Columns");
   colsH.id = "xp-cols-h";
@@ -2308,13 +2315,14 @@ async function previewTable(e) {
   const rowsBox = xpEl("div");
   fig.appendChild(rowsBox);
   rowsSec.append(rowsH, fig);
-  detail.append(head, chartSlot, colsSec, joinSec, rowsSec);
+  detail.append(head, cmpSlot, chartSlot, colsSec, joinSec, rowsSec);
   xpState.cards = null;
   xpPaged(rowsBox, `SELECT * FROM ${e.fq}`, e.t, null, !(e.n != null && Number(e.n) <= xp.SAMPLE_OVER));
   const paint = (stage, st) => {
     if (!alive()) return;
     xpState.cards = st.cards;
     const total = Number(st.total) || 0;
+    xpState.total = total;
     const words = {
       columns: `${st.cards.length} columns · counting values…`,
       stats: "Building distributions…",
@@ -2345,6 +2353,8 @@ async function previewTable(e) {
   if (!alive()) return;
   detail.removeAttribute("aria-busy");
   mk.disabled = false;
+  cmpBtn.disabled = false;
+  xpTabularHints(e, cards, alive).catch(() => {});
   xpJoins(e, xpState.cards, joinSec, alive).catch(() => {});
 }
 
@@ -2423,7 +2433,10 @@ function xpCard(c, cards, e, chartSlot) {
     const ul = xpEl("ul", "xp-hints");
     ul.setAttribute("aria-label", "Data-quality hints");
     for (const hn of c.hints) {
-      const it = xpEl("li", "xp-hint", hn.text);
+      const it = xpEl("li", "xp-hint");
+      it.appendChild(xpEl("span", "xp-hint-t", hn.text));
+      const done = xpState.checks.get(`${e.fq}|${c.name}|${hn.code}`);
+      if (done) it.appendChild(xpCheckResult(done));
       it.dataset.code = hn.code;
       ul.appendChild(it);
     }
@@ -2677,6 +2690,274 @@ async function xpJoins(e, cards, sec, alive) {
     ul.appendChild(li);
   }
   sec.replaceChildren(h, ul);
+}
+
+// ---- anofox_tabular: run a hint's check (#111) ----
+// Available when run_checks is in the session (the native engine, a
+// DuckDB-Wasm build once there is one); probed once per catalog load.
+let xpTab = null;
+function tabularReady() {
+  if (servedMode) return Promise.resolve(null);
+  return (xpTab ||= (async () => {
+    const has = async (sql) => Number((await xpRows(sql))[0]?.n) > 0;
+    try {
+      if (await has(xp.TABULAR_PROBE)) return { load: false };
+    } catch (_) {}
+    try {
+      if (backend !== "live") {
+        await ensureExtension("anofox_tabular");
+        return (await has(xp.TABULAR_PROBE)) ? { load: false } : null;
+      }
+      return (await has("LOAD anofox_tabular;\n" + xp.TABULAR_PROBE)) ? { load: true } : null;
+    } catch (_) {
+      return null;
+    }
+  })());
+}
+function xpCheckResult(r) {
+  const ok = r.status === "pass";
+  const el = xpEl("span", "xp-hint-res " + (ok ? "ok" : r.status === "error" ? "err" : "bad"));
+  el.textContent = `anofox_tabular ${r.check_type}: ${xp.fmtStat(r.value)} — ${r.status}`;
+  el.title = r.message || "";
+  return el;
+}
+async function xpTabularHints(e, ul, alive) {
+  if (!ul.querySelector(".xp-hint")) return;
+  const t = await tabularReady();
+  if (!t || !alive()) return;
+  for (const li of ul.querySelectorAll(".xp-card")) {
+    const c = (xpState.cards || []).find((x) => x.name === li.dataset.col);
+    if (!c) continue;
+    li.querySelectorAll(".xp-hint").forEach((h, i) => {
+      const hint = c.hints[i];
+      const check = hint && xp.hintCheck(e.fq, c, hint);
+      if (!check || h.querySelector(".xp-runcheck") || h.querySelector(".xp-hint-res")) return;
+      const b = xpBtn("Run the check", "xp-link xp-runcheck", async () => {
+        b.disabled = true;
+        b.textContent = "Checking…";
+        try {
+          const rows = await xpRows(xp.tabularChecksSql([check], t.load));
+          const r = rows[0];
+          if (!r) throw new Error("run_checks returned no row");
+          xpState.checks.set(`${e.fq}|${c.name}|${hint.code}`, r);
+          b.replaceWith(xpCheckResult(r));
+        } catch (err) {
+          b.disabled = false;
+          b.textContent = "Run the check";
+          h.appendChild(xpEl("span", "xp-hint-res err", shortError(err)));
+        }
+      }, `Run the anofox_tabular ${check.type} check for ${c.name}`);
+      h.appendChild(b);
+    });
+  }
+}
+
+// ---- compare two tables, or two time ranges of one (#111) ----
+function xpCompareForm(e, slot, alive) {
+  slot.innerHTML = "";
+  const sec = xpEl("section", "panel xp-chart xp-cmp-panel");
+  const hid = "xp-cmp-h" + ++xpUid;
+  sec.setAttribute("aria-labelledby", hid);
+  const bar = xpEl("div", "xp-chart-bar");
+  const h = xpEl("h3", "", `Compare ${e.t}`);
+  h.id = hid;
+  h.tabIndex = -1;
+  bar.append(h, xpEl("span", "xp-flex"), xpBtn("✕", "btn2 icon", () => (slot.innerHTML = ""), "Close the comparison"));
+  const form = xpEl("form", "xp-cmp-form");
+  const dates = (xpState.cards || []).filter((c) => (c.kind === "date" || c.kind === "time") && xp.halves(c.tmin, c.tmax));
+  const mode = xpEl("fieldset", "xp-cmp-mode");
+  mode.appendChild(xpEl("legend", "", "Compare"));
+  const radio = (v, label, on) => {
+    const l = xpEl("label");
+    const r = xpEl("input");
+    r.type = "radio";
+    r.name = hid + "-mode";
+    r.value = v;
+    r.checked = on;
+    r.onchange = show;
+    l.append(r, " " + label);
+    mode.appendChild(l);
+    return r;
+  };
+  const rTable = radio("table", "with another table", true);
+  const rRange = dates.length ? radio("range", "two time ranges", false) : null;
+  const pick = (label, opts, val) => {
+    const l = xpEl("label", "xp-pick");
+    l.appendChild(xpEl("span", "", label));
+    const sel = xpEl("select");
+    for (const [v, t] of opts) {
+      const o = xpEl("option", "", t);
+      o.value = v;
+      sel.appendChild(o);
+    }
+    if (val != null) sel.value = val;
+    l.appendChild(sel);
+    return [l, sel];
+  };
+  const others = xpState.tables.filter((x) => x.fq !== e.fq);
+  const [tl, tsel] = pick("Table B", others.map((x) => [x.fq, `${x.db === "memory" ? "" : x.db + "."}${x.sc === "main" ? "" : x.sc + "."}${x.t}`]));
+  const rangeBox = xpEl("div", "xp-cmp-ranges");
+  const [dl, dsel] = pick("Date", dates.map((c) => [c.name, c.name]));
+  const date = (label) => {
+    const l = xpEl("label", "xp-pick");
+    l.appendChild(xpEl("span", "", label));
+    const i = xpEl("input");
+    i.type = "date";
+    l.appendChild(i);
+    return [l, i];
+  };
+  const [al0, a0] = date("A from"),
+    [al1, a1] = date("to"),
+    [bl0, b0] = date("B from"),
+    [bl1, b1] = date("to");
+  const fill = () => {
+    const c = dates.find((x) => x.name === dsel.value);
+    const hv = c && xp.halves(c.tmin, c.tmax);
+    if (hv) [[a0.value, a1.value], [b0.value, b1.value]] = hv;
+  };
+  dsel.onchange = fill;
+  fill();
+  rangeBox.append(dl, al0, al1, bl0, bl1);
+  const go = xpBtn("Compare", "", null);
+  go.type = "submit";
+  form.append(mode, tl, rangeBox, go);
+  function show() {
+    const range = !!(rRange && rRange.checked);
+    tl.hidden = range;
+    rangeBox.hidden = !range;
+  }
+  show();
+  const out = xpEl("div", "xp-cmp-out");
+  const msg = xpEl("div", "xp-progress");
+  msg.setAttribute("role", "status");
+  sec.append(bar, form, msg, out);
+  slot.appendChild(sec);
+  h.focus({ preventScroll: true });
+  sec.scrollIntoView({ block: "nearest" });
+  if (!others.length && !dates.length) msg.textContent = "There is no other table, and no date to split by.";
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    let a, b;
+    if (rRange && rRange.checked) {
+      if (!(a0.value && a1.value && b0.value && b1.value)) return (msg.textContent = "Pick both date ranges.");
+      a = { src: xp.rangeSide(e.fq, dsel.value, a0.value, a1.value), label: `${a0.value} – ${a1.value}`, range: true };
+      b = { src: xp.rangeSide(e.fq, dsel.value, b0.value, b1.value), label: `${b0.value} – ${b1.value}`, range: true };
+    } else {
+      const o = others.find((x) => x.fq === tsel.value);
+      if (!o) return (msg.textContent = "Pick a table to compare with.");
+      a = { src: e.fq, label: e.t, total: xpState.total };
+      b = { src: o.fq, label: o.t };
+    }
+    xpCompareRun(a, b, msg, out, alive);
+  };
+}
+async function xpCompareRun(a, b, msg, out, pickAlive) {
+  const tok = ++xpState.ctok;
+  const alive = () => tok === xpState.ctok && pickAlive();
+  out.replaceChildren();
+  out.setAttribute("aria-busy", "true");
+  msg.classList.remove("done");
+  const words = { a: `Profiling ${b.label}…`, b: "Distributions on one scale…", overlay: "Matching keys…", done: "" };
+  msg.textContent = `Profiling ${a.label}…`;
+  let cmp;
+  try {
+    cmp = await xp.compareTables(xpRows, page_sql, a, b, { alive, onStage: (st) => alive() && (msg.textContent = words[st] ?? "") });
+  } catch (err) {
+    if ((err && err.name === "Superseded") || !alive()) return;
+    out.removeAttribute("aria-busy");
+    msg.textContent = "";
+    out.appendChild(mkErrorBody(err, ""));
+    return;
+  }
+  if (!alive()) return;
+  out.removeAttribute("aria-busy");
+  const na = Number(cmp.a.total) || 0,
+    nb = Number(cmp.b.total) || 0;
+  const pct = na ? ` (${nb >= na ? "+" : ""}${xp.fmtStat((100 * (nb - na)) / na, 2)}%)` : "";
+  msg.classList.add("done");
+  msg.textContent = `A = ${a.label}, B = ${b.label}. Rows: ${na.toLocaleString("en-US")} → ${nb.toLocaleString("en-US")}${pct}.`;
+  const sum = xpEl("ul", "xp-cmp-sum");
+  const changed = cmp.cols.filter((r) => r.change !== "same");
+  sum.appendChild(xpEl("li", "", changed.length ? `Schema: ${changed.map((r) => `${r.name} ${r.change}`).join(", ")}.` : "Schema: the same columns and types."));
+  if (cmp.diff)
+    sum.appendChild(
+      xpEl("li", "", `By ${cmp.key}: ${Number(cmp.diff.added).toLocaleString("en-US")} rows added, ${Number(cmp.diff.removed).toLocaleString("en-US")} removed, ${Number(cmp.diff.changed).toLocaleString("en-US")} changed.`)
+    );
+  if (cmp.a.sampled || cmp.b.sampled) sum.appendChild(xpEl("li", "", `Profiles of the big side${cmp.a.sampled && cmp.b.sampled ? "s" : ""} use a sample of ${xp.SAMPLE_ROWS.toLocaleString("en-US")} rows.`));
+  const mk = xpBtn("＋ New dashboard from this comparison", "", () => {
+    const name = `${a.label} vs ${b.label}`;
+    setMode("edit");
+    loadDash(name, xp.compareDashboard({ a, b, cmp }));
+    $("dash-name").value = name;
+  });
+  // the columns side by side
+  const wrap = xpEl("div", "tbl-scroll");
+  wrap.tabIndex = 0; // scrolls sideways on a phone: reachable by keyboard
+  wrap.setAttribute("role", "region");
+  wrap.setAttribute("aria-label", "Columns of A and B");
+  const t = xpEl("table", "xp-cmp");
+  const cap = xpEl("caption", "", `Columns of A and B`);
+  t.appendChild(cap);
+  const head = xpEl("tr");
+  for (const c of ["Column", "Change", "Type", "Empty %", "Distinct", "Mean", "Median", "Distribution (A outline, B filled)"]) {
+    const th = xpEl("th", "", c);
+    th.scope = "col";
+    head.appendChild(th);
+  }
+  const thead = xpEl("thead");
+  thead.appendChild(head);
+  const tb = xpEl("tbody");
+  const ab = (r, f) => {
+    const x = r.a ? f(r.a) : "–",
+      y = r.b ? f(r.b) : "–";
+    return x === y ? x : `${x} → ${y}`;
+  };
+  for (const r of cmp.cols) {
+    const tr = xpEl("tr", r.change !== "same" || r.shifts.length ? "xp-cmp-hot" : "");
+    const th = xpEl("th", "", r.name);
+    th.scope = "row";
+    tr.appendChild(th);
+    tr.appendChild(xpEl("td", "xp-cmp-" + r.change, r.change));
+    tr.appendChild(xpEl("td", "", ab(r, (c) => c.type)));
+    tr.appendChild(xpEl("td", "num", ab(r, (c) => xp.fmtStat(c.nullPct, 2))));
+    tr.appendChild(xpEl("td", "num", ab(r, (c) => xp.fmtStat(c.distinct))));
+    tr.appendChild(xpEl("td", "num", ab(r, (c) => (c.kind === "num" ? xp.fmtStat(c.mean) : "–"))));
+    tr.appendChild(xpEl("td", "num", ab(r, (c) => (c.kind === "num" ? xp.fmtStat(c.median) : "–"))));
+    const td = xpEl("td");
+    const ov = cmp.overlay.get(r.name);
+    if (ov) td.appendChild(xpOverlay(r.name, ov));
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+  t.append(thead, tb);
+  wrap.appendChild(t);
+  out.append(sum, wrap, mk);
+}
+// Two 10-bin histograms on one range: A as an outline, B filled.
+function xpOverlay(name, h) {
+  const W = 120,
+    H = 30;
+  const max = Math.max(...h.a, ...h.b, 1);
+  const bw = W / 10;
+  const peak = (arr) => {
+    const k = arr.indexOf(Math.max(...arr));
+    const w = (h.hi - h.lo) / 10;
+    return `${xp.fmtStat(h.lo + k * w)} to ${xp.fmtStat(h.lo + (k + 1) * w)}`;
+  };
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", "xp-ov");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Distribution of ${name} from ${xp.fmtStat(h.lo)} to ${xp.fmtStat(h.hi)}: most of A from ${peak(h.a)}, most of B from ${peak(h.b)}.`);
+  const bars = (arr, cls) =>
+    arr
+      .map((n, i) => {
+        const y = n ? Math.max(1.5, (n / max) * (H - 2)) : 0;
+        return `<rect class="${cls}" x="${(i * bw + 1).toFixed(1)}" y="${(H - y).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${y.toFixed(1)}"/>`;
+      })
+      .join("");
+  svg.innerHTML = bars(h.b, "ov-b") + bars(h.a, "ov-a");
+  return svg;
 }
 
 // ---- the paged rows: the ::PAGED renderer over any SELECT ----
