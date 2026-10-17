@@ -772,7 +772,7 @@ fn table_svg(
     );
     let skip: std::collections::HashSet<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title))
+        .filter(|(_, r)| matches!(r, Role::Title | Role::Info))
         .map(|(i, _)| *i)
         .collect();
     // Per-column format roles (::MONEY, ::PERCENT, ::TREND, ::COLORSCALE, …),

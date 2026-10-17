@@ -96,7 +96,7 @@ terminal.
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
-| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent', 'comma', ' kg'… |
+| `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
@@ -115,7 +115,7 @@ terminal.
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
-| `::PERCENT` | `::PCT` | kpi | percent KPI / table column format |
+| `::PERCENT` | `::PCT` | kpi | percent KPI / table column format; the value is in percent (12.5 → 12.5%; a fraction × 100) |
 | `::COMPACT` |  | kpi | compact-number KPI / table column format (1.2K) |
 | `::DELTA` | `::COMPARE`, `::PREVIOUS` | kpi | comparison value → trend arrow + % on a KPI (up = good) |
 | `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
@@ -183,6 +183,14 @@ terminal.
 `::PERCENT`, `::COMPACT`, `::METRIC` (number formats), `::TREND` (▲/▼),
 `::COLORSCALE`, `::BADGE`, `::SPARKLINE` (a `list()` column) and `::PLAIN`
 format that column; `::TITLE` becomes the table's title bar.
+
+**Percent units.** `::PERCENT` (KPI tiles and table columns),
+`'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and
+`{{x:percent}}` in Markdown all take the value **in percent, 0–100**: `12.5`
+reads `12.5%`. A fraction such as a rate from `avg(flag::INTEGER)` (`0.287`)
+would read `0.3%` — multiply it: `round(100 * avg(late::INTEGER), 1) ::PERCENT`.
+Only the share charts (`::BARCHART_PERCENT`, `::BAR_STACKED_PERCENT`, a
+fractional `::LINECHART_PERCENT`) compute their own shares.
 
 The cast on the **measure** column selects the geom; `XAXIS`/`CATEGORY` position
 and colour it; `LABEL` alone becomes a **spanning section heading** (not a card).
@@ -1150,7 +1158,7 @@ sample has both.
 ### Formatted tooltips
 
 Hover tooltips show values the way the panel formats them: its `::YFORMAT`
-(`'$'`, `'€'`, `'percent'`, `'comma'`, `' kg'`, `'CHF '` — the same keywords as
+(`'$'`, `'€'`, `'percent'` — values 0–100, `'comma'`, `' kg'`, `'CHF '` — the same keywords as
 the axis) in the dashboard `::LOCALE`, with cents kept for currency
 (`$1,234.50`, `1.234,50 €`). Share charts (`::BARCHART_PERCENT`,
 `::BAR_STACKED_PERCENT`, a fractional `::LINECHART_PERCENT`) read as percent.

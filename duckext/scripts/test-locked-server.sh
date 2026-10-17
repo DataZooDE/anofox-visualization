@@ -5,7 +5,11 @@
 #   * `search_path` (and the caller's `USE` passed through it) decides where
 #     the panels' unqualified names resolve (#104);
 #   * per-response size cap (413), query slots (503 + Retry-After) and the
-#     limits in /healthz (#103).
+#     limits in /healthz (#103);
+#   * viewer variables: `-- @vars`, reserved names, values bound as literals,
+#     and a dashboard's own defaulting `SET VARIABLE` (#151) — plus, with
+#     NODE_PATH (Playwright), the same in a real browser (locked-vars-e2e.mjs,
+#     also ::INFO in a ::PAGED table, #152).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -117,3 +121,59 @@ for k in '"max_queries":1' '"max_response_bytes":1048576' '"refused_queries":1' 
 done
 stop
 echo "OK: size cap (413), query slots (503 + Retry-After), limits in /healthz"
+
+# 4. Viewer variables (#151). The server sets the viewer's values first, then
+# re-runs the dashboard's own SETs: a plain SET wins, a defaulting
+# coalesce(getvariable(…), …) keeps the viewer's value.
+mkdir "$T/dash4"
+cat > "$T/dash4/runs.sql" <<'SQL'
+-- @vars run
+SET VARIABLE run = coalesce(nullif(getvariable('run'), ''), (SELECT max(name) FROM runs));
+SELECT count(*)::BIGINT AS n ::METRIC, 'run ' || getvariable('run') ::LABEL FROM runs WHERE name = getvariable('run');
+SELECT getvariable('run') AS r ::TABLE, getvariable('other') AS o FROM range(1);
+SELECT name AS "Run" ::PAGED, 'Runs of the forecast pipeline' AS about ::INFO FROM runs ORDER BY name;
+SQL
+cat > "$T/dash4/pick.sql" <<'SQL'
+-- @vars run
+SELECT name AS run ::DROPDOWN FROM runs ORDER BY name;
+SET VARIABLE run = coalesce(nullif(getvariable('run'), ''), (SELECT max(name) FROM runs));
+SELECT count(*)::BIGINT AS n ::METRIC, 'run ' || getvariable('run') ::LABEL FROM runs WHERE name = getvariable('run');
+SQL
+"$DUCKDB" "$T/runs.duckdb" -c "CREATE TABLE runs AS SELECT * FROM (VALUES ('a'), ('b'), ('c')) t(name);" >/dev/null
+start "$T/runs.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/dash4"), $PORT, '{}');" || fail "variables server"
+vpanel() {
+  curl -s -o "$T/body" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+    -d "{\"dashboard\":\"runs\",\"panel\":2,\"vars\":$1}"
+}
+[ "$(vpanel '{}')" = 200 ] && grep -q '"r":"c"' "$T/body" || fail "default: $(cat "$T/body")"
+[ "$(vpanel '{"run":"a"}')" = 200 ] && grep -q '"r":"a"' "$T/body" || fail "viewer value: $(cat "$T/body")"
+# a value is a typed literal, never SQL: an expression stays its text
+[ "$(vpanel '{"run":"(SELECT max(name) FROM runs)"}')" = 200 ] && grep -q '"r":"(SELECT max(name) FROM runs)"' "$T/body" \
+  || fail "expression value: $(cat "$T/body")"
+# not in -- @vars: dropped; reserved: refused
+[ "$(vpanel '{"other":"x"}')" = 200 ] && grep -q '"o":null' "$T/body" || fail "-- @vars: $(cat "$T/body")"
+[ "$(vpanel '{"__claim_user":"x"}')" = 400 ] || fail "__claim_user accepted: $(cat "$T/body")"
+[ "$(vpanel '{"anofox_data":"/"}')" = 400 ] || fail "anofox_data accepted: $(cat "$T/body")"
+echo "OK: viewer variables (-- @vars, reserved names, literals, a defaulting SET VARIABLE)"
+# `omit` (#152): only the ::PAGED panel's own ::INFO column; anything else is a
+# 400 that doesn't echo the name.
+opanel() {
+  curl -s -o "$T/body" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+    -d "{\"dashboard\":\"runs\",\"panel\":$1,\"vars\":{},\"page\":{\"limit\":5,\"omit\":$2}}"
+}
+[ "$(opanel 3 '["__anofox_info"]')" = 200 ] && grep -q '"Run":"a"' "$T/body" && ! grep -q "forecast pipeline" "$T/body" \
+  || fail "omit the ::INFO column: $(cat "$T/body")"
+[ "$(opanel 3 '[]')" = 200 ] && grep -q "forecast pipeline" "$T/body" || fail "no omit: $(cat "$T/body")"
+for bad in '["Run"]' '["secret_col"]' '["__anofox_info","Run"]'; do
+  [ "$(opanel 3 "$bad")" = 400 ] && ! grep -q "secret_col\|Run" "$T/body" || fail "omit $bad: $(cat "$T/body")"
+done
+# a panel without an ::INFO column (the probe ::TABLE)
+[ "$(opanel 2 '["__anofox_info"]')" = 400 ] || fail "omit on a panel without ::INFO: $(cat "$T/body")"
+echo "OK: page omit names only the panel's own ::INFO column"
+if [ -n "${NODE_PATH:-}" ]; then
+  node "$(dirname "$0")/locked-vars-e2e.mjs" "http://127.0.0.1:$PORT" || fail "browser checks (locked-vars-e2e.mjs)"
+  echo "OK: in a browser — a dashboard's own SET VARIABLE is no viewer value; ::INFO in ::PAGED"
+else
+  echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
+fi
+stop

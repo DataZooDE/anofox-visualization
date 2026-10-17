@@ -268,31 +268,55 @@ impl AuthoringGuard {
         }
     }
     /// If `url` carries `?token=<valid>`, return the `(Location, Set-Cookie)`
-    /// for a redirect that stores the token in a cookie and drops it from the URL.
+    /// for a redirect that stores the token in a cookie and drops it from the
+    /// URL — every other query parameter (`?theme=`, `?v.*=`) is kept as sent.
     pub fn bootstrap(&self, url: &str) -> Option<(String, String)> {
         let q = parse_query(url);
         let t = q.get("token")?;
         if !ct_eq(t, &self.token) {
             return None;
         }
-        let path = url.split('?').next().unwrap_or("/");
+        let (path, query) = url.split_once('?').unwrap_or((url, ""));
         // The Location comes from the request: keep it a same-site path. HTTP
         // rejects control characters in a header value (the header would
-        // fail to build), and `//host` would redirect off-site.
+        // fail to build); `//host` would redirect off-site, and so would
+        // `/\host` (browsers read a `\` as `/`).
         let path = if path.starts_with('/')
             && !path.starts_with("//")
+            && !path.contains('\\')
+            && !path.to_ascii_lowercase().contains("%5c")
             && !path.bytes().any(|b| b.is_ascii_control())
         {
             path
         } else {
             "/"
         };
+        // The token goes under any spelling a server could read as `token`
+        // (case, `[]`, trailing `+` / blanks / NUL, `;` as a separator).
+        let is_token = |kv: &str| {
+            let k = url_decode(kv.split('=').next().unwrap_or("")).to_ascii_lowercase();
+            let k = k.trim_matches(|c: char| c.is_whitespace() || c == '\0' || c == '+');
+            k.trim_end_matches("[]") == "token"
+        };
+        let rest: Vec<&str> = query
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .split(['&', ';'])
+            .filter(|kv| !kv.is_empty() && !is_token(kv))
+            .collect();
+        let query = rest.join("&");
+        let location = if query.is_empty() || query.bytes().any(|b| b.is_ascii_control()) {
+            path.to_string()
+        } else {
+            format!("{path}?{query}")
+        };
         let cookie = format!(
             "{}={}; Path=/; HttpOnly; SameSite=Strict",
             self.cookie_name(),
             self.token
         );
-        Some((path.to_string(), cookie))
+        Some((location, cookie))
     }
 }
 
@@ -415,6 +439,10 @@ pub struct PageRequest {
     /// Return up to [`MAX_DISTINCT`] distinct values `v` of this column (for a
     /// filter dropdown), under every filter except those on the column itself.
     pub distinct: Option<String>,
+    /// Columns that are not table data — only the `::PAGED` panel's `::INFO`
+    /// definition ([`crate::sql::INFO_COLUMN`]), at most once: left out of
+    /// every answer, the search over the whole row included.
+    pub omit: Vec<String>,
 }
 
 /// One per-column filter of a [`PageRequest`].
@@ -440,6 +468,8 @@ pub enum FilterOp {
 /// Limits of a [`PageRequest`].
 pub const MAX_FILTERS: usize = 32;
 pub const MAX_STATS_COLS: usize = 64;
+/// Most columns a page request may leave out (`omit`).
+pub const MAX_OMIT_COLS: usize = 8;
 pub const MAX_DISTINCT: usize = 50;
 const MAX_COL_LEN: usize = 256;
 
@@ -522,6 +552,7 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
                 | "stats"
                 | "profile"
                 | "distinct"
+                | "omit"
         ) {
             return Err(format!("unknown page field '{k}'"));
         }
@@ -616,6 +647,25 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
         None | Some(serde_json::Value::Null) => None,
         Some(v) => Some(col(v, "'page.distinct'")?),
     };
+    // Only the panel's own ::INFO column can be left out (a page never skips
+    // a data column); once, whatever the request repeats.
+    let mut omit = Vec::new();
+    if let Some(cs) = p.get("omit") {
+        let cs = cs
+            .as_array()
+            .ok_or("'page.omit' must be an array of column names")?;
+        if cs.len() > MAX_OMIT_COLS {
+            return Err(format!("more than {MAX_OMIT_COLS} omitted columns"));
+        }
+        for c in cs {
+            if c.as_str() != Some(crate::sql::INFO_COLUMN) {
+                return Err("'page.omit' may only name the panel's ::INFO column".into());
+            }
+        }
+        if !cs.is_empty() {
+            omit.push(crate::sql::INFO_COLUMN.to_string());
+        }
+    }
     let count = p.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
     if [
         count,
@@ -641,6 +691,7 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
         stats,
         profile,
         distinct,
+        omit,
     })
 }
 
@@ -664,6 +715,12 @@ pub fn page_sql_inline(base: &str, p: &PageRequest) -> String {
 
 fn build_page_sql(base: &str, p: &PageRequest, param: &mut dyn FnMut(&str) -> String) -> String {
     let base = base.trim().trim_end_matches(';');
+    let base = if p.omit.is_empty() {
+        base.to_string()
+    } else {
+        let cols: Vec<String> = p.omit.iter().map(|c| quote_ident(c)).collect();
+        format!("SELECT * EXCLUDE ({}) FROM ({base}) _om", cols.join(", "))
+    };
     // A value read as a number — through text, so any column type is fine.
     // Text like an md5 "1e99…" reads as ±inf: only finite values count.
     let num = |c: &str| {
@@ -1197,12 +1254,49 @@ mod tests {
         assert_eq!(loc, "/");
         assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"));
         assert!(g.bootstrap("/?token=nope").is_none());
-        for odd in ["//evil.example/", "/a\rb", "/a\x0bb", "x"] {
+        for odd in [
+            "//evil.example/",
+            "/\\evil.example/",
+            "/\\/evil.example/",
+            "/%5Cevil.example/",
+            "/%5cevil.example/",
+            "/a\rb",
+            "/a\x0bb",
+            "x",
+        ] {
             let (loc, _) = g.bootstrap(&format!("{odd}?token={}", g.token)).unwrap();
             assert_eq!(loc, "/", "{odd:?}");
         }
         let (loc, _) = g.bootstrap(&format!("/d/sales?token={}", g.token)).unwrap();
         assert_eq!(loc, "/d/sales");
+        // #155: every parameter but the token survives, as sent.
+        let (loc, _) = g
+            .bootstrap(&format!(
+                "/?theme=dark&token={}&v.run=a%20b&v.ch=x&v.ch=y",
+                g.token
+            ))
+            .unwrap();
+        assert_eq!(loc, "/?theme=dark&v.run=a%20b&v.ch=x&v.ch=y");
+        let (loc, _) = g
+            .bootstrap(&format!("/d/sales?%74oken={}&zoom=1", g.token))
+            .unwrap();
+        assert_eq!(loc, "/d/sales?zoom=1");
+        let (loc, _) = g
+            .bootstrap(&format!("/?token={}&v.a=\r\nX: y", g.token))
+            .unwrap();
+        assert_eq!(loc, "/");
+        let (loc, _) = g
+            .bootstrap(&format!("//evil.example/?token={}&a=1", g.token))
+            .unwrap();
+        assert_eq!(loc, "/?a=1");
+        // other spellings of the key go too
+        let t = &g.token;
+        let (loc, _) = g
+            .bootstrap(&format!(
+                "/?token={t}&TOKEN={t}&token[]={t}&token+={t}&token%00={t}&a=1;token={t}&%20Token%20={t}&b=2"
+            ))
+            .unwrap();
+        assert_eq!(loc, "/?a=1&b=2");
     }
 
     #[test]

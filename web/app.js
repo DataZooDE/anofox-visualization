@@ -1174,6 +1174,9 @@ const servedViewer = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => 
 const servedAborts = new Map(); // "panel/kind" -> AbortController
 let servedTables = 0; // per-table-instance suffix for the kinds
 const isAbort = (e) => e && e.name === "AbortError";
+// The output name of a ::PAGED table's ::INFO column (sql::INFO_COLUMN): the
+// only column a page request may leave out (`omit`).
+const INFO_COLUMN = "__anofox_info";
 
 // Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
@@ -1376,16 +1379,17 @@ async function ensureDataFiles(sql) {
 // {base, count?, limit?, offset?, sort?, desc?, filter?} — so the locked server
 // builds the paging SQL itself. `kind` (served mode only): a newer request of
 // the same panel + kind supersedes this one (it then rejects with an AbortError).
-async function runSql(sql, page, kind) {
+// `setup`: the statement is one of the dashboard's own setup statements.
+async function runSql(sql, page, kind, setup) {
   const t0 = performance.now();
   try {
-    return await runSqlInner(sql, page, kind);
+    return await runSqlInner(sql, page, kind, setup);
   } finally {
     // timing for the perf check (scripts/perf-e2e.mjs reads the "dp:sql" entries)
     performance.measure("dp:sql", { start: t0, detail: String(sql).slice(0, 120) });
   }
 }
-async function runSqlInner(sql, page, kind) {
+async function runSqlInner(sql, page, kind, setup) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
@@ -1394,10 +1398,12 @@ async function runSqlInner(sql, page, kind) {
   if (STATS_RE.test(code)) await ensureExtension("anofox_statistics");
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
   if (servedMode) {
-    // Capture a SET VARIABLE (never sent as SQL) …
-    const m = sql.match(/^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i);
-    if (m) {
-      servedVars[m[1]] = sqlLiteralToJson(m[2]);
+    // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
+    // own SET VARIABLEs are not viewer values: the server re-runs them after
+    // the viewer's (an expression such as coalesce(getvariable('x'), …) must
+    // see the viewer's value, not its own source text).
+    if (setv) {
+      if (!setup) servedVars[setv[1]] = sqlLiteralToJson(setv[2]);
       return "[]";
     }
     // … and send the statement's plan index + the variable values.
@@ -6131,7 +6137,7 @@ const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join
 const CREATE_RE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO|FUNCTION|SEQUENCE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w."]+)/i;
 async function runSetup(sql) {
   const sig = varSig(sql);
-  await runSql(sql);
+  await runSql(sql, undefined, undefined, true);
   const code = sqlCode(sql);
   const made = CREATE_RE.exec(code);
   const name = made && made[1].toLowerCase();
@@ -6626,9 +6632,15 @@ async function runOnce(fresh = true) {
         fig.className = "panel";
         fig._async = true; // its rows load after the swap: a re-run never keeps it
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+        // An ::INFO column is the ⓘ text, not a column: every request leaves
+        // it out (`omit` names it — the planner gives it a fixed name, see
+        // sql::INFO_COLUMN) and the indexes after it shift.
+        const infoR = s.roles.find((r) => r[1] === "INFO");
+        const proles = infoR ? s.roles.filter((r) => r !== infoR).map((ri) => (ri[0] > infoR[0] ? [ri[0] - 1, ri[1]] : ri)) : s.roles;
+        let infoText = null;
         const fmtByIdx = {};
-        for (const [ix, r] of s.roles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
-        const titleRole = s.roles.find((r) => r[1] === "TITLE");
+        for (const [ix, r] of proles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
+        const titleRole = proles.find((r) => r[1] === "TITLE");
         const titleIdx = titleRole ? titleRole[0] : -1;
         const base = s.sql;
         const idx = i;
@@ -6668,8 +6680,9 @@ async function runOnce(fresh = true) {
         // A newer load (page, sort, search…) supersedes the running one; so does
         // a newer Scroll-view block.
         const inst = ++servedTables;
-        const pageReq = async (extra, withFilters = true, kind) => {
+        const pageReq = async (extra, withFilters = true, kind, withInfo = false) => {
           const page = { ...extra };
+          if (infoR && !withInfo) page.omit = [INFO_COLUMN];
           if (withFilters) {
             const q = (dpFilterText[idx] || "").trim();
             if (q) page.filter = q;
@@ -6694,6 +6707,11 @@ async function runOnce(fresh = true) {
           const scroll = st.view === "scroll";
           let rows = [];
           try {
+            if (infoR && infoText == null) {
+              // the definition, from the first row
+              const r0 = (await pageReq({ limit: 1 }, false, "load", true))[0];
+              infoText = String(r0?.[INFO_COLUMN] ?? "").replace(/^"|"$/g, "");
+            }
             rows = await pageReq({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() }, true, "load");
             if (!stats) {
               // the column names come from a page; a search with no hits still
@@ -6727,6 +6745,7 @@ async function runOnce(fresh = true) {
             if (tv != null) titleHolder.appendChild(mkTitle((caption = String(tv).replace(/^"|"$/g, ""))));
             sk = titleIdx;
           }
+          if (infoText && !fig.querySelector(".dp-info")) addInfo(fig, infoText); // (a new title drops it)
           const reload = () => {
             stats = null;
             dpPage[idx] = 0;

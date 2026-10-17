@@ -409,11 +409,26 @@ GROUP BY region;
 ```
 
 **Only filter on claims, never on viewer variables.** Any variable that is not
-a claim is set by the viewer and can hold any value. Optionally restrict the
+a claim is set by the viewer and can hold any value. A column that raises an
+`error()` is not an access control either: a `::PAGED` table's requests (count,
+distinct values, stats, a page without its `::INFO` column) evaluate only the
+columns they need — put access rules in a `WHERE` on the claims or in the
+policy. Optionally restrict the
 viewer-settable variables of a dashboard with a header line
 `-- @vars region, channel, selected`; variables not listed are dropped (never
 set) on a locked server. List the dashboard's inputs, named selections and
 `selected` (the client sends the shared click selection).
+
+**The dashboard's own `SET VARIABLE`s run after the viewer's values.** Every
+panel request sets the viewer's values (typed literals), then re-runs the
+dashboard's setup statements before that panel, best effort (a failing one is
+logged and skipped): a plain `SET VARIABLE x = …` overrides a viewer's `x`
+only when it succeeds — one that reads another viewer-settable variable can be
+made to fail — so it is a default, never an access rule. A default such as
+`SET VARIABLE x = coalesce(nullif(getvariable('x'), ''), (SELECT max(run) FROM
+runs))` keeps the viewer's `x`. Restrict what viewers can set with `-- @vars`,
+and filter on claims. The browser sends only what the viewer set (inputs,
+selections, `?v.` values) — never a dashboard's own `SET VARIABLE` text.
 
 **Per-viewer caching.** The result cache and the single-flight key include the
 viewer's claims (user, groups, every extra claim), so a result computed for one
