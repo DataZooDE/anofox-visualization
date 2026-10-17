@@ -64,8 +64,8 @@ async function exploreRun({ width, dark }) {
   if (width < 600 && (await page.isHidden("#side-explore"))) await page.click("#side-toggle");
   await page.click("#side-explore");
   if (!(await page.evaluate(() => document.body.classList.contains("mode-explore")))) return fail(`${tag}: Explore did not open`);
-  // a phone hides the dashboard list once you are in Explore
-  if (width < 600 && !(await page.evaluate(() => document.body.classList.contains("side-collapsed")))) await page.click("#side-toggle");
+  // a phone's sidebar drawer closes once Explore is picked
+  if (await page.evaluate(() => document.body.classList.contains("side-open"))) fail(`${tag}: the sidebar drawer stays open over Explore`);
   await page.waitForSelector(".cat-table");
   const tables = await page.$$eval(".cat-table", (b) => b.map((x) => x.dataset.fq));
   if (tables.length < 3) fail(`${tag}: only ${tables.length} tables in the catalog`);
@@ -202,7 +202,6 @@ async function exploreRun({ width, dark }) {
   // The last picked table comes back (per viewer) in a new visit.
   const again = await ctx.newPage();
   await open(again, "Period & KPIs", true);
-  await again.click(width < 600 && (await again.isHidden("#side-explore")) ? "#side-toggle" : "body", { position: { x: 1, y: 1 } }).catch(() => {});
   await again.evaluate(() => document.getElementById("side-explore").click());
   await again.waitForFunction(() => document.querySelector(".xp-h")?.textContent === "shop", null, { timeout: 60000 }).then(
     () => ok(`${tag}: the last table is picked again`),
