@@ -1,0 +1,1255 @@
+//! Maps: the extension's own SVG writer for `::MAP` panels.
+//!
+//! A map panel's rows carry WKT (`::MAP`), optionally a backdrop
+//! (`::BASEMAP`), a measure or a `::CATEGORY` to colour by, a `::LABEL`, a
+//! layer opacity (`::ALPHA`) and the map modifiers `::PROJECTION`,
+//! `::CLASSES`, `::MIDPOINT` and `::RANGE`. The writer:
+//!
+//! 1. parses each row's WKT once (`ggplot_rs::spatial::parse_wkt`),
+//! 2. resolves the projection (`'auto'` by the data's extent) and projects
+//!    every vertex, densifying long edges where the projection curves them,
+//! 3. fits the projected box into the panel (or the browser's zoom window),
+//! 4. simplifies each ring in pixel space (0.5 px) and writes compact
+//!    relative `<path>` data — `fill-rule="evenodd"`, so holes are cut out —
+//!    and `<circle>`s for points,
+//! 5. colours by a themed sequential or diverging ramp (continuous, or in
+//!    classes with a stepped legend and counts), or by the theme palette,
+//! 6. writes a legend strip, a hatch for rows without a value and a
+//!    one-sentence summary (`<desc>` and `data-summary`).
+//!
+//! Features are drawn in row order. Each carries `data-row`, `data-series`
+//! (its `::CATEGORY`, else its `::LABEL`), `data-value` (the raw measure),
+//! `data-label`, `data-x` (its key when it has no label: the row) and, when
+//! classed, `data-class` (1-based), plus a `<title>`; the root carries
+//! `data-map`, `data-proj` and `data-classes` (the class labels as JSON).
+
+pub(crate) mod classes;
+pub(crate) mod project;
+mod write;
+
+use crate::format::{escape_xml as esc, ValueFmt};
+use crate::theme::{hex, mix};
+use crate::{
+    cell_num, find_role, role_num, role_str, value_fmt, value_str, Column, Kind, Ramp,
+    RenderOptions, Role,
+};
+use classes::{Classes, Method};
+use ggplot_rs::prelude::Value;
+use ggplot_rs::spatial::{parse_wkt, Geometry};
+use project::{Extent, Proj, Projection};
+use write::{push_path, simplify, tenths};
+
+type Rgb = (u8, u8, u8);
+
+/// Drawn marks above which a render warning suggests aggregating.
+pub(crate) const MARK_WARN: usize = 100_000;
+/// Pixel tolerance of the screen-space simplification.
+const SIMPLIFY_PX: f64 = 0.5;
+/// Legend and summary text size (as the plotting engine's legends).
+const FONT: f64 = 8.8;
+/// Point radius.
+const POINT_R: f64 = 3.0;
+
+/// One drawable part of a feature, in lon/lat or projected units.
+#[derive(Clone, Debug)]
+enum Shape {
+    /// One polygon: its exterior ring, then its holes.
+    Area(Vec<Vec<[f64; 2]>>),
+    Line(Vec<[f64; 2]>),
+    Point([f64; 2]),
+}
+
+fn shapes(g: &Geometry, out: &mut Vec<Shape>) {
+    match g {
+        Geometry::Empty => {}
+        Geometry::Point(c) => out.push(Shape::Point(*c)),
+        Geometry::MultiPoint(cs) => out.extend(cs.iter().map(|c| Shape::Point(*c))),
+        Geometry::LineString(cs) => out.push(Shape::Line(cs.clone())),
+        Geometry::MultiLineString(ls) => out.extend(ls.iter().map(|l| Shape::Line(l.clone()))),
+        Geometry::Polygon(rings) => out.push(Shape::Area(rings.clone())),
+        Geometry::MultiPolygon(ps) => out.extend(ps.iter().map(|p| Shape::Area(p.clone()))),
+        Geometry::Collection(gs) => gs.iter().for_each(|g| shapes(g, out)),
+    }
+}
+
+fn for_coords(s: &Shape, f: &mut impl FnMut([f64; 2])) {
+    match s {
+        Shape::Area(rings) => rings.iter().flatten().for_each(|c| f(*c)),
+        Shape::Line(cs) => cs.iter().for_each(|c| f(*c)),
+        Shape::Point(c) => f(*c),
+    }
+}
+
+/// Project one shape (vertices without an image are dropped).
+fn project_shape(s: &Shape, p: &Proj) -> Option<Shape> {
+    let path = |cs: &[[f64; 2]]| -> Vec<[f64; 2]> {
+        let dense;
+        let cs = if p.curves() {
+            dense = project::densify(cs, 1.0);
+            &dense[..]
+        } else {
+            cs
+        };
+        cs.iter().filter_map(|c| p.forward(*c)).collect()
+    };
+    match s {
+        Shape::Point(c) => p.forward(*c).map(Shape::Point),
+        Shape::Line(cs) => {
+            Some(Shape::Line(path(cs))).filter(|s| matches!(s, Shape::Line(v) if v.len() > 1))
+        }
+        Shape::Area(rings) => {
+            let rings: Vec<_> = rings
+                .iter()
+                .map(|r| path(r))
+                .filter(|r| r.len() > 2)
+                .collect();
+            (!rings.is_empty()).then_some(Shape::Area(rings))
+        }
+    }
+}
+
+/// The WKT column of a map: the first `::MAP`-role column holding text.
+/// (`::CHOROPLETH` is an alias of `::MAP`, so `v::CHOROPLETH` next to a
+/// geometry is a *second* geometry-role column — a numeric one is the measure.)
+pub(crate) fn geometry(cols: &[Column]) -> Option<&Column> {
+    cols.iter().find(|c| {
+        c.role == Role::Geometry
+            && c.values
+                .iter()
+                .any(|v| matches!(v, Value::Str(s) if !s.is_empty() && crate::num_str(s).is_none()))
+    })
+}
+
+/// Parsed geometry per row (`None`: missing or unparseable WKT).
+fn parse_column(c: Option<&Column>, n: usize) -> Vec<Vec<Shape>> {
+    (0..n)
+        .map(|i| {
+            let mut out = Vec::new();
+            if let Some(g) = c.and_then(|c| c.values.get(i)).and_then(|v| match v {
+                Value::Str(s) => parse_wkt(s),
+                _ => None,
+            }) {
+                shapes(&g, &mut out);
+            }
+            out
+        })
+        .collect()
+}
+
+/// What a map is coloured by.
+enum Fill {
+    /// A measure: per-row values and the colour scale.
+    Measure(Box<ValueScale>),
+    /// A `::CATEGORY`: the level of each row and the legend entries.
+    Category {
+        of_row: Vec<Option<usize>>,
+        levels: Vec<(String, Rgb)>,
+    },
+    /// Nothing: a light brand tint.
+    Plain(Rgb),
+}
+
+/// The colour scale of a measure.
+struct ValueScale {
+    /// The value of each row (`None` = no data).
+    values: Vec<Option<f64>>,
+    ramp: Ramp,
+    /// The diverging centre (the ramp runs over `value - mid`).
+    mid: f64,
+    diverging: bool,
+    /// Where a sequential ramp starts (a quarter in over a basemap, so pale
+    /// points don't vanish into it).
+    start: f64,
+    /// The colour domain (after a `::RANGE` cap).
+    lo: f64,
+    hi: f64,
+    /// Values beyond the `::RANGE` cap on either side.
+    capped_lo: bool,
+    capped_hi: bool,
+    classes: Option<(Method, Classes, Vec<Rgb>)>,
+    fmt: ValueFmt,
+}
+
+impl ValueScale {
+    fn color_at(&self, v: f64) -> Rgb {
+        let v = v.clamp(self.lo, self.hi);
+        if self.diverging {
+            return self.ramp.color_of(v - self.mid);
+        }
+        let span = self.hi - self.lo;
+        let p = if span > 0.0 {
+            (v - self.lo) / span
+        } else {
+            1.0
+        };
+        self.ramp.color_at(self.start + (1.0 - self.start) * p)
+    }
+
+    /// The colour and class (0-based) of a value.
+    fn color(&self, v: f64) -> (Rgb, Option<usize>) {
+        match &self.classes {
+            Some((_, c, colors)) => {
+                let i = c.index(v.clamp(self.lo, self.hi));
+                (colors[i], Some(i))
+            }
+            None => (self.color_at(v), None),
+        }
+    }
+}
+
+/// The parsed modifiers and columns of a map panel.
+struct Model<'a> {
+    rows: usize,
+    features: Vec<Vec<Shape>>,
+    base: Vec<Vec<Shape>>,
+    label: Option<&'a Column>,
+    category: Option<&'a Column>,
+    alpha: f64,
+    projection: Projection,
+    proj: Proj,
+    fill: Fill,
+}
+
+/// The `::RANGE 'lo,hi'` of a map (a colour-domain cap).
+fn range_of(cols: &[Column]) -> Option<(f64, f64)> {
+    let s = find_role(cols, Role::Range)?
+        .values
+        .iter()
+        .find(|v| !matches!(v, Value::Na))
+        .map(value_str)?;
+    let p: Vec<f64> = s
+        .trim_matches(|c| c == '[' || c == ']')
+        .split([',', ';'])
+        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+        .collect();
+    match p.as_slice() {
+        [a, b] if a != b => Some((a.min(*b), a.max(*b))),
+        _ => None,
+    }
+}
+
+/// The measure column of a map: a chart-kind column, or a numeric second
+/// `::MAP`/`::CHOROPLETH` column (`region::MAP, sales::CHOROPLETH`).
+fn measure_of(cols: &[Column], geom: &Column) -> Option<Column> {
+    let numeric_geometry = cols
+        .iter()
+        .find(|c| {
+            c.role == Role::Geometry
+                && !std::ptr::eq(*c, geom)
+                && c.values.iter().any(|v| cell_num(v).is_some())
+                && c.values
+                    .iter()
+                    .all(|v| *v == Value::Na || cell_num(v).is_some())
+        })
+        .map(|c| {
+            let vals = c
+                .values
+                .iter()
+                .map(|v| cell_num(v).map_or(Value::Na, Value::Float))
+                .collect();
+            Column::new(c.name.clone(), Role::Value(Kind::Bar), vals)
+        });
+    cols.iter()
+        .find(|c| matches!(c.role, Role::Value(_)))
+        .cloned()
+        .or(numeric_geometry)
+        .filter(|c| c.values.iter().any(|v| v.as_f64().is_some()))
+}
+
+impl<'a> Model<'a> {
+    fn new(o: &RenderOptions, cols: &'a [Column]) -> Option<Model<'a>> {
+        let geom = geometry(cols)?;
+        let rows = geom.values.len();
+        let features = parse_column(Some(geom), rows);
+        let base = parse_column(find_role(cols, Role::Basemap), rows);
+        // an unknown name draws as 'auto' (lint: map/unknown-projection)
+        let projection = role_str(cols, Role::Projection)
+            .and_then(|s| Projection::parse(&s))
+            .unwrap_or(Projection::Auto);
+        let mut extent = Extent::new();
+        for s in features.iter().chain(&base).flatten() {
+            for_coords(s, &mut |c| extent.add(c));
+        }
+        let (projection, proj) = Proj::setup(projection, &extent);
+        let features = features
+            .iter()
+            .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
+            .collect();
+        let base = base
+            .iter()
+            .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
+            .collect();
+        let measure = measure_of(cols, geom);
+        let category =
+            find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
+        let has_base = find_role(cols, Role::Basemap).is_some();
+        let fill = match (&measure, category) {
+            (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
+            (None, Some(c)) => category_fill(o, c, rows),
+            (None, None) => Fill::Plain(crate::wash(o, o.brand(), 0.55)),
+        };
+        Some(Model {
+            rows,
+            features,
+            base,
+            label: find_role(cols, Role::Label),
+            category,
+            alpha: role_num(cols, Role::Alpha)
+                .map(|a| a.clamp(0.05, 1.0))
+                .unwrap_or(1.0),
+            projection,
+            proj,
+            fill,
+        })
+    }
+
+    /// The projected box of everything drawn (data and backdrop).
+    fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut e = Extent::new();
+        for s in self.features.iter().chain(&self.base).flatten() {
+            for_coords(s, &mut |c| e.add(c));
+        }
+        (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
+    }
+
+    fn text(&self, c: Option<&Column>, i: usize) -> String {
+        match c.and_then(|c| c.values.get(i)) {
+            None | Some(Value::Na) => String::new(),
+            Some(v) => value_str(v),
+        }
+    }
+}
+
+/// The colour scale of a measure: classes when `::CLASSES` is set, a
+/// diverging ramp when the values span the midpoint (0, or `::MIDPOINT`),
+/// else sequential; `::RANGE` caps the domain.
+fn value_scale(
+    o: &RenderOptions,
+    cols: &[Column],
+    m: &Column,
+    over_base: bool,
+    rows: usize,
+) -> ValueScale {
+    let values: Vec<Option<f64>> = (0..rows)
+        .map(|i| {
+            m.values
+                .get(i)
+                .and_then(Value::as_f64)
+                .filter(|f| f.is_finite())
+        })
+        .collect();
+    let finite: Vec<f64> = values.iter().flatten().copied().collect();
+    let (min, max) = finite
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+            (a.min(*v), b.max(*v))
+        });
+    let (lo, hi) = match range_of(cols) {
+        Some((a, b)) => (a, b),
+        None => (min, max),
+    };
+    let explicit_mid = role_num(cols, Role::Midpoint);
+    let mid = explicit_mid.unwrap_or(0.0);
+    let diverging = explicit_mid.is_some() || (lo < mid && hi > mid);
+    let ramp = if diverging {
+        // the ramp diverges only across its zero: keep both arms present
+        let span = (hi - lo).abs().max(1e-9);
+        Ramp::new(
+            o,
+            o.theme.seq_low(),
+            (lo - mid).min(-1e-9 * span),
+            (hi - mid).max(1e-9 * span),
+        )
+    } else {
+        Ramp::new(o, o.theme.seq_low(), lo, hi)
+    };
+    let kind = match m.role {
+        Role::Value(k) => k,
+        _ => Kind::Bar,
+    };
+    let mut scale = ValueScale {
+        values,
+        ramp,
+        mid,
+        diverging,
+        // (in the dark variant the low end recedes into the card: start later)
+        start: match (over_base && !diverging, o.theme.variant) {
+            (false, _) => 0.0,
+            (true, crate::theme::Variant::Dark) => 0.4,
+            (true, _) => 0.25,
+        },
+        lo,
+        hi,
+        capped_lo: min < lo,
+        capped_hi: max > hi,
+        classes: None,
+        fmt: value_fmt(cols, kind, &m.values),
+    };
+    // a bad spec draws a continuous ramp (lint: map/bad-classes)
+    if let Some(spec) = role_str(cols, Role::Classes) {
+        match Method::parse(&spec) {
+            Err(_) => {}
+            Ok(method) => {
+                let clamped: Vec<f64> = finite.iter().map(|v| v.clamp(lo, hi)).collect();
+                if let Some(mut c) = Classes::build(&method, &clamped) {
+                    c.open_lo |= scale.capped_lo;
+                    c.open_hi |= scale.capped_hi;
+                    let k = c.len();
+                    let colors = (0..k)
+                        .map(|i| {
+                            if scale.diverging {
+                                let (a, b) = c.bounds(i);
+                                scale.color_at((a + b) / 2.0)
+                            } else {
+                                let p = (i + 1) as f64 / k as f64;
+                                scale.ramp.color_at(scale.start + (1.0 - scale.start) * p)
+                            }
+                        })
+                        .collect();
+                    scale.classes = Some((method, c, colors));
+                }
+            }
+        }
+    }
+    scale
+}
+
+/// Colours by `::CATEGORY`: the theme palette over the levels in sorted
+/// order (so a level keeps its colour across charts); a level that is
+/// itself `#rrggbb` is drawn in that colour.
+fn category_fill(o: &RenderOptions, c: &Column, rows: usize) -> Fill {
+    let levels = crate::distinct_labels(c);
+    let levels: Vec<String> = levels.into_iter().filter(|l| !l.is_empty()).collect();
+    let colors: Vec<(String, Rgb)> = levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let col = crate::parse_rgb(l).unwrap_or_else(|| o.theme.color(i));
+            (l.clone(), col)
+        })
+        .collect();
+    let of_row = (0..rows)
+        .map(|i| {
+            let v = c.values.get(i).map(value_str).unwrap_or_default();
+            levels.iter().position(|l| *l == v)
+        })
+        .collect();
+    Fill::Category {
+        of_row,
+        levels: colors,
+    }
+}
+
+/// Screen transform: projected `(x, y)` (y up) → panel pixels.
+#[derive(Clone, Copy, Debug)]
+struct Frame {
+    s: f64,
+    ox: f64,
+    oy: f64,
+    x0: f64,
+    y1: f64,
+}
+
+impl Frame {
+    /// Fit the box `(x0, y0, x1, y1)` into the rectangle `(ax, ay, aw, ah)`,
+    /// centred, keeping the aspect.
+    fn fit(b: (f64, f64, f64, f64), area: (f64, f64, f64, f64)) -> Frame {
+        let (x0, y0, x1, y1) = b;
+        let (ax, ay, aw, ah) = area;
+        let (bw, bh) = ((x1 - x0).max(1e-12), (y1 - y0).max(1e-12));
+        let s = (aw / bw).min(ah / bh);
+        Frame {
+            s,
+            ox: ax + (aw - bw * s) / 2.0,
+            oy: ay + (ah - bh * s) / 2.0,
+            x0,
+            y1,
+        }
+    }
+
+    fn at(&self, [x, y]: [f64; 2]) -> (f64, f64) {
+        (
+            self.ox + (x - self.x0) * self.s,
+            self.oy + (self.y1 - y) * self.s,
+        )
+    }
+
+    /// The projected window `[x0, x1, y0, y1]` the whole `w`×`h` panel shows.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    fn window(&self, w: f64, h: f64) -> [f64; 4] {
+        let x0 = self.x0 - self.ox / self.s;
+        let y1 = self.y1 + self.oy / self.s;
+        [x0, x0 + w / self.s, y1 - h / self.s, y1]
+    }
+}
+
+/// The box with a 4% margin (a lone point gets a small neighbourhood).
+fn padded((x0, y0, x1, y1): (f64, f64, f64, f64), planar: bool) -> (f64, f64, f64, f64) {
+    let (w, h) = (x1 - x0, y1 - y0);
+    let unit = if planar { 1.0 } else { 1_000.0 };
+    let m = 0.04 * w.max(h);
+    let (mx, my) = if w <= 0.0 && h <= 0.0 {
+        (unit, unit)
+    } else {
+        (m.max(0.04 * w), m.max(0.04 * h))
+    };
+    (x0 - mx, y0 - my, x1 + mx, y1 + my)
+}
+
+/// The legend strip at the top of a map.
+enum Legend {
+    None,
+    Category(Vec<(String, Rgb)>),
+    Gradient {
+        stops: Vec<Rgb>,
+        ticks: Vec<(f64, String)>,
+    },
+    Steps {
+        colors: Vec<Rgb>,
+        ticks: Vec<String>,
+        counts: Vec<usize>,
+    },
+}
+
+/// The legend and its height at panel width `w`.
+fn legend_of(o: &RenderOptions, m: &Model, w: f64) -> (Legend, usize, f64) {
+    // drawn rows without a value (rows without geometry — a backdrop's —
+    // don't count)
+    let nodata = match &m.fill {
+        Fill::Measure(s) => (0..m.rows)
+            .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
+            .count(),
+        _ => 0,
+    };
+    let legend = match &m.fill {
+        Fill::Plain(_) => Legend::None,
+        Fill::Category { levels, .. } => Legend::Category(levels.clone()),
+        Fill::Measure(s) => {
+            let short = |v: f64| s.fmt.short(v, &o.locale);
+            match &s.classes {
+                Some((_, c, colors)) => {
+                    let mut ticks: Vec<String> = (0..=c.len())
+                        .map(|i| {
+                            let v = if i == 0 {
+                                c.lo
+                            } else if i == c.len() {
+                                c.hi
+                            } else {
+                                c.edges[i - 1]
+                            };
+                            short(v)
+                        })
+                        .collect();
+                    if c.open_lo {
+                        ticks[0] = format!("≤{}", ticks[0]);
+                    }
+                    if c.open_hi {
+                        let l = ticks.len() - 1;
+                        ticks[l] = format!("≥{}", ticks[l]);
+                    }
+                    Legend::Steps {
+                        colors: colors.clone(),
+                        ticks,
+                        counts: c.counts.clone(),
+                    }
+                }
+                None => {
+                    let stops = (0..=16)
+                        .map(|i| s.color_at(s.lo + (s.hi - s.lo) * i as f64 / 16.0))
+                        .collect();
+                    let mut ticks = vec![(0.0, short(s.lo)), (1.0, short(s.hi))];
+                    if s.capped_lo {
+                        ticks[0].1 = format!("≤{}", ticks[0].1);
+                    }
+                    if s.capped_hi {
+                        ticks[1].1 = format!("≥{}", ticks[1].1);
+                    }
+                    if s.diverging && s.mid > s.lo && s.mid < s.hi && s.hi > s.lo {
+                        ticks.insert(1, ((s.mid - s.lo) / (s.hi - s.lo), short(s.mid)));
+                    }
+                    if s.hi <= s.lo {
+                        ticks.truncate(1);
+                        ticks[0].0 = 0.5;
+                    }
+                    Legend::Gradient { stops, ticks }
+                }
+            }
+        }
+    };
+    let h = match &legend {
+        Legend::None if nodata == 0 => 0.0,
+        Legend::None => 18.0,
+        Legend::Category(items) => {
+            let rows = category_rows(items, w).len().max(1);
+            8.0 + rows as f64 * 14.0
+        }
+        Legend::Gradient { .. } | Legend::Steps { .. } => 34.0,
+    };
+    (legend, nodata, h)
+}
+
+/// Category legend entries packed into rows that fit `w`: `(x, entry)`.
+fn category_rows(items: &[(String, Rgb)], w: f64) -> Vec<Vec<(f64, usize)>> {
+    let mut rows: Vec<Vec<(f64, usize)>> = vec![Vec::new()];
+    let mut x = 4.0;
+    for (i, (name, _)) in items.iter().enumerate() {
+        let iw = 12.0 + crate::ticks::text_width(name, FONT) + 12.0;
+        if x + iw > w - 4.0 && !rows.last().unwrap().is_empty() {
+            rows.push(Vec::new());
+            x = 4.0;
+        }
+        rows.last_mut().unwrap().push((x, i));
+        x += iw;
+    }
+    rows
+}
+
+/// A stable id prefix for this map's `<defs>` (pages hold many SVGs).
+fn id_of(cols: &[Column], w: u32, h: u32) -> String {
+    let mut x: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |b: &[u8]| {
+        for c in b {
+            x ^= *c as u64;
+            x = x.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    eat(&w.to_le_bytes());
+    eat(&h.to_le_bytes());
+    for c in cols {
+        eat(c.name.as_bytes());
+        for v in c.values.iter().take(64) {
+            eat(value_str(v).as_bytes());
+        }
+        eat(&c.values.len().to_le_bytes());
+    }
+    format!("m{:08x}", x as u32)
+}
+
+/// An attribute value: escaped, newlines kept as `&#10;`.
+fn attr(s: &str) -> String {
+    esc(s).replace('\n', "&#10;").replace('\r', "&#13;")
+}
+
+/// A rendered map: the SVG body, its root attributes and render warnings.
+pub(crate) struct Drawn {
+    pub body: String,
+    pub attrs: Vec<(&'static str, String)>,
+    pub warnings: Vec<String>,
+}
+
+/// The map's frame: the zoom window over the whole panel, else the data's
+/// box (with its margin) fitted below the legend.
+fn frame_of(m: &Model, o: &RenderOptions, w: f64, h: f64, legend_h: f64) -> Option<Frame> {
+    if let Some(((x0, x1), (y0, y1))) = o.zoom {
+        if [x0, x1, y0, y1].iter().all(|f| f.is_finite()) && x1 > x0 && y1 > y0 {
+            return Some(Frame::fit((x0, y0, x1, y1), (0.0, 0.0, w, h)));
+        }
+    }
+    let b = padded(m.bbox()?, matches!(m.proj, Proj::Identity));
+    let top = legend_h + 2.0;
+    Some(Frame::fit(b, (2.0, top, w - 4.0, (h - top - 2.0).max(1.0))))
+}
+
+/// The projected window `[x0, x1, y0, y1]` the panel shows when not zoomed
+/// (the browser's zoom starts from it); `w`/`h` 0 = the data's box alone.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) -> Option<[f64; 4]> {
+    let m = Model::new(o, cols)?;
+    if w == 0 || h == 0 {
+        let (x0, y0, x1, y1) = m.bbox()?;
+        return Some([x0, x1, y0, y1]);
+    }
+    let (w, h) = (w as f64, h as f64);
+    let (_, _, lh) = legend_of(o, &m, w);
+    let o = RenderOptions {
+        zoom: None,
+        ..o.clone()
+    };
+    frame_of(&m, &o, w, h, lh).map(|f| f.window(w, h))
+}
+
+/// Render a map panel's body (`None` when no row has geometry).
+pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
+    let m = Model::new(o, cols)?;
+    let (w, h) = (width as f64, height as f64);
+    let (legend, nodata, lh) = legend_of(o, &m, w);
+    let frame = frame_of(&m, o, w, h, lh)?;
+    let t = &o.theme;
+    let id = id_of(cols, width, height);
+    let card = t.colors.card;
+    let font = esc(&t.svg_font());
+    let mut out = String::with_capacity(16 * 1024);
+    let mut warnings = Vec::new();
+
+    // ---- defs: the no-data hatch, the gradient
+    let hatch_bg = mix(t.colors.muted, card, 0.85);
+    let hatch_fg = mix(t.colors.muted, card, 0.35);
+    let mut defs = String::new();
+    if nodata > 0 {
+        defs.push_str(&format!(
+            "<pattern id=\"{id}-nd\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><rect width=\"4\" height=\"4\" fill=\"{}\"/><path d=\"M0 0v4\" stroke=\"{}\" stroke-width=\"1.2\"/></pattern>",
+            hex(hatch_bg),
+            hex(hatch_fg)
+        ));
+    }
+    if let Legend::Gradient { stops, .. } = &legend {
+        defs.push_str(&format!("<linearGradient id=\"{id}-g\">"));
+        for (i, c) in stops.iter().enumerate() {
+            defs.push_str(&format!(
+                "<stop offset=\"{:.3}\" stop-color=\"{}\"/>",
+                i as f64 / (stops.len() - 1).max(1) as f64,
+                hex(*c)
+            ));
+        }
+        defs.push_str("</linearGradient>");
+    }
+    if !defs.is_empty() {
+        out.push_str(&format!("<defs>{defs}</defs>"));
+    }
+
+    // ---- the basemap
+    let viewport = (-20.0, -20.0, w + 20.0, h + 20.0);
+    let mut marks = 0usize;
+    let land = mix(t.colors.muted, card, 0.92);
+    let land_edge = mix(t.colors.muted, card, 0.7);
+    let mut base = String::new();
+    for f in &m.base {
+        let d = path_d(f, &frame, viewport, true);
+        if !d.is_empty() {
+            base.push_str(&format!("<path d=\"{d}\"/>"));
+            marks += 1;
+        }
+    }
+    if !base.is_empty() {
+        out.push_str(&format!(
+            "<g class=\"dp-basemap\" fill=\"{}\" fill-rule=\"evenodd\" stroke=\"{}\" stroke-width=\".5\" stroke-linejoin=\"round\">{base}</g>",
+            hex(land),
+            hex(land_edge)
+        ));
+    }
+
+    // ---- the features, in row order
+    let border = t.chart_grid();
+    let plain_edge = mix(t.colors.muted, card, 0.35);
+    let alpha = if m.alpha < 1.0 {
+        format!("{:.2}", m.alpha)
+    } else {
+        String::new()
+    };
+    let fmt_full = |s: &ValueScale, v: f64| s.fmt.full(v, &o.locale);
+    // the areas' border and fill rule sit on the group (lines and points
+    // set their own stroke)
+    let edge = if matches!(m.fill, Fill::Plain(_)) {
+        plain_edge
+    } else {
+        border
+    };
+    out.push_str(&format!(
+        "<g class=\"dp-features\" fill-rule=\"evenodd\" stroke=\"{}\" stroke-width=\".6\" stroke-linejoin=\"round\" stroke-linecap=\"round\">",
+        hex(edge)
+    ));
+    for (i, f) in m.features.iter().enumerate() {
+        if f.is_empty() {
+            continue;
+        }
+        let label = m.text(m.label, i);
+        let cat = m.text(m.category, i);
+        let series = if cat.is_empty() {
+            label.clone()
+        } else {
+            cat.clone()
+        };
+        let (color, value, class, nd) = match &m.fill {
+            Fill::Measure(s) => match s.values[i] {
+                Some(v) => {
+                    let (c, k) = s.color(v);
+                    (c, Some(v), k, false)
+                }
+                None => (hatch_bg, None, None, true),
+            },
+            Fill::Category { of_row, levels } => (
+                of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
+                None,
+                None,
+                false,
+            ),
+            Fill::Plain(c) => (*c, None, None, false),
+        };
+        // the tooltip: "label: value", as the plotting engine wrote it
+        let shown = match (&m.fill, value) {
+            (Fill::Measure(s), Some(v)) => fmt_full(s, v),
+            (Fill::Measure(_), None) => "no data".to_string(),
+            (Fill::Category { .. }, _) => cat.clone(),
+            _ => String::new(),
+        };
+        let mut title = match (label.is_empty(), shown.is_empty()) {
+            (false, false) => format!("{label}: {shown}"),
+            (false, true) => label.clone(),
+            (true, _) => shown,
+        };
+        if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
+            if let Some((_, c, _)) = &s.classes {
+                title.push_str(&format!(
+                    " (class {} of {}: {})",
+                    k + 1,
+                    c.len(),
+                    c.label(k, &|v| s.fmt.short(v, &o.locale))
+                ));
+            }
+        }
+        // the key (when no label names it) and class first, then the row
+        // metadata the browser reads
+        let mut data = String::new();
+        if label.is_empty() {
+            data.push_str(&format!(" data-x=\"{i}\""));
+        }
+        if let Some(k) = class {
+            data.push_str(&format!(" data-class=\"{}\"", k + 1));
+        }
+        data.push_str(&format!(" data-row=\"{i}\""));
+        if !series.is_empty() {
+            data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
+        }
+        if let Some(v) = value {
+            data.push_str(&format!(" data-value=\"{v}\""));
+        }
+        if !label.is_empty() {
+            data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
+        }
+        let inner = if title.is_empty() {
+            "/>".to_string()
+        } else {
+            format!("><title>{}</title>", esc(&title))
+        };
+        let close = |tag: &str| {
+            if title.is_empty() {
+                String::new()
+            } else {
+                format!("</{tag}>")
+            }
+        };
+        let fill_attr = if nd {
+            format!("url(#{id}-nd)")
+        } else {
+            hex(color)
+        };
+        let fo = if alpha.is_empty() {
+            String::new()
+        } else {
+            format!(" fill-opacity=\"{alpha}\"")
+        };
+        let areas: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Area(_))).collect();
+        let lines: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Line(_))).collect();
+        if !areas.is_empty() {
+            let d = path_d_of(&areas, &frame, viewport, true);
+            if !d.is_empty() {
+                out.push_str(&format!(
+                    "<path d=\"{d}\" fill=\"{fill_attr}\"{fo}{data}{inner}{}",
+                    close("path")
+                ));
+                marks += 1;
+            }
+        }
+        if !lines.is_empty() {
+            let d = path_d_of(&lines, &frame, viewport, false);
+            if !d.is_empty() {
+                let so = if alpha.is_empty() {
+                    String::new()
+                } else {
+                    format!(" stroke-opacity=\"{alpha}\"")
+                };
+                out.push_str(&format!(
+                    "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"{so}{data}{inner}{}",
+                    if nd { hex(hatch_fg) } else { hex(color) },
+                    close("path")
+                ));
+                marks += 1;
+            }
+        }
+        for s in f {
+            if let Shape::Point(p) = s {
+                let (x, y) = frame.at(*p);
+                if x < viewport.0 || y < viewport.1 || x > viewport.2 || y > viewport.3 {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{POINT_R}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".5\"{data}{inner}{}",
+                    x,
+                    y,
+                    hex(card),
+                    close("circle")
+                ));
+                marks += 1;
+            }
+        }
+    }
+    out.push_str("</g>");
+    if marks > MARK_WARN {
+        warnings.push(format!(
+            "map: {marks} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light"
+        ));
+    }
+
+    // ---- the legend strip (over a card backing, for a zoomed map)
+    out.push_str(&legend_svg(o, &legend, nodata, &id, w, lh, &font));
+
+    // ---- summary and root attributes
+    let summary = summary(o, &m);
+    out.insert_str(0, &format!("<desc>{}</desc>", esc(&summary)));
+    let mut attrs = vec![
+        ("data-map", String::new()),
+        ("data-proj", m.projection.name().to_string()),
+        ("data-summary", summary),
+    ];
+    if let Fill::Measure(s) = &m.fill {
+        if let Some((_, c, _)) = &s.classes {
+            let labels: Vec<String> = (0..c.len())
+                .map(|k| c.label(k, &|v| s.fmt.short(v, &o.locale)))
+                .collect();
+            attrs.push((
+                "data-classes",
+                serde_json::to_string(&labels).unwrap_or_default(),
+            ));
+        }
+    }
+    Some(Drawn {
+        body: out,
+        attrs,
+        warnings,
+    })
+}
+
+/// Path data of one feature's shapes of one kind.
+fn path_d_of(shapes: &[&Shape], f: &Frame, vp: (f64, f64, f64, f64), close: bool) -> String {
+    let mut d = String::new();
+    for s in shapes {
+        match s {
+            Shape::Area(rings) => {
+                for r in rings {
+                    push_ring(&mut d, r, f, vp, true);
+                }
+            }
+            Shape::Line(cs) => push_ring(&mut d, cs, f, vp, close),
+            Shape::Point(_) => {}
+        }
+    }
+    d
+}
+
+/// Path data of a backdrop feature (areas and lines).
+fn path_d(shapes: &[Shape], f: &Frame, vp: (f64, f64, f64, f64), close: bool) -> String {
+    let refs: Vec<&Shape> = shapes.iter().collect();
+    path_d_of(&refs, f, vp, close)
+}
+
+/// Append one ring/line, simplified in pixel space; skipped when it lies
+/// wholly outside the viewport or shrinks below a pixel.
+fn push_ring(d: &mut String, pts: &[[f64; 2]], f: &Frame, vp: (f64, f64, f64, f64), close: bool) {
+    let scr: Vec<(f64, f64)> = pts.iter().map(|p| f.at(*p)).collect();
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for (x, y) in &scr {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(*x);
+        y1 = y1.max(*y);
+    }
+    if x1 < vp.0 || y1 < vp.1 || x0 > vp.2 || y0 > vp.3 {
+        return;
+    }
+    if close && (x1 - x0).max(y1 - y0) < 0.5 {
+        return;
+    }
+    let s = simplify(&scr, SIMPLIFY_PX);
+    if close && s.len() < 3 {
+        // a sliver: keep its box corners so it still shows
+        let a = tenths((x0, y0));
+        let b = tenths((x1, y1));
+        push_path(d, &[a, (b.0, a.1), b, (a.0, b.1)], true);
+        return;
+    }
+    push_path(d, &s, close);
+}
+
+/// The legend strip: category swatches, a gradient bar, or stepped classes
+/// with their counts; then the no-data hatch with its count.
+fn legend_svg(
+    o: &RenderOptions,
+    legend: &Legend,
+    nodata: usize,
+    id: &str,
+    w: f64,
+    lh: f64,
+    font: &str,
+) -> String {
+    if lh <= 0.0 {
+        return String::new();
+    }
+    let t = &o.theme;
+    let ink = hex(t.chart_label());
+    let muted = hex(t.chart_text());
+    let text = |x: f64, y: f64, anchor: &str, fill: &str, s: &str| {
+        format!(
+            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"{FONT}\" fill=\"{fill}\">{}</text>",
+            esc(s)
+        )
+    };
+    let mut g = format!(
+        "<g class=\"dp-legend\"><rect width=\"{w:.1}\" height=\"{lh:.1}\" fill=\"{}\" fill-opacity=\".88\"/>",
+        hex(t.colors.card)
+    );
+    let mut x_end = 4.0;
+    let nd_text = format!("No data ({nodata})");
+    match legend {
+        Legend::None => {}
+        Legend::Category(items) => {
+            for (r, row) in category_rows(items, w).iter().enumerate() {
+                let y = 10.0 + r as f64 * 14.0;
+                for (x, i) in row {
+                    let (name, c) = &items[*i];
+                    g.push_str(&format!(
+                        "<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"9\" height=\"9\" rx=\"1.5\" fill=\"{}\"/>",
+                        y - 4.5,
+                        hex(*c)
+                    ));
+                    g.push_str(&text(x + 13.0, y, "start", &ink, name));
+                    x_end = x + 13.0 + crate::ticks::text_width(name, FONT) + 12.0;
+                }
+            }
+        }
+        Legend::Gradient { ticks, .. } => {
+            let bw = (w * 0.3).clamp(80.0, 160.0);
+            g.push_str(&format!(
+                "<rect x=\"6\" y=\"8\" width=\"{bw:.1}\" height=\"8\" rx=\"1.5\" fill=\"url(#{id}-g)\"/>"
+            ));
+            for (p, s) in ticks {
+                let x = 6.0 + p * bw;
+                let anchor = if *p <= 0.0 {
+                    "start"
+                } else if *p >= 1.0 {
+                    "end"
+                } else {
+                    "middle"
+                };
+                g.push_str(&format!(
+                    "<path d=\"M{x:.1} 16v3\" stroke=\"{muted}\" stroke-width=\".6\"/>"
+                ));
+                g.push_str(&text(x, 25.0, anchor, &ink, s));
+            }
+            x_end = 6.0 + bw + 14.0;
+        }
+        Legend::Steps {
+            colors,
+            ticks,
+            counts,
+        } => {
+            let k = colors.len();
+            let room = w
+                - 12.0
+                - if nodata > 0 {
+                    20.0 + crate::ticks::text_width(&nd_text, FONT)
+                } else {
+                    0.0
+                };
+            let widest = ticks
+                .iter()
+                .map(|s| crate::ticks::text_width(s, FONT))
+                .fold(0.0, f64::max);
+            let sw = (room / k as f64)
+                .clamp(18.0, (widest + 10.0).max(40.0))
+                .min(64.0);
+            // label every boundary when they fit, else every other one
+            let every = if widest + 4.0 > sw { 2 } else { 1 };
+            for (i, c) in colors.iter().enumerate() {
+                let x = 6.0 + i as f64 * sw;
+                g.push_str(&format!(
+                    "<rect x=\"{x:.1}\" y=\"5\" width=\"{sw:.1}\" height=\"12\" fill=\"{}\"/>",
+                    hex(*c)
+                ));
+                g.push_str(&format!(
+                    "<text x=\"{:.1}\" y=\"11.5\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"7.5\" fill=\"{}\">{}</text>",
+                    x + sw / 2.0,
+                    hex(t.text_on(*c)),
+                    counts[i]
+                ));
+            }
+            for (i, s) in ticks.iter().enumerate() {
+                if i % every != 0 && i != ticks.len() - 1 {
+                    continue;
+                }
+                let x = 6.0 + i as f64 * sw;
+                let anchor = if i == 0 {
+                    "start"
+                } else if i == ticks.len() - 1 {
+                    "end"
+                } else {
+                    "middle"
+                };
+                g.push_str(&format!(
+                    "<path d=\"M{x:.1} 17v3\" stroke=\"{muted}\" stroke-width=\".6\"/>"
+                ));
+                g.push_str(&text(x, 26.0, anchor, &ink, s));
+            }
+            x_end = 6.0 + k as f64 * sw + 14.0;
+        }
+    }
+    if nodata > 0 {
+        let (x, y) = if matches!(legend, Legend::Category(_)) || x_end + 60.0 > w {
+            (6.0, lh - 10.0)
+        } else {
+            (x_end, 11.0)
+        };
+        g.push_str(&format!(
+            "<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"12\" height=\"12\" fill=\"url(#{id}-nd)\" stroke=\"{}\" stroke-width=\".5\"/>",
+            y - 6.0,
+            hex(t.chart_grid())
+        ));
+        g.push_str(&text(x + 16.0, y, "start", &ink, &nd_text));
+    }
+    g.push_str("</g>");
+    g
+}
+
+/// One sentence for screen readers: what the map shows, its projection,
+/// the highest and lowest feature, the classes and their counts, and how
+/// many rows have no value.
+fn summary(o: &RenderOptions, m: &Model) -> String {
+    let drawn: Vec<usize> = (0..m.rows).filter(|i| !m.features[*i].is_empty()).collect();
+    let (mut areas, mut lines, mut points) = (0, 0, 0);
+    for i in &drawn {
+        match m.features[*i].first() {
+            Some(Shape::Area(_)) => areas += 1,
+            Some(Shape::Line(_)) => lines += 1,
+            Some(Shape::Point(_)) => points += 1,
+            None => {}
+        }
+    }
+    let n = drawn.len();
+    let what = if areas == n {
+        if n == 1 {
+            "region"
+        } else {
+            "regions"
+        }
+    } else if points == n {
+        if n == 1 {
+            "point"
+        } else {
+            "points"
+        }
+    } else if lines == n {
+        if n == 1 {
+            "line"
+        } else {
+            "lines"
+        }
+    } else if n == 1 {
+        "feature"
+    } else {
+        "features"
+    };
+    let mut out = format!("{n} {what} ({})", m.projection.describe());
+    let name = |i: usize| {
+        let l = m.text(m.label, i);
+        if !l.is_empty() {
+            l.lines().next().unwrap_or("").to_string()
+        } else {
+            let c = m.text(m.category, i);
+            if c.is_empty() {
+                format!("row {}", i + 1)
+            } else {
+                c
+            }
+        }
+    };
+    match &m.fill {
+        Fill::Measure(s) => {
+            let vals: Vec<(usize, f64)> = drawn
+                .iter()
+                .filter_map(|i| s.values[*i].map(|v| (*i, v)))
+                .collect();
+            if let (Some(hi), Some(lo)) = (
+                vals.iter().max_by(|a, b| a.1.total_cmp(&b.1)),
+                vals.iter().min_by(|a, b| a.1.total_cmp(&b.1)),
+            ) {
+                let f = |v: f64| s.fmt.full(v, &o.locale);
+                if hi.0 == lo.0 {
+                    out.push_str(&format!(". {} {}", name(hi.0), f(hi.1)));
+                } else {
+                    out.push_str(&format!(
+                        ". Highest: {} {}; lowest: {} {}",
+                        name(hi.0),
+                        f(hi.1),
+                        name(lo.0),
+                        f(lo.1)
+                    ));
+                }
+            }
+            if let Some((method, c, _)) = &s.classes {
+                let counts: Vec<String> = c.counts.iter().map(|n| n.to_string()).collect();
+                out.push_str(&format!(
+                    ". {} {} classes: {}",
+                    c.len(),
+                    method.name(),
+                    counts.join(" / ")
+                ));
+            }
+            let missing = drawn.iter().filter(|i| s.values[**i].is_none()).count();
+            if missing > 0 {
+                out.push_str(&format!("; {missing} without data"));
+            }
+        }
+        Fill::Category { levels, of_row } => {
+            let mut counts = vec![0usize; levels.len()];
+            for i in &drawn {
+                if let Some(k) = of_row[*i] {
+                    counts[k] += 1;
+                }
+            }
+            let parts: Vec<String> = levels
+                .iter()
+                .zip(&counts)
+                .take(6)
+                .map(|((l, _), c)| format!("{l} ({c})"))
+                .collect();
+            let more = levels.len().saturating_sub(6);
+            out.push_str(&format!(
+                ". {} groups: {}{}",
+                levels.len(),
+                parts.join(", "),
+                if more > 0 {
+                    format!(", and {more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        Fill::Plain(_) => {}
+    }
+    out.push('.');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_window_round_trips() {
+        let f = Frame::fit((0.0, 0.0, 10.0, 5.0), (2.0, 30.0, 96.0, 68.0));
+        let [x0, x1, y0, y1] = f.window(100.0, 100.0);
+        // the window spans the panel at the same scale
+        assert!(((x1 - x0) * f.s - 100.0).abs() < 1e-9);
+        assert!(((y1 - y0) * f.s - 100.0).abs() < 1e-9);
+        // and fitting it back over the whole panel gives the same transform
+        let g = Frame::fit((x0, y0, x1, y1), (0.0, 0.0, 100.0, 100.0));
+        let p = [3.0, 4.0];
+        let (a, b) = (f.at(p), g.at(p));
+        assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+    }
+}

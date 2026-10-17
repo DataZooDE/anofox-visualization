@@ -11380,14 +11380,15 @@ function zoomFromShared(sv, aspect) {
 }
 
 // Scroll-to-zoom / drag-to-pan for a map panel. Re-renders the panel's SVG with
-// a lon/lat zoom window (double-click resets to auto-fit). The initial view is
-// seeded from the geometry bounds, padded to the panel's aspect so the first
-// zoom step doesn't jump. In a ::SYNC_ZOOM group a zoom, pan or reset of one
-// map is applied to every other map of the group, and a map that joins later
-// (a re-run) takes the group's current view.
+// a zoom window in the map's projected units, y up (double-click resets to
+// auto-fit). The initial view is the window the whole panel shows unzoomed
+// (map_bounds at the drawn size), so the first zoom step doesn't jump. In a
+// ::SYNC_ZOOM group a zoom, pan or reset of one map is applied to every other
+// map of the group, and a map that joins later (a re-run) takes the group's
+// current view.
 function attachMapZoom(holder, rowsJson, roles, ph) {
   const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
-  let view = null; // {x0,x1,y0,y1} in lon/lat; null = auto-fit
+  let view = null; // {x0,x1,y0,y1} in projected units; null = auto-fit
   let raf = 0;
   const gr = roles.find((r) => r[1] === "SYNC_ZOOM");
   const groupName = gr ? cellAt(rowsJson, gr[0]).trim() : "";
@@ -11405,7 +11406,7 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   const fit = () => {
     let b;
     try {
-      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles)));
+      b = JSON.parse(map_bounds(rowsJson, JSON.stringify(roles), W(), ph));
     } catch (_) {
       b = [];
     }
@@ -11584,7 +11585,7 @@ function attachHover() {
   // mark has given its <title> up already.
   const marks = [
     ...document.querySelectorAll(
-      ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline"
+      ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline,.panel svg[data-map]:not([data-hw]) path"
     ),
   ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
   document.querySelectorAll(".panel svg:not([data-hw])").forEach((svg) => svg.setAttribute("data-hw", ""));
@@ -11791,11 +11792,16 @@ function attachChartA11y() {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
       return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
     });
-    // A ::DIAGRAM brings its own summary (steps, stages, loops) from the renderer.
+    // A ::DIAGRAM or a ::MAP brings its own summary from the renderer (steps,
+    // stages, loops; regions, extremes, classes).
     const ds = svg.getAttribute("data-summary");
     const kind = svg._track ? "Strip under the chart" : chartKind(fig._dp && (fig._dp.drawn || fig._dp.roles));
     const summary =
-      ds != null ? `Diagram${title ? `: ${title}` : ""}; ${ds}.` : chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
+      ds != null
+        ? svg.hasAttribute("data-map")
+          ? `Map${title ? `: ${title}` : ""}; ${ds}`
+          : `Diagram${title ? `: ${title}` : ""}; ${ds}.`
+        : chartSummary(kind, title, items, (v) => fmtTipValue(String(v)));
     svg.setAttribute("aria-label", summary);
     svg.setAttribute("aria-roledescription", "chart");
     svg.querySelector(":scope > desc")?.remove();
@@ -12019,8 +12025,11 @@ function applyAsTables() {
       view.className = "dp-astable-view";
       const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
       const dsvg = holder.querySelector(":scope > svg[data-diagram]");
+      const msvg = holder.querySelector(":scope > svg[data-map]");
       view.innerHTML = dsvg
         ? diagramTextHtml(dsvg, title)
+        : msvg
+        ? mapTableHtml(msvg, 200, title)
         : dataTableHtml(fig._dp, 200, title) +
           (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
       holder.after(view);
@@ -12214,6 +12223,51 @@ function diagramTextHtml(svg, caption) {
         .map((n) => `<tr><td>${esc(name.get(n.dataset.node))}</td><td>${esc(n.dataset.fvalue || "")}</td></tr>`)
         .join("")}</tbody></table>`;
   return `<ol class="dp-diagram-steps"${label}>${items.join("")}</ol>${table}`;
+}
+
+// A ::MAP as a table: one row per feature — its name (::LABEL, else its
+// series), series, value and class — sorted by value, highest first. No WKT.
+function mapTableHtml(svg, limit, caption) {
+  const esc = (v) => escapeHtml(v == null ? "" : String(v));
+  let classes = [];
+  try {
+    classes = JSON.parse(svg.getAttribute("data-classes") || "[]");
+  } catch (_) {}
+  const seen = new Set();
+  const rows = [];
+  for (const el of svg.querySelectorAll("[data-row]")) {
+    const r = el.getAttribute("data-row");
+    if (seen.has(r)) continue;
+    seen.add(r);
+    const label = el.getAttribute("data-label") || "";
+    const series = el.getAttribute("data-series") || "";
+    const raw = el.getAttribute("data-value");
+    const k = +el.getAttribute("data-class");
+    const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    rows.push({
+      name,
+      series: series && series !== label && series !== name ? series : "",
+      raw: raw == null || raw === "" ? null : Number(raw),
+      value: el.getAttribute("data-fvalue") || (raw != null ? fmtTipValue(raw) : ""),
+      cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
+    });
+  }
+  if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
+  const cols = [
+    ["name", "name"],
+    ["series", "series"],
+    ["value", "value"],
+    ["cls", "class"],
+  ].filter(([k]) => k === "name" || rows.some((r) => r[k]));
+  const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");
+  const body = rows
+    .slice(0, limit)
+    .map((r) => `<tr>${cols.map(([k]) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
+    .join("");
+  return (
+    `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}"` : ""}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (rows.length > limit ? `<div class="dp-modal-note">Showing ${limit} of ${rows.length} rows</div>` : "")
+  );
 }
 
 function dataTableHtml(dp, limit, caption) {

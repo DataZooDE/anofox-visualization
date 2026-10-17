@@ -220,9 +220,30 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   ]);
   const svg = wasm.render_panel(rows, JSON.stringify(maps[0].roles), 460, 300, "", "");
   assert.match(svg, /^<svg[^>]* data-map=""/);
-  assert.match(svg, /<polyline [^>]*data-row="0" data-series="Van 1" data-label="Van 1: 4 km, back 07:10, 1 stop late"/);
+  // the own map writer draws lines and areas as <path> (a line unfilled)
+  assert.match(svg, /<path [^>]*fill="none"[^>]*data-row="0" data-series="Van 1" data-label="Van 1: 4 km, back 07:10, 1 stop late"/);
   assert.match(svg, /<circle [^>]*data-row="1" data-series="Van 1" data-label="Backstube 3 — bakery&#10;Van 1, stop #1"/);
-  assert.match(svg, /<polygon [^>]*data-row="2" data-series="late stop"/);
+  assert.match(svg, /<path [^>]*data-row="2" data-series="late stop"/);
+}
+
+// Maps: the zoom UI starts from map_bounds — the projected window the whole
+// panel shows unzoomed, at the panel's aspect — and hands it back as the
+// zoom, which draws the same view.
+{
+  const rows = JSON.stringify([
+    { c0: "POLYGON((9 49, 10 49, 10 50, 9 50, 9 49))", c1: 3, c2: "Nord" },
+    { c0: "POLYGON((10 49, 11 49, 11 50, 10 50, 10 49))", c1: 7, c2: "Ost" },
+  ]);
+  const roles = JSON.stringify([[0, "MAP"], [1, "BARCHART"], [2, "LABEL"]]);
+  const b = JSON.parse(wasm.map_bounds(rows, roles, 460, 300));
+  assert.equal(b.length, 4);
+  assert.ok(Math.abs((b[1] - b[0]) / (b[3] - b[2]) - 460 / 300) < 1e-9, `aspect: ${b}`);
+  const plain = wasm.render_panel(rows, roles, 460, 300, "", "");
+  assert.match(plain, /^<svg[^>]* data-map="" data-proj="utm"/);
+  const zoomed = wasm.render_panel(rows, roles, 460, 300, "", JSON.stringify(b));
+  const paths = (s) => [...s.matchAll(/<path d="([^"]*)" fill="#[0-9a-f]{6}" data-row/g)].map((m) => m[1]);
+  assert.deepEqual(paths(zoomed), paths(plain), "the start window draws the same view");
+  assert.deepEqual(JSON.parse(wasm.map_bounds("[]", roles, 460, 300)), []);
 }
 
 console.log(`examples_lib_test: ok (${EXAMPLES.length} examples in ${exampleAreas(EXAMPLES).length} areas)`);

@@ -34,7 +34,7 @@ pub mod inputs;
 pub mod kpi;
 pub mod lint;
 pub mod macros;
-mod mapmarks;
+pub(crate) mod map;
 pub mod math;
 pub mod page;
 pub mod period;
@@ -315,6 +315,15 @@ pub enum Role {
     /// The zoom group of a `::MAP` (`::SYNC_ZOOM`): maps with the same name
     /// zoom and pan together in the browser. Read from the first value.
     SyncZoom,
+    /// A map's projection (`::PROJECTION`): `'auto'` (by the data's extent),
+    /// `'equal-earth'`, `'mercator'`, `'albers-europe'`, `'conic'`, `'utm'`
+    /// or `'none'` (planar coordinates). Read from the first value.
+    Projection,
+    /// A map's class breaks (`::CLASSES`): `'quantile 5'`, `'jenks 5'`,
+    /// `'equal 5'` or edges `'0,10,50,100'`; a stepped legend with counts.
+    Classes,
+    /// The centre of a map's diverging colour ramp (`::MIDPOINT`).
+    Midpoint,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -1205,6 +1214,10 @@ pub(crate) enum Panel {
         height: u32,
         /// The SVG content (without the `<svg>` wrapper).
         body: String,
+        /// Extra root attributes (e.g. `data-map`) written on the `<svg>`.
+        attrs: Vec<(&'static str, String)>,
+        /// Render warnings (reported like the plotting engine's).
+        warnings: Vec<String>,
     },
 }
 
@@ -1247,6 +1260,17 @@ impl Panel {
         }
     }
 
+    /// One of the extension's own SVGs, without root attributes.
+    pub(crate) fn own(width: u32, height: u32, body: String) -> Panel {
+        Panel::Own {
+            width,
+            height,
+            body,
+            attrs: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
     pub(crate) fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
         Panel::Plot {
             plot: Box::new(plot),
@@ -1274,9 +1298,6 @@ impl Panel {
                 };
                 svg.map(|(s, w)| {
                     let mut s = ticks::fit_x_labels(s);
-                    if attrs.iter().any(|(k, _)| *k == "data-map") {
-                        s = mapmarks::lift(s);
-                    }
                     for (k, v) in &attrs {
                         s = with_root_attr(s, k, v);
                     }
@@ -1288,10 +1309,15 @@ impl Panel {
                 width,
                 height,
                 body,
-            } => Ok((
-                format!("{}{body}</svg>", svg_open(place, width, height)),
-                Vec::new(),
-            )),
+                attrs,
+                warnings,
+            } => {
+                let mut s = format!("{}{body}</svg>", svg_open(place, width, height));
+                for (k, v) in &attrs {
+                    s = with_root_attr(s, k, v);
+                }
+                Ok((s, warnings))
+            }
         }
     }
 }
@@ -1441,7 +1467,12 @@ fn render_placed(
             None => draw(None),
         }
         .map_err(RenderError::Render)?;
-        let svg = o.theme.finish_svg(strip_nonfinite_marks(svg));
+        // A map paints with the variant's own tokens: no neutral remap.
+        let svg = if map::geometry(&cols).is_some() {
+            o.theme.with_font(svg)
+        } else {
+            o.theme.finish_svg(strip_nonfinite_marks(svg))
+        };
         let svg = with_line_styles(with_rule_marks(with_xline_dates(svg, &cols)), &cols);
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         if boxstats::is_stats(&cols) {
@@ -1933,18 +1964,20 @@ fn render_inner(
     // the headless dashboard; at most its natural height.
     if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
         let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
-        return Ok(Panel::Own {
-            width,
-            height: h,
-            body: k.body(width as f64, h as f64, o),
-        });
+        return Ok(Panel::own(width, h, k.body(width as f64, h as f64, o)));
     }
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
     if cols.iter().any(|c| c.role == Role::Geometry) {
-        if map_geometry(cols).is_none() {
-            return Ok(note_svg(None, "No data", width, height));
-        }
-        return render_map(o, cols, title.as_deref(), width, height);
+        return Ok(match map::render(o, cols, width, height) {
+            Some(m) => Panel::Own {
+                width,
+                height,
+                body: m.body,
+                attrs: m.attrs,
+                warnings: m.warnings,
+            },
+            None => note_svg(None, "No data", width, height),
+        });
     }
     let value = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let Some(value) = value else {
@@ -3712,13 +3745,19 @@ impl Ramp {
     }
 
     /// The colour a value gets (as the gradient scale maps it).
-    fn color_of(&self, v: f64) -> (u8, u8, u8) {
+    pub(crate) fn color_of(&self, v: f64) -> (u8, u8, u8) {
         let span = self.max - self.min;
         let p = if span > 0.0 {
             ((v - self.min) / span).clamp(0.0, 1.0)
         } else {
             0.5
         };
+        self.color_at(p)
+    }
+
+    /// The colour at position `p` (0..1) along the ramp.
+    pub(crate) fn color_at(&self, p: f64) -> (u8, u8, u8) {
+        let p = p.clamp(0.0, 1.0);
         let i = self
             .stops
             .windows(2)
@@ -4714,18 +4753,6 @@ fn fmt_g(v: f64) -> String {
     }
 }
 
-/// The WKT column of a map: the first `::MAP`-role column holding text.
-/// (`::CHOROPLETH` is an alias of `::MAP`, so `v::CHOROPLETH` next to a
-/// geometry is a *second* geometry-role column — a numeric one is the measure.)
-fn map_geometry(cols: &[Column]) -> Option<&Column> {
-    cols.iter().find(|c| {
-        c.role == Role::Geometry
-            && c.values
-                .iter()
-                .any(|v| matches!(v, Value::Str(s) if !s.is_empty() && num_str(s).is_none()))
-    })
-}
-
 /// A cell as a number: numeric values, or text that parses as one (DuckDB's
 /// JSON writes DECIMALs as strings, e.g. `"1.0"`).
 fn num_str(s: &str) -> Option<f64> {
@@ -4737,157 +4764,6 @@ fn cell_num(v: &Value) -> Option<f64> {
         Value::Str(s) => num_str(s),
         v => v.as_f64().filter(|f| f.is_finite()),
     }
-}
-
-/// A cell as geom_sf writes it into a feature's `<title>` (its own
-/// formatting: floats to 3 decimals, nothing for dates / missing).
-fn sf_str(v: &Value) -> String {
-    match v {
-        Value::Str(s) => s.clone(),
-        Value::Float(f) => format!("{}", (f * 1000.0).round() / 1000.0),
-        Value::Integer(i) => format!("{i}"),
-        Value::Bool(b) => format!("{b}"),
-        _ => String::new(),
-    }
-}
-
-/// A choropleth map from a WKT `::MAP` geometry column, filled by a numeric
-/// measure (light → brand gradient, viridis over a basemap), else by a
-/// `::CATEGORY` (theme palette), else in a light brand tint.
-fn render_map(
-    o: &RenderOptions,
-    cols: &[Column],
-    _title: Option<&str>,
-    width: u32,
-    height: u32,
-) -> Result<Panel, String> {
-    let geom = map_geometry(cols).ok_or("map needs a ::MAP column of WKT text")?;
-    // The measure: a chart-kind column, or a numeric second ::MAP/::CHOROPLETH
-    // column (`region::MAP, sales::CHOROPLETH`).
-    let numeric_geometry = cols
-        .iter()
-        .find(|c| {
-            c.role == Role::Geometry
-                && !std::ptr::eq(*c, geom)
-                && c.values.iter().any(|v| cell_num(v).is_some())
-                && c.values
-                    .iter()
-                    .all(|v| *v == Value::Na || cell_num(v).is_some())
-        })
-        .map(|c| {
-            let vals = c
-                .values
-                .iter()
-                .map(|v| cell_num(v).map_or(Value::Na, Value::Float))
-                .collect();
-            Column::new(c.name.clone(), Role::Value(Kind::Bar), vals)
-        });
-    let measure = cols
-        .iter()
-        .find(|c| matches!(c.role, Role::Value(_)))
-        .or(numeric_geometry.as_ref())
-        .filter(|c| c.values.iter().any(|v| v.as_f64().is_some()));
-    let category =
-        find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
-    let label = find_role(cols, Role::Label);
-    let base = find_role(cols, Role::Basemap);
-    // Optional layer opacity (`::ALPHA`) — e.g. overlapping quake points reading
-    // as density. Clamp to a valid 0..1; default fully opaque.
-    let alpha = role_num(cols, Role::Alpha)
-        .map(|a| a.clamp(0.05, 1.0))
-        .unwrap_or(1.0);
-    let mut data: Vec<(String, Vec<Value>)> = vec![("geometry".to_string(), geom.values.clone())];
-    let mut aes = Aes::new();
-    let fill_col = measure.or(category);
-    if let Some(f) = fill_col {
-        data.push(("fill".to_string(), f.values.clone()));
-        aes = aes.fill("fill");
-    }
-    // The hover label (geom_sf's `<title>`), each prefixed with the row's
-    // metadata — row index, series (the ::CATEGORY, else the ::LABEL), raw
-    // measure and ::LABEL text — which `mapmarks::lift` moves onto the mark as
-    // `data-*` attributes once rendered (the title text stays as it was).
-    let lab = label.or(fill_col);
-    let cell = |c: Option<&Column>, i: usize| match c.and_then(|c| c.values.get(i)) {
-        None | Some(Value::Na) => String::new(),
-        Some(v) => value_str(v),
-    };
-    let marked = (0..geom.values.len())
-        .map(|i| {
-            let label_text = cell(label, i);
-            let series = match cell(category, i) {
-                s if s.is_empty() => label_text.clone(),
-                s => s,
-            };
-            let value = measure
-                .and_then(|m| m.values.get(i))
-                .and_then(Value::as_f64)
-                .map(|f| f.to_string())
-                .unwrap_or_default();
-            let row = i.to_string();
-            Value::Str(mapmarks::marker(
-                &[
-                    ("row", &row),
-                    ("series", &series),
-                    ("value", &value),
-                    ("label", &label_text),
-                ],
-                &lab.and_then(|c| c.values.get(i))
-                    .map(sf_str)
-                    .unwrap_or_default(),
-            ))
-        })
-        .collect();
-    data.push(("label".to_string(), marked));
-    aes = aes.label("label");
-    let mut plot = GGPlot::new(data).aes(aes);
-    // Optional grey basemap (e.g. country outlines) drawn first, behind the data
-    // layer — a separate no-fill geom_sf layer that shares the map's scales.
-    if let Some(b) = base {
-        let base_geom = ggplot_rs::geom::sf::GeomSf {
-            fill: (228, 230, 233),
-            color: (198, 201, 206),
-            ..Default::default()
-        };
-        plot = plot
-            .geom_sf_with(base_geom)
-            .layer_data(vec![("geometry".to_string(), b.values.clone())])
-            .layer_aes(Aes::new());
-    }
-    // An unfilled map takes a light brand tint (not ggplot's default blue).
-    let plot = plot.geom_sf_with(ggplot_rs::geom::sf::GeomSf {
-        alpha,
-        fill: wash(o, o.brand(), 0.55),
-        color: (90, 98, 112),
-        ..Default::default()
-    });
-    // A zoom window (from scroll/drag in the UI) clips to that lon/lat rectangle;
-    // otherwise fit the whole geometry with an equal aspect ratio.
-    let mut plot = match o.zoom {
-        Some((xlim, ylim)) => plot.coord_cartesian_zoom(Some(xlim), Some(ylim)),
-        None => plot.coord_sf(),
-    };
-    plot = plot.house_void(o);
-    if measure.is_some() {
-        // Viridis gives points/regions strong contrast over the grey basemap;
-        // a plain choropleth keeps the on-brand light→primary gradient.
-        plot = if base.is_some() {
-            plot.scale_fill_viridis_c()
-        } else {
-            plot.scale_fill_gradient(rgba(o.theme.seq_low()), rgba(o.theme.seq_high(o.brand())))
-        };
-    } else if let Some(cat) = category {
-        plot = plot
-            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
-            .legend_position(ggplot_rs::theme::LegendPosition::Top);
-    }
-    Ok(Panel::Plot {
-        plot: Box::new(plot),
-        width,
-        height,
-        // `data-map` also tells `Panel::finish` to lift the marks' metadata.
-        attrs: vec![("data-map", String::new())],
-    })
 }
 
 /// A pie/donut: one stacked bar (x constant) wrapped into polar coords, sliced
@@ -4942,25 +4818,25 @@ fn render_pie(
 
 /// A minimal SVG heading (for a `::LABEL`-only result).
 fn heading_svg(text: &str, width: u32) -> Panel {
-    Panel::Own {
+    Panel::own(
         width,
-        height: 40,
-        body: format!(
+        40,
+        format!(
             "<text x=\"4\" y=\"26\" font-family=\"system-ui,sans-serif\" font-size=\"20\" font-weight=\"600\" fill=\"{}\">{}</text>",
             theme::SVG_HEADING,
             format::escape_xml(text)
         ),
-    }
+    )
 }
 
 /// A full-size placeholder panel with a centred note ("No data", "needs ≥ 2
 /// values", …) and the optional title — instead of a confusing ggplot error.
 fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
     let (w, h) = (width as f64, height as f64);
-    Panel::Own {
+    Panel::own(
         width,
         height,
-        body: format!(
+        format!(
             "{}<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"13\" fill=\"{}\">{}</text>",
             title_text(title, w),
             w / 2.0,
@@ -4968,7 +4844,7 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
             theme::SVG_NOTE,
             format::escape_xml(note)
         ),
-    }
+    )
 }
 
 /// The `<text>` title strip of a [`note_svg`] placeholder, or `""` without a

@@ -179,11 +179,15 @@ pub fn render_contract(
     .unwrap_or_else(|e| error_svg(&e.to_string(), width))
 }
 
-/// Bounds `[x0, x1, y0, y1]` of a map panel's geometry (the `MAP` + `BASEMAP`
-/// columns), in lon/lat — the UI uses these to seed an aspect-correct zoom view.
+/// The window `[x0, x1, y0, y1]` a map panel shows before any zoom, in its
+/// projected units (y up) — the UI zooms and pans from it and hands the
+/// window back as the zoom. With the panel's `width` × `height` it is the
+/// whole panel's window (legend and margins included), so the first zoom
+/// step doesn't jump; with 0 × 0 it is the data's projected box.
 #[wasm_bindgen]
-pub fn map_bounds(rows_json: &str, roles_json: &str) -> String {
-    guard(|| Ok(map_bounds_inner(rows_json, roles_json))).unwrap_or_else(|_| "[]".into())
+pub fn map_bounds(rows_json: &str, roles_json: &str, width: u32, height: u32) -> String {
+    guard(|| Ok(map_bounds_inner(rows_json, roles_json, width, height)))
+        .unwrap_or_else(|_| "[]".into())
 }
 
 fn entries_of(roles_json: &str) -> Vec<(usize, Role, String)> {
@@ -193,40 +197,21 @@ fn entries_of(roles_json: &str) -> Vec<(usize, Role, String)> {
         .unwrap_or_default()
 }
 
-fn map_bounds_inner(rows_json: &str, roles_json: &str) -> String {
+fn map_bounds_inner(rows_json: &str, roles_json: &str, width: u32, height: u32) -> String {
     let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
-    let geo_cols: Vec<String> = entries_of(roles_json)
-        .iter()
-        .filter(|(_, r, _)| matches!(r, Role::Geometry | Role::Basemap))
-        .map(|(i, _, _)| format!("c{i}"))
-        .collect();
-    let (mut x0, mut y0, mut x1, mut y1) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for row in &rows {
-        for key in &geo_cols {
-            if let Some(b) = row
-                .get(key)
-                .and_then(|v| v.as_str())
-                .and_then(ggplot_rs::spatial::parse_wkt)
-                .and_then(|g| g.bounds())
-            {
-                if [b.0, b.1, b.2, b.3].iter().all(|f| f.is_finite()) {
-                    x0 = x0.min(b.0);
-                    y0 = y0.min(b.1);
-                    x1 = x1.max(b.2);
-                    y1 = y1.max(b.3);
-                }
-            }
-        }
+    let cols = columns_from_entries(&rows, &entries_of(roles_json));
+    let (w, h) = if width == 0 || height == 0 {
+        (0, 0)
+    } else {
+        (
+            crate::clamp_dim(width as u64),
+            crate::clamp_dim(height as u64),
+        )
+    };
+    match crate::map::view_bounds(&cols, &RenderOptions::default(), w, h) {
+        Some([x0, x1, y0, y1]) => format!("[{x0},{x1},{y0},{y1}]"),
+        None => "[]".into(),
     }
-    if !x0.is_finite() {
-        return "[]".into();
-    }
-    format!("[{x0},{x1},{y0},{y1}]")
 }
 
 /// Data extent `[x0, x1, y0, y1]` of a cartesian panel. Returns `[]` unless the

@@ -111,8 +111,11 @@ terminal.
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
+| `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
+| `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
+| `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
-| `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100' |
+| `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
@@ -953,6 +956,63 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
 - `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
   tooltips.
+
+### Maps
+
+```sql
+SELECT wkt::MAP,                 -- WKT geometry (POLYGON, POINT, LINESTRING, MULTI…)
+       name::LABEL,              -- hover label (and the feature's name in the summary)
+       sales::BARCHART,          -- the measure that colours each feature
+       'quantile 5'::CLASSES,    -- optional: 5 classes with a stepped legend
+       'Sales by district'::TITLE
+FROM districts;
+```
+
+Maps are drawn by the extension's own writer: the WKT of each row is parsed
+once, projected, fitted into the panel and simplified in pixel space (0.5 px),
+then written as compact `<path>`s (holes cut out with `fill-rule="evenodd"`)
+and `<circle>`s for points. Features are drawn in row order.
+
+- **Projection** (`::PROJECTION`): `'auto'` (default) picks one from the
+  data's extent — coordinates beyond lon ±180 / lat ±90, or a vertex exactly
+  at (0, 0) (a planar grid's origin) → `'none'`; a longitude span over 120° →
+  `'equal-earth'`; at most 6° → `'utm'` (the zone of the centre); otherwise
+  `'conic'` (Albers equal-area, standard parallels at 1/6 and 5/6 of the
+  latitude span). `'albers-europe'` is fixed (λ₀ 10°, φ₁ 43°, φ₂ 62°);
+  `'mercator'` is Web Mercator (`dashboard --check` hints `map/mercator-choropleth`
+  on a filled map: it inflates areas towards the poles); `'none'` draws x/y as
+  they are (km grids, floor plans).
+- **Colour**: a measure colours on the theme's sequential ramp (over a
+  `::BASEMAP` it starts a quarter in, so pale points don't vanish); when the
+  values span 0, or with `::MIDPOINT n`, the theme's diverging ramp around that
+  centre. `::RANGE 'lo,hi'` caps the colour domain (the legend then reads
+  `≤lo` / `≥hi`). Without a measure a `::CATEGORY` colours by the theme palette
+  (levels sorted, `#rrggbb` levels in their own colour); with neither, a light
+  brand tint. Rows with geometry but no value get a hatch and a "No data (n)"
+  legend entry.
+- **Classes** (`::CLASSES`): `'quantile n'` (equal counts; ties give fewer
+  classes), `'jenks n'` (Fisher-Jenks natural breaks; above 2,000 values on an
+  even sample), `'equal n'` (equal width) — n from 2 to 9, default 5 — or
+  custom edges `'0,10,50,100'` (values outside go to the open end classes,
+  `< 10` / `≥ 50`). The legend shows each class's colour with its count and
+  the edges under it; the tooltip names the class ("class 2 of 5: 10 – 50").
+  `dashboard --check` reports `map/bad-classes` and `map/unknown-projection`.
+- **Backdrop** (`::BASEMAP`): a second WKT column drawn first in a pale land
+  colour with hairline borders; `::ALPHA` sets the data layer's opacity.
+- **Hover / click / zoom**: each feature carries `data-row`, `data-series`
+  (its `::CATEGORY`, else its `::LABEL`), `data-value`, `data-label`,
+  `data-x` (its key — the row — when it has no label; else the label is the
+  key) and `data-class`; the root carries `data-map`,
+  `data-proj` and `data-classes`. Scroll zooms and drag pans in the browser
+  (double-click resets); the zoom window is in the projected units, and each
+  zoom re-renders, so simplification acts as level of detail.
+- **Accessibility**: the SVG's `<desc>` (and the chart's aria label) is one
+  sentence — "400 regions (equal-area conic). Highest: München 980; lowest:
+  Zweibrücken 12. 5 quantile classes: 80 / 80 / 80 / 80 / 80; 3 without
+  data." "Charts as tables" lists name, series, value and class per feature,
+  highest first, without the WKT.
+- **Size**: above 100,000 drawn marks the render warns (aggregate in SQL, e.g.
+  with the h3 extension); `map/too-many-marks` flags more than 20,000 points.
 
 ### Waterfall, bullet and funnel
 
@@ -2496,10 +2556,10 @@ the CLI output and the browser builder attach a small hover layer that shows a
 styled tooltip (`web: 22`) and highlights the mark; the browser keys its
 cross-filter / series highlight / legend toggle on `data-series` and reads the
 value from `data-value`, falling back to the `"series: value"` title text only
-for marks without them. Map features carry `data-row` (the row they were drawn
-from), `data-series` (their `::CATEGORY`, else their `::LABEL`), `data-value`
-(the measure) and `data-label` (the `::LABEL` text), and a map's root `<svg>`
-carries `data-map`. The root `<svg>` carries the drawn
+for marks without them (SVGs from older renderers). Map features carry
+`data-row` (the row they were drawn from), `data-series` (their `::CATEGORY`,
+else their `::LABEL`), `data-value` (the measure) and `data-label` (the
+`::LABEL` text), and a map's root `<svg>` carries `data-map` (see Maps). The root `<svg>` carries the drawn
 domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
 `data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
 runtime, works on static HTML.
@@ -2529,7 +2589,7 @@ wasm exports (`src/wasm.rs`):
 | `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale"}`; `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
 | `resolve_dashboard_theme(spec, chrome_json)` | a theme spec (+ `{title,brand,logo,favicon,locale}`) → `{ok, name, mode, light:{css,…}, dark:{css,…}}` |
 | `format_number_locale(value, fmt, locale)` / `format_date_locale(iso, locale)` | KPI / table formatting in a dashboard locale |
-| `map_bounds(rows_json, roles_json)` | a map's lon/lat extent for the zoom UI |
+| `map_bounds(rows_json, roles_json, width, height)` | the projected window an unzoomed map panel shows (`[x0, x1, y0, y1]`, y up), the zoom UI's start |
 | `panel_bounds(…)` | *deprecated* raw data extent of a cartesian panel; the UI now reads the rendered SVG's `data-domain` / `data-flip` attributes (ggplot-rs) and the `zoomable` role set instead |
 | `roles_json()` | the role registry + derived role sets (inputs, metrics, directives, table formats, text sizes, zoomable chart kinds — the browser's single source) |
 | `format_number(value, fmt)` | KPI/table number formatting shared with the headless renderer |

@@ -811,6 +811,18 @@ where
                 }),
         );
 
+        diags.extend(
+            map_diags(&p.roles, &rows)
+                .into_iter()
+                .map(|(severity, code, message)| Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                }),
+        );
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -1605,6 +1617,101 @@ fn motion_diags(
     }
     out
 }
+
+/// Map modifiers the renderer would ignore or that mislead: an unknown
+/// `::PROJECTION`, a bad `::CLASSES` spec, a Mercator choropleth (areas
+/// grow towards the poles) and more point marks than a map draws well.
+fn map_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some(geom) = roles
+        .iter()
+        .find(|(i, r)| {
+            *r == Role::Geometry
+                && column_texts(rows, *i)
+                    .iter()
+                    .any(|t| t.trim().parse::<f64>().is_err())
+        })
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    let first = |want: Role| {
+        roles
+            .iter()
+            .find(|(_, r)| *r == want)
+            .and_then(|(i, _)| column_texts(rows, *i).into_iter().next())
+    };
+    let projection = first(Role::Projection);
+    if let Some(p) = &projection {
+        if crate::map::project::Projection::parse(p).is_none() {
+            out.push((
+                Severity::Warning,
+                "map/unknown-projection",
+                format!(
+                    "::PROJECTION '{p}' is not one of {} — the map is drawn with 'auto'",
+                    crate::map::project::Projection::NAMES.join(", ")
+                ),
+            ));
+        }
+    }
+    if let Some(c) = first(Role::Classes) {
+        if let Err(e) = crate::map::classes::Method::parse(&c) {
+            out.push((
+                Severity::Warning,
+                "map/bad-classes",
+                format!("{e} — the map is drawn with a continuous ramp"),
+            ));
+        }
+    }
+    let wkt = column_texts(rows, geom);
+    let filled = roles.iter().any(|(i, r)| {
+        matches!(r, Role::Value(_))
+            || (*r == Role::Geometry && *i != geom && !column_texts(rows, *i).is_empty())
+    });
+    let areas = wkt
+        .iter()
+        .any(|t| t.trim_start().to_ascii_uppercase().contains("POLYGON"));
+    if filled
+        && areas
+        && projection
+            .as_deref()
+            .and_then(crate::map::project::Projection::parse)
+            == Some(crate::map::project::Projection::Mercator)
+    {
+        out.push((
+            Severity::Note,
+            "map/mercator-choropleth",
+            "a choropleth in 'mercator' inflates areas towards the poles — 'auto' or \
+             'equal-earth' keeps them comparable"
+                .to_string(),
+        ));
+    }
+    let points: usize = wkt
+        .iter()
+        .map(|t| match ggplot_rs::spatial::parse_wkt(t) {
+            Some(ggplot_rs::spatial::Geometry::Point(_)) => 1,
+            Some(ggplot_rs::spatial::Geometry::MultiPoint(p)) => p.len(),
+            _ => 0,
+        })
+        .sum();
+    if points > MAP_POINTS_WARN {
+        out.push((
+            Severity::Warning,
+            "map/too-many-marks",
+            format!(
+                "{points} points on one map (over {MAP_POINTS_WARN}) — aggregate in SQL, e.g. to H3 \
+                 cells (the h3 extension) or to regions, to keep the map light"
+            ),
+        ));
+    }
+    out
+}
+
+/// Point marks above which a map is linted as too dense.
+const MAP_POINTS_WARN: usize = 20_000;
 
 /// The first cell of a result as text (`""` when there is none).
 fn first_text(rows: &[Map<String, Value>]) -> String {
@@ -2907,6 +3014,48 @@ mod design_tests {
         assert_eq!(w.len(), 1, "{d:?}");
         assert_eq!(w[0].severity, Severity::Warning);
         assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn map_modifiers_are_checked() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .filter(|d| d.code.starts_with("map/"))
+                .map(|d| (d.severity, d.code))
+                .collect()
+        };
+        let poly = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
+        let row = |p: &str, c: &str| json!({ "c0": poly, "c1": 1.0, "c2": p, "c3": c });
+        let sql = "SELECT g::MAP, v::BARCHART, 'p'::PROJECTION, 'c'::CLASSES FROM t;";
+        assert!(codes(sql, vec![row("conic", "quantile 5")]).is_empty());
+        assert_eq!(
+            codes(sql, vec![row("robinson", "jenks 4")]),
+            vec![(Severity::Warning, "map/unknown-projection")]
+        );
+        for bad in ["quantile 12", "kmeans 4", "0,10,5"] {
+            assert_eq!(
+                codes(sql, vec![row("auto", bad)]),
+                vec![(Severity::Warning, "map/bad-classes")],
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            codes(sql, vec![row("mercator", "equal 4")]),
+            vec![(Severity::Note, "map/mercator-choropleth")]
+        );
+        // points in Mercator are fine; too many of them are not
+        let pts: Vec<Value> = (0..20_001)
+            .map(|i| json!({ "c0": format!("POINT({} 1)", i % 90) }))
+            .collect();
+        assert_eq!(
+            codes("SELECT g::MAP FROM t;", pts),
+            vec![(Severity::Warning, "map/too-many-marks")]
+        );
     }
 
     #[test]

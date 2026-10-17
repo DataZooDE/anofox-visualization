@@ -146,9 +146,11 @@ fn map_fill_by_value_and_category() {
         "POLYGON((0 0,1 0,1 1,0 1,0 0))",
         "POLYGON((1 0,2 0,2 1,1 1,1 0))",
     ]);
+    // the features: the map writer's `<path>`s that carry a data-row
     let fills = |s: &str| -> Vec<String> {
-        s.split("<polygon ")
+        s.split("<path ")
             .skip(1)
+            .filter(|t| t[..t.find('>').unwrap()].contains("data-row="))
             .map(|t| t[t.find("fill=\"").unwrap() + 6..][..7].to_string())
             .collect()
     };
@@ -173,8 +175,8 @@ fn map_fill_by_value_and_category() {
 }
 
 // ── A4b: map features carry their row, series, value and label ───────────
-/// The opening tags of the drawn map features (`<polygon`, `<polyline`,
-/// `<circle`) that carry a `data-row`.
+/// The opening tags of the drawn map features (`<path`, `<circle`) that
+/// carry a `data-row`.
 fn map_marks(svg: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = svg;
@@ -219,7 +221,9 @@ fn map_marks_carry_row_series_value_and_label() {
     let m = map_marks(&s);
     assert_eq!(m.len(), 4, "{m:?}");
     assert!(
-        m[0].starts_with("<polyline ")
+        // lines and areas are <path>s (a line unfilled)
+        m[0].starts_with("<path ")
+            && m[0].contains(" fill=\"none\"")
             && m[0].contains(" data-row=\"0\" data-series=\"Van 1\" data-label=\"Van 1: 12 km\">")
     );
     assert!(
@@ -235,9 +239,7 @@ fn map_marks_carry_row_series_value_and_label() {
         m[2]
     );
     assert!(s.contains("data-series=\"Van 2\"><title>Van 2</title>"));
-    assert!(
-        m[3].starts_with("<polygon ") && m[3].contains(" data-series=\"late &quot;stop&quot;\"")
-    );
+    assert!(m[3].starts_with("<path ") && m[3].contains(" data-series=\"late &quot;stop&quot;\""));
     assert!(s.contains("<title>Bakery &amp; Co\nstop #1: Van 1</title>"));
     assert!(
         !s.contains('\u{E000}') && !s.contains('\u{E001}'),
