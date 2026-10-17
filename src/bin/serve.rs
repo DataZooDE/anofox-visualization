@@ -217,8 +217,8 @@ fn parse_args() -> Opts {
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
     }
-    if let Err(e) = o.app.check() {
-        usage(&format!("--app-hide-name needs --app-logo ({e})"));
+    if o.app.check().is_err() {
+        usage("--app-hide-name needs --app-logo (the bar would be empty)");
     }
     if o.dashboards_dir.is_some() && !o.app.is_empty() {
         usage("--app-* style the authoring builder (locked dashboards show no app bar)");
