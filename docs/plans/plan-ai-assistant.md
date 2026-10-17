@@ -178,8 +178,16 @@ handlers**. The locked handlers never route it, and a test asserts that
     `mcp_servers`;
   - `metadata.user_id`, if sent, must be an opaque id.
 
-  Everything else is passed through unchanged, so prompt caching keeps
-  working.
+  **Allowlist, not denylist (security review M7):** only the top-level
+  fields the assistant needs are forwarded (`model`, `max_tokens`,
+  `system`, `messages`, `tools`, `tool_choice`, `thinking`, `stream`,
+  `metadata`, `output_config`), and each tool may carry only `name`,
+  `description`, `input_schema`, `strict`, `cache_control` and
+  `eager_input_streaming`. Any other field is a 400. No client header is
+  forwarded except `content-type`. `anthropic-version` is pinned on the
+  server, and an `anthropic-beta` header from the client is never passed on.
+  Prompt caching keeps working, because `cache_control` is on the list.
+  Ask's own upstream requests use the same allowlist.
 - **Key:** from `ANTHROPIC_API_KEY`, or `--assist-key-file`, read once at
   start. It is never echoed back, logged or shown in an error.
   `--assist-base-url` points the proxy at a company gateway that speaks the
@@ -732,24 +740,39 @@ has no tool that reaches a file, the network or another dashboard.
 
 The context has four parts.
 
-- **The panel catalog.** Built on the server from the plan it already holds
-  for each dashboard. Per statement:
+- **The static catalog** (security review H1). This is **text from the
+  dashboard source only**, and it is the only part of the context that is
+  shared and cached. Per statement:
   - its index, its tab, and its kind (KPI, line, bar, table, input…);
-  - its title and `::LABEL`;
-  - each column's display name and role;
-  - its `::INFO` definitions;
-  - for a `::THRESHOLDS` panel, the rule text;
-  - the band pairs (`::BAND_LOWER` / `::BAND_UPPER`, with their level);
-  - its `::MARKDOWN` / `::CALLOUT` text, which is where a dashboard states
-    its takeaway.
+  - the column names and roles;
+  - its `@ask` flags.
 
-  It also holds `-- @title` / `@description` and the `::ASOF` freshness of
-  the dashboard.
+  It also holds the header `@title` / `@description`. A panel whose title
+  is a `::TITLE` value is listed as "Panel 7 (title from data)".
 
-  Left out of the catalog:
-  - **panels on tabs hidden by an unmet `@requires`**;
-  - **panels marked `-- @ask skip`** (§12.4);
-  - for a viewer with a scope, panels the scope doesn't allow.
+  **Role values are data, not catalog.** `::TITLE`, `::LABEL`, `::INFO`,
+  `::THRESHOLDS`, `::MARKDOWN`, `::CALLOUT` and `::ASOF` are column roles:
+  their values are rows of a panel's result, computed under the viewer's
+  claims and policies. So they reach the model **only through `get_panel`**,
+  with the caps, the masking and the citation bookkeeping that come with
+  it.
+
+  The prefix bytes must be identical for viewers with different claims, and
+  a test checks this (§12.9 tests 1 and 7). The cache breakpoint comes
+  after the static catalog and before anything computed for a viewer.
+
+  Two decisions are made **per request**, in the per-viewer part after the
+  breakpoint:
+  - which panels are excluded (tabs hidden by an unmet `@requires`, which
+    can depend on scope-locked vars and the data folder, and `@ask skip`);
+  - the note "tab X is unavailable".
+
+  The shared prefix stays free of exclusions. Ask checks every panel
+  against this per-request list before it calls `locked_panel`, because
+  `locked_panel` knows nothing of `@ask skip` (I2).
+
+  *(I1: scopes are per dashboard plus locked vars, not per panel, so there
+  is no per-panel scope exclusion.)*
 
   No SQL text is ever in the context.
 - **A role note.** It is a short glossary for **only the roles the dashboard
@@ -776,7 +799,7 @@ so the model usually reads one to three of them.
 | Tool | Input | Returns | Limits |
 |---|---|---|---|
 | `list_panels` | `{tab?}` | the catalog entries (no data) | — |
-| `get_panel` | `{panel, vars?, page?}` | the panel's rows for this viewer, with column names and roles, and the row count. `vars` may change **input values the viewer could set** (e.g. "and for region US?"). `page` (sort / filter / offset) applies to `::PAGED` tables. | **One panel request, built and checked exactly like `POST /api/panel`**. Each result is at most 200 rows / 16 KB of JSON to the model (it says "first 200 of 1 834 rows; sort or filter for others"). All panel data in one question is at most 64 KB. At most 8 `get_panel` calls per question. |
+| `get_panel` | `{panel, vars?, page?}` | the panel's rows for this viewer, with column names and roles, and the row count. `vars` may set **only variables bound by the dashboard's own input panels, and for an input with an option list only to one of its options** (M3). `@ask on` requires `-- @vars`. `page` (sort / filter / offset) applies to `::PAGED` tables. | **One panel request, built and checked exactly like `POST /api/panel`**. Each result is at most 200 rows / 16 KB of JSON to the model (it says "first 200 of 1 834 rows; sort or filter for others"). All panel data in one question is at most 64 KB. At most 8 `get_panel` calls per question. |
 | `answer` | `{text, citations: [{panel, label, value?, row?: {column: value}}], scope: "answered" \| "partly" \| "not_on_dashboard"}` | — (ends the turn) | `strict: true`; `text` ≤ 1 200 characters |
 
 **On the locked server, `get_panel` is the panel path, not a copy of it.**
@@ -798,13 +821,22 @@ The static render server (B) calls its own panel runner with the
 `@param` allowlist in the same way. A unit test asserts that the tool and
 the endpoint return byte-identical results for the same viewer and request.
 
-**Citations are checked before they are shown.** The server keeps every
-`get_panel` result of the conversation. A citation must name a panel that was
-read in this conversation. A cited `value` must occur in that result, with
-numbers compared after the panel's own formatting and rounding. A citation
-that fails is shown as *not verified* with a warning mark, and the miss is
-counted in the eval. Numbers inside the free text are not checked one by one;
-the eval measures them (§12.8).
+**Citations are checked as a triple (security review M4).** A citation
+names the panel, the row (by its key columns), the column and the value. It
+is *verified* only when the server finds that row in that panel's result
+(read in this conversation) and the cell matches after the panel's
+formatting and rounding. The right value in the wrong row is *not
+verified*. Each citation carries the vars of the `get_panel` call that
+produced it.
+
+**The client builds the chip text** from the plan (the panel title) and the
+verified cell. The model's `label` is shown, if at all, as plain unverified
+text. A chip whose vars differ from the current view says so ("with region
+= US"), and clicking it applies those vars as a visible change.
+
+`get_panel` always builds the body with the conversation's dashboard id. A
+`dashboard` field in the tool input is ignored, and a test checks this
+(I3).
 
 ### 12.4 Opt-in, limits and logs
 
@@ -821,7 +853,12 @@ the eval measures them (§12.8).
      "base_url": "https://api.anthropic.com", // or a company gateway
      "transport": "anthropic",                 // or "openai" (M3, self-hosted)
      "provider_label": "Anthropic (Claude)",   // shown in the notice
-     "per_viewer": { "per_hour": 10, "per_day": 30 },
+     "per_viewer": { "per_hour": 10, "per_day": 30,
+                     "tokens_per_hour": 200000, "tokens_per_day": 600000 },
+     "per_question_tokens": 60000,             // checked before each model turn
+     "max_question_chars": 2000,               // body ≤ 16 KB
+     "allow": ["group:analysts"],              // optional: who may ask
+     "anonymous": false,
      "tokens_per_hour": 2000000,               // the whole server
      "concurrency": 4,
      "mask": "auto",                           // "auto" | ["col", …] | "off"
@@ -835,8 +872,12 @@ the eval measures them (§12.8).
    The start **fails** in each of these cases:
    - `enabled` is set but the key is missing;
    - the model is not in the allowlist;
-   - the `bind` goes beyond loopback without `auth`, so an anonymous network
-     could spend the key.
+   - **`auth` is not configured** (security review M1). Ask requires a
+     login whatever the bind, because a loopback bind behind nginx is
+     still public. The only exception is an explicit
+     `"ask": {"anonymous": true}`, which the start message prints as a
+     warning. The static render server (B) refuses in the same way; it
+     does not just warn.
 
    The start message names the model and the provider.
 2. **The dashboard.** A header line `-- @ask on`, read by
@@ -863,9 +904,29 @@ the auth proxy (P1), JWT, OIDC sessions and signed embed links (P3).
 - `/api/ask` takes the same same-origin `POST` rules as `/api/panel`, and the
   same `Host` allowlist.
 
-**Limits:**
-- Per viewer (the signed-in user, or the peer address without `auth`):
-  10 questions an hour and 30 a day by default.
+**Limits** (amended by security review H2 and M2):
+- **Ask runs on its own small worker pool, not on the HTTP workers.** An
+  `/api/ask` request hands off to that pool and streams progress, so login,
+  static assets, `/api/panel` and `/healthz` never wait for a model.
+- **At most 1 concurrent question per viewer.**
+- Ask holds **at most `max(1, max_queries / 2)` query slots** at once,
+  through a sub-semaphore, so viewers always have slots.
+- **One deadline per question** (60 s). The remaining time is passed to
+  each `get_panel` as its timeout.
+- **Token budgets per viewer** (per hour and per day), a **per-question
+  token ceiling** checked before each model turn (a running total, plus an
+  estimate of the next request), and a **question size cap**.
+- `max_tokens` and the effort are fixed in the server config. Budget is
+  **reserved before a call** and reconciled from `usage` after it, so
+  concurrent questions can't overshoot.
+- `ask.allow` restricts Ask to groups or claims.
+- Retries on 429 / 529 count against the limits, with a bounded backoff.
+- *Cancel* aborts the upstream call and releases Ask's query slots, and is
+  sent by the client as `DELETE /api/ask/<conversation>`.
+
+Also in force:
+- Per viewer (the signed-in user; `auth` is required, see M1): 10 questions
+  an hour and 30 a day by default.
 - Per server: a token budget per hour, read from each response's `usage`.
 - Per question: at most 6 model turns and the panel-data caps of §12.3, with
   a 60 s timeout.
@@ -890,17 +951,31 @@ What is and isn't logged:
   an answer quotes data values.
 - **Panel data is never logged.** Vars follow the existing `log_vars` rule.
 
-Each question also gets one audit-log event (`audit: "ask"`) the first time
-a viewer uses Ask in a session, so that use of the provider shows up next to
+**Ask's tool vars** are logged by **name** only, unless `log_answers` is
+set, even when `log_vars` is `values` (L2).
+
+A viewer's first use of Ask in a session writes **one audit-log event per
+session** (`audit: "ask"`), so that use of the provider shows up next to
 the logins.
+
+**Retention:** Ask log lines follow the request log's rotation, which the
+operator sets and must state in their records of processing.
+Conversations are held in memory for at most 30 minutes after the last
+question.
 
 ### 12.5 Conversations and follow-ups
 
-The conversation lives **on the server**, in memory, keyed by user, page
-session and a random 128-bit conversation id.
+The conversation lives **on the server**, in memory, keyed by the session
+id, **`Claims::key()`** and a random 128-bit conversation id (L1). A claims
+or group change, a policy reload or a revocation drops it. There are at most
+3 conversations per user and 2 000 per server, and each holds at most
+256 KB. Limits and conversations are per replica, which is documented.
+Embed links that a host application mints once for many people make those
+people one "viewer" (I5).
 - It holds at most 10 turns and expires 30 minutes after the last question.
 - It is capped in total size, and the oldest turns drop first.
-- It is dropped on logout and on a snapshot refresh. After a refresh the
+- It is dropped on logout, on a snapshot refresh, on a claims change and on
+  a policy reload. After a refresh the
   next question starts fresh with a note: "the data was refreshed".
 
 The client sends only `{dashboard, conversation, question, tab, vars,
@@ -920,9 +995,15 @@ behaving well.
   anyway. There is no SQL, no file, no network, no other dashboard and no
   write. The worst a successful injection can do is give **this viewer** a
   wrong or odd answer about data **they can already see**.
-- **No way out.** The answer is rendered as **plain text with escaped
-  Markdown**: bold, italics, lists and inline code only, through the existing
-  sanitising `renderMarkdown` path with links and images turned off.
+- **No way out.** The answer is rendered by a **dedicated
+  `renderAnswer(text)`** (security review M5). It escapes everything, then
+  allows only `**`, `*`, inline code and `-` / `1.` lists: no links or
+  autolinks, headings, blockquotes, HTML or math. URLs and e-mail addresses
+  in the text are shown greyed out (L5). The existing `renderMarkdown`
+  renders links as live anchors, so it is **not** used. The result sits in a
+  container that is visually separate from the chips and the notice. Mode B
+  escapes on the server **after** unmasking, because restored real values
+  are untrusted text too.
   - Model output never becomes HTML, a URL, an image or a style.
   - The only links are the **citation chips**, built by the client from the
     validated citations and pointing into the dashboard itself.
@@ -934,8 +1015,14 @@ behaving well.
   tab (`openTabNow`), scrolls to the panel and highlights the cited mark or
   row (the existing selection decoration, `decorateSelections`). The client
   checks the panel index and the cited key against its own plan and data, and
-  ignores anything else. The model can't make the page do anything without
-  the viewer's click.
+  ignores anything else. The highlight compares data values; it never builds
+  a CSS selector or `innerHTML` from model-supplied keys. The model can't
+  make the page do anything without the viewer's click.
+- **Failure modes (L4).** If the model stops without calling `answer`
+  (`end_turn` with text, `max_tokens`, a refusal, a timeout, a cancel), the
+  viewer gets a fixed "I couldn't answer that" message, never the raw text.
+  Upstream error bodies are never relayed to the viewer or the log: only
+  the status and `request_id` are kept.
 - **Labelled data.** Panel results reach the model inside
   `<panel_data panel="3">` blocks. The system prompt says that text inside
   them is data and never an instruction, and that questions about anything
@@ -952,7 +1039,32 @@ behaving well.
 Nothing about the viewer is sent: no user name, e-mail or claims, and
 `metadata.user_id` is not set.
 
-**Masking.** With `mask: "auto"` (the default once Ask is on), the server
+**Masking is best-effort minimisation, not a guarantee** (security review
+M6). Pseudonymised data is still personal data for the controller.
+
+What masking does:
+- Tokens use a sentinel format that can't occur in data (`⟦P4⟧`). If a
+  result already contains that format, the panel fails safe (it is not
+  sent).
+- Translation is exact-token in both directions: tokens in the answer
+  become real values, and tokens in `get_panel` vars become real values
+  before the query runs.
+- The conversation's map is also applied to the **question**, the
+  **view-state vars** and **error strings** before anything is sent.
+- The map is **per conversation**, built only from this viewer's
+  `get_panel` results, and dropped with the conversation. It is never
+  shared or stable across viewers, so the provider can't link people
+  across sessions.
+- The detector covers English and German column names (`name`, `Kunde`,
+  `Mitarbeiter`, `Ansprechpartner`, `Straße`, `Telefon`, `Personalnummer`…),
+  spaced IBANs and IDs. It is tested with an English and a German fixture.
+- An `@ask on` dashboard with a column the detector flags is a lint
+  **error** (`ask/raw-detail`), unless the panel has `@ask skip` or an
+  explicit `-- @ask mask col,…`.
+- Quasi-identifiers (department + age + salary) are not masked. `@ask
+  skip` is the tool for those panels.
+
+With `mask: "auto"` (the default once Ask is on), the server
 **pseudonymises** values before they leave:
 - values that look like e-mail addresses, phone numbers or IBANs;
 - the values of columns whose names suggest personal data (`name`,
@@ -968,7 +1080,8 @@ columns, and `"off"` turns masking off (the start message says so).
 **The viewer notice.** The first time a viewer opens Ask in a session, they
 see the notice, and Ask stays closed until they choose *Continue*:
 
-> "Your question and the data of the panels you can see are sent to
+> "Your question and the data of the panels on this dashboard that the
+> assistant reads are sent to
 > *Anthropic (Claude)* to answer it. Answers are AI-generated and can be
 > wrong; check the cited panels."
 
@@ -981,17 +1094,35 @@ operators):
 - The operator who turns Ask on is the **controller**, and the model
   provider acts as a **processor** for the panel data and questions.
 - Before Ask is enabled on personal data, the operator needs a **data
-  processing agreement** with the provider. Anthropic's commercial terms
-  include one. The operator also needs a legal basis (usually legitimate
+  processing agreement** with the provider. *(Whether the provider's
+  current commercial terms include one, and which transfer mechanism they
+  use, must be checked against the provider's published terms, with the
+  date, before this goes into DOCS.md. This note makes no claim about
+  them.)* The operator also needs a legal basis (usually legitimate
   interest for internal reporting) and an entry in their records of
   processing.
 - If the provider processes data outside the EU, the transfer needs a
-  transfer mechanism (SCCs or the EU–US Data Privacy Framework); check the
-  provider's current terms.
+  transfer mechanism. Check the provider's current terms and record the
+  source and date.
 - The provider's own **retention** of API inputs and outputs applies; check
   its current policy, and zero-retention arrangements where they are
   offered.
-- The viewer notice above covers transparency to the viewer.
+- **The viewer notice covers only the viewer.** The people whose data is
+  in the panels (customers, employees) are owed Art. 13 / 14 information
+  too: the operator updates their privacy notice and records of
+  processing.
+- **A DPIA (Art. 35)** may be needed for a new AI processing of personal
+  data at scale. The operator decides with their data protection officer.
+- **Employee data (Germany).** Per-user logging of question text can be a
+  technical means of monitoring behaviour, so works-council
+  co-determination (§87(1) Nr. 6 BetrVG) probably applies. The legal basis
+  for employee data (§26 BDSG vs. Art. 6(1)(f) after CJEU C-34/21) is
+  unsettled. See the open question at the top of §13.
+- **The notice that questions are logged is generated by the server**
+  whenever `log_questions` is on; it is not left to the operator's
+  `notice` text.
+- The EU AI Act Art. 50 transparency duty (from 2 August 2026) is
+  supported by the "AI-generated" labelling; legal confirms.
 - Data minimisation is built in: panels on demand, the caps, `@ask skip`,
   masking, and no identity in requests.
 - Customers who can't send data out at all can use the OpenAI-compatible
@@ -1031,7 +1162,23 @@ operators):
   - Esc closes the panel and returns focus to its opener.
   - The phone layout is covered by `a11y-e2e` at 390 px, and an axe run
     covers the open panel.
-- **The static render server (B)** has no client data API and little
+- **Builder Ask (M9).** Before the first send, a per-conversation consent
+  reads: "panel rows will be sent to <destination>". It uses the same
+  masking module and tests as served Ask. `get_panel` binds vars as typed
+  `SET VARIABLE` literals, never by textual substitution (tested), and stays
+  inside the read-only gate of §3.3. Exported HTML and static View pages
+  load the Ask module only when `assistant.enabled` is set.
+- **The static render server (B)** (security review M8):
+  - Ask responses (B and A) are `Cache-Control: no-store, private` and never
+    enter the render or panel cache.
+  - B's form carries a per-session CSRF token and is checked with `Origin` /
+    `Sec-Fetch-Site`.
+  - Ask on B is **single-turn**, or follows up through a server-held
+    conversation id only. History is never carried in hidden fields.
+  - B has no policies and no `@requires` hiding, so every panel must
+    filter on the claims itself, which the docs state.
+
+  The rest of this point describes B's form. B has no client data API and little
   script. It gets an *Ask* form under the dashboard: a `POST` with the
   page's `@param` values, answered by a server-rendered page with the answer
   as escaped text and citations as `#panel-n` anchors. It shows the same
@@ -1075,8 +1222,22 @@ fake model upstream that records every request:
    `/api/ask` and inside a `get_panel` call are refused like in `/api/panel`.
 5. A model reply with a URL, an image, HTML or a citation to a panel it
    never read is rendered inert, or marked *not verified*.
-6. The masking round trip: a pseudonym never reaches the viewer, and a real
-   value never reaches the upstream.
+6. The masking round trip, narrowed by M6: values the detector flags never
+   reach the upstream, and a pseudonym never reaches the viewer. Tested
+   with an English and a German fixture; a sentinel collision fails safe.
+7. **Claim-dependent text (H1):** a `::MARKDOWN` / `::CALLOUT` / `::LABEL`
+   whose value depends on `getvariable('__claim_user')`. User B's canary
+   never reaches a request made for A, and the prefix bytes are identical
+   for A and B.
+8. **Load (H2):** 4 concurrent asks against a slow fake model, while the p95
+   of `/api/panel` and `/` stays within bounds.
+9. **Citations (M4):** the right value in the wrong row is *not verified*;
+   chip text never contains model text.
+10. **Rendering (M5):** an XSS and markup corpus through `renderAnswer`
+    (`javascript:`, `data:`, `<img onerror>`, nested Markdown, `\href`, a
+    fake chip made of text and glyphs).
+11. **The upstream allowlist (M7):** unknown body fields and
+    `anthropic-beta` headers are refused or stripped.
 
 The live eval runs like the Build eval (§6). At about $0.05 a question it
 costs about $1 for 15 cases, and it shares the workflow and the key of §11.5.
@@ -1090,7 +1251,11 @@ The assumptions, for Sonnet 5 at effort `medium`:
 - two model calls;
 - about 1.5 K output tokens, including thinking.
 
-That is about **$0.04–0.06 per question**, and about $0.02 for a follow-up
+Worst case, bounded by the new caps (security review M2): 6 turns with
+about 20 K tokens of panel data each, plus history, stays under the
+`per_question_tokens` ceiling of 60 K input-equivalent tokens, so at most
+about $0.15–0.20 a question. The typical case is about **$0.04–0.06 per
+question**, and about $0.02 for a follow-up
 within 5 minutes. At the default limit of 30 questions per viewer per day
 that is at most about $1.50 per viewer per day. The server's
 `tokens_per_hour` caps the whole bill.
@@ -1132,6 +1297,37 @@ blocking findings are fixed.
   same PR, as for #160. The threat-model rows above go into
   `docs/secure-serving.md` in M2-4.
 
+### 12.14 Security review changes (2026-10-18)
+
+The independent design review (M2-0, verdict *approve with required
+changes*: 2 High, 9 Medium) is folded into the sections above. This table is
+the index, and each change has a test in §12.9 or in the PR that builds it.
+
+| Finding | Change | Where |
+|---|---|---|
+| **H1** The catalog held role values, which are query results, in a prefix described as shared | The catalog is split. Only static source text is in the shared prefix. Role values (`::TITLE`, `::LABEL`, `::INFO`, `::THRESHOLDS`, `::MARKDOWN`, `::CALLOUT`, `::ASOF`) come only through `get_panel`. Exclusions are decided per request, in the per-viewer part. Tested: identical prefix bytes across policy users, and a claim-dependent `::MARKDOWN` canary | §12.2, §12.9 test 7 |
+| **H2** Ask held HTTP workers and query slots, so one viewer could stall the server | Ask runs on its own pool; 1 concurrent question per viewer; Ask holds at most `max(1, max_queries/2)` slots; one deadline per question, passed down to `get_panel`; a load test | §12.4, §12.9 test 8 |
+| **M1** The loopback exemption missed a server behind a reverse proxy | Ask requires `auth` whatever the bind (except an explicit, warned `anonymous: true`); B refuses rather than warns | §12.4 |
+| **M2** One viewer could use up the shared budget | Per-viewer token budgets, a per-question token ceiling, a question size cap, server-fixed `max_tokens` and effort, budget reserved before each call, `ask.allow`; worst-case cost stated | §12.4, §12.10 |
+| **M3** Model-chosen vars were "anything the endpoint accepts" | `@ask on` requires `-- @vars`; Ask may set only variables bound to the dashboard's input panels, and only to their options | §12.3, lint |
+| **M4** Citation checks were too weak; the chip text was model-written | Verified as panel + row + column + value; chip text built by the client; citations carry their vars | §12.3, §12.9 test 9 |
+| **M5** `renderMarkdown` renders live links | A dedicated `renderAnswer` (no links, headings, blockquotes, HTML or math), with an XSS corpus test | §12.6, §12.9 test 10 |
+| **M6** Masking promised more than a heuristic can | Described as best effort; sentinel tokens; exact-token translation both ways; the question, vars and errors masked; per-conversation maps; an English and a German fixture; a lint error for flagged columns | §12.7, §12.9 test 6 |
+| **M7** `/assist` used a denylist | An allowlist of body fields, tool fields and headers; no `anthropic-beta` from the client; the same list for Ask's upstream calls | §2.3, §12.9 test 11 |
+| **M8** B: CSRF, caching, history | `no-store, private`; a CSRF token plus Origin / Sec-Fetch-Site; single-turn or a server-held id; no `@requires` hiding stated | §12.8 |
+| **M9** Builder Ask sent rows without consent | Per-conversation consent; the shared masking module; typed `SET VARIABLE` binding; the module loaded only when enabled | §12.8 |
+| **L1** Conversation binding | Keyed on the session + `Claims::key()`; dropped on claims or policy change; numeric caps; per replica | §12.5 |
+| **L2** Logging | Ask tool vars logged by name; one audit event per session | §12.4 |
+| **L3** Upstream hygiene | `base_url` must be https unless loopback; no redirects; `HTTPS_PROXY` only when configured (documented: it sees the key); `key_file` opened with the `revocation_file` rules (0600, no symlink); a generic User-Agent; no identity in headers or metadata; upstream error bodies never relayed | M2-1 / M2-3 implementation |
+| **L4** Failure modes | A fixed "couldn't answer" message; retries count against the limits; cancel through `DELETE /api/ask/<id>` aborts upstream and frees slots | §12.4, §12.6 |
+| **L5** Social engineering in the answer text | URLs and e-mail addresses greyed out | §12.6 |
+| **L6** Notice wording | "the data of panels on this dashboard that the assistant reads" | §12.7 |
+| **I1–I6** | No per-panel scopes (I1); Ask checks its own exclusion list before `locked_panel` (I2); the dashboard id is fixed by the conversation (I3); with H1 there is no data in shared prefixes, and operators with several tenants on one key should use one workspace per tenant (I4); embed links minted once for many people share one viewer (I5); JWT callers are covered by M2's budgets (I6) | §12.2, §12.3, §12.5 |
+| **GDPR** | Art. 13 / 14 duties towards the people in the panels; a DPIA note; pseudonymised data is still personal data; DPA and transfer statements removed until checked against the provider's dated terms; works council and §26 BDSG; a server-generated "questions are logged" notice; retention stated; AI Act Art. 50 | §12.7, §13 |
+
+**Implementation of M2-3 and later starts only now that these are in the
+note.** Each serving PR still gets its own review (§12.12).
+
 ### 12.13 The follow-up Ask must not block: a dashboard published as an agent (#194)
 
 In #194 a dashboard is published as a guarded agent: the locked server, plus
@@ -1169,6 +1365,15 @@ release bundle, and the channels. They are #194's design note
 (`docs/plans/plan-dashboard-to-agent.md`).
 
 ## 13. Open questions for the owner (Ask)
+
+0. **New, from the security review: should `log_questions` default to
+   `false` for served Ask?** The reviewer recommends `false`, or logging
+   with a pseudonymised user. Logging question text per user can count as
+   a technical means of monitoring employees, which brings in works-council
+   co-determination (§87(1) Nr. 6 BetrVG). The owner decided `true` on
+   2026-10-18 (§13.1, decision 1), and **that decision stays in force
+   until the owner decides again**. Whatever the default, the server
+   generates the "questions are logged" notice.
 
 1. **Logging question text.** Questions are logged by default
    (`log_questions: true`) and answers are not. A question can itself hold
