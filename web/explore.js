@@ -639,3 +639,256 @@ export async function profileTable(run, pageSql, fq, opts = {}) {
   opts.onStage?.("done", state);
   return state;
 }
+
+// ---- anofox_tabular: a hint's check (#111) ----
+
+// Is anofox_tabular's run_checks there (loaded in this session)?
+export const TABULAR_PROBE = "SELECT count(*) AS n FROM duckdb_functions() WHERE function_name = 'run_checks'";
+
+// The anofox_tabular check behind a hint of column `card` of table `fq`:
+// {type, table, column, params, lower, upper} (run_checks' contract), or null.
+export function hintCheck(fq, card, hint) {
+  const q = qid(card.name);
+  const c = { table: fq, column: card.name, params: null, lower: null, upper: null };
+  switch (hint.code) {
+    case "all-null":
+    case "mostly-null":
+      return { ...c, type: "null_rate", upper: 0.5 };
+    case "constant":
+      return { ...c, type: "distinct_count", lower: 2 };
+    case "duplicate-keys":
+      return { ...c, type: "duplicate_count", upper: 0 };
+    case "mixed-types": // the share of values that are not numbers
+      return { ...c, column: null, type: "compliance", params: { expression: `${q} IS NULL OR TRY_CAST(${q} AS DOUBLE) IS NULL` }, lower: 1 };
+    case "outliers": {
+      const w = card.p95 - card.p05;
+      if (!(w > 0)) return null;
+      const lo = card.p05 - 3 * w,
+        hi = card.p95 + 3 * w;
+      return { ...c, column: null, type: "compliance", params: { expression: `${q} IS NULL OR ${finite(q)} BETWEEN ${lo} AND ${hi}` }, lower: 1 };
+    }
+  }
+  return null;
+}
+
+// Run checks with anofox_tabular: its checks table lives in an attached
+// in-memory database (run_checks needs a regular table; the data's own
+// database may be read-only). One script, so a client that runs each request
+// in a fresh process sees it whole; `load` prepends LOAD anofox_tabular.
+// The last statement's rows: check_name, check_type, value, thresholds,
+// status, message.
+export function tabularChecksSql(checks, load = false) {
+  const s = (v) => (v == null ? "CAST(NULL AS VARCHAR)" : sqlStr(v));
+  const d = (v) => (v == null || !Number.isFinite(Number(v)) ? "CAST(NULL AS DOUBLE)" : `CAST(${Number(v)} AS DOUBLE)`);
+  const rows = checks.map(
+    (c, i) =>
+      `(${sqlStr(`${i + 1} ${c.type}${c.column ? " " + c.column : ""}`)}, ${sqlStr(c.type)}, ${sqlStr(c.table)}, ${s(c.column)}, ${s(c.params && JSON.stringify(c.params))}, ` +
+      `${d(c.lower)}, ${d(c.upper)}, false, CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR))`
+  );
+  return [
+    load && "LOAD anofox_tabular",
+    "ATTACH IF NOT EXISTS ':memory:' AS xp_checks (READ_WRITE)",
+    "CREATE OR REPLACE TABLE xp_checks.main.checks AS SELECT * FROM (VALUES " +
+      rows.join(", ") +
+      ") t(check_name, check_type, table_name, column_name, params, lower_threshold, upper_threshold, monitor_only, identifier_column, filter_expr)",
+    "SELECT check_name, check_type, value, lower_threshold, upper_threshold, status, message FROM run_checks('xp_checks.main.checks') ORDER BY check_name",
+  ]
+    .filter(Boolean)
+    .join(";\n");
+}
+
+// ---- compare two tables, or two time ranges of one (#111) ----
+
+// One side of a time-range comparison: the table's rows in [from, to].
+export const rangeSide = (fq, col, from, to) =>
+  `(SELECT * FROM ${fq} WHERE CAST(${qid(col)} AS DATE) BETWEEN DATE ${sqlStr(from)} AND DATE ${sqlStr(to)}) _r`;
+
+// Two halves of a date range (ISO text): [[from, to], [from, to]].
+export function halves(t0, t1) {
+  const a = Date.parse(String(t0).slice(0, 10)),
+    b = Date.parse(String(t1).slice(0, 10));
+  if (!isFinite(a) || !isFinite(b) || b <= a) return null;
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const mid = a + Math.floor((b - a) / 864e5 / 2) * 864e5;
+  return [
+    [day(a), day(mid)],
+    [day(mid + 864e5), day(b)],
+  ];
+}
+
+// The column-by-column comparison of two profiles: rows {name, change:
+// same | added | removed | retyped, a, b (the cards), shifts: [text]}.
+export function compareCards(A, B) {
+  const byB = new Map(B.map((c) => [c.name, c]));
+  const out = [];
+  const rel = (x, y) => (x == null || y == null ? null : x === y ? 0 : (y - x) / (Math.abs(x) || 1));
+  for (const a of A) {
+    const b = byB.get(a.name);
+    if (!b) {
+      out.push({ name: a.name, change: "removed", a, b: null, shifts: [] });
+      continue;
+    }
+    byB.delete(a.name);
+    const shifts = [];
+    if (Math.abs((b.nullPct || 0) - (a.nullPct || 0)) >= 5) shifts.push(`empty ${fmtStat(a.nullPct, 2)}% → ${fmtStat(b.nullPct, 2)}%`);
+    const dd = rel(a.distinct, b.distinct);
+    if (dd != null && Math.abs(dd) >= 0.2 && Math.abs(b.distinct - a.distinct) >= 3) shifts.push(`distinct ${fmtStat(a.distinct)} → ${fmtStat(b.distinct)}`);
+    for (const k of ["mean", "median"]) {
+      const r = rel(a[k], b[k]);
+      if (r != null && Math.abs(r) >= 0.1) shifts.push(`${k} ${fmtStat(a[k])} → ${fmtStat(b[k])} (${r > 0 ? "+" : ""}${Math.round(100 * r)}%)`);
+    }
+    out.push({ name: a.name, change: a.type === b.type ? "same" : "retyped", a, b, shifts });
+  }
+  for (const b of byB.values()) out.push({ name: b.name, change: "added", a: null, b, shifts: [] });
+  return out;
+}
+
+// A key both sides share: a column unique (and never empty) on both, named
+// like a key first. Its name, or null.
+export function compareKey(A, B) {
+  const byB = new Map(B.map((c) => [c.name, c]));
+  const unique = (c) => c && c.kind !== "other" && c.n > 0 && c.nonnull === c.n && c.distinct === c.n;
+  const keys = A.filter((a) => unique(a) && unique(byB.get(a.name)));
+  keys.sort((x, y) => idLike(y.name) - idLike(x.name));
+  return keys.length && (idLike(keys[0].name) || keys[0].kind !== "num" || keys.length === 1) ? keys[0].name : null;
+}
+
+// Rows added / removed / changed between two sides by `key`, over the
+// common columns (the anofox_tabular diff_joindiff semantics, in plain SQL).
+// `common`: column names, or {name, num} (num: compare as numbers, so an
+// INTEGER retyped to DOUBLE is no change).
+export function keyDiffSql(srcA, srcB, key, common) {
+  const k = qid(key);
+  const others = common.map((c) => (typeof c === "string" ? { name: c } : c)).filter((c) => c.name !== key);
+  const val = (c) => (c.num ? `CAST(${qid(c.name)} AS DOUBLE)` : qid(c.name));
+  const h = others.length ? `md5(CAST(row(${others.map(val).join(", ")}) AS VARCHAR))` : "''";
+  const side = (src) => `SELECT CAST(${k} AS VARCHAR) AS k, ${h} AS h FROM ${src}`;
+  return (
+    `SELECT count(*) FILTER (WHERE _a.k IS NULL) AS added, count(*) FILTER (WHERE _b.k IS NULL) AS removed, ` +
+    `count(*) FILTER (WHERE _a.k IS NOT NULL AND _b.k IS NOT NULL AND _a.h <> _b.h) AS changed, ` +
+    `count(*) FILTER (WHERE _a.h = _b.h) AS same FROM (${side(srcA)}) _a FULL OUTER JOIN (${side(srcB)}) _b ON _a.k = _b.k`
+  );
+}
+
+// 10-bin histograms of both sides on one shared range per numeric column
+// (`cols`: [{i, name, lo, hi}]): rows (c, s = 'a' | 'b', k, n).
+export function overlaySql(baseA, baseB, cols) {
+  const part = (base, s, c) => {
+    const x = finite(qid(c.name));
+    const w = c.hi - c.lo;
+    return (
+      `SELECT ${c.i} AS c, '${s}' AS s, ${w > 0 ? `least(9, floor((_x - ${c.lo}) / ${w} * 10))::INTEGER` : "0"} AS k, count(*) AS n ` +
+      `FROM (SELECT ${x} AS _x FROM (${base}) _o) _v WHERE _x IS NOT NULL GROUP BY 3`
+    );
+  };
+  return cols.flatMap((c) => [part(baseA, "a", c), part(baseB, "b", c)]).join(" UNION ALL ") + " ORDER BY 1, 2, 3";
+}
+
+// Profile both sides (`a`, `b`: {src, label, total?}) and compare them:
+// {a, b (profiles), cols (compareCards), key, diff, overlay: Map col -> {a, b}}.
+// Same `alive` / `onStage(stage, state)` contract as profileTable.
+export async function compareTables(run, pageSql, a, b, opts = {}) {
+  const alive = opts.alive || (() => true);
+  const step = async (sql) => {
+    if (!alive()) throw new Superseded();
+    const r = await run(sql);
+    if (!alive()) throw new Superseded();
+    return r;
+  };
+  const state = { a: null, b: null, cols: [], key: null, diff: null, overlay: new Map() };
+  state.a = await profileTable(run, pageSql, a.src, { alive, total: a.total });
+  opts.onStage?.("a", state);
+  state.b = await profileTable(run, pageSql, b.src, { alive, total: b.total });
+  state.cols = compareCards(state.a.cards, state.b.cards);
+  opts.onStage?.("b", state);
+  const nums = state.cols
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r.a && r.b && r.a.kind === "num" && r.b.kind === "num" && r.a.min != null && r.b.min != null)
+    .slice(0, 24)
+    .map(({ r, i }) => ({ i, name: r.name, lo: Math.min(r.a.min, r.b.min), hi: Math.max(r.a.max, r.b.max) }));
+  if (nums.length) {
+    const rows = await step(overlaySql(profileBase(a.src, state.a.total).base, profileBase(b.src, state.b.total).base, nums));
+    for (const c of nums) {
+      const h = { a: Array(10).fill(0), b: Array(10).fill(0), lo: c.lo, hi: c.hi };
+      for (const r of rows) if (Number(r.c) === c.i) h[r.s][Math.min(9, Math.max(0, Number(r.k)))] += Number(r.n) || 0;
+      state.overlay.set(c.name, h);
+    }
+  }
+  opts.onStage?.("overlay", state);
+  state.key = compareKey(state.a.cards, state.b.cards);
+  if (state.key) {
+    const common = state.cols.filter((r) => r.a && r.b && r.a.kind !== "other").map((r) => ({ name: r.name, num: r.a.kind === "num" && r.b.kind === "num" }));
+    state.diff = (await step(keyDiffSql(a.src, b.src, state.key, common)))[0] || null;
+  }
+  opts.onStage?.("done", state);
+  return state;
+}
+
+// A starter dashboard for a comparison: row counts (and the main measure)
+// with B against A as a ::DELTA, key changes, the schema differences, rows by
+// the main category per side, the main measure's spread per side and, for
+// two tables with a date, both over time. Passes dashboard --check --strict.
+export function compareDashboard({ a, b, cmp }) {
+  const A = a.src,
+    B = b.src;
+  const la = String(a.label),
+    lb = String(b.label);
+  const both = cmp.cols.filter((r) => r.a && r.b);
+  const plan = starterPlan(both.map((r) => r.b));
+  const out = [
+    `-- Compare ${la} (A) with ${lb} (B), written by Explore data from both profiles.`,
+    "-- Every panel is a query on both sides: edit, add, remove.",
+    "",
+    "SELECT 'B against A'::GROUP;",
+    `SELECT (SELECT count(*) FROM ${B})::COMPACT, (SELECT count(*) FROM ${A})::DELTA, ${sqlStr("vs " + la)}::DELTA_LABEL, ${sqlStr("Rows in " + lb)}::LABEL;`,
+  ];
+  const m = plan.measures[0];
+  if (m) {
+    const f = avgLike(m.name) ? "avg" : "sum";
+    out.push(
+      `SELECT (SELECT ${f}(${qid(m.name)}) FROM ${B})::COMPACT, (SELECT ${f}(${qid(m.name)}) FROM ${A})::DELTA, ${sqlStr("vs " + la)}::DELTA_LABEL, ` +
+        `${sqlStr((f === "avg" ? "Average " : "Total ") + lower(m.name))}::LABEL;`
+    );
+  }
+  if (cmp.key) {
+    const common = both.filter((r) => r.a.kind !== "other").map((r) => ({ name: r.name, num: r.a.kind === "num" && r.b.kind === "num" }));
+    const d = `(${keyDiffSql(A, B, cmp.key, common)}) _d`;
+    for (const [col, word] of [["added", "added"], ["removed", "removed"], ["changed", "changed"]])
+      out.push(`SELECT ${col}::COMPACT, ${sqlStr(`Rows ${word} (by ${cmp.key})`)}::LABEL FROM ${d};`);
+  }
+  out.push("SELECT 1::ENDGROUP;", "");
+  if (cmp.cols.some((r) => r.change !== "same"))
+    out.push(
+      `SELECT coalesce(_a.column_name, _b.column_name) AS "Column", _a.column_type AS "In A", _b.column_type AS "In B",\n` +
+        `       CASE WHEN _a.column_name IS NULL THEN 'added' WHEN _b.column_name IS NULL THEN 'removed' ELSE 'retyped' END AS "Change" ::TABLE,\n` +
+        `       'Schema differences'::TITLE\n` +
+        `FROM (DESCRIBE SELECT * FROM ${A}) _a FULL OUTER JOIN (DESCRIBE SELECT * FROM ${B}) _b ON _a.column_name = _b.column_name\n` +
+        `WHERE _a.column_type IS DISTINCT FROM _b.column_type ORDER BY 1;`
+    );
+  const sides = (cols) => `SELECT ${sqlStr(la)} AS side, ${cols} FROM ${A} UNION ALL SELECT ${sqlStr(lb)}, ${cols} FROM ${B}`;
+  const cat = plan.cats[0];
+  if (cat) {
+    const q = qid(cat.name);
+    out.push(
+      `SELECT coalesce(CAST(${q} AS VARCHAR), '(empty)')::XAXIS, side::CATEGORY, count(*)::BARCHART, ${sqlStr(`Rows by ${lower(cat.name)}`)}::TITLE\n` +
+        `FROM (${sides(q)}) _s\nWHERE coalesce(CAST(${q} AS VARCHAR), '(empty)') IN (SELECT coalesce(CAST(${q} AS VARCHAR), '(empty)') FROM (${sides(q)}) _t GROUP BY 1 ORDER BY count(*) DESC, 1 LIMIT 10)\n` +
+        `GROUP BY 1, 2 ORDER BY 1, 2;`
+    );
+  }
+  if (m) {
+    const q = qid(m.name);
+    const smp = (src) => `(SELECT ${q} FROM ${src} WHERE ${q} IS NOT NULL) _x USING SAMPLE reservoir(2500 ROWS) REPEATABLE (97)`;
+    out.push(
+      `SELECT side::XAXIS, ${q}::BOXPLOT, ${sqlStr("Spread of " + lower(m.name))}::TITLE\n` +
+        `FROM (SELECT ${sqlStr(la)} AS side, ${q} FROM ${smp(A)} UNION ALL SELECT ${sqlStr(lb)}, ${q} FROM ${smp(B)}) _s;`
+    );
+  }
+  if (plan.date && !a.range) {
+    const d = qid(plan.date.name);
+    out.push(
+      `SELECT CAST(date_trunc('month', ${d}) AS DATE)::XAXIS, side::CATEGORY, count(*)::LINECHART, 'Rows per month'::TITLE\n` +
+        `FROM (${sides(d)}) _s WHERE ${d} IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2;`
+    );
+  }
+  return out.join("\n") + "\n";
+}

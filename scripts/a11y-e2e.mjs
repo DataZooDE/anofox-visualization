@@ -366,6 +366,11 @@ if (axe && existsSync(axe)) {
     if (!(await xp.evaluate(() => document.activeElement?.closest(".xp-chart")))) fail("explore: the chart preview does not take the focus");
     await xp.click("#xq-run");
     await xp.waitForSelector("#xq-tools button", { timeout: 60000 });
+    // a comparison of two time ranges (#111)
+    await xp.click("button:has-text('Compare…')");
+    await xp.check(".xp-cmp-mode input[value=range]");
+    await xp.click(".xp-cmp-form button[type=submit]");
+    await xp.waitForSelector("table.xp-cmp", { timeout: 60000 });
     await xp.addScriptTag({ path: axe });
     const xres = await xp.evaluate(async () => window.axe.run("#explore", { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }));
     for (const v of xres.violations) console.log(`axe explore ${scheme} ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help} — ${v.nodes[0]?.target}`);

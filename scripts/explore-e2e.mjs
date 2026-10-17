@@ -187,6 +187,56 @@ async function exploreRun({ width, dark }) {
   await page.waitForFunction(() => /^100 rows/.test(document.getElementById("xq-info").textContent), null, { timeout: 60000 });
   ok(`${tag}: likely joins (${join.replace(/\s+/g, " ").trim()})`);
 
+  // Compare (#111): two tables by a key, then two time ranges of one.
+  const sql = async (q) => {
+    await page.fill("#xq-sql", q);
+    await page.click("#xq-run");
+    await page.waitForFunction(() => /rows? · /.test(document.getElementById("xq-info").textContent) || !document.getElementById("xq-err").hidden, null, { timeout: 60000 });
+  };
+  await sql("CREATE OR REPLACE TABLE cust_v1 AS SELECT i AS customer_id, 'n' || i AS name, ['DE','FR','IT'][1 + i % 3] AS country, i * 10 AS score FROM range(1, 301) t(i)");
+  await sql("CREATE OR REPLACE TABLE cust_v2 AS SELECT i AS customer_id, CASE WHEN i % 25 = 0 THEN 'x' || i ELSE 'n' || i END AS name, ['DE','FR','IT'][1 + i % 3] AS country, (i * 10)::DOUBLE AS score, i % 2 = 0 AS active FROM range(20, 341) t(i)");
+  await page.waitForSelector('.cat-table[data-fq$=\'"cust_v2"\']', { timeout: 60000 });
+  await pick(page, "cust_v1");
+  await page.click("button:has-text('Compare…')");
+  await page.selectOption(".xp-cmp-form select", { label: "cust_v2" });
+  await page.click(".xp-cmp-form button[type=submit]");
+  await page.waitForSelector("table.xp-cmp", { timeout: 60000 });
+  const sum = await page.textContent(".xp-cmp-sum");
+  if (!/score retyped/.test(sum) || !/active added/.test(sum) || !/40 rows added, 19 removed, 12 changed/.test(sum)) fail(`${tag}: compare summary: ${sum}`);
+  else ok(`${tag}: compare two tables (${sum.trim()})`);
+  if (shots) await page.locator(".xp-cmp-panel").screenshot({ path: path.join(shots, `compare-${width}-${dark ? "dark" : "light"}.png`) });
+  if (!(await page.$("table.xp-cmp caption")) || !(await page.$("table.xp-cmp svg.xp-ov[aria-label]"))) fail(`${tag}: compare table without a caption or overlay summaries`);
+  await pick(page, "shop");
+  await page.click("button:has-text('Compare…')");
+  await page.check(".xp-cmp-mode input[value=range]");
+  await page.click(".xp-cmp-form button[type=submit]");
+  await page.waitForSelector("table.xp-cmp", { timeout: 60000 });
+  ok(`${tag}: compare two time ranges (${(await page.textContent(".xp-cmp-panel .xp-progress")).trim()})`);
+  await page.click("button:has-text('New dashboard from this comparison')");
+  await page.waitForFunction(() => !document.body.classList.contains("mode-explore") && document.querySelector(".dash .panel") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await page.waitForTimeout(500);
+  const cbad = await page.$$eval(".dash .dp-errcard, .dash .dp-err", (e) => e.map((x) => x.textContent.slice(0, 160)));
+  if (cbad.length) fail(`${tag}: comparison dashboard has panel errors: ${cbad.join(" | ")}`);
+  else ok(`${tag}: comparison dashboard runs (${await page.$$eval(".dash .panel", (p) => p.length)} panels)`);
+  await page.evaluate(() => document.getElementById("side-explore").click()); // (collapsed on a phone)
+  await page.waitForSelector(".cat-table");
+
+  // anofox_tabular (#111): with run_checks in the session (here a stand-in
+  // macro with its contract), a hint runs its check and shows the result.
+  await sql("CREATE OR REPLACE TABLE dupes AS SELECT i % 40 AS order_id, i AS v FROM range(100) t(i)");
+  await sql(
+    "CREATE OR REPLACE MACRO run_checks(t) AS TABLE SELECT check_name, check_type, 60.0::DOUBLE AS value, lower_threshold, upper_threshold, 'fail' AS status, 'stand-in' AS message FROM query_table(t)"
+  );
+  await page.waitForSelector('.cat-table[data-fq$=\'"dupes"\']', { timeout: 60000 });
+  await pick(page, "dupes");
+  await page.waitForSelector('.xp-card[data-col="order_id"] .xp-runcheck', { timeout: 60000 });
+  await page.click('.xp-card[data-col="order_id"] .xp-runcheck');
+  await page.waitForSelector('.xp-card[data-col="order_id"] .xp-hint-res', { timeout: 60000 });
+  const res = await page.textContent('.xp-card[data-col="order_id"] .xp-hint-res');
+  if (!/anofox_tabular duplicate_count: 60 — fail/.test(res)) fail(`${tag}: hint check: ${res}`);
+  else ok(`${tag}: a hint runs its anofox_tabular check (${res})`);
+  await sql("DROP MACRO TABLE run_checks");
+
   // A starter dashboard from the table runs with no panel errors.
   await pick(page, "shop");
   await page.click("button:has-text('New dashboard from this table')");

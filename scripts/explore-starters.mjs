@@ -13,7 +13,7 @@ import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
-import { CATALOG_SQL, profileTable, qid, starterDashboard } from "../web/explore.js";
+import { CATALOG_SQL, compareDashboard, compareTables, halves, hintCheck, profileTable, qid, rangeSide, starterDashboard, tabularChecksSql } from "../web/explore.js";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const arg = (k, d) => {
@@ -95,20 +95,39 @@ CREATE OR REPLACE TABLE "edge ""quoted"" names" AS SELECT i AS "order id", 'k' |
 CREATE OR REPLACE TABLE edge_wide AS SELECT ${Array.from({ length: 40 }, (_, k) => `i * ${k + 1} AS m${k}, 'g' || ((i + ${k}) % 5) AS g${k}`).join(", ")} FROM range(100) t(i);
 CREATE OR REPLACE TABLE edge_dates_only AS SELECT DATE '2020-01-01' + i::INT AS d FROM range(1000) t(i);
 CREATE OR REPLACE TABLE edge_many_cats AS SELECT 'p' || (i % 400) AS product, i % 9 AS bucket, i * 0.1 AS v FROM range(2000) t(i);
+CREATE OR REPLACE TABLE edge_customers_v1 AS SELECT i AS customer_id, 'n' || i AS name, ['DE','FR','IT'][1 + i % 3] AS country, i * 10 AS score FROM range(1, 301) t(i);
+CREATE OR REPLACE TABLE edge_customers_v2 AS SELECT i AS customer_id, CASE WHEN i % 25 = 0 THEN 'renamed' || i ELSE 'n' || i END AS name,
+       ['DE','FR','IT'][1 + i % 3] AS country, (i * 10)::DOUBLE AS score, i % 2 = 0 AS active FROM range(20, 341) t(i);
 CREATE OR REPLACE VIEW edge_view AS SELECT cat, sum(amount) AS amount FROM edge_types GROUP BY cat;
 `);
-made += 8;
+made += 10;
 
 // Profile every table and view, write its starter, lint it.
 const tables = rows(CATALOG_SQL).filter((r) => r.schema_name === "main");
 const pageSql = (base, page) => wasm.page_sql(base, page);
 const failures = [];
+// anofox_tabular (#111): every hint's check runs natively when the extension
+// is installed (duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'").
+let tabular = true;
+try {
+  execFileSync(DUCKDB, ["-unsigned", ":memory:", "-c", "LOAD anofox_tabular"], { stdio: "ignore" });
+} catch (_) {
+  tabular = false;
+  console.log("anofox_tabular is not installed: the hints' checks are not run natively");
+}
+const hintChecks = [];
+const profiles = new Map(); // table -> its cards (the halves below reuse them)
 for (const t of tables) {
   const fq = `${qid(t.database_name)}.${qid(t.schema_name)}.${qid(t.table_name)}`;
   let sql;
   try {
     const prof = await profileTable(async (q) => rows(q), pageSql, fq);
     sql = starterDashboard({ name: t.table_name, fq, cards: prof.cards });
+    profiles.set(t.table_name, prof.cards);
+    for (const c of prof.cards) for (const h of c.hints || []) {
+      const chk = hintCheck(fq, c, h);
+      if (chk) hintChecks.push(chk);
+    }
   } catch (e) {
     failures.push(`${t.table_name}: profile failed: ${String(e.stderr || e.message || e).slice(0, 400)}`);
     continue;
@@ -127,6 +146,65 @@ for (const t of tables) {
     failures.push(`${t.table_name} (${file}):\n` + bad.map((d) => `    ${d.severity} [stmt ${d.stmt}] ${d.code}: ${d.message}\n      ${d.sql}`).join("\n"));
   else console.log(`ok  ${t.table_name}${note.length ? `  (notes: ${[...new Set(note)].join(", ")})` : ""}`);
 }
+if (tabular && hintChecks.length) {
+  try {
+    const out = execFileSync(DUCKDB, ["-unsigned", "-readonly", dbFile, "-json", "-c", tabularChecksSql(hintChecks, true)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
+    const res = JSON.parse(out.trim());
+    const bad = res.filter((r) => !["pass", "fail", "warn"].includes(r.status));
+    if (res.length !== hintChecks.length || bad.length) failures.push(`hint checks: ${res.length}/${hintChecks.length} results, ${bad.map((r) => `${r.check_name}: ${r.message}`).join("; ")}`);
+    else console.log(`ok  ${res.length} hint checks ran in anofox_tabular (${res.filter((r) => r.status === "fail").length} fail, as the hints said)`);
+  } catch (e) {
+    failures.push(`hint checks: ${String(e.stderr || e.message || e).replace(/\[anofox\][^\n]*\n/g, "").slice(0, 600)}`);
+  }
+}
+
+// Comparisons (#111): pairs of tables (keyed and not), and two halves of
+// the time range of every table with a date.
+const lint = (name, sql) => {
+  const file = path.join(out, name.replace(/[^A-Za-z0-9_]+/g, "_") + ".sql");
+  writeFileSync(file, sql);
+  let res;
+  try {
+    res = JSON.parse(execFileSync(DASH, ["--check", file, "--strict", "--json", "--db", dbFile], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  } catch (e) {
+    res = e.stdout ? JSON.parse(e.stdout) : { ok: false, diagnostics: [{ severity: "error", code: "cli", message: String(e.stderr || e) }] };
+  }
+  const bad = res.diagnostics.filter((d) => d.severity === "error" || String(d.code).startsWith("design/"));
+  if (!res.ok || bad.length) failures.push(`${name} (${file}):\n` + bad.map((d) => `    ${d.severity} [stmt ${d.stmt}] ${d.code}: ${d.message}\n      ${d.sql}`).join("\n"));
+  else console.log(`ok  ${name}`);
+};
+const fqOf = (t) => tables.find((x) => x.table_name === t) && `"samples"."main".${qid(t)}`;
+let compared = 0;
+const PAIRS = [["edge_customers_v1", "edge_customers_v2"], ["tq_customers_legacy", "tq_customers_new"], ["fm_yesterday", "fm_today"], ["sales", "sales2"], ["edge_types", "edge_one"], ["edge_types", "edge_empty"], ["sessions", "sales"]];
+for (const [x, y] of PAIRS) {
+  if (!fqOf(x) || !fqOf(y)) continue;
+  try {
+    const a = { src: fqOf(x), label: x },
+      b = { src: fqOf(y), label: y };
+    const cmp = await compareTables(async (q) => rows(q), pageSql, a, b);
+    lint(`compare ${x} vs ${y}`, compareDashboard({ a, b, cmp }));
+    compared++;
+  } catch (e) {
+    failures.push(`compare ${x} vs ${y}: ${String(e.stderr || e.message || e).slice(0, 400)}`);
+  }
+}
+for (const t of tables) {
+  if (compared >= 20) break;
+  const fq = `${qid(t.database_name)}.${qid(t.schema_name)}.${qid(t.table_name)}`;
+  try {
+    const d = (profiles.get(t.table_name) || []).find((c) => (c.kind === "date" || c.kind === "time") && c.tmin && c.tmax);
+    const hv = d && halves(d.tmin, d.tmax);
+    if (!hv) continue;
+    const a = { src: rangeSide(fq, d.name, ...hv[0]), label: `${hv[0][0]} – ${hv[0][1]}`, range: true },
+      b = { src: rangeSide(fq, d.name, ...hv[1]), label: `${hv[1][0]} – ${hv[1][1]}`, range: true };
+    const cmp = await compareTables(async (q) => rows(q), pageSql, a, b);
+    lint(`compare ${t.table_name} halves`, compareDashboard({ a, b, cmp }));
+    compared++;
+  } catch (e) {
+    failures.push(`compare ${t.table_name} halves: ${String(e.stderr || e.message || e).slice(0, 400)}`);
+  }
+}
+console.log(`\n${compared} comparisons`);
 console.log(`\n${tables.length} tables (${made} created, ${skipped} example statements left out); starters in ${out}`);
 if (failures.length) {
   console.error(`\n${failures.length} starter dashboard(s) failed --check --strict:\n` + failures.join("\n"));
