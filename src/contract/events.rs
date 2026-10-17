@@ -306,8 +306,9 @@ pub(super) fn events(
         "ds" if xs.iter().any(|v| matches!(v, Value::DateTime(_))) => "date".to_string(),
         k => look::humanize(k),
     };
-    let ydefault = lane_key.map(look::humanize).unwrap_or_default();
-    let plot = labels.apply(look::styled(plot, o, false), &xdefault, &ydefault);
+    // The lanes are labelled: no y title by default (it would sit on the
+    // labels), as in the coefficient and test forests; ylab := still sets one.
+    let plot = labels.apply(look::styled(plot, o, false), &xdefault, "");
     let plot = if sevs.len() < 2 {
         plot.legend_position(ggplot_rs::theme::LegendPosition::None)
     } else {
