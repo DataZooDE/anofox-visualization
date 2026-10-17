@@ -35,7 +35,7 @@ const ok = (m) => console.log("ok   " + m);
 const browser = await chromium.launch();
 
 // The samples whose tables are explored (each creates its tables when it runs).
-const SAMPLES = ["Period & KPIs", "Overview", "Formatting & paging"];
+const SAMPLES = ["How are sales doing this period against the last?", "Where do our sessions come from?", "Which products and stores are on plan?"];
 
 // The first sample by URL, the others from the sidebar (same page: the
 // in-browser DuckDB keeps every sample's tables).
@@ -251,7 +251,7 @@ async function exploreRun({ width, dark }) {
   noPageErrors(errs, tag);
   // The last picked table comes back (per viewer) in a new visit.
   const again = await ctx.newPage();
-  await open(again, "Period & KPIs", true);
+  await open(again, "How are sales doing this period against the last?", true);
   await again.evaluate(() => document.getElementById("side-explore").click());
   await again.waitForFunction(() => document.querySelector(".xp-h")?.textContent === "shop", null, { timeout: 60000 }).then(
     () => ok(`${tag}: the last table is picked again`),

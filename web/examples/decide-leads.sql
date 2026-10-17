@@ -1,3 +1,7 @@
+-- @title Who should sales call first?
+-- @group Sales & customers
+-- @tags  decide, leads
+--
 -- Decide use case — inbound lead routing and qualification with anofox_decide.
 --
 -- STORED RESULTS, NOT LIVE. The models' answers were computed natively with

@@ -1,3 +1,7 @@
+-- @title Can we switch on the new CRM?
+-- @group Data quality
+-- @tags  tabular, data quality, migration
+--
 -- Tabular showcase — a data-quality report with anofox_tabular.
 --
 -- STORED RESULTS, NOT LIVE. The check results, weekly rule runs, profiles,

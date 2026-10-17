@@ -1,3 +1,7 @@
+-- @title What should we order this week to sell the most?
+-- @group Demand & stock
+-- @tags  optimize, forecast, replenishment
+--
 -- Forecast → optimize: plan inventory from a forecast (anofox-forecast + anofox-optimize).
 --
 -- STORED RESULTS, NOT LIVE. Both steps ran natively

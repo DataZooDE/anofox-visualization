@@ -18,13 +18,15 @@ import init, {
   period_resolve,
   kpi_parts,
   threshold_rules,
+  dashboard_meta,
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
-// Examples, grouped for the sidebar. Each entry is a full dashboard script.
+// Examples written inline (the rest are web/examples/*.sql, FILE_SAMPLES).
+// Each is a full dashboard script whose header places it in the sidebar.
 const SESSIONS = `CREATE OR REPLACE TABLE sessions AS SELECT * FROM (VALUES
   ('W1','app',30),('W1','web',22),('W1','api',12),
   ('W2','app',41),('W2','web',28),('W2','api',15),
@@ -38,11 +40,11 @@ const SALES = `CREATE OR REPLACE TABLE sales AS SELECT * FROM (VALUES
   ('W4','app',48,2000.0),('W4','web',30,1250.0),('W4','api',18,640.0)
 ) t(week, channel, n, revenue);`;
 
-const SAMPLE_GROUPS = [
-  {
-    group: "Start here",
-    items: {
-      Overview: `-- Annotate result columns with ::ROLE casts. Un-annotated statements
+const INLINE_SAMPLES = [
+  `-- @title Where do our sessions come from?
+-- @group Start here
+-- @tags  charts, kpi, cross-filter
+-- Annotate result columns with ::ROLE casts. Un-annotated statements
 -- (this CREATE) are setup; annotated SELECTs become panels.
 ${SESSIONS}
 
@@ -74,7 +76,10 @@ SELECT 6::COL; SELECT 'single'::ROWSELECT; -- clicking a row sets getvariable('s
 SELECT 'Detail'::TITLE, channel, week, sum(n) AS n ::TABLE
 FROM sessions GROUP BY ALL ORDER BY channel, week;`,
 
-      "Signal explorer": `-- Everything below is generated on the fly with range() — no table needed.
+  `-- @title Can we build a dashboard without a data source?
+-- @group Start here
+-- @tags  charts, kpi, generated data
+-- Everything below is generated on the fly with range() — no table needed.
 SELECT 'No table needed — a whole dashboard from pure SQL math'::LABEL;
 
 SELECT 12::COL;
@@ -111,13 +116,11 @@ SELECT 12::COL;
 SELECT (i % 12)::XAXIS, floor(i/12.0)::YAXIS,
        round(avg(sin(i/6.0)*cos(floor(i/12.0)/3.0)*40 + 50),0)::HEATMAP, 'sin · cos surface'::TITLE
 FROM range(0, 96) t(i) GROUP BY 1,2 ORDER BY 1,2;`,
-    },
-  },
 
-  {
-    group: "Charts",
-    items: {
-      "Chart gallery": `${SALES}
+  `-- @title Which chart fits which question?
+-- @group How it works
+-- @tags  charts, gallery
+${SALES}
 CREATE OR REPLACE TABLE m AS
 SELECT i AS id,
        ['app','web','api'][(i % 3) + 1] AS channel,
@@ -333,14 +336,11 @@ FROM qcty q
 WHERE getvariable('selected') = '' OR q.country = getvariable('selected')
 UNION ALL
 SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
-    },
-  },
 
-  {
-    group: "Forecast", // = FORECAST_GROUP (declared below)
-    ext: true,
-    items: {
-      "How much will each item sell next year?": `-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
+  `-- @title How much will each item sell next year?
+-- @group Demand & stock
+-- @tags  forecast, m5
+-- Live in-browser SeasonalES forecast: DuckDB-Wasm loads a parquet and runs the
 -- anofox-forecast extension entirely client-side — no server. On boot the app
 -- registers the parquet and, on a v1.5.x engine, does the equivalent of:
 --
@@ -465,7 +465,10 @@ SELECT item    AS "Item × store" ::PAGED,
        es_rmse AS "ES · RMSE"    ::COMPACT,
        sn_rmse AS "SN · RMSE"    ::COMPACT
 FROM lx_scores ORDER BY item;`,
-      "Which forecast method fits our demand?": `-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
+  `-- @title Which forecast method fits our demand?
+-- @group Demand & stock
+-- @tags  forecast, backtest, m5
+-- M5 forecast · decomposition · backtest on the anofox-forecast extension,
 -- one dashboard across all categories (monthly). Methods: MFLES vs MSTL.
 -- Heavy steps cached with CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS an_cat AS
@@ -596,13 +599,11 @@ SELECT 6::COL; SELECT remainder ::QQ, 'Residual normal Q-Q'::TITLE FROM an_decom
 SELECT 12::COL; SELECT ds ::XAXIS, series ::CATEGORY, val ::LINECHART, 'Backtest — actual vs MFLES vs MSTL'::TITLE
 FROM (SELECT ds, 'Actual' AS series, actual AS val FROM an_bt WHERE category='HOUSEHOLD' AND method='MSTL'
       UNION ALL SELECT ds, method, predicted FROM an_bt WHERE category='HOUSEHOLD') ORDER BY series, ds;`,
-    },
-  },
 
-  {
-    group: "Interactivity",
-    items: {
-      "Filters & inputs": `CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
+  `-- @title How do filters change what we see?
+-- @group How it works
+-- @tags  inputs, filters, cross-filter
+CREATE OR REPLACE TABLE events AS SELECT * FROM (VALUES
   (DATE '2024-01-05','app','EU','launch',30),(DATE '2024-01-12','web','EU','promo',22),(DATE '2024-01-20','api','US','launch',12),
   (DATE '2024-02-03','app','US','promo',41),(DATE '2024-02-14','web','EU','launch',28),(DATE '2024-02-22','api','EU','promo',15),
   (DATE '2024-03-02','app','EU','promo',26),(DATE '2024-03-11','web','US','launch',33),(DATE '2024-03-19','api','US','promo', 9),
@@ -733,7 +734,10 @@ SELECT month::XAXIS, sum(amount)::LINECHART, 'Monthly (by SKU & market)'::TITLE 
 WHERE (len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku))
   AND (COALESCE(getvariable('market'),'') = '' OR region = getvariable('market'))
 GROUP BY month ORDER BY month;`,
-      "Selections & drill": `-- A small sales cube: region > country > city, three channels, 26 weeks.
+  `-- @title Which region, country and city bring the revenue?
+-- @group How it works
+-- @tags  selections, drill-down, drill-through
+-- A small sales cube: region > country > city, three channels, 26 weeks.
 CREATE OR REPLACE TABLE geo AS SELECT * FROM (VALUES
   ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
   ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
@@ -813,13 +817,11 @@ SELECT sum(revenue)::MONEY, ('Revenue — ' || getvariable('pick_city'))::LABEL 
 SELECT 8::COL;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, ('Weekly revenue by channel — ' || getvariable('pick_city'))::TITLE
 FROM orders WHERE city = getvariable('pick_city') GROUP BY ALL ORDER BY week, channel;`,
-    },
-  },
 
-  {
-    group: "Tables",
-    items: {
-      "Formatting & paging": `CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
+  `-- @title Which products and stores are on plan?
+-- @group How it works
+-- @tags  tables, formatting, paging
+CREATE OR REPLACE TABLE fc AS SELECT * FROM (VALUES
   ('SKU-A',12400, 4.2,'on track',  8.5),
   ('SKU-B', 7300,11.8,'at risk',  -3.1),
   ('SKU-C',21850, 6.5,'on track',  2.7),
@@ -895,13 +897,11 @@ SELECT 'score: median'::TOTALS;
 SELECT 'ID-' || lpad(i::VARCHAR, 6, '0') AS id, ['app','web','api','cli'][(i % 4) + 1] AS channel,
        ((i * 37) % 1000) AS score, ((i * 91) % 100) AS load_pct ::PAGED
 FROM range(1, 100001) t(i);`,
-    },
-  },
 
-  {
-    group: "Layout",
-    items: {
-      "Groups, tabs & height": `${SALES}
+  `-- @title How is revenue split by week and channel?
+-- @group How it works
+-- @tags  layout, tabs, kpi
+${SALES}
 
 SELECT 'Layout — groups, tabs & height'::LABEL;
 SELECT 12::COL;
@@ -933,112 +933,160 @@ SELECT 'Trend'::SUBTAB;
 SELECT week::XAXIS, channel::CATEGORY, sum(n)::LINECHART, 'Sessions trend'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'Share'::SUBTAB;
 SELECT channel::CATEGORY, sum(n)::PIE, 'Session share'::TITLE FROM sales GROUP BY ALL;`,
-    },
-  },
 ];
 
-// Present the examples as a learning path: start → the visual vocabulary →
-// making it interactive → tables → page layout → theming. The showcases of
-// the anofox DuckDB extensions live in their own sidebar area ("anofox
-// extensions", groups with `ext: true`), one group per extension, so they
-// never mix with the core feature tour (and a missing extension never blocks
-// the core demos).
-const STATS_GROUP = "Statistics";
-const FORECAST_GROUP = "Forecast";
-const TABULAR_GROUP = "Tabular";
-const OPTIMIZE_GROUP = "Optimize";
-const DECIDE_GROUP = "Decide";
-const INVENTORY_GROUP = "Inventory";
-const THEMING_GROUP = "Theming";
-const EXT_GROUPS = [STATS_GROUP, FORECAST_GROUP, TABULAR_GROUP, OPTIMIZE_GROUP, DECIDE_GROUP, INVENTORY_GROUP];
-const GROUP_ORDER = ["Start here", "Charts", "Interactivity", "Tables", "Layout", THEMING_GROUP, ...EXT_GROUPS];
-const sortGroups = () =>
-  SAMPLE_GROUPS.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
-sortGroups();
-
-const SAMPLES = Object.fromEntries(SAMPLE_GROUPS.flatMap((g) => Object.entries(g.items)));
+// The examples library: one sidebar section, grouped by business area. Each
+// example says where it belongs in its own header comments (`-- @title`,
+// `-- @group`, `-- @tags`, read by the wasm dashboard_meta — the parser the
+// servers use), so the scripts above and web/examples/*.sql are the single
+// source of truth. This list only orders the areas (one not in it sorts after
+// them, by name); the feature tours sit under "How it works", closed until the
+// viewer opens it.
+const EX_AREAS = [
+  "Start here",
+  "Demand & stock",
+  "Logistics & production",
+  "Sales & customers",
+  "Service & operations",
+  "Data quality",
+  "How it works",
+];
+const EX_AREAS_CLOSED = ["How it works"];
+// Earlier sidebar names → the example's id, so old `?dashboard=<name>` links
+// still open it (names that didn't change resolve by name).
+const LEGACY_NAMES = {
+  Overview: "where-do-our-sessions-come-from",
+  "Signal explorer": "can-we-build-a-dashboard-without-a-data-source",
+  "Chart gallery": "which-chart-fits-which-question",
+  "Filters & inputs": "how-do-filters-change-what-we-see",
+  "Selections & drill": "which-region-country-and-city-bring-the-revenue",
+  "Formatting & paging": "which-products-and-stores-are-on-plan",
+  "Groups, tabs & height": "how-is-revenue-split-by-week-and-channel",
+  "Period & KPIs": "how-are-sales-doing-this-period-against-the-last",
+  "A sales cockpit in your brand": "how-is-acme-selling-across-regions-and-channels",
+  "A German branch report": "how-is-our-german-branch-doing-this-year",
+};
 
 // Examples kept in their own files under web/examples/ — the single source of
 // a dashboard that is also run natively (examples/<name>/showcase.sql links to
 // it). Fetched once at boot; a missing file just leaves the example out.
-// "stored results" showcases read tables computed natively (web/data/<ext>/,
+// Some read tables computed natively (web/data/<ext>/,
 // scripts/gen-showcase-data.sh) because their extension can't run in
-// DuckDB-Wasm; their names and dashboards say so.
+// DuckDB-Wasm. Listed in sidebar order within each area.
 const FILE_SAMPLES = [
-  { group: "Charts", name: "How does data move through our pipeline?", url: "examples/diagram-pipeline.sql" },
-  { group: "Interactivity", name: "Period & KPIs", url: "examples/period-kpis.sql" },
-  { group: "Interactivity", name: "How will demand develop after today?", url: "examples/motion-demand.sql" },
-  { group: "Charts", name: "When could we run out of stock?", url: "examples/stock-outlook.sql" },
-  { group: THEMING_GROUP, name: "A sales cockpit in your brand", url: "examples/theming-branded.sql" },
-  { group: THEMING_GROUP, name: "A German branch report", url: "examples/theming-de-locale.sql" },
-  {
-    group: STATS_GROUP,
-    name: "What sets the price of a home?",
-    url: "examples/statistics-showcase.sql",
-  },
-  { group: STATS_GROUP, name: "Did the new checkout lift conversion?", url: "examples/statistics-ab-test.sql" },
-  { group: STATS_GROUP, name: "Why do customers cancel?", url: "examples/statistics-churn-drivers.sql" },
-  { group: FORECAST_GROUP, name: "Will any substation exceed its capacity next week?", url: "examples/forecast-energy-load.sql" },
-  { group: FORECAST_GROUP, name: "How many agents do we need per half-hour?", url: "examples/forecast-callcentre-staffing.sql" },
-  {
-    group: TABULAR_GROUP,
-    name: "Can we switch on the new CRM?",
-    url: "examples/tabular-showcase.sql",
-  },
-  { group: TABULAR_GROUP, name: "Is today's supplier feed safe to load?", url: "examples/tabular-feed.sql" },
-  { group: TABULAR_GROUP, name: "Which duplicate customers should we merge?", url: "examples/tabular-dedup.sql" },
-  {
-    group: OPTIMIZE_GROUP,
-    name: "How do we plan a busy day at the distribution centre?",
-    url: "examples/optimize-showcase.sql",
-  },
-  { group: OPTIMIZE_GROUP, name: "Which line runs which order, with the least changeover?", url: "examples/optimize-production.sql" },
-  { group: OPTIMIZE_GROUP, name: "Which van serves which stop tomorrow?", url: "examples/optimize-delivery.sql" },
-  {
-    group: OPTIMIZE_GROUP,
-    name: "What should we order this week to sell the most?",
-    url: "examples/optimize-replenishment.sql",
-  },
-  {
-    group: DECIDE_GROUP,
-    name: "Can a model triage the support inbox?",
-    url: "examples/decide-showcase.sql",
-  },
-  { group: DECIDE_GROUP, name: "Which claims can we fast-track?", url: "examples/decide-claims.sql" },
-  { group: DECIDE_GROUP, name: "Who should sales call first?", url: "examples/decide-leads.sql" },
-  {
-    group: INVENTORY_GROUP,
-    name: "Where will stock run short, and can we trust the plan?",
-    url: "examples/inventory-twin.sql",
-  },
-  { group: INVENTORY_GROUP, name: "Where does our supply chain amplify demand, and what would stabilise it?", url: "examples/supply-chain.sql" },
-  {
-    group: INVENTORY_GROUP,
-    name: "How reliable are our suppliers, and what does it cost us in stock?",
-    url: "examples/supplier-lead-times.sql",
-  },
+  "examples/stock-outlook.sql",
+  "examples/motion-demand.sql",
+  "examples/inventory-twin.sql",
+  "examples/optimize-replenishment.sql",
+  "examples/supplier-lead-times.sql",
+  "examples/supply-chain.sql",
+  "examples/optimize-showcase.sql",
+  "examples/optimize-production.sql",
+  "examples/optimize-delivery.sql",
+  "examples/period-kpis.sql",
+  "examples/statistics-ab-test.sql",
+  "examples/statistics-churn-drivers.sql",
+  "examples/decide-leads.sql",
+  "examples/statistics-showcase.sql",
+  "examples/forecast-callcentre-staffing.sql",
+  "examples/forecast-energy-load.sql",
+  "examples/decide-showcase.sql",
+  "examples/decide-claims.sql",
+  "examples/tabular-feed.sql",
+  "examples/tabular-dedup.sql",
+  "examples/tabular-showcase.sql",
+  "examples/diagram-pipeline.sql",
+  "examples/theming-branded.sql",
+  "examples/theming-de-locale.sql",
 ];
+
+// The flat list of examples, in sidebar order: {id, name, group, tags,
+// source: "example", sql}. Filled at boot (inline scripts, then the files).
+const EXAMPLES = [];
+
+// A name's slug — an example's stable id in `?dashboard=`
+// ("Who should sales call first?" → "who-should-sales-call-first").
+function slugify(name) {
+  const s = String(name ?? "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/ß/g, "ss")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s || "dashboard";
+}
+// One example's entry; `meta` is dashboard_meta's result, `fallback` the
+// name when the script has no `-- @title`.
+function exampleEntry(sql, meta, fallback) {
+  const name = String(meta?.title || "").trim() || fallback;
+  const tags = Array.isArray(meta?.tags) ? meta.tags : [];
+  return { id: slugify(name), name, group: meta?.group || "", tags, source: "example", sql };
+}
+function addExample(sql, fallback) {
+  let meta = null;
+  try {
+    meta = JSON.parse(dashboard_meta(sql));
+  } catch (_) {
+    /* unreadable header: the example is ungrouped */
+  }
+  EXAMPLES.push(exampleEntry(sql, meta, fallback));
+}
+// What `?dashboard=<q>` opens: an example by id, by an earlier name
+// (LEGACY_NAMES) or by name — examples first, so a shared link opens the same
+// example for everyone — then a saved dashboard by name. `my:<id>` addresses
+// a saved dashboard only (by its name or the name's slug).
+// → {kind: "example", entry} | {kind: "mine", name, sql} | null.
+function resolveDash(q, examples, saved) {
+  if (!q) return null;
+  const names = Object.keys(saved || {});
+  const mine = (n) => (n === undefined ? null : { kind: "mine", name: n, sql: saved[n].sql });
+  if (q.startsWith("my:")) {
+    const id = q.slice(3);
+    return mine(names.find((n) => n === id) ?? names.find((n) => slugify(n) === id));
+  }
+  const ex =
+    examples.find((e) => e.id === q) ||
+    (Object.hasOwn(LEGACY_NAMES, q) && examples.find((e) => e.id === LEGACY_NAMES[q])) ||
+    examples.find((e) => e.name === q);
+  if (ex) return { kind: "example", entry: ex };
+  return names.includes(q) ? mine(q) : null;
+}
+// The examples by area, in EX_AREAS order: [{area, items: [{sub, entry}]}].
+// A `-- @group A / B` sits in area A under the sub-heading B (a deeper path
+// is drawn flat, as written); no `@group` → "More examples".
+function exampleAreas(examples) {
+  const by = new Map();
+  for (const e of examples) {
+    const [area, ...rest] = (e.group || "More examples").split(" / ");
+    if (!by.has(area)) by.set(area, []);
+    by.get(area).push({ sub: rest.join(" / "), entry: e });
+  }
+  const rank = (a) => (EX_AREAS.includes(a) ? EX_AREAS.indexOf(a) : EX_AREAS.length);
+  return [...by.keys()]
+    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .map((area) => {
+      const items = by.get(area);
+      const subs = [...new Set(items.map((i) => i.sub))];
+      return { area, items: subs.flatMap((s) => items.filter((i) => i.sub === s)) };
+    });
+}
 async function loadFileSamples() {
   // Fetch in parallel, register in FILE_SAMPLES order (stable sidebar order).
   const texts = await Promise.all(
-    FILE_SAMPLES.map(async (f) => {
+    FILE_SAMPLES.map(async (url) => {
       try {
-        const r = await fetch(f.url);
+        const r = await fetch(url);
         return r.ok ? await r.text() : null;
       } catch (_) {
         return null; /* offline / file:// — skip the example */
       }
     })
   );
-  FILE_SAMPLES.forEach((f, i) => {
-    const sql = texts[i];
-    if (sql == null) return;
-    let g = SAMPLE_GROUPS.find((x) => x.group === f.group);
-    if (!g) SAMPLE_GROUPS.push((g = { group: f.group, ext: EXT_GROUPS.includes(f.group), items: {} }));
-    g.items[f.name] = sql;
-    SAMPLES[f.name] = sql;
+  FILE_SAMPLES.forEach((url, i) => {
+    if (texts[i] != null) addExample(texts[i], url.replace(/^.*\/|\.sql$/g, ""));
   });
-  sortGroups();
 }
 
 const $ = (id) => document.getElementById(id);
@@ -1412,6 +1460,7 @@ async function boot() {
   // Sidebar (dashboard list) + app-shell controls. A served dashboard is
   // the server's own: the bundled examples aren't fetched (an embedded page
   // has no credential for them).
+  INLINE_SAMPLES.forEach((sql, i) => addExample(sql, `Example ${i + 1}`));
   if (!window.__served) await loadFileSamples();
   renderSidebar();
   $("side-new").onclick = () => loadDash("", "");
@@ -1426,7 +1475,8 @@ async function boot() {
   //   ?theme=dark|light the viewer's light/dark choice (a dashboard whose
   //                   ::THEME follows the viewer switches; JSON is never read
   //                   from the URL)
-  //   ?dashboard=Name load a saved/example dashboard by name
+  //   ?dashboard=id   open an example by its id (or by name, also an earlier
+  //                   one) or a saved dashboard by name; my:<id> = saved only
   //   ?mode=edit      open with the SQL editor (default: the dashboard view)
   //   #sql=<base64>   inline SQL (from Share)
   const params = new URLSearchParams(location.search);
@@ -1466,24 +1516,26 @@ async function boot() {
   const servedSql = served && typeof served.sql === "string" ? served.sql : null;
   const hashSql = decodeHashSql();
   const wantDash = params.get("dashboard");
-  const savedItems = dashStore().items;
+  const found = resolveDash(wantDash, EXAMPLES, dashStore().items);
   if (servedSql != null) {
     $("sql").value = servedSql;
     $("dash-name").value = served.title || "Dashboard";
   } else if (hashSql) {
     $("sql").value = hashSql;
     $("dash-name").value = "Shared";
-  } else if (wantDash && (SAMPLES[wantDash] || savedItems[wantDash])) {
-    curDash = wantDash;
-    $("sql").value = SAMPLES[wantDash] || savedItems[wantDash].sql;
-    $("dash-name").value = wantDash;
+  } else if (found?.kind === "mine") {
+    curDash = "my:" + found.name;
+    $("sql").value = found.sql;
+    $("dash-name").value = found.name;
     markActive();
-  } else {
-    const first = Object.keys(SAMPLES)[0];
-    curDash = first;
-    $("sql").value = SAMPLES[first];
-    $("dash-name").value = first;
-    markActive();
+  } else if (found || EXAMPLES.length) {
+    const ex = found?.entry || EXAMPLES[0];
+    curDash = "ex:" + ex.id;
+    $("sql").value = ex.sql;
+    $("dash-name").value = ex.name;
+    // a linked example shows in the sidebar, even in a closed library / area
+    if (found) revealExample(ex);
+    else markActive();
   }
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
@@ -1740,7 +1792,7 @@ function initSideResizer() {
 
 // ---------- app shell: sidebar, dashboards, modes, data exploration ----------
 const DASH_KEY = "dp_dashboards";
-let curDash = null;
+let curDash = null; // the open entry's sidebar key (sideItem)
 // Store: { items: { name: {sql, group} }, groups: [names], collapsed: {group:bool} }.
 function dashStore() {
   let raw;
@@ -1763,11 +1815,15 @@ function dashStore() {
 }
 const dashSaveStore = (s) => localStorage.setItem(DASH_KEY, JSON.stringify(s));
 
-function renderSidebar() {
+// `focusId`: the control to focus once the list is rebuilt (a toggle that
+// re-rendered it), so keyboard users keep their place.
+function renderSidebar(focusId) {
   const nav = $("side-nav");
   nav.innerHTML = "";
   const store = dashStore();
   const names = Object.keys(store.items);
+  const lib = exLibState();
+  const showEx = lib.hidden && EXAMPLES.length ? showExamplesButton(lib) : null;
 
   // "My dashboards" header with a + group button (drop here to ungroup)
   const hdr = document.createElement("div");
@@ -1791,6 +1847,13 @@ function renderSidebar() {
     moveDash(e.dataTransfer.getData("text/plain"), "");
   };
   nav.appendChild(hdr);
+  if (!names.length) {
+    const empty = document.createElement("p");
+    empty.className = "side-empty";
+    empty.textContent = "Nothing saved yet. Save keeps a dashboard in this browser.";
+    if (showEx) empty.append(" ", showEx);
+    nav.appendChild(empty);
+  }
 
   // bucket dashboards by group
   const byGroup = {};
@@ -1805,69 +1868,161 @@ function renderSidebar() {
     nav.appendChild(groupHeader(g, store));
     if (!store.collapsed[g])
       for (const n of byGroup[g]) {
-        const it = sideItem(n, store.items[n].sql, true);
+        const it = sideItem(n, store.items[n].sql, "my:" + n, true);
         it.classList.add("in-group");
         nav.appendChild(it);
       }
   }
-  for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, true));
+  for (const n of ungrouped) nav.appendChild(sideItem(n, store.items[n].sql, "my:" + n, true));
+  if (showEx && names.length) {
+    const back = document.createElement("p");
+    back.className = "side-empty";
+    back.append("Examples are hidden. ", showEx);
+    nav.appendChild(back);
+  }
 
-  // Examples — visually separated from your dashboards, collectively collapsible.
-  const exc = exCollapsed();
-  const master = document.createElement("div");
-  master.className = "side-section side-section-toggle side-master";
-  const mc = document.createElement("span");
-  mc.className = "ex-caret";
-  mc.textContent = exc.__all__ ? "▸" : "▾";
-  const ml = document.createElement("span");
-  ml.textContent = "Examples";
-  master.append(mc, ml);
-  master.onclick = () => toggleEx("__all__");
-  nav.appendChild(master);
-  // Group headers are static labels — only the two masters collapse.
-  const groupItems = (g) => {
-    const hdr = document.createElement("div");
-    hdr.className = "side-section side-sub";
-    hdr.textContent = g.group;
-    nav.appendChild(hdr);
-    for (const [n, sql] of Object.entries(g.items)) {
-      const it = sideItem(n, sql, false);
-      it.classList.add("side-ex-item"); // indent examples under their group header
-      nav.appendChild(it);
-    }
-  };
-  if (!exc.__all__) for (const g of SAMPLE_GROUPS) if (!g.ext) groupItems(g);
-  // The anofox extension showcases — a separate area below the core tour.
-  const extGroups = SAMPLE_GROUPS.filter((g) => g.ext);
-  if (extGroups.length) {
-    const xm = document.createElement("div");
-    xm.className = "side-section side-section-toggle side-master";
-    const xc = document.createElement("span");
-    xc.className = "ex-caret";
-    xc.textContent = exc.__ext__ ? "▸" : "▾";
-    const xl = document.createElement("span");
-    xl.textContent = "anofox extensions";
-    xm.title = "Showcases of the anofox DuckDB extensions (live in the browser, or stored results computed natively)";
-    xm.append(xc, xl);
-    xm.onclick = () => toggleEx("__ext__");
-    nav.appendChild(xm);
-    if (!exc.__ext__) for (const g of extGroups) groupItems(g);
-  }
+  if (!lib.hidden && EXAMPLES.length) renderExamples(nav, lib, names.length);
   markActive();
+  if (focusId) $(focusId)?.focus();
 }
-const EXC_KEY = "dp_ex_collapsed";
-function exCollapsed() {
+
+// The examples library's state, per browser: {open, hidden, areas: {area:
+// open}}. `open` / an area are unset until the viewer toggles them.
+const EXL_KEY = "dp_examples";
+function exLibState() {
+  let s = null;
   try {
-    return JSON.parse(localStorage.getItem(EXC_KEY) || "{}");
+    s = JSON.parse(localStorage.getItem(EXL_KEY) || "null");
+    // the earlier "collapse all examples" choice carries over once
+    if (!s && JSON.parse(localStorage.getItem("dp_ex_collapsed") || "{}").__all__) s = { open: false };
   } catch (_) {
-    return {};
+    s = null;
+  }
+  if (!s || typeof s !== "object" || Array.isArray(s)) s = {};
+  if (!s.areas || typeof s.areas !== "object") s.areas = {};
+  return s;
+}
+function exLibSave(s) {
+  try {
+    localStorage.setItem(EXL_KEY, JSON.stringify(s));
+  } catch (_) {
+    /* storage blocked: the choice lasts until the next render */
   }
 }
-function toggleEx(group) {
-  const c = exCollapsed();
-  c[group] = !c[group];
-  localStorage.setItem(EXC_KEY, JSON.stringify(c));
+// Is the library open? The viewer's choice; otherwise open only while they
+// have no dashboards of their own (a first visit starts in the examples).
+function exLibOpen(s, mine) {
+  return typeof s.open === "boolean" ? s.open : mine === 0;
+}
+function exAreaOpen(s, area) {
+  return typeof s.areas[area] === "boolean" ? s.areas[area] : !EX_AREAS_CLOSED.includes(area);
+}
+// Shown open for this page only (an example opened by a link sits in a
+// closed library or area): {open, areas: {area: true}}. A toggle drops it.
+let exPeek = { areas: {} };
+function revealExample(entry) {
+  const area = (entry.group || "More examples").split(" / ")[0];
+  exPeek = { open: true, areas: { [area]: true } };
   renderSidebar();
+  document.querySelector(".side-item.active")?.scrollIntoView({ block: "nearest" });
+}
+function showExamplesButton(lib) {
+  const b = document.createElement("button");
+  b.className = "side-mini";
+  b.id = "side-show-ex";
+  b.textContent = "Show examples";
+  b.onclick = () => {
+    lib.hidden = false;
+    exLibSave(lib);
+    renderSidebar("side-ex-toggle");
+  };
+  return b;
+}
+function renderExamples(nav, lib, mine) {
+  const open = exPeek.open ?? exLibOpen(lib, mine);
+  const row = document.createElement("div");
+  row.className = "side-section side-section-row side-master";
+  const tog = document.createElement("button");
+  tog.className = "side-toggle";
+  tog.id = "side-ex-toggle";
+  tog.setAttribute("aria-expanded", String(open));
+  tog.setAttribute("aria-controls", "side-ex");
+  tog.innerHTML = `<span class="ex-caret" aria-hidden="true">${open ? "▾" : "▸"}</span><span>Examples</span>`;
+  tog.append(countBadge(EXAMPLES.length));
+  tog.onclick = () => {
+    delete exPeek.open;
+    lib.open = !open;
+    exLibSave(lib);
+    renderSidebar(tog.id);
+  };
+  const hide = document.createElement("button");
+  hide.className = "side-mini";
+  hide.id = "side-hide-ex";
+  hide.textContent = "Hide";
+  hide.title = "hide the examples (Show examples, under My dashboards, brings them back)";
+  hide.setAttribute("aria-label", "Hide examples");
+  hide.onclick = () => {
+    lib.hidden = true;
+    exLibSave(lib);
+    renderSidebar("side-show-ex");
+  };
+  row.append(tog, hide);
+  nav.appendChild(row);
+
+  const list = document.createElement("div");
+  list.id = "side-ex";
+  list.className = "side-ex";
+  list.setAttribute("role", "group");
+  list.setAttribute("aria-label", "Examples");
+  list.hidden = !open;
+  for (const { area, items } of exampleAreas(EXAMPLES)) {
+    const key = slugify(area);
+    const aOpen = exPeek.areas[area] ?? exAreaOpen(lib, area);
+    const ab = document.createElement("button");
+    ab.className = "side-area";
+    ab.id = "side-area-" + key;
+    ab.setAttribute("aria-expanded", String(aOpen));
+    ab.setAttribute("aria-controls", "side-area-list-" + key);
+    const caret = document.createElement("span");
+    caret.className = "g-caret";
+    caret.setAttribute("aria-hidden", "true");
+    caret.textContent = aOpen ? "▾" : "▸";
+    const nm = document.createElement("span");
+    nm.className = "g-name";
+    nm.textContent = area;
+    ab.append(caret, nm, countBadge(items.length));
+    ab.onclick = () => {
+      delete exPeek.areas[area];
+      lib.areas[area] = !aOpen;
+      exLibSave(lib);
+      renderSidebar(ab.id);
+    };
+    const box = document.createElement("div");
+    box.id = "side-area-list-" + key;
+    box.hidden = !aOpen;
+    let sub = "";
+    for (const { sub: s, entry } of items) {
+      if (s && s !== sub) {
+        const h = document.createElement("div");
+        h.className = "side-ex-sub";
+        h.textContent = s;
+        box.appendChild(h);
+      }
+      sub = s;
+      const it = sideItem(entry.name, entry.sql, "ex:" + entry.id, false);
+      it.classList.add("side-ex-item"); // indent examples under their area
+      if (entry.tags.length) it.title = `${entry.name}\nTags: ${entry.tags.join(", ")}`;
+      box.appendChild(it);
+    }
+    list.append(ab, box);
+  }
+  nav.appendChild(list);
+}
+function countBadge(n) {
+  const c = document.createElement("span");
+  c.className = "side-count";
+  c.textContent = String(n);
+  return c;
 }
 function sideSection(t) {
   const d = document.createElement("div");
@@ -1920,10 +2075,12 @@ function groupHeader(g, store) {
   };
   return h;
 }
-function sideItem(name, sql, deletable) {
+// `key`: "ex:<id>" for an example, "my:<name>" for a saved dashboard.
+function sideItem(name, sql, key, deletable) {
   const b = document.createElement("button");
   b.className = "side-item";
   b.dataset.name = name;
+  b.dataset.key = key;
   if (deletable) {
     b.draggable = true;
     b.ondragstart = (e) => {
@@ -1947,11 +2104,11 @@ function sideItem(name, sql, deletable) {
     };
     b.appendChild(del);
   }
-  b.onclick = () => loadDash(name, sql);
+  b.onclick = () => loadDash(name, sql, key);
   return b;
 }
 function markActive() {
-  document.querySelectorAll(".side-item").forEach((el) => el.classList.toggle("active", el.dataset.name === curDash));
+  document.querySelectorAll(".side-item").forEach((el) => el.classList.toggle("active", el.dataset.key === curDash));
 }
 function createGroup() {
   const g = (prompt("New group name") || "").trim();
@@ -1990,8 +2147,8 @@ function moveDash(name, group) {
     renderSidebar();
   }
 }
-function loadDash(name, sql) {
-  curDash = name || null;
+function loadDash(name, sql, key) {
+  curDash = key || null;
   // A different dashboard starts clean — don't carry tab/filter/page state over.
   dpTab = null;
   dpTableUI = {};
@@ -2025,7 +2182,7 @@ function saveDash() {
   const group = s.items[name] ? s.items[name].group : "";
   s.items[name] = { sql: $("sql").value, group };
   dashSaveStore(s);
-  curDash = name;
+  curDash = "my:" + name;
   renderSidebar();
   status("saved ✓");
 }
@@ -2033,7 +2190,7 @@ function delDash(name) {
   const s = dashStore();
   delete s.items[name];
   dashSaveStore(s);
-  if (curDash === name) curDash = null;
+  if (curDash === "my:" + name) curDash = null;
   renderSidebar();
 }
 

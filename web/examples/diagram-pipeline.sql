@@ -1,3 +1,7 @@
+-- @title How does data move through our pipeline?
+-- @group Data quality
+-- @tags  diagram, pipeline, monitoring
+--
 -- How does data move through our pipeline? The nightly run of an inventory
 -- digital-twin pipeline (the stages of inventory-rs): three sources land,
 -- are ingested and validated, build the twin, project stock, monitor drift

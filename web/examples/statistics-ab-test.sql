@@ -1,3 +1,7 @@
+-- @title Did the new checkout lift conversion?
+-- @group Sales & customers
+-- @tags  statistics, ab-test, conversion
+--
 -- A/B test readout — did the new one-page checkout lift conversion?
 --
 -- LIVE: every number below is computed when the dashboard runs. The script

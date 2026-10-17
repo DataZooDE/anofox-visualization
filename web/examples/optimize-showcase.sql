@@ -1,3 +1,7 @@
+-- @title How do we plan a busy day at the distribution centre?
+-- @group Logistics & production
+-- @tags  optimize, warehouse
+--
 -- Optimize showcase — anofox_optimize on one Friday at a distribution centre.
 --
 -- STORED RESULTS, NOT LIVE. The solver outputs below were computed natively

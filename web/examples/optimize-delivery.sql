@@ -1,3 +1,7 @@
+-- @title Which van serves which stop tomorrow?
+-- @group Logistics & production
+-- @tags  optimize, routing
+--
 -- Delivery routing — anofox_optimize plans tomorrow's vans for a food wholesaler.
 --
 -- STORED RESULTS, NOT LIVE. The routes below were computed natively with the

@@ -1,3 +1,7 @@
+-- @title How are sales doing this period against the last?
+-- @group Sales & customers
+-- @tags  period, kpi, comparison
+--
 -- Period & KPIs: one ::PERIOD input drives the whole page — a date range from
 -- presets (last 30 days, month/quarter/year to date, last quarter, …, or a
 -- custom range), a time grain (day/week/month/quarter) and a comparison
