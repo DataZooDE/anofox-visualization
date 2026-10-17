@@ -331,6 +331,14 @@ The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualizatio
 This extension collects **no telemetry** — no usage data, no query contents,
 nothing leaves your machine.
 
+The anofox extensions it plots (statistics, forecast, tabular, optimize,
+decide) send pseudonymous usage telemetry by default. Set
+`DATAZOO_DISABLE_TELEMETRY=1` in the environment of the process that loads
+them to switch it off for all of them; `SET anofox_telemetry_enabled = false`
+alone misses the load event and, with several loaded, all but the first. The
+browser demo's DuckDB-Wasm builds send nothing. See
+[Telemetry of the anofox extensions](docs/DOCS.md#telemetry-of-the-anofox-extensions).
+
 ## License
 
 This project is licensed under the **Business Source License 1.1** (BSL 1.1).

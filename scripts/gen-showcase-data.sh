@@ -11,7 +11,7 @@
 #   The extensions come from get.erpl.io:  INSTALL anofox_<ext> FROM 'https://get.erpl.io'
 #   decide additionally needs:  CALL decide_download('laya-multilingual')
 set -euo pipefail
-export DATAZOO_DISABLE_TELEMETRY="${DATAZOO_DISABLE_TELEMETRY:-1}"  # no usage telemetry from anofox extensions
+export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DUCKDB="${DUCKDB:-duckdb}"
 cd "$ROOT"

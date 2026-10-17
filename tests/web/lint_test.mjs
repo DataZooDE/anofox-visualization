@@ -11,6 +11,7 @@
 // whose `LOAD <extension>` fails in the CLI (not installed, or an outdated
 // build in ~/.duckdb) has no native reference: it is named in the output and
 // must lint without an error in the browser instead.
+process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox extensions, whatever was inherited (child processes inherit it)
 import { execFileSync, spawn } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";

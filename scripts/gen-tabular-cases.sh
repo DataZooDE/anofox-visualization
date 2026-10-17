@@ -10,7 +10,7 @@
 #   DUCKDB=/path/to/duckdb (v1.5.6; default: duckdb on PATH), started -unsigned.
 #   The extension comes from get.erpl.io:  INSTALL anofox_tabular FROM 'https://get.erpl.io'
 set -euo pipefail
-export DATAZOO_DISABLE_TELEMETRY="${DATAZOO_DISABLE_TELEMETRY:-1}"  # no usage telemetry from anofox extensions
+export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DUCKDB="${DUCKDB:-duckdb}"
 cd "$ROOT"

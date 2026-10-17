@@ -4,7 +4,7 @@
 // --prefix tests/web), a real profile of sample tables in DuckDB-Wasm, every
 // starter statement run there, and a time bound for profiling 1 M rows.
 // (`dashboard --check --strict` of the starters: scripts/explore-starters.mjs.)
-process.env.DATAZOO_DISABLE_TELEMETRY ??= "1"; // no usage telemetry from anofox extensions (child processes inherit it)
+process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox extensions, whatever was inherited (child processes inherit it)
 import { existsSync, readFileSync } from "fs";
 import { createRequire } from "module";
 import path from "path";

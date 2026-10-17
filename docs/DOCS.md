@@ -2562,6 +2562,42 @@ For the full trust model, the static-render alternative (`serve` bin), and
 deployment (reverse proxy, TLS, auth), see
 [`secure-serving.md`](secure-serving.md).
 
+### Telemetry of the anofox extensions
+
+anofox-visualization sends nothing. The anofox extensions whose results it
+plots (anofox_statistics, anofox_forecast, anofox_tabular, anofox_optimize,
+anofox_decide) send pseudonymous usage telemetry by default, to PostHog EU:
+that the extension loaded and which of its functions ran, with call counts —
+per their `TELEMETRY.md`, never data, SQL, table or column names. To switch
+it off for all five, set the variable in the environment of the process that
+loads them (the DuckDB CLI, `dashboard`, `dashboard serve`, or the session
+that calls `anofox_serve_dashboards`):
+
+```bash
+export DATAZOO_DISABLE_TELEMETRY=1      # 1, true or yes
+```
+
+It is checked before anything is sent. `SET anofox_telemetry_enabled = false`
+is not enough on its own: it comes after `LOAD`, which already reports the
+load, and with several anofox extensions loaded it reaches only the first one
+loaded (they share the setting's name). A locked server sets
+`lock_configuration` after a dashboard's `-- @load` lines, so a dashboard
+can't change it either: use the variable. This repository's CI, tests and
+scripts set it.
+
+The browser builder runs only anofox_statistics and anofox_forecast, and their
+DuckDB-Wasm builds have the telemetry compiled out: a visitor's browser sends
+nothing for them (`tests/web/wasm_extensions_test.mjs` checks the builds,
+`scripts/telemetry-e2e.mjs` every request the demo makes).
+
+anofox_tabular's `pii_scan_table` / `pii_audit_table` download a NER model
+from Hugging Face on first use, for names, organisations, locations and misc
+entities. The pattern recognizers alone need no download:
+
+```sql
+SET anofox_pii_enabled_types = 'EMAIL,PHONE,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN,DE_TAX_ID,URL,US_PASSPORT,CRYPTO_ADDRESS,UK_NINO,MAC_ADDRESS,API_KEY';
+```
+
 ---
 
 ## 3. Interactivity
