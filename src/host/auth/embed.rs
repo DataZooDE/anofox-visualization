@@ -205,6 +205,11 @@ impl Embed {
             None | Some(Value::Null) => {
                 format!("{}{id}", crate::host::access::RESERVED_USER_PREFIX)
             }
+            // An explicit user may not take the reserved form either: a link
+            // for one dashboard can't pose as another's default user.
+            Some(Value::String(s)) if crate::host::access::is_reserved_user(s.trim()) => {
+                return Err(AuthError::Malformed)
+            }
             Some(Value::String(s)) => clean_claim(s)?,
             Some(_) => return Err(AuthError::Malformed),
         };
@@ -402,6 +407,16 @@ mod tests {
         p.as_object_mut().unwrap().remove("user");
         let (c, _) = e.verify_link(&link(p), "sales").unwrap();
         assert_eq!(c.user, "embed:sales");
+        // ...and a link can't name that form itself
+        for u in ["embed:payroll", "EMBED:sales", " embed:x"] {
+            let mut p = good();
+            p["user"] = json!(u);
+            assert_eq!(
+                e.verify_link(&link(p), "sales"),
+                Err("malformed_identity"),
+                "{u}"
+            );
+        }
         let proxy = crate::host::access::ProxyAuth::from_json(
             &json!({"mode": "proxy", "shared_secret": "0123456789abcdef0123456789abcdef"}),
             |_| None,
