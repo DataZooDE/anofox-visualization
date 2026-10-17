@@ -6712,11 +6712,21 @@ function titleOf(s, rowsJson) {
 // token inside a tag (a link URL, an attribute) is dropped — a value can
 // never become markup, a TeX command or a URL. Unknown columns stay
 // as written. `fmt(value, spec)` formats one value.
+// A name reads the statement's own column, aliased "md:name" by the SQL
+// rewrite (src/sql.rs MD_PREFIX), else a `*`-expanded column of that name —
+// never a positional c0, c1, … key (#138; src/lint.rs md_column).
+function markdownColumn(keys, name) {
+  const n = name.toLowerCase();
+  return (
+    keys.find((k) => k.startsWith("md:") && k.slice(3).toLowerCase() === n) ??
+    keys.find((k) => !k.startsWith("md:") && !/^c\d+$/i.test(k) && k.toLowerCase() === n)
+  );
+}
 function markdownWithValues(src, row, fmt) {
   const vals = [];
   const keys = Object.keys(row || {});
   const md = String(src ?? "").replace(/\{\{\s*([A-Za-z_][\w ]*?)\s*(?::\s*([A-Za-z_]+)\s*)?\}\}/g, (m, name, spec) => {
-    const key = keys.find((k) => k.toLowerCase() === name.toLowerCase());
+    const key = markdownColumn(keys, name);
     if (key === undefined) return m;
     vals.push(String(fmt(row[key], (spec || "").toLowerCase())));
     return `\uE000${vals.length - 1}\uE001`;

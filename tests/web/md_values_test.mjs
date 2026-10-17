@@ -11,7 +11,7 @@ const grab = (name) => {
   return m[0];
 };
 const { markdownWithValues } = new Function(
-  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\n${grab("markdownWithValues")}\n${grab("texText")}\nreturn { markdownWithValues };`
+  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\n${grab("markdownColumn")}\n${grab("markdownWithValues")}\n${grab("texText")}\nreturn { markdownWithValues };`
 )();
 // a stub formatter: shows which spec was asked for
 const fmt = (v, spec) => (spec ? `${v}|${spec}` : String(v));
@@ -33,4 +33,13 @@ assert.ok(!/javascript/i.test(l), l);
 assert.ok(!l.includes("EU"), l);
 // Placeholders keep working inside emphasis and lists.
 assert.ok(markdownWithValues("- **{{region}}** _{{growth}}_", row, fmt).includes("<strong>EU</strong>"));
+// #138: the rewrite aliases the statement's columns "md:name"; a value column
+// named c0 reads as itself, never as the positional c0 (the Markdown text).
+// SELECT 'x {{c0:money}} {{c1}}'::MARKDOWN, 4.5 AS c0 → { c0: <text>, "md:c0": 4.5 }
+const pos = { c0: "x {{c0:money}} {{c1}} {{C0}}", "md:c0": 4.5, "md:Growth": 3 };
+const c = markdownWithValues(pos.c0, pos, fmt);
+assert.ok(c.includes("x 4.5|money {{c1}} 4.5"), c);
+assert.ok(markdownWithValues("{{growth}}", pos, fmt).includes("3"));
+// a positional key alone never fills a placeholder
+assert.ok(markdownWithValues("{{c0}}", { c0: "text" }, fmt).includes("{{c0}}"));
 console.log("md_values_test: ok");

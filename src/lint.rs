@@ -445,11 +445,13 @@ where
                         sql: short.clone(),
                     })
                 };
-                if !row.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
-                    warn(
-                        "markdown/unknown-placeholder",
-                        format!("{{{{{name}}}}} names no column of this SELECT — add `… AS {name}` (it is shown as written)"),
-                    );
+                if md_column(row.keys(), &name).is_none() {
+                    let message = if is_positional_key(&name) {
+                        format!("{{{{{name}}}}} names no column of this SELECT — `{name}` is also an internal column name: alias the value `… AS {name}` in this SELECT, not in a subquery or `*` (it is shown as written)")
+                    } else {
+                        format!("{{{{{name}}}}} names no column of this SELECT — add `… AS {name}` (it is shown as written)")
+                    };
+                    warn("markdown/unknown-placeholder", message);
                 }
                 if let Some(sp) =
                     spec.filter(|sp| !MD_FORMATS.contains(&sp.to_ascii_lowercase().as_str()))
@@ -1131,6 +1133,29 @@ const MD_FORMATS: &[&str] = &[
     "money", "currency", "usd", "eur", "dollar", "percent", "pct", "compact", "metric", "number",
     "num", "date", "text",
 ];
+
+/// `c0`, `c1`, …: the rewrite's positional output names (`AS c{i}`).
+fn is_positional_key(k: &str) -> bool {
+    k.len() > 1
+        && k.as_bytes()[0].eq_ignore_ascii_case(&b'c')
+        && k[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The row key a `{{name}}` placeholder reads, as `markdownWithValues` in
+/// `web/app.js` resolves it: the statement's own `"md:name"` column, else a
+/// `*`-expanded column of that name — never a positional `c{i}` key (#138).
+fn md_column<'a>(keys: impl Iterator<Item = &'a String> + Clone, name: &str) -> Option<&'a String> {
+    let pre = crate::sql::MD_PREFIX;
+    keys.clone()
+        .find(|k| {
+            k.len() > pre.len() && k.starts_with(pre) && k[pre.len()..].eq_ignore_ascii_case(name)
+        })
+        .or_else(|| {
+            keys.into_iter().find(|k| {
+                !k.starts_with(pre) && !is_positional_key(k) && k.eq_ignore_ascii_case(name)
+            })
+        })
+}
 
 /// The `{{name}}` / `{{name:fmt}}` placeholders of a Markdown text.
 fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
@@ -2167,7 +2192,7 @@ mod design_tests {
         let data = |_q: &str| {
             Ok(rows(
                 1,
-                |_| json!({ "c0": "Grew {{growth:pct}} to {{revenue:eur}}; {{nope}} {{growth:fancy}}", "growth": 12.5, "revenue": 1.0 }),
+                |_| json!({ "c0": "Grew {{growth:pct}} to {{revenue:eur}}; {{nope}} {{growth:fancy}}", "md:growth": 12.5, "md:revenue": 1.0 }),
             ))
         };
         let d = check(
@@ -2186,6 +2211,25 @@ mod design_tests {
             .filter(|(c, _)| *c == "markdown/unknown-format")
             .collect();
         assert_eq!(fmt.len(), 1, "{msgs:?}");
+        // #138: {{c0}} reads the statement's own `… AS c0` ("md:c0"), never the
+        // positional c0 (the Markdown text itself); {{c1}} names nothing.
+        let data = |_q: &str| {
+            Ok(rows(
+                1,
+                |_| json!({ "c0": "{{c0:eur}} {{c1}}", "md:c0": 4.5 }),
+            ))
+        };
+        let d = check("SELECT '{{c0:eur}} {{c1}}'::MARKDOWN, 4.5 AS c0;", data);
+        let unknown: Vec<_> = d
+            .iter()
+            .filter(|x| x.code == "markdown/unknown-placeholder")
+            .map(|x| x.message.clone())
+            .collect();
+        assert_eq!(unknown.len(), 1, "{unknown:?}");
+        assert!(
+            unknown[0].contains("{{c1}}") && unknown[0].contains("internal"),
+            "{unknown:?}"
+        );
         assert_eq!(
             md_placeholders("a {{ x : money }} {{ 1bad }} {{y}}"),
             vec![("x".into(), Some("money".into())), ("y".into(), None)]

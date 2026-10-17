@@ -12,7 +12,7 @@ const grab = (name) => {
   return m[0];
 };
 const { mathSpans, renderMarkdown, markdownWithValues } = new Function(
-  ["escapeHtml", "safeUrl", "mathSpans", "renderMarkdown", "markdownWithValues", "texText"].map(grab).join("\n") +
+  ["escapeHtml", "safeUrl", "mathSpans", "renderMarkdown", "markdownColumn", "markdownWithValues", "texText"].map(grab).join("\n") +
     "\nreturn { mathSpans, renderMarkdown, markdownWithValues };"
 )();
 const math = (s) => mathSpans(s).filter((g) => g.tex != null);
