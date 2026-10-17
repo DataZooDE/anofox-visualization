@@ -778,9 +778,13 @@ struct Dash {
     meta: sv::DashboardMeta,
     /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
     updated: Option<String>,
-    /// Each statement's `-- @requires`, with its tab's (indexed like
-    /// `stmts`, see [`anofox_visualization::sql::Panel::all_requires`]).
+    /// Each statement's own `-- @requires` (indexed like `stmts`).
     requires: Vec<Vec<Requirement>>,
+    /// Per statement other than setup: the `::TAB` / `::SUBTAB` statements
+    /// whose section it is in ([`anofox_visualization::sql::Panel::tabs`]).
+    /// Their `-- @requires` gate it too, decided where each tab stands — as
+    /// the page decides them — so a hidden tab's panels never run.
+    tabs: Vec<Vec<usize>>,
 }
 
 /// A private, randomly named 0700 directory holding the snapshot files;
@@ -1285,12 +1289,13 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
         // A statement in a ::TAB / ::SUBTAB section runs under the tab's
         // `-- @requires` too (setup only under its own): a hidden tab's panels
         // never run, also when a viewer asks for them directly.
+        let tabs = planned
+            .iter()
+            .map(|p| if p.setup { Vec::new() } else { p.tabs.clone() })
+            .collect();
         let (stmts, requires) = planned
             .into_iter()
-            .map(|p| {
-                let reqs = p.all_requires();
-                ((p.setup, p.sql.trim().to_string()), reqs)
-            })
+            .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
             .unzip();
         out.push(Dash {
             id,
@@ -1300,6 +1305,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             meta,
             updated: sv::file_date(&p),
             requires,
+            tabs,
         });
     }
     if out.is_empty() {
@@ -2111,7 +2117,12 @@ fn run_panel(
                 _ => true,
             }
         };
+        let gates = dash.tabs.get(r.panel).map_or(&[][..], Vec::as_slice);
         for (i, (setup, sql)) in stmts[..r.panel].iter().enumerate() {
+            // The panel's tab (and sub-tab), on the state at the tab.
+            if gates.contains(&i) && !met(c, i) {
+                return Err(REQUIRES_MISSING.to_string());
+            }
             if *setup {
                 if !met(c, i) {
                     continue;
@@ -2353,6 +2364,7 @@ mod tests {
             stmts: vec![],
             info: vec![],
             requires: vec![],
+            tabs: vec![],
             meta: sv::parse_dashboard_meta(id, script),
             updated: None,
         }

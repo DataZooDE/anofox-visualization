@@ -67,6 +67,10 @@ pub struct Panel {
     /// hidden: its statements other than setup are not run. (Setup still runs;
     /// a missing-input failure of one in such a section is expected.)
     pub tab_requires: Vec<requires::Requirement>,
+    /// The plan indices of those `::TAB` / `::SUBTAB` statements (with
+    /// `-- @requires` or not), outermost first. Their requirements are
+    /// decided where they stand: with the variables set above the tab.
+    pub tabs: Vec<usize>,
 }
 
 impl Panel {
@@ -100,16 +104,20 @@ impl Panel {
 fn section_requires(panels: &mut [Panel]) {
     let mut tab: Vec<requires::Requirement> = Vec::new();
     let mut sub: Vec<requires::Requirement> = Vec::new();
-    for p in panels.iter_mut() {
+    let (mut tab_at, mut sub_at) = (None, None);
+    for (i, p) in panels.iter_mut().enumerate() {
         match p.tab_kind() {
             Some(false) => {
                 tab = p.requires.clone();
                 sub.clear();
+                (tab_at, sub_at) = (Some(i), None);
                 continue;
             }
             Some(true) => {
                 p.tab_requires = tab.clone();
+                p.tabs = tab_at.into_iter().collect();
                 sub = p.requires.clone();
+                sub_at = Some(i);
                 continue;
             }
             None => {}
@@ -121,6 +129,7 @@ fn section_requires(panels: &mut [Panel]) {
             continue;
         }
         p.tab_requires = tab.iter().chain(&sub).cloned().collect();
+        p.tabs = tab_at.into_iter().chain(sub_at).collect();
     }
 }
 
@@ -158,6 +167,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     tab_requires: Vec::new(),
+                    tabs: Vec::new(),
                 }
             } else {
                 Panel {
@@ -169,6 +179,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     tab_requires: Vec::new(),
+                    tabs: Vec::new(),
                 }
             })
         })
@@ -910,6 +921,12 @@ SELECT 3 ::METRIC;
             [None, Some(false), None]
         );
         assert_eq!(p[5].tab_kind(), Some(true));
+        // where they are decided: the tab, then the sub-tab
+        assert_eq!(p[6].tabs, [1, 5]);
+        assert_eq!(p[5].tabs, [1]);
+        assert_eq!(p[2].tabs, [1]);
+        assert!(p[1].tabs.is_empty() && p[4].tabs.is_empty() && p[0].tabs.is_empty());
+        assert_eq!(p[10].tabs, [9]);
     }
 
     #[test]

@@ -292,6 +292,15 @@ SELECT 'Detail'::SUBTAB;
 SELECT 3::BIGINT AS three ::METRIC;
 SELECT 'Other'::SUBTAB;
 SELECT 4::BIGINT AS four ::METRIC;
+-- @requires ${later}/fc.parquet
+SELECT 'Late'::TAB;
+SET VARIABLE later = getvariable('rd');
+SELECT v::BIGINT AS v ::METRIC FROM read_parquet(getvariable('rd') || '/fc.parquet');
+SELECT 'Again'::TAB;
+SELECT 2::BIGINT AS two ::METRIC;
+-- @requires ${rd}/present.parquet
+SELECT 'Detail'::SUBTAB;
+SELECT 5::BIGINT AS five ::METRIC;
 SQL
 start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/tdash"), $PORT,
   json_object('data', $(q "$T/truns"), 'path_vars', ['run']));" || fail "tabs server"
@@ -312,6 +321,13 @@ na "$(panel 11 '{"run":"r1"}' tabs)" "hidden sub-tab's panel"
 # Before the tabs and in another tab: unaffected.
 [ "$(panel 2 '{"run":"r2"}' tabs)" = 200 ] || fail "a panel before the tabs: $(cat "$T/body")"
 [ "$(panel 6 '{"run":"r2"}' tabs)" = 200 ] || fail "a panel of another tab: $(cat "$T/body")"
+# A tab is decided where it stands: `${later}` is set only below the tab, so
+# the tab is hidden — and so are its panels, though `later` is set by then.
+na "$(panel 14 '{"run":"r1"}' tabs)" "a tab whose variable is set below it"
+na "$(panel 16 '{"run":"r1"}' tabs)" "the panel of a tab whose variable is set below it"
+# The same SQL in two tabs: each statement answers by its own tab.
+[ "$(panel 18 '{"run":"r2"}' tabs)" = 200 ] || fail "a KPI whose twin is in a hidden tab: $(cat "$T/body")"
+[ "$(panel 19 '{"run":"r1"}' tabs)" = 200 ] || fail "a sub-tab whose twin is hidden: $(cat "$T/body")"
 echo "OK: -- @requires on a ::TRACK; a hidden ::TAB / ::SUBTAB's panels never run"
 if [ -n "${NODE_PATH:-}" ]; then
   node "$(dirname "$0")/requires-tabs-e2e.mjs" "http://127.0.0.1:$PORT" || fail "browser checks (requires-tabs-e2e.mjs)"

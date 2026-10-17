@@ -1578,8 +1578,11 @@ Every panel carries its own state — there is no full-page spinner:
   Setup statements in a hidden tab's section still run (a `CREATE TEMP VIEW`
   there may serve later tabs); one that fails because the tab's input is
   missing is expected and silent. `@requires` on the tab and on its panels as
-  well is fine. Chrome directives (`::THEME`, `::DASHBOARD_TITLE`, …) apply
-  wherever they sit. On a locked server the tab is decided on the server (it
+  well is fine. Chrome directives (`::THEME`, `::DASHBOARD_TITLE`, `::ASOF`,
+  …) apply to the whole dashboard wherever they sit, so they still run in a
+  hidden tab's section: keep them above the first tab. Hiding is
+  presentation, not secrecy: a served page's source still holds the hidden
+  tab's SQL. On a locked server the tab is decided on the server (it
   answers the tab's statement *Not available*), and so is every panel in it,
   whoever asks: a hidden tab's panels never run. As for panels, a locked
   server checks the paths only with a data folder. The static renderers

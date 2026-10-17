@@ -1177,7 +1177,8 @@ let conn = null;
 // self-contained (multi-user safe — no shared session state).
 let servedMode = false;
 const servedVars = {};
-let servedIndex = null; // planned statement SQL -> plan index
+let servedIndex = null; // planned statement SQL -> its first plan index
+let servedPlan = null; // the served dashboard's planned statements
 // Superseding: a request with a `kind` aborts this page's previous request of
 // the same panel + kind (a ::PAGED table's page / scroll block), and names
 // itself in X-Anofox-Supersede so the server interrupts the old query too.
@@ -1210,14 +1211,19 @@ function sqlLiteralToJson(lit) {
   return t !== "" && Number.isFinite(n) ? n : t;
 }
 
-async function servedRequest(sql, page, kind) {
+// `at`: the statement's own plan index, when the caller knows it — the same
+// SQL can stand in two tabs, whose `-- @requires` differ (#167); else the
+// first statement with that SQL.
+async function servedRequest(sql, page, kind, at) {
   if (!servedIndex) {
     servedIndex = new Map();
-    JSON.parse(plan(window.__served.sql)).forEach((st, i) => {
+    servedPlan = JSON.parse(plan(window.__served.sql));
+    servedPlan.forEach((st, i) => {
       if (!servedIndex.has(st.sql)) servedIndex.set(st.sql, i);
     });
   }
-  const idx = servedIndex.get(page ? page.base : sql);
+  const want = page ? page.base : sql;
+  const idx = Number.isInteger(at) && servedPlan[at] && servedPlan[at].sql === want ? at : servedIndex.get(want);
   if (idx === undefined) throw new Error("this dashboard is served locked: only its own statements can run");
   const body = { dashboard: window.__served.id, panel: idx, vars: servedVars };
   if (page) {
@@ -1392,16 +1398,17 @@ async function ensureDataFiles(sql) {
 // builds the paging SQL itself. `kind` (served mode only): a newer request of
 // the same panel + kind supersedes this one (it then rejects with an AbortError).
 // `setup`: the statement is one of the dashboard's own setup statements.
-async function runSql(sql, page, kind, setup) {
+// `at` (served mode): the statement's plan index (see servedRequest).
+async function runSql(sql, page, kind, setup, at) {
   const t0 = performance.now();
   try {
-    return await runSqlInner(sql, page, kind, setup);
+    return await runSqlInner(sql, page, kind, setup, at);
   } finally {
     // timing for the perf check (scripts/perf-e2e.mjs reads the "dp:sql" entries)
     performance.measure("dp:sql", { start: t0, detail: String(sql).slice(0, 120) });
   }
 }
-async function runSqlInner(sql, page, kind, setup) {
+async function runSqlInner(sql, page, kind, setup, at) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
   const code = sqlCode(sql); // (the data/… file check below reads the strings)
@@ -1419,7 +1426,7 @@ async function runSqlInner(sql, page, kind, setup) {
       return "[]";
     }
     // … and send the statement's plan index + the variable values.
-    return servedRequest(sql, page, kind);
+    return servedRequest(sql, page, kind, at);
   }
   if (backend === "live") {
     const r = await fetch("/query", { method: "POST", body: sql });
@@ -5616,7 +5623,7 @@ async function prepInteractions(stmts) {
     const d = s.setup ? null : directive(s);
     if (d !== "SELECT_AS" && d !== "DRILL") continue;
     try {
-      const rows = JSON.parse(await runSql(s.sql));
+      const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, i));
       if (d === "DRILL") {
         const drill = parseDrill(rows[0] ? Object.values(rows[0])[0] : "");
         if (!drill) continue;
@@ -6398,20 +6405,20 @@ async function lazyPool(jobs, inline) {
 // — a cross-filter re-run or a tab shown again skips the queries whose inputs
 // did not change. A full run clears the cache. A query that fails on a missing
 // table or function while setup is still deferred runs that setup and retries.
-async function panelSql(sql) {
-  const key = `${dpSetupEpoch}\u0000${varSig(sql)}\u0000${sql}`;
+async function panelSql(sql, at) {
+  const key = `${dpSetupEpoch}\u0000${varSig(sql)}\u0000${sql}${servedMode ? "\u0000" + at : ""}`;
   if (dpResults.has(key)) {
     performance.mark("dp:cache-hit");
     return dpResults.get(key);
   }
   let rows;
   try {
-    rows = await runSql(sql);
+    rows = await runSql(sql, undefined, undefined, undefined, at);
   } catch (e) {
     const L = dpLazy.building;
     if (!(L && L.setup.length && /does not exist|Catalog Error/i.test(String(e)))) throw e;
     await lazyFlushSetup(L, Infinity, null);
-    return panelSql(sql);
+    return panelSql(sql, at);
   }
   if (rows.length < 4e6) {
     dpResults.set(key, rows);
@@ -6438,7 +6445,7 @@ async function lazyRunJob(job, inline = false) {
     const ts = L.stmts[t.i];
     if (out.lastChart) {
       try {
-        addTrack(out.lastChart, { rows: await panelSql(ts.sql), roles: ts.roles, height: t.height });
+        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i), roles: ts.roles, height: t.height });
       } catch (e) {
         // A strip whose optional input is missing is left out (#162).
         if (isOptionalMissing(ts, e)) console.info(`track skipped (optional input missing): ${requiresText(reqsOf(ts))}`);
@@ -6575,6 +6582,7 @@ async function runOnce(fresh = true) {
   let stmts;
   try {
     stmts = JSON.parse(plan($("sql").value));
+    stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
   } catch (e) {
     grid.replaceChildren();
     return showError(grid, String(e));
@@ -6612,7 +6620,7 @@ async function runOnce(fresh = true) {
     try {
       if (!s.setup && chromeRole(s)) {
         const cr = chromeRole(s);
-        const rows = JSON.parse(await runSql(s.sql));
+        const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, i));
         const idx = s.roles.find((r) => r[1] === cr)[0];
         let v = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
         if (v != null && typeof v === "object") v = JSON.stringify(v);
@@ -6638,7 +6646,7 @@ async function runOnce(fresh = true) {
         await runSetup(s.sql);
       } else if (isInput(s)) {
         const kind = inputKind(s);
-        const rows = JSON.parse(await panelSql(s.sql));
+        const rows = JSON.parse(await panelSql(s.sql, i));
         if (!rows.length) continue;
         // Optional ::LABEL column → the control's caption (default: the variable
         // name). A ::DATERANGE keeps its columns as they are (from, to, label).
@@ -6769,7 +6777,7 @@ async function runOnce(fresh = true) {
     // A literal directive (SELECT 'Map'::TAB, SELECT 6::SPAN) needs no query.
     const lit = /^\s*SELECT\s+(?:(-?\d+(?:\.\d+)?)|'((?:[^']|'')*)')\s+AS\s+c0\s*;?\s*$/i.exec(s.sql);
     if (lit) return lit[2] !== undefined ? lit[2].replace(/''/g, "'") : Number(lit[1]);
-    const rows = JSON.parse(await runSql(s.sql));
+    const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i));
     return rows[0] ? Object.values(rows[0])[0] : null;
   };
   // One panel statement (a contract plot, a ::PAGED table, or a chart / table /
@@ -6787,7 +6795,7 @@ async function runOnce(fresh = true) {
         // A contract plot call (SELECT anofox_plot_terms(t) FROM … t): the planner
         // rewrote it to return the rows (+ named args) as JSON; render each
         // result row (one per GROUP BY key) with the contract renderer.
-        const rows = JSON.parse(await panelSql(s.sql));
+        const rows = JSON.parse(await panelSql(s.sql, i));
         const span = Math.min(12, nextSpan || defaultSpan);
         const title = titleOf(s, JSON.stringify(rows.slice(0, 1)));
         const mk = (caption) => {
@@ -6898,7 +6906,7 @@ async function runOnce(fresh = true) {
             const fl = colFilters();
             if (fl.length) page.filters = fl;
           }
-          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst));
+          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx));
           const sql = page_sql(base, JSON.stringify(page));
           if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
           return JSON.parse(await runSql(sql));
@@ -7029,7 +7037,7 @@ async function runOnce(fresh = true) {
         nextIa = {};
         nextEmpty = "";
       } else {
-        const rowsJson = await panelSql(s.sql);
+        const rowsJson = await panelSql(s.sql, i);
         if (trackHost) {
           // A thin strip under the chart before it, on its x axis (same panel).
           addTrack(trackHost, { rows: rowsJson, roles: s.roles, height: nextHeight || 0 });
@@ -8534,7 +8542,7 @@ async function tabShown(s) {
   if (!s.requires || !s.requires.length) return true;
   if (servedMode) {
     try {
-      await runSql(s.sql);
+      await runSql(s.sql, undefined, undefined, false, s.i);
       return true;
     } catch (e) {
       if (isOptionalMissing(s, e)) return false;
