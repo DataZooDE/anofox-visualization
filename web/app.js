@@ -4144,8 +4144,11 @@ async function runOnce(fresh = true) {
             },
             onColFilters: reload,
             distinct: (col) => pageReq({ distinct: col }).then((rs) => rs.map((r) => r.v)),
-            // the Stats strip's histograms / top values, once per filter state
-            profile: () => (stats._prof ||= pageReq({ profile: stats._cols })),
+            // the Stats strip's histograms / top values of one column, once per
+            // filter state — one column per request: a profile groups every
+            // value of its column, so all columns at once multiply the peak
+            // memory (#118)
+            profile: (col) => ((stats._prof ||= {})[col] ||= pageReq({ profile: [col] })),
             fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }, true, "rows"),
           };
           holder.appendChild(renderTable(rows, sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
@@ -6571,8 +6574,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     if (server) {
       const j = server.statCols ? server.statCols.indexOf(c) : -1;
       const st = sstat(c);
-      if (j < 0 || !prof) return null;
-      const mine = prof.filter((r) => Number(r.c) === j);
+      const mine = prof?.[c];
+      if (j < 0 || !mine) return null;
       const hist = new Array(BINS).fill(0);
       for (const r of mine) if (r.t === "h") hist[Math.min(BINS - 1, Number(r.k) || 0)] += Number(r.n);
       const top = mine.filter((r) => r.t === "t").map((r) => [unquote(r.v), Number(r.n)]);
@@ -6642,11 +6645,20 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     };
     if (!server) return fill(null);
     const row = sRow;
-    fill(null);
-    server
-      .profile()
-      .then((prof) => row === sRow && fill(prof))
-      .catch(() => {});
+    const prof = {};
+    fill(prof);
+    // column by column, two at a time; each cell fills in as its column arrives
+    const cols = visCols().filter((c) => server.statCols?.includes(c));
+    let next = 0;
+    const work = async () => {
+      while (next < cols.length && row === sRow) {
+        const c = cols[next++];
+        prof[c] = await server.profile(c).catch(() => null);
+        if (row === sRow) fill(prof);
+      }
+    };
+    work();
+    work();
   }
 
   // ── the per-column filter row (behind the Filters button) ──
