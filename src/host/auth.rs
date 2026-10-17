@@ -207,13 +207,21 @@ pub struct JwtAuth {
     pub accept_id_tokens: bool,
 }
 
-/// Does a verified payload look like an OIDC ID token (`nonce`, `at_hash`,
-/// `c_hash`, or Cognito's `token_use: "id"`)?
-fn is_id_token(p: &Value) -> bool {
+/// Does a verified token look like an OIDC ID token? Not when its header
+/// says `at+jwt` (an RFC 9068 access token); otherwise yes with `nonce`,
+/// `at_hash`, `c_hash`, Cognito's `token_use: "id"` or Keycloak's `typ: "ID"`.
+fn is_id_token(header_typ: Option<&str>, p: &Value) -> bool {
+    if header_typ.is_some_and(|t| {
+        t.eq_ignore_ascii_case("at+jwt") || t.eq_ignore_ascii_case("application/at+jwt")
+    }) {
+        return false;
+    }
+    let field = |k: &str| p.get(k).and_then(Value::as_str);
     ["nonce", "at_hash", "c_hash"]
         .iter()
         .any(|k| p.get(*k).is_some())
-        || p.get("token_use").and_then(Value::as_str) == Some("id")
+        || field("token_use") == Some("id")
+        || field("typ").is_some_and(|t| t.eq_ignore_ascii_case("id"))
 }
 
 /// Refuse a configuration in which one secret plays two roles (#114): the
@@ -261,6 +269,9 @@ pub struct Auth {
     pub embed: Option<embed::Embed>,
     pub keys: Option<apikey::ApiKeys>,
     pub audit: Option<Arc<AuditLog>>,
+    /// Accept an embed page session as `?embed_session=` on `GET /d/…` —
+    /// only `serve --dashboards` (pages without script) turns this on.
+    pub query_sessions: bool,
     /// When each credential's last successful use was audited (sampling).
     audited_ok: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
@@ -793,7 +804,7 @@ impl Auth {
                 .iter()
                 .map(|v| v.to_string())
                 .collect();
-            if s.is_empty() && r.method == "GET" && path.starts_with("/d/") {
+            if s.is_empty() && self.query_sessions && r.method == "GET" && path.starts_with("/d/") {
                 s = r.query_all("embed_session");
             }
             if !s.is_empty() {
@@ -880,8 +891,8 @@ impl Auth {
             method: Some("jwt"),
             audited: false,
         };
-        let payload = j.verifier.verify(token).map_err(d)?;
-        if !j.accept_id_tokens && is_id_token(&payload) {
+        let (payload, typ) = j.verifier.verify_typed(token).map_err(d)?;
+        if !j.accept_id_tokens && is_id_token(typ.as_deref(), &payload) {
             return Err(d("id_token"));
         }
         let claims = j.map.claims(&payload).map_err(|e| d(e.reason()))?;

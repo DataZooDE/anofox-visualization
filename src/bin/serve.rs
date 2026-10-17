@@ -160,10 +160,11 @@ fn parse_args() -> Opts {
                 };
                 let val: serde_json::Value = serde_json::from_str(&json)
                     .unwrap_or_else(|e| usage(&format!("--auth: bad JSON: {e}")));
-                o.auth = Some(
-                    Auth::from_json(&val, |k| std::env::var(k).ok())
-                        .unwrap_or_else(|e| usage(&format!("--{e}"))),
-                );
+                let mut a = Auth::from_json(&val, |k| std::env::var(k).ok())
+                    .unwrap_or_else(|e| usage(&format!("--{e}")));
+                // Pages without script carry an embed page session in the URL.
+                a.query_sessions = true;
+                o.auth = Some(a);
             }
             "--log" => {
                 log = Some(

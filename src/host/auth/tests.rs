@@ -224,6 +224,7 @@ fn id_tokens_are_not_bearer_tokens() {
         json!({"nonce": "n"}),
         json!({"at_hash": "x"}),
         json!({"token_use": "id"}),
+        json!({"typ": "ID"}),
     ] {
         let t = sign(&k, Some("k1"), &jwt_payload(extra.clone()));
         let h = format!("Bearer {t}");
@@ -232,6 +233,9 @@ fn id_tokens_are_not_bearer_tokens() {
             .unwrap_err();
         assert_eq!(d.reason, "id_token", "{extra}");
     }
+    // an RFC 9068 access token (header typ at+jwt) is no ID token
+    assert!(!is_id_token(Some("at+jwt"), &json!({"nonce": "n"})));
+    assert!(is_id_token(Some("JWT"), &json!({"typ": "ID"})));
     // a jwt audience equal to the oidc client_id fails the start
     let f = idp(&[]);
     let fetch = move |_: Option<&std::path::Path>| -> Result<Arc<dyn http::Fetch>, String> {
@@ -290,7 +294,7 @@ fn an_invalid_credential_never_falls_back() {
 #[test]
 fn embed_links_become_scoped_page_sessions() {
     let dir = tmpdir();
-    let (a, _) = all_methods(idp(&[]), &dir);
+    let (mut a, _) = all_methods(idp(&[]), &dir);
     let link = embed_link(json!({"dashboard": "sales", "user": "acme-1",
         "claims": {"tenant": "acme"}, "vars": {"region": "EU"}, "exp": now_s() + 60}));
     let url = format!("/d/sales?embed={link}");
@@ -323,6 +327,12 @@ fn embed_links_become_scoped_page_sessions() {
     // a page without script (serve --dashboards) carries the page session
     // in its URL instead; it is checked like the header, on /d/ only
     let q = format!("/d/sales?embed_session={page}");
+    // (only where the server turned it on: serve --dashboards)
+    assert_eq!(
+        a.authenticate(&req("GET", &q, &[])).unwrap_err().reason,
+        "no_credentials"
+    );
+    a.query_sessions = true;
     assert_eq!(
         a.authenticate(&req("GET", &q, &[])).unwrap().scope,
         id.scope

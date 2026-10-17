@@ -608,11 +608,11 @@ the same value; their keys are derived per use).
 | `leeway_s` | `60` | Clock skew for `exp`, `nbf`, `iat` (at most 300) |
 | `max_age_s` | — | Refuse tokens issued longer ago (requires `iat`) |
 | `jwks_ttl_s` | `3600` | Key-set cache lifetime (60–86400) |
-| `user_claim` | `sub` | Token field → `__claim_user`. If it is `email`, the token must also carry `email_verified: true` (`deny: email_unverified`): an address the IdP did not verify is no identity (nOAuth) |
+| `user_claim` | `sub` | Token field → `__claim_user`. If it is an e-mail field (`email`, or a path or namespaced name ending in it, like `profile.email`), the token must also carry `email_verified: true` (`deny: email_unverified`): an address the IdP did not verify is no identity (nOAuth). The same holds for a `claims` entry taken from an e-mail field. Other fields some IdPs let users change (Entra ID's `preferred_username` and `upn`) are no stable identity: prefer `sub` or `oid` |
 | `groups_claim` | off | Token field (list or string) → `__claim_groups`; `{"field": …, "required": true}` makes it mandatory |
 | `claims` | — | `{name: "field"}` → `__claim_<name>`; dotted paths (`realm_access.roles`) and namespaced fields (`https://example.com/tenant`) work |
 | `cookie` | — | Also read the token from this cookie |
-| `accept_id_tokens` | `false` | Accept OIDC ID tokens (a `nonce`, `at_hash`, `c_hash` or `token_use: "id"` claim) as bearer tokens. Off: an ID token is a login receipt for one client, not an API credential (`deny: id_token`). With `oidc` configured too, an `audience` equal to its `client_id` fails the start unless this is set |
+| `accept_id_tokens` | `false` | Accept OIDC ID tokens (a `nonce`, `at_hash`, `c_hash`, `token_use: "id"` or `typ: "ID"` claim, unless the header's `typ` is `at+jwt`) as bearer tokens. Off: an ID token is a login receipt for one client, not an API credential (`deny: id_token`). With `oidc` configured too, an `audience` equal to its `client_id` fails the start unless this is set |
 | `ca_file` | Mozilla roots | PEM roots for an internal IdP (replaces the public roots) |
 
 How a token is checked: compact JWS only; the header's `alg` must be one of
@@ -650,7 +650,7 @@ The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
 | `session_ttl_s` | `28800` (8 h) | Session lifetime, 60 s … 7 days |
 | `session_secret_env` | random per start | ≥ 32 characters; sign sessions with it so they survive a restart and work on every replica (#22). Without it, a restart signs everyone out |
 | `post_logout_url` | `/auth/logged-out` | Where `POST /auth/logout` sends the browser |
-| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink): they survive a restart, and replicas sharing the file see each other's within 2 s |
+| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink; expired lines are dropped at start): they survive a restart, and replicas sharing the file see each other's within 2 s. If the file disappears, can't be read or becomes writable by group or others, every login session is refused until it is fixed (fail closed, reported on stderr) |
 
 1. `GET /auth/login?next=/d/sales` creates a random `state`, `nonce` and PKCE
    verifier, keeps them in a signed `HttpOnly; Secure; SameSite=Lax` cookie
@@ -726,8 +726,9 @@ exchanged for a **page session** scoped to that one dashboard:
   credential when `embed` is configured — they are the open-source viewer, no
   data. Pages, `/api/panel` and data files still need one.
 - `serve --dashboards` (no script) exchanges the link once and keeps the page
-  session in the page's form (`?embed_session=`, accepted on `GET /d/…`
-  only), so `one_time` links work there too.
+  session in the page's form (`?embed_session=`, accepted on `GET /d/…` by
+  that server only; its pages are `Referrer-Policy: same-origin`), so
+  `one_time` links work there too.
 - `/healthz` answers a scoped credential (an embed page, an API key limited
   to dashboards) with `{"status":"ok"}` only, like a request without login.
 - A locked variable listed in `path_vars` must be a plain file or folder name,
