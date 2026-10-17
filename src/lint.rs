@@ -182,6 +182,20 @@ where
                 ),
                 sql: short.clone(),
             });
+            // Its "Not available" card still takes the panel's place: a KPI
+            // tile stays in its run, any other panel ends it — with or
+            // without the file, the same verdict.
+            if opts.design && !p.setup && is_content_panel(&p.roles) {
+                count_design_panel(
+                    &p.roles,
+                    group_depth == 0,
+                    stmt,
+                    &mut kpi_run,
+                    &mut kpi_run_stmt,
+                    &mut rendered_panels,
+                    &mut diags,
+                );
+            }
             continue;
         }
 
@@ -284,6 +298,18 @@ where
             Ok(rows) => rows,
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
+                // (its "Not available" / error card takes the panel's place)
+                if opts.design && is_content_panel(&p.roles) {
+                    count_design_panel(
+                        &p.roles,
+                        group_depth == 0,
+                        stmt,
+                        &mut kpi_run,
+                        &mut kpi_run_stmt,
+                        &mut rendered_panels,
+                        &mut diags,
+                    );
+                }
                 continue;
             }
         };
@@ -839,19 +865,17 @@ where
         if opts.design && !is_track {
             // Count content panels (charts/tables/markdown) toward the
             // scan-budget, but NOT individual KPI tiles — a strip of KPIs is one
-            // band to scan, not N panels.
-            if is_kpi(&p.roles) {
-                if group_depth == 0 {
-                    if kpi_run == 0 {
-                        kpi_run_stmt = stmt;
-                    }
-                    kpi_run += 1;
-                }
-            } else {
-                rendered_panels += 1;
-                // A non-KPI content panel ends a run of top-level KPI tiles.
-                flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
-            }
+            // band to scan, not N panels. A non-KPI content panel ends a run of
+            // top-level KPI tiles.
+            count_design_panel(
+                &p.roles,
+                group_depth == 0,
+                stmt,
+                &mut kpi_run,
+                &mut kpi_run_stmt,
+                &mut rendered_panels,
+                &mut diags,
+            );
 
             if let Some(k) = chart_kind(&p.roles) {
                 let titled = p.roles.iter().any(|(_, r)| matches!(r, Role::Title));
@@ -1462,9 +1486,45 @@ fn one_line(s: &str) -> String {
 // ---- design-lint helpers -------------------------------------------------
 
 /// A KPI tile — a big-number card (`::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT`).
+/// In a `::TABLE` / `::PAGED` statement those are column formats, not tiles.
 fn is_kpi(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| matches!(r, Role::Metric(_)))
-        && !roles.iter().any(|(_, r)| *r == Role::Diagram)
+        && !roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Diagram | Role::Table | Role::PagedTable))
+}
+
+/// A statement that shows a content panel or KPI tile: not an input, a layout
+/// directive, a section heading (a lone ::LABEL) or a ::TRACK.
+fn is_content_panel(roles: &[(usize, Role)]) -> bool {
+    input_kind(roles).is_none()
+        && !roles::is_directive_panel(roles)
+        && !(roles.len() == 1 && matches!(roles[0].1, Role::Label))
+        && !crate::track::is_track(roles)
+}
+
+/// The design counters for one panel: a top-level KPI tile extends the run of
+/// tiles; any other panel counts toward the scan budget and ends the run.
+fn count_design_panel(
+    roles: &[(usize, Role)],
+    top_level: bool,
+    stmt: usize,
+    kpi_run: &mut usize,
+    kpi_run_stmt: &mut usize,
+    rendered_panels: &mut usize,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if is_kpi(roles) {
+        if top_level {
+            if *kpi_run == 0 {
+                *kpi_run_stmt = stmt;
+            }
+            *kpi_run += 1;
+        }
+    } else {
+        *rendered_panels += 1;
+        flush_kpi_run(diags, kpi_run, *kpi_run_stmt);
+    }
 }
 
 /// A KPI statement's `::DELTA_FORMAT` / `::DELTA_LABEL` / `::SPARKLINE`
@@ -2184,6 +2244,60 @@ mod design_tests {
                        SELECT 1::ENDGROUP;";
         let d2 = check(grouped, |_q| Ok(one.clone()));
         assert!(!has(&d2, "design/ungrouped-kpis"), "{d2:?}");
+    }
+
+    #[test]
+    fn tables_are_not_kpi_tiles_and_a_missing_panel_keeps_its_place() {
+        // #153: a ::TABLE / ::PAGED with ::PERCENT / ::COMPACT columns is a
+        // table, not a tile — it ends a run of tiles instead of extending it.
+        let one = rows(1, |_| json!({ "c0": 42.0, "c1": "x" }));
+        let tables = "SELECT sum(a)::METRIC, 'A'::LABEL FROM t;\n\
+                      SELECT sum(b)::METRIC, 'B'::LABEL FROM t;\n\
+                      SELECT x::PERCENT, y ::TABLE FROM t;\n\
+                      SELECT x::COMPACT, y ::PAGED FROM t;";
+        let d = check(tables, |_q| Ok(one.clone()));
+        assert!(!has(&d, "design/ungrouped-kpis"), "{d:?}");
+        // A panel skipped by `-- @requires` ("Not available") between two
+        // tiles ends the run, the same as when its file is there.
+        let script = "SELECT sum(a)::METRIC, 'A'::LABEL FROM t;\n\
+                      SELECT sum(b)::METRIC, 'B'::LABEL FROM t;\n\
+                      -- @requires data/opt.parquet\n\
+                      SELECT a ::XAXIS, b ::BARCHART, 'T'::TITLE FROM 'data/opt.parquet';\n\
+                      SELECT sum(c)::METRIC, 'C'::LABEL FROM t;";
+        for present in [true, false] {
+            let d = check(script, |q| {
+                if q.contains("glob(") {
+                    Ok(vec![json!({ "n": present as i64 })
+                        .as_object()
+                        .unwrap()
+                        .clone()])
+                } else {
+                    Ok(one.clone())
+                }
+            });
+            assert!(
+                !has(&d, "design/ungrouped-kpis"),
+                "present={present}: {d:?}"
+            );
+        }
+        // … and a missing tile stays in its run either way.
+        let script = "SELECT sum(a)::METRIC, 'A'::LABEL FROM t;\n\
+                      SELECT sum(b)::METRIC, 'B'::LABEL FROM t;\n\
+                      -- @requires data/opt.parquet\n\
+                      SELECT sum(c)::METRIC, 'C'::LABEL FROM 'data/opt.parquet';";
+        for present in [true, false] {
+            let d = check(script, |q| {
+                if q.contains("glob(") {
+                    Ok(vec![json!({ "n": present as i64 })
+                        .as_object()
+                        .unwrap()
+                        .clone()])
+                } else {
+                    Ok(one.clone())
+                }
+            });
+            assert!(has(&d, "design/ungrouped-kpis"), "present={present}: {d:?}");
+        }
     }
 
     #[test]
