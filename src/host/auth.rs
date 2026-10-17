@@ -610,14 +610,13 @@ impl Auth {
             ),
             ("POST", "/auth/logout") => {
                 for c in r.cookies(oidc::SESSION_COOKIE) {
-                    if let Ok(s) = o.sessions.verify("login", c) {
-                        o.sessions.revoke(&s.sid, s.exp);
+                    if let Some((sid, user)) = o.sessions.logout("login", c) {
                         self.audit(Event {
                             event: "logout",
                             outcome: "ok",
                             method: Some("oidc"),
-                            user: Some(&s.claims.user),
-                            sid: Some(&s.sid),
+                            user: Some(&user),
+                            sid: Some(&sid),
                             peer: r.peer,
                             ..Default::default()
                         });
