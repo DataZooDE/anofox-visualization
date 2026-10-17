@@ -22,13 +22,13 @@ description: >
   panels, the Explore data page, the `dashboard --describe` / `--check`
   generate-validate-repair loop with its lint codes, the design contract
   and the gotchas that silently break a panel.
-version: 2026.10.17
+version: 2026.10.18
 user-invocable: false
 ---
 
 # Anofox Visualization — ::ROLE Dashboards (build-dashboard)
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.17) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
+**Extension:** `anofox_visualization` (CalVer 2026.10.18) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
 
 A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel (chart, KPI, table, input). Statements without a role (`CREATE TABLE`, `SET`, `LOAD`, …) run as setup, in order, on one session. Your output is one SQL script.
 
