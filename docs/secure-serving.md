@@ -583,6 +583,11 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 }');
 ```
 
+**`serve --dashboards`** takes the same `--auth` methods, but it has no row
+and column policies (#49 / `policy` is only in `anofox_serve_dashboards`):
+there every panel must filter on `getvariable('__claim_*')` itself; its start
+message says so.
+
 **Which credential counts.** Exactly one per request, the first present of:
 an embed link (`GET /d/<id>?embed=<token>`), the proxy's secret header, an
 `Authorization` header, an embed page session (`X-Anofox-Session`), the login
@@ -650,7 +655,7 @@ The authorization code flow with PKCE. Takes the `jwt` keys for the ID token
 | `session_ttl_s` | `28800` (8 h) | Session lifetime, 60 s … 7 days |
 | `session_secret_env` | random per start | ≥ 32 characters; sign sessions with it so they survive a restart and work on every replica (#22). Without it, a restart signs everyone out |
 | `post_logout_url` | `/auth/logged-out` | Where `POST /auth/logout` sends the browser |
-| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink; expired lines are dropped at start): they survive a restart, and replicas sharing the file see each other's within 2 s. If the file disappears, can't be read or becomes writable by group or others, every login session is refused until it is fixed (fail closed; reported on stderr and as `revocation_file` / `error` in the audit log) |
+| `revocation_file` | — | Keep logouts in this file (JSON lines, `0600`, never through a symlink; expired lines are dropped at start): they survive a restart, and replicas sharing the file see each other's within 2 s. If the file disappears, can't be read or becomes writable by group or others, every login session is answered `503` (`Retry-After`, `deny: revocations_unavailable`, no login redirect) until it is fixed (fail closed; reported on stderr and as `revocation_file` / `error` in the audit log). Expired lines are compacted at start only if no other replica wrote meanwhile. **Rotate it safely:** write the new file next to it and `rename` it into place — never move the old file away first (meanwhile every session would be refused, and logouts written to the moved file would be lost) |
 
 1. `GET /auth/login?next=/d/sales` creates a random `state`, `nonce` and PKCE
    verifier, keeps them in a signed `HttpOnly; Secure; SameSite=Lax` cookie

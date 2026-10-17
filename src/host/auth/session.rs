@@ -200,9 +200,7 @@ impl Sessions {
             v.as_array().ok_or(bad)?.iter().map(s).collect()
         };
         let sid = s(&p["sid"])?;
-        if self.is_revoked(&sid) {
-            return Err("revoked");
-        }
+        self.check_revocations(&sid)?;
         let attrs = p["a"]
             .as_array()
             .ok_or(bad)?
@@ -264,15 +262,20 @@ impl Sessions {
         }
     }
 
-    fn is_revoked(&self, sid: &str) -> bool {
+    /// `revoked`, or `revocations_unavailable` while the revocation file
+    /// can't be trusted (a 503 for the server, not a reason to log in again).
+    fn check_revocations(&self, sid: &str) -> Result<(), &'static str> {
         if let Some(f) = &self.revocations {
             f.reload(&self.revoked);
             if f.is_broken() {
-                return true;
+                return Err("revocations_unavailable");
             }
         }
         let r = self.revoked.lock().unwrap_or_else(|p| p.into_inner());
-        r.contains_key(sid)
+        if r.contains_key(sid) {
+            return Err("revoked");
+        }
+        Ok(())
     }
 
     /// Keep revocations in `path` (JSON lines, `0600`, no symlinks): a logout
@@ -283,25 +286,7 @@ impl Sessions {
             |e: &dyn std::fmt::Display| format!("auth.revocation_file: {}: {e}", path.display());
         // Created 0600 (an existing file is tightened), never via a symlink.
         crate::host::access::open_log(&path).map_err(|e| bad(&e))?;
-        // Compact: keep only the unexpired lines (atomically).
-        let text = std::fs::read_to_string(&path).map_err(|e| bad(&e))?;
-        let keep = parse_revocations(&text, super::jwt::now_s());
-        let tmp = path.with_extension(format!("tmp-{}", crate::host::serving::random_token()));
-        {
-            use std::io::Write;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
-            }
-            let mut f = o.open(&tmp).map_err(|e| bad(&e))?;
-            for (sid, exp) in &keep {
-                writeln!(f, "{}", json!({"sid": sid, "exp": exp})).map_err(|e| bad(&e))?;
-            }
-        }
-        std::fs::rename(&tmp, &path).map_err(|e| bad(&e))?;
+        compact_revocations(&path, || {}).map_err(|e| bad(&e))?;
         let f = Revocations {
             path: path.clone(),
             stamp: Mutex::new((None, None)),
@@ -428,6 +413,49 @@ impl Revocations {
     fn is_broken(&self) -> bool {
         self.broken.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+/// Drop the expired lines of a revocation file: write the rest to a new
+/// `0600` file and rename it into place — unless the file changed meanwhile
+/// (another replica appended a logout): then it is left as it is, so no
+/// revocation is lost. `before_rename` is a test hook.
+fn compact_revocations(
+    path: &std::path::Path,
+    before_rename: impl FnOnce(),
+) -> std::io::Result<bool> {
+    use std::io::Write;
+    let stamp = |p: &std::path::Path| -> std::io::Result<(Option<std::time::SystemTime>, u64)> {
+        let m = std::fs::metadata(p)?;
+        Ok((m.modified().ok(), m.len()))
+    };
+    let before = stamp(path)?;
+    let text = std::fs::read_to_string(path)?;
+    if stamp(path)? != before {
+        return Ok(false);
+    }
+    let keep = parse_revocations(&text, super::jwt::now_s());
+    let tmp = path.with_extension(format!("tmp-{}", crate::host::serving::random_token()));
+    {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp)?;
+        for (sid, exp) in &keep {
+            writeln!(f, "{}", json!({"sid": sid, "exp": exp}))?;
+        }
+        f.sync_all()?;
+    }
+    before_rename();
+    if stamp(path)? != before {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(true)
 }
 
 /// The unexpired `(sid, exp)` lines of a revocation file.
@@ -569,7 +597,7 @@ mod tests {
         b.set_audit(std::sync::Arc::new(
             super::super::audit::AuditLog::new(audit.to_str().unwrap()).unwrap(),
         ));
-        assert_eq!(b.verify("login", &t2), Err("revoked"));
+        assert_eq!(b.verify("login", &t2), Err("revocations_unavailable"));
         let a = std::fs::read_to_string(&audit).unwrap();
         assert!(
             a.contains("\"audit\":\"revocation_file\"") && a.contains("\"outcome\":\"error\""),
@@ -581,7 +609,7 @@ mod tests {
             std::fs::write(&file, "").unwrap();
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
             b.revocations.as_ref().unwrap().stamp.lock().unwrap().1 = None;
-            assert_eq!(b.verify("login", &t2), Err("revoked"));
+            assert_eq!(b.verify("login", &t2), Err("revocations_unavailable"));
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
             b.revocations.as_ref().unwrap().stamp.lock().unwrap().1 = None;
             assert!(b.verify("login", &t2).is_ok());
@@ -598,6 +626,40 @@ mod tests {
                 .with_revocation_file(link)
                 .is_err());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_never_loses_a_concurrent_logout() {
+        // Another replica appends between our read and our rename: the
+        // compaction is abandoned, the new line stays.
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-rev-c-{}",
+            crate::host::serving::random_token()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("revoked.jsonl");
+        std::fs::write(&file, format!("{}\n", json!({"sid": "old", "exp": 1}))).unwrap();
+        let exp = super::super::jwt::now_s() + 600;
+        let appended = compact_revocations(&file, || {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            writeln!(f, "{}", json!({"sid": "new", "exp": exp})).unwrap();
+        })
+        .unwrap();
+        assert!(!appended);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"new\""), "{text}");
+        // unchanged meanwhile: compacted
+        assert!(compact_revocations(&file, || {}).unwrap());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("\"new\"") && !text.contains("\"old\""),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

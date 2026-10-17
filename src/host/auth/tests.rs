@@ -171,6 +171,18 @@ fn each_method_yields_the_same_claims_shape() {
     assert!(a
         .login_redirect(&req("GET", "/d/sales", &[]), &expired_link)
         .is_none());
+    // a broken revocation file: 503 + Retry-After, never the login loop
+    let down = Denied {
+        reason: "revocations_unavailable",
+        method: Some("oidc"),
+        audited: false,
+    };
+    assert!(a
+        .login_redirect(&req("GET", "/d/sales", &[]), &down)
+        .is_none());
+    let r = down.unavailable().unwrap();
+    assert_eq!((r.status, r.header_value("Retry-After")), (503, Some("10")));
+    assert!(expired_link.unavailable().is_none());
     let ended = Denied {
         reason: "expired",
         method: Some("oidc"),

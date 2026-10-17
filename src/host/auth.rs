@@ -104,6 +104,20 @@ pub struct Denied {
     pub audited: bool,
 }
 
+impl Denied {
+    /// The refusal is the server's (its revocation file can't be trusted
+    /// right now): `503` with `Retry-After`, no login redirect.
+    pub fn unavailable(&self) -> Option<Reply> {
+        (self.reason == "revocations_unavailable").then(|| {
+            Reply::text(
+                503,
+                "service unavailable: sign-in state can't be checked right now",
+            )
+            .header("Retry-After", "10")
+        })
+    }
+}
+
 /// One request, as authentication sees it.
 #[derive(Debug, Clone, Copy)]
 pub struct Req<'a> {

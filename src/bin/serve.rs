@@ -669,6 +669,9 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
     match (&o.auth, sv::is_loopback_bind(&o.bind)) {
         (Some(a), _) => {
             println!("  login: {}", a.describe());
+            println!(
+                "  no row/column policies here (only anofox_serve_dashboards has them): every panel must filter on getvariable('__claim_*') itself"
+            );
             for w in a.prefetch() {
                 eprintln!("  WARNING: {w} — requests fail closed until it is reachable");
             }
@@ -886,6 +889,9 @@ fn route_serve(
                 Err(d) => {
                     *deny = Some(d.reason);
                     *how = d.method;
+                    if let Some(rep) = d.unavailable() {
+                        return send(req, rep);
+                    }
                     if let Some(rep) = auth.login_redirect(&r, &d) {
                         return send(req, rep);
                     }

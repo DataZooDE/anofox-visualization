@@ -1567,6 +1567,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Err(d) => {
                     info.deny = Some(d.reason);
                     info.auth = d.method;
+                    if let Some(rep) = d.unavailable() {
+                        return send(req, rep);
+                    }
                     if let Some(rep) = auth.login_redirect(&r, &d) {
                         return send(req, rep);
                     }
