@@ -534,6 +534,10 @@ fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
     Some((expr, role))
 }
 
+/// Alias prefix of a ::MARKDOWN statement's named (placeholder) columns:
+/// `revenue` → `revenue AS "md:revenue"`, read by `{{revenue}}`.
+pub const MD_PREFIX: &str = "md:";
+
 /// Rewrite `<expr>::ROLE` casts in the SELECT list into `<expr> AS c{i}`.
 pub fn rewrite(stmt: &str) -> Rewritten {
     let none = || (stmt.to_string(), Vec::new(), Vec::new());
@@ -660,13 +664,22 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         }
         if lex::is_star_item(item) {
             items.push(item.to_string()); // `*`, `t.*`, COLUMNS(…) expand in place
-        } else if markdown && {
-            let (core, alias) = trailing_alias(item);
-            alias.is_some() || lex::simple_ident(core).is_some()
-        } {
-            // A ::MARKDOWN statement's other columns keep their names: the
-            // text's {{name}} placeholders read them.
-            items.push(item.to_string());
+        } else if let Some(name) = markdown
+            .then(|| {
+                let (core, alias) = trailing_alias(item);
+                alias.or_else(|| lex::simple_ident(core))
+            })
+            .flatten()
+        {
+            // A ::MARKDOWN statement's other columns keep their names for the
+            // text's {{name}} placeholders, under a reserved prefix so a user
+            // column named `c0` never collides with the positional `c{i}`
+            // keys (#138).
+            let core = trailing_alias(item).0;
+            items.push(format!(
+                "{core} AS \"{MD_PREFIX}{}\"",
+                name.replace('"', "\"\"")
+            ));
         } else {
             items.push(format!("{} AS c{i}", trailing_alias(item).0));
         }
@@ -683,6 +696,17 @@ pub fn simple_ident(s: &str) -> Option<String> {
 #[cfg(test)]
 mod alias_tests {
     use super::*;
+    #[test]
+    fn markdown_columns_never_collide_with_positional_keys() {
+        // #138: a value column named c0 next to the ::MARKDOWN text (c0)
+        let (s, roles, _) =
+            rewrite("SELECT 'x {{c0:money}}'::MARKDOWN, 4.5 AS c0, n, \"Q \"\"3\"\"\" FROM t");
+        assert!(s.contains("'x {{c0:money}}' AS c0,"), "{s}");
+        assert!(s.contains(r#"4.5 AS "md:c0""#), "{s}");
+        assert!(s.contains(r#"n AS "md:n""#), "{s}");
+        assert!(s.contains(r#""Q ""3""" AS "md:Q ""3""""#), "{s}");
+        assert_eq!(roles, vec![(0, Role::Markdown)]);
+    }
     #[test]
     fn value_columns_keep_names() {
         // Data lookup stays keyed by c{i}; the human name travels as metadata.

@@ -388,7 +388,8 @@ pub fn simple_ident(s: &str) -> Option<String> {
         [t] if t.kind == TokKind::Word => Some(t.text(s).to_string()),
         [t] if t.kind == TokKind::QuotedIdent => {
             let x = t.text(s);
-            Some(x.trim_matches('"').replace("\"\"", "\""))
+            let x = x.strip_prefix('"').unwrap_or(x);
+            Some(x.strip_suffix('"').unwrap_or(x).replace("\"\"", "\""))
         }
         _ => None,
     }
