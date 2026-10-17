@@ -4,6 +4,7 @@
 // producer each. Skips (exit 0, with a note) unless
 //   * the extensions were fetched: scripts/fetch-wasm-extensions.sh, and
 //   * DuckDB-Wasm is installed: npm install --prefix tests/web.
+process.env.DATAZOO_DISABLE_TELEMETRY ??= "1"; // no usage telemetry from anofox extensions (child processes inherit it)
 import { existsSync } from "fs";
 import { spawn } from "child_process";
 import { createRequire } from "module";

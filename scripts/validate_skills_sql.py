@@ -45,6 +45,7 @@ import concurrent.futures as cf
 import glob
 import json
 import os
+os.environ.setdefault("DATAZOO_DISABLE_TELEMETRY", "1")  # no usage telemetry from anofox extensions
 import re
 import shlex
 import stat

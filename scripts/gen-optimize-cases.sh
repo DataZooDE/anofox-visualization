@@ -11,6 +11,7 @@
 #     INSTALL anofox_optimize FROM 'https://get.erpl.io'
 #     INSTALL anofox_forecast FROM 'https://get.erpl.io'   # replenishment only
 set -euo pipefail
+export DATAZOO_DISABLE_TELEMETRY="${DATAZOO_DISABLE_TELEMETRY:-1}"  # no usage telemetry from anofox extensions
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DUCKDB="${DUCKDB:-duckdb}"
 cd "$ROOT"

@@ -11,6 +11,7 @@
 # Pages deploy still publishes the web app before the first release exists.
 set -euo pipefail
 # shellcheck source=scripts/release/common.sh
+export DATAZOO_DISABLE_TELEMETRY="${DATAZOO_DISABLE_TELEMETRY:-1}"  # no usage telemetry from anofox extensions
 . "$(dirname "$0")/common.sh"
 
 if [ "${1:-}" = "--release" ]; then
