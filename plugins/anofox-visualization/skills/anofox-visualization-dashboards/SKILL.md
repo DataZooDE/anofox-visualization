@@ -65,6 +65,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 
 `--check` gives each input a default (`SET VARIABLE`: the first option of a single input, every option of a `::MULTISELECT`, both ends of a `::DATERANGE`, the default period of a `::PERIOD`), so filtered panels are checked with real data. Variables nothing sets (`selected`, a clicked table's key) are unset: guard them with `COALESCE` / `NULLIF` as in the master-detail example. `--json` prints `{"ok": …, "diagnostics": [{"severity", "stmt", "code", "message", "sql"}]}`.
 
+<!-- assist:begin (the builder assistant's guide: scripts/gen-assist-guide.mjs) -->
 ## Roles
 
 `dashboard --roles` prints the authoritative list from the registry (`src/roles.rs`); `dashboard --roles-md` the table of `docs/DOCS.md`. Unknown casts are flagged by `--check`.
@@ -455,6 +456,8 @@ Layers run left to right (`'TB'::DIRECTION` for top to bottom); loops are drawn 
 
 Motion: stages appear one after another by default (`'none'::ANIMATE` = off). `style` in `::EDGES` or `::LINESTYLE` on a row (styles the edges into that node; a constant = every edge): `'flow'` moving dashes, `'flow-dots'` travelling dots, `'dashed'`. `CASE stage WHEN 'monitor' THEN '412 twins drift' END::STORY` makes Step / Play steps that light the node and every edge touching it. Keyboard: the arrow keys follow the connections. Edges with a `value` are as wide as what they carry; a `status` word (`ok` / `delayed` / `failed` / `late`) colours them. A run picker plus `'tween'::TRANSITION` changes widths, colours and values in place. See the example "How does data move through our pipeline?". `team::LANE` groups nodes into labelled swimlanes; `stage_no::XAXIS` pins a node's stage (`::XAXIS` + `::YAXIS` on every node: placed by hand); `list(v ORDER BY t)::SPARKLINE` draws a trend in the box; `'flow-volume'` edges move faster the more they carry. From two tables without dashboard SQL: `SELECT anofox_plot_diagram(n, edges := (SELECT list(e) FROM run_edges e)) FROM run_manifest n` (Grafana names `id/title/mainstat`, `source/target/value`; `stage`, `from_stage`, `to_stage`, `count` read too).
 
+<!-- assist:end -->
+
 ## Motion (browser only)
 
 Use motion where it tells the story, not as decoration; `--svg`/PNG/PDF stay static and *reduce motion* shows the final state.
@@ -472,6 +475,7 @@ Charts are keyboard-navigable (Tab into a chart, arrows across marks, Enter = cl
 
 In the builder (`web/`, `serve <db>`, `anofox_serve`) the sidebar's **Explore data** page lists every table / view / added file (CSV, Parquet, JSON, `https://` URL); a table opens as column cards (type, empty %, distinct, histogram / top values / date range, quality hints, likely joins) over its `::PAGED` rows. **Chart this** previews a chart and **Add to dashboard** appends its annotated SQL; **New dashboard from this table** writes a starter (KPIs, `::ASOF`, `::PERIOD`, a filter, trend, top-N, distribution, rows); **Compare…** diffs two tables or two time ranges and writes a starter with `::DELTA`s; with `anofox_tabular` loaded each hint can **Run the check**. Locked servers have no Explore page. From a terminal, `dashboard --describe` gives the same grounding.
 
+<!-- assist:begin (the builder assistant's guide: scripts/gen-assist-guide.mjs) -->
 ## Gotchas
 
 These silently break a panel (it renders wrong or vanishes):
@@ -489,6 +493,8 @@ These silently break a panel (it renders wrong or vanishes):
 11. **Say what an empty result means**: `SELECT 'No orders in range — widen the dates'::EMPTY;` before a filtered panel replaces the generic "No data for this selection". **Optional outputs** (a file only some runs write): put `-- @requires data/run/x.parquet` on its own line directly above the statement — a missing file then shows "Not available" instead of an error card. Commas = all needed; `a.parquet | b.parquet` = either name will do; `${name}` = `getvariable('name')` (e.g. `-- @requires ${rd}/forecasts.parquet` after `SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run')`); a relative path resolves against `anofox_data` when set. On a locked server `${name}` must be server-side (`anofox_data`, a `path_vars` variable, or set by the dashboard) and the path must stay inside the data folder. Above a `::TRACK` a missing input leaves the strip out. **Optional tabs:** `-- @requires` directly above `SELECT 'Forecastability'::TAB;` (or a `::SUBTAB`) hides the whole tab — button, pane, panels (never run, also on a locked server) — when the input is missing, instead of a tab of "Not available" cards; `?tab=` to it opens the first shown tab. Set the tab's `${name}` above the tab statement.
 12. **Annotations are per row.** `::XLINE_LABEL`, `::XBAND_FROM`/`_TO`/`_LABEL` and `::ANNOTATE` read the row they are on: `LEFT JOIN events e ON e.day = s.day` and select `e.day::XLINE, e.note::XLINE_LABEL` — only the rows that carry an event draw it.
 13. **`::THRESHOLDS` inside a `::TABLE` statement is just a column.** Put the table's rules in their own statement before it, naming the columns.
+
+<!-- assist:end -->
 
 ## Running it
 

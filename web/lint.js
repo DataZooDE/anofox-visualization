@@ -18,14 +18,15 @@ export const MAX_STEPS = 40;
 // error. `strict` and `design` are `--strict` and the inverse of
 // `--no-design`. `onStep(n, queries)` reports progress; `cancelled()` stops
 // before the next query. Resolves to {diagnostics, ok, summary, spans, steps,
-// queries}, or null when cancelled.
+// queries, answers} (answers: query -> {rows} | {error}), or null when
+// cancelled.
 export async function lintScript(script, { step, run, strict = false, design = true, onStep, cancelled }) {
   const opts = JSON.stringify({ strict, design });
   const known = new Map(); // query -> {rows} | {error}
   for (let n = 1; n <= MAX_STEPS; n++) {
     const res = JSON.parse(step(script, knownJson(known), opts));
     if (res.error) throw new Error(res.error);
-    if (res.done) return { ...res, steps: n, queries: known.size };
+    if (res.done) return { ...res, steps: n, queries: known.size, answers: known };
     onStep?.(n, known.size + res.need.length);
     for (const sql of res.need) {
       if (cancelled?.()) return null;
