@@ -78,28 +78,86 @@ SELECT 1::ENDGROUP;
 -- ── 1 · Map ──────────────────────────────────────────────────────────────────
 SELECT 'Map'::TAB;
 
+-- One plan's map layers: the routes, the stops, and a diamond ring around
+-- every late stop (its own 'late stop' colour, so the misses jump out; the
+-- stop's van-coloured dot stays visible and clickable inside it). Each
+-- feature's ::LABEL is its hover text. The van colours are the same on both
+-- maps: 'late stop' sorts after every 'Van N', so it takes the next colour.
+CREATE OR REPLACE MACRO dr_quad(x1, y1, x2, y2, x3, y3, x4, y4) AS
+    printf('((%.2f %.2f, %.2f %.2f, %.2f %.2f, %.2f %.2f, %.2f %.2f))', x1, y1, x2, y2, x3, y3, x4, y4, x1, y1);
+CREATE OR REPLACE MACRO dr_ring(x, y) AS
+    'MULTIPOLYGON(' || dr_quad(x, y + 1.1, x + 1.1, y, x + 0.6, y, x, y + 0.6) || ', ' ||
+                       dr_quad(x + 1.1, y, x, y - 1.1, x, y - 0.6, x + 0.6, y) || ', ' ||
+                       dr_quad(x, y - 1.1, x - 1.1, y, x - 0.6, y, x, y - 0.6) || ', ' ||
+                       dr_quad(x - 1.1, y, x, y + 1.1, x, y + 0.6, x - 0.6, y) || ')';
+CREATE OR REPLACE MACRO dr_stop_label(name, kind, van, pos, arrive_min, deliver_by_min, late_min, cages) AS
+    name || ' — ' || kind || chr(10) || 'Van ' || van || ', stop #' || pos || chr(10) ||
+    'arrives ' || dr_clock(arrive_min) || ', deadline ' || dr_clock(deliver_by_min) || chr(10) ||
+    CASE WHEN late_min > 0 THEN round(late_min)::INTEGER || ' min late'
+         ELSE round(deliver_by_min - arrive_min)::INTEGER || ' min to spare' END || chr(10) ||
+    cages || CASE WHEN cages = 1 THEN ' roll cage' ELSE ' roll cages' END;
+CREATE OR REPLACE MACRO dr_map(p) AS TABLE
+    SELECT 1 AS layer, l.van, l.wkt, 'Van ' || l.van AS series,
+           'Van ' || l.van || ': ' || round(v.km)::INTEGER || ' km, back ' || dr_clock(v.back_min) || ', ' ||
+           v.late_stops || CASE WHEN v.late_stops = 1 THEN ' stop late' ELSE ' stops late' END AS label
+    FROM dr_legs l JOIN dr_vans v USING (plan, vans, van)
+    WHERE l.plan = p AND l.vans = dr_n()
+    UNION ALL
+    SELECT 2, r.van,
+           dr_ring(r.x_km, r.y_km), 'late stop',
+           dr_stop_label(s.name, s.kind, r.van, r.pos, r.arrive_min, r.deliver_by_min, r.late_min, s.cages)
+    FROM dr_route r JOIN dr_stops s USING (stop_id)
+    WHERE r.plan = p AND r.vans = dr_n() AND r.stop_id > 0 AND r.late_min > 0
+    UNION ALL
+    SELECT 3, r.van, 'POINT(' || r.x_km || ' ' || r.y_km || ')', 'Van ' || r.van,
+           dr_stop_label(s.name, s.kind, r.van, r.pos, r.arrive_min, r.deliver_by_min, r.late_min, s.cages)
+    FROM dr_route r JOIN dr_stops s USING (stop_id)
+    WHERE r.plan = p AND r.vans = dr_n() AND r.stop_id > 0;
+
 SELECT 12::COL;
-SELECT ('**' || dr_n() || ' vans.** Left: today''s fixed districts driven in order-list sequence — routes criss-cross, and the busiest district carries ' ||
-        (SELECT max(cages) FROM dr_vans WHERE plan = dr_today() AND vans = dr_n()) || ' cages for a ' || dr_cap() || '-cage van. Right: the **' || dr_plan() ||
-        '** plan — compact wedges around the depot (the dot in the middle), balanced by load. Axes in km; each colour is one van.')::MARKDOWN;
+SELECT ('**' || dr_n() || ' vans.** Left: today''s fixed districts driven in order-list sequence — routes criss-cross, the busiest district carries ' ||
+        (SELECT max(cages) FROM dr_vans WHERE plan = dr_today() AND vans = dr_n()) || ' cages for a ' || dr_cap() || '-cage van, and the diamond rings mark the ' ||
+        (SELECT late_stops FROM dr_summary WHERE plan = dr_today() AND vans = dr_n()) || ' stops reached after their deadline. Right: the **' || dr_plan() ||
+        '** plan — compact wedges around the depot (where the routes meet), balanced by load. Axes in km; each colour is one van. ' ||
+        '**Hover** a stop for its arrival and deadline, a route for its van. **Click** a van on either map to pick it out on both (and in the table below); click empty space to clear. ' ||
+        '**Scroll or drag** to zoom — the two maps move together; double-click resets.')::MARKDOWN;
 
 SELECT 6::COL;
 SELECT 480::HEIGHT;
-SELECT wkt ::MAP, 'Van ' || van ::CATEGORY,
+SELECT wkt ::MAP, series ::CATEGORY, label ::LABEL, 'routes'::SYNC_ZOOM,
        ('Today: ' || (SELECT round(km) FROM dr_summary WHERE plan = dr_today() AND vans = dr_n()) || ' km, ' ||
         (SELECT late_stops FROM dr_summary WHERE plan = dr_today() AND vans = dr_n()) || ' stops late')::TITLE
-FROM (SELECT wkt, van FROM dr_legs WHERE plan = dr_today() AND vans = dr_n()
-      UNION ALL SELECT 'POINT(' || x_km || ' ' || y_km || ')', van FROM dr_route WHERE plan = dr_today() AND vans = dr_n() AND stop_id > 0)
-ORDER BY van;
+FROM dr_map(dr_today())
+ORDER BY layer, van;
 
 SELECT 6::COL;
 SELECT 480::HEIGHT;
-SELECT wkt ::MAP, 'Van ' || van ::CATEGORY,
+SELECT wkt ::MAP, series ::CATEGORY, label ::LABEL, 'routes'::SYNC_ZOOM,
        (dr_plan() || ': ' || (SELECT round(km) FROM dr_summary WHERE plan = dr_plan() AND vans = dr_n()) || ' km, ' ||
         (SELECT late_stops FROM dr_summary WHERE plan = dr_plan() AND vans = dr_n()) || ' stops late')::TITLE
-FROM (SELECT wkt, van FROM dr_legs WHERE plan = dr_plan() AND vans = dr_n()
-      UNION ALL SELECT 'POINT(' || x_km || ' ' || y_km || ')', van FROM dr_route WHERE plan = dr_plan() AND vans = dr_n() AND stop_id > 0)
-ORDER BY van;
+FROM dr_map(dr_plan())
+ORDER BY layer, van;
+
+-- The clicked van (or, for a click on a ring, every van with a late stop),
+-- today vs. the plan, with a link to its stop list. A click elsewhere (another
+-- tab's chart) leaves every van in.
+CREATE OR REPLACE MACRO dr_pick() AS
+    CASE WHEN coalesce(getvariable('selected'), '') LIKE 'Van %' OR getvariable('selected') = 'late stop'
+         THEN getvariable('selected') ELSE '' END;
+SELECT 12::COL;
+SELECT 'none'::TOTALS;
+SELECT 'today_late > 0'::FLAG;
+SELECT ('Today: today_km, today_late | ' || dr_plan() || ': plan_km, plan_late, back')::COLGROUP;
+SELECT 'Van ' || t.van AS "Van" ::TABLE, t.km AS today_km, t.late_stops AS today_late,
+       p.km AS plan_km, p.late_stops AS plan_late, dr_clock(p.back_min) AS back ::PLAIN,
+       '#Stop list?v.van=Van ' || t.van AS "Stop list" ::LINK,
+       CASE dr_pick() WHEN '' THEN 'Every van — click one on a map to pick it out'
+                      WHEN 'late stop' THEN 'The vans with a late stop today'
+                      ELSE dr_pick() || ': today vs. ' || dr_plan() END ::TITLE
+FROM dr_vans t JOIN dr_vans p ON p.plan = dr_plan() AND p.vans = t.vans AND p.van = t.van
+WHERE t.plan = dr_today() AND t.vans = dr_n()
+  AND (dr_pick() IN ('', 'Van ' || t.van) OR (dr_pick() = 'late stop' AND t.late_stops > 0))
+ORDER BY t.van;
 
 -- ── 2 · Vans ─────────────────────────────────────────────────────────────────
 SELECT 'Vans'::TAB;
