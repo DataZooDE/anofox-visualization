@@ -311,6 +311,9 @@ pub enum Role {
     /// Layer opacity 0..1 for a `::MAP` (`::ALPHA`) — e.g. semi-transparent
     /// earthquake points so overlaps read as density. Read from the first value.
     Alpha,
+    /// The zoom group of a `::MAP` (`::SYNC_ZOOM`): maps with the same name
+    /// zoom and pan together in the browser. Read from the first value.
+    SyncZoom,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
