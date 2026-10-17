@@ -7452,7 +7452,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   let sortCol = server ? server.sortCol : saved.sortCol ?? null;
   let dir = server ? server.sortDir || 1 : saved.dir ?? 1;
   let page = server ? server.page : saved.page || 0;
-  let pageSize = server ? server.pageSize : saved.pageSize || 10;
+  // A client table of up to 20 rows opens with all of them on one page (20 /
+  // page); a longer one pages by 10.
+  let pageSize = server ? server.pageSize : saved.pageSize || (rows.length <= 20 ? 20 : 10);
   let view = server ? server.view || "pages" : saved.view || "pages";
   // density: compact rows by default for long tables
   let compact = saved.compact ?? (server ? server.unfiltered ?? server.total : rows.length) > 50;

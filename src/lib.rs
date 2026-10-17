@@ -805,6 +805,63 @@ fn dz_scale(o: &RenderOptions, aesthetic: Aesthetic, col: &Column) -> ScaleColor
     scale.with_levels(levels).with_palette(palette)
 }
 
+/// A `::COLORS` level map on a chart (`'Critical:bad; Watch:warn; OK:good'`):
+/// each named `::CATEGORY` level in its status colour (the theme's
+/// negative / warning / positive / muted) or `#rrggbb`, levels in the
+/// written order (the legend order); levels it does not name follow, sorted,
+/// in palette colours. `None` without a level map (a gauge's zone colours).
+fn mapped_scale(
+    o: &RenderOptions,
+    aesthetic: Aesthetic,
+    col: &Column,
+    cols: &[Column],
+) -> Option<ScaleColorDiscrete> {
+    let spec = cols
+        .iter()
+        .find(|c| c.role == Role::GaugeColors)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .filter(|s| thresholds::is_level_map(s))?;
+    let map = thresholds::parse_level_colors(&spec).ok()?;
+    let present = distinct_labels(col);
+    let mut levels: Vec<String> = map
+        .iter()
+        .map(|(l, _)| l.clone())
+        .filter(|l| present.contains(l))
+        .collect();
+    levels.extend(
+        present
+            .into_iter()
+            .filter(|l| !map.iter().any(|(m, _)| m == l)),
+    );
+    let palette = levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match map.iter().find(|(m, _)| m == l) {
+            Some((_, c)) => {
+                let (r, g, b) = c.rgb(&o.theme);
+                ggplot_rs::scale::color::RGBAColor::new(r, g, b)
+            }
+            None => dz_color(o, i),
+        })
+        .collect();
+    Some(
+        ScaleColorDiscrete::new(aesthetic)
+            .with_levels(levels)
+            .with_palette(palette),
+    )
+}
+
+/// [`dz_scale`], or the `::COLORS` level map's scale when the chart has one.
+fn category_scale(
+    o: &RenderOptions,
+    aesthetic: Aesthetic,
+    col: &Column,
+    cols: &[Column],
+) -> ScaleColorDiscrete {
+    mapped_scale(o, aesthetic.clone(), col, cols).unwrap_or_else(|| dz_scale(o, aesthetic, col))
+}
+
 /// The colour [`dz_scale`] gives the last (sorted) level of `col`.
 fn last_level_color(o: &RenderOptions, col: &Column) -> Option<(u8, u8, u8)> {
     let levels = distinct_labels(col);
@@ -2383,8 +2440,10 @@ fn cartesian(
     data.push(("label".to_string(), label_vals));
     aes = aes.label("label");
 
-    // Bubble scatter: a `::SIZE` measure maps to point area.
-    if let Some(sz) = find_role(cols, Role::Size) {
+    // Bubble scatter: a `::SIZE` measure maps to point area. A constant
+    // (`4::SIZE`) is no measure: it sets the point size, without a legend.
+    let fixed_size = find_role(cols, Role::Size).and_then(constant_size);
+    if let Some(sz) = find_role(cols, Role::Size).filter(|_| fixed_size.is_none()) {
         data.push(("size".to_string(), sz.values.clone()));
         aes = aes.size("size");
     }
@@ -2711,7 +2770,14 @@ fn cartesian(
             .position(PositionStack),
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
-        Kind::Point | Kind::Bubble => plot.geom_point(),
+        Kind::Point | Kind::Bubble => match fixed_size {
+            Some(size) => plot.geom_point_with(GeomPoint {
+                size,
+                color: brand,
+                ..Default::default()
+            }),
+            None => plot.geom_point(),
+        },
         Kind::Jitter => plot.geom_jitter(),
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
@@ -3001,13 +3067,14 @@ fn cartesian(
     if let Some(col) = color_col {
         // The theme palette, levels sorted so a series keeps its colour across
         // charts; `#rrggbb` levels are drawn in that colour.
+        // A `::COLORS` level map pins named levels to status colours.
         plot = if by_colour {
-            plot.scale_color(dz_scale(o, Aesthetic::Color, col))
+            plot.scale_color(category_scale(o, Aesthetic::Color, col, cols))
         } else {
-            plot.scale_fill(dz_scale(o, Aesthetic::Fill, col))
+            plot.scale_fill(category_scale(o, Aesthetic::Fill, col, cols))
         };
         if (step_band && category.is_some()) || multi_band {
-            plot = plot.scale_fill(dz_scale(o, Aesthetic::Fill, col));
+            plot = plot.scale_fill(category_scale(o, Aesthetic::Fill, col, cols));
         }
     }
     if !combo_names.is_empty() {
@@ -4264,6 +4331,16 @@ fn fmt_label(v: &Value) -> String {
             None => String::new(),
         },
     }
+}
+
+/// A `::SIZE` column holding one number on every row: that point size
+/// (clamped to 1–12; ggplot's default is 3), else `None` (a measure).
+fn constant_size(col: &Column) -> Option<f64> {
+    let first = col.values.first()?.as_f64().filter(|f| f.is_finite())?;
+    col.values
+        .iter()
+        .all(|v| v.as_f64() == Some(first))
+        .then_some(first.clamp(1.0, 12.0))
 }
 
 /// Parse a `#rrggbb` / `rrggbb` string into an RGBA colour (`None` otherwise).

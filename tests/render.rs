@@ -133,3 +133,61 @@ fn zoomable_role_set() {
         assert!(!z.contains(&k), "{k} not zoomable");
     }
 }
+
+#[test]
+fn colors_level_map_paints_category_levels_in_status_colours() {
+    // SELECT d::XAXIS, p::SCATTER, status::CATEGORY, 'Critical:bad; Watch:warn; OK:good'::COLORS
+    let cols = vec![
+        Column::new("d", Role::X, nums(&[1.0, 5.0, 20.0])),
+        Column::new(
+            "p",
+            parse_role("SCATTER").unwrap(),
+            nums(&[90.0, 40.0, 10.0]),
+        ),
+        Column::new("status", Role::Category, strs(&["Critical", "Watch", "OK"])),
+        Column::new(
+            "c",
+            Role::GaugeColors,
+            strs(&["Critical:bad; Watch:warn; OK:good"; 3]),
+        ),
+    ];
+    let svg = render(&cols, 480, 320).unwrap().to_lowercase();
+    let t = anofox_visualization::theme::ResolvedTheme::default();
+    for (r, g, b) in [t.colors.negative, t.colors.warning, t.colors.positive] {
+        let hex = format!("#{r:02x}{g:02x}{b:02x}");
+        let rgb = format!("rgb({r},{g},{b})");
+        assert!(svg.contains(&hex) || svg.contains(&rgb), "{hex} drawn");
+    }
+    // The legend names the levels, in the map's order — never a hex code.
+    let (c, w, o) = (
+        svg.find(">critical<"),
+        svg.find(">watch<"),
+        svg.find(">ok<"),
+    );
+    assert!(c.is_some() && c < w && w < o, "legend Critical, Watch, OK");
+}
+
+#[test]
+fn a_constant_size_sets_the_point_size_without_a_legend() {
+    // SELECT d::XAXIS, p::SCATTER, s::CATEGORY, 7::SIZE — 7 is no measure
+    let cols = |size: &[f64]| {
+        vec![
+            Column::new("d", Role::X, nums(&[1.0, 5.0, 20.0])),
+            Column::new(
+                "p",
+                parse_role("SCATTER").unwrap(),
+                nums(&[90.0, 40.0, 10.0]),
+            ),
+            Column::new("s", Role::Category, strs(&["a", "b", "c"])),
+            Column::new("n", Role::Size, nums(size)),
+        ]
+    };
+    let fixed = render(&cols(&[7.0; 3]), 480, 320).unwrap();
+    assert!(!fixed.contains(">7<"), "no size legend for a constant");
+    assert!(
+        fixed.contains(">a<") && fixed.contains(">c<"),
+        "the colour legend stays"
+    );
+    let bubbles = render(&cols(&[1.0, 5.0, 9.0]), 480, 320).unwrap();
+    assert_ne!(fixed, bubbles, "a varying ::SIZE is still a measure");
+}
