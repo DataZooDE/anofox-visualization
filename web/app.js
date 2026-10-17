@@ -1174,6 +1174,9 @@ const servedViewer = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => 
 const servedAborts = new Map(); // "panel/kind" -> AbortController
 let servedTables = 0; // per-table-instance suffix for the kinds
 const isAbort = (e) => e && e.name === "AbortError";
+// The output name of a ::PAGED table's ::INFO column (sql::INFO_COLUMN): the
+// only column a page request may leave out (`omit`).
+const INFO_COLUMN = "__anofox_info";
 
 // Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
@@ -6630,11 +6633,11 @@ async function runOnce(fresh = true) {
         fig._async = true; // its rows load after the swap: a re-run never keeps it
         if (container === curGrid) fig.style.gridColumn = `span ${span}`;
         // An ::INFO column is the ⓘ text, not a column: every request leaves
-        // it out (`omit`, once its name is known) and the indexes after it shift.
+        // it out (`omit` names it — the planner gives it a fixed name, see
+        // sql::INFO_COLUMN) and the indexes after it shift.
         const infoR = s.roles.find((r) => r[1] === "INFO");
         const proles = infoR ? s.roles.filter((r) => r !== infoR).map((ri) => (ri[0] > infoR[0] ? [ri[0] - 1, ri[1]] : ri)) : s.roles;
-        let infoCol = null;
-        let infoText = "";
+        let infoText = null;
         const fmtByIdx = {};
         for (const [ix, r] of proles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
         const titleRole = proles.find((r) => r[1] === "TITLE");
@@ -6677,9 +6680,9 @@ async function runOnce(fresh = true) {
         // A newer load (page, sort, search…) supersedes the running one; so does
         // a newer Scroll-view block.
         const inst = ++servedTables;
-        const pageReq = async (extra, withFilters = true, kind) => {
+        const pageReq = async (extra, withFilters = true, kind, withInfo = false) => {
           const page = { ...extra };
-          if (infoCol) page.omit = [infoCol];
+          if (infoR && !withInfo) page.omit = [INFO_COLUMN];
           if (withFilters) {
             const q = (dpFilterText[idx] || "").trim();
             if (q) page.filter = q;
@@ -6704,13 +6707,10 @@ async function runOnce(fresh = true) {
           const scroll = st.view === "scroll";
           let rows = [];
           try {
-            if (infoR && !infoCol) {
-              // the definition (and the column's name) from the first row
-              const r0 = (await pageReq({ limit: 1 }, false, "load"))[0];
-              if (r0) {
-                infoCol = Object.keys(r0)[infoR[0]];
-                infoText = String(r0[infoCol] ?? "").replace(/^"|"$/g, "");
-              }
+            if (infoR && infoText == null) {
+              // the definition, from the first row
+              const r0 = (await pageReq({ limit: 1 }, false, "load", true))[0];
+              infoText = String(r0?.[INFO_COLUMN] ?? "").replace(/^"|"$/g, "");
             }
             rows = await pageReq({ limit: scroll ? 100 : pageSize, offset: scroll ? 0 : page * pageSize, ...sortPart() }, true, "load");
             if (!stats) {

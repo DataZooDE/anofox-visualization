@@ -750,6 +750,9 @@ struct Dash {
     sql: String,
     /// Planned statements: (is_setup, sql), indexed like the client's plan().
     stmts: Vec<(bool, String)>,
+    /// Per statement: a `::PAGED` table with an `::INFO` column (the only
+    /// column a page request may leave out).
+    info: Vec<bool>,
     /// `-- @vars`: the variables a viewer may set (others are dropped).
     vars: Option<Vec<String>>,
 }
@@ -1233,7 +1236,16 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
         let meta = sv::parse_dashboard_meta(&id, &sql);
         loads.extend(meta.loads.iter().cloned());
-        let stmts = anofox_visualization::sql::plan(&sql)
+        let planned = anofox_visualization::sql::plan(&sql);
+        let info = planned
+            .iter()
+            .map(|p| {
+                use anofox_visualization::Role;
+                let has = |want: Role| p.roles.iter().any(|(_, r)| *r == want);
+                has(Role::PagedTable) && has(Role::Info)
+            })
+            .collect();
+        let stmts = planned
             .into_iter()
             .map(|p| (p.setup, p.sql.trim().to_string()))
             .collect();
@@ -1242,6 +1254,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             title: meta.title,
             sql,
             stmts,
+            info,
             vars: meta.vars,
         });
     }
@@ -1865,6 +1878,16 @@ fn locked_panel(
     let (is_setup, panel_sql) = stmts
         .get(r.panel)
         .ok_or((404, "no such panel".to_string()))?;
+    // `omit` (parse_page allows only the ::INFO column's name): only for a
+    // ::PAGED table that has one.
+    if r.page.as_ref().is_some_and(|p| !p.omit.is_empty())
+        && !dash.info.get(r.panel).copied().unwrap_or(false)
+    {
+        return Err((
+            400,
+            "'page.omit' may only name the panel's ::INFO column".into(),
+        ));
+    }
     if *is_setup {
         // setup runs server-side, per request (run_panel)
         return Ok((

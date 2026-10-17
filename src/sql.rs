@@ -538,6 +538,11 @@ fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
 /// `revenue` → `revenue AS "md:revenue"`, read by `{{revenue}}`.
 pub const MD_PREFIX: &str = "md:";
 
+/// The output name of a `::PAGED` table's `::INFO` column (its ⓘ definition):
+/// a fixed name, so a page request can leave exactly that column out (`omit`)
+/// and nothing else.
+pub const INFO_COLUMN: &str = "__anofox_info";
+
 /// Rewrite `<expr>::ROLE` casts in the SELECT list into `<expr> AS c{i}`.
 pub fn rewrite(stmt: &str) -> Rewritten {
     let none = || (stmt.to_string(), Vec::new(), Vec::new());
@@ -590,6 +595,9 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                             || crate::roles::is_table_format(rr)
                         {
                             roles.push((idx, rr));
+                        }
+                        if rr == Role::Info && role == Role::PagedTable {
+                            return format!("{} AS \"{INFO_COLUMN}\"", trailing_alias(expr).0);
                         }
                     }
                     expr.to_string()

@@ -4,6 +4,7 @@
 mod common;
 
 use anofox_visualization::host::serving::{page_sql_inline, parse_page};
+use anofox_visualization::sql::{plan, INFO_COLUMN};
 use std::process::Command;
 
 fn duck(sql: &str) -> Option<String> {
@@ -177,9 +178,18 @@ fn profile_of_columns_named_like_its_aliases() {
 
 #[test]
 fn an_info_column_is_omitted_from_rows_and_search() {
-    // A ::PAGED table's ::INFO column is the panel's definition (#152): with
-    // `omit` it is in no answer, and the search never matches its text.
-    let base = "SELECT i AS id, 'Revenue net of returns' AS about FROM range(1, 6) t(i)";
+    // A ::PAGED table's ::INFO column is the panel's definition (#152): the
+    // planner names it INFO_COLUMN, and with `omit` it is in no answer — the
+    // search never matches its text.
+    let planned = &plan(
+        "SELECT i AS id ::PAGED, 'Revenue net of returns' AS about ::INFO FROM range(1, 6) t(i)",
+    )[0];
+    assert!(
+        planned.sql.contains(&format!("AS \"{INFO_COLUMN}\"")),
+        "{}",
+        planned.sql
+    );
+    let base = planned.sql.as_str();
     let run = |page: &str| {
         let p = parse_page(&serde_json::from_str(page).unwrap()).unwrap();
         duck(&page_sql_inline(base, &p)).map(|out| {
@@ -191,21 +201,36 @@ fn an_info_column_is_omitted_from_rows_and_search() {
             .unwrap()
         })
     };
-    let Some(rows) = run(r#"{"limit":10,"omit":["about"]}"#) else {
+    let omit = format!(r#""omit":["{INFO_COLUMN}"]"#);
+    let Some(rows) = run(&format!(r#"{{"limit":10,{omit}}}"#)) else {
         common::skip_without("duckdb", "an_info_column_is_omitted_from_rows_and_search");
         return;
     };
     assert_eq!(rows.as_array().unwrap().len(), 5);
-    assert!(rows[0].get("about").is_none(), "{rows}");
-    let n = run(r#"{"count":true,"filter":"returns","omit":["about"]}"#).unwrap();
+    assert!(rows[0].get(INFO_COLUMN).is_none(), "{rows}");
+    let n = run(&format!(r#"{{"count":true,"filter":"returns",{omit}}}"#)).unwrap();
     assert_eq!(n[0]["n"], 0);
     let n = run(r#"{"count":true,"filter":"returns"}"#).unwrap();
     assert_eq!(n[0]["n"], 5);
-    let s = run(r#"{"stats":["id"],"omit":["about"]}"#).unwrap();
+    let s = run(&format!(r#"{{"stats":["id"],{omit}}}"#)).unwrap();
     assert_eq!(s[0]["n"], 5);
-    // a column name is quoted, never interpolated
-    let p = parse_page(&serde_json::json!({"limit": 1, "omit": ["a\") FROM x; --"]})).unwrap();
-    assert!(page_sql_inline(base, &p).contains(r#"EXCLUDE ("a"") FROM x; --")"#));
-    assert!(parse_page(&serde_json::json!({"omit": "about"})).is_err());
-    assert!(parse_page(&serde_json::json!({"omit": vec!["c"; 9]})).is_err());
+    // Only the ::INFO column, once: any other name is refused (without
+    // echoing it), a repeat collapses to one.
+    for bad in [
+        serde_json::json!({"omit": ["id"]}),
+        serde_json::json!({"omit": ["about"]}),
+        serde_json::json!({"omit": [INFO_COLUMN, "id"]}),
+        serde_json::json!({"omit": [format!("{INFO_COLUMN}\") FROM x; --")]}),
+        serde_json::json!({"omit": INFO_COLUMN}),
+        serde_json::json!({"omit": vec![INFO_COLUMN; 9]}),
+    ] {
+        let e = parse_page(&bad).unwrap_err();
+        assert!(!e.contains("about") && !e.contains("FROM x"), "{e}");
+    }
+    let p = parse_page(&serde_json::json!({"omit": [INFO_COLUMN, INFO_COLUMN]})).unwrap();
+    assert_eq!(p.omit, vec![INFO_COLUMN.to_string()]);
+    assert!(parse_page(&serde_json::json!({"omit": []}))
+        .unwrap()
+        .omit
+        .is_empty());
 }

@@ -279,23 +279,31 @@ impl AuthoringGuard {
         let (path, query) = url.split_once('?').unwrap_or((url, ""));
         // The Location comes from the request: keep it a same-site path. HTTP
         // rejects control characters in a header value (the header would
-        // fail to build), and `//host` would redirect off-site.
+        // fail to build); `//host` would redirect off-site, and so would
+        // `/\host` (browsers read a `\` as `/`).
         let path = if path.starts_with('/')
             && !path.starts_with("//")
+            && !path.contains('\\')
+            && !path.to_ascii_lowercase().contains("%5c")
             && !path.bytes().any(|b| b.is_ascii_control())
         {
             path
         } else {
             "/"
         };
+        // The token goes under any spelling a server could read as `token`
+        // (case, `[]`, trailing `+` / blanks / NUL, `;` as a separator).
+        let is_token = |kv: &str| {
+            let k = url_decode(kv.split('=').next().unwrap_or("")).to_ascii_lowercase();
+            let k = k.trim_matches(|c: char| c.is_whitespace() || c == '\0' || c == '+');
+            k.trim_end_matches("[]") == "token"
+        };
         let rest: Vec<&str> = query
             .split('#')
             .next()
             .unwrap_or("")
-            .split('&')
-            .filter(|kv| {
-                !kv.is_empty() && url_decode(kv.split('=').next().unwrap_or("")) != "token"
-            })
+            .split(['&', ';'])
+            .filter(|kv| !kv.is_empty() && !is_token(kv))
             .collect();
         let query = rest.join("&");
         let location = if query.is_empty() || query.bytes().any(|b| b.is_ascii_control()) {
@@ -431,8 +439,9 @@ pub struct PageRequest {
     /// Return up to [`MAX_DISTINCT`] distinct values `v` of this column (for a
     /// filter dropdown), under every filter except those on the column itself.
     pub distinct: Option<String>,
-    /// Columns that are not table data (a `::INFO` panel definition): left out
-    /// of every answer, the search over the whole row included.
+    /// Columns that are not table data — only the `::PAGED` panel's `::INFO`
+    /// definition ([`crate::sql::INFO_COLUMN`]), at most once: left out of
+    /// every answer, the search over the whole row included.
     pub omit: Vec<String>,
 }
 
@@ -638,6 +647,8 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
         None | Some(serde_json::Value::Null) => None,
         Some(v) => Some(col(v, "'page.distinct'")?),
     };
+    // Only the panel's own ::INFO column can be left out (a page never skips
+    // a data column); once, whatever the request repeats.
     let mut omit = Vec::new();
     if let Some(cs) = p.get("omit") {
         let cs = cs
@@ -647,7 +658,12 @@ pub fn parse_page(p: &serde_json::Value) -> Result<PageRequest, String> {
             return Err(format!("more than {MAX_OMIT_COLS} omitted columns"));
         }
         for c in cs {
-            omit.push(col(c, "'page.omit'")?);
+            if c.as_str() != Some(crate::sql::INFO_COLUMN) {
+                return Err("'page.omit' may only name the panel's ::INFO column".into());
+            }
+        }
+        if !cs.is_empty() {
+            omit.push(crate::sql::INFO_COLUMN.to_string());
         }
     }
     let count = p.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1238,7 +1254,16 @@ mod tests {
         assert_eq!(loc, "/");
         assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"));
         assert!(g.bootstrap("/?token=nope").is_none());
-        for odd in ["//evil.example/", "/a\rb", "/a\x0bb", "x"] {
+        for odd in [
+            "//evil.example/",
+            "/\\evil.example/",
+            "/\\/evil.example/",
+            "/%5Cevil.example/",
+            "/%5cevil.example/",
+            "/a\rb",
+            "/a\x0bb",
+            "x",
+        ] {
             let (loc, _) = g.bootstrap(&format!("{odd}?token={}", g.token)).unwrap();
             assert_eq!(loc, "/", "{odd:?}");
         }
@@ -1264,6 +1289,14 @@ mod tests {
             .bootstrap(&format!("//evil.example/?token={}&a=1", g.token))
             .unwrap();
         assert_eq!(loc, "/?a=1");
+        // other spellings of the key go too
+        let t = &g.token;
+        let (loc, _) = g
+            .bootstrap(&format!(
+                "/?token={t}&TOKEN={t}&token[]={t}&token+={t}&token%00={t}&a=1;token={t}&%20Token%20={t}&b=2"
+            ))
+            .unwrap();
+        assert_eq!(loc, "/?a=1&b=2");
     }
 
     #[test]

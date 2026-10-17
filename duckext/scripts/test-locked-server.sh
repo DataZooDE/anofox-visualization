@@ -155,6 +155,21 @@ vpanel() {
 [ "$(vpanel '{"__claim_user":"x"}')" = 400 ] || fail "__claim_user accepted: $(cat "$T/body")"
 [ "$(vpanel '{"anofox_data":"/"}')" = 400 ] || fail "anofox_data accepted: $(cat "$T/body")"
 echo "OK: viewer variables (-- @vars, reserved names, literals, a defaulting SET VARIABLE)"
+# `omit` (#152): only the ::PAGED panel's own ::INFO column; anything else is a
+# 400 that doesn't echo the name.
+opanel() {
+  curl -s -o "$T/body" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+    -d "{\"dashboard\":\"runs\",\"panel\":$1,\"vars\":{},\"page\":{\"limit\":5,\"omit\":$2}}"
+}
+[ "$(opanel 3 '["__anofox_info"]')" = 200 ] && grep -q '"Run":"a"' "$T/body" && ! grep -q "forecast pipeline" "$T/body" \
+  || fail "omit the ::INFO column: $(cat "$T/body")"
+[ "$(opanel 3 '[]')" = 200 ] && grep -q "forecast pipeline" "$T/body" || fail "no omit: $(cat "$T/body")"
+for bad in '["Run"]' '["secret_col"]' '["__anofox_info","Run"]'; do
+  [ "$(opanel 3 "$bad")" = 400 ] && ! grep -q "secret_col\|Run" "$T/body" || fail "omit $bad: $(cat "$T/body")"
+done
+# a panel without an ::INFO column (the probe ::TABLE)
+[ "$(opanel 2 '["__anofox_info"]')" = 400 ] || fail "omit on a panel without ::INFO: $(cat "$T/body")"
+echo "OK: page omit names only the panel's own ::INFO column"
 if [ -n "${NODE_PATH:-}" ]; then
   node "$(dirname "$0")/locked-vars-e2e.mjs" "http://127.0.0.1:$PORT" || fail "browser checks (locked-vars-e2e.mjs)"
   echo "OK: in a browser — a dashboard's own SET VARIABLE is no viewer value; ::INFO in ::PAGED"

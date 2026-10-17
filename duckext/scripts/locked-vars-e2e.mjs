@@ -55,7 +55,7 @@ const kpi = (page) =>
   check(JSON.stringify(t.heads?.map((h) => h.replace(/[↕↑↓]/g, "").trim())) === '["Run"]', `the ::INFO column is no table column: ${JSON.stringify(t.heads)}`);
   check(t.info === "Runs of the forecast pipeline", `the ::PAGED table has the ⓘ definition: ${JSON.stringify(t.info)}`);
   const paged = bodies.filter((b) => b.page);
-  check(paged.some((b) => b.page.stats) && paged.filter((b) => !(b.page.limit === 1 && !b.page.omit)).every((b) => JSON.stringify(b.page.omit) === '["about"]'), `the page requests omit the ::INFO column: ${JSON.stringify(paged.map((b) => b.page))}`);
+  check(paged.some((b) => b.page.stats) && paged.filter((b) => !(b.page.limit === 1 && !b.page.omit)).every((b) => JSON.stringify(b.page.omit) === '["__anofox_info"]'), `the page requests omit the ::INFO column: ${JSON.stringify(paged.map((b) => b.page))}`);
   check(!errs.length, `no page errors: ${errs.join(" | ")}`);
   await page.close();
 }
