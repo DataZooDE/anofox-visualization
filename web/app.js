@@ -1025,7 +1025,8 @@ function exampleEntry(sql, meta, fallback) {
   const tags = Array.isArray(meta?.tags) ? meta.tags : [];
   const owner = meta?.owner || "";
   const certified = meta?.certified || "";
-  return { id: slugify(name), name, group: meta?.group || "", tags, owner, certified, source: "example", sql };
+  const description = meta?.description || "";
+  return { id: slugify(name), name, group: meta?.group || "", tags, description, owner, certified, source: "example", sql };
 }
 function addExample(sql, fallback) {
   let meta = null;
@@ -2024,13 +2025,14 @@ const foldText = (s) =>
 function searchTerms(q) {
   return foldText(q).split(/\s+/).filter(Boolean);
 }
-// Does an entry ({name, title, group, tags, owner, certified}) match every
-// word (in its name, page title, group, tags or owner), carry every selected
+// Does an entry ({name, title, description, group, tags, owner, certified})
+// match every word (in its name, page title, description, group, tags or
+// owner), carry every selected
 // tag and — with `certified` — a certification?
 function dashMatches(e, terms, tags, certified = false) {
   if (certified && !e.certified) return false;
   if (tags.length && !tags.every((t) => e.tags.includes(t))) return false;
-  const hay = foldText([e.name, e.title, e.group, e.owner, ...(e.tags || [])].join("\n"));
+  const hay = foldText([e.name, e.title, e.description, e.group, e.owner, ...(e.tags || [])].join("\n"));
   return terms.every((t) => hay.includes(t));
 }
 // The tag chips for the entries in view: the selected ones first, then the
@@ -2260,15 +2262,22 @@ function renderSidebar(focusId) {
   markActive();
   if (focusId) $(focusId)?.focus();
 }
-// A saved dashboard's header ({title, group, tags, owner, certified}), cached
-// per SQL text.
+// A saved dashboard's header ({title, group, tags, description, owner,
+// certified}), cached per SQL text.
 const dashMetaCache = new Map();
 function dashMetaOf(sql) {
   if (!dashMetaCache.has(sql)) {
-    let m = { title: "", group: "", tags: [], owner: "", certified: "" };
+    let m = { title: "", group: "", tags: [], description: "", owner: "", certified: "" };
     try {
       const j = JSON.parse(dashboard_meta(sql));
-      m = { title: j.title || "", group: j.group || "", tags: j.tags || [], owner: j.owner || "", certified: j.certified || "" };
+      m = {
+        title: j.title || "",
+        group: j.group || "",
+        tags: j.tags || [],
+        description: j.description || "",
+        owner: j.owner || "",
+        certified: j.certified || "",
+      };
     } catch (_) {
       /* unreadable header: ungrouped, untagged */
     }
@@ -2590,8 +2599,8 @@ function moveMenu(d) {
   ];
 }
 // `key`: "ex:<id>" for an example, "my:<id>" for a saved dashboard.
-// `info`: the entry's header ({owner, certified, tags}): the owner as a small
-// line under the name, ✓ when certified, both in the tooltip.
+// `info`: the entry's header ({description, owner, certified, tags}): the
+// owner as a small line under the name, ✓ when certified; all in the tooltip.
 function sideItem(name, sql, key, info = {}) {
   const b = document.createElement("button");
   b.className = "side-item";
@@ -2603,6 +2612,7 @@ function sideItem(name, sql, key, info = {}) {
   // long names are clamped in the sidebar: the full name is the tooltip
   b.title = [
     name,
+    info.description || "",
     info.owner ? `Owner: ${info.owner}` : "",
     info.certified ? `Certified on ${info.certified}` : "",
     info.tags?.length ? `Tags: ${info.tags.join(", ")}` : "",
@@ -6158,7 +6168,7 @@ function servedNavLink(d, served) {
     a.className = "active"; // styled by web/theme-base.css (.served-nav)
     a.setAttribute("aria-current", "page");
   }
-  const tip = [d.owner ? `Owner: ${d.owner}` : "", d.certified ? `Certified on ${d.certified}` : "", (d.tags || []).length ? `Tags: ${d.tags.join(", ")}` : ""].filter(Boolean);
+  const tip = [d.description || "", d.owner ? `Owner: ${d.owner}` : "", d.certified ? `Certified on ${d.certified}` : "", (d.tags || []).length ? `Tags: ${d.tags.join(", ")}` : ""].filter(Boolean);
   if (tip.length) a.title = tip.join("\n");
   if (d.certified) {
     const c = document.createElement("span");
@@ -6238,7 +6248,7 @@ function servedNavMenu(served, groups) {
         o.textContent = d.owner;
         li.appendChild(o);
       }
-      li.dataset.q = foldText([d.title, d.id, group, d.owner, ...(d.tags || []), d.certified ? "certified" : ""].join(" "));
+      li.dataset.q = foldText([d.title, d.id, group, d.description, d.owner, ...(d.tags || []), d.certified ? "certified" : ""].join(" "));
       ul.appendChild(li);
     }
     sec.appendChild(ul);

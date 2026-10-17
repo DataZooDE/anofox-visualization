@@ -57,7 +57,7 @@ pub struct Diagnostic {
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Header comments ([`header_diags`], warnings): `header/empty-group` |
     /// `header/long-group` | `header/too-many-tags` | `header/empty-owner` |
-    /// `header/bad-certified`. A served folder ([`folder_diags`], warnings):
+    /// `header/bad-certified` | `header/long-description`. A served folder ([`folder_diags`], warnings):
     /// `folder/duplicate-title` | `folder/bad-id`.
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -1070,10 +1070,15 @@ pub fn check_policy(
     diags
 }
 
+/// The longest `-- @description` (characters, its lines joined) the linter
+/// takes without a warning.
+pub const MAX_DESCRIPTION_CHARS: usize = 160;
+
 /// The header comments that place and describe a dashboard (`-- @group`,
-/// `-- @tags`, `-- @owner`, `-- @certified`): an empty or over-long group,
-/// more tags than are kept, an empty owner, a certification date that isn't
-/// `YYYY-MM-DD`. Reported as statement 0 (the header comes before the first
+/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`): an empty or
+/// over-long group, more tags than are kept, a description over
+/// [`MAX_DESCRIPTION_CHARS`], an empty owner, a certification date that
+/// isn't `YYYY-MM-DD`. Reported as statement 0 (the header comes before the first
 /// statement).
 pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     use crate::host::serving::{
@@ -1091,6 +1096,7 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     };
     let mut tags: Vec<String> = Vec::new();
     let mut tags_line = "";
+    let (mut desc, mut desc_warned) = (0usize, false);
     for line in script.lines() {
         if let Some(g) = header_value(line, "group") {
             if g.split('/').all(|p| p.trim().is_empty()) {
@@ -1106,6 +1112,19 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                         "`-- @group` is {} characters long — keep it to {MAX_GROUP_CHARS} or fewer \
                          (it is a sidebar heading)",
                         g.chars().count()
+                    ),
+                    line,
+                );
+            }
+        } else if let Some(d) = header_value(line, "description") {
+            desc += d.chars().count() + usize::from(desc > 0);
+            if desc > MAX_DESCRIPTION_CHARS && !desc_warned {
+                desc_warned = true;
+                warn(
+                    "header/long-description",
+                    format!(
+                        "`-- @description` is over {MAX_DESCRIPTION_CHARS} characters — keep it to \
+                         one line (the landing page shows two lines of it)"
                     ),
                     line,
                 );
@@ -1919,6 +1938,13 @@ mod design_tests {
             ["header/bad-certified"]
         );
         assert_eq!(codes("-- @certified\n"), ["header/bad-certified"]);
+        assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
+        let long = format!(
+            "-- @description {}\n-- @description {}\n",
+            "x".repeat(100),
+            "y".repeat(100)
+        );
+        assert_eq!(codes(&long), ["header/long-description"]);
         let f = |n: &str, s: &str| (n.to_string(), s.to_string());
         let d = folder_diags(&[
             f("a.sql", "-- @title Sales\nSELECT 1;"),

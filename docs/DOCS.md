@@ -1376,6 +1376,7 @@ with the browser through wasm):
 -- @title  Weekly sales by region
 -- @group  Sales / EMEA
 -- @tags   weekly, kpi, emea
+-- @description Orders and revenue per region, week by week.
 -- @owner  Sales controlling
 -- @certified 2026-10-15
 -- @refresh 300
@@ -1386,6 +1387,7 @@ with the browser through wasm):
 | `-- @title <name>` | The dashboard's name: the sidebar entry of an example, the page title and nav entry on a server (without it, the file id). Name it as a plain business question. |
 | `-- @group <name>` | Where it sits: one group per dashboard, a ` / ` adds one level (`Sales / EMEA`, drawn as a sub-heading; deeper paths are kept as written and drawn flat). No `@group`, or an empty one, means ungrouped. |
 | `-- @tags a, b` | Free labels for finding it: trimmed, lower-cased, without duplicates, at most 10 (several `@tags` lines add up). |
+| `-- @description <text>` | One line on what the dashboard answers: the line under its title on a server's landing page, and part of the tooltip in the builder's sidebar and the served nav. Several `@description` lines are joined. |
 | `-- @owner <text>` | Who looks after it — a name, a team, an address. Shown as a small line under the name in the builder's sidebar, in the tooltip of a served nav link and on the `/` list. |
 | `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
@@ -1395,8 +1397,9 @@ with the browser through wasm):
 `dashboard --check` warns about an empty `@group` (`header/empty-group`), one
 longer than 80 characters (`header/long-group`), more than 10 tags
 (`header/too-many-tags`), an empty `@owner` (`header/empty-owner`) and a
-`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`),
-reported as statement 0. `dashboard --check <folder>` lints every `.sql` of a
+`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`) and a
+`@description` over 160 characters (`header/long-description`), reported as
+statement 0. `dashboard --check <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
 same title (`folder/duplicate-title`, ignoring case) and a file name the
 servers skip (`folder/bad-id`).
@@ -2302,10 +2305,20 @@ first, then each `-- @group` under its name; a certified one carries ✓, and
 the owner, the certification date and the tags are in the link's tooltip.
 From 9 dashboards on, the nav is one button naming the open dashboard; it
 opens the grouped list with a search field (Enter opens it, Esc closes it).
-The `/` list page — the locked server's and `serve --dashboards`' — groups
-the same way (`Sales / EMEA`: a *EMEA* sub-heading under *Sales*), shows each
-dashboard's owner, **✓ certified** and tags, and gets a search field from 9
-dashboards on. Before serving a folder, `dashboard --check <folder>` finds
+**The landing page.** `/` on the locked server and on `serve --dashboards` is
+a landing page in the server's theme (light and dark follow the viewer's
+system setting when the theme does; phone widths get one column). Its header
+is the installation's name, tagline and logo — `options.app` of
+`anofox_serve_dashboards`, `--app-name` / `--app-tagline` / `--app-logo` of
+`serve --dashboards` — or *Dashboards* and a count. The dashboards are cards,
+grouped the same way as the nav (`Sales / EMEA`: an *EMEA* sub-heading under
+*Sales*, each group with its count); a card shows the title, the
+`@description`, the owner, **✓ certified**, the day its file last changed and
+the tags. From 9 dashboards on, a search field, tag chips and *✓ certified
+only* filter the cards. It lists only what the viewer's scope allows, like the
+nav, and is plain server-rendered HTML (no wasm). To open a dashboard instead
+— a run list, say — set `options.home` (`serve --home <id>`): `/` then
+redirects there. Before serving a folder, `dashboard --check <folder>` finds
 duplicate titles.
 
 For the full trust model, the static-render alternative (`serve` bin), and

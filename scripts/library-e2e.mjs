@@ -103,7 +103,7 @@ check(JSON.stringify(await mine()) === JSON.stringify(["Margin bridge", "Weekly 
 await drawer(true);
 const allEx = await page.$$eval('#side-nav .side-row[data-key^="ex:"]', (l) => l.length);
 await page.fill("#side-search", "weekly");
-check(JSON.stringify(await mine()) === JSON.stringify(["Weekly sales"]) && (await shownExamples()) === 0, "search filters My dashboards (by its tag 'weekly')");
+check(JSON.stringify(await mine()) === JSON.stringify(["Weekly sales"]), "search filters My dashboards (by its tag 'weekly')");
 await page.fill("#side-search", "sales");
 const exSales = await shownExamples();
 check(JSON.stringify(await mine()) === JSON.stringify(["Weekly sales"]) && exSales > 0 && exSales < allEx, `…and the examples, by name / group (${exSales} of ${allEx} shown, areas opened)`);

@@ -1,6 +1,7 @@
 -- @title What should we order this week to sell the most?
 -- @group Demand & stock
 -- @tags  optimize, forecast, replenishment
+-- @description From the demand forecast to this week's purchase quantities within the budget, and the sales they protect.
 --
 -- Forecast → optimize: plan inventory from a forecast (anofox-forecast + anofox-optimize).
 --

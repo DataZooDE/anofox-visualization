@@ -416,7 +416,7 @@ pub fn threshold_rules(spec: &str) -> String {
 }
 
 /// A dashboard's header comments as `{"title","group","tags","refresh",
-/// "owner","certified"}`,
+/// "description","owner","certified"}`,
 /// read by the parser the servers use
 /// ([`crate::host::serving::parse_dashboard_meta`]), so the builder's sidebar
 /// and a served folder place a dashboard alike. `title` is "" without
@@ -427,12 +427,12 @@ pub fn dashboard_meta(script: &str) -> String {
         let m = crate::host::serving::parse_dashboard_meta("", script);
         Ok(serde_json::json!({
             "title": m.title, "group": m.group, "tags": m.tags, "refresh": m.refresh,
-            "owner": m.owner, "certified": m.certified,
+            "description": m.description, "owner": m.owner, "certified": m.certified,
         })
         .to_string())
     })
     .unwrap_or_else(|_| {
-        r#"{"title":"","group":null,"tags":[],"refresh":0,"owner":null,"certified":null}"#.into()
+        r#"{"title":"","group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null}"#.into()
     })
 }
 

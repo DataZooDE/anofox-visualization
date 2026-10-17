@@ -231,6 +231,14 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     current_schema())`. With `attach: false`, the databases it names are
     snapshotted. With an access policy it must name one database (its
     `main` schema), where the policy resolves names.
+  - `app` — the landing page's header: `{"name": "…", "tagline": "…",
+    "logo": "https://… | data:image/…", "favicon": "…"}` (the app-bar
+    settings of `anofox_serve`; `name_visible: false` shows the logo alone).
+    Without it the page is titled *Dashboards*.
+  - `home` — a dashboard id: `/` redirects (`302`) to `/d/<home>` instead of
+    showing the landing page, when the viewer may read that dashboard (else
+    the landing page). The server refuses to start if no such dashboard
+    exists.
 - **DNS rebinding.** Only requests whose `Host` is a loopback name on the
   server's port (`127.0.0.1`, `localhost`, `[::1]`) are served; anything else
   gets `421`. Behind a reverse proxy that forwards the original `Host` (Caddy

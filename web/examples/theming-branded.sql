@@ -1,6 +1,7 @@
 -- @title How is ACME selling across regions and channels?
 -- @group How it works
 -- @tags  theming, branding, kpi
+-- @description ACME's sales by region, channel and product line, in ACME's own corporate design.
 --
 -- Theming: your branding. A sales cockpit for a made-up company, ACME, in
 -- ACME's own indigo corporate theme (inlined as JSON so the example also

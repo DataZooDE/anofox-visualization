@@ -11,10 +11,10 @@ description: >
   which mode to pick, the trust model (server-owned SQL, typed variables,
   read-only snapshot, Host allowlist), every option (max_rows, timeout_ms,
   threads, max_queries, max_inflight_mb, max_response_mb, cache_mb,
-  memory_limit, duckdb_threads, bind, hosts, search_path, attach, load,
+  memory_limit, duckdb_threads, bind, hosts, search_path, app, home, attach, load,
   refresh_s, data, path_vars, theme), the result cache, single-flight and
   cancelled requests, snapshot refresh, a live data folder, /healthz,
-  header comments (-- @title, -- @group, -- @tags, -- @owner, -- @certified,
+  header comments (-- @title, -- @group, -- @tags, -- @description, -- @owner, -- @certified,
   -- @load, -- @param, -- @vars, -- @requires)
   and deployment (deploy/run-locked.sh, systemd, Docker, reverse proxy with
   TLS, replicas behind a load balancer, sizing). Use when the user wants to
@@ -85,6 +85,8 @@ Unknown keys and bad values fail the start, naming the valid ones.
 | `bind` | `127.0.0.1` | `"0.0.0.0"` in a container / behind a load balancer on another host (warns without `auth`) |
 | `hosts` | loopback names | public names the proxy forwards in `Host` (else `421`); `"*"` disables the check |
 | `search_path` | serving default database | where unqualified names resolve: `"warehouse"`, `"warehouse.sales"`, comma-separated. A `USE` before starting does **not** reach the server |
+| `app` | none | the landing page's header: `{"name", "tagline", "logo", "favicon"}` (the app-bar settings; logo an https:// or data:image/ URL) |
+| `home` | none | a dashboard id: `/` redirects to it instead of the landing page (refuses to start if it doesn't exist) |
 | `attach` | `true` | snapshot every attached DuckDB database; `false` = only the current one |
 | `load` | `[]` | extensions for the snapshot (`["spatial"]`) |
 | `refresh_s` | — | rebuild the snapshot every *n* s |
@@ -141,6 +143,7 @@ dashboard --svg file.sql [out.svg]                                    # the whol
 -- @title Which regions are behind plan?
 -- @group Sales / EMEA
 -- @tags  plan, regions
+-- @description Revenue against plan per region, month by month.
 -- @owner Sales controlling
 -- @certified 2026-10-15
 -- @load spatial
@@ -151,9 +154,9 @@ SELECT month::XAXIS, sum(revenue)::LINECHART, 'Revenue'::TITLE
 FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY month;
 ```
 
-`@title` page title (a plain business question; provenance goes in other `--` comments, not on the page) · `@group` where it sits (one group, ` / ` for one sub-level; parsed by the servers, shown by the builder's library) · `@tags` labels (lower-cased, ≤10; `--check` warns about an empty or >80-character group and more tags) · `@owner` who looks after it (nav tooltip, `/` list, builder sidebar) · `@certified YYYY-MM-DD` the last check: a ✓ certified badge (a bad date counts as not certified; `--check` warns) · `@load` an extension (identifiers only) · `@param` a static-mode whitelist with its default · `@vars` the variables a locked-server viewer may set · `@refresh` the page refresh interval · `-- @requires <path>` directly above one statement: a missing optional file shows "Not available" instead of an error.
+`@title` page title (a plain business question; provenance goes in other `--` comments, not on the page) · `@group` where it sits (one group, ` / ` for one sub-level; parsed by the servers, shown by the builder's library) · `@tags` labels (lower-cased, ≤10; `--check` warns about an empty or >80-character group and more tags) · `@description` one line under the title on the landing page · `@owner` who looks after it (nav tooltip, `/` list, builder sidebar) · `@certified YYYY-MM-DD` the last check: a ✓ certified badge (a bad date counts as not certified; `--check` warns) · `@load` an extension (identifiers only) · `@param` a static-mode whitelist with its default · `@vars` the variables a locked-server viewer may set · `@refresh` the page refresh interval · `-- @requires <path>` directly above one statement: a missing optional file shows "Not available" instead of an error.
 
-A served folder groups itself from these headers: `window.__served.nav` items are `{id, title, group, tags, owner, certified}` (only what the viewer's scope allows); the nav shows the ungrouped first, then the groups, and becomes a searchable menu from 9 dashboards on; the `/` list (locked server and `serve --dashboards`) is grouped the same way with owners, ✓ certified and tags. Lint the whole folder first with `dashboard --check <folder>` (`folder/duplicate-title`, `folder/bad-id`).
+A served folder groups itself from these headers: `window.__served.nav` items are `{id, title, group, tags, owner, certified}` (only what the viewer's scope allows); the nav shows the ungrouped first, then the groups, and becomes a searchable menu from 9 dashboards on; the `/` landing page (locked server and `serve --dashboards`) shows them as cards grouped the same way (title, description, owner, ✓ certified, updated, tags; search, tag and certified filters from 9 on), headed by `options.app` / `--app-name …` (name, tagline, logo); `options.home` / `--home <id>` makes `/` redirect to one dashboard instead. Lint the whole folder first with `dashboard --check <folder>` (`folder/duplicate-title`, `folder/bad-id`).
 
 ## Gotchas
 

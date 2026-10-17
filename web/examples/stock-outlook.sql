@@ -1,6 +1,7 @@
 -- @title When could we run out of stock?
 -- @group Demand & stock
 -- @tags  stock, forecast, bands
+-- @description One item's stock with a four-week projection band and what happened around it.
 --
 -- When could we run out of stock? One item's on-hand stock with a 4-week
 -- projection, and what happened around it, on one shared time axis:

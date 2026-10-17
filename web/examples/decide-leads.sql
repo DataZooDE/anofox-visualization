@@ -1,6 +1,7 @@
 -- @title Who should sales call first?
 -- @group Sales & customers
 -- @tags  decide, leads
+-- @description Ranks this week's inbound leads by how likely they are to buy, so reps call the best ones first.
 --
 -- Decide use case — inbound lead routing and qualification with anofox_decide.
 --

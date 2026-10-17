@@ -856,6 +856,9 @@ pub struct DashboardMeta {
     /// `-- @tags a, b`: free labels, trimmed, lower-cased, without duplicates,
     /// at most [`MAX_TAGS`].
     pub tags: Vec<String>,
+    /// `-- @description <text>`: one line on what it answers (several lines
+    /// are joined); `None` when missing or empty.
+    pub description: Option<String>,
     /// `-- @owner <text>`: who looks after the dashboard (a name, a team, an
     /// address); `None` when missing or empty.
     pub owner: Option<String>,
@@ -865,14 +868,42 @@ pub struct DashboardMeta {
 }
 
 impl DashboardMeta {
-    /// A served folder's nav entry: `{id, title, group, tags, owner,
-    /// certified}` (`window.__served.nav`).
+    /// A served folder's nav entry: `{id, title, group, tags, description,
+    /// owner, certified}` (`window.__served.nav`).
     pub fn nav_json(&self, id: &str) -> serde_json::Value {
         serde_json::json!({
             "id": id, "title": self.title, "group": self.group, "tags": self.tags,
-            "owner": self.owner, "certified": self.certified,
+            "description": self.description, "owner": self.owner, "certified": self.certified,
         })
     }
+}
+
+/// The day (UTC, `YYYY-MM-DD`) a file was last modified — a served
+/// dashboard's "updated" on the landing page; `None` when unknown.
+pub fn file_date(path: &std::path::Path) -> Option<String> {
+    let secs = std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(iso_date_of_unix(secs))
+}
+
+/// `YYYY-MM-DD` (UTC) of a Unix time in seconds (the proleptic Gregorian
+/// calendar; Howard Hinnant's `civil_from_days`).
+pub fn iso_date_of_unix(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// A calendar date written `YYYY-MM-DD` (as `-- @certified` wants it).
@@ -934,7 +965,8 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
 /// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`,
-/// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>` header comments (a repeated `@group` wins over the earlier one; `@tags`
+/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`
+/// header comments (a repeated `@group` wins over the earlier one; `@tags`
 /// lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
@@ -949,6 +981,13 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.title = r.trim().to_string();
         } else if let Some(r) = header_value(l, "group") {
             m.group = normalize_group(r);
+        } else if let Some(r) = header_value(l, "description") {
+            if !r.is_empty() {
+                m.description = Some(match m.description.take() {
+                    Some(d) => format!("{d} {r}"),
+                    None => r.to_string(),
+                });
+            }
         } else if let Some(r) = header_value(l, "owner") {
             m.owner = Some(r.to_string()).filter(|o| !o.is_empty());
         } else if let Some(r) = header_value(l, "certified") {
@@ -1408,6 +1447,26 @@ mod tests {
         assert_eq!(j["owner"], "Finance team <fin@example.com>");
         assert_eq!(j["certified"], "2026-10-15");
         assert!(j["group"].is_null() && j["tags"].as_array().unwrap().is_empty());
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @description Which stores sell\n-- @description  the most?\n-- @description\nSELECT 1;",
+        );
+        assert_eq!(
+            m.description.as_deref(),
+            Some("Which stores sell the most?")
+        );
+        assert_eq!(
+            m.nav_json("s")["description"],
+            "Which stores sell the most?"
+        );
+        for (secs, day) in [
+            (0, "1970-01-01"),
+            (951_782_400, "2000-02-29"),
+            (1_792_195_200, "2026-10-17"),
+            (4_107_456_000, "2100-02-28"),
+        ] {
+            assert_eq!(iso_date_of_unix(secs), day, "{secs}");
+        }
         let m = parse_dashboard_meta("s", "-- @owner\n-- @certified 15.10.2026\nSELECT 1;");
         assert_eq!((m.owner, m.certified), (None, None));
         for ok in ["2026-10-15", "2024-02-29", "2000-02-29", "1999-12-31"] {

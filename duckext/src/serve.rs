@@ -487,6 +487,12 @@ pub struct LockedOptions {
     /// `db[.schema]` entries, the first one `USE`d. Empty: the serving
     /// database's default database.
     pub search_path: Vec<(String, Option<String>)>,
+    /// `app`: the installation's name, tagline, logo and favicon — the header
+    /// of the `/` landing page (the app-bar settings of `anofox_serve`).
+    pub app: Option<AppBrand>,
+    /// `home`: a dashboard id `/` redirects to instead of the landing page
+    /// (when the viewer may read it).
+    pub home: Option<String>,
 }
 
 /// The `hash` mask's HMAC key. Never printed.
@@ -526,6 +532,8 @@ impl Default for LockedOptions {
             max_response: 32 << 20,
             max_queries: 4,
             search_path: Vec::new(),
+            app: None,
+            home: None,
         }
     }
 }
@@ -647,7 +655,19 @@ impl LockedOptions {
                     let p = val.as_str().map(str::trim).ok_or("options.search_path must be a string like \"warehouse\" or \"warehouse.sales\"")?;
                     o.search_path = parse_search_path(p).map_err(|e| format!("options.search_path: {e}"))?;
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path)")),
+                "app" => {
+                    if !val.is_object() {
+                        return Err("options.app must be an object like {\"name\": \"…\", \"tagline\": \"…\", \"logo\": \"https://…\"}".into());
+                    }
+                    let a = AppBrand::from_json(&val.to_string()).map_err(|e| format!("options.app: {e}"))?;
+                    a.check().map_err(|e| format!("options.app: {e}"))?;
+                    o.app = Some(a);
+                }
+                "home" => {
+                    let h = val.as_str().map(str::trim).filter(|h| sv::valid_dashboard_id(h)).ok_or("options.home must be a dashboard id (its file name without .sql)")?;
+                    o.home = Some(h.to_string());
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.
@@ -753,8 +773,10 @@ struct Dash {
     /// column a page request may leave out).
     info: Vec<bool>,
     /// The header comments: title, `-- @vars` (the variables a viewer may
-    /// set; others are dropped), group, tags, owner, certified.
+    /// set; others are dropped), group, tags, description, owner, certified.
     meta: sv::DashboardMeta,
+    /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
+    updated: Option<String>,
 }
 
 /// A private, randomly named 0700 directory holding the snapshot files;
@@ -927,6 +949,13 @@ pub fn start_locked(
         ));
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
+    if let Some(h) = &opts.home {
+        if !dashboards.iter().any(|d| &d.id == h) {
+            return Err(format!(
+                "anofox-visualization: options.home: no dashboard '{h}' in '{dir}'"
+            ));
+        }
+    }
     loads.extend(opts.load.iter().cloned());
     // A policy file next to the dashboards is enforced even without the
     // option: forgetting the option must not serve every row.
@@ -1255,6 +1284,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             stmts,
             info,
             meta,
+            updated: sv::file_date(&p),
         });
     }
     if out.is_empty() {
@@ -1681,6 +1711,19 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             "this server is locked: there is no SQL endpoint (use POST /api/panel)",
         ),
         (&Method::Get, "/") => {
+            // options.home: straight to that dashboard (if this viewer may read it)
+            if let Some(h) = st
+                .opts
+                .home
+                .as_deref()
+                .filter(|h| scope.is_none_or(|s| s.allows(h)))
+            {
+                let resp = Response::empty(302)
+                    .with_header(header("Location", &format!("/d/{h}")))
+                    .with_header(header("Cache-Control", "no-store"));
+                let _ = req.respond(resp);
+                return 302;
+            }
             respond(
                 req,
                 200,
@@ -2109,19 +2152,26 @@ fn nav_json(dashboards: &[Dash], scope: Option<&Scope>) -> Vec<serde_json::Value
         .collect()
 }
 
-/// The `/` list: the readable dashboards, grouped (see
-/// `page::list_dashboards`), in the server's theme.
+/// The `/` landing page: the dashboards the viewer may read (the same
+/// scope filter as the nav), as cards in groups, in the server's theme, with
+/// `options.app` as its header (see `page::landing`).
 fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
-    let t = anofox_visualization::theme::resolve(st.opts.theme.as_deref().unwrap_or(""))
-        .map(|s| s.default_variant().clone())
-        .unwrap_or_default();
-    let items: Vec<(String, &sv::DashboardMeta)> = st
-        .dashboards
-        .iter()
-        .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
-        .map(|d| (format!("/d/{}", d.id), &d.meta))
-        .collect();
-    anofox_visualization::page::list_dashboards(&t, "Dashboards", &items)
+    let set = anofox_visualization::theme::resolve(st.opts.theme.as_deref().unwrap_or(""))
+        .unwrap_or_else(|_| anofox_visualization::theme::resolve("").expect("the default theme"));
+    anofox_visualization::page::landing(&anofox_visualization::page::Landing {
+        theme: &set,
+        app: st.opts.app.as_ref(),
+        items: st
+            .dashboards
+            .iter()
+            .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
+            .map(|d| anofox_visualization::page::LandingItem {
+                href: format!("/d/{}", d.id),
+                meta: &d.meta,
+                updated: d.updated.clone(),
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]
@@ -2135,6 +2185,7 @@ mod tests {
             stmts: vec![],
             info: vec![],
             meta: sv::parse_dashboard_meta(id, script),
+            updated: None,
         }
     }
 
@@ -2144,7 +2195,7 @@ mod tests {
             dash(
                 "sales",
                 "-- @title Weekly sales\n-- @group Sales / EMEA\n-- @tags kpi, weekly\n\
-                 -- @owner Finance\n-- @certified 2026-10-15\nSELECT 1;",
+                 -- @owner Finance\n-- @certified 2026-10-15\n-- @description Per store.\nSELECT 1;",
             ),
             dash("ops", "-- @group Ops\nSELECT 1;"),
             dash("plain", "SELECT 1;"),
@@ -2154,12 +2205,13 @@ mod tests {
         assert_eq!(
             all[0],
             serde_json::json!({"id": "sales", "title": "Weekly sales", "group": "Sales / EMEA",
-                "tags": ["kpi", "weekly"], "owner": "Finance", "certified": "2026-10-15"})
+                "tags": ["kpi", "weekly"], "description": "Per store.", "owner": "Finance",
+                "certified": "2026-10-15"})
         );
         assert_eq!(
             all[2],
             serde_json::json!({"id": "plain", "title": "plain", "group": null, "tags": [],
-                "owner": null, "certified": null})
+                "description": null, "owner": null, "certified": null})
         );
         // a scoped viewer sees only their dashboards — with their groups intact
         let scope = Scope {

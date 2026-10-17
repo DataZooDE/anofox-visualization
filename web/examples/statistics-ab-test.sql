@@ -1,6 +1,7 @@
 -- @title Did the new checkout lift conversion?
 -- @group Sales & customers
 -- @tags  statistics, ab-test, conversion
+-- @description Whether the new one-page checkout really converts better, and that it slows nothing down.
 --
 -- A/B test readout — did the new one-page checkout lift conversion?
 --

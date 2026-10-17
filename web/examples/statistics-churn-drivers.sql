@@ -1,6 +1,7 @@
 -- @title Why do customers cancel?
 -- @group Sales & customers
 -- @tags  statistics, churn
+-- @description What makes customers cancel, and how many each retention lever would keep.
 --
 -- Drivers of churn — why do customers cancel, and which lever pays off?
 --

@@ -1,6 +1,7 @@
 -- @title Which van serves which stop tomorrow?
 -- @group Logistics & production
 -- @tags  optimize, routing
+-- @description Tomorrow's van routes for a food wholesaler: stops on time, kilometres and cost saved.
 --
 -- Delivery routing — anofox_optimize plans tomorrow's vans for a food wholesaler.
 --

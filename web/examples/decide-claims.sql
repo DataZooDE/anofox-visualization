@@ -1,6 +1,7 @@
 -- @title Which claims can we fast-track?
 -- @group Service & operations
 -- @tags  decide, insurance, claims
+-- @description Routes each insurance claim to fast track, normal handling or fraud review, within the fraud team's weekly capacity.
 --
 -- Decide use case — insurance claim routing with anofox_decide.
 --

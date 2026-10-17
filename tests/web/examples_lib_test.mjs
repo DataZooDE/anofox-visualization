@@ -194,8 +194,8 @@ assert.equal(startDash("my:__proto__", EXAMPLES, []), null);
 
 // dashboard_meta is the servers' parser: group levels, tag clean-up, the cap.
 const m = JSON.parse(wasm.dashboard_meta("-- @title  T\n-- @group Sales/EMEA\n-- @tags A, b ,a\nSELECT 1;"));
-assert.deepEqual(m, { title: "T", group: "Sales / EMEA", tags: ["a", "b"], refresh: 0, owner: null, certified: null });
-assert.deepEqual(JSON.parse(wasm.dashboard_meta("SELECT 1;")), { title: "", group: null, tags: [], refresh: 0, owner: null, certified: null });
+assert.deepEqual(m, { title: "T", group: "Sales / EMEA", tags: ["a", "b"], refresh: 0, description: null, owner: null, certified: null });
+assert.deepEqual(JSON.parse(wasm.dashboard_meta("SELECT 1;")), { title: "", group: null, tags: [], refresh: 0, description: null, owner: null, certified: null });
 // owner and certification (a bad date is no certification)
 const oc = JSON.parse(wasm.dashboard_meta("-- @owner  Finance team\n-- @certified 2026-10-15\nSELECT 1;"));
 assert.deepEqual([oc.owner, oc.certified], ["Finance team", "2026-10-15"]);

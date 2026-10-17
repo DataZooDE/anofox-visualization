@@ -1,10 +1,13 @@
 // A served folder on the locked server (anofox_serve_dashboards), in a real
-// browser (sidebar plan, PR 4): the `/` list groups the dashboards by
-// `-- @group` and shows the owner, "✓ certified" and the tags; the nav on a
-// dashboard page groups its links, and above 8 dashboards becomes one button
-// with a searchable, grouped list (keyboard: Enter opens, the search takes
-// the focus, Esc closes back onto the button). Runs two folders (4 and 10
-// dashboards), each on its own server it starts and stops.
+// browser (sidebar plan, PR 4): the `/` landing page shows the dashboards as
+// cards grouped by `-- @group` (counts; title, description, tags, owner,
+// "✓ certified", updated), with options.app as its header and, above 8
+// dashboards, a search field, tag chips and "certified only"; options.home
+// redirects `/`. The nav on a dashboard page groups its links, and above 8
+// dashboards becomes one button with a searchable, grouped list (keyboard:
+// Enter opens, the search takes the focus, Esc closes back onto the button).
+// Runs three servers (4 and 10 dashboards, and one with options.home), each
+// started and stopped by this script.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8930] \
@@ -49,12 +52,13 @@ function folder(entries) {
   return dir;
 }
 // Start the locked server on `dir` (a DuckDB process we own; stopped by PID).
-async function serve(dir, port) {
+async function serve(dir, port, options = null) {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"] });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
   p.stderr.on("data", (d) => (log += d));
-  p.stdin.write(`LOAD ${sqlStr(ext)};\nSELECT anofox_serve_dashboards(${sqlStr(dir)}, ${port});\n`);
+  const opts = options ? `, ${sqlStr(JSON.stringify(options))}` : "";
+  p.stdin.write(`LOAD ${sqlStr(ext)};\nSELECT anofox_serve_dashboards(${sqlStr(dir)}, ${port}${opts});\n`);
   for (let i = 0; i < 100; i++) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return { proc: p, log: () => log };
@@ -83,13 +87,13 @@ async function axeCheck(p, sel, what) {
   if (!axe || !existsSync(axe)) return;
   await p.addScriptTag({ path: axe });
   const r = await p.evaluate(async (s) => window.axe.run(s, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }), sel);
-  for (const v of r.violations) console.log(`axe ${what} ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help} — ${v.nodes[0]?.target}`);
+  for (const v of r.violations) console.log(`axe ${what} ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help} — ${v.nodes.map((n) => n.target).join(" ")}`);
   check(!r.violations.some((v) => v.impact === "serious" || v.impact === "critical"), `axe ${what}: no serious violation (${r.passes.length} pass)`);
 }
 
 // ── 1. Four dashboards: a grouped nav bar ──
 const small = folder([
-  ["weekly", "-- @title Weekly sales\n-- @group Sales\n-- @tags kpi, weekly\n-- @owner Sales controlling\n-- @certified 2026-10-15"],
+  ["weekly", "-- @title Weekly sales\n-- @group Sales\n-- @tags kpi, weekly\n-- @owner Sales controlling\n-- @certified 2026-10-15\n-- @description Orders and revenue per store, week by week."],
   ["margin", "-- @title Margin bridge\n-- @group Sales\n-- @owner Finance"],
   ["stock", "-- @title Stock outlook\n-- @group Ops\n-- @certified 2026-02-30"],
   ["start", "-- @title Start here"],
@@ -98,11 +102,14 @@ let srv = await serve(small, port0);
 try {
   const list = await (await fetch(`http://127.0.0.1:${port0}/`)).text();
   const at = (s) => list.indexOf(s);
-  check(at(">Start here<") > 0 && at(">Start here<") < at(">Ops</h2>") && at(">Ops</h2>") < at(">Sales</h2>"), "/ list: ungrouped first, then the groups by name");
-  check(at(">Sales</h2>") < at(">Weekly sales<") && at(">Sales</h2>") < at(">Margin bridge<"), "/ list: dashboards under their group");
-  check((list.match(/✓ certified/g) || []).length === 1, "/ list: one ✓ certified (a bad date is no certification)");
-  check(list.includes(">Sales controlling<") && list.includes(">kpi<"), "/ list: owner and tags");
-  check(!list.includes('id="dash-q"'), "/ list: no search for 4 dashboards");
+  check(at(">Start here<") > 0 && at(">Start here<") < at(">Ops <") && at(">Ops <") < at(">Sales <"), "landing: ungrouped first, then the groups by name");
+  check(at(">Sales <") < at(">Weekly sales<") && at(">Sales <") < at(">Margin bridge<"), "landing: cards under their group");
+  check(/>Sales <span class="lp-n"[^>]*>2</.test(list), "landing: a count per group");
+  check((list.match(/✓ certified/g) || []).length === 1, "landing: one ✓ certified (a bad date is no certification)");
+  check(list.includes(">Sales controlling<") && list.includes("<li>kpi</li>") && list.includes(">Orders and revenue per store, week by week.<"), "landing: owner, tags and description");
+  check(/Updated <time datetime="\d{4}-\d\d-\d\d">/.test(list), "landing: updated (the file's date)");
+  check(list.includes("<h1 class=\"lp-title\">Dashboards</h1>") && list.includes("4 dashboards in 2 groups"), "landing: a header without options.app");
+  check(!list.includes('id="lp-q"'), "landing: no filters for 4 dashboards");
 
   const p = await page(`http://127.0.0.1:${port0}/d/weekly`);
   await p.waitForSelector(".served-nav a", { timeout: 60000 });
@@ -113,10 +120,9 @@ try {
   await p.waitForSelector(".dash .panel", { timeout: 60000 });
   await axeCheck(p, ".served-nav", "nav bar");
   if (shots) await p.screenshot({ path: `${shots}/${tag}-served-bar.png` });
-  if (shots) {
-    const lp = await page(`http://127.0.0.1:${port0}/`);
-    await lp.screenshot({ path: `${shots}/${tag}-served-list.png`, fullPage: true });
-  }
+  const lp = await page(`http://127.0.0.1:${port0}/`);
+  await axeCheck(lp, "body", "landing (4)");
+  if (shots) await lp.screenshot({ path: `${shots}/${tag}-landing-small.png`, fullPage: true });
 } finally {
   stop(srv);
 }
@@ -125,14 +131,36 @@ try {
 const big = folder(
   Array.from({ length: 10 }, (_, i) => [
     `d${i}`,
-    `-- @title Report ${i}${i % 3 === 0 ? "\n-- @group Finance" : i % 3 === 1 ? "\n-- @group Ops / Plants" : ""}${i === 4 ? "\n-- @owner Plant team\n-- @certified 2026-10-01" : ""}`,
+    `-- @title Report ${i}${i % 3 === 0 ? "\n-- @group Finance" : i % 3 === 1 ? "\n-- @group Ops / Plants" : ""}${i === 4 ? "\n-- @owner Plant team\n-- @certified 2026-10-01" : ""}\n-- @tags ${i % 2 ? "weekly" : "monthly"}\n-- @description What report ${i} answers, in one line.`,
   ])
 );
 const port1 = port0 + 1;
-srv = await serve(big, port1);
+srv = await serve(big, port1, { app: { name: "Bakery <BI>", tagline: "Sales & stock" } });
 try {
   const list = await (await fetch(`http://127.0.0.1:${port1}/`)).text();
-  check(list.includes('id="dash-q"') && list.includes(">Plants</h3>"), "/ list: a search field above 8, `A / B` as a sub-heading");
+  check(list.includes('id="lp-q"') && list.includes(">Plants</h3>") && list.includes('id="lp-cert"'), "landing: filters above 8, `A / B` as a sub-heading");
+  check(list.includes("<h1 class=\"lp-title\">Bakery &lt;BI&gt;</h1>") && list.includes("Sales &amp; stock · 10 dashboards"), "landing: options.app is the header (escaped)");
+  // the filters, in the browser
+  const lp = await page(`http://127.0.0.1:${port1}/`);
+  await lp.waitForSelector("#lp-q");
+  const shownCards = () => lp.$$eval(".lp-card", (l) => l.filter((c) => !c.hidden).map((c) => c.querySelector(".lp-link").textContent));
+  await lp.fill("#lp-q", "report 4");
+  check(JSON.stringify(await shownCards()) === JSON.stringify(["Report 4"]), "landing search");
+  check(/1 of 10/.test(await lp.textContent("#lp-status")), "…announced (role=status)");
+  await lp.click("#lp-clear");
+  check((await shownCards()).length === 10 && (await lp.evaluate(() => document.activeElement.id)) === "lp-q", "Clear shows all, focus to the search");
+  await lp.click('.lp-chip[data-tag="weekly"]');
+  check((await shownCards()).length === 5 && (await lp.getAttribute('.lp-chip[data-tag="weekly"]', "aria-pressed")) === "true", "a tag chip filters (aria-pressed)");
+  await lp.click('.lp-chip[data-tag="weekly"]');
+  await lp.click("#lp-cert");
+  check(JSON.stringify(await shownCards()) === JSON.stringify(["Report 4"]), "certified only");
+  check((await lp.$$eval(".lp-group", (l) => l.filter((g) => !g.hidden).length)) === 1, "groups without a match hide");
+  await lp.click("#lp-clear");
+  await lp.focus("#lp-q");
+  await lp.keyboard.press("Tab");
+  check(await lp.evaluate(() => document.activeElement.classList.contains("lp-chip")), "Tab reaches the chips");
+  await axeCheck(lp, "body", "landing (10)");
+  if (shots) await lp.screenshot({ path: `${shots}/${tag}-landing.png`, fullPage: true });
   const p = await page(`http://127.0.0.1:${port1}/d/d4`);
   await p.waitForSelector("#served-nav-pick", { timeout: 60000 });
   check((await p.$$(".served-nav > a")).length === 0, "no row of 10 links: one button");
@@ -154,6 +182,16 @@ try {
   await p.click('#served-nav-menu a[href="/d/d7"]');
   await p.waitForURL(/\/d\/d7$/);
   check(true, "a link in the list opens that dashboard");
+} finally {
+  stop(srv);
+}
+
+// ── 3. options.home: / goes straight to that dashboard ──
+const port2 = port0 + 2;
+srv = await serve(small, port2, { home: "weekly" });
+try {
+  const r = await fetch(`http://127.0.0.1:${port2}/`, { redirect: "manual" });
+  check(r.status === 302 && r.headers.get("location") === "/d/weekly", `options.home: / → ${r.status} ${r.headers.get("location")}`);
 } finally {
   stop(srv);
 }

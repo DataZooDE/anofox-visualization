@@ -1,6 +1,7 @@
 -- @title How do we plan a busy day at the distribution centre?
 -- @group Logistics & production
 -- @tags  optimize, warehouse
+-- @description One Friday at a distribution centre: containers, carriers, picking waves and packing lines, each planned by a solver.
 --
 -- Optimize showcase — anofox_optimize on one Friday at a distribution centre.
 --
