@@ -9,8 +9,11 @@
 //   - panels the action does not touch being rebuilt (their DOM must stay)
 //   - focus lost to <body>
 //   - more than one run per click, a frame without the panels (white flash)
-//   - the run (click → data on screen) above --bound ms, or the motion after
-//     it (run end → stable) above --settle ms: the drill animations are
+//   - the run (click → data on screen) slower than the dashboard's plain
+//     re-run measured in the same session (a cross-filter click: same queries,
+//     no drill) × 2.5, at least --bound ms — so machine load, which slows both,
+//     cancels out while a slow drill path does not; or the motion after the
+//     run (run end → stable) above --settle ms: the drill animations are
 //     ≤ 400 ms, so a slow settle is the page, not the query or machine load
 // and prints the numbers. --frames DIR saves a frame strip per action (CDP
 // screencast, montage'd when ImageMagick is on the PATH); --axe runs axe-core
@@ -34,12 +37,9 @@ const arg = (k, d) => {
 const base = arg("--url", "http://127.0.0.1:8791/");
 const motion = arg("--motion", "no-preference");
 const frames = arg("--frames", "");
-// The run time is the query + render: on a machine busier than its cores
-// (load average / cores > 1) it stretches with the queue, so its bound does
-// too — printed with every run. The settle bound does not scale.
-const load = os.loadavg()[0] / Math.max(1, os.cpus().length);
-const bound = Math.round(Number(arg("--bound", "1500")) * Math.max(1, load));
-console.log(`run bound ${bound} ms (load ${load.toFixed(2)} per core)`);
+const bound = Number(arg("--bound", "1500"));
+console.log(`load average ${os.loadavg().map((l) => l.toFixed(1)).join(" ")} on ${os.cpus().length} cores`);
+const runTimes = []; // [label, ms]: checked against the baseline re-run at the end
 const settleBound = Number(arg("--settle", "900"));
 const axe = arg("--axe", "");
 const fail = (m) => {
@@ -226,7 +226,7 @@ function check(label, r, { keepAll = true, focus = true } = {}) {
   if (r.blankFrames) fail(`${label}: ${r.blankFrames} frame(s) without any panel`);
   if (keepAll && r.kept < r.before - 2) fail(`${label}: ${r.before - r.kept} of ${r.before} panels rebuilt (only the drilled chart and its follower may change)`);
   if (focus && (r.focus === "body" || !r.focusInDrill)) fail(`${label}: focus lost (${r.focus})`);
-  if (r.runMs > bound) fail(`${label}: the run took ${r.runMs} ms (bound ${bound} ms)`);
+  runTimes.push([label, r.runMs]);
   if (r.settleMs > settleBound) fail(`${label}: still moving ${r.settleMs} ms after the run (bound ${settleBound} ms)`);
 }
 
@@ -246,6 +246,10 @@ const markAt = (sel, k = 0) =>
     [sel, k]
   );
 
+// The actions run in a try, so the run-time check below still reports (a
+// slow drill can desynchronise the later steps).
+let base1 = null, base2 = null;
+try {
 // (a) drill-down: click the first region bar.
 const bar = await markAt(".panel-svg > svg .dp-hit");
 await record();
@@ -293,15 +297,16 @@ await page.evaluate(() => {
   const svg = document.querySelector(".dash .dp-crumbs").closest(".panel").querySelector(".panel-svg > svg");
   window.__focusSvg = svg;
   svg.focus();
-  svg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 });
-await settled();
-await page.waitForTimeout(300);
+// (these two cross-filter runs are also the baseline for the run times)
+await record();
+await page.evaluate(() => window.__focusSvg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+base1 = await stable("baseline-1");
 const kept = await focusKept("kept panel");
 if (!kept.same) fail("kept panel: a re-run that does not change the chart rebuilt it");
+await record();
 await page.evaluate(() => document.activeElement.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }))); // clear
-await settled();
-await page.waitForTimeout(300);
+base2 = await stable("baseline-2");
 
 // (b) back up with the breadcrumb ("All").
 const all = await page.$eval(".dash .dp-crumbs .dp-crumb", (b) => {
@@ -383,6 +388,16 @@ await page.waitForTimeout(300);
 const ret = await page.evaluate(() => ({ tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent, label: document.activeElement.getAttribute("aria-label") }));
 console.log(`drill-through-key: focus "${t2}", Esc → ${ret.tab} / ${ret.label}`);
 if (ret.tab !== "Drill-through" || ret.label !== origin) fail(`drill-through-key: Esc did not return to the mark (${ret.tab}, ${ret.label})`);
+
+} catch (e) {
+  fail(`stopped: ${String(e).split("\n")[0]}`);
+}
+
+// Run times against the plain re-run of this session (without one: --bound).
+const baseline = base1 && base2 ? Math.max(base1.runMs, base2.runMs) : 0;
+const allowed = Math.max(bound, Math.round(2.5 * baseline));
+console.log(`run times (baseline re-run ${baseline} ms → allowed ${allowed} ms): ${runTimes.map(([l, t]) => `${l} ${t}`).join(", ")}`);
+for (const [label, t] of runTimes) if (t > allowed) fail(`${label}: the run took ${t} ms (allowed ${allowed} ms: 2.5 × the ${baseline} ms re-run, at least ${bound})`);
 
 if (errs.length) fail("page errors: " + errs.join(" | "));
 await browser.close();
