@@ -1770,7 +1770,7 @@ fn map_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
 ) -> Vec<(Severity, &'static str, String)> {
-    let mut out = Vec::new();
+    let mut out = region_diags(roles, rows);
     let Some(geom) = roles
         .iter()
         .find(|(i, r)| {
@@ -1851,6 +1851,106 @@ fn map_diags(
                  cells (the h3 extension) or to regions, to keep the map light"
             ),
         ));
+    }
+    out
+}
+
+/// A column's cells as text (numbers too; `None` for NULL).
+fn cells(rows: &[Map<String, Value>], idx: usize) -> Vec<Option<String>> {
+    rows.iter()
+        .map(|row| {
+            match row
+                .get(&format!("c{idx}"))
+                .or_else(|| row.values().nth(idx))
+            {
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                Some(Value::Number(n)) => Some(n.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Region and point inputs of a map: an unknown `::BOUNDARIES` layer,
+/// `::REGION` codes the built-in boundaries don't know (up to five listed),
+/// regions matched only by name, and latitudes beyond ±90 that would be
+/// valid longitudes (`::LAT` and `::LON` swapped).
+fn region_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let col = |want: Role| {
+        roles
+            .iter()
+            .find(|(_, r)| *r == want)
+            .map(|(i, _)| cells(rows, *i))
+    };
+    let forced = col(Role::Boundaries).and_then(|c| c.into_iter().flatten().next());
+    let layer = match &forced {
+        Some(f) => match crate::map::layer_name(f) {
+            Some(l) => Some(l),
+            None => {
+                out.push((
+                    Severity::Warning,
+                    "map/unknown-region",
+                    format!(
+                        "::BOUNDARIES '{f}' is not a built-in layer ({}) — codes are matched against the default layers",
+                        crate::map::boundaries::LAYERS.join(", ")
+                    ),
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(codes) = col(Role::Region) {
+        if let Some(m) = crate::map::boundaries::match_codes(&codes, layer) {
+            if m.unmatched_count > 0 {
+                let list: Vec<String> = m.unmatched.iter().map(|c| format!("'{c}'")).collect();
+                out.push((
+                    Severity::Warning,
+                    "map/unknown-region",
+                    format!(
+                        "{} ::REGION code(s) match nothing in '{}' and are not drawn: {}{}",
+                        m.unmatched_count,
+                        m.layer.name,
+                        list.join(", "),
+                        if m.unmatched_count > list.len() {
+                            ", …"
+                        } else {
+                            ""
+                        }
+                    ),
+                ));
+            }
+            if m.by_name && m.rows.iter().any(|r| !r.is_empty()) {
+                out.push((
+                    Severity::Note,
+                    "map/region-by-name",
+                    format!(
+                        "::REGION matched '{}' by name — codes (ISO 3166, AGS, NUTS) are unambiguous; names may not be",
+                        m.layer.name
+                    ),
+                ));
+            }
+        }
+    }
+    if let (Some(lat), Some(lon)) = (col(Role::Lat), col(Role::Lon)) {
+        let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse::<f64>().ok());
+        let lats: Vec<f64> = lat.iter().filter_map(num).collect();
+        let lons: Vec<f64> = lon.iter().filter_map(num).collect();
+        if lats.iter().any(|v| v.abs() > 90.0)
+            && lats.iter().all(|v| v.abs() <= 180.0)
+            && lons.iter().all(|v| v.abs() <= 90.0)
+        {
+            out.push((
+                Severity::Warning,
+                "map/lat-lon-swapped",
+                "::LAT has values beyond ±90 that would be valid longitudes, and ::LON stays within ±90 — are ::LAT and ::LON swapped?"
+                    .to_string(),
+            ));
+        }
     }
     out
 }
@@ -3201,6 +3301,57 @@ mod design_tests {
             codes("SELECT g::MAP FROM t;", pts),
             vec![(Severity::Warning, "map/too-many-marks")]
         );
+    }
+
+    #[test]
+    fn map_regions_and_points_are_checked() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str, String)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .filter(|d| d.code.starts_with("map/"))
+                .map(|d| (d.severity, d.code, d.message))
+                .collect()
+        };
+        let sql = "SELECT c::REGION, v::BARCHART FROM t;";
+        let rows = |cs: &[&str]| cs.iter().map(|c| json!({ "c0": c, "c1": 1.0 })).collect();
+        assert!(codes(sql, rows(&["DE-BY", "DE-BE"])).is_empty());
+        let d = codes(sql, rows(&["DE-BY", "DE-XX", "DE-YY"]));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!((d[0].0, d[0].1), (Severity::Warning, "map/unknown-region"));
+        assert!(
+            d[0].2.contains("'DE-XX', 'DE-YY'") && d[0].2.contains("de-states"),
+            "{}",
+            d[0].2
+        );
+        let d = codes(sql, rows(&["Bayern", "Hessen"]));
+        assert_eq!(
+            d.iter().map(|x| x.1).collect::<Vec<_>>(),
+            vec!["map/region-by-name"]
+        );
+        let d = codes(
+            "SELECT c::REGION, 'states'::BOUNDARIES FROM t;",
+            vec![json!({ "c0": "DE-BY", "c1": "states" })],
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.1 == "map/unknown-region" && x.2.contains("BOUNDARIES")),
+            "{d:?}"
+        );
+        // ::LAT beyond ±90 that would be longitudes: swapped
+        let pts = |la: f64, lo: f64| json!({ "c0": la, "c1": lo });
+        let sql = "SELECT a::LAT, b::LON FROM t;";
+        assert_eq!(
+            codes(sql, vec![pts(13.4, 52.5), pts(120.5, 30.0)])
+                .iter()
+                .map(|x| x.1)
+                .collect::<Vec<_>>(),
+            vec!["map/lat-lon-swapped"]
+        );
+        assert!(codes(sql, vec![pts(52.5, 13.4), pts(30.0, 120.5)]).is_empty());
     }
 
     #[test]

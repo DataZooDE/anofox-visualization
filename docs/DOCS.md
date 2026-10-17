@@ -84,7 +84,10 @@ terminal.
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
-| `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | grey WKT backdrop layer under a ::MAP |
+| `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
+| `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |
+| `::LON` | `::LONGITUDE`, `::LNG` | chart | a map point's longitude (degrees, WGS84), with ::LAT |
+| `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts' |
 | `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
 | `::XLINE` |  | annotation | vertical reference line at an x (a number, date or timestamp) |
@@ -114,6 +117,7 @@ terminal.
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
+| `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -960,12 +964,19 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
 ### Maps
 
 ```sql
-SELECT wkt::MAP,                 -- WKT geometry (POLYGON, POINT, LINESTRING, MULTI…)
-       name::LABEL,              -- hover label (and the feature's name in the summary)
-       sales::BARCHART,          -- the measure that colours each feature
+-- a region code: the shape comes from the built-in boundaries
+SELECT ags::REGION,              -- '09162' (AGS), 'DE-BY', 'DE', 'DEU', 'DE212' (NUTS 3) …
+       sales AS "Sales"::BARCHART,  -- the measure that colours each region
        'quantile 5'::CLASSES,    -- optional: 5 classes with a stepped legend
+       8::LABEL_TOP,             -- name the 8 most important regions on the map
        'Sales by district'::TITLE
 FROM districts;
+
+-- points by latitude / longitude over a built-in backdrop
+SELECT lat::LAT, lon::LON, city::LABEL, orders::BARCHART, 'de-states'::BASEMAP FROM depots;
+
+-- any geometry as WKT (POLYGON, POINT, LINESTRING, MULTI…)
+SELECT ST_AsText(geom)::MAP, name::LABEL, sales::BARCHART FROM my_shapes;
 ```
 
 Maps are drawn by the extension's own writer: the WKT of each row is parsed
@@ -1004,8 +1015,18 @@ and `<circle>`s for points. Features are drawn in row order.
   `< 10` / `≥ 50`). The legend shows each class's colour with its count and
   the edges under it; the tooltip names the class ("class 2 of 5: 10 – 50").
   `dashboard --check` reports `map/bad-classes` and `map/unknown-projection`.
-- **Backdrop** (`::BASEMAP`): a second WKT column drawn first in a pale land
-  colour with hairline borders; `::ALPHA` sets the data layer's opacity.
+- **Backdrop** (`::BASEMAP`): a built-in layer (`'world'` — without
+  Antarctica —, `'de-states'`, `'de-districts'`, `'world-50m'`) or a second
+  WKT column, drawn first in a pale land colour with hairline borders;
+  `::ALPHA` sets the data layer's opacity.
+- **Labels** (`::LABEL_TOP n`: the n most important; `::DATALABELS`: all
+  that fit): a region's name sits at its pole of inaccessibility (inside even
+  a C-shaped region), a point's to its right, in the ink with a halo in the
+  card colour. Importance is `::RANK`, else |value|, else area; a label that
+  would overlap another, the legend or the attribution, or is wider than its
+  region, is left out.
+- **Scale bar**: on a map of lon/lat data less than about 3,000 km wide, a
+  "nice" length (1/2/5 × 10ⁿ km) at the map's centre, bottom left.
 - **Hover / click / zoom**: each feature carries `data-row`, `data-series`
   (its `::CATEGORY`, else its `::LABEL`), `data-value`, `data-label`,
   `data-x` (its key — the row — when it has no label; else the label is the
@@ -1020,6 +1041,50 @@ and `<circle>`s for points. Features are drawn in row order.
   highest first, without the WKT.
 - **Size**: above 100,000 drawn marks the render warns (aggregate in SQL, e.g.
   with the h3 extension); `map/too-many-marks` flags more than 20,000 points.
+
+#### Built-in boundaries (`::REGION`, `::BOUNDARIES`)
+
+Countries, German states and German districts ship with the app as
+same-origin files in `web/data/boundaries/` (sources, licences and the build
+in [`SOURCES.md`](../web/data/boundaries/SOURCES.md),
+`scripts/build-boundaries.sh`). The browser fetches a layer the first time a
+panel needs it (no outside request; it works offline and on the locked
+server); native renders (`dashboard --svg`, `serve`, the extension) carry the
+default layers embedded, so they need no file access. The pack is not part of
+the wasm.
+
+| Layer | Codes a `::REGION` may hold | Features |
+|---|---|---|
+| `world` | ISO 3166-1 alpha-2 / alpha-3 (`'FR'`, `'FRA'`), Natural Earth `ADM0_A3` | 177 countries (Natural Earth 1:110m) |
+| `world-50m` | as `world` (only with `'world-50m'::BOUNDARIES`; browser only) | 242 countries (1:50m) |
+| `de-states` | ISO 3166-2 (`'DE-BY'`), the 2-digit AGS (`'09'`), NUTS 1 (`'DE2'`) | 16 Länder (BKG VG2500) |
+| `de-districts` | the 5-digit AGS (`'09162'`), NUTS 3 (`'DE212'`); a NUTS 2 code (`'DE21'`) draws all its districts | 400 Kreise (BKG VG2500) |
+
+The layer most codes match is used; `'de-districts'::BOUNDARIES` forces one.
+When no code matches, names are tried (`'Bayern'`, `'Köln'`, `'Germany'`;
+case and umlauts folded) and `dashboard --check` notes `map/region-by-name`.
+A code read as a number keeps working (`9162` → `09162`). Codes that match
+nothing are not drawn and are listed by `map/unknown-region`; a `::LAT`
+beyond ±90 next to a `::LON` within ±90 is flagged as `map/lat-lon-swapped`.
+
+The hover and the map labels use the region's name in the dashboard locale
+(`::LOCALE 'de-DE'` → "Bayern", else "Bavaria"); a `::LABEL` from the data
+always wins. Every map drawn from a layer carries its attribution, small and
+muted in the bottom-right corner: "Made with Natural Earth" for the world
+layers; for the BKG layers the source note the licence requires — "© BKG
+(2026) dl-de/by-2-0, Datenquellen: https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf"
+with "BKG" and the licence linked — and "geometry modified (simplified)".
+
+The files are plain CSV (`key,codes,name_en,name_de,alt,wkt`), so SQL can
+join them too: `FROM 'data/boundaries/world.csv'` (with the `spatial`
+extension, `ST_GeomFromText(wkt)` for point-in-polygon).
+
+**EU NUTS regions are not included**: Eurostat/GISCO's terms allow only
+non-commercial use. `scripts/fetch-nuts.sh --accept-terms` downloads NUTS
+2024 (1:20M) for you — you hold the licence — and writes `nuts0` … `nuts3`
+layers next to the pack (gitignored); use them with `'nuts2'::BOUNDARIES`.
+Maps drawn from them carry "© EuroGeographics for the administrative
+boundaries", as the terms require.
 
 ### Waterfall, bullet and funnel
 
@@ -2607,6 +2672,8 @@ wasm exports (`src/wasm.rs`):
 | `resolve_dashboard_theme(spec, chrome_json)` | a theme spec (+ `{title,brand,logo,favicon,locale}`) → `{ok, name, mode, light:{css,…}, dark:{css,…}}` |
 | `format_number_locale(value, fmt, locale)` / `format_date_locale(iso, locale)` | KPI / table formatting in a dashboard locale |
 | `map_bounds(rows_json, roles_json, width, height)` | the projected window an unzoomed map panel shows (`[x0, x1, y0, y1]`, y up), the zoom UI's start |
+| `map_layers(rows_json, roles_json)` | the built-in boundary layers a map panel needs that aren't loaded yet (`["de-districts"]`) |
+| `register_boundaries(layer, csv)` | load a boundary layer fetched from `data/boundaries/<layer>.csv`; returns its region count (−1 on a bad name or file) |
 | `panel_bounds(…)` | *deprecated* raw data extent of a cartesian panel; the UI now reads the rendered SVG's `data-domain` / `data-flip` attributes (ggplot-rs) and the `zoomable` role set instead |
 | `roles_json()` | the role registry + derived role sets (inputs, metrics, directives, table formats, text sizes, zoomable chart kinds — the browser's single source) |
 | `format_number(value, fmt)` | KPI/table number formatting shared with the headless renderer |

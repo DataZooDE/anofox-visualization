@@ -324,6 +324,18 @@ pub enum Role {
     Classes,
     /// The centre of a map's diverging colour ramp (`::MIDPOINT`).
     Midpoint,
+    /// A region code a map looks up in the built-in boundary pack
+    /// (`::REGION`): ISO 3166-1 (`'DE'`, `'DEU'`), ISO 3166-2 (`'DE-BY'`), a
+    /// German AGS (`'09162'`) or NUTS code (`'DE212'`), else a name.
+    Region,
+    /// A point's latitude on a map (`::LAT`), with `::LON`.
+    Lat,
+    /// A point's longitude on a map (`::LON`), with `::LAT`.
+    Lon,
+    /// The pack layer a map's `::REGION` codes are looked up in
+    /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
+    /// `'de-districts'`. Read from the first value.
+    Boundaries,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -1483,7 +1495,7 @@ fn render_placed(
         }
         .map_err(RenderError::Render)?;
         // A map paints with the variant's own tokens: no neutral remap.
-        let svg = if map::geometry(&cols).is_some() {
+        let svg = if map::is_map(&cols) {
             o.theme.with_font(svg)
         } else {
             o.theme.finish_svg(strip_nonfinite_marks(svg))
@@ -1982,7 +1994,12 @@ fn render_inner(
         return Ok(Panel::own(width, h, k.body(width as f64, h as f64, o)));
     }
     // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
-    if cols.iter().any(|c| c.role == Role::Geometry) {
+    if cols.iter().any(|c| {
+        matches!(
+            c.role,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon
+        )
+    }) {
         return Ok(match map::render(o, cols, width, height) {
             Some(m) => Panel::Own {
                 width,

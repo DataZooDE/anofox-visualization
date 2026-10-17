@@ -190,6 +190,34 @@ pub fn map_bounds(rows_json: &str, roles_json: &str, width: u32, height: u32) ->
         .unwrap_or_else(|_| "[]".into())
 }
 
+/// The built-in boundary layers a panel needs that aren't registered yet,
+/// as a JSON array (`["de-districts"]`): the UI fetches each from
+/// `data/boundaries/<layer>.csv` and hands it to [`register_boundaries`]
+/// before it renders the panel.
+#[wasm_bindgen]
+pub fn map_layers(rows_json: &str, roles_json: &str) -> String {
+    guard(|| {
+        let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
+        let cols = columns_from_entries(&rows, &entries_of(roles_json));
+        let want: Vec<&str> = crate::map::needed_layers(&cols)
+            .into_iter()
+            .filter(|l| !crate::map::boundaries::available(l))
+            .collect();
+        Ok(serde_json::to_string(&want).unwrap_or_else(|_| "[]".into()))
+    })
+    .unwrap_or_else(|_| "[]".into())
+}
+
+/// Register a built-in boundary layer from its CSV text (fetched by the
+/// UI); returns its region count, or -1 when the name or text is bad.
+#[wasm_bindgen]
+pub fn register_boundaries(layer: &str, csv: &str) -> i32 {
+    guard(|| Ok(crate::map::boundaries::register(layer, csv)))
+        .ok()
+        .and_then(Result::ok)
+        .map_or(-1, |n| n as i32)
+}
+
 fn entries_of(roles_json: &str) -> Vec<(usize, Role, String)> {
     serde_json::from_str::<serde_json::Value>(roles_json)
         .ok()

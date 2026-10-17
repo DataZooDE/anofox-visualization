@@ -246,4 +246,27 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   assert.deepEqual(JSON.parse(wasm.map_bounds("[]", roles, 460, 300)), []);
 }
 
+// Built-in boundaries: a ::REGION panel names the layers it needs; once the
+// UI registers a layer's CSV (fetched from web/data/boundaries/), the wasm
+// draws from it — the pack itself is not in the wasm.
+{
+  const rows = JSON.stringify([
+    { c0: "DE-BY", c1: 3 },
+    { c0: "DE-BE", c1: 7 },
+  ]);
+  const roles = JSON.stringify([[0, "REGION"], [1, "BARCHART"]]);
+  assert.deepEqual(JSON.parse(wasm.map_layers(rows, roles)), ["de-states"]);
+  const before = wasm.render_panel(rows, roles, 460, 300, "", "");
+  assert.ok(!/data-row/.test(before), "nothing to draw before the layer is registered");
+  const csv = readFileSync(new URL("../../web/data/boundaries/de-states.csv", import.meta.url), "utf8");
+  assert.equal(wasm.register_boundaries("de-states", csv), 16);
+  assert.equal(wasm.register_boundaries("not-a-layer", csv), -1);
+  assert.deepEqual(JSON.parse(wasm.map_layers(rows, roles)), []);
+  const svg = wasm.render_panel(rows, roles, 460, 300, "", "");
+  assert.match(svg, /<path [^>]*data-row="0" data-series="Bavaria"/);
+  assert.match(svg, /dl-de\/by-2-0/);
+  const bm = JSON.stringify([[0, "LAT"], [1, "LON"], [2, "BASEMAP"]]);
+  assert.deepEqual(JSON.parse(wasm.map_layers(JSON.stringify([{ c0: 52.5, c1: 13.4, c2: "world" }]), bm)), ["world"]);
+}
+
 console.log(`examples_lib_test: ok (${EXAMPLES.length} examples in ${exampleAreas(EXAMPLES).length} areas)`);

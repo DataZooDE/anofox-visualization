@@ -7,6 +7,8 @@ import init, {
   render_stack,
   render_contract,
   map_bounds,
+  map_layers,
+  register_boundaries,
   roles_json,
   format_number,
   format_number_locale,
@@ -283,72 +285,71 @@ SELECT 8::COL; SELECT day::XAXIS, series::CATEGORY, y::LINECHART, 'Multi-series 
 SELECT 6::COL; SELECT y::XAXIS, z::SCATTER, series::CATEGORY, 'Scatter — ▧ brush a box, ◧ filter by value'::TITLE FROM tsm ORDER BY y;
 SELECT 6::COL; SELECT series::XAXIS, sum(y)::BARCHART, ''::DATALABELS, 'Bars — ◧ value filter dims bars below the range'::TITLE FROM tsm GROUP BY series ORDER BY series;
 
--- Maps read real GeoJSON in the browser via DuckDB's spatial extension
--- (ST_Read → ST_AsText → WKT); the map writer projects and draws it (::MAP).
+-- Maps draw countries, states and districts from the built-in boundaries
+-- (::REGION codes, a 'world'::BASEMAP: same-origin files, no outside request),
+-- or any WKT (::MAP) and lat/lon points (::LAT / ::LON).
 SELECT 'Map'::TAB;
 
 SELECT 'World'::SUBTAB;
 SELECT 12::COL;
-SELECT ST_AsText(geom) ::MAP,
-       POP_EST AS "Population" ::BARCHART,  -- fill = population (legend title)
+SELECT iso3 ::REGION,                       -- ISO 3166 code → the built-in countries
+       population AS "Population" ::BARCHART,
        'quantile 5'::CLASSES,               -- five classes of equal size
-       NAME ::LABEL,                        -- hover tooltip
+       12 ::LABEL_TOP,                      -- name the 12 most populous
        'Where do most people live?'::TITLE
-FROM ST_Read('countries.geojson')
-WHERE NAME <> 'Antarctica';
+FROM 'data/maps/world-population.csv'
+WHERE iso3 <> 'ATA';
 
 SELECT 'Earthquakes'::SUBTAB;
 SELECT 12::COL;
--- Quake points coloured by magnitude, semi-transparent (::ALPHA) so overlaps
--- read as density, over a grey country basemap. The two layers ride in disjoint
--- rows: quakes fill ::MAP, countries fill ::BASEMAP.
-SELECT ST_AsText(geom) ::MAP, mag AS "Magnitude" ::BARCHART, place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+-- Live USGS quakes (GeoJSON via DuckDB's spatial extension) as ::LAT/::LON
+-- points, coloured by magnitude and semi-transparent (::ALPHA) so overlaps
+-- read as density, over the built-in world backdrop.
+SELECT ST_Y(geom) ::LAT, ST_X(geom) ::LON, mag AS "Magnitude" ::BARCHART, place ::LABEL,
+       0.6 ::ALPHA, 'world' ::BASEMAP,
        'USGS earthquakes (M≥2.5, past 30 days) — colour = magnitude'::TITLE
-FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL
-UNION ALL
-SELECT NULL, NULL, NULL, 0.6, ST_AsText(geom), NULL
-FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';
+FROM ST_Read('quakes.geojson') WHERE mag IS NOT NULL;
 
 -- Linked maps: click a country on the left and the right map filters to the
 -- earthquakes INSIDE it (true point-in-polygon, so no neighbours leak in).
 -- Clicking sets getvariable('selected') = the country name; click empty space to
 -- clear. IF NOT EXISTS keeps the spatial reads and the one-off point-in-polygon
--- join out of the per-click re-run.
+-- join out of the per-click re-run. The country shapes come from the built-in
+-- boundaries' file (WKT in a CSV), read like any data file.
 SELECT 'Linked'::SUBTAB;
 
 CREATE TABLE IF NOT EXISTS cgeo AS
-SELECT NAME AS country, ST_AsText(geom) AS wkt, geom,
-       ST_XMin(geom) AS x0, ST_XMax(geom) AS x1, ST_YMin(geom) AS y0, ST_YMax(geom) AS y1
-FROM ST_Read('countries.geojson') WHERE NAME <> 'Antarctica';
+SELECT key, name_en AS country, ST_GeomFromText(wkt) AS geom
+FROM 'data/boundaries/world.csv' WHERE key <> 'ATA';
+CREATE TABLE IF NOT EXISTS cbox AS
+SELECT *, ST_XMin(geom) AS x0, ST_XMax(geom) AS x1, ST_YMin(geom) AS y0, ST_YMax(geom) AS y1 FROM cgeo;
 
 -- Tag each quake with the country that CONTAINS it (offshore → NULL). The bbox
 -- test short-circuits before the exact ST_Contains, so the join stays quick.
 CREATE TABLE IF NOT EXISTS qcty AS
-SELECT ST_AsText(q.geom) AS wkt, q.mag, q.place, c.country
+SELECT ST_Y(q.geom) AS lat, ST_X(q.geom) AS lon, q.mag, q.place, c.country
 FROM ST_Read('quakes.geojson') q
-LEFT JOIN cgeo c
+LEFT JOIN cbox c
   ON ST_X(q.geom) BETWEEN c.x0 AND c.x1 AND ST_Y(q.geom) BETWEEN c.y0 AND c.y1
      AND ST_Contains(c.geom, ST_Point(ST_X(q.geom), ST_Y(q.geom)))
 WHERE q.mag IS NOT NULL;
 
 SELECT 12::COL;
-SELECT 'Two **linked maps** rendered from real GeoJSON (DuckDB''s spatial extension → WKT → ::MAP). **Click a country** on the left choropleth and the right map filters to the earthquakes *inside* it — a true point-in-polygon join, so no neighbours leak in. Click empty space to clear.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Two **linked maps**: countries from the built-in boundaries (::REGION), live quakes from USGS (::LAT/::LON). **Click a country** on the left choropleth and the right map filters to the earthquakes *inside* it — a true point-in-polygon join, so no neighbours leak in. Click empty space to clear.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- LEFT: world, filled by onshore-quake count per country. Click a country.
 SELECT 6::COL;
-SELECT c.wkt ::MAP, count(q.country) AS "Earthquakes" ::BARCHART, c.country ::LABEL,
+SELECT c.key ::REGION, count(q.country) AS "Earthquakes" ::BARCHART, c.country ::LABEL,
        'Quakes per country — click one'::TITLE
 FROM cgeo c LEFT JOIN qcty q ON q.country = c.country
-GROUP BY c.wkt, c.country;
+GROUP BY c.key, c.country;
 
--- RIGHT: quakes inside the selected country (exact), semi-transparent, on a basemap.
+-- RIGHT: quakes inside the selected country (exact), semi-transparent, on the world backdrop.
 SELECT 6::COL;
-SELECT q.wkt ::MAP, q.mag AS "Magnitude" ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, NULL ::BASEMAP,
+SELECT q.lat ::LAT, q.lon ::LON, q.mag AS "Magnitude" ::BARCHART, q.place ::LABEL, 0.6 ::ALPHA, 'world' ::BASEMAP,
        'Earthquakes in selection'::TITLE
 FROM qcty q
-WHERE getvariable('selected') = '' OR q.country = getvariable('selected')
-UNION ALL
-SELECT NULL, NULL, NULL, 0.6, wkt, NULL FROM cgeo;`,
+WHERE getvariable('selected') = '' OR q.country = getvariable('selected');`,
 
   `-- @title How much will each item sell next year?
 -- @group Demand & stock
@@ -1265,9 +1266,10 @@ async function servedRequest(sql, page, kind, at) {
 }
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 
-// The map examples read remote GeoJSON with DuckDB's `spatial` extension. Load
-// it and register the two datasets on first use (memoised), so `ST_Read(...)`
-// works from plain example SQL without a server.
+// The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
+// `spatial` extension. Load it and register the feed on first use (memoised),
+// so `ST_Read('quakes.geojson')` works from plain example SQL without a
+// server. (Country shapes come from the built-in boundaries, same-origin.)
 let geoReady = null;
 async function ensureGeo() {
   if (backend === "live") return; // the live backend brings its own spatial setup
@@ -1279,10 +1281,6 @@ async function ensureGeo() {
         const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
         await db.registerFileBuffer(name, bytes);
       };
-      await reg(
-        "countries.geojson",
-        "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_admin_0_countries.geojson"
-      );
       await reg(
         "quakes.geojson",
         "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_month.geojson"
@@ -1369,6 +1367,37 @@ async function ensureForecast(sql) {
   if (fcParquet) await fcParquet;
   // 2. The extension, only for statements that use it.
   if (/\bts_\w+\b|\banofox_forecast\b/i.test(sqlCode(sql))) await ensureExtension("anofox_forecast");
+}
+
+// A ::MAP panel: WKT, a ::REGION code or a ::LAT/::LON point.
+function isMapPanel(roles) {
+  return roles.some((r) => r[1] === "MAP" || r[1] === "REGION" || r[1] === "LAT");
+}
+
+// The built-in boundary layers (::REGION codes, a named ::BASEMAP) are
+// same-origin files, web/data/boundaries/<layer>.csv: fetched when a panel
+// first needs one (memoised per layer; a failure is retried later) and handed
+// to the renderer once — they are not part of the wasm.
+const boundaryLayers = {};
+async function ensureBoundaries(rowsJson, roles) {
+  let want = [];
+  try {
+    want = JSON.parse(map_layers(rowsJson, JSON.stringify(roles)));
+  } catch (_) {}
+  await Promise.all(
+    want.map((l) => {
+      if (!boundaryLayers[l])
+        boundaryLayers[l] = (async () => {
+          const r = await fetch(new URL(`data/boundaries/${l}.csv`, import.meta.url));
+          if (!r.ok) throw new Error(`couldn't fetch the '${l}' boundaries (HTTP ${r.status})`);
+          if (register_boundaries(l, await r.text()) < 0) throw new Error(`bad '${l}' boundary file`);
+        })().catch((e) => {
+          delete boundaryLayers[l];
+          throw e;
+        });
+      return boundaryLayers[l];
+    })
+  );
 }
 
 // Stored showcase results: an example that reads 'data/<ext>/<table>.csv'
@@ -7144,6 +7173,7 @@ async function runOnce(fresh = true) {
         nextEmpty = "";
       } else {
         const rowsJson = await panelSql(s.sql, i);
+        if (isMapPanel(s.roles)) await ensureBoundaries(rowsJson, s.roles);
         if (trackHost) {
           // A thin strip under the chart before it, on its x axis (same panel).
           addTrack(trackHost, { rows: rowsJson, roles: s.roles, height: nextHeight || 0 });
@@ -7338,7 +7368,7 @@ async function runOnce(fresh = true) {
           } else {
             // a lone sparkline is a small strip; a ::DIAGRAM's are in its boxes
             const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM");
-            const isMap = s.roles.some((r) => r[1] === "MAP");
+            const isMap = isMapPanel(s.roles);
             // a map without ::HEIGHT takes the height its shape needs
             const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
             const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100)) : 300); // ::HEIGHT, else default
@@ -11852,7 +11882,7 @@ const CHART_KINDS = [
   [/^HEATMAP/, "Heatmap"],
   [/^CALENDAR/, "Calendar heatmap"],
   [/^CANDLESTICK/, "Candlestick chart"],
-  [/^MAP/, "Map"],
+  [/^(MAP|REGION|LAT)$/, "Map"],
   [/^DIAGRAM/, "Diagram"],
 ];
 function chartKind(roles) {
