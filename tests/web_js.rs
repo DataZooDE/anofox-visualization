@@ -101,3 +101,8 @@ fn web_examples_library_keeps_old_links() {
 fn web_my_dashboards_store() {
     run_node("dash_store_test.mjs");
 }
+
+#[test]
+fn web_sidebar_search_and_zip() {
+    run_node("library_test.mjs");
+}

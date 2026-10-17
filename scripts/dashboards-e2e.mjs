@@ -39,19 +39,31 @@ const ctx = await browser.newContext({ viewport: { width, height: phone ? 844 : 
 const page = await ctx.newPage();
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e)));
-// confirm(): answer with the next queued reply (default: accept), and record it
-const dialogs = [];
-const replies = [];
-page.on("dialog", async (d) => {
-  dialogs.push(d.message());
-  const yes = replies.length ? replies.shift() : true;
-  if (d.type() === "prompt") await (yes === false ? d.dismiss() : d.accept(typeof yes === "string" ? yes : ""));
-  else await (yes ? d.accept() : d.dismiss());
+// The app's own dialogs (new group, rename group, replace): a string fills
+// the field and confirms, true confirms, false cancels (Esc). → its title.
+// A native one would be a regression.
+page.on("dialog", (d) => {
+  errs.push(`a native ${d.type()}() dialog: ${d.message()}`);
+  d.dismiss();
 });
+async function answer(reply) {
+  const dlg = await page.waitForSelector(".dp-dialog [role=dialog]", { timeout: 10000 });
+  const title = await dlg.$eval("h3", (h) => h.textContent);
+  const label = await dlg.getAttribute("aria-labelledby");
+  if (!label) fail("dialog without a label");
+  if (typeof reply === "string") {
+    check(await page.evaluate(() => document.activeElement.matches(".dp-dialog input[type=text]")), `dialog “${title}”: the field has the focus`);
+    await page.fill(".dp-dialog input[type=text]", reply);
+    await page.keyboard.press("Enter");
+  } else if (reply) await page.click(".dp-dialog .dp-dialog-primary");
+  else await page.keyboard.press("Escape");
+  await page.waitForSelector(".dp-dialog", { state: "detached" });
+  return title;
+}
 const q = theme ? `&theme=${theme}` : "";
 const ran = () => page.waitForFunction(() => document.querySelector(".dash .panel") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
 const store = () => page.evaluate(() => JSON.parse(localStorage.getItem("dp_dashboards") || "null"));
-const names = () => page.$$eval("#side-nav .side-row .s-name", (l) => l.map((e) => e.textContent));
+const names = () => page.$$eval('#side-nav .side-row[data-key^="my:"] .s-name', (l) => l.map((e) => e.textContent));
 const item = async (n) => {
   const s = await store();
   const id = Object.keys(s.items).find((k) => s.items[k].name === n);
@@ -122,8 +134,8 @@ await shot("saved");
 
 // ── 3. Move to a group through ⋯ (a new one, then an existing one) ──
 await menu("Scratch", "Move to group…");
-replies.push("Sales & customers");
 await pickInMenu("New group…");
+await answer("Sales & customers");
 let scratch = await item("Scratch");
 check(/^-- @group Sales & customers$/m.test(scratch.sql), "Move to group writes the -- @group line");
 check(/^-- @group Sales & customers$/m.test(await page.$eval("#sql", (t) => t.value)), "…in the open editor too");
@@ -164,10 +176,9 @@ await page.click(`#side-my-${copy.id}`);
 await drawer(false);
 await ran();
 await page.fill("#dash-name", "Leads this week");
-replies.push(false);
-const nDialogs = dialogs.length;
 await page.click("#save");
-check(dialogs.length === nDialogs + 1 && /Replace "Leads this week"\?/.test(dialogs.at(-1)), "Save asks: Replace …?");
+check(/Replace “Leads this week”\?/.test(await answer(false)), "Save asks: Replace …?");
+check((await focusId()) === "save", "Esc closes the dialog, focus back on Save");
 check(!!(await item("Leads this week copy")) && (await names()).filter((n) => n === "Leads this week").length === 1, "declined: nothing overwritten");
 await page.fill("#dash-name", "Leads this week copy");
 
@@ -191,9 +202,9 @@ await page.waitForSelector("#side-toast", { state: "detached", timeout: 15000 })
 check(!(await item("Leads this week copy")), "deleted for good after the toast");
 
 // ── 8. Groups: a new one, collapse, keyboard reorder, rename rewrites @group ──
-replies.push("Ops");
 await drawer(true);
 await page.click("#side-add-group");
+await answer("Ops");
 check((await store()).groups.includes("Ops"), "an empty group is kept");
 const groupsNow = async () => page.$$eval("#side-nav .side-group", (l) => l.map((g) => g.dataset.group));
 check(JSON.stringify(await groupsNow()) === JSON.stringify(["Sales & customers", "Ops"]), "groups in their order");
@@ -206,8 +217,8 @@ await page.keyboard.press("Enter");
 check((await page.getAttribute("#side-group-sales-and-customers", "aria-expanded")) === "false", "a group collapses");
 check(!(await page.$(`#side-my-${leads.id}`)), "…hiding its dashboards");
 await page.keyboard.press("Enter");
-replies.push("Sales");
 await page.click('.side-group[data-group="Sales & customers"] .g-btn[aria-label^="Rename"]');
+await answer("Sales");
 leads = await item("Leads this week");
 check(/^-- @group Sales$/m.test(leads.sql) && /^-- @group Sales$/m.test((await item("Scratch pad")).sql), "renaming a group rewrites its members' -- @group");
 check(!(await store()).groups.includes("Sales & customers"), "the old name is gone");

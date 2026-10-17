@@ -41,7 +41,7 @@
   --ui-font-body:'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif;
 }
 body.dark{
-  --ui-err-ink:#f87171;
+  --ui-err-ink:#f87171;--ui-card:#141414;
   --ui-bg:#0a0a0a;--ui-ink:#ededed;--ui-muted:#a1a1aa;--ui-line:#262626;
   --ui-accent:#3b82f6;--ui-accent2:#3b82f6;
   --ui-bg-image:linear-gradient(180deg,#0a0a0a,#0a0a0a);
@@ -113,6 +113,30 @@ body.side-collapsed .side-resizer,body.embed .side-resizer{display:none}
 .side-section-row>span,.side-section-row .side-mini{white-space:nowrap}
 .side-mini{background:none;color:var(--ui-accent);box-shadow:none;padding:.05rem .35rem;font-size:.72rem;font-weight:700;border-radius:6px}
 .side-mini:hover{background:var(--ui-tint-3);transform:none;filter:none}
+/* search + tag chips */
+.side-search input{width:100%;box-sizing:border-box;font:inherit;font-size:.84rem;color:var(--ui-ink);background:var(--ui-input-bg);border:1px solid var(--ui-input-border,var(--ui-line));border-radius:9px;padding:.42rem .6rem}
+.side-search input:focus{outline:none;border-color:var(--ui-accent);box-shadow:var(--ui-focus)}
+.side-chips{display:flex;flex-wrap:nowrap;gap:.25rem;overflow-x:auto;scrollbar-width:thin;margin-top:-.2rem;padding-bottom:.15rem}
+.side-chip{flex:none}
+.side-item .s-src{flex:none;font-size:.68rem;font-weight:600;color:var(--ui-muted)}
+.side-item.active .s-src{color:inherit}
+.side-chips[hidden]{display:none}
+.side-chip{background:var(--ui-tint-1);box-shadow:none;border:1px solid var(--ui-line);color:var(--ui-ink);font:inherit;font-size:.72rem;font-weight:600;padding:.12rem .5rem;border-radius:999px;cursor:pointer}
+.side-chip:hover{background:var(--ui-tint-3);transform:none;filter:none;box-shadow:none}
+.side-chip[aria-pressed=true]{background:var(--ui-accent);border-color:var(--ui-accent);color:var(--ui-on-accent)}
+.side-chip-clear{font-size:.8rem;padding:.08rem .45rem}
+.side-toggle:disabled,.side-area:disabled,.side-group-tog:disabled{cursor:default;opacity:1;color:inherit}
+.side-nomatch{margin-top:.6rem}
+.sidebar.side-dropping{outline:2px dashed var(--ui-accent);outline-offset:-4px}
+/* dialogs (rename, new group, replace, import clashes) */
+.md-dialog.dp-dialog{z-index:1003}
+.dp-dialog-card .md-note{white-space:pre-line}
+.dp-dialog-check input{padding:0!important;width:auto}
+.dp-dialog-check{flex-direction:row!important;align-items:center;gap:.45rem!important;font-weight:500!important;color:var(--ui-ink)!important}
+.dp-dialog-actions{flex-wrap:wrap}
+.dp-dialog-actions button{border-radius:10px;padding:.5rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
+.dp-dialog-primary{border:0;background:linear-gradient(135deg,var(--ui-accent),var(--ui-accent2));color:var(--ui-on-accent)}
+.dp-dialog-primary.danger{background:var(--ui-err-ink);color:var(--ui-card)}
 /* My dashboards: a row = the name (opens it) + ⋯ (its menu) */
 .side-row{display:flex;align-items:center;gap:.1rem;border-radius:9px}
 .side-row.in-group{padding-left:1rem}
@@ -433,6 +457,9 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
 <div class="shell">
   <aside class="sidebar" id="sidebar" aria-label="Dashboards">
     <button id="side-new" class="side-new">＋ New dashboard</button>
+    <div class="side-search"><input id="side-search" type="search" placeholder="Search dashboards…" aria-label="Search your dashboards and the examples (name, group, tags)" aria-controls="side-nav" autocomplete="off" spellcheck="false"></div>
+    <div id="side-chips" class="side-chips" role="group" aria-label="Filter by tag" hidden></div>
+    <input type="file" id="side-import" accept=".sql,.zip" multiple hidden>
     <nav class="side-nav" id="side-nav"></nav>
     <div id="side-live" class="sr-only" aria-live="polite"></div>
     <button id="side-explore" class="side-explore">🔍 Explore data</button>
