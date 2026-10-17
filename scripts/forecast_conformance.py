@@ -38,7 +38,6 @@ import re
 import subprocess
 import sys
 
-sys.dont_write_bytecode = True  # scripts/__pycache__ is tracked
 # The anofox extensions send usage telemetry unless this is set; every duckdb
 # process the harness starts inherits it (forced: an inherited 0 must not
 # re-enable it). Each session also turns the extension's setting off.
