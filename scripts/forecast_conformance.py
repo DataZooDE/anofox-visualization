@@ -39,6 +39,9 @@ import subprocess
 import sys
 
 sys.dont_write_bytecode = True  # scripts/__pycache__ is tracked
+# The anofox extensions send usage telemetry unless this is set; every duckdb
+# process the harness starts inherits it.
+os.environ.setdefault("DATAZOO_DISABLE_TELEMETRY", "1")
 from statistics_conformance import montage, svgs_of  # noqa: E402
 
 # ── demo data ────────────────────────────────────────────────────────────────

@@ -386,6 +386,8 @@ jobs:
     # get.erpl.io. DuckDB is pinned to v1.5.6.
     name: anofox-forecast conformance (${{ matrix.repo }})
     runs-on: ubuntu-latest
+    env:
+      DATAZOO_DISABLE_TELEMETRY: "1"
     timeout-minutes: 40
     strategy:
       fail-fast: false
