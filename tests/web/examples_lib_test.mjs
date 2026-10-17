@@ -190,4 +190,28 @@ const m = JSON.parse(wasm.dashboard_meta("-- @title  T\n-- @group Sales/EMEA\n--
 assert.deepEqual(m, { title: "T", group: "Sales / EMEA", tags: ["a", "b"], refresh: 0 });
 assert.deepEqual(JSON.parse(wasm.dashboard_meta("SELECT 1;")), { title: "", group: null, tags: [], refresh: 0 });
 
+// The delivery-routing maps: both ::MAP panels carry a ::CATEGORY (the van),
+// a ::LABEL (the hover text) and the same ::SYNC_ZOOM group, and the renderer
+// keys each feature by its van (data-series) and row (data-row).
+{
+  const sql = readFileSync(new URL("../../web/examples/optimize-delivery.sql", import.meta.url), "utf8");
+  const maps = JSON.parse(wasm.plan(sql)).filter((s) => s.roles.some((r) => r[1] === "MAP"));
+  assert.equal(maps.length, 2, "two maps on the Map tab");
+  for (const s of maps) {
+    for (const r of ["CATEGORY", "LABEL", "SYNC_ZOOM"]) assert.ok(s.roles.some((x) => x[1] === r), `map without ::${r}`);
+    const z = s.roles.find((x) => x[1] === "SYNC_ZOOM")[0];
+    assert.match(s.sql, new RegExp(`'routes' AS c${z}\\b`), "both maps zoom as 'routes'");
+  }
+  const rows = JSON.stringify([
+    { c0: "LINESTRING(0 0, 1 2, 0 0)", c1: "Van 1", c2: "Van 1: 4 km, back 07:10, 1 stop late", c3: "routes", c4: "Today" },
+    { c0: "POINT(1 2)", c1: "Van 1", c2: "Backstube 3 — bakery\nVan 1, stop #1", c3: "routes", c4: "Today" },
+    { c0: "MULTIPOLYGON(((1 3.1, 2.1 2, 1.6 2, 1 2.6, 1 3.1)))", c1: "late stop", c2: "Backstube 3 — bakery", c3: "routes", c4: "Today" },
+  ]);
+  const svg = wasm.render_panel(rows, JSON.stringify(maps[0].roles), 460, 300, "", "");
+  assert.match(svg, /^<svg[^>]* data-map=""/);
+  assert.match(svg, /<polyline [^>]*data-row="0" data-series="Van 1" data-label="Van 1: 4 km, back 07:10, 1 stop late"/);
+  assert.match(svg, /<circle [^>]*data-row="1" data-series="Van 1" data-label="Backstube 3 — bakery&#10;Van 1, stop #1"/);
+  assert.match(svg, /<polygon [^>]*data-row="2" data-series="late stop"/);
+}
+
 console.log(`examples_lib_test: ok (${EXAMPLES.length} examples in ${exampleAreas(EXAMPLES).length} areas)`);
