@@ -930,6 +930,8 @@ that are not in the rows are not drawn and reported as a render warning
 `scripts/statistics_conformance.py` renders the output of every producer
 (see the README); `scripts/decide_conformance.py` does the same for
 anofox-decide's outputs, through the SQL that makes them contract tables.
+`scripts/tabular_conformance.py` does the same for anofox-tabular, whose
+outputs need an adapter to a contract schema first.
 
 ### Heatmaps
 

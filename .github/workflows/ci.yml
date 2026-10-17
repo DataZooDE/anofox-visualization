@@ -324,6 +324,59 @@ jobs:
           path: ${{ runner.temp }}/decide-conformance
           if-no-files-found: ignore
 
+  tabular-conformance:
+    # Every anofox-tabular result producer (the anofox_tab_* table functions
+    # but config/status; none is tagged anofox.contract yet) → an adapter to
+    # the nearest contract schema or a generic chart → anofox_plot(...) and
+    # the specific macro, on the C-API build. anofox_tabular comes signed from
+    # the community repository (pinned by its description.yml), DuckDB v1.5.6.
+    name: anofox-tabular conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DATAZOO_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install DuckDB CLI v1.5.6
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/duckdb"
+          "$HOME/.local/bin/duckdb" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install anofox_tabular from the community repository
+        run: |
+          for i in 1 2 3; do
+            duckdb -c "INSTALL anofox_tabular FROM community" && break
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          duckdb -c "LOAD anofox_tabular;
+            SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'anofox_tabular';"
+
+      - name: Build the C-API extension
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh --release
+
+      - name: Conformance (every producer → anofox_plot + specific macro)
+        run: |
+          python3 scripts/tabular_conformance.py --duckdb duckdb \
+            --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" \
+            --out "$RUNNER_TEMP/tabular-conformance" --jobs 4 --no-montage
+
+      - name: Upload the SVGs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabular-conformance-svgs
+          path: ${{ runner.temp }}/tabular-conformance
+          if-no-files-found: ignore
+
   skills-sql:
     # Every ```sql block of the Claude Code plugin's skills
     # (plugins/anofox-visualization/skills/*/SKILL.md) runs against the C-API

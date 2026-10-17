@@ -320,6 +320,27 @@ python3 scripts/decide_conformance.py --duckdb duckdb --ext /tmp/anofox_visualiz
 
 CI runs it on every push (job *anofox-decide conformance*).
 
+### Conformance with anofox-tabular
+
+[anofox-tabular](https://github.com/DataZooDE/anofox-tabular) does not tag its
+functions for the contract yet, and none of its outputs matches a contract
+schema as it comes. `scripts/tabular_conformance.py` calls **every** result
+producer anyway (the 30 `anofox_tab_*` table functions other than the
+config/status ones) on small deterministic tables. It reshapes each output into
+the nearest schema (check results and profiles → `summary`, the time-aware checks
+→ `events`, `outlier_tree` → `terms`) or a generic chart (diffs, PII counts,
+anomaly scores), and hands it to `anofox_plot(...)` and the specific macro. It
+fails on a SQL error, a missing SVG, an unexpected render warning or a
+producer without a recipe. It also reports when a raw output starts to match a
+schema:
+
+```bash
+duckdb -c "INSTALL anofox_tabular FROM community"   # signed, DuckDB v1.5.6
+python3 scripts/tabular_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/tabular-viz
+```
+
+CI job *anofox-tabular conformance*.
+
 ## Claude Code plugin
 
 The repository ships a [Claude Code](https://claude.com/claude-code) plugin with five skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
