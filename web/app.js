@@ -3947,6 +3947,8 @@ document.addEventListener("keydown", (e) => {
   const el = document.activeElement;
   const tag = ((el && el.tagName) || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select" || (el && el.isContentEditable)) return;
+  // Enter on a focused link or button (a table's ::LINK cell) activates it.
+  if (e.key === "Enter" && (e.defaultPrevented || el?.closest?.("a[href], button, summary, [role=button]"))) return;
   switch (e.key) {
     case "ArrowDown": e.preventDefault(); dpNav.move(1); break;
     case "ArrowUp": e.preventDefault(); dpNav.move(-1); break;
@@ -4382,7 +4384,7 @@ function followLink(url) {
 // it in; the run then updates it in place. The focus goes to the tab's first
 // panel title (announced; else its tab button), and Esc there goes back to
 // the link's origin (dpLinkBack).
-let dpLinkFrom = null; // the element a ::LINK was followed from: {stmt, series, x} (a mark) or {stmt, link} (a table link)
+let dpLinkFrom = null; // the element a ::LINK was followed from: {stmt, series, x, n} (a mark: the n-th with its key) or {stmt, link} (a table link)
 let dpLinkBack = null; // {from, to, origin}: the tab switch a drill-through made
 const activePane = () => [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].find((p) => p.style.display !== "none");
 function openTabNow(name) {
@@ -4424,16 +4426,45 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   dpLinkBack = null;
   btn.click();
-  const o = b.origin;
-  const fig = o && document.querySelector(`.dash .panel[data-stmt="${o.stmt}"]`);
-  let to = null;
-  if (fig && o.link != null) to = fig.querySelectorAll(".dp-link")[o.link];
-  else if (fig) {
-    const svg = fig.querySelector(".panel-svg > svg");
-    to = (svg && chartMarks(svg).find((m) => m.getAttribute("data-series") === o.series && (m.getAttribute("data-x") || "") === o.x)) || svg;
-  }
-  (to || btn).focus({ preventScroll: true });
+  // The origin is found again by its key: the tab's panels may have been
+  // re-rendered since, or (lazy, #120) be drawn only now that it shows — then
+  // the tab button holds the focus until they are (resumeLinkReturn).
+  const to = linkOrigin(b.origin);
+  dpLinkReturn = !to && b.origin ? { origin: b.origin, tab: b.from } : null;
+  if (to) focusOrigin(b.origin, to);
+  else btn.focus({ preventScroll: true });
 });
+// The mark or table link a drill-through was followed from, in the panel now
+// on the page (else its chart); null while that panel is yet to be drawn.
+function linkOrigin(o) {
+  const fig = o && document.querySelector(`.dash .panel[data-stmt="${o.stmt}"]`);
+  if (!fig) return null;
+  if (o.link != null) return fig.querySelectorAll(".dp-link")[o.link] || null;
+  const svg = fig.querySelector(".panel-svg > svg");
+  return (svg && sameKeyMarks(svg, o)[o.n || 0]) || svg;
+}
+// A chart's marks with a key's series and x (a dot and its interval share one).
+const sameKeyMarks = (svg, k) => chartMarks(svg).filter((m) => m.getAttribute("data-series") === k.series && (m.getAttribute("data-x") || "") === k.x);
+let dpLinkReturn = null; // {origin, tab}: an Esc back whose origin was not drawn yet
+// After panels are drawn (wireCharts): hand the focus on to the origin, if it
+// is still on that tab's button (or nowhere) — else the reader moved on.
+function resumeLinkReturn() {
+  const r = dpLinkReturn;
+  if (!r) return;
+  const ae = document.activeElement;
+  const cur = document.querySelector(".dash > .tabbar > .tab-btn.active");
+  if (cur?.textContent !== r.tab || (ae && ae !== document.body && ae !== cur)) return (dpLinkReturn = null);
+  const to = linkOrigin(r.origin);
+  if (!to) return;
+  dpLinkReturn = null;
+  focusOrigin(r.origin, to);
+}
+// Focus the origin; a chart's mark (or the chart) is kept through a re-run
+// still in flight, like any focused mark (dpA11yFocus).
+function focusOrigin(o, to) {
+  to.focus({ preventScroll: true });
+  if (o.link == null) dpA11yFocus = to.matches(".dp-hit") ? { stmt: o.stmt, series: o.series, x: o.x } : { stmt: o.stmt, chart: true };
+}
 // A chart mark's ::LINK: the template of the row the mark was drawn from
 // (matched on x and series), filled with the mark's values and the drill path.
 function chartLink(link, el, key, series) {
@@ -6204,6 +6235,7 @@ if (typeof ResizeObserver !== "undefined")
 function wireCharts() {
   attachHover();
   mountStories();
+  resumeLinkReturn();
 }
 
 // ::STORY steppers (web/anim.js) under every chart that has steps. A chart
@@ -9802,7 +9834,9 @@ function attachHover() {
       const key = dx ? String(xTickLabel(el, dx)) : series;
       if (ia && ia.drill && drillInto(ia.drill, key)) return;
       if (ia && ia.link) {
-        dpLinkFrom = markKey(el.closest(".panel"), el);
+        const k = markKey(el.closest(".panel"), el);
+        const svg = el.closest("svg");
+        dpLinkFrom = { ...k, n: Math.max(0, svg ? sameKeyMarks(svg, k).indexOf(el) : 0) };
         return followLink(chartLink(ia.link, el, key, series));
       }
       if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);

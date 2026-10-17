@@ -241,6 +241,7 @@ SELECT 340::HEIGHT;
 SELECT substation ::XAXIS, round(util_p50, 1) AS "Forecast peak" ::SCATTER,
        round(100 * peak_lo / firm_mw, 1) ::YMIN, round(util_hi, 1) ::YMAX,
        100 ::REFLINE, 'firm capacity' ::REFLINE_LABEL, 1 ::FLIP, ' %'::YFORMAT,
+       '#Substation drill-down?v.substation={value}' ::LINK,
        ('Peak load next week, % of firm capacity — ' || (SELECT string_agg(substation, ' and ' ORDER BY util_hi DESC) FROM el_risk WHERE status_rank <= 2)
         || ' can cross 100 % (dot = forecast, bar = ' || getvariable('interval_level') || ' interval)') ::TITLE
 FROM el_risk ORDER BY util_hi DESC;
