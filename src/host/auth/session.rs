@@ -271,6 +271,15 @@ impl Sessions {
                 if exp.saturating_sub(iat) > self.max_ttl {
                     return None;
                 }
+                // Logged out already: nothing to record (or to audit) again.
+                if self
+                    .revoked
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .contains_key(sid)
+                {
+                    return None;
+                }
                 self.revoke(sid, exp);
                 Some((
                     sid.to_string(),
@@ -310,14 +319,25 @@ impl Sessions {
     pub fn with_revocation_file(mut self, path: std::path::PathBuf) -> Result<Sessions, String> {
         let bad =
             |e: &dyn std::fmt::Display| format!("auth.revocation_file: {}: {e}", path.display());
+        // Created on the very first start only: a lock file without the file
+        // means it was deleted or moved, and a new empty one would forget
+        // every logout in it.
+        if std::fs::symlink_metadata(&path).is_err()
+            && std::fs::symlink_metadata(lock_path(&path)).is_ok()
+        {
+            return Err(bad(
+                &"missing, but its .lock file exists: restore the file (or remove the .lock file to start with no revocations)",
+            ));
+        }
         // Created 0600 (an existing file is tightened), never via a symlink.
         crate::host::access::open_log(&path).map_err(|e| bad(&e))?;
         compact_revocations(&path, || {}).map_err(|e| bad(&e))?;
         let f = Revocations {
             path: path.clone(),
             stamp: Mutex::new((None, None)),
-            pending: Mutex::new(Vec::new()),
+            pending: Mutex::new(HashMap::new()),
             broken: std::sync::atomic::AtomicBool::new(false),
+            failing: std::sync::atomic::AtomicBool::new(false),
             audit: std::sync::OnceLock::new(),
         };
         f.reload(&self.revoked);
@@ -342,7 +362,9 @@ pub struct Revocations {
     stamp: Mutex<ReloadState>,
     /// Logouts not written yet (the file was unavailable): retried on the
     /// next logout and reload.
-    pending: Mutex<Vec<(String, u64)>>,
+    pending: Mutex<HashMap<String, u64>>,
+    /// The last write failed (reported once, until a write succeeds).
+    failing: std::sync::atomic::AtomicBool,
     /// The file can't be trusted right now: every session is refused.
     broken: std::sync::atomic::AtomicBool,
     /// Where a broken file is also reported.
@@ -356,40 +378,58 @@ impl Revocations {
     fn record(&self, sid: &str, exp: u64) {
         let mut q = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         if q.len() < 100_000 {
-            q.push((sid.to_string(), exp));
+            q.insert(sid.to_string(), exp);
         }
         self.flush(&mut q);
     }
 
     /// Append the queued logouts, under the file's lock and to the file that
-    /// is at `path` now (not one compaction just replaced).
-    fn flush(&self, q: &mut Vec<(String, u64)>) {
+    /// is at `path` now (not one compaction just replaced). A failure keeps
+    /// them queued and is reported on stderr and in the audit log.
+    fn flush(&self, q: &mut HashMap<String, u64>) {
         use std::io::Write;
         let now = super::jwt::now_s();
-        q.retain(|(_, exp)| *exp >= now);
+        q.retain(|_, exp| *exp >= now);
         if q.is_empty() {
             return;
         }
-        let text: String = q
-            .iter()
-            .map(|(sid, exp)| format!("{}\n", json!({"sid": sid, "exp": exp})))
-            .collect();
-        let r = lock_revocations(&self.path).and_then(|_lock| {
+        let r = lock_revocations(&self.path, false).and_then(|_lock| {
             for _ in 0..3 {
                 let mut f = open_nofollow(&self.path, true)?;
                 if same_file(&f, &self.path)? {
+                    let text: String = q
+                        .iter()
+                        .map(|(sid, exp)| format!("{}\n", json!({"sid": sid, "exp": exp})))
+                        .collect();
                     return f.write_all(text.as_bytes());
                 }
             }
             Err(std::io::Error::other("the file keeps being replaced"))
         });
+        use std::sync::atomic::Ordering;
         match r {
-            Ok(()) => q.clear(),
-            Err(e) => eprintln!(
-                "[anofox-serve] revocation file {}: {e} — {} logout(s) queued",
-                self.path.display(),
-                q.len()
-            ),
+            Ok(()) => {
+                q.clear();
+                self.failing.store(false, Ordering::SeqCst);
+            }
+            Err(e) => {
+                let e = format!("{e} — {} logout(s) queued", q.len());
+                eprintln!(
+                    "[anofox-serve] revocation file {}: {e}",
+                    self.path.display()
+                );
+                if !self.failing.swap(true, Ordering::SeqCst) {
+                    if let Some(a) = self.audit.get() {
+                        a.write(&super::audit::Event {
+                            event: "revocation_file",
+                            outcome: "error",
+                            reason: Some("write_failed"),
+                            detail: Some(&e),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -484,7 +524,8 @@ fn open_nofollow(path: &std::path::Path, append: bool) -> std::io::Result<std::f
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK: a FIFO put in its place can't hang the server
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let f = o.open(path)?;
     let meta = f.metadata()?;
@@ -501,16 +542,57 @@ fn open_nofollow(path: &std::path::Path, append: bool) -> std::io::Result<std::f
     Ok(f)
 }
 
-/// The exclusive lock on `<path>.lock` (`0600`, no symlinks) that every
-/// writer of a revocation file holds while it appends or compacts, so a
-/// logout never lands in a file compaction is about to replace. Released
-/// when the returned handle is dropped.
-fn lock_revocations(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+/// `<path>.lock`.
+fn lock_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
-    let f = crate::host::access::open_log(std::path::Path::new(&name))?;
-    f.lock()?;
-    Ok(f)
+    name.into()
+}
+
+/// The exclusive lock on `<path>.lock` that every writer of a revocation
+/// file holds while it appends or compacts, so a logout never lands in a
+/// file compaction is about to replace. Released when the returned handle is
+/// dropped. The lock file is opened read + write (what `LockFileEx` needs on
+/// Windows), `0600`, never through a symlink, a regular file only.
+/// `wait`: block until the lock is free (compaction at start); otherwise (a
+/// request) give up after about a second.
+fn lock_revocations(path: &std::path::Path, wait: bool) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let f = o.open(lock_path(path))?;
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("lock file: not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    if wait {
+        f.lock()?;
+        return Ok(f);
+    }
+    for _ in 0..200 {
+        match f.try_lock() {
+            Ok(()) => return Ok(f),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "lock file: held too long by another writer",
+    ))
 }
 
 /// Is the open file `f` still the one at `path` (same inode, not replaced)?
@@ -539,7 +621,7 @@ fn compact_revocations(
     before_rename: impl FnOnce(),
 ) -> std::io::Result<bool> {
     use std::io::Write;
-    let _lock = lock_revocations(path)?;
+    let _lock = lock_revocations(path, true)?;
     let mut f = open_nofollow(path, false)?;
     let mut text = String::new();
     std::io::Read::read_to_string(&mut f, &mut text)?;
@@ -788,8 +870,9 @@ mod tests {
         Revocations {
             path: path.to_path_buf(),
             stamp: Mutex::new((None, None)),
-            pending: Mutex::new(Vec::new()),
+            pending: Mutex::new(HashMap::new()),
             broken: std::sync::atomic::AtomicBool::new(false),
+            failing: std::sync::atomic::AtomicBool::new(false),
             audit: std::sync::OnceLock::new(),
         }
     }
@@ -851,13 +934,17 @@ mod tests {
                     r.record(sid, exp);
                     std::thread::yield_now();
                 }
+                r
             });
             let mut compactions = 0;
             while !t.is_finished() {
                 compact_revocations(&file, std::thread::yield_now).unwrap();
                 compactions += 1;
+                std::thread::sleep(std::time::Duration::from_micros(200));
             }
-            t.join().unwrap();
+            // what a reload does with logouts queued while the lock was busy
+            let r = t.join().unwrap();
+            r.flush(&mut r.pending.lock().unwrap());
             assert!(compactions > 0);
             let text = std::fs::read_to_string(&file).unwrap();
             missing += sids.iter().filter(|s| !text.contains(s.as_str())).count();
@@ -879,7 +966,12 @@ mod tests {
         for i in 0..50 {
             r.record(&format!("p{i}"), exp);
         }
-        assert!(r.pending.lock().unwrap().is_empty());
+        // what a reload does with logouts queued while the lock was busy
+        let mut q = r.pending.lock().unwrap();
+        for _ in 0..30 {
+            r.flush(&mut q);
+        }
+        assert!(q.is_empty());
     }
 
     #[test]
@@ -904,6 +996,7 @@ mod tests {
                 .unwrap();
             let status = loop {
                 compact_revocations(&file, || {}).unwrap();
+                std::thread::sleep(std::time::Duration::from_micros(200));
                 if let Some(s) = child.try_wait().unwrap() {
                     break s;
                 }
@@ -970,6 +1063,19 @@ mod tests {
             a.logout("login", &t1),
             Some((s1.sid.clone(), "alice".into()))
         );
+        // logging out again records (and audits) nothing more
+        assert_eq!(a.logout("login", &t1), None);
+        a.revoke(&s1.sid, s1.exp);
+        assert_eq!(
+            a.revocations
+                .as_ref()
+                .unwrap()
+                .pending
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(!file.exists());
         // a symlink in its place: not written through either
         #[cfg(unix)]
@@ -1001,6 +1107,129 @@ mod tests {
             .unwrap();
         assert_eq!(b.verify("login", &t1), Err("revoked"));
         assert_eq!(b.verify("login", &t2), Err("revoked"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lock_file_without_its_revocation_file_refuses_to_start() {
+        let dir = tmp("l4");
+        let file = dir.join("revoked.jsonl");
+        let start = || Sessions::new(None, "login", 60).with_revocation_file(file.clone());
+        // the very first start creates both
+        assert!(start().is_ok());
+        assert!(file.exists() && lock_path(&file).exists());
+        // the file is deleted (or moved away): refuse, don't start empty
+        std::fs::remove_file(&file).unwrap();
+        let e = start().unwrap_err();
+        assert!(e.contains("missing"), "{e}");
+        assert!(!file.exists());
+        // restored: starts again
+        std::fs::write(&file, "").unwrap();
+        assert!(start().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_never_hangs_the_server() {
+        let dir = tmp("l2");
+        let fifo = |p: &std::path::Path| {
+            let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        };
+        let file = dir.join("revoked.jsonl");
+        fifo(&file);
+        let lock_file = dir.join("other.jsonl");
+        std::fs::write(&lock_file, "").unwrap();
+        fifo(&lock_path(&lock_file));
+        // each open of a FIFO (no writer, no reader) fails at once
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (f, l) = (file.clone(), lock_file.clone());
+        std::thread::spawn(move || {
+            let r = [
+                open_nofollow(&f, false).is_err(),
+                open_nofollow(&f, true).is_err(),
+                crate::host::access::open_log(&f).is_err(),
+                lock_revocations(&l, false).is_err(),
+                lock_revocations(&l, true).is_err(),
+                Sessions::new(None, "login", 60)
+                    .with_revocation_file(f.clone())
+                    .is_err(),
+            ];
+            tx.send(r).unwrap();
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("hung on a FIFO");
+        assert_eq!(r, [true; 6]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_is_private_read_write_and_no_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("l3");
+        let file = dir.join("revoked.jsonl");
+        std::fs::write(&file, "").unwrap();
+        // created 0600; an existing one is tightened
+        drop(lock_revocations(&file, true).unwrap());
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&lock_path(&file)), 0o600);
+        std::fs::set_permissions(lock_path(&file), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let l = lock_revocations(&file, true).unwrap();
+        assert_eq!(mode(&lock_path(&file)), 0o600);
+        // opened for reading and writing (LockFileEx on Windows needs it)
+        let fl = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&l), libc::F_GETFL) };
+        assert_eq!(fl & libc::O_ACCMODE, libc::O_RDWR);
+        assert_eq!(fl & libc::O_APPEND, 0);
+        drop(l);
+        // never through a symlink
+        let other = dir.join("other.jsonl");
+        std::fs::write(&other, "").unwrap();
+        std::os::unix::fs::symlink(dir.join("target"), lock_path(&other)).unwrap();
+        assert!(lock_revocations(&other, true).is_err());
+        assert!(!dir.join("target").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lock_held_too_long_queues_the_logout_and_is_audited_once() {
+        let dir = tmp("l5");
+        let file = dir.join("revoked.jsonl");
+        let a = Sessions::new(None, "login", 3600)
+            .with_revocation_file(file.clone())
+            .unwrap();
+        let audit = dir.join("audit.jsonl");
+        a.set_audit(std::sync::Arc::new(
+            super::super::audit::AuditLog::new(audit.to_str().unwrap()).unwrap(),
+        ));
+        // another writer holds the lock: a logout waits about a second, no more
+        let held = lock_revocations(&file, true).unwrap();
+        let (t1, s1) = a.issue("login", 60, &claims(), &Scope::default());
+        let (t2, s2) = a.issue("login", 60, &claims(), &Scope::default());
+        let started = std::time::Instant::now();
+        assert!(a.logout("login", &t1).is_some());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(a.logout("login", &t2).is_some());
+        // refused in memory at once, queued for the file, reported once
+        assert_eq!(a.verify("login", &t1), Err("revoked"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(
+            log.matches("\"reason\":\"write_failed\"").count(),
+            1,
+            "{log}"
+        );
+        assert!(log.contains("\"audit\":\"revocation_file\""), "{log}");
+        // released: the next write takes both
+        drop(held);
+        let (_, s3) = a.issue("login", 60, &claims(), &Scope::default());
+        a.revoke(&s3.sid, s3.exp);
+        let text = std::fs::read_to_string(&file).unwrap();
+        for s in [&s1, &s2, &s3] {
+            assert!(text.contains(&s.sid), "{text}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

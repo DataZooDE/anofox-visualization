@@ -691,7 +691,9 @@ pub fn open_log(p: &std::path::Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK: a FIFO put in its place can't hang the server
+        o.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         let f = o.open(p)?;
         let meta = f.metadata()?;
         if !meta.is_file() {
