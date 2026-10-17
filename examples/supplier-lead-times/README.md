@@ -26,15 +26,21 @@ safety stock rise with it. The *Over time* chart steps through it
 
 ## Tabs
 
-Inputs: the supplier (`::DROPDOWN`, its region and promise as a hint) and the
-service level (`::BUTTONS` 95 / 90 / 98 / 99 %).
+Inputs: the supplier (`::DROPDOWN`, its region as a hint) and the service
+level (`::BUTTONS` 95 / 90 / 98 / 99 %). The selected supplier is highlighted
+everywhere: the KPI tiles answer for it (the all-supplier figure in each
+caption), every all-supplier chart draws it in the accent and the others in a
+muted grey (a theme palette with grey second; "other suppliers" sorts after
+every supplier name), and the supplier and item tables mark its rows. A click
+on a supplier in a chart, or *Highlight* in the supplier table, selects it
+(`'?v.supplier={value}'::LINK`).
 
 | Tab | Shows |
 |---|---|
-| header | the question and its answer; on-time share, days late when late, lead-time variability (CV) and the safety stock held for lead-time variability, each with thresholds and the change against the previous quarter |
-| Reliability | days late or early against the promise per supplier (`::BOXPLOT`), promised vs actual lead time (median and 10–90 % range), every supplier with a monthly sparkline; a click on a supplier opens its orders (`::LINK`) |
+| header | the question and its answer; for the selected supplier: on-time share, mean and 90 % lead time, variability (CV) and the safety stock held for lead-time variability, each with thresholds, the change against the previous quarter and the all-supplier figure |
+| Reliability | days late or early against the promise per supplier (`::BOXPLOT`), promised vs actual lead time (median and 10–90 % range), every supplier with a monthly sparkline |
 | Over time | the selected supplier's weekly lead-time median with nested 95 / 80 / 50 % bands (`::BAND_LOWER` / `::BAND_UPPER`), the lead time planning assumed, the drift story (`::STORY`), strips (`::TRACK`) for late lines, disruptions and the drift monitor; the CUSUM with its warning and alarm lines; the calibration proposals |
-| Safety stock | King's formula in TeX, $SS = z\sqrt{\bar L\sigma_D^2+\bar D^2\sigma_L^2}$, with the current values; safety-stock value per supplier split into what demand variability and what lead-time variability needs, and the sales value not served from stock with each plan — both move (`'tween'::TRANSITION`) when the service level changes; every item |
+| Safety stock | King's formula in TeX, $SS = z\sqrt{\bar L\sigma_D^2+\bar D^2\sigma_L^2}$, with the current values; per supplier the safety stock lead-time variability adds and the sales a fixed-lead-time plan would lose — both move (`'tween'::TRANSITION`) when the service level changes; every item |
 | Orders | the selected supplier's lines by order day, what is on order now (overdue against the promise), every closed line |
 
 ## Definitions

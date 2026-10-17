@@ -27,6 +27,10 @@
 
 -- ── Look ─────────────────────────────────────────────────────────────────────
 SELECT 'How reliable are our suppliers, and what does it cost us in stock?'::DASHBOARD_TITLE;
+-- The house palette, with grey second: the selected supplier is drawn in the
+-- accent, every other supplier (the second series) muted.
+SELECT '{"extends": "light", "palette": ["#2563eb", "#b8bec8", "#eb6834", "#1baf7a", "#eda100", "#4a3aa7"],
+         "dark": {"palette": ["#3b82f6", "#5b6472", "#d95926", "#199e70", "#c98500", "#9085e9"]}}'::THEME;
 
 -- ── Data ─────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE TABLE lt_po AS FROM read_csv('data/supplier-lead-times/po_history.csv');
@@ -57,6 +61,10 @@ CREATE OR REPLACE MACRO lt_qname(d) AS 'Q' || quarter(d) || ' ' || year(d);
 
 -- The inputs.
 CREATE OR REPLACE MACRO lt_sup() AS coalesce(getvariable('supplier'), 'Castings');
+-- The selected supplier as its own series, the rest as one muted series
+-- ("other suppliers" sorts after every capitalised name, so it takes the
+-- second, grey palette slot).
+CREATE OR REPLACE MACRO lt_pick(supplier) AS CASE WHEN supplier = lt_sup() THEN supplier ELSE 'other suppliers' END;
 CREATE OR REPLACE MACRO lt_level_txt() AS coalesce(getvariable('service_level'), '95 %');
 CREATE OR REPLACE MACRO lt_alpha() AS replace(lt_level_txt(), ' %', '')::INTEGER / 100;
 CREATE OR REPLACE MACRO lt_z() AS
@@ -151,8 +159,8 @@ SELECT ('**The purchasing lead** of a distributor buys ' || (SELECT count(*) FRO
         ' % of it (*Safety stock*).')::MARKDOWN;
 
 SELECT 'Inputs'::GROUP;
-SELECT s.name AS supplier ::DROPDOWN, 'Supplier'::LABEL,
-       s.region || ', promises ' || s.promised_days || ' days' ::HINT
+SELECT s.name AS supplier ::DROPDOWN, 'Supplier (highlighted)'::LABEL,
+       replace(s.region, ', sea freight', ' (sea)') ::HINT
 FROM lt_suppliers s ORDER BY s.name = 'Castings' DESC, s.supplier_id;
 SELECT service_level ::BUTTONS, 'Service level'::LABEL, hint ::HINT
 FROM (VALUES (1, '95 %', 'no stockout in 95 of 100 replenishment cycles'),
@@ -161,29 +169,39 @@ FROM (VALUES (1, '95 %', 'no stockout in 95 of 100 replenishment cycles'),
              (4, '99 %', 'no stockout in 99 of 100 cycles')) t(k, service_level, hint) ORDER BY k;
 SELECT 1::ENDGROUP;
 
-SELECT ('All suppliers, ' || lt_qname(lt_q0()))::GROUP;
-SELECT 100 * avg((days_late <= 0)::INTEGER) FILTER (WHERE closed_at >= lt_q0()) ::PERCENT,
-       100 * avg((days_late <= 0)::INTEGER) FILTER (WHERE closed_at >= lt_q1() AND closed_at < lt_q0()) ::DELTA,
+-- The selected supplier's quarter against the one before; the caption
+-- carries the same figure over all suppliers.
+SELECT (lt_sup() || ', ' || lt_qname(lt_q0()) || ' — captions: all suppliers')::GROUP;
+SELECT 100 * a.on_time ::PERCENT, 100 * b.on_time ::DELTA,
        'abs'::DELTA_FORMAT, ('vs ' || lt_qname(lt_q1()))::DELTA_LABEL,
-       'On time'::LABEL, '<80:bad; <90:warn; good'::THRESHOLDS,
-       'Share of order lines whose last receipt arrived by the date the supplier promised.'::INFO
-FROM lt_lines;
-SELECT round(avg(days_late) FILTER (WHERE closed_at >= lt_q0() AND days_late > 0), 1) ::METRIC,
-       round(avg(days_late) FILTER (WHERE closed_at >= lt_q1() AND closed_at < lt_q0() AND days_late > 0), 1) ::DELTA_LOWER_GOOD,
+       ('On time · all ' || (SELECT round(100 * avg((days_late <= 0)::INTEGER))::INTEGER FROM lt_lines WHERE closed_at >= lt_q0()) || ' %')::LABEL,
+       '<80:bad; <90:warn; good'::THRESHOLDS,
+       'Share of the supplier''s order lines whose last receipt arrived by the date it promised. The caption: all suppliers'' lines.'::INFO
+FROM lt_stats(lt_q0(), lt_today() + 1) a JOIN lt_stats(lt_q1(), lt_q0()) b USING (supplier) WHERE a.supplier = lt_sup();
+SELECT round(a.mean_lt, 1) ::METRIC, round(b.mean_lt, 1) ::DELTA_LOWER_GOOD,
        'abs'::DELTA_FORMAT, ('vs ' || lt_qname(lt_q1()))::DELTA_LABEL,
-       'Days late, when late'::LABEL, '>=4:bad; >=2:warn; good'::THRESHOLDS,
-       'Average days between the promised date and the last receipt, over the lines that came late.'::INFO
-FROM lt_lines;
-SELECT (SELECT 100 * sum(cv * lines) / sum(lines) FROM lt_stats(lt_q0(), lt_today() + 1)) ::PERCENT,
-       (SELECT 100 * sum(cv * lines) / sum(lines) FROM lt_stats(lt_q1(), lt_q0())) ::DELTA_LOWER_GOOD,
+       ('Mean lead time, days · promised ' || a.promised)::LABEL,
+       ('>=' || round(1.2 * a.promised, 1) || ':bad; >' || a.promised || ':warn; good')::THRESHOLDS,
+       'Order day to the quantity-weighted mean receipt day, lines closed in the quarter. Amber above the promise, red 20 % above it.'::INFO
+FROM lt_stats(lt_q0(), lt_today() + 1) a JOIN lt_stats(lt_q1(), lt_q0()) b USING (supplier) WHERE a.supplier = lt_sup();
+SELECT round(a.p90_lt, 1) ::METRIC, round(b.p90_lt, 1) ::DELTA_LOWER_GOOD,
        'abs'::DELTA_FORMAT, ('vs ' || lt_qname(lt_q1()))::DELTA_LABEL,
-       'Lead-time variability (CV)'::LABEL, '>=20:bad; >=10:warn; good'::THRESHOLDS,
-       'Coefficient of variation: standard deviation / mean of each supplier''s lead time, averaged over the suppliers by order lines. 10 % means a 20-day lead time typically varies by ±2 days.'::INFO;
-SELECT (SELECT round(sum((ss_kings - ss_fixed) * unit_cost)) FROM lt_ss(lt_q0(), lt_today() + 1)) ::METRIC,
-       (SELECT round(sum((ss_kings - ss_fixed) * unit_cost)) FROM lt_ss(lt_q1(), lt_q0())) ::DELTA_LOWER_GOOD,
+       '90 % arrive within, days'::LABEL,
+       ('>=' || round(1.5 * a.promised, 1) || ':bad; >' || round(1.2 * a.promised, 1) || ':warn; good')::THRESHOLDS,
+       'The 90 % quantile of the lead time: what to plan for when one late delivery in ten is acceptable.'::INFO
+FROM lt_stats(lt_q0(), lt_today() + 1) a JOIN lt_stats(lt_q1(), lt_q0()) b USING (supplier) WHERE a.supplier = lt_sup();
+SELECT 100 * a.cv ::PERCENT, 100 * b.cv ::DELTA_LOWER_GOOD,
+       'abs'::DELTA_FORMAT, ('vs ' || lt_qname(lt_q1()))::DELTA_LABEL,
+       ('Variability (CV) · all ' || (SELECT round(100 * sum(cv * lines) / sum(lines))::INTEGER FROM lt_stats(lt_q0(), lt_today() + 1)) || ' %')::LABEL,
+       '>=20:bad; >=10:warn; good'::THRESHOLDS,
+       'Coefficient of variation: standard deviation / mean of the lead time. 10 % means a 20-day lead time typically varies by ±2 days. The caption: averaged over all suppliers by order lines.'::INFO
+FROM lt_stats(lt_q0(), lt_today() + 1) a JOIN lt_stats(lt_q1(), lt_q0()) b USING (supplier) WHERE a.supplier = lt_sup();
+SELECT (SELECT round(sum((ss_kings - ss_fixed) * unit_cost)) FROM lt_ss(lt_q0(), lt_today() + 1) WHERE supplier = lt_sup()) ::METRIC,
+       (SELECT round(sum((ss_kings - ss_fixed) * unit_cost)) FROM lt_ss(lt_q1(), lt_q0()) WHERE supplier = lt_sup()) ::DELTA_LOWER_GOOD,
        ('vs ' || lt_qname(lt_q1()))::DELTA_LABEL,
-       'Stock held for lead-time variability (EUR)'::LABEL,
-       'Value of the safety stock that only exists because lead times vary: King''s formula minus the same stock with a fixed lead time, at the chosen service level, at unit cost.'::INFO;
+       ('Stock for lead-time variability, EUR · all ' ||
+        (SELECT round(sum((ss_kings - ss_fixed) * unit_cost) / 1000, 1) FROM lt_ss(lt_q0(), lt_today() + 1)) || 'k')::LABEL,
+       'Value of the safety stock that only exists because lead times vary: King''s formula minus the same stock with a fixed lead time, at the chosen service level, at unit cost. The caption: all suppliers.'::INFO;
 SELECT 1::ENDGROUP;
 
 -- ── 1 · Reliability ──────────────────────────────────────────────────────────
@@ -196,13 +214,13 @@ SELECT ('**Which suppliers deliver when they promise?** Over the last two quarte
         (SELECT supplier || '** least often (' || round(100 * on_time)::INTEGER || ' % on time, ' || round(late_by, 1) || ' days late when late)'
          FROM lt_stats(lt_q1(), lt_today() + 1) ORDER BY on_time LIMIT 1) ||
         '. A box above the zero line is a supplier whose promise is optimistic; a tall box one whose lead time you cannot plan on. ' ||
-        'Click a supplier to see its orders.')::MARKDOWN;
+        'The selected supplier is drawn in blue; click another supplier in a chart or the table to select it everywhere.')::MARKDOWN;
 
 SELECT 7::COL;
 SELECT 340::HEIGHT;
-SELECT supplier ::XAXIS, lead_time - promised_lt ::BOXPLOT,
+SELECT supplier ::XAXIS, lt_pick(supplier) ::CATEGORY, lead_time - promised_lt ::BOXPLOT,
        0 ::REFLINE,
-       '#Orders?v.supplier={value}' ::LINK,
+       '?v.supplier={value}' ::LINK,
        'Days late (+) or early (−) against the promise (0), per order line, last two quarters'::TITLE,
        'Lead time of each closed line minus the lead time the supplier promised for it. The box holds the middle half of the lines, the whiskers the rest up to 1.5 box heights, dots beyond are outliers. Lead time: order day to the quantity-weighted mean receipt day.'::INFO
 FROM lt_lines WHERE closed_at >= lt_q1()
@@ -211,19 +229,21 @@ ORDER BY supplier;
 SELECT 5::COL;
 SELECT 340::HEIGHT;
 SELECT supplier ::XAXIS, kind ::CATEGORY, v ::SCATTER, lo ::YMIN, hi ::YMAX, 1 ::FLIP,
-       '#Orders?v.supplier={value}' ::LINK,
+       '?v.supplier={value}' ::LINK,
        'Promised vs actual lead time (days)'::TITLE,
-       'Promised: the supplier''s contracted lead time. Actual: the median of the last two quarters, the line from the 10 % to the 90 % quantile.'::INFO
+       'Promised: the supplier''s contracted lead time. Actual (blue: the selected supplier): the median of the last two quarters, the line from the 10 % to the 90 % quantile.'::INFO
 FROM (SELECT supplier, 'promised' AS kind, promised::DOUBLE AS v, NULL::DOUBLE AS lo, NULL::DOUBLE AS hi
       FROM lt_stats(lt_q1(), lt_today() + 1)
       UNION ALL
-      SELECT supplier, 'actual (median, 10–90 %)', quantile_cont(lead_time, 0.5), quantile_cont(lead_time, 0.1), quantile_cont(lead_time, 0.9)
+      SELECT supplier, lt_pick(supplier), quantile_cont(lead_time, 0.5), quantile_cont(lead_time, 0.1), quantile_cont(lead_time, 0.9)
       FROM lt_lines WHERE closed_at >= lt_q1() GROUP BY supplier)
-ORDER BY supplier, kind DESC;
+ORDER BY supplier, kind;
 
 SELECT 12::COL;
 SELECT 'On time %: <80:bad; <90:warn; good | CV %: >=20:bad; >=10:warn; good'::THRESHOLDS;
-SELECT a.supplier AS "Supplier" ::TABLE, s.region AS "Region", a.promised AS "Promised (days)",
+SELECT a.supplier AS "Supplier" ::TABLE,
+       CASE WHEN a.supplier = lt_sup() THEN 'selected' END AS "Shown" ::BADGE,
+       s.region AS "Region", a.promised AS "Promised (days)",
        round(a.mean_lt, 1) AS "Mean (days)", round(a.p90_lt, 1) AS "90 % within (days)",
        round(100 * a.cv) AS "CV %",
        round(100 * a.on_time) AS "On time %", round(100 * b.on_time) AS "On time % before",
@@ -231,7 +251,7 @@ SELECT a.supplier AS "Supplier" ::TABLE, s.region AS "Region", a.promised AS "Pr
        a.lines AS "Lines",
        (SELECT list(m ORDER BY mo) FROM (SELECT date_trunc('month', closed_at) AS mo, avg(lead_time) AS m
                                         FROM lt_lines l WHERE l.supplier = a.supplier GROUP BY 1)) AS "Mean lead time by month" ::SPARKLINE,
-       '#Orders?v.supplier={value}' AS "Orders" ::LINK,
+       '?v.supplier={value}' AS "Highlight" ::LINK,
        ('Every supplier, ' || lt_qname(lt_q0()) || ' (before: ' || lt_qname(lt_q1()) || ')')::TITLE,
        'Mean and 90 % quantile of the lead time of the lines closed in the quarter; CV = standard deviation / mean (the variability). The sparkline runs from Jan 2025.'::INFO
 FROM lt_stats(lt_q0(), lt_today() + 1) a JOIN lt_stats(lt_q1(), lt_q0()) b USING (supplier)
@@ -333,7 +353,9 @@ SELECT '**What does lead-time variability cost?** Safety stock covers the demand
 
 $$SS = z\sqrt{\bar L\,\sigma_D^2 + \bar D^2\,\sigma_L^2}$$
 
-$z$ is the service-level factor ({{z}} at {{lvl}}), $\bar L$ and $\sigma_L$ the mean and standard deviation of the lead time (days, lines closed in {{q}}), $\bar D$ and $\sigma_D$ those of daily demand. With $\sigma_L = 0$ it falls back to $z\,\sigma_D\sqrt{\bar L}$. Over all items the second term adds **€{{extra}}k** of safety stock to the **€{{fixed}}k** a fixed lead time would need; **{{worst}}** accounts for the most. Change the service level to see both move.'::MARKDOWN,
+$z$ is the service-level factor ({{z}} at {{lvl}}), $\bar L$ and $\sigma_L$ the mean and standard deviation of the lead time (days, lines closed in {{q}}), $\bar D$ and $\sigma_D$ those of daily demand. With $\sigma_L = 0$ it falls back to $z\,\sigma_D\sqrt{\bar L}$. Over all items the second term adds **€{{extra}}k** of safety stock to the **€{{fixed}}k** a fixed lead time would need; **{{worst}}** accounts for the most; the selected **{{sup}}** for €{{sel}}k (blue below). Change the service level to see the charts move.'::MARKDOWN,
+       lt_sup() AS sup,
+       (SELECT round(sum((ss_kings - ss_fixed) * unit_cost) / 1000, 1) FROM lt_ss(lt_q0(), lt_today() + 1) WHERE supplier = lt_sup()) AS sel,
        round(lt_z(), 2) AS z, lt_level_txt() AS lvl, lt_qname(lt_q0()) AS q,
        (SELECT round(sum((ss_kings - ss_fixed) * unit_cost) / 1000, 1) FROM lt_ss(lt_q0(), lt_today() + 1)) AS extra,
        (SELECT round(sum(ss_fixed * unit_cost) / 1000, 1) FROM lt_ss(lt_q0(), lt_today() + 1)) AS fixed,
@@ -341,36 +363,31 @@ $z$ is the service-level factor ({{z}} at {{lvl}}), $\bar L$ and $\sigma_L$ the 
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
-SELECT supplier ::XAXIS, part ::CATEGORY, eur ::BARCHART_STACKED, 1 ::FLIP, '€' ::YFORMAT,
-       'tween' ::TRANSITION,
-       ('Safety stock value by supplier at ' || lt_level_txt() || ', by what it covers (EUR)')::TITLE,
-       'At unit cost, summed over each supplier''s items. Demand varies: the stock a fixed lead time would need. Lead time varies: what King''s formula adds on top.'::INFO
-FROM (SELECT supplier, 'demand varies' AS part, sum(ss_fixed * unit_cost) AS eur FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL
-      UNION ALL
-      SELECT supplier, 'lead time varies', sum((ss_kings - ss_fixed) * unit_cost) FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL)
-ORDER BY supplier, part DESC;
+SELECT supplier ::XAXIS, lt_pick(supplier) ::CATEGORY, round(sum((ss_kings - ss_fixed) * unit_cost)) ::BARCHART, 1 ::FLIP, '€' ::YFORMAT,
+       'tween' ::TRANSITION, '?v.supplier={value}' ::LINK,
+       ('Safety stock added by lead-time variability at ' || lt_level_txt() || ' (EUR)')::TITLE,
+       'King''s formula minus the stock a fixed lead time would need, at unit cost, summed over each supplier''s items. Blue: the selected supplier.'::INFO
+FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL ORDER BY supplier;
 
 SELECT 6::COL;
 SELECT 340::HEIGHT;
-SELECT supplier ::XAXIS, plan ::CATEGORY, round(short) ::BARCHART, 1 ::FLIP, '€' ::YFORMAT,
-       'tween' ::TRANSITION,
-       ('Sales value not served from stock per year at ' || lt_level_txt() || ' (EUR)')::TITLE,
-       'Demand not served from stock in a year at unit cost, summed over the supplier''s items: (1 − fill rate) × demand × unit cost. Safety stock planned as if the lead time were fixed, against King''s formula. Fill rate per order cycle of one review period: 1 − σ·G(k)/Q, where σ is the spread of demand over the real (varying) lead time, k the safety stock in units of σ, G the normal loss function and Q the order quantity. Planning as if the lead time were fixed leaves the shelf short more often.'::INFO
-FROM (SELECT supplier, 'lead time as if fixed' AS plan, sum((1 - fill_fixed) * d * 365 * unit_cost) AS short FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL
-      UNION ALL
-      SELECT supplier, 'King''s formula', sum((1 - fill_kings) * d * 365 * unit_cost) FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL)
-ORDER BY supplier, plan;
+SELECT supplier ::XAXIS, lt_pick(supplier) ::CATEGORY, round(sum((fill_kings - fill_fixed) * d * 365 * unit_cost)) ::BARCHART, 1 ::FLIP, '€' ::YFORMAT,
+       'tween' ::TRANSITION, '?v.supplier={value}' ::LINK,
+       ('Sales a fixed-lead-time plan would lose per year at ' || lt_level_txt() || ' (EUR)')::TITLE,
+       'Demand not served from stock in a year at unit cost when the safety stock is planned as if the lead time were fixed, minus the same with King''s formula. Fill rate per order cycle of one review period: 1 − σ·G(k)/Q, where σ is the spread of demand over the real (varying) lead time, k the safety stock in units of σ, G the normal loss function and Q the order quantity. Blue: the selected supplier.'::INFO
+FROM lt_ss(lt_q0(), lt_today() + 1) GROUP BY ALL ORDER BY supplier;
 
 SELECT 12::COL;
 SELECT sku_id AS "Item" ::TABLE, description AS "Description", supplier AS "Supplier",
+       CASE WHEN supplier = lt_sup() THEN 'selected' END AS "Shown" ::BADGE,
        round(d, 1) AS "Demand per day", round(sd_d, 1) AS "Demand σ",
        round(l, 1) AS "Lead time (days)", round(sd_l, 1) AS "Lead time σ",
        round(ss_fixed) AS "Safety stock, fixed lead time", round(ss_kings) AS "Safety stock, King",
        round((ss_kings - ss_fixed) * unit_cost) AS "Extra for lead-time variability (EUR)",
        round(100 * fill_kings, 1) AS "Fill rate %",
-       ('Every item at ' || lt_level_txt() || ', lead times of ' || lt_qname(lt_q0()) || ', largest extra first')::TITLE
+       ('Every item at ' || lt_level_txt() || ', lead times of ' || lt_qname(lt_q0()) || ': ' || lt_sup() || ' first, then by the extra')::TITLE
 FROM lt_ss(lt_q0(), lt_today() + 1)
-ORDER BY (ss_kings - ss_fixed) * unit_cost DESC;
+ORDER BY supplier = lt_sup() DESC, (ss_kings - ss_fixed) * unit_cost DESC;
 
 -- ── 4 · Orders ───────────────────────────────────────────────────────────────
 SELECT 'Orders'::TAB;
