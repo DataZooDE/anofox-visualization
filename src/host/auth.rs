@@ -59,7 +59,9 @@ pub struct Scope {
 pub fn lockable_var(name: &str) -> bool {
     crate::host::serving::valid_ident(name)
         && !access::is_reserved_var(name)
-        && !name.to_ascii_lowercase().starts_with("__anofox")
+        && !name
+            .to_ascii_lowercase()
+            .starts_with(crate::host::policy::RESERVED_PREFIX)
 }
 
 impl Scope {

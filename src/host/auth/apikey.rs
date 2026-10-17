@@ -115,6 +115,9 @@ pub fn parse_file(text: &str) -> Result<Vec<KeyEntry>, String> {
             .ok()
             .filter(|u| !u.is_empty())
             .ok_or_else(|| bad("user is required"))?;
+        if crate::host::access::is_reserved_user(&user) {
+            return Err(bad("user names of the form embed:… are reserved"));
+        }
         let mut groups = Vec::new();
         if let Some(g) = o.get("groups") {
             let g = g

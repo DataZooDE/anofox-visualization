@@ -461,6 +461,9 @@ impl ClaimMap {
         // An e-mail address as the identity only when the IdP verified it:
         // on IdPs where users can set their own address, an unverified one
         // would let anyone become anyone (nOAuth, #115).
+        if crate::host::access::is_reserved_user(&user) {
+            return Err(AuthError::Malformed);
+        }
         let unverified = !verified(payload.get("email_verified"));
         if unverified && is_email_field(&self.user) {
             return Err(AuthError::Unverified);

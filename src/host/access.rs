@@ -392,6 +392,9 @@ impl ProxyAuth {
         if user.is_empty() {
             return Err(AuthError::NoUser);
         }
+        if is_reserved_user(&user) {
+            return Err(AuthError::Malformed);
+        }
         let mut groups = Vec::new();
         if let Some(h) = &self.header_groups {
             if let Some(g) = one(&h.header)? {
@@ -428,6 +431,17 @@ impl ProxyAuth {
             attrs,
         })
     }
+}
+
+/// Users of this form (`embed:<dashboard>`) are made by the server for embed
+/// links without a `user`; no proxy header, token, or API key may claim one.
+pub const RESERVED_USER_PREFIX: &str = "embed:";
+
+/// Is `user` in the server's reserved form?
+pub fn is_reserved_user(user: &str) -> bool {
+    user.len() >= RESERVED_USER_PREFIX.len()
+        && user.as_bytes()[..RESERVED_USER_PREFIX.len()]
+            .eq_ignore_ascii_case(RESERVED_USER_PREFIX.as_bytes())
 }
 
 /// One claim value as the server accepts it from any login method: trimmed,
