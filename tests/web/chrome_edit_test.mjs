@@ -12,7 +12,7 @@ const grab = (name) => {
   return m[0];
 };
 const { setChromeSql, chromeUrlOk } = new Function(
-  `${grab("setChromeSql")}\n${grab("chromeUrlOk")}\nreturn { setChromeSql, chromeUrlOk };`
+  `${grab("chromeStmt")}\n${grab("setChromeSql")}\n${grab("chromeUrlOk")}\nreturn { setChromeSql, chromeUrlOk };`
 )();
 
 // Update in place: the literal changes, quotes are doubled, the rest is untouched.

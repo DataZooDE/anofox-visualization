@@ -144,8 +144,8 @@ for (const e of EXAMPLES) {
   assert.ok(e.name.endsWith("?"), `${e.name}: name it as a plain question`);
   assert.equal(e.id, slugify(e.name));
   // examples first: an id opens the example even when a saved dashboard has its name
-  assert.equal(resolveDash(e.id, EXAMPLES, { [e.id]: { sql: "x" } }).entry, e);
-  assert.equal(resolveDash(e.name, EXAMPLES, { [e.name]: { sql: "x" } }).entry, e);
+  assert.equal(resolveDash(e.id, EXAMPLES, [{ id: e.id, name: e.id, sql: "x" }]).entry, e);
+  assert.equal(resolveDash(e.name, EXAMPLES, [{ id: "x", name: e.name, sql: "x" }]).entry, e);
 }
 for (const a of lib.EX_AREAS) assert.ok(EXAMPLES.some((e) => e.group === a), `area "${a}" is empty`);
 // the extension feature tags stay searchable
@@ -154,7 +154,7 @@ for (const t of ["charts", "tables", "forecast", "statistics", "decide", "optimi
 
 // Every old name still opens the same example.
 for (const [name, want] of Object.entries(MASTER_NAMES)) {
-  const r = resolveDash(name, EXAMPLES, {});
+  const r = resolveDash(name, EXAMPLES, []);
   assert.ok(r && r.kind === "example", `?dashboard=${name} no longer resolves`);
   const from = origin.get(r.entry.id);
   if (want.startsWith("inline:")) assert.ok(from.includes(want.slice(7)), `${name} → ${r.entry.name}`);
@@ -162,9 +162,15 @@ for (const [name, want] of Object.entries(MASTER_NAMES)) {
 }
 for (const name of Object.keys(lib.LEGACY_NAMES)) assert.ok(MASTER_NAMES[name], `LEGACY_NAMES has an unknown name ${name}`);
 
-// Saved dashboards: by name after the examples; `my:` addresses them only.
-const saved = { "Weekly sales": { sql: "SELECT 1" }, "Who should sales call first?": { sql: "SELECT 2" } };
-assert.deepEqual(resolveDash("Weekly sales", EXAMPLES, saved), { kind: "mine", name: "Weekly sales", sql: "SELECT 1" });
+// Saved dashboards ([{id, name, sql}], the store's list): by name after the
+// examples; `my:` addresses them only (by id, name or the name's slug).
+const saved = [
+  { id: "weekly", name: "Weekly sales", sql: "SELECT 1" },
+  { id: "who-should-sales-call-first", name: "Who should sales call first?", sql: "SELECT 2" },
+];
+const ws = { kind: "mine", id: "weekly", name: "Weekly sales", sql: "SELECT 1" };
+assert.deepEqual(resolveDash("Weekly sales", EXAMPLES, saved), ws);
+assert.deepEqual(resolveDash("my:weekly", EXAMPLES, saved), ws);
 assert.equal(resolveDash("my:weekly-sales", EXAMPLES, saved).name, "Weekly sales");
 assert.equal(resolveDash("my:Weekly sales", EXAMPLES, saved).name, "Weekly sales");
 assert.equal(resolveDash("my:who-should-sales-call-first", EXAMPLES, saved).sql, "SELECT 2");
@@ -175,15 +181,16 @@ for (const miss of ["", null, "nope", "__proto__", "constructor", "my:", "my:__p
 
 // Without a link: the dashboard open last, if it still exists; else the first
 // saved one; else null (the first example).
-assert.deepEqual(startDash("my:Weekly sales", EXAMPLES, saved), { kind: "mine", name: "Weekly sales", sql: "SELECT 1" });
+assert.deepEqual(startDash("my:weekly", EXAMPLES, saved), ws);
+assert.deepEqual(startDash("my:Weekly sales", EXAMPLES, saved), ws, "a key from before ids (my:<name>)");
 assert.equal(startDash("ex:why-do-customers-cancel", EXAMPLES, saved).entry.name, "Why do customers cancel?");
 assert.equal(startDash("ex:gone", EXAMPLES, saved).name, "Weekly sales");
 assert.equal(startDash("my:Deleted", EXAMPLES, saved).name, "Weekly sales");
 assert.equal(startDash(null, EXAMPLES, saved).name, "Weekly sales");
-assert.equal(startDash("ex:why-do-customers-cancel", EXAMPLES, {}).entry.id, "why-do-customers-cancel");
-assert.equal(startDash("my:Weekly sales", EXAMPLES, {}), null);
-assert.equal(startDash(null, EXAMPLES, {}), null);
-assert.equal(startDash("my:__proto__", EXAMPLES, {}), null);
+assert.equal(startDash("ex:why-do-customers-cancel", EXAMPLES, []).entry.id, "why-do-customers-cancel");
+assert.equal(startDash("my:Weekly sales", EXAMPLES, []), null);
+assert.equal(startDash(null, EXAMPLES, []), null);
+assert.equal(startDash("my:__proto__", EXAMPLES, []), null);
 
 // dashboard_meta is the servers' parser: group levels, tag clean-up, the cap.
 const m = JSON.parse(wasm.dashboard_meta("-- @title  T\n-- @group Sales/EMEA\n-- @tags A, b ,a\nSELECT 1;"));

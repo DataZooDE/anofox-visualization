@@ -1938,6 +1938,26 @@ the tooltip. Without a link (`?dashboard=` or a Share hash) the builder
 reopens the dashboard you had open last in this browser, else your first saved
 dashboard, else the first example.
 
+**My dashboards.** **Save** keeps the editor's dashboard under the name in the
+toolbar. Saving the dashboard you opened updates it (renames it, when you
+changed the name); a name another of your dashboards already has asks
+*Replace "…"?* first. The toolbar name and the page title
+(`::DASHBOARD_TITLE`, when the SQL has one) are one name: change either and
+the other follows. Each dashboard's **⋯** menu has *Rename* (in place: Enter
+saves, Esc cancels), *Duplicate* ("… copy", below it), *Move to group…* and
+*Delete*, which a toast lets you **Undo** for about 8 seconds. A dashboard's
+group is the `-- @group` line of its SQL: moving it, renaming a group or
+deleting one (its dashboards stay, ungrouped) rewrites that line, so the
+group travels with the SQL. Groups fold open and shut and keep their order
+(drag a group, or Alt+↑/↓ on it); empty ones stay until you delete them.
+Dashboards without a group come first. The header's **⋯** sorts them —
+*manual* (drag, or Alt+↑/↓), *name* or *last edited* — and shows or hides the
+examples. Everything lives in this browser's `localStorage`
+(`dp_dashboards`, version 2: `{v, items: {id: {name, sql, updated}}, order,
+groups, collapsed, sort}`); a store from before this version is converted on
+first load, the original kept as `dp_dashboards_v1`. `?dashboard=my:<id>`
+opens one of yours (the id is the slug of the name it was first saved under).
+
 Each example says where it belongs in its own header comments (`-- @title`,
 `-- @group`, `-- @tags`, see *Dashboard header comments*), so
 `web/examples/*.sql` is the single source of truth for the library. Open one
@@ -1946,9 +1966,8 @@ directly with `?dashboard=<id>`: the id is the slug of its name
 names the examples had before they were grouped (`?dashboard=Overview`,
 `?dashboard=Chart%20gallery`, …), so old links keep opening the same example.
 Examples are looked up first, then your saved dashboards by name;
-`?dashboard=my:<id>` (the slug of a saved dashboard's name) opens only one of
-yours. A linked example shows its area in the sidebar, even when the section
-is closed.
+`?dashboard=my:<id>` opens only one of yours. A linked example shows its area
+in the sidebar, even when the section is closed.
 
 Some examples run an anofox extension live in the browser (statistics,
 forecast); others (tabular, optimize, decide) read results computed natively,
