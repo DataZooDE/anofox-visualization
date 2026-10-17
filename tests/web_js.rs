@@ -96,3 +96,8 @@ fn web_story_keys_match_marks() {
 fn web_examples_library_keeps_old_links() {
     run_node("examples_lib_test.mjs");
 }
+
+#[test]
+fn web_my_dashboards_store() {
+    run_node("dash_store_test.mjs");
+}
