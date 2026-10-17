@@ -415,6 +415,14 @@ viewer-settable variables of a dashboard with a header line
 set) on a locked server. List the dashboard's inputs, named selections and
 `selected` (the client sends the shared click selection).
 
+**The dashboard's own `SET VARIABLE`s run after the viewer's values.** Every
+panel request sets the viewer's values (typed literals), then re-runs the
+dashboard's setup: a plain `SET VARIABLE x = …` overrides a viewer's `x`, a
+default such as `SET VARIABLE x = coalesce(nullif(getvariable('x'), ''),
+(SELECT max(run) FROM runs))` keeps it. The browser sends only what the viewer
+set (inputs, selections, `?v.` values) — never a dashboard's own `SET
+VARIABLE` text.
+
 **Per-viewer caching.** The result cache and the single-flight key include the
 viewer's claims (user, groups, every extra claim), so a result computed for one
 viewer is never served to — and a running query never shared with — a viewer

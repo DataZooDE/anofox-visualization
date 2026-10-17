@@ -174,3 +174,38 @@ fn profile_of_columns_named_like_its_aliases() {
         .sum();
     assert_eq!(hist, 40);
 }
+
+#[test]
+fn an_info_column_is_omitted_from_rows_and_search() {
+    // A ::PAGED table's ::INFO column is the panel's definition (#152): with
+    // `omit` it is in no answer, and the search never matches its text.
+    let base = "SELECT i AS id, 'Revenue net of returns' AS about FROM range(1, 6) t(i)";
+    let run = |page: &str| {
+        let p = parse_page(&serde_json::from_str(page).unwrap()).unwrap();
+        duck(&page_sql_inline(base, &p)).map(|out| {
+            serde_json::from_str::<serde_json::Value>(if out.trim().is_empty() {
+                "[]"
+            } else {
+                &out
+            })
+            .unwrap()
+        })
+    };
+    let Some(rows) = run(r#"{"limit":10,"omit":["about"]}"#) else {
+        common::skip_without("duckdb", "an_info_column_is_omitted_from_rows_and_search");
+        return;
+    };
+    assert_eq!(rows.as_array().unwrap().len(), 5);
+    assert!(rows[0].get("about").is_none(), "{rows}");
+    let n = run(r#"{"count":true,"filter":"returns","omit":["about"]}"#).unwrap();
+    assert_eq!(n[0]["n"], 0);
+    let n = run(r#"{"count":true,"filter":"returns"}"#).unwrap();
+    assert_eq!(n[0]["n"], 5);
+    let s = run(r#"{"stats":["id"],"omit":["about"]}"#).unwrap();
+    assert_eq!(s[0]["n"], 5);
+    // a column name is quoted, never interpolated
+    let p = parse_page(&serde_json::json!({"limit": 1, "omit": ["a\") FROM x; --"]})).unwrap();
+    assert!(page_sql_inline(base, &p).contains(r#"EXCLUDE ("a"") FROM x; --")"#));
+    assert!(parse_page(&serde_json::json!({"omit": "about"})).is_err());
+    assert!(parse_page(&serde_json::json!({"omit": vec!["c"; 9]})).is_err());
+}
