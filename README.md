@@ -298,7 +298,7 @@ conformance*).
 
 ## Claude Code plugin
 
-The repository ships a [Claude Code](https://claude.com/claude-code) plugin with four skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
+The repository ships a [Claude Code](https://claude.com/claude-code) plugin with five skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
 
 Install it in a Claude Code session:
 
@@ -309,10 +309,11 @@ Install it in a Claude Code session:
 
 | Skill | Covers |
 |-------|--------|
-| `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs from-source build |
-| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs and tables, inputs and `getvariable()`, cross-filter, contract plots as panels, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
-| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial` and `anofox_plot` with all options, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11 and anofox-forecast, use in dashboards and the browser builder |
-| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: the trust model, options and limits, header comments, which mode to use |
+| `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs full-toolkit build |
+| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs with delta / sparkline / goal, `::PERIOD`, tables, inputs and `getvariable()`, cross-filter, drill-down and URL state, annotations, forecast fans and strips, thresholds, waterfall / bullet / funnel, `::DIAGRAM`, motion, Markdown values and formulas, contract plots as panels, Explore data, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
+| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial/_events/_diagram` and `anofox_plot` with all options, column aliases, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11 and anofox-forecast, results from Python (the `anofox_viz` package) and R, use in dashboards and the browser builder |
+| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: which mode to use, the trust model, every option and limit, cache and refresh, a data folder, header comments, deployment (systemd, Docker, reverse proxy, replicas) |
+| `anofox-visualization-access-control` | Login on a locked server (auth proxy, JWT, OIDC, signed embed links, API keys), the `__claim_*` variables, row and column access policies, `dashboard --check --policy`, request and audit logs |
 
 The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualization/). To use a local checkout instead of the marketplace, start Claude Code with `claude --plugin-dir ./plugins/anofox-visualization`. Every `sql` block in the skills is executed in CI against the built extension (`scripts/validate_skills_sql.py`; dashboard scripts are linted with `dashboard --check --strict`).
 

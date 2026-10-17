@@ -5,13 +5,13 @@
     "url": "https://github.com/DataZooDE"
   },
   "metadata": {
-    "description": "Claude Code skills for the anofox_visualization DuckDB extension: charts, ::ROLE dashboards, statistics plots and serving."
+    "description": "Claude Code skills for the anofox_visualization DuckDB extension: charts, ::ROLE dashboards, statistics plots, serving and access control."
   },
   "plugins": [
     {
       "name": "anofox-visualization",
       "source": "./plugins/anofox-visualization",
-      "description": "Charts and dashboards from SQL with the anofox_visualization DuckDB extension — SQL to SVG (anofox_render and the column chart macros), interactive ::ROLE dashboards (layout, KPIs, tables, inputs, cross-filter, dashboard --check lint and design rules), the anofox_plot_* contract macros for anofox-statistics and anofox-forecast output (coefficients, residual diagnostics, predictions and forecasts, ROC / survival / CV curves, post-hoc tests), and locked, read-only serving of dashboards.",
+      "description": "Charts and dashboards from SQL with the anofox_visualization DuckDB extension — SQL to SVG (anofox_render and the column chart macros), interactive ::ROLE dashboards (KPIs, periods, tables, inputs, cross-filter and drill-down, annotations and forecast fans, process diagrams, motion, Explore data, dashboard --check lint and design rules), the anofox_plot_* contract macros for anofox-statistics, anofox-forecast and Python / R results (the anofox_viz package), locked read-only serving and deployment, and login with row / column access policies.",
       "keywords": [
         "duckdb",
         "visualization",
@@ -20,6 +20,8 @@
         "svg",
         "sql",
         "statistics",
+        "python",
+        "security",
         "claude-code"
       ]
     }
