@@ -1,7 +1,7 @@
 # Plan: a sidebar users can manage — their own dashboards, the examples, served folders
 
-Status: design note for owner review (2026-10-17), based on master `cb4701a`.
-No code yet. Supersedes the examples-only "sidebar by business area" proposal
+Status: **approved by the owner (2026-10-17)**, based on master `cb4701a`.
+Implementation follows §6. Supersedes the examples-only "sidebar by business area" proposal
 of 2026-10-17 (see the handover note). Owner decisions taken so far:
 
 - **Scope: builder and served.** One metadata model groups dashboards in the
@@ -164,13 +164,14 @@ written into its SQL as `-- @group`. A backup copy of v1 is kept as
 PR 1 should land before more examples are added, because new examples would
 then come with their own `@group` header.
 
-## 7. Questions for the owner
+## 7. Decisions (2026-10-17)
 
-1. **Business-area groups for the examples:** keep the list in §3 (Start here,
-   Demand & stock, Logistics & production, Sales & customers, Service &
-   operations, Data quality, How it works)?
-2. **Dashboard name = `::DASHBOARD_TITLE`:** should the two be merged into one
-   name, as proposed, or kept as separate names?
-3. **Server-side "My dashboards"** (§5): is it wanted soon? If so, the v2 store
-   should be shaped so a server backend can replace `localStorage` later. That
-   costs little now.
+The owner approved the plan ("go with the sidebar"). The open questions were
+settled with the proposed defaults; the owner can still redirect them:
+
+1. **Business areas for the examples:** as listed in §3.
+2. **One name:** the sidebar name and `::DASHBOARD_TITLE` are merged into
+   one name.
+3. **Server-side "My dashboards"** stays out of scope (§5). The v2 store sits
+   behind a small storage interface (`list / get / put / remove`), so a
+   server backend can replace `localStorage` later.
