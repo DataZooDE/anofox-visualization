@@ -749,6 +749,11 @@ where
                 }
             }
         }
+        // ::COLORSCALE… / ::THRESHOLDS colour a ::HEATMAP / ::CALENDAR's tiles
+        // (or table cells): elsewhere a colour scale does nothing, both at once
+        // is one too many, and rules whose cuts miss the values paint every
+        // tile alike (percent vs fraction).
+        diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -2239,6 +2244,111 @@ fn looks_like_date(s: &str) -> bool {
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
 }
 
+/// Status colour scales on tiles (see the call site).
+fn tile_scale_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+    stmt: usize,
+    short: &str,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut warn = |code, message: String| {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt,
+            code,
+            message,
+            sql: short.to_string(),
+        })
+    };
+    let tiles = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Value(Kind::Heatmap | Kind::Calendar)));
+    let scale = roles.iter().find(|(_, r)| matches!(r, Role::ColorScale(_)));
+    let table = roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable));
+    let rules = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Thresholds)
+        .and_then(|(idx, _)| column_texts(rows, *idx).into_iter().next())
+        .and_then(|spec| crate::thresholds::Rules::parse(&spec).ok());
+    match (scale, tiles) {
+        (Some((_, r)), None) if !table => warn(
+            "colorscale/no-tiles",
+            format!(
+                "::{} colours a table column's cells or a ::HEATMAP / ::CALENDAR's tiles — \
+                 this panel has neither, so it does nothing",
+                r.token()
+            ),
+        ),
+        (Some((_, r)), Some(_)) if rules.is_some() => warn(
+            "colorscale/with-thresholds",
+            format!(
+                "::THRESHOLDS colour the tiles in steps, so the ::{} is ignored — keep one",
+                r.token()
+            ),
+        ),
+        _ => {}
+    }
+    let (Some((vidx, _)), Some(rules)) = (tiles, rules) else {
+        return out;
+    };
+    let key = format!("c{vidx}");
+    let vals: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| r.get(&key).or_else(|| r.values().nth(*vidx)))
+        .filter_map(|v| match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        })
+        .filter(|f| f.is_finite())
+        .collect();
+    let bands = rules.bands();
+    let band_of = |v: f64| bands.iter().position(|b| b.contains(v));
+    let cuts: Vec<f64> = bands
+        .iter()
+        .flat_map(|b| [b.lo, b.hi])
+        .flatten()
+        .map(|(c, _)| c.abs())
+        .filter(|c| *c > 0.0)
+        .collect();
+    let fractions = |xs: &[f64]| xs.iter().all(|x| x.abs() <= 1.0);
+    // Only a unit mismatch: fractions against cuts above 1, or the reverse.
+    let unit_mismatch = !cuts.is_empty() && fractions(&vals) != fractions(&cuts);
+    if unit_mismatch
+        && bands.len() > 1
+        && vals.len() > 1
+        && vals.iter().all(|&v| band_of(v) == band_of(vals[0]))
+    {
+        let (lo, hi) = vals
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+        let band = band_of(vals[0]).map(|i| &bands[i]);
+        warn(
+            "thresholds/one-band",
+            format!(
+                "every tile is in the same ::THRESHOLDS band ({}, {}) — the values run {} to {}; \
+                 are the rules in the values' unit (percent 0–100 vs a fraction 0–1)?",
+                band.map_or_else(String::new, |b| b.label(|v| format!("{v}"))),
+                band.map_or("neutral", |b| b.status.as_str()),
+                fmt_num(lo),
+                fmt_num(hi),
+            ),
+        );
+    }
+    out
+}
+
+/// A number for a lint message (no float noise).
+fn fmt_num(v: f64) -> String {
+    let r = (v * 1e4).round() / 1e4;
+    format!("{r}")
+}
+
 /// Are output column `c{col}`'s numeric values sorted (either direction)?
 fn col_is_monotonic(rows: &[Map<String, Value>], col: usize) -> bool {
     let key = format!("c{col}");
@@ -2839,6 +2949,41 @@ mod design_tests {
             rows(2, |i| json!({ "c0": i, "c1": i, "c2": "Critical:bad" })),
         );
         assert!(has(&d, "colors/no-category"), "{d:?}");
+    }
+
+    #[test]
+    fn heatmap_status_scales_are_checked() {
+        let heat = |v: fn(usize) -> f64| {
+            rows(
+                3,
+                move |i| json!({ "c0": i, "c1": "r", "c2": v(i), "c3": ">=50:bad; >=20:warn; good", "c4": "" }),
+            )
+        };
+        let sql = "SELECT x::XAXIS, 'r'::YAXIS, v::HEATMAP, '>=50:bad; >=20:warn; good'::THRESHOLDS FROM t;";
+        // Percent values against percent rules: quiet, even when all are good.
+        let ok = lint_one(sql, heat(|i| i as f64));
+        assert!(!has(&ok, "thresholds/one-band"), "{ok:?}");
+        // Fractions against percent cuts: every tile alike.
+        let d = lint_one(sql, heat(|i| i as f64 / 10.0));
+        assert!(has(&d, "thresholds/one-band"), "{d:?}");
+        // A colour scale beside the rules is ignored.
+        let d = lint_one(
+            "SELECT x::XAXIS, 'r'::YAXIS, v::HEATMAP, '>=50:bad; good'::THRESHOLDS, ''::COLORSCALE FROM t;",
+            heat(|i| 10.0 * i as f64),
+        );
+        assert!(has(&d, "colorscale/with-thresholds"), "{d:?}");
+        // On a bar chart a colour scale does nothing; on a heatmap it is fine.
+        let data = rows(2, |i| json!({ "c0": i, "c1": i, "c2": "" }));
+        let d = lint_one(
+            "SELECT x::XAXIS, y::BARCHART, ''::COLORSCALE FROM t;",
+            data.clone(),
+        );
+        assert!(has(&d, "colorscale/no-tiles"), "{d:?}");
+        let d = lint_one(
+            "SELECT x::XAXIS, 'r'::YAXIS, y::HEATMAP, ''::COLORSCALE_HIGH_GOOD FROM t;",
+            rows(2, |i| json!({ "c0": i, "c1": "r", "c2": i, "c3": "" })),
+        );
+        assert!(!has(&d, "colorscale/no-tiles"), "{d:?}");
     }
 
     #[test]
