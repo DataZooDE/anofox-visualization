@@ -2477,13 +2477,24 @@ mod tests {
     #[test]
     fn auth_and_refresh_never_cross_users() {
         // Two users hammer the same panel while the snapshot is refreshed:
-        // every answer must be the asking user's, from some snapshot; the
-        // cache is per user (key) and per snapshot (generation).
+        // every answer must be the asking user's, from the snapshot the
+        // request started on; the cache is per user (key) and per snapshot
+        // (generation), and each (user, snapshot) runs exactly once.
+        //
+        // Deterministic progress (no sleeps as synchronisation): the refresher
+        // rebuilds until every worker is done, and a worker is only done once
+        // it has done its requests AND seen MIN_SNAPSHOTS snapshots.
         use crate::generation::Current;
+        use std::collections::{BTreeSet, HashMap};
         use std::sync::atomic::{AtomicBool, AtomicUsize};
+        const WORKERS: usize = 8;
+        const REQUESTS: usize = 400;
+        const MIN_SNAPSHOTS: usize = 3;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let current = Arc::new(Current::new(1u32, 1 << 20));
+        let done = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let runs = Arc::new(AtomicUsize::new(0));
+        let executions: Arc<Mutex<HashMap<(String, u32), usize>>> = Arc::default();
         let r = sv::parse_panel_request(r#"{"dashboard":"who","panel":0}"#).unwrap();
         let refresher = {
             let (current, stop) = (current.clone(), stop.clone());
@@ -2492,26 +2503,31 @@ mod tests {
                 while !stop.load(Ordering::SeqCst) {
                     v += 1;
                     current.rebuild(true, || Ok(v)).unwrap();
-                    std::thread::sleep(Duration::from_millis(2));
+                    std::thread::yield_now();
                 }
                 v
             })
         };
-        let workers: Vec<_> = (0..8)
+        let workers: Vec<_> = (0..WORKERS)
             .map(|w| {
-                let (current, runs, r) = (current.clone(), runs.clone(), r.clone());
+                let (current, done, executions, r) =
+                    (current.clone(), done.clone(), executions.clone(), r.clone());
                 std::thread::spawn(move || {
                     let user = if w % 2 == 0 { "alice" } else { "bob" };
                     let claims = Claims {
                         user: user.into(),
                         ..Default::default()
                     };
-                    let mut seen = std::collections::BTreeSet::new();
-                    for _ in 0..400 {
+                    let mut seen = BTreeSet::new();
+                    let mut i = 0;
+                    while i < REQUESTS || seen.len() < MIN_SNAPSHOTS {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no progress: {i} requests, snapshots seen {seen:?}"
+                        );
                         let gen = current.get();
                         let key = panel_key(&r, Some(&claims));
                         let (out, _) = gen.cache.run(&key, None, |_| {
-                            runs.fetch_add(1, Ordering::SeqCst);
                             // The "session": what the panel reads is what the
                             // request's SETs put there.
                             let sets = request_sets(&r, Some(&claims), None);
@@ -2520,6 +2536,11 @@ mod tests {
                                 .find_map(|s| s.strip_prefix("SET VARIABLE __claim_user = "))
                                 .map(|l| l.trim_matches('\'').to_string())
                                 .unwrap_or_default();
+                            *executions
+                                .lock()
+                                .unwrap()
+                                .entry((who.clone(), gen.snap))
+                                .or_default() += 1;
                             Ok(format!("{who}@{}", gen.snap))
                         });
                         let out = out.unwrap();
@@ -2528,10 +2549,12 @@ mod tests {
                         assert_eq!(
                             snap.parse::<u32>().unwrap(),
                             gen.snap,
-                            "cross-snapshot answer"
+                            "cross-snapshot answer {out}"
                         );
                         seen.insert(gen.snap);
+                        i += 1;
                     }
+                    done.fetch_add(1, Ordering::SeqCst);
                     seen.len()
                 })
             })
@@ -2539,14 +2562,49 @@ mod tests {
         let snapshots_seen: Vec<usize> = workers.into_iter().map(|w| w.join().unwrap()).collect();
         stop.store(true, Ordering::SeqCst);
         let last = refresher.join().unwrap();
-        assert!(last > 2, "the snapshot was refreshed during the run");
-        assert!(
-            snapshots_seen.iter().any(|n| *n > 1),
-            "requests spanned refreshes"
-        );
-        // cached: far fewer executions than requests, but at least one per user
-        let n = runs.load(Ordering::SeqCst);
-        assert!((2..8 * 400).contains(&n), "{n} executions");
+        assert_eq!(done.load(Ordering::SeqCst), WORKERS);
+        // snapshots are numbered 1..=last
+        assert!(last as usize >= MIN_SNAPSHOTS, "{last}");
+        assert!(snapshots_seen.iter().all(|n| *n >= MIN_SNAPSHOTS));
+        // Single-flight + a cache per snapshot: each (user, snapshot) ran
+        // exactly once, and only for the two users. (Exactly once holds here
+        // because every run succeeds, the cache is far larger than the two
+        // entries per snapshot and nothing is superseded; errors, evictions
+        // and abandoned runs would legitimately run again.)
+        let ex = executions.lock().unwrap();
+        assert!(ex.values().all(|n| *n == 1), "{ex:?}");
+        assert!(ex.keys().all(|(u, _)| u == "alice" || u == "bob"));
+        assert!(ex.len() >= 2 * MIN_SNAPSHOTS);
+    }
+
+    #[test]
+    fn a_refresh_during_a_request_keeps_its_snapshot() {
+        // A request keeps the snapshot it started on, even if the refresh
+        // lands while its query runs; its result is cached in that old
+        // generation only, so the next request (new snapshot) runs again.
+        use crate::generation::Current;
+        let current = Current::new(1u32, 1 << 20);
+        let r = sv::parse_panel_request(r#"{"dashboard":"who","panel":0}"#).unwrap();
+        let alice = Claims {
+            user: "alice".into(),
+            ..Default::default()
+        };
+        let key = panel_key(&r, Some(&alice));
+        let gen = current.get();
+        let (out, how) = gen.cache.run(&key, None, |_| {
+            current.rebuild(true, || Ok(2)).unwrap(); // mid-request
+            Ok(format!("alice@{}", gen.snap))
+        });
+        assert_eq!((out.unwrap().as_str(), how), ("alice@1", Served::Executed));
+        let gen2 = current.get();
+        assert_eq!(gen2.snap, 2);
+        let (out, how) = gen2
+            .cache
+            .run(&key, None, |_| Ok(format!("alice@{}", gen2.snap)));
+        assert_eq!((out.unwrap().as_str(), how), ("alice@2", Served::Executed));
+        // and the old generation still answers its own result
+        let (out, how) = gen.cache.run(&key, None, |_| unreachable!());
+        assert_eq!((out.unwrap().as_str(), how), ("alice@1", Served::Hit));
     }
 
     #[test]
