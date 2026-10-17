@@ -9,6 +9,7 @@
 //   wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
 //   cargo build --bin dashboard
 //   node scripts/explore-starters.mjs [--dashboard target/debug/dashboard] [--duckdb duckdb] [--out DIR]
+process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox extensions, whatever was inherited (child processes inherit it)
 import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import os from "os";

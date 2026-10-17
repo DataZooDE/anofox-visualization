@@ -24,6 +24,10 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  # anofox extensions send usage telemetry by default; never from CI
+  DATAZOO_DISABLE_TELEMETRY: "1"
+
 jobs:
   build:
     # After a release run: only when it succeeded on a v* tag (a manual run

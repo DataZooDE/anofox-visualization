@@ -10,6 +10,7 @@
 # a missing release or no extension assets is a warning, not an error, so the
 # Pages deploy still publishes the web app before the first release exists.
 set -euo pipefail
+export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited
 # shellcheck source=scripts/release/common.sh
 . "$(dirname "$0")/common.sh"
 

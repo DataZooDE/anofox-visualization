@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # anofox extensions send usage telemetry by default; never from CI
+  DATAZOO_DISABLE_TELEMETRY: "1"
   CARGO_TERM_COLOR: always
 
 jobs:

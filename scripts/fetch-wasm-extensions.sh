@@ -16,6 +16,7 @@
 #
 # usage: scripts/fetch-wasm-extensions.sh [duckdb-version]   (default v1.5.6)
 set -euo pipefail
+export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited
 VER="${1:-v1.5.6}"
 BASE="${ANOFOX_EXT_BASE:-https://get.erpl.io}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

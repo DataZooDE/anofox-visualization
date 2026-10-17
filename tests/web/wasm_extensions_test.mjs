@@ -4,7 +4,8 @@
 // producer each. Skips (exit 0, with a note) unless
 //   * the extensions were fetched: scripts/fetch-wasm-extensions.sh, and
 //   * DuckDB-Wasm is installed: npm install --prefix tests/web.
-import { existsSync } from "fs";
+process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox extensions, whatever was inherited (child processes inherit it)
+import { existsSync, readFileSync } from "fs";
 import { spawn } from "child_process";
 import { createRequire } from "module";
 import path from "path";
@@ -22,6 +23,15 @@ for (const p of ["wasm_eh", "wasm_mvp"])
   for (const e of ["anofox_statistics", "anofox_forecast"])
     if (!existsSync(path.join(repoDir, VER, p, `${e}.duckdb_extension.wasm`)))
       skip(`web/localext/${VER}/${p}/${e} missing (run scripts/fetch-wasm-extensions.sh)`);
+// The browser builds carry no usage telemetry (upstream compiles the PostHog
+// client out under Emscripten): no PostHog strings, no OpenSSL imports. Were
+// it ever compiled in, web/app.js would have to switch it off after LOAD.
+for (const p of ["wasm_eh", "wasm_mvp"])
+  for (const e of ["anofox_statistics", "anofox_forecast"]) {
+    const bin = readFileSync(path.join(repoDir, VER, p, `${e}.duckdb_extension.wasm`)).toString("latin1");
+    for (const s of ["posthog", "anofox_telemetry_enabled", "SSL_CTX_new", "TLS_client_method"])
+      assert.ok(!bin.toLowerCase().includes(s.toLowerCase()), `${p}/${e}: the wasm build contains "${s}" — telemetry is compiled in`);
+  }
 const require = createRequire(path.join(here, "package.json"));
 let duckdb, dist;
 try {
@@ -75,6 +85,9 @@ try {
     // anofox_statistics: a coefficient table.
     q("FORCE INSTALL anofox_statistics");
     q("LOAD anofox_statistics");
+    const noTelemetry = () =>
+      assert.equal(q("SELECT count(*) AS n FROM duckdb_settings() WHERE name = 'anofox_telemetry_enabled'")[0].n, 0, "a wasm build registers anofox_telemetry_enabled");
+    noTelemetry();
     const tidy = q("SELECT term, estimate FROM ols_tidy_by('d', g, y, [x]) ORDER BY term");
     assert.equal(tidy.length, 2, JSON.stringify(tidy));
     assert.ok(Math.abs(tidy.find((r) => r.term !== "(Intercept)").estimate - 0.5) < 0.1, JSON.stringify(tidy));
@@ -86,6 +99,7 @@ try {
       q("LOAD anofox_forecast");
       const fc = q("SELECT count(*) AS n FROM ts_forecast_by('d', g, ds, y, 'AutoETS', 7, '1d')");
       assert.equal(fc[0].n, 7);
+      noTelemetry();
     }
     console.log(`wasm extensions (${bundle}): ok`);
   }
