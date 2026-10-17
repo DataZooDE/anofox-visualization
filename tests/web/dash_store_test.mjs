@@ -19,8 +19,8 @@ const line = (name) => grab(new RegExp(`^const ${name} = .*$`, "m"), `const ${na
 const lib = new Function(
   [
     ...["DASH_KEY", "DASH_V1_KEY", "DASH_SORTS"].map(line),
-    ...["slugify", "newDashId", "migrateDashStore", "makeDashStorage", "isHeaderLine", "setGroupSql", "copyName", "dashGroupList", "sortDashes", "chromeStmt", "setChromeSql", "withTitleSql"].map(fn),
-    "return { DASH_KEY, DASH_V1_KEY, newDashId, migrateDashStore, makeDashStorage, isHeaderLine, setGroupSql, copyName, dashGroupList, sortDashes, withTitleSql };",
+    ...["slugify", "newDashId", "migrateDashStore", "makeDashStorage", "isHeaderLine", "setGroupSql", "copyName", "dashGroupList", "sortDashes", "chromeStmt", "setChromeSql", "withTitleSql", "sqlToSave"].map(fn),
+    "return { DASH_KEY, DASH_V1_KEY, newDashId, migrateDashStore, makeDashStorage, isHeaderLine, setGroupSql, copyName, dashGroupList, sortDashes, withTitleSql, sqlToSave };",
   ].join("\n")
 )();
 const { DASH_KEY, DASH_V1_KEY, migrateDashStore, makeDashStorage, setGroupSql, copyName, dashGroupList, sortDashes, withTitleSql } = lib;
@@ -157,6 +157,15 @@ for (const sql of [...odd, ...examples]) {
     assert.equal(setGroupSql(out, g), out, "setting the same group again changes nothing");
   }
   assert.equal(groupOf(setGroupSql(sql, "")), null);
+}
+// Saving an example as yours: its library area is not kept as a group (the
+// title follows the name, the tags stay); your own dashboards keep theirs.
+for (const sql of examples) {
+  const meta = JSON.parse(wasm.dashboard_meta(sql));
+  const saved = JSON.parse(wasm.dashboard_meta(lib.sqlToSave(sql, "Mine", true)));
+  assert.equal(saved.group, null);
+  assert.deepEqual([saved.title, saved.tags], [meta.title, meta.tags]);
+  assert.equal(groupOf(lib.sqlToSave(sql, "Mine", false)), meta.group);
 }
 // a migrated v1 dashboard is in its group for the servers too
 assert.equal(groupOf(m.items["weekly-sales-2"].sql), "Sales");

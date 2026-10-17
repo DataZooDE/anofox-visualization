@@ -105,7 +105,9 @@ check(true, "renaming in the toolbar renames the page title");
 await page.click("#save");
 let leads = await item("Leads this week");
 check(leads && /'Leads this week'::DASHBOARD_TITLE/.test(leads.sql), "saved, with the page title in its SQL");
-check(/^-- @group Sales & customers$/m.test(leads?.sql || ""), "an example's @group comes along");
+check(leads && !/^-- @group/m.test(leads.sql) && /^-- @tags/m.test(leads.sql), "a saved example starts ungrouped (its @group dropped, @tags kept)");
+check(!/^-- @group/m.test(await page.$eval("#sql", (t) => t.value)), "…in the editor too");
+check(!(await page.$("#side-nav .side-group")), "no group appears for the example's library area");
 check((await store()).v === 2, "the store is v2");
 
 // ── 2. A second one, from scratch ──
@@ -118,12 +120,17 @@ await page.click("#save");
 check((await names()).includes("Scratch"), "Scratch saved (ungrouped)");
 await shot("saved");
 
-// ── 3. Move to a group through ⋯ ──
+// ── 3. Move to a group through ⋯ (a new one, then an existing one) ──
 await menu("Scratch", "Move to group…");
-await pickInMenu("Sales & customers");
+replies.push("Sales & customers");
+await pickInMenu("New group…");
 let scratch = await item("Scratch");
 check(/^-- @group Sales & customers$/m.test(scratch.sql), "Move to group writes the -- @group line");
 check(/^-- @group Sales & customers$/m.test(await page.$eval("#sql", (t) => t.value)), "…in the open editor too");
+await menu("Leads this week", "Move to group…");
+await pickInMenu("Sales & customers");
+leads = await item("Leads this week");
+check(/^-- @group Sales & customers$/m.test(leads.sql), "…and into an existing group");
 
 // ── 4. Rename in place ──
 await menu("Scratch", "Rename");
@@ -146,6 +153,7 @@ if (phone) check(await page.evaluate(() => document.body.classList.contains("sid
 await menu("Leads this week", "Duplicate");
 const copy = await item("Leads this week copy");
 check(copy && /'Leads this week copy'::DASHBOARD_TITLE/.test(copy.sql), "duplicated, with its own page title");
+check(/^-- @group Sales & customers$/m.test(copy?.sql || ""), "a duplicate of yours keeps its group");
 const order = (await store()).order;
 check(order.indexOf(copy.id) === order.indexOf(leads.id) + 1, "the copy sits below the original");
 await shot("menu-done");

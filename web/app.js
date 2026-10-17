@@ -1999,6 +1999,13 @@ function withTitleSql(sql, name) {
   return name && chromeStmt(sql, "DASHBOARD_TITLE") ? setChromeSql(sql, "DASHBOARD_TITLE", name) : sql;
 }
 
+// The SQL Save stores under `name`: its page title follows the name, and a
+// copy of an example drops the example's `-- @group` (its library area is
+// not a group of yours; `@tags` stay).
+function sqlToSave(sql, name, fromExample) {
+  return withTitleSql(fromExample ? setGroupSql(sql, "") : sql, name);
+}
+
 const lsSafe = {
   getItem(k) {
     try {
@@ -2650,7 +2657,8 @@ function loadDash(name, sql, key) {
 // Save the editor as a saved dashboard under the toolbar name. The open
 // saved dashboard is updated (renamed, when the name changed); a name that
 // belongs to another dashboard asks "Replace …?" first. The page title
-// (::DASHBOARD_TITLE, when the SQL has one) follows the name.
+// (::DASHBOARD_TITLE, when the SQL has one) follows the name. An example
+// saved as a dashboard of yours drops its `-- @group` (its library area).
 function saveDash() {
   const name = ($("dash-name").value || "").replace(/\s+/g, " ").trim();
   if (!name) {
@@ -2662,7 +2670,10 @@ function saveDash() {
   if (other && !confirm(`Replace "${name}"?\n\nAnother of your dashboards has this name; it will be overwritten.`))
     return status("not saved");
   const ta = $("sql");
-  const sql = withTitleSql(ta.value, name);
+  // a copy of an example starts ungrouped: the library's area is not a group
+  // of yours (its @tags stay)
+  const fromExample = !cur && curDash?.startsWith("ex:");
+  const sql = sqlToSave(ta.value, name, fromExample);
   if (sql !== ta.value) {
     ta.value = sql;
     ta.dispatchEvent(new Event("input"));

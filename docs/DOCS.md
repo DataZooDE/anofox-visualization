@@ -1950,7 +1950,8 @@ group is the `-- @group` line of its SQL: moving it, renaming a group or
 deleting one (its dashboards stay, ungrouped) rewrites that line, so the
 group travels with the SQL. Groups fold open and shut and keep their order
 (drag a group, or Alt+↑/↓ on it); empty ones stay until you delete them.
-Dashboards without a group come first. The header's **⋯** sorts them —
+Dashboards without a group come first; an example you save as your own starts
+there too (its library area isn't kept as a group; its `@tags` are). The header's **⋯** sorts them —
 *manual* (drag, or Alt+↑/↓), *name* or *last edited* — and shows or hides the
 examples. Everything lives in this browser's `localStorage`
 (`dp_dashboards`, version 2: `{v, items: {id: {name, sql, updated}}, order,
