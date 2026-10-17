@@ -19,7 +19,7 @@ const line = (name) => grab(new RegExp(`^const ${name} = .*$`, "m"), `const ${na
 const lib = new Function(
   [
     ...["DASH_KEY", "DASH_V1_KEY", "DASH_SORTS"].map(line),
-    ...["slugify", "newDashId", "migrateDashStore", "makeDashStorage", "isHeaderLine", "setGroupSql", "copyName", "dashGroupList", "sortDashes", "chromeStmt", "setChromeSql", "withTitleSql", "sqlToSave"].map(fn),
+    ...["slugify", "newDashId", "migrateDashStore", "makeDashStorage", "isHeaderLine", "setHeaderSql", "setGroupSql", "copyName", "dashGroupList", "sortDashes", "chromeStmt", "setChromeSql", "withTitleSql", "sqlToSave"].map(fn),
     "return { DASH_KEY, DASH_V1_KEY, newDashId, migrateDashStore, makeDashStorage, isHeaderLine, setGroupSql, copyName, dashGroupList, sortDashes, withTitleSql, sqlToSave };",
   ].join("\n")
 )();
@@ -125,7 +125,9 @@ assert.equal(db2.get(c).updated, gone.updated, "an undo keeps the time it was ed
 assert.equal(db2.remove("nope"), -1);
 // the sidebar state
 db2.setMeta({ groups: ["B", "A", "A", 3], collapsed: { A: true }, sort: "name", order: ["sales-2", "sales"] });
-assert.deepEqual(db2.meta(), { order: ["sales-2", "sales", "middle"], groups: ["B", "A"], collapsed: { A: true }, sort: "name" });
+assert.deepEqual(db2.meta(), { order: ["sales-2", "sales", "middle"], groups: ["B", "A"], collapsed: { A: true }, sort: "name", recent: [], recentOpen: false });
+db2.setMeta({ recent: ["my:sales", 4, "ex:a", "ex:b", "ex:c", "ex:d", "ex:e"], recentOpen: true });
+assert.deepEqual([db2.meta().recent, db2.meta().recentOpen], [["my:sales", "ex:a", "ex:b", "ex:c", "ex:d"], true], "recent: strings, at most 5");
 db2.setMeta({ sort: "bogus" });
 assert.equal(db2.meta().sort, "manual");
 

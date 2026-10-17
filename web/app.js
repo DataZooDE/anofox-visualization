@@ -1079,12 +1079,15 @@ function lastDash() {
     return null;
   }
 }
+// Remember `key` as the dashboard open last, and in Recently opened.
 function rememberDash(key) {
   try {
     localStorage.setItem(LAST_KEY, key);
   } catch (_) {
     /* storage blocked: the next visit starts on the first example */
   }
+  const recent = dashDB.meta().recent;
+  if (recent[0] !== key) dashDB.setMeta({ recent: pushRecent(recent, key) });
 }
 // The examples by area, in EX_AREAS order: [{area, items: [{sub, entry}]}].
 // A `-- @group A / B` sits in area A under the sub-heading B (a deeper path
@@ -1512,6 +1515,7 @@ async function boot() {
   $("mode-view").onclick = () => setMode("view");
   $("side-explore").onclick = () => setMode(bodyMode() === "explore" ? "edit" : "explore");
   wireExplore();
+  wireImport();
   // URL params — for embedding / theming:
   //   ?embed=1        hide the header + sidebar + toolbar (dashboard only)
   //   ?primary=RRGGBB brand accent colour (UI + chart primary)
@@ -1760,12 +1764,13 @@ function initSideDrawer() {
   document.addEventListener(
     "keydown",
     (e) => {
-      if (!isOpen() || e.target.closest?.(".side-menu, .side-toast, .side-rename")) return;
+      if (!isOpen() || e.target.closest?.(".side-menu, .side-toast, .side-rename, .dp-dialog")) return;
+      if (e.key === "Escape" && e.target.id === "side-search" && (e.target.value || sideFilter.tags.length)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         open(false);
       } else if (e.key === "Tab") {
-        const f = [...side.querySelectorAll("button, a[href], [tabindex='0']")].filter((el) => el.offsetParent);
+        const f = [...side.querySelectorAll("button, a[href], input, [tabindex='0']")].filter((el) => el.offsetParent && !el.disabled);
         if (!f.length) return;
         const [first, last] = [f[0], f[f.length - 1]];
         if (!side.contains(document.activeElement) || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
@@ -1842,7 +1847,8 @@ function initSideResizer() {
 // interface (list / get / put / remove, plus the sidebar's own state) so a
 // server backend can replace it later. Store v2:
 //   {v: 2, items: {id: {name, sql, updated}}, order: [id], groups: [name],
-//    collapsed: {group: true}, sort: "manual" | "name" | "updated"}
+//    collapsed: {group: true}, sort: "manual" | "name" | "updated",
+//    recent: ["ex:<id>" | "my:<id>"] (the last 5 opened), recentOpen: bool}
 // A dashboard's group is not stored: it is the `-- @group` line of its SQL
 // (read by dashboard_meta), so it travels with the SQL. `groups` keeps the
 // order of the groups and the empty ones.
@@ -1874,14 +1880,15 @@ function migrateDashStore(raw, now) {
     const order = strs(raw.order).filter((id) => Object.hasOwn(items, id));
     for (const id of Object.keys(items)) if (!order.includes(id)) order.push(id);
     const sort = DASH_SORTS.includes(raw.sort) ? raw.sort : "manual";
-    return { v: 2, items, order, groups: strs(raw.groups), collapsed: { ...obj(raw.collapsed) }, sort };
+    const recent = strs(raw.recent).slice(0, 5);
+    return { v: 2, items, order, groups: strs(raw.groups), collapsed: { ...obj(raw.collapsed) }, sort, recent, recentOpen: raw.recentOpen === true };
   }
   const r = obj(raw);
   const v1 = r.items
     ? obj(r.items)
     : Object.fromEntries(Object.entries(r).filter(([, sql]) => typeof sql === "string").map(([n, sql]) => [n, { sql, group: "" }]));
   const groups = r.items ? strs(r.groups) : [];
-  const out = { v: 2, items: {}, order: [], groups, collapsed: r.items ? { ...obj(r.collapsed) } : {}, sort: "manual" };
+  const out = { v: 2, items: {}, order: [], groups, collapsed: r.items ? { ...obj(r.collapsed) } : {}, sort: "manual", recent: [], recentOpen: false };
   for (const [name, it] of Object.entries(v1)) {
     if (!it || typeof it.sql !== "string") continue;
     const g = typeof it.group === "string" && groups.includes(it.group) ? it.group : "";
@@ -1936,14 +1943,14 @@ function makeDashStorage(ls, now = () => Date.now()) {
       save(s);
       return at;
     },
-    // The sidebar's state: {order, groups, collapsed, sort}.
+    // The sidebar's state: {order, groups, collapsed, sort, recent, recentOpen}.
     meta() {
-      const { order, groups, collapsed, sort } = load();
-      return { order, groups, collapsed, sort };
+      const { order, groups, collapsed, sort, recent, recentOpen } = load();
+      return { order, groups, collapsed, sort, recent, recentOpen };
     },
     setMeta(m) {
       const s = load();
-      for (const k of ["order", "groups", "collapsed", "sort"]) if (m[k] !== undefined) s[k] = m[k];
+      for (const k of ["order", "groups", "collapsed", "sort", "recent", "recentOpen"]) if (m[k] !== undefined) s[k] = m[k];
       save(migrateDashStore(s, now()));
     },
   };
@@ -1956,26 +1963,30 @@ function isHeaderLine(line, name) {
   const r = t.slice(4 + name.length);
   return r === "" || /^\s/.test(r);
 }
-// The SQL with its `-- @group` set to `group` ("" removes it): the first
-// @group line is replaced and any later one dropped; a new one goes below
-// a leading `-- @title`, else on the first line.
-function setGroupSql(sql, group) {
-  const g = String(group ?? "")
+// The SQL with its `-- @<key>` header line set to `value` ("" removes it):
+// the first such line is replaced and any later one dropped. A new @title
+// goes on the first line; any other below a leading `-- @title`, else on the
+// first line.
+function setHeaderSql(sql, key, value) {
+  const v = String(value ?? "")
     .replace(/[\r\n]+/g, " ")
     .trim();
   const lines = String(sql ?? "").split("\n");
-  const line = `-- @group ${g}`;
-  const at = lines.findIndex((l) => isHeaderLine(l, "group"));
-  const out = lines.filter((l, i) => i === at || !isHeaderLine(l, "group"));
+  const line = `-- @${key} ${v}`;
+  const at = lines.findIndex((l) => isHeaderLine(l, key));
+  const out = lines.filter((l, i) => i === at || !isHeaderLine(l, key));
   if (at >= 0) {
-    if (g) out[at] = line;
+    if (v) out[at] = line;
     else out.splice(at, 1);
     return out.join("\n");
   }
-  if (!g) return sql;
-  const t = out.findIndex((l) => isHeaderLine(l, "title"));
+  if (!v) return sql;
+  const t = key === "title" ? -1 : out.findIndex((l) => isHeaderLine(l, "title"));
   out.splice(t >= 0 && out.slice(0, t).every((l) => /^\s*--/.test(l)) ? t + 1 : 0, 0, line);
   return out.join("\n");
+}
+function setGroupSql(sql, group) {
+  return setHeaderSql(sql, "group", group);
 }
 // "<name> copy", "<name> copy 2", … — the first name no dashboard has.
 function copyName(name, taken) {
@@ -1983,6 +1994,102 @@ function copyName(name, taken) {
   let n = base;
   for (let i = 2; taken.includes(n); i++) n = `${base} ${i}`;
   return n;
+}
+// An imported dashboard kept beside one of the same name: "<name> (2)", …
+function importName(name, taken) {
+  let n = name;
+  for (let i = 2; taken.includes(n); i++) n = `${name} (${i})`;
+  return n;
+}
+// The last opened (most recent first, at most 5): `key` moved to the front.
+function pushRecent(recent, key) {
+  return [key, ...(recent || []).filter((k) => k !== key)].slice(0, 5);
+}
+
+// ---- search and tag chips ----
+const foldText = (s) =>
+  String(s ?? "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+// The words of a search ("weekly emea" → ["weekly", "emea"]).
+function searchTerms(q) {
+  return foldText(q).split(/\s+/).filter(Boolean);
+}
+// Does an entry ({name, title, group, tags}) match every word (in its name,
+// page title, group or tags) and carry every selected tag?
+function dashMatches(e, terms, tags) {
+  if (tags.length && !tags.every((t) => e.tags.includes(t))) return false;
+  const hay = foldText([e.name, e.title, e.group, ...(e.tags || [])].join("\n"));
+  return terms.every((t) => hay.includes(t));
+}
+// The tag chips for the entries in view: the selected ones first, then the
+// most used (ties by name), at most `limit`.
+function tagsInView(entries, selected, limit = 8) {
+  const n = new Map();
+  for (const e of entries) for (const t of e.tags || []) n.set(t, (n.get(t) || 0) + 1);
+  const rest = [...n.keys()].filter((t) => !selected.includes(t)).sort((a, b) => n.get(b) - n.get(a) || a.localeCompare(b));
+  return [...selected, ...rest].slice(0, Math.max(limit, selected.length));
+}
+
+// ---- export and import: .sql files and a served-folder .zip ----
+// The files of a served folder for `list` ([{id, name, sql}]): `<id>.sql`,
+// each with `-- @title <name>` (its @group and @tags are in the SQL already),
+// so `anofox_serve_dashboards` / `serve --dashboards` can serve it as is.
+function exportFiles(list) {
+  const used = new Set();
+  return list.map((d) => {
+    let id = slugify(d.id).slice(0, 120);
+    for (let i = 2; used.has(id); i++) id = `${slugify(d.id).slice(0, 116)}-${i}`;
+    used.add(id);
+    return { name: `${id}.sql`, text: setHeaderSql(d.sql, "title", d.name) };
+  });
+}
+// The files of a .zip ([{name, data}], folders left out) — the reading side
+// of zipStored (the .xlsx writer's). Only stored (uncompressed) entries can
+// be read; anything else — deflate, encryption,
+// zip64, a damaged file — throws an Error saying what to do instead.
+function unzipStored(bytes) {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const bad = (m) => {
+    throw new Error(m);
+  };
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i--)
+    if (v.getUint32(i, true) === 0x06054b50) {
+      end = i;
+      break;
+    }
+  if (end < 0) bad("not a .zip file");
+  const count = v.getUint16(end + 10, true);
+  let p = v.getUint32(end + 16, true);
+  if (p === 0xffffffff || count === 0xffff) bad("zip64 archives are not supported");
+  const dec = new TextDecoder("utf-8");
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    if (p + 46 > bytes.length || v.getUint32(p, true) !== 0x02014b50) bad("the .zip is damaged (central directory)");
+    const flags = v.getUint16(p + 8, true);
+    const method = v.getUint16(p + 10, true);
+    const crc = v.getUint32(p + 16, true);
+    const size = v.getUint32(p + 20, true);
+    const nlen = v.getUint16(p + 28, true);
+    const xlen = v.getUint16(p + 30, true);
+    const clen = v.getUint16(p + 32, true);
+    const off = v.getUint32(p + 42, true);
+    const name = dec.decode(bytes.subarray(p + 46, p + 46 + nlen));
+    p += 46 + nlen + xlen + clen;
+    if (name.endsWith("/")) continue;
+    if (flags & 1) bad(`"${name}" is encrypted`);
+    if (method !== 0)
+      bad(`"${name}" is compressed. Import the .sql files themselves, or a .zip made with no compression ("store", e.g. zip -0)`);
+    if (off + 30 > bytes.length || v.getUint32(off, true) !== 0x04034b50) bad(`the .zip is damaged ("${name}")`);
+    const start = off + 30 + v.getUint16(off + 26, true) + v.getUint16(off + 28, true);
+    if (start + size > bytes.length) bad(`the .zip is damaged ("${name}")`);
+    const data = bytes.slice(start, start + size);
+    if (crc32(data) !== crc) bad(`the .zip is damaged ("${name}": checksum)`);
+    out.push({ name, data });
+  }
+  return out;
 }
 // The groups in sidebar order: the stored ones (empty ones too), then any
 // `@group` only a dashboard's SQL names, by name.
@@ -2027,26 +2134,13 @@ const lsSafe = {
   },
 };
 const dashDB = makeDashStorage(lsSafe);
-// A saved dashboard's group, from its SQL (cached per SQL text).
-const dashMetaCache = new Map();
-function dashGroupOf(sql) {
-  if (!dashMetaCache.has(sql)) {
-    let g = "";
-    try {
-      g = JSON.parse(dashboard_meta(sql)).group || "";
-    } catch (_) {
-      /* unreadable header: ungrouped */
-    }
-    if (dashMetaCache.size > 200) dashMetaCache.clear();
-    dashMetaCache.set(sql, g);
-  }
-  return dashMetaCache.get(sql);
-}
 const myKey = (id) => "my:" + id;
 const curMyId = () => (curDash && curDash.startsWith("my:") ? curDash.slice(3) : null);
 
 // `focusId`: the control to focus once the list is rebuilt (a toggle or a
 // menu action that re-rendered it), so keyboard users keep their place.
+// The search field and the tag chips (sideFilter) narrow every section.
+const sideFilter = { q: "", tags: [] };
 function renderSidebar(focusId) {
   const nav = $("side-nav");
   nav.innerHTML = "";
@@ -2054,14 +2148,25 @@ function renderSidebar(focusId) {
   const meta = dashDB.meta();
   const lib = exLibState();
   const showEx = lib.hidden && EXAMPLES.length ? showExamplesButton(lib) : null;
+  const terms = searchTerms(sideFilter.q);
+  const on = terms.length > 0 || sideFilter.tags.length > 0;
+  const match = (e) => !on || dashMatches(e, terms, sideFilter.tags);
+  const mineAll = list.map((d) => ({ ...dashMetaOf(d.sql), ...d }));
+  const mine = mineAll.filter(match);
+  const exAll = lib.hidden ? [] : EXAMPLES.map((e) => ({ ...e, title: e.name }));
+  const ex = exAll.filter(match);
+  const recent = meta.recent
+    .map((k) => (k.startsWith("my:") ? mineAll.find((d) => myKey(d.id) === k) : exAll.find((e) => "ex:" + e.id === k)))
+    .filter(Boolean);
+  renderChips(on ? [...mine, ...ex] : [...mineAll, ...exAll]);
 
-  // "My dashboards" header: + group, and ⋯ (sort, examples). Drop a
-  // dashboard here to ungroup it.
+  // "My dashboards" header: + group, and ⋯ (sort, import / export,
+  // examples). Drop a dashboard here to ungroup it.
   const hdr = document.createElement("div");
   hdr.className = "side-section side-section-row side-my";
   const lbl = document.createElement("span");
   lbl.textContent = "My dashboards";
-  if (list.length) lbl.append(countBadge(list.length));
+  if (list.length) lbl.append(countBadge(on ? mine.length : list.length));
   const add = document.createElement("button");
   add.className = "side-mini";
   add.id = "side-add-group";
@@ -2072,11 +2177,11 @@ function renderSidebar(focusId) {
   more.className = "side-more side-more-hdr";
   more.id = "side-my-more";
   more.textContent = "⋯";
-  more.title = "sort, groups, examples";
+  more.title = "sort, import, export, examples";
   more.setAttribute("aria-label", "My dashboards: options");
   more.setAttribute("aria-haspopup", "menu");
   more.setAttribute("aria-expanded", "false");
-  more.onclick = () => openSideMenu(more, myMenu(meta, lib));
+  more.onclick = () => openSideMenu(more, myMenu(meta, lib, list));
   const tools = document.createElement("span");
   tools.className = "side-tools";
   tools.append(add, more);
@@ -2086,14 +2191,22 @@ function renderSidebar(focusId) {
   if (!list.length) {
     const empty = document.createElement("p");
     empty.className = "side-empty";
-    empty.textContent = "Nothing saved yet. Save keeps a dashboard in this browser.";
+    empty.textContent = "Nothing saved yet. Save keeps a dashboard in this browser; ⋯ imports .sql files.";
     if (showEx) empty.append(" ", showEx);
     nav.appendChild(empty);
+  } else if (on && !mine.length) {
+    const none = document.createElement("p");
+    none.className = "side-empty";
+    none.textContent = "None of yours matches.";
+    nav.appendChild(none);
   }
 
-  // bucket the dashboards by the `-- @group` of their SQL
-  const withGroup = list.map((d) => ({ ...d, group: dashGroupOf(d.sql) }));
-  const groups = dashGroupList(meta.groups, withGroup.map((d) => d.group));
+  // bucket the dashboards by the `-- @group` of their SQL; while searching,
+  // only the groups with a match, open
+  const groups = dashGroupList(
+    meta.groups,
+    mineAll.map((d) => d.group)
+  );
   const rows = (ds, inGroup) => {
     for (const d of sortDashes(ds, meta.sort)) {
       const r = myRow(d, meta);
@@ -2104,13 +2217,14 @@ function renderSidebar(focusId) {
   // ungrouped first, right under the header (so none reads as the last
   // group's), then the groups
   rows(
-    withGroup.filter((d) => !d.group),
+    mine.filter((d) => !d.group),
     false
   );
   for (const g of groups) {
-    const members = withGroup.filter((d) => d.group === g);
-    nav.appendChild(groupHeader(g, meta, members.length, groups));
-    if (!meta.collapsed[g]) rows(members, true);
+    const members = mine.filter((d) => d.group === g);
+    if (on && !members.length) continue;
+    nav.appendChild(groupHeader(g, meta, members.length, groups, on));
+    if (on || !meta.collapsed[g]) rows(members, true);
   }
   if (showEx && list.length) {
     const back = document.createElement("p");
@@ -2119,12 +2233,122 @@ function renderSidebar(focusId) {
     nav.appendChild(back);
   }
 
-  if (!lib.hidden && EXAMPLES.length) renderExamples(nav, lib, list.length);
+  const rec = recent.filter(match);
+  if (rec.length) renderRecent(nav, rec, on || meta.recentOpen);
+  if (ex.length || (!on && exAll.length)) renderExamples(nav, lib, list.length, on ? ex : EXAMPLES, on);
+  if (on && !mine.length && !rec.length && !ex.length) {
+    const none = document.createElement("p");
+    none.className = "side-empty side-nomatch";
+    none.textContent = "Nothing matches. ";
+    const clr = document.createElement("button");
+    clr.className = "side-mini";
+    clr.textContent = "Clear the search";
+    clr.onclick = () => clearSideFilter(true);
+    none.append(clr);
+    nav.appendChild(none);
+  }
   markActive();
   if (focusId) $(focusId)?.focus();
 }
-// The My dashboards ⋯ menu: sort order, a new group, show / hide examples.
-function myMenu(meta, lib) {
+// A saved dashboard's header ({title, group, tags}), cached per SQL text.
+const dashMetaCache = new Map();
+function dashMetaOf(sql) {
+  if (!dashMetaCache.has(sql)) {
+    let m = { title: "", group: "", tags: [] };
+    try {
+      const j = JSON.parse(dashboard_meta(sql));
+      m = { title: j.title || "", group: j.group || "", tags: j.tags || [] };
+    } catch (_) {
+      /* unreadable header: ungrouped, untagged */
+    }
+    if (dashMetaCache.size > 200) dashMetaCache.clear();
+    dashMetaCache.set(sql, m);
+  }
+  return dashMetaCache.get(sql);
+}
+const dashGroupOf = (sql) => dashMetaOf(sql).group;
+// The tag chips under the search field: the tags of what is in view; one
+// pressed filters by it (several: all of them).
+function renderChips(entries) {
+  const box = $("side-chips");
+  if (!box) return;
+  box.innerHTML = "";
+  const tags = tagsInView(entries, sideFilter.tags);
+  for (const t of tags) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "side-chip";
+    b.id = "side-chip-" + slugify(t);
+    b.textContent = t;
+    const on = sideFilter.tags.includes(t);
+    b.setAttribute("aria-pressed", String(on));
+    b.title = on ? `showing only “${t}” — press to drop it` : `show only “${t}”`;
+    b.onclick = () => {
+      sideFilter.tags = on ? sideFilter.tags.filter((x) => x !== t) : [...sideFilter.tags, t];
+      renderSidebar(b.id);
+    };
+    box.appendChild(b);
+  }
+  if (sideFilter.q.trim() || sideFilter.tags.length) {
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "side-chip side-chip-clear";
+    x.id = "side-chip-clear";
+    x.textContent = "×";
+    x.title = "clear the search and the tags";
+    x.setAttribute("aria-label", "Clear the search and the tags");
+    x.onclick = () => clearSideFilter(true);
+    box.prepend(x); // first: the row scrolls sideways
+  }
+  box.hidden = !box.childElementCount;
+}
+function clearSideFilter(focus) {
+  sideFilter.q = "";
+  sideFilter.tags = [];
+  const s = $("side-search");
+  if (s) s.value = "";
+  renderSidebar();
+  if (focus) s?.focus();
+}
+// Recently opened: the last 5 dashboards and examples, per browser.
+function renderRecent(nav, entries, open) {
+  const row = document.createElement("div");
+  row.className = "side-section side-section-row side-master side-recent-hdr";
+  const tog = document.createElement("button");
+  tog.className = "side-toggle";
+  tog.id = "side-recent-toggle";
+  tog.setAttribute("aria-expanded", String(open));
+  tog.setAttribute("aria-controls", "side-recent");
+  tog.innerHTML = `<span class="ex-caret" aria-hidden="true">${open ? "▾" : "▸"}</span><span>Recently opened</span>`;
+  tog.append(countBadge(entries.length));
+  tog.onclick = () => {
+    dashDB.setMeta({ recentOpen: !open });
+    renderSidebar(tog.id);
+  };
+  row.append(tog);
+  const box = document.createElement("div");
+  box.id = "side-recent";
+  box.setAttribute("role", "group");
+  box.setAttribute("aria-label", "Recently opened");
+  box.hidden = !open;
+  if (open)
+    for (const e of entries) {
+      const key = e.source === "example" ? "ex:" + e.id : myKey(e.id);
+      const it = sideItem(e.name, e.sql, key);
+      it.classList.add("side-ex-item", "side-recent-item");
+      if (e.source === "example") {
+        const src = document.createElement("span");
+        src.className = "s-src";
+        src.textContent = "example";
+        it.appendChild(src);
+      }
+      box.appendChild(it);
+    }
+  nav.append(row, box);
+}
+// The My dashboards ⋯ menu: sort order, a new group, import / export, show /
+// hide examples.
+function myMenu(meta, lib, list) {
   const sortBy = (sort) => () => {
     dashDB.setMeta({ sort });
     renderSidebar("side-my-more");
@@ -2135,7 +2359,9 @@ function myMenu(meta, lib) {
     { label: "Sort: last edited", checked: meta.sort === "updated", run: sortBy("updated") },
     { sep: true },
     { label: "New group…", run: () => createGroup() },
+    { label: "Import .sql / .zip…", run: () => $("side-import")?.click() },
   ];
+  if (list.length) items.push({ label: `Export all (${list.length}) as .zip`, run: () => exportAll() });
   if (EXAMPLES.length)
     items.push({
       label: lib.hidden ? "Show examples" : "Hide examples",
@@ -2171,7 +2397,7 @@ function dropTarget(el, onDash, onGroup) {
 }
 // A group of My dashboards: a toggle (collapse; drag or Alt+↑/↓ to reorder
 // the groups), rename and delete.
-function groupHeader(g, meta, count, groups) {
+function groupHeader(g, meta, count, groups, searching) {
   const key = slugify(g);
   const h = document.createElement("div");
   h.className = "side-group" + (meta.collapsed[g] ? " collapsed" : "");
@@ -2179,12 +2405,14 @@ function groupHeader(g, meta, count, groups) {
   const tog = document.createElement("button");
   tog.className = "side-group-tog";
   tog.id = "side-group-" + key;
-  tog.setAttribute("aria-expanded", String(!meta.collapsed[g]));
+  tog.setAttribute("aria-expanded", String(searching || !meta.collapsed[g]));
+  // while searching, every group with a match is shown open
+  tog.disabled = !!searching;
   tog.title = `${g} — Alt+↑/↓ or drag to reorder the groups`;
   const caret = document.createElement("span");
   caret.className = "g-caret";
   caret.setAttribute("aria-hidden", "true");
-  caret.textContent = meta.collapsed[g] ? "▸" : "▾";
+  caret.textContent = !searching && meta.collapsed[g] ? "▸" : "▾";
   const nm = document.createElement("span");
   nm.className = "g-name";
   nm.textContent = g;
@@ -2315,6 +2543,7 @@ function dashMenu(d) {
     { label: "Rename", run: () => startRename(d.id) },
     { label: "Duplicate", run: () => duplicateDash(d.id) },
     { label: "Move to group…", keep: true, run: (anchor) => openSideMenu(anchor, moveMenu(d)) },
+    { label: "Download .sql", run: () => downloadSql(d.id, d.name, dashDB.get(d.id)?.sql ?? d.sql) },
     { sep: true },
     { label: "Delete", danger: true, run: () => delDash(d.id) },
   ];
@@ -2481,16 +2710,16 @@ function addGroup(g) {
   if (g && !groups.includes(g)) dashDB.setMeta({ groups: [...groups, g] });
 }
 // New group; with `id`, move that dashboard into it.
-function createGroup(id) {
-  const g = (prompt("New group name") || "").replace(/\s+/g, " ").trim();
+async function createGroup(id) {
+  const g = await askName("New group", "Group name", "", "Create");
   if (!g) return;
   addGroup(g);
   if (id) moveDash(id, g);
   else renderSidebar("side-group-" + slugify(g));
 }
 // Rename a group: every member's `-- @group` line is rewritten.
-function renameGroup(old) {
-  const g = (prompt("Rename group", old) || "").replace(/\s+/g, " ").trim();
+async function renameGroup(old) {
+  const g = await askName("Rename group", "Group name", old, "Rename");
   if (!g || g === old) return;
   for (const d of dashDB.list())
     if (dashGroupOf(d.sql) === old) setDashSql(d, setGroupSql(d.sql, g), (t) => setGroupSql(t, g));
@@ -2556,7 +2785,8 @@ function startRename(id) {
   const finish = (save) => {
     if (done) return;
     done = true;
-    if (!save || !renameDash(id, inp.value)) renderSidebar("side-my-" + id);
+    if (!save) renderSidebar("side-my-" + id);
+    else renameDash(id, inp.value).then((ok) => ok || renderSidebar("side-my-" + id));
   };
   inp.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -2571,15 +2801,15 @@ function startRename(id) {
   inp.addEventListener("blur", () => finish(true));
 }
 // Rename a saved dashboard (and its ::DASHBOARD_TITLE, when it has one). A
-// name another dashboard has asks before replacing it. False: nothing done.
-function renameDash(id, raw) {
+// name another dashboard has asks before replacing it. → false: nothing done.
+async function renameDash(id, raw) {
   const d = dashDB.get(id);
   const name = String(raw ?? "")
     .replace(/\s+/g, " ")
     .trim();
   if (!d || !name || name === d.name) return false;
   const other = dashNamed(name, id);
-  if (other && !confirm(`Replace "${name}"?\n\nAnother of your dashboards has this name; it will be deleted.`)) return false;
+  if (other && !(await askReplace(name, "Renaming this one deletes it."))) return false;
   if (other) dashDB.remove(other.id);
   dashDB.put({ id, name, sql: withTitleSql(d.sql, name) });
   if (curMyId() === id) {
@@ -2663,7 +2893,7 @@ function loadDash(name, sql, key) {
 // belongs to another dashboard asks "Replace …?" first. The page title
 // (::DASHBOARD_TITLE, when the SQL has one) follows the name. An example
 // saved as a dashboard of yours drops its `-- @group` (its library area).
-function saveDash() {
+async function saveDash() {
   const name = ($("dash-name").value || "").replace(/\s+/g, " ").trim();
   if (!name) {
     $("dash-name").focus();
@@ -2671,7 +2901,7 @@ function saveDash() {
   }
   const cur = curMyId() && dashDB.get(curMyId()) ? curMyId() : null;
   const other = dashNamed(name, cur);
-  if (other && !confirm(`Replace "${name}"?\n\nAnother of your dashboards has this name; it will be overwritten.`))
+  if (other && !(await askReplace(name, "Saving overwrites it.")))
     return status("not saved");
   const ta = $("sql");
   // a copy of an example starts ungrouped: the library's area is not a group
@@ -2748,8 +2978,10 @@ function showExamplesButton(lib) {
   };
   return b;
 }
-function renderExamples(nav, lib, mine) {
-  const open = exPeek.open ?? exLibOpen(lib, mine);
+// `entries`: the examples to show (all, or the search's matches); while
+// searching the section and its areas are shown open.
+function renderExamples(nav, lib, mine, entries, searching) {
+  const open = searching || (exPeek.open ?? exLibOpen(lib, mine));
   const row = document.createElement("div");
   row.className = "side-section side-section-row side-master";
   const tog = document.createElement("button");
@@ -2758,7 +2990,8 @@ function renderExamples(nav, lib, mine) {
   tog.setAttribute("aria-expanded", String(open));
   tog.setAttribute("aria-controls", "side-ex");
   tog.innerHTML = `<span class="ex-caret" aria-hidden="true">${open ? "▾" : "▸"}</span><span>Examples</span>`;
-  tog.append(countBadge(EXAMPLES.length));
+  tog.append(countBadge(entries.length));
+  tog.disabled = !!searching;
   tog.onclick = () => {
     delete exPeek.open;
     lib.open = !open;
@@ -2785,9 +3018,9 @@ function renderExamples(nav, lib, mine) {
   list.setAttribute("role", "group");
   list.setAttribute("aria-label", "Examples");
   list.hidden = !open;
-  for (const { area, items } of exampleAreas(EXAMPLES)) {
+  for (const { area, items } of exampleAreas(entries)) {
     const key = slugify(area);
-    const aOpen = exPeek.areas[area] ?? exAreaOpen(lib, area);
+    const aOpen = searching || (exPeek.areas[area] ?? exAreaOpen(lib, area));
     const ab = document.createElement("button");
     ab.className = "side-area";
     ab.id = "side-area-" + key;
@@ -2801,6 +3034,7 @@ function renderExamples(nav, lib, mine) {
     nm.className = "g-name";
     nm.textContent = area;
     ab.append(caret, nm, countBadge(items.length));
+    ab.disabled = !!searching;
     ab.onclick = () => {
       delete exPeek.areas[area];
       lib.areas[area] = !aOpen;
@@ -2819,10 +3053,7 @@ function renderExamples(nav, lib, mine) {
         box.appendChild(h);
       }
       sub = s;
-      const it = sideItem(entry.name, entry.sql, "ex:" + entry.id, false);
-      it.classList.add("side-ex-item"); // indent examples under their area
-      if (entry.tags.length) it.title = `${entry.name}\nTags: ${entry.tags.join(", ")}`;
-      box.appendChild(it);
+      box.appendChild(exRow(entry));
     }
     list.append(ab, box);
   }
@@ -2833,6 +3064,293 @@ function countBadge(n) {
   c.className = "side-count";
   c.textContent = String(n);
   return c;
+}
+
+// ---- dialogs (instead of prompt / confirm) ----
+// A small modal dialog: {title, text?, input?: {label, value}, check?: label,
+// buttons: [{label, value, primary?, danger?}], cancel?: the value of Esc / a
+// click outside}. Focus stays inside (Tab wraps) and goes back to where it
+// was. → Promise<{value, input, checked}>.
+function dpDialog({ title, text = "", input = null, check = null, buttons, cancel = null }) {
+  return new Promise((resolve) => {
+    const opener = document.activeElement;
+    const veil = document.createElement("div");
+    veil.className = "md-dialog dp-dialog";
+    const card = document.createElement("div");
+    card.className = "md-card dp-dialog-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    const hid = "dp-dialog-title";
+    card.setAttribute("aria-labelledby", hid);
+    const h = document.createElement("h3");
+    h.id = hid;
+    h.textContent = title;
+    card.appendChild(h);
+    if (text) {
+      const p = document.createElement("p");
+      p.className = "md-note";
+      p.id = "dp-dialog-text";
+      p.textContent = text;
+      card.setAttribute("aria-describedby", p.id);
+      card.appendChild(p);
+    }
+    let inp = null;
+    if (input) {
+      const l = document.createElement("label");
+      l.textContent = input.label;
+      inp = document.createElement("input");
+      inp.type = "text";
+      inp.value = input.value || "";
+      inp.spellcheck = false;
+      inp.autocomplete = "off";
+      l.appendChild(inp);
+      card.appendChild(l);
+    }
+    let chk = null;
+    if (check) {
+      const l = document.createElement("label");
+      l.className = "dp-dialog-check";
+      chk = document.createElement("input");
+      chk.type = "checkbox";
+      l.append(chk, " ", check);
+      card.appendChild(l);
+    }
+    const acts = document.createElement("div");
+    acts.className = "md-actions dp-dialog-actions";
+    const spacer = document.createElement("span");
+    spacer.style.flex = "1";
+    acts.appendChild(spacer);
+    const done = (value) => {
+      veil.remove();
+      document.removeEventListener("keydown", onKey, true);
+      if (opener?.isConnected) opener.focus();
+      resolve({ value, input: inp ? inp.value : null, checked: !!chk?.checked });
+    };
+    let primary = null;
+    for (const b of buttons) {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = b.primary ? "dp-dialog-primary" + (b.danger ? " danger" : "") : "btn2";
+      el.textContent = b.label;
+      el.onclick = () => done(b.value);
+      if (b.primary) primary = el;
+      acts.appendChild(el);
+    }
+    card.appendChild(acts);
+    veil.appendChild(card);
+    veil.addEventListener("mousedown", (e) => e.target === veil && done(cancel));
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        done(cancel);
+      } else if (e.key === "Enter" && e.target === inp && primary) {
+        e.preventDefault();
+        primary.click();
+      } else if (e.key === "Tab") {
+        const f = [...card.querySelectorAll("input, button")];
+        const i = f.indexOf(document.activeElement);
+        const j = i < 0 ? 0 : (i + (e.shiftKey ? -1 : 1) + f.length) % f.length;
+        e.preventDefault();
+        e.stopPropagation();
+        f[j].focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(veil);
+    if (inp) {
+      inp.focus();
+      inp.select();
+    } else (primary || acts.querySelector("button"))?.focus();
+  });
+}
+// A name, asked in a dialog (null: cancelled or empty).
+async function askName(title, label, value = "", ok = "Save") {
+  const r = await dpDialog({
+    title,
+    input: { label, value },
+    buttons: [
+      { label: "Cancel", value: false },
+      { label: ok, value: true, primary: true },
+    ],
+    cancel: false,
+  });
+  const v = (r.input || "").replace(/\s+/g, " ").trim();
+  return r.value && v ? v : null;
+}
+// "Replace …?" — true to go ahead.
+async function askReplace(name, what) {
+  const r = await dpDialog({
+    title: `Replace “${name}”?`,
+    text: `Another of your dashboards is called “${name}”. ${what}`,
+    buttons: [
+      { label: "Cancel", value: false },
+      { label: "Replace", value: true, primary: true, danger: true },
+    ],
+    cancel: false,
+  });
+  return r.value;
+}
+
+// ---- examples: use as a template, download ----
+function exRow(entry) {
+  const row = document.createElement("div");
+  row.className = "side-row side-ex-row";
+  row.dataset.key = "ex:" + entry.id;
+  const it = sideItem(entry.name, entry.sql, "ex:" + entry.id);
+  it.classList.add("side-ex-item"); // indent examples under their area
+  if (entry.tags.length) it.title = `${entry.name}\nTags: ${entry.tags.join(", ")}`;
+  const more = document.createElement("button");
+  more.className = "side-more";
+  more.id = "side-ex-more-" + entry.id;
+  more.textContent = "⋯";
+  more.title = "use as a template, download";
+  more.setAttribute("aria-label", `${entry.name}: actions`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.setAttribute("aria-expanded", "false");
+  more.onclick = () =>
+    openSideMenu(more, [
+      { label: "Use as a template", run: () => useTemplate(entry) },
+      { label: "Download .sql", run: () => downloadSql(entry.id, entry.name, entry.sql) },
+    ]);
+  row.append(it, more);
+  return row;
+}
+// A copy of an example in My dashboards (ungrouped, its own name), opened.
+function useTemplate(entry) {
+  const name = dashNamed(entry.name) ? copyName(entry.name, dashDB.list().map((d) => d.name)) : entry.name;
+  const sql = sqlToSave(entry.sql, name, true);
+  const id = dashDB.put({ name, sql });
+  loadDash(name, sql, myKey(id));
+  renderSidebar("side-my-" + id);
+  sideSay(`${name}: added to My dashboards`);
+}
+// One dashboard as `<id>.sql` (with its `-- @title`).
+function downloadSql(id, name, sql) {
+  const [f] = exportFiles([{ id, name, sql }]);
+  download(new Blob([f.text], { type: "application/sql" }), f.name);
+}
+// Every saved dashboard as a served folder in a .zip.
+function exportAll() {
+  const list = dashDB.list();
+  if (!list.length) return;
+  const zip = zipStored(exportFiles(list).map((f) => ({ name: f.name, data: f.text }))); // the .xlsx writer's zip
+  download(new Blob([zip], { type: "application/zip" }), "my-dashboards.zip");
+  sideSay(`Exported ${list.length} dashboards`);
+}
+// Import .sql files and stored .zip files (the picker, or dropped on the
+// sidebar). The name is the file's `-- @title`, else its name; a name you
+// already have asks: Keep both / Replace / Skip.
+const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+async function importFiles(files) {
+  const found = []; // {base, text}
+  const errors = [];
+  const dec = new TextDecoder("utf-8");
+  const text = (bytes) => dec.decode(bytes).replace(/^﻿/, "");
+  for (const f of files) {
+    if (f.size > IMPORT_MAX_BYTES) {
+      errors.push(`${f.name}: larger than 20 MB`);
+      continue;
+    }
+    if (/\.zip$/i.test(f.name)) {
+      try {
+        const entries = unzipStored(new Uint8Array(await f.arrayBuffer())).filter((e) => /\.sql$/i.test(e.name));
+        if (!entries.length) errors.push(`${f.name}: no .sql files inside`);
+        for (const e of entries) found.push({ base: e.name.split("/").pop(), text: text(e.data) });
+      } catch (e) {
+        errors.push(`${f.name}: ${e.message}`);
+      }
+    } else if (/\.sql$/i.test(f.name)) found.push({ base: f.name, text: text(new Uint8Array(await f.arrayBuffer())) });
+    else errors.push(`${f.name}: not a .sql or .zip file`);
+  }
+  let added = 0,
+    replaced = 0,
+    skipped = 0,
+    lastId = null,
+    always = null;
+  for (let i = 0; i < found.length; i++) {
+    const { base, text: sql } = found[i];
+    const name = (dashMetaOf(sql).title || base.replace(/\.sql$/i, "")).replace(/\s+/g, " ").trim() || "Imported dashboard";
+    const other = dashNamed(name);
+    let choice = other ? always : "new";
+    if (!choice) {
+      const left = found.slice(i + 1).filter((x) => dashNamed((dashMetaOf(x.text).title || x.base.replace(/\.sql$/i, "")).trim())).length;
+      const r = await dpDialog({
+        title: `“${name}” already exists`,
+        text: "One of your dashboards has this name. Keep both (the import gets a number), replace yours, or skip this file.",
+        check: left ? `Do the same for the ${left} other name clash${left > 1 ? "es" : ""}` : null,
+        buttons: [
+          { label: "Skip", value: "skip" },
+          { label: "Replace", value: "replace" },
+          { label: "Keep both", value: "keep", primary: true },
+        ],
+        cancel: "skip",
+      });
+      choice = r.value;
+      if (r.checked) always = choice;
+    }
+    if (choice === "skip") {
+      skipped++;
+      continue;
+    }
+    const nm = choice === "keep" ? importName(name, dashDB.list().map((d) => d.name)) : name;
+    lastId = dashDB.put({ id: choice === "replace" ? other.id : undefined, name: nm, sql });
+    addGroup(dashGroupOf(sql));
+    choice === "replace" ? replaced++ : added++;
+  }
+  renderSidebar(lastId ? "side-my-" + lastId : "side-my-more");
+  const parts = [`${added} imported`];
+  if (replaced) parts.push(`${replaced} replaced`);
+  if (skipped) parts.push(`${skipped} skipped`);
+  const summary = parts.join(", ");
+  status(summary);
+  sideSay(summary);
+  if (errors.length)
+    await dpDialog({
+      title: found.length ? "Some files were not imported" : "Nothing was imported",
+      text: errors.join("\n"),
+      buttons: [{ label: "OK", value: true, primary: true }],
+    });
+}
+// The import picker and dropping files on the sidebar.
+function wireImport() {
+  const pick = $("side-import");
+  if (pick)
+    pick.onchange = () => {
+      const fs = [...pick.files];
+      pick.value = "";
+      if (fs.length) importFiles(fs);
+    };
+  const side = $("sidebar");
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+  side.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    side.classList.add("side-dropping");
+  });
+  side.addEventListener("dragleave", (e) => {
+    if (!side.contains(e.relatedTarget)) side.classList.remove("side-dropping");
+  });
+  side.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    side.classList.remove("side-dropping");
+    importFiles([...e.dataTransfer.files]);
+  });
+  const s = $("side-search");
+  if (s) {
+    s.addEventListener("input", () => {
+      sideFilter.q = s.value;
+      renderSidebar();
+    });
+    s.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && (s.value || sideFilter.tags.length)) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearSideFilter(true);
+      }
+    });
+  }
 }
 // ---- Edit / View / Explore modes ----
 function bodyMode() {

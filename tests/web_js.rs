@@ -106,3 +106,8 @@ fn web_my_dashboards_store() {
 fn web_app_bar_settings_are_merged_and_checked() {
     run_node("app_brand_test.mjs");
 }
+
+#[test]
+fn web_sidebar_search_and_zip() {
+    run_node("library_test.mjs");
+}

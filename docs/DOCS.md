@@ -1944,20 +1944,47 @@ changed the name); a name another of your dashboards already has asks
 *Replace "…"?* first. The toolbar name and the page title
 (`::DASHBOARD_TITLE`, when the SQL has one) are one name: change either and
 the other follows. Each dashboard's **⋯** menu has *Rename* (in place: Enter
-saves, Esc cancels), *Duplicate* ("… copy", below it), *Move to group…* and
-*Delete*, which a toast lets you **Undo** for about 8 seconds. A dashboard's
-group is the `-- @group` line of its SQL: moving it, renaming a group or
-deleting one (its dashboards stay, ungrouped) rewrites that line, so the
-group travels with the SQL. Groups fold open and shut and keep their order
-(drag a group, or Alt+↑/↓ on it); empty ones stay until you delete them.
-Dashboards without a group come first; an example you save as your own starts
-there too (its library area isn't kept as a group; its `@tags` are). The header's **⋯** sorts them —
-*manual* (drag, or Alt+↑/↓), *name* or *last edited* — and shows or hides the
-examples. Everything lives in this browser's `localStorage`
-(`dp_dashboards`, version 2: `{v, items: {id: {name, sql, updated}}, order,
-groups, collapsed, sort}`); a store from before this version is converted on
-first load, the original kept as `dp_dashboards_v1`. `?dashboard=my:<id>`
-opens one of yours (the id is the slug of the name it was first saved under).
+saves, Esc cancels), *Duplicate* ("… copy", below it), *Move to group…*,
+*Download .sql* and *Delete*, which a toast lets you **Undo** for about 8
+seconds. A dashboard's group is the `-- @group` line of its SQL: moving it,
+renaming a group or deleting one (its dashboards stay, ungrouped) rewrites
+that line, so the group travels with the SQL. Groups fold open and shut and
+keep their order (drag a group, or Alt+↑/↓ on it); empty ones stay until you
+delete them. Dashboards without a group come first; an example you save as
+your own starts there too (its library area isn't kept as a group; its
+`@tags` are). An example's **⋯** has *Use as a template* (a copy of it in My
+dashboards, opened) and *Download .sql*. Questions (a group's name, *Replace
+…?*, an import's name clash) come in small dialogs that keep the keyboard
+inside until they close.
+
+The header's **⋯** sorts your dashboards — *manual* (drag, or Alt+↑/↓),
+*name* or *last edited* — and has *New group…*, *Import .sql / .zip…*,
+*Export all as .zip* and *Show / Hide examples*:
+
+- **Export all** writes `my-dashboards.zip`, laid out as a served folder:
+  one `<id>.sql` per dashboard, each with `-- @title <name>` (and its
+  `@group` / `@tags`), so `anofox_serve_dashboards` or `serve --dashboards`
+  serves it unchanged. *Download .sql* gives one such file.
+- **Import** takes `.sql` files and `.zip` files (the picker, or drop them on
+  the sidebar). A dashboard's name is its `-- @title`, else the file name.
+  The zip must be uncompressed ("store", e.g. `zip -0`, or an *Export all*);
+  a compressed one is refused with that hint. When a name is taken you
+  choose *Keep both* (the import gets "(2)"), *Replace* or *Skip* — once for
+  all the clashes, if you like.
+
+**Search and tags.** The field under *New dashboard* (in the phone drawer too)
+filters every section at once — your dashboards, *Recently opened* and the
+examples — by name, page title, group and tags; every word has to match, and
+groups and areas with a match are shown open. Esc clears it. The tag chips
+under it are the tags of what is in view: press one to show only dashboards
+with that tag (several: all of them); × clears both. **Recently opened** lists
+the last 5 dashboards and examples you opened, per browser.
+
+Everything lives in this browser's `localStorage` (`dp_dashboards`, version
+2: `{v, items: {id: {name, sql, updated}}, order, groups, collapsed, sort,
+recent, recentOpen}`); a store from before this version is converted on first
+load, the original kept as `dp_dashboards_v1`. `?dashboard=my:<id>` opens one
+of yours (the id is the slug of the name it was first saved under).
 
 Each example says where it belongs in its own header comments (`-- @title`,
 `-- @group`, `-- @tags`, see *Dashboard header comments*), so
