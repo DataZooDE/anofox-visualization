@@ -1982,6 +1982,58 @@ The live extensions are fetched by `scripts/fetch-wasm-extensions.sh` into
 `'data/<ext>/<file>.csv'` gets that file fetched and registered with
 DuckDB-Wasm first.
 
+#### Your name and logo in the app bar
+
+The bar at the top of the builder shows **anofox-visualization** and
+*Dashboards from SQL* by default. An installation can put its own name,
+tagline and logo there. This is the deployment's bar, not a dashboard's
+header: a dashboard still brands itself with `::BRAND`, `::DASHBOARD_TITLE`,
+`::LOGO` and `::FAVICON`. The *Powered by DataZoo GmbH* credit and the
+*© DataZoo GmbH* sidebar footer always stay.
+
+| Setting   | What it does |
+|-----------|--------------|
+| `name`    | The name in the bar and the browser tab (1–80 characters). |
+| `tagline` | The line next to it (up to 160 characters); `""` hides it. Not shown on phones. |
+| `logo`    | An image left of the name, 28 px high (24 px on phones). |
+| `link`    | Where the name and logo go when clicked (opens in a new tab). |
+| `favicon` | The tab icon while the open dashboard sets no `::FAVICON`. |
+| `name_visible` | `false` shows the logo alone, for a logo that already spells the name (a wordmark); the name becomes the logo's alt text and stays the tab title. Needs a `logo`, so the bar is never empty. |
+
+`logo` and `favicon` take an `https://` (or `http://`) address or a
+`data:image/png|jpeg|gif|webp|svg+xml` URI. In `app-config.json` they can also
+be a path next to `index.html` (`brand/logo.svg`). `link` must be an
+`http(s)://` address. A value that breaks these rules is skipped (the console
+says why), so a typo never empties the bar. The text is shown as text, never
+as HTML. The browser tab reads `name — tagline` while the open dashboard has
+no `::DASHBOARD_TITLE`.
+
+Where the settings come from, later wins:
+
+1. the defaults above;
+2. **`app-config.json` next to `index.html`**, for static hosting (GitHub
+   Pages, any web server). Copy
+   [`web/app-config.example.json`](../web/app-config.example.json) to
+   `web/app-config.json` and edit it. The builder loads it at start; without
+   the file it uses the defaults. `web/app-config.json` is in `.gitignore`,
+   and `serve` and the extension never serve it, even when it was in `web/`
+   at build time: a binary is configured by its flags or options only.
+3. **the serving process**: `serve --app-name …` (see *b2*) or
+   `anofox_serve(port, options)` (see *c*).
+
+```json
+{
+  "name": "Acme Insights",
+  "tagline": "Sales and stock, every morning",
+  "logo": "brand/logo.svg",
+  "link": "https://intranet.acme.example/"
+}
+```
+
+The bar stays hidden until the settings are known (at most 1.5 s), so the
+default name doesn't flash first. In embed mode (`?embed=1`) and on a locked
+server there is no app bar.
+
 ### b2) Serve the UI on a live DuckDB — explore existing data
 
 `anofox-visualization serve` starts a tiny local HTTP server that serves the same builder UI
@@ -1995,6 +2047,22 @@ cargo build --bin serve --features serve
 #   --port N     choose the port
 #   --no-open    don't launch a browser (open the printed URL yourself)
 ```
+
+Your name and logo in the app bar (see *Your name and logo in the app bar*):
+
+```sh
+./target/debug/serve mydata.duckdb --app-name "Acme Insights" \
+    --app-tagline "Sales and stock, every morning" --app-logo brand/logo.svg \
+    --app-link https://intranet.acme.example/   # also --app-favicon FILE|URL
+# a logo that spells the name: --app-logo wordmark.svg --app-hide-name
+```
+
+`--app-logo` and `--app-favicon` take an image file (read once and put in the
+page, so nothing else is served) or an `https://` / `data:image/` address.
+A file that isn't a PNG, JPEG, GIF, WebP or SVG, or is larger than 512 KB, is
+refused with an error. `--app-tagline ""` hides the tagline. The flags style
+the authoring builder only; `serve --dashboards` refuses them, because a
+locked server shows no app bar.
 
 It runs whatever SQL the builder sends, so it is locked to you: loopback only,
 and the printed URL carries a per-run token (kept in a cookie) that every
@@ -2058,6 +2126,18 @@ session, from inside DuckDB.
 LOAD 'anofox_visualization.duckdb_extension';  -- (duckdb -unsigned; see duckext/BUILD.md)
 SELECT anofox_serve(8080);                    -- serves http://127.0.0.1:8080/?token=… + opens the browser
 SELECT anofox_serve_stop(8080);               -- stop it again
+```
+
+`anofox_serve(port, options)` sets the app bar (see *Your name and logo in
+the app bar*): a JSON object with `name`, `tagline`, `logo`, `link`,
+`favicon` and `name_visible` (`true` / `false`). The extension doesn't open files itself; read a logo with DuckDB,
+so its file access settings apply:
+
+```sql
+SELECT anofox_serve(8080, json_object(
+         'name', 'Acme Insights', 'tagline', 'Sales and stock, every morning',
+         'logo', 'data:image/svg+xml;base64,' || to_base64(content)))
+FROM read_blob('brand/logo.svg');
 ```
 
 The extension embeds the same UI and answers `/query` on a live connection

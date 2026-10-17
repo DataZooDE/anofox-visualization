@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>anofox-visualization — SQL dashboards in the browser</title>
+<title>anofox-visualization — Dashboards from SQL</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -67,6 +67,17 @@ header{position:sticky;top:0;z-index:40;padding:.7rem 1.4rem;border-bottom:1px s
 header h1{font-size:1.18rem;font-weight:700;margin:0;letter-spacing:-.02em;display:flex;align-items:center;gap:.5rem}
 header h1::before{content:"";width:11px;height:11px;border-radius:50%;background:linear-gradient(135deg,var(--ui-accent),var(--ui-accent2));box-shadow:var(--ui-dot-shadow)}
 header .tag{color:var(--ui-muted);font-size:.82rem}
+/* the app bar per installation (app-config.json / serve --app-*; appBrandApply):
+   hidden until the settings are known (at most ~1.5 s), so the default name
+   never flashes; a logo replaces the dot and keeps the bar's height */
+header #app-brand,header #app-tag{visibility:hidden;animation:app-brand-in 0s 1.5s forwards}
+body.brand-ready header #app-brand,body.brand-ready header #app-tag{visibility:visible;animation:none}
+@keyframes app-brand-in{to{visibility:visible}}
+header h1.has-logo::before{display:none}
+header h1 a{color:inherit;text-decoration:none;display:inherit;align-items:inherit;gap:inherit}
+header h1 a:hover .app-name{text-decoration:underline}
+header h1{white-space:nowrap}
+header h1 .app-logo{display:block;flex:none;height:28px;width:auto;max-width:180px;object-fit:contain;object-position:left center}
 header .actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
 header .status{font-size:.78rem;color:var(--ui-muted);min-width:58px;text-align:right;font-weight:600}
 /* embed mode (?embed=1): dashboard only — no header, sidebar, or toolbar */
@@ -382,7 +393,9 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
 .more-btn{display:none}
 @media(max-width:640px){
   header{padding:.55rem .9rem;gap:.6rem;flex-wrap:nowrap}
-  header h1{font-size:1rem;white-space:nowrap}
+  header h1{font-size:1rem;white-space:nowrap;min-width:0}
+  header h1 .app-name{overflow:hidden;text-overflow:ellipsis}
+  header h1 .app-logo{height:24px;max-width:120px}
   header .tag{display:none}
   header .status{margin-left:auto;min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   header .more-btn{display:inline-flex;flex:none;order:1}
@@ -397,8 +410,8 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
 <body class="mode-view">
 <div id="loadbar"></div>
 <header>
-  <h1>anofox-visualization</h1>
-  <span class="tag">SQL dashboards — live DuckDB or DuckDB-Wasm, rendered by ggplot-rs</span>
+  <h1 id="app-brand">anofox-visualization</h1>
+  <span class="tag" id="app-tag">Dashboards from SQL</span>
   <button id="more" class="btn2 icon more-btn" aria-expanded="false" aria-controls="actions" aria-label="More actions" title="more actions">⋯</button>
   <div class="actions" id="actions">
     <button id="md" class="btn2" title="connect a MotherDuck database">☁ MotherDuck</button>

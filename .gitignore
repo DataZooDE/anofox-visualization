@@ -11,3 +11,4 @@
 /tests/web/node_modules
 /dist
 /.cache
+/web/app-config.json
