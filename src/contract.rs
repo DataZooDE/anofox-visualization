@@ -1414,6 +1414,12 @@ mod tests {
         assert_eq!(super::stats::direction_of("MAPE"), 1.0);
         assert_eq!(super::stats::direction_of("smape"), 1.0);
         assert_eq!(super::stats::direction_of("brier"), 1.0);
+        // anofox-decide's decide_ece: expected calibration error.
+        assert_eq!(super::stats::direction_of("ece"), 1.0);
+        assert_eq!(
+            super::stats::direction_of("expected_calibration_error"),
+            1.0
+        );
         assert_eq!(super::stats::direction_of("log_loss"), 1.0);
         assert_eq!(super::stats::direction_of("auc"), -1.0);
         assert_eq!(super::stats::direction_of("accuracy"), -1.0);
