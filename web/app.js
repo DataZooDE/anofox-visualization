@@ -5927,7 +5927,7 @@ async function runOnce(fresh = true) {
     const was = o.querySelector(".panel-svg > svg");
     if (!svg || !was || (!motion && svg.getAttribute("data-transition") !== "tween")) continue;
     const drill = motion && motion.drill && n._ia && n._ia.drill && n._ia.drill.prefix === motion.drill ? motion : null;
-    tweens.push([svg, dpAnim.geom(was), drill]);
+    tweens.push([n, dpAnim.geom(was), drill]);
   }
   // Accessibility: swap every chart for its data table (state survives runs).
   if (!dash.querySelector(".dp-a11y-bar")) {
@@ -5958,7 +5958,11 @@ async function runOnce(fresh = true) {
   const tWire = performance.now();
   wireCharts();
   performance.measure("dp:wire", { start: tWire });
-  for (const [svg, old, drill] of tweens) drill ? dpAnim.zoom(svg, old, drill.key, drill.down) : dpAnim.tween(svg, old);
+  // (the chart as it is now: fitCharts may have redrawn it at the panel's width)
+  for (const [fig, old, drill] of tweens) {
+    const svg = fig.querySelector(".panel-svg > svg");
+    if (svg) drill ? dpAnim.zoom(svg, old, drill.key, drill.down) : dpAnim.tween(svg, old);
+  }
   // A drill / drill-through hands the focus on (a crumb, the opened tab) when
   // the run removed the element that had it.
   if (motion && motion.focus && (!document.activeElement || document.activeElement === document.body)) motion.focus();

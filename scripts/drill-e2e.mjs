@@ -9,18 +9,24 @@
 //   - panels the action does not touch being rebuilt (their DOM must stay)
 //   - focus lost to <body>
 //   - more than one run per click, a frame without the panels (white flash)
-//   - time to stable above --bound ms
+//   - the run (click → data on screen) slower than the dashboard's plain
+//     re-run measured in the same session (a cross-filter click: same queries,
+//     no drill) × 2.5, at least --bound ms — so machine load, which slows both,
+//     cancels out while a slow drill path does not; or the motion after the
+//     run (run end → stable) above --settle ms: the drill animations are
+//     ≤ 400 ms, so a slow settle is the page, not the query or machine load
 // and prints the numbers. --frames DIR saves a frame strip per action (CDP
 // screencast, montage'd when ImageMagick is on the PATH); --axe runs axe-core
 // on the drilled chart.
 //
 //   python3 serve_nocache.py 8791 &
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/drill-e2e.mjs \
-//       [--url http://127.0.0.1:8791/] [--motion reduce] [--frames dir] [--bound 1500] [--axe axe.min.js]
+//       [--url http://127.0.0.1:8791/] [--motion reduce] [--frames dir] [--bound 1500] [--settle 900] [--width 390] [--axe axe.min.js]
 import { createRequire } from "module";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import path from "path";
+import os from "os";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -32,6 +38,9 @@ const base = arg("--url", "http://127.0.0.1:8791/");
 const motion = arg("--motion", "no-preference");
 const frames = arg("--frames", "");
 const bound = Number(arg("--bound", "1500"));
+console.log(`load average ${os.loadavg().map((l) => l.toFixed(1)).join(" ")} on ${os.cpus().length} cores`);
+const runTimes = []; // [label, ms]: checked against the baseline re-run at the end
+const settleBound = Number(arg("--settle", "900"));
 const axe = arg("--axe", "");
 const fail = (m) => {
   console.error("FAIL: " + m);
@@ -39,7 +48,8 @@ const fail = (m) => {
 };
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 640 }, reducedMotion: motion });
+// --width 390: a phone, where charts are redrawn at their shown width (fitCharts)
+const page = await browser.newPage({ viewport: { width: Number(arg("--width", "1280")), height: 640 }, reducedMotion: motion });
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e)));
 await page.addInitScript(() => {
@@ -92,6 +102,7 @@ async function record(tabSwitch = false) {
         if (m.target.id === "dp-tip" || m.target.closest?.("#dp-tip")) continue;
         if (m.type === "attributes" && m.target === document.body && m.attributeName === "class") {
           if (document.body.classList.contains("loading") && !m.oldValue?.includes("loading")) R.runs++;
+          else if (!document.body.classList.contains("loading") && m.oldValue?.includes("loading")) R.runEnd = performance.now() - R.t0;
           continue;
         }
         if (R.tabSwitch && !R.switchAt) {
@@ -164,6 +175,8 @@ async function stable(label, opts = {}) {
       longMs: Math.round(long.reduce((a, s) => a + s.d, 0)),
       runs: R.runs,
       stableMs: Math.round(R.lastMut),
+      runMs: Math.round(R.runEnd ?? R.lastMut),
+      settleMs: Math.round(Math.max(0, R.lastMut - (R.runEnd ?? R.lastMut))),
       skel: Math.max(0, ...R.frames.map((f) => f.skel)),
       skelMs: (() => {
         const on = R.frames.filter((f) => f.skel);
@@ -213,7 +226,8 @@ function check(label, r, { keepAll = true, focus = true } = {}) {
   if (r.blankFrames) fail(`${label}: ${r.blankFrames} frame(s) without any panel`);
   if (keepAll && r.kept < r.before - 2) fail(`${label}: ${r.before - r.kept} of ${r.before} panels rebuilt (only the drilled chart and its follower may change)`);
   if (focus && (r.focus === "body" || !r.focusInDrill)) fail(`${label}: focus lost (${r.focus})`);
-  if (r.stableMs > bound) fail(`${label}: stable after ${r.stableMs} ms (bound ${bound} ms)`);
+  runTimes.push([label, r.runMs]);
+  if (r.settleMs > settleBound) fail(`${label}: still moving ${r.settleMs} ms after the run (bound ${settleBound} ms)`);
 }
 
 // The drill chart, scrolled a little down so a scroll jump shows.
@@ -232,6 +246,10 @@ const markAt = (sel, k = 0) =>
     [sel, k]
   );
 
+// The actions run in a try, so the run-time check below still reports (a
+// slow drill can desynchronise the later steps).
+let base1 = null, base2 = null;
+try {
 // (a) drill-down: click the first region bar.
 const bar = await markAt(".panel-svg > svg .dp-hit");
 await record();
@@ -279,15 +297,16 @@ await page.evaluate(() => {
   const svg = document.querySelector(".dash .dp-crumbs").closest(".panel").querySelector(".panel-svg > svg");
   window.__focusSvg = svg;
   svg.focus();
-  svg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 });
-await settled();
-await page.waitForTimeout(300);
+// (these two cross-filter runs are also the baseline for the run times)
+await record();
+await page.evaluate(() => window.__focusSvg.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+base1 = await stable("baseline-1");
 const kept = await focusKept("kept panel");
 if (!kept.same) fail("kept panel: a re-run that does not change the chart rebuilt it");
+await record();
 await page.evaluate(() => document.activeElement.querySelector(".dp-hit").dispatchEvent(new MouseEvent("click", { bubbles: true }))); // clear
-await settled();
-await page.waitForTimeout(300);
+base2 = await stable("baseline-2");
 
 // (b) back up with the breadcrumb ("All").
 const all = await page.$eval(".dash .dp-crumbs .dp-crumb", (b) => {
@@ -369,6 +388,16 @@ await page.waitForTimeout(300);
 const ret = await page.evaluate(() => ({ tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent, label: document.activeElement.getAttribute("aria-label") }));
 console.log(`drill-through-key: focus "${t2}", Esc → ${ret.tab} / ${ret.label}`);
 if (ret.tab !== "Drill-through" || ret.label !== origin) fail(`drill-through-key: Esc did not return to the mark (${ret.tab}, ${ret.label})`);
+
+} catch (e) {
+  fail(`stopped: ${String(e).split("\n")[0]}`);
+}
+
+// Run times against the plain re-run of this session (without one: --bound).
+const baseline = base1 && base2 ? Math.max(base1.runMs, base2.runMs) : 0;
+const allowed = Math.max(bound, Math.round(2.5 * baseline));
+console.log(`run times (baseline re-run ${baseline} ms → allowed ${allowed} ms): ${runTimes.map(([l, t]) => `${l} ${t}`).join(", ")}`);
+for (const [label, t] of runTimes) if (t > allowed) fail(`${label}: the run took ${t} ms (allowed ${allowed} ms: 2.5 × the ${baseline} ms re-run, at least ${bound})`);
 
 if (errs.length) fail("page errors: " + errs.join(" | "));
 await browser.close();
