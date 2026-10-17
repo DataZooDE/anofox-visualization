@@ -36,6 +36,13 @@ terminal.
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
 | `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size |
+| `::Q1` | `::QUARTILE1`, `::LOWER_QUARTILE` | encoding | a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT) |
+| `::MEDIAN` | `::Q2` | encoding | the median line of a box from statistics (see ::Q1) |
+| `::Q3` | `::QUARTILE3`, `::UPPER_QUARTILE` | encoding | the upper quartile of a box from statistics (see ::Q1) |
+| `::WHISKER_LOW` | `::WHISKER_LOWER`, `::LOWER_WHISKER` | encoding | the lower whisker end of a box from statistics (without it: none) |
+| `::WHISKER_HIGH` | `::WHISKER_UPPER`, `::UPPER_WHISKER` | encoding | the upper whisker end of a box from statistics |
+| `::MEAN` | `::AVERAGE` | encoding | a box's mean from statistics, drawn as a dot |
+| `::OUTLIERS` | `::OUTLIER_LIST` | encoding | a box's outliers from statistics: a list of numbers, drawn as open circles |
 | `::YMIN` | `::Y_MIN` | encoding | lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars |
 | `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
 | `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
@@ -396,6 +403,39 @@ can map a mark's numeric `data-x` back to its level.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).
+
+#### Box plots from statistics
+
+`::BOXPLOT` computes the box from raw rows, which must all reach the page
+(`max_rows`). For a whole population (every series of every method) compute the
+numbers in SQL and send one row per box:
+
+```sql
+SELECT method::XAXIS,
+       quantile_cont(abs_err, 0.25)::Q1, median(abs_err)::MEDIAN,
+       quantile_cont(abs_err, 0.75)::Q3,
+       quantile_cont(abs_err, 0.05)::WHISKER_LOW,
+       quantile_cont(abs_err, 0.95)::WHISKER_HIGH,
+       avg(abs_err)::MEAN,
+       'Absolute error by method'::TITLE
+FROM backtest GROUP BY method ORDER BY median(abs_err);
+```
+
+- `::Q1`, `::MEDIAN` and `::Q3` are required, and no chart measure: the
+  statement draws a box plot by itself. `::WHISKER_LOW` / `::WHISKER_HIGH`
+  (a pair) are the whisker ends — your rule: the 5 / 95 % quantiles, min / max,
+  or Tukey's 1.5 × IQR fences; without them there are no whiskers.
+- `::MEAN` adds a dot; `::OUTLIERS` (a list of numbers, e.g.
+  `list(v) FILTER (WHERE v > hi)`) draws open circles like a raw box plot's.
+- The box looks like a raw-rows `::BOXPLOT` (theme, dark mode, `::CATEGORY`
+  fill, `::FLIP`, `::YFORMAT`, `::YSCALE`, `::FACET`, reference lines); its
+  tooltip names every number (*ets: median 4.1 · Q1 3 · Q3 5.2 · whiskers 1 –
+  8 · mean 4.4 · 2 outliers*), and the screen-reader summary and *charts as
+  tables* read the rows.
+- `dashboard --check` reports a missing quartile role, unpaired whiskers or a
+  chart measure beside them (`box/missing`, an error), a box where
+  Q1 ≤ median ≤ Q3 does not hold or a whisker ends inside the box
+  (`box/unordered`), and a box with a NULL quartile (`box/null`, not drawn).
 
 ### Annotations from data (events, ranges, callouts)
 
@@ -1463,7 +1503,7 @@ Every panel carries its own state — there is no full-page spinner:
   message and the SQL behind *Details*. The other panels keep rendering.
 - **Not available.** One dashboard often serves many runs or projects whose
   outputs are optional. Name the optional file in a `-- @requires <path>`
-  comment line directly above the statement (several: comma-separated):
+  comment line directly above the statement:
 
   ```sql
   -- @requires data/run/anomalies.parquet
@@ -1476,9 +1516,54 @@ Every panel carries its own state — there is no full-page spinner:
   error; a `-- @requires` setup statement is skipped. Any other error is still an
   error card. This works the same in the browser, `serve`, the locked server
   (`serve --dashboards`, `anofox_serve_dashboards`) and the extension.
-  `dashboard --check` checks the paths with DuckDB's `glob()` and reports a
-  missing one as a **note** (`optional/missing`), not an error — `--strict`
-  still passes.
+
+  The paths:
+
+  - **Several inputs**, all needed: separate them with commas (or spaces), or
+    write several lines.
+  - **Alternatives**: `a.parquet | b.parquet` is met when either exists
+    (producers name the same output differently). The message names them all:
+    *This run has no a.parquet or b.parquet*.
+  - **Variables**: `${name}` is the value of the DuckDB variable `name`
+    (`getvariable('name')`) where the statement runs: a `SET VARIABLE` above
+    it, an input, a `?v.name=` link, or `anofox_data` (the data folder a locked
+    server sets). Patterns (`*`, `**`, `?`) work, as in `glob()`.
+  - **Relative paths** resolve against `getvariable('anofox_data')` when it is
+    set, else where DuckDB resolves the statement's own relative paths (the
+    working directory).
+
+  ```sql
+  SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+  -- @requires ${rd}/_anofox_meta_forecasts.parquet | ${rd}/forecasts.parquet
+  SELECT ds::XAXIS, yhat::LINECHART FROM read_parquet(getvariable('rd') || '/*forecasts.parquet');
+  ```
+
+  `dashboard --check` and a locked server with a data folder check the paths
+  before the statement runs (DuckDB's `glob()`, after expanding the variables
+  with the values the statement would see): a requirement none of whose
+  alternatives exists skips the statement. `--check --data <dir>` sets
+  `anofox_data` as the locked server does. On the locked server a `${name}`
+  must be a server-side value (`anofox_data`, a `path_vars` variable, a
+  credential's locked variable, the login's claims, or what the dashboard's own
+  statements set), and the expanded path must stay inside the data folder —
+  see *A live data folder* in [secure serving](secure-serving.md).
+  Elsewhere (the builder, `serve`) the statement's own missing-input error
+  decides.
+
+  A statement skipped for a missing input is skipped for whoever picked that
+  run: never put `@requires` on a setup statement whose effect narrows what a
+  viewer sees (a `SET VARIABLE region = 'EU'`, a filtering view — also one that
+  reads a file *and* filters rows, which `requires/on-setup` cannot detect).
+  Put it on the statement that reads the file, and keep filtering elsewhere.
+
+  `dashboard --check` reports a missing input as a **note** (`optional/missing`),
+  not an error — `--strict` still passes. It warns about a `${name}` with no
+  value (`requires/unknown-variable`: the path counts as missing), an empty
+  alternative (`requires/empty-alternative`: `a |`, `a || b`, a line with no
+  path), a malformed `${…}` (`requires/bad-variable`) and `@requires` on a
+  setup statement that reads no file (`requires/on-setup`); `--strict` fails
+  on these warnings. On the locked server a pattern (`*`, `?`, `[…]`) counts
+  only in the `@requires` text itself, not in a variable's value.
 
 ### Interactivity
 

@@ -50,7 +50,11 @@ pub struct Diagnostic {
     /// `transition/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
-    /// (warnings) | `optional/missing` (a note: a
+    /// (warnings) | `box/missing` (error: a box from statistics without
+    /// ::Q1 / ::MEDIAN / ::Q3, unpaired whiskers, no ::XAXIS, or beside a chart
+    /// measure) | `box/unordered` | `box/null` (warnings) |
+    /// `requires/unknown-variable` | `requires/empty-alternative` |
+    /// `requires/bad-variable` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available").
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
@@ -167,9 +171,49 @@ where
             }
         }
 
+        // Malformed `-- @requires` lines (an empty alternative, a bad `${…}`).
+        for (code, message) in &p.requires_issues {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code,
+                message: message.clone(),
+                sql: short.clone(),
+            });
+        }
+        // `-- @requires` on a setup statement that reads no file: a viewer who
+        // picks a run without that file skips it (and keeps their own value
+        // of what it sets).
+        if p.setup && !p.requires.is_empty() && !reads_a_file(&p.sql) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "requires/on-setup",
+                message: "`-- @requires` on a setup statement that reads no file: a viewer can \
+                          skip it by choosing a run without that file, so nothing it sets may \
+                          narrow what a viewer sees — move the `@requires` to the statement \
+                          that reads the file"
+                    .into(),
+                sql: short.clone(),
+            });
+        }
         // An optional input that is missing: the statement is skipped (setup
         // never reaches the prelude) and its panel reads "Not available".
-        if let Some(path) = p.requires.iter().find(|f| input_missing(&mut run_query, f)) {
+        let unmet = unmet_requirement(&mut run_query, &prelude, &p.requires);
+        for v in &unmet.unknown {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "requires/unknown-variable",
+                message: format!(
+                    "`${{{v}}}` in `-- @requires` names no variable set here (a SET VARIABLE \
+                     above, an input, or `anofox_data`, which `dashboard --check --data <dir>` \
+                     and the locked server set) — that path counts as missing"
+                ),
+                sql: short.clone(),
+            });
+        }
+        if let Some(path) = unmet.missing {
             diags.push(Diagnostic {
                 severity: Severity::Note,
                 stmt,
@@ -795,7 +839,29 @@ where
         // Let the render engine validate the role/column combination (this
         // catches missing required aesthetics, e.g. a bar chart with no x).
         let cols = sql::columns_from_rows(&rows, &p.roles);
+        // A box plot from statistics: its roles (else it cannot render),
+        // then its numbers.
+        let box_roles = crate::boxstats::prepare(cols.clone());
+        match &box_roles {
+            Err(e) => diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt,
+                code: "box/missing",
+                message: e.clone(),
+                sql: short.clone(),
+            }),
+            Ok(_) => diags.extend(crate::boxstats::issues(&cols).into_iter().map(
+                |(code, message)| Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                },
+            )),
+        }
         match render_with_warnings(&cols, 460, 300, &RenderOptions::default()) {
+            Err(_) if box_roles.is_err() => {}
             Err(e) => diags.push(Diagnostic {
                 severity: Severity::Error,
                 stmt,
@@ -1815,7 +1881,12 @@ fn flush_kpi_run(diags: &mut Vec<Diagnostic>, run: &mut usize, start_stmt: usize
 
 /// A failed statement: an error, or — for a `-- @requires` statement whose
 /// input is missing — a note (the panel reads "Not available").
-fn sql_error(stmt: usize, requires: &[String], e: &str, short: &str) -> Diagnostic {
+fn sql_error(
+    stmt: usize,
+    requires: &[sql::requires::Requirement],
+    e: &str,
+    short: &str,
+) -> Diagnostic {
     let optional = !requires.is_empty() && sql::is_missing_input_error(e);
     Diagnostic {
         severity: if optional {
@@ -1841,6 +1912,93 @@ fn sql_error(stmt: usize, requires: &[String], e: &str, short: &str) -> Diagnost
     }
 }
 
+/// Does a statement read a file: a `read_…` / `glob` / `parquet_…` table
+/// function, or a quoted path with a data-file extension (`FROM 'x.parquet'`)?
+/// (`requires/on-setup`; a `SET VARIABLE` that builds a path reads nothing.)
+fn reads_a_file(sql: &str) -> bool {
+    let code = sql.to_ascii_lowercase();
+    if code.trim_start().starts_with("set ") {
+        return false;
+    }
+    ["read_", "glob(", "parquet_", "sniff_csv("]
+        .iter()
+        .any(|f| code.contains(f))
+        || [
+            ".parquet'",
+            ".csv'",
+            ".json'",
+            ".jsonl'",
+            ".tsv'",
+            ".xlsx'",
+            ".ndjson'",
+        ]
+        .iter()
+        .any(|e| code.contains(e))
+}
+
+/// The outcome of a statement's `-- @requires` lines.
+#[derive(Default)]
+struct Unmet {
+    /// The first requirement none of whose alternatives exists (as written).
+    missing: Option<String>,
+    /// Variables named by `${…}` that have no value here.
+    unknown: Vec<String>,
+}
+
+/// Check `requires` the way the locked server does: expand each `${name}`
+/// with the value the prelude gives it, resolve a relative path against
+/// `anofox_data` (when set), and look for at least one existing alternative
+/// per requirement.
+fn unmet_requirement<F>(
+    run_query: &mut F,
+    prelude: &str,
+    requires: &[sql::requires::Requirement],
+) -> Unmet
+where
+    F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
+{
+    use sql::requires as rq;
+    let mut out = Unmet::default();
+    if requires.is_empty() {
+        return out;
+    }
+    let mut names = rq::all_vars(requires);
+    names.push(rq::DATA_VAR.to_string());
+    let row = run_query(&format!("{prelude}{};", rq::vars_sql(&names)))
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .unwrap_or_default();
+    let value = |name: &str| -> Option<String> {
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+        row.get(&format!("v{i}"))?.as_str().map(str::to_string)
+    };
+    let root = value(rq::DATA_VAR);
+    for req in requires {
+        let mut met = false;
+        for alt in req {
+            match rq::expand(alt, value) {
+                Ok(path) => {
+                    if !input_missing(run_query, &rq::resolve(&path, root.as_deref())) {
+                        met = true;
+                        break;
+                    }
+                }
+                Err(rq::Unexpanded::Unknown(v)) => {
+                    if !out.unknown.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
+                        out.unknown.push(v);
+                    }
+                }
+                // (reported as requires/bad-variable)
+                Err(rq::Unexpanded::Malformed(_)) => {}
+            }
+        }
+        if !met && out.missing.is_none() {
+            out.missing = Some(req.join(" | "));
+        }
+    }
+    out
+}
+
 /// Is a `-- @requires` path missing? Asks DuckDB (`glob`, so patterns work);
 /// an error (e.g. a remote URL glob cannot list) counts as present — the
 /// statement then runs and a missing-file error is still a note.
@@ -1848,11 +2006,7 @@ fn input_missing<F>(run_query: &mut F, path: &str) -> bool
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
-    let q = format!(
-        "SELECT count(*) AS n FROM glob('{}')",
-        path.replace('\'', "''")
-    );
-    match run_query(&q) {
+    match run_query(&sql::requires::glob_sql(path)) {
         Ok(rows) => rows
             .first()
             .and_then(|r| r.get("n"))
@@ -1887,7 +2041,10 @@ mod design_tests {
         let d = check(
             "-- @requires data/run/opt.parquet\nSELECT a ::XAXIS, b ::BARCHART FROM 'data/run/opt.parquet';",
             |q| {
-                assert!(q.contains("glob("), "the panel itself must not run: {q}");
+                assert!(
+                    q.contains("glob(") || q.contains("getvariable("),
+                    "the panel itself must not run: {q}"
+                );
                 Ok(vec![json!({ "n": 0 }).as_object().unwrap().clone()])
             },
         );
@@ -1924,6 +2081,156 @@ mod design_tests {
         assert!(!has(&d, "empty-panel"), "{d:?}");
         let d = lint_one("SELECT a ::XAXIS, b ::BARCHART FROM t;", vec![]);
         assert!(has(&d, "empty-panel"), "{d:?}");
+    }
+
+    /// A fake session for `-- @requires`: `vars` are the variables the
+    /// prelude sets, `files` the paths `glob` finds; any other query returns
+    /// one row (so a panel that runs is not empty).
+    fn requires_session<'a>(
+        vars: &'a [(&'a str, &'a str)],
+        files: &'a [&'a str],
+        globbed: &'a std::cell::RefCell<Vec<String>>,
+    ) -> impl FnMut(&str) -> Result<Vec<Map<String, Value>>, String> + 'a {
+        move |q: &str| {
+            let q = q.rsplit(";\n").next().unwrap_or(q);
+            if let Some(rest) = q.split("FROM glob('").nth(1) {
+                let path = rest
+                    .trim_end_matches(';')
+                    .trim_end_matches("')")
+                    .replace("''", "'");
+                globbed.borrow_mut().push(path.clone());
+                let n = files.iter().filter(|f| **f == path).count();
+                return Ok(vec![json!({ "n": n.to_string() })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            if q.starts_with("SELECT CAST(getvariable(") {
+                let mut row = Map::new();
+                for (i, part) in q.split("getvariable('").skip(1).enumerate() {
+                    let name = part.split('\'').next().unwrap();
+                    if let Some((_, v)) = vars.iter().find(|(n, _)| *n == name) {
+                        row.insert(format!("v{i}"), Value::String(v.to_string()));
+                    }
+                }
+                return Ok(vec![row]);
+            }
+            Ok(vec![json!({ "c0": "a", "c1": 1 })
+                .as_object()
+                .unwrap()
+                .clone()])
+        }
+    }
+
+    #[test]
+    fn box_statistics_are_checked() {
+        let row = |q1: f64, m: f64, q3: f64| {
+            json!({ "c0": "a", "c1": q1, "c2": m, "c3": q3, "c4": 0.0, "c5": 9.0 })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let sql = "SELECT g::XAXIS, a::Q1, b::MEDIAN, c::Q3, lo::WHISKER_LOW, hi::WHISKER_HIGH, \
+                   'Error by method'::TITLE FROM t;";
+        let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
+        assert!(lint_one(sql, vec![row(1.0, 2.0, 3.0)]).is_empty());
+        let d = lint_one(sql, vec![row(1.0, 4.0, 3.0)]);
+        assert_eq!(codes(&d), ["box/unordered"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        let d = lint_one(sql, vec![row(-1.0, 2.0, 3.0)]);
+        assert_eq!(codes(&d), ["box/unordered"], "{d:?}");
+        assert!(d[0].message.contains("whisker"), "{}", d[0].message);
+        // A missing quartile: one error, not a render error as well.
+        let d = lint_one(
+            "SELECT g::XAXIS, a::Q1, b::MEDIAN FROM t;",
+            vec![row(1.0, 2.0, 3.0)],
+        );
+        assert_eq!(codes(&d), ["box/missing"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("::Q3"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn requires_expands_variables_and_takes_alternatives() {
+        let panel = "SELECT a ::XAXIS, b ::BARCHART FROM t;";
+        let globbed = std::cell::RefCell::new(Vec::new());
+        let lint = |req: &str, vars: &[(&str, &str)], files: &[&str]| {
+            globbed.borrow_mut().clear();
+            check_opts(
+                &format!("-- @requires {req}\n{panel}"),
+                requires_session(vars, files, &globbed),
+                LintOptions { design: false },
+            )
+        };
+        let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
+        let vars = [("rd", "/srv/runs/r1"), ("anofox_data", "/srv/runs")];
+        // `${rd}` expands; the second alternative exists → met.
+        let d = lint(
+            "${rd}/_anofox_meta_forecasts.parquet | ${rd}/forecasts.parquet",
+            &vars,
+            &["/srv/runs/r1/forecasts.parquet"],
+        );
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(
+            *globbed.borrow(),
+            [
+                "/srv/runs/r1/_anofox_meta_forecasts.parquet",
+                "/srv/runs/r1/forecasts.parquet"
+            ]
+        );
+        // Neither alternative → the note names the requirement as written.
+        let d = lint("${rd}/a.parquet | ${rd}/b.parquet", &vars, &[]);
+        assert_eq!(codes(&d), ["optional/missing"]);
+        assert!(
+            d[0].message.contains("${rd}/a.parquet | ${rd}/b.parquet"),
+            "{}",
+            d[0].message
+        );
+        // Every requirement must be met.
+        let d = lint("${rd}/a, ${rd}/b", &vars, &["/srv/runs/r1/a"]);
+        assert_eq!(codes(&d), ["optional/missing"]);
+        // A relative path resolves against anofox_data …
+        let d = lint("r1/a", &vars, &["/srv/runs/r1/a"]);
+        assert!(d.is_empty(), "{d:?}");
+        // … and stays relative (the working directory) without it.
+        let d = lint("r1/a", &[], &["r1/a"]);
+        assert!(d.is_empty(), "{d:?}");
+        // An unknown variable: a warning, and the path counts as missing.
+        let d = lint("${nope}/a", &vars, &[]);
+        assert_eq!(codes(&d), ["requires/unknown-variable", "optional/missing"]);
+        // … unless another alternative is met.
+        let d = lint("${nope}/a | ${rd}/a", &vars, &["/srv/runs/r1/a"]);
+        assert_eq!(codes(&d), ["requires/unknown-variable"]);
+        // On a setup statement that reads no file: a warning; one that
+        // reads the file is fine.
+        let set = |stmt: &str| {
+            check_opts(
+                &format!("-- @requires ${{rd}}/a\n{stmt}"),
+                requires_session(&vars, &["/srv/runs/r1/a"], &globbed),
+                LintOptions { design: false },
+            )
+        };
+        assert_eq!(
+            codes(&set("SET VARIABLE region = 'EU';")),
+            ["requires/on-setup"]
+        );
+        assert_eq!(
+            codes(&set(
+                "CREATE TEMP VIEW v AS SELECT * FROM t WHERE r = 'EU';"
+            )),
+            ["requires/on-setup"]
+        );
+        assert!(set(
+            "CREATE TEMP VIEW v AS SELECT * FROM read_parquet(getvariable('rd') || '/a');"
+        )
+        .is_empty());
+        assert!(set("CREATE TEMP VIEW v AS SELECT * FROM 'data/a.parquet';").is_empty());
+        // Malformed lines.
+        let d = lint("${rd}/a |", &vars, &["/srv/runs/r1/a"]);
+        assert_eq!(codes(&d), ["requires/empty-alternative"]);
+        let d = lint("${rd/a", &vars, &[]);
+        assert_eq!(codes(&d), ["requires/bad-variable", "optional/missing"]);
+        assert!(d.iter().all(|d| d.severity != Severity::Error), "{d:?}");
     }
 
     #[test]

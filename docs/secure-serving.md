@@ -179,6 +179,53 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
   the start. The check needs DuckDB's `json` extension (loaded into the
   snapshot automatically; without it the server refuses to start).
+- **`-- @requires` paths** ([DOCS](DOCS.md), *Not available*) are checked
+  on the server before a statement runs: a setup statement whose input is
+  missing is skipped, a panel answers `400` *optional input missing: no files
+  found …*, which the page shows as *Not available* (also under an access
+  policy: the message carries no data). The rule for a path:
+  - `${name}` takes the request's value of a **server-side** variable only:
+    `anofox_data`, a `path_vars` variable (already a plain name), a
+    credential's locked variable, a login claim, or one the dashboard's own
+    statements set (`SET VARIABLE rd = getvariable('anofox_data') || '/' ||
+    getvariable('run')`). A variable the viewer sets that is none of these, or
+    an unset one, is not expanded: that alternative counts as missing.
+  - **Patterns only from the author's text.** A dashboard variable can carry
+    a viewer's value (`… || getvariable('q')` with a free `q`), so a variable's
+    value containing a pattern character (`*`, `?`, `[`, `]`, `{`, `}`) is
+    refused: that alternative counts as missing. Patterns written in the
+    `@requires` line itself (`*/forecasts.parquet`) work.
+  - The expanded path, resolved against the folder when relative, must stay
+    inside it: no `..` segment, no `~`, no URL, no backslash or control
+    character, no absolute path outside the folder — such an alternative counts
+    as missing without touching the file system (the log says why).
+  - **Matches are confined too.** `glob()` lists *through* a symlink that
+    points out of the folder (DuckDB refuses only the read), so the server
+    resolves the matches one by one (at most 1,024 per pattern, stopping at
+    the first) and counts only one whose real path is inside the folder. A
+    pattern whose first 1,024 matches all lead out of the folder counts as
+    missing (fails closed; the log says so).
+  - Any error of the check (a refused path, a glob DuckDB rejects, a timeout,
+    a request superseded mid-check) counts as missing for that request; the
+    details go to the server log only, never to the viewer.
+  - Definite answers (also "missing") are remembered for 5 seconds per
+    expanded path (at most 4,096), so a recursive pattern is not rescanned by
+    every request. A failed or interrupted check is never remembered, so no
+    viewer can make a file "missing" for the others. The memory is shared:
+    from the response time a viewer may tell whether someone checked the same
+    path in the last 5 seconds (as with the panel cache) — only for paths that
+    viewer can build themselves.
+  - The viewer learns only *available / not available*, about files in the
+    folder, which every viewer may read anyway. Without a data folder the
+    snapshot can open no files, and nothing is checked in advance: the
+    statement's own error decides, as before.
+  - **A viewer can skip a setup statement that carries `@requires`** (by
+    picking a run without the file). Never guard a statement that narrows what
+    a viewer sees with it — neither a statement that reads no file
+    (`dashboard --check` warns: `requires/on-setup`) nor one that reads a file
+    *and* filters rows (`CREATE TEMP VIEW v AS … WHERE r IN (SELECT … FROM
+    read_csv('allowed.csv'))`: no warning, the lint can't tell). Access policy
+    views are unaffected: the server creates them before any dashboard SQL.
 - Error messages sent to viewers show the folder as `<data>`; the log keeps
   the full path.
 - Files appear live: a new run is readable as soon as it is written, without a
@@ -189,8 +236,11 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   FROM read_parquet('/srv/runs/…')`) are copied into the snapshot as views and
   read the files live too.
 - Every viewer can read every file in the folder (by any `path_vars` value):
-  serve one folder per audience. (DuckDB 1.5 resolves symlinks, so a link
-  inside the folder that points outside it is refused too.)
+  serve one folder per audience. (DuckDB 1.5 resolves symlinks, so reading
+  through a link inside the folder that points outside it is refused too. A
+  `glob()` pattern still *lists* such a file's name: keep links out of the
+  folder, or don't give panels a viewer-chosen pattern. The server's own
+  `@requires` check counts only matches inside the folder, see above.)
 
 **Per-request isolation and limits.**
 

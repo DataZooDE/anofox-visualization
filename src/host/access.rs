@@ -32,7 +32,7 @@ use std::sync::Mutex;
 pub const CLAIM_PREFIX: &str = "__claim_";
 
 /// The variable a locked server sets to its data folder (`options.data`).
-pub const DATA_VAR: &str = "anofox_data";
+pub const DATA_VAR: &str = crate::sql::requires::DATA_VAR;
 
 /// Is `name` a variable only the server sets — a claim (`__claim_*`) or
 /// `anofox_data` — in any case (DuckDB variable names are case-insensitive)?

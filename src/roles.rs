@@ -74,6 +74,18 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
     e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size"),
+    e("Q1", &["QUARTILE1", "LOWER_QUARTILE"], R::Q1, "encoding", true,
+      "a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT)"),
+    e("MEDIAN", &["Q2"], R::Median, "encoding", true, "the median line of a box from statistics (see ::Q1)"),
+    e("Q3", &["QUARTILE3", "UPPER_QUARTILE"], R::Q3, "encoding", true,
+      "the upper quartile of a box from statistics (see ::Q1)"),
+    e("WHISKER_LOW", &["WHISKER_LOWER", "LOWER_WHISKER"], R::WhiskerLow, "encoding", true,
+      "the lower whisker end of a box from statistics (without it: none)"),
+    e("WHISKER_HIGH", &["WHISKER_UPPER", "UPPER_WHISKER"], R::WhiskerHigh, "encoding", true,
+      "the upper whisker end of a box from statistics"),
+    e("MEAN", &["AVERAGE"], R::Mean, "encoding", true, "a box's mean from statistics, drawn as a dot"),
+    e("OUTLIERS", &["OUTLIER_LIST"], R::Outliers, "encoding", true,
+      "a box's outliers from statistics: a list of numbers, drawn as open circles"),
     e("YMIN", &["Y_MIN"], R::YMin, "encoding", true,
       "lower end of a y interval: a ::SCATTER becomes a pointrange, other measures get error bars"),
     e("YMAX", &["Y_MAX"], R::YMax, "encoding", true, "upper end of a y interval (see ::YMIN)"),
@@ -741,6 +753,13 @@ mod tests {
             Role::Open,
             Role::High,
             Role::Low,
+            Role::Q1,
+            Role::Median,
+            Role::Q3,
+            Role::WhiskerLow,
+            Role::WhiskerHigh,
+            Role::Mean,
+            Role::Outliers,
             Role::YMin,
             Role::YMax,
             Role::XMin,
@@ -847,6 +866,13 @@ mod tests {
                 | Role::Open
                 | Role::High
                 | Role::Low
+                | Role::Q1
+                | Role::Median
+                | Role::Q3
+                | Role::WhiskerLow
+                | Role::WhiskerHigh
+                | Role::Mean
+                | Role::Outliers
                 | Role::YMin
                 | Role::YMax
                 | Role::XMin

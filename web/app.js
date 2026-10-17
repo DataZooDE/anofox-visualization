@@ -210,6 +210,15 @@ SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
+-- A box plot from statistics: one row per box, the numbers computed in SQL —
+-- for a population too large to send as rows (::Q1 / ::MEDIAN / ::Q3, no ::BOXPLOT).
+SELECT 12::COL; SELECT channel::XAXIS, q1::Q1, med::MEDIAN, q3::Q3, lo::WHISKER_LOW, hi::WHISKER_HIGH, mean::MEAN,
+       list(value ORDER BY value) FILTER (WHERE value < lo OR value > hi)::OUTLIERS,
+       'Box plot from statistics — one row per box, 5–95 % whiskers (::Q1, ::MEDIAN, ::Q3)'::TITLE
+FROM m JOIN (SELECT channel, quantile_cont(value, 0.25) AS q1, median(value) AS med, quantile_cont(value, 0.75) AS q3,
+                    quantile_cont(value, 0.05) AS lo, quantile_cont(value, 0.95) AS hi, round(avg(value), 1) AS mean
+             FROM m GROUP BY channel) s USING (channel)
+GROUP BY ALL ORDER BY channel;
 
 SELECT 'Pie, gauge & radar'::TAB;
 SELECT 6::COL; SELECT channel::CATEGORY, sum(n)::PIE, 'Pie'::TITLE FROM sales GROUP BY ALL;
@@ -6356,7 +6365,7 @@ function lazyFlushSetup(L, upto, at) {
       try {
         await runSetup(L.stmts[k].sql);
       } catch (e) {
-        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${L.stmts[k].requires.join(", ")}`);
+        if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(L.stmts[k].requires)}`);
         else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
       }
     }
@@ -6703,7 +6712,7 @@ async function runOnce(fresh = true) {
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
       }
     } catch (e) {
-      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${s.requires.join(", ")}`);
+      if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(s.requires)}`);
       else newGrid.appendChild(mkErrorCard(e, s.sql, true));
     }
   }
@@ -8456,6 +8465,20 @@ const isOptionalMissing = (s, e) => !!(s && s.requires && s.requires.length) && 
 function isMissingInputError(msg) {
   return /no files found|cannot open file|no such file|does not exist|http 404|couldn't fetch/i.test(String(msg));
 }
+// `-- @requires` as planned: [[path, alternative, …], …] — every
+// requirement must be met, any alternative meets it.
+const requiresText = (reqs) => (reqs || []).map((r) => [].concat(r).join(" | ")).join(", ");
+// The file a `-- @requires` path names, for the viewer: `${name}` filled in
+// when the variable holds a plain value this run (a locked server's data
+// folder never reaches the page), then just the last path segment.
+function requiresName(p) {
+  const full = String(p).replace(/\$\{([A-Za-z_]\w*)\}/g, (m, n) => {
+    const lit = String(dpVarNow[n] ?? "").trim();
+    if (/^'(?:[^']|'')*'$/.test(lit)) return lit.slice(1, -1).replace(/''/g, "'");
+    return /^-?\d+(\.\d+)?$/.test(lit) ? lit : m;
+  });
+  return full.split("/").pop();
+}
 function mkNotAvailable(s) {
   const fig = document.createElement("figure");
   fig.className = "panel dp-na";
@@ -8465,7 +8488,11 @@ function mkNotAvailable(s) {
   const b = document.createElement("strong");
   b.textContent = "Not available";
   const why = document.createElement("span");
-  why.textContent = "This run has no " + s.requires.map((p) => p.split("/").pop()).join(", ");
+  why.textContent =
+    "This run has no " +
+    s.requires
+      .map((r) => [...new Set([].concat(r).map(requiresName))].join(" or "))
+      .join(", ");
   d.append(b, why);
   fig.appendChild(d);
   return fig;
@@ -11550,7 +11577,7 @@ const CHART_KINDS = [
   [/^RADAR/, "Radar chart"],
   [/^HISTOGRAM/, "Histogram"],
   [/^DENSITY/, "Density plot"],
-  [/^BOXPLOT/, "Box plot"],
+  [/^BOXPLOT|^(Q1|MEDIAN|Q3)$/, "Box plot"], // (raw rows, or one row of statistics per box)
   [/^VIOLIN/, "Violin plot"],
   [/^QQ/, "Q-Q plot"],
   [/^HEATMAP/, "Heatmap"],
@@ -12056,7 +12083,18 @@ function dataTableHtml(dp, limit, caption) {
     return !r || !SKIP.has(r[1]);
   });
   // Header names: the role's display name, else a friendly role name, else key.
-  const FRIENDLY = { XAXIS: "x", YAXIS: "y", CATEGORY: "series" };
+  const FRIENDLY = {
+    XAXIS: "x",
+    YAXIS: "y",
+    CATEGORY: "series",
+    Q1: "Q1",
+    MEDIAN: "median",
+    Q3: "Q3",
+    WHISKER_LOW: "whisker low",
+    WHISKER_HIGH: "whisker high",
+    MEAN: "mean",
+    OUTLIERS: "outliers",
+  };
   const nameFor = (k) => {
     const r = roleFor(k);
     if (r && r[2]) return r[2];

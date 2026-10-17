@@ -197,6 +197,136 @@ fn violin_and_box_are_filled() {
     }
 }
 
+// ── A box plot from statistics (#157): one row per box looks like the
+// raw-rows box plot, light and dark; its tooltip names every number ──────
+/// The `fill` / `stroke` values of every `<rect>` and `<circle>` (the
+/// boxes, outlier circles and mean dots; the grid is drawn as lines).
+fn mark_colours(svg: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for tag in svg
+        .split('<')
+        .filter(|t| t.starts_with("rect ") || t.starts_with("circle "))
+    {
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        if !tag.contains("<title>") && !tag.contains("data-") && tag.starts_with("rect ") {
+            continue; // background / panel rects
+        }
+        for a in [" fill=\"", " stroke=\""] {
+            if let Some(k) = tag.find(a) {
+                let v = &tag[k + a.len()..];
+                out.insert(v[..v.find('"').unwrap()].to_string());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn box_from_statistics_looks_like_the_raw_box() {
+    use anofox_visualization::{render_with, theme, RenderOptions};
+    use std::sync::Arc;
+    // Raw rows whose quartiles the engine computes …
+    let x: Vec<&str> = (0..40)
+        .map(|i| if i % 2 == 0 { "a" } else { "b" })
+        .collect();
+    let y: Vec<f64> = (0..40)
+        .map(|i| (i % 9) as f64 + if i == 38 { 30.0 } else { 0.0 })
+        .collect();
+    let raw = vec![
+        Column::new("x", Role::X, strs(&x)),
+        Column::new("y", Role::Value(Kind::Boxplot), nums(&y)),
+    ];
+    // … and one row per box, computed elsewhere.
+    let stats = vec![
+        Column::new("x", Role::X, strs(&["a", "b"])),
+        Column::new("q1", Role::Q1, nums(&[2.0, 3.0])),
+        Column::new("m", Role::Median, nums(&[4.0, 5.0])),
+        Column::new("q3", Role::Q3, nums(&[6.0, 7.0])),
+        Column::new("lo", Role::WhiskerLow, nums(&[0.0, 1.0])),
+        Column::new("hi", Role::WhiskerHigh, nums(&[8.0, 8.0])),
+        Column::new("mean", Role::Mean, nums(&[4.4, 5.1])),
+        Column::new("out", Role::Outliers, strs(&["[30, 31.5]", "[]"])),
+    ];
+    for dark in [false, true] {
+        let set = theme::default_set();
+        let o = RenderOptions {
+            theme: Arc::new(if dark {
+                set.dark.clone()
+            } else {
+                set.light.clone()
+            }),
+            ..RenderOptions::default()
+        };
+        let r = render_with(&raw, 480, 320, &o).expect("raw renders");
+        let s = render_with(&stats, 480, 320, &o).expect("stats render");
+        // The same body fill and outline as the raw box plot.
+        let (rc, sc) = (mark_colours(&r), mark_colours(&s));
+        assert!(rc.is_subset(&sc), "dark={dark}: raw {rc:?} vs stats {sc:?}");
+        if !dark {
+            assert!(s.contains("#C2D3F9"), "brand tint");
+        }
+        // Five numbers (and the mean, the outliers) in the box's tooltip.
+        assert!(
+            s.contains(
+                "<title>a: median 4 · Q1 2 · Q3 6 · whiskers 0 – 8 · mean 4.4 · 2 outliers</title>"
+            ),
+            "{s}"
+        );
+        assert!(s.contains("<title>b: median 5 · Q1 3 · Q3 7 · whiskers 1 – 8 · mean 5.1</title>"));
+        assert!(
+            !s.contains("median 4 (2–6)"),
+            "the engine's tooltip is replaced"
+        );
+        assert!(
+            !s.contains("mean: "),
+            "a mean dot has no tooltip of its own"
+        );
+        // Two outlier circles (the engine's, r = 2), inside the panel: the
+        // y scale covers them.
+        let open: Vec<&str> = s
+            .split("<circle ")
+            .skip(1)
+            .filter(|t| t[..t.find('>').unwrap()].contains("r=\"2.00\""))
+            .collect();
+        assert_eq!(open.len(), 2, "{s}");
+        let plot: Vec<f64> = {
+            let k = s.find("data-plot=\"").unwrap() + 11;
+            s[k..k + s[k..].find('"').unwrap()]
+                .split(' ')
+                .map(|v| v.parse().unwrap())
+                .collect()
+        };
+        for c in &open {
+            let k = c.find("cy=\"").unwrap() + 4;
+            let cy: f64 = c[k..k + c[k..].find('"').unwrap()].parse().unwrap();
+            assert!(
+                cy >= plot[1] - 0.5 && cy <= plot[1] + plot[3] + 0.5,
+                "outlier at {cy} outside {plot:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn box_from_statistics_needs_its_quartiles() {
+    let base = || {
+        vec![
+            Column::new("x", Role::X, strs(&["a"])),
+            Column::new("q1", Role::Q1, nums(&[2.0])),
+            Column::new("m", Role::Median, nums(&[4.0])),
+        ]
+    };
+    let e = render(&base(), 480, 320).unwrap_err();
+    assert!(e.contains("::Q3"), "{e}");
+    let mut with_raw = base();
+    with_raw.push(Column::new("q3", Role::Q3, nums(&[6.0])));
+    assert!(render(&with_raw, 480, 320).is_ok());
+    with_raw.push(Column::new("y", Role::Value(Kind::Boxplot), nums(&[4.0])));
+    assert!(render(&with_raw, 480, 320)
+        .unwrap_err()
+        .contains("no chart measure"));
+}
+
 fn coef(kind: Kind, extra: Vec<Column>) -> Vec<Column> {
     let mut v = vec![
         Column::new("term", Role::X, strs(&["a", "b", "a", "b"])),
