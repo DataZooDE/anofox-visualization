@@ -61,10 +61,86 @@ pub struct Panel {
     pub requires: Vec<requires::Requirement>,
     /// What is malformed in those lines (`dashboard --check` reports it).
     pub requires_issues: Vec<(&'static str, String)>,
+    /// The `-- @requires` of the `::TAB` / `::SUBTAB` whose section the
+    /// statement is in (a `::SUBTAB` statement: its `::TAB`'s), see
+    /// [`section_requires`]. A tab whose own requirements are not met is
+    /// hidden: its statements other than setup are not run. (Setup still runs;
+    /// a missing-input failure of one in such a section is expected.)
+    pub tab_requires: Vec<requires::Requirement>,
+    /// The plan indices of those `::TAB` / `::SUBTAB` statements (with
+    /// `-- @requires` or not), outermost first. Their requirements are
+    /// decided where they stand: with the variables set above the tab.
+    pub tabs: Vec<usize>,
+}
+
+impl Panel {
+    /// A `::TAB` (`Some(false)`) or `::SUBTAB` (`Some(true)`) statement?
+    pub fn tab_kind(&self) -> Option<bool> {
+        if self.setup {
+            return None;
+        }
+        self.roles.iter().find_map(|(_, r)| match r {
+            Role::Tab => Some(false),
+            Role::SubTab => Some(true),
+            _ => None,
+        })
+    }
+
+    /// The requirements a statement runs under: its own, and — unless it is
+    /// setup — those of the tab it is in.
+    pub fn all_requires(&self) -> Vec<requires::Requirement> {
+        let mut out = self.requires.clone();
+        if !self.setup {
+            out.extend(self.tab_requires.iter().cloned());
+        }
+        out
+    }
+}
+
+/// Fill each statement's [`Panel::tab_requires`]: a `::TAB`'s section runs to
+/// the next `::TAB`, a `::SUBTAB`'s to the next `::SUBTAB` or `::TAB`. Chrome
+/// directives (`::THEME`, `::DASHBOARD_TITLE`, …) apply to the whole
+/// dashboard wherever they sit: they inherit nothing.
+fn section_requires(panels: &mut [Panel]) {
+    let mut tab: Vec<requires::Requirement> = Vec::new();
+    let mut sub: Vec<requires::Requirement> = Vec::new();
+    let (mut tab_at, mut sub_at) = (None, None);
+    for (i, p) in panels.iter_mut().enumerate() {
+        match p.tab_kind() {
+            Some(false) => {
+                tab = p.requires.clone();
+                sub.clear();
+                (tab_at, sub_at) = (Some(i), None);
+                continue;
+            }
+            Some(true) => {
+                p.tab_requires = tab.clone();
+                p.tabs = tab_at.into_iter().collect();
+                sub = p.requires.clone();
+                sub_at = Some(i);
+                continue;
+            }
+            None => {}
+        }
+        if p.roles
+            .iter()
+            .any(|(_, r)| crate::roles::is_chrome_directive(*r))
+        {
+            continue;
+        }
+        p.tab_requires = tab.iter().chain(&sub).cloned().collect();
+        p.tabs = tab_at.into_iter().chain(sub_at).collect();
+    }
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
 pub fn plan(script: &str) -> Vec<Panel> {
+    let mut panels = plan_statements(script);
+    section_requires(&mut panels);
+    panels
+}
+
+fn plan_statements(script: &str) -> Vec<Panel> {
     split_statements(script)
         .into_iter()
         .filter_map(|raw| {
@@ -90,6 +166,8 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     contract: None,
                     requires,
                     requires_issues,
+                    tab_requires: Vec::new(),
+                    tabs: Vec::new(),
                 }
             } else {
                 Panel {
@@ -100,6 +178,8 @@ pub fn plan(script: &str) -> Vec<Panel> {
                     contract: None,
                     requires,
                     requires_issues,
+                    tab_requires: Vec::new(),
+                    tabs: Vec::new(),
                 }
             })
         })
@@ -796,6 +876,57 @@ mod requires_tests {
         );
         assert!(p[2].requires.is_empty());
         assert!(!p[1].sql.contains("@requires"));
+    }
+
+    #[test]
+    fn a_tab_passes_its_requires_to_its_section() {
+        let p = plan(
+            "SELECT 1 ::METRIC;
+             -- @requires a.parquet
+SELECT 'A'::TAB;
+             SELECT 2 ::METRIC;
+             CREATE TEMP VIEW v AS SELECT 1;
+             SELECT 'dark'::THEME;
+             -- @requires b.parquet
+SELECT 'B1'::SUBTAB;
+             -- @requires c.parquet
+SELECT 3 ::METRIC;
+             SELECT 'B2'::SUBTAB;
+             SELECT 4 ::METRIC;
+             SELECT 'Plain'::TAB;
+             SELECT 5 ::METRIC",
+        );
+        let tab: Vec<Vec<Vec<String>>> = p.iter().map(Panel::all_requires).collect();
+        let r = |f: &str| vec![f.to_string()];
+        let (a, b, c) = (r("a.parquet"), r("b.parquet"), r("c.parquet"));
+        assert_eq!(
+            tab,
+            vec![
+                vec![],                     // before the first tab
+                vec![a.clone()],            // the tab: its own
+                vec![a.clone()],            // its panel
+                vec![],                     // setup: only its own
+                vec![],                     // chrome: the whole dashboard
+                vec![b.clone(), a.clone()], // the sub-tab: its own + the tab's
+                vec![c, a.clone(), b],      // its panel: own + tab + sub-tab
+                vec![a.clone()],            // the next sub-tab
+                vec![a.clone()],
+                vec![], // a new tab starts fresh
+                vec![],
+            ]
+        );
+        assert_eq!(p[3].tab_requires, vec![vec!["a.parquet".to_string()]]);
+        assert_eq!(
+            p.iter().map(Panel::tab_kind).collect::<Vec<_>>()[..3],
+            [None, Some(false), None]
+        );
+        assert_eq!(p[5].tab_kind(), Some(true));
+        // where they are decided: the tab, then the sub-tab
+        assert_eq!(p[6].tabs, [1, 5]);
+        assert_eq!(p[5].tabs, [1]);
+        assert_eq!(p[2].tabs, [1]);
+        assert!(p[1].tabs.is_empty() && p[4].tabs.is_empty() && p[0].tabs.is_empty());
+        assert_eq!(p[10].tabs, [9]);
     }
 
     #[test]

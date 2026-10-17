@@ -337,6 +337,123 @@ pub fn all_vars(reqs: &[Requirement]) -> Vec<String> {
     out
 }
 
+/// The outcome of a statement's `-- @requires` lines, checked locally
+/// ([`check`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Unmet {
+    /// The first requirement none of whose alternatives exists (as written).
+    pub missing: Option<String>,
+    /// Variables named by `${…}` that have no value here.
+    pub unknown: Vec<String>,
+}
+
+/// Check `requires` on an author's own session (`dashboard --check`, the
+/// static renderers; not a locked server, see its `requires_met`): expand each
+/// `${name}` with the session's value, resolve a relative path against
+/// `anofox_data` (when set), and look for at least one existing alternative
+/// per requirement. `first_row(sql, session)` runs a query and returns its
+/// first row as `(column, text)` pairs; `session`: the query reads the
+/// session's variables (the `glob` queries don't). A `glob` that fails (e.g. a
+/// remote URL glob cannot list) counts as present — the statement then runs
+/// and its own error decides.
+pub fn check<Q>(requires: &[Requirement], mut first_row: Q) -> Unmet
+where
+    Q: FnMut(&str, bool) -> Result<Vec<(String, Option<String>)>, String>,
+{
+    let mut out = Unmet::default();
+    if requires.is_empty() {
+        return out;
+    }
+    let mut names = all_vars(requires);
+    names.push(DATA_VAR.to_string());
+    let row = first_row(&vars_sql(&names), true).unwrap_or_default();
+    let value = |name: &str| -> Option<String> {
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+        let key = format!("v{i}");
+        row.iter().find(|(k, _)| *k == key)?.1.clone()
+    };
+    let root = value(DATA_VAR);
+    for req in requires {
+        let mut met = false;
+        for alt in req {
+            match expand(alt, value) {
+                Ok(path) => {
+                    let n = first_row(&glob_sql(&resolve(&path, root.as_deref())), false)
+                        .ok()
+                        .and_then(|r| r.into_iter().find(|(k, _)| k == "n"))
+                        .and_then(|(_, v)| v?.parse::<u64>().ok());
+                    if n != Some(0) {
+                        met = true;
+                        break;
+                    }
+                }
+                Err(Unexpanded::Unknown(v)) => {
+                    if !out.unknown.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
+                        out.unknown.push(v);
+                    }
+                }
+                // (reported as requires/bad-variable)
+                Err(Unexpanded::Malformed(_)) => {}
+            }
+        }
+        if !met && out.missing.is_none() {
+            out.missing = Some(req.join(" | "));
+        }
+    }
+    out
+}
+
+/// Which statements a hidden tab leaves out, decided statement by statement
+/// as a script runs (the tab's `${…}` take the values set above it). Setup
+/// statements and chrome directives are never left out.
+#[derive(Debug, Default)]
+pub struct Sections {
+    /// The unmet requirement of the current `::TAB` (as written).
+    tab: Option<String>,
+    /// … of the current `::SUBTAB`.
+    sub: Option<String>,
+}
+
+impl Sections {
+    /// The next statement: `Some(requirement)` when it is left out (a hidden
+    /// tab, or a statement in one). `unmet(reqs)` checks a tab's own
+    /// requirements (`Some(path)` = missing); it is not called for a sub-tab
+    /// inside a hidden tab.
+    pub fn step(
+        &mut self,
+        p: &super::Panel,
+        unmet: impl FnOnce(&[Requirement]) -> Option<String>,
+    ) -> Option<String> {
+        let own = !p.requires.is_empty();
+        match p.tab_kind() {
+            Some(false) => {
+                self.sub = None;
+                self.tab = if own { unmet(&p.requires) } else { None };
+                return self.tab.clone();
+            }
+            Some(true) => {
+                self.sub = if own && self.tab.is_none() {
+                    unmet(&p.requires)
+                } else {
+                    None
+                };
+                return self.tab.clone().or(self.sub.clone());
+            }
+            None => {}
+        }
+        // (`tab_requires` is empty for what a hidden tab never leaves out)
+        if p.setup || p.tab_requires.is_empty() {
+            return None;
+        }
+        self.tab.clone().or(self.sub.clone())
+    }
+
+    /// Is the current section hidden (a setup statement in it still runs)?
+    pub fn hiding(&self) -> bool {
+        self.tab.is_some() || self.sub.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +606,101 @@ mod tests {
         let expired = ExistsCache::new(std::time::Duration::ZERO, 4);
         assert!(!expired.exists("/d/x", || probe(false)));
         assert!(expired.exists("/d/x", || probe(true)));
+    }
+
+    #[test]
+    fn a_local_check_expands_resolves_and_takes_alternatives() {
+        let files = ["/srv/runs/r1/b"];
+        let session = |q: &str, _: bool| -> Result<Vec<(String, Option<String>)>, String> {
+            if let Some(rest) = q.split("FROM glob('").nth(1) {
+                let path = rest.trim_end_matches("')").replace("''", "'");
+                let n = files.iter().filter(|f| **f == path).count();
+                return Ok(vec![("n".into(), Some(n.to_string()))]);
+            }
+            // vars_sql: rd and anofox_data are set, nothing else
+            Ok(q.split("getvariable('")
+                .skip(1)
+                .enumerate()
+                .map(|(i, part)| {
+                    let v = match part.split('\'').next().unwrap() {
+                        "rd" => Some("r1".to_string()),
+                        "anofox_data" => Some("/srv/runs".to_string()),
+                        _ => None,
+                    };
+                    (format!("v{i}"), v)
+                })
+                .collect())
+        };
+        assert_eq!(
+            check(&s(&[&["${rd}/a", "${rd}/b"]]), session),
+            Unmet::default()
+        );
+        assert_eq!(
+            check(&s(&[&["${rd}/b"], &["${rd}/a"]]), session).missing,
+            Some("${rd}/a".into())
+        );
+        let u = check(&s(&[&["${nope}/b"]]), session);
+        assert_eq!(
+            (u.missing.as_deref(), &u.unknown[..]),
+            (Some("${nope}/b"), &["nope".to_string()][..])
+        );
+        // A glob that fails counts as present.
+        assert_eq!(
+            check(&s(&[&["x"]]), |_, _| Err("no".into())),
+            Unmet::default()
+        );
+    }
+
+    #[test]
+    fn hidden_tabs_leave_out_their_sections() {
+        let p = super::super::plan(
+            "SELECT 1 ::METRIC;\n\
+             -- @requires gone\nSELECT 'A'::TAB;\n\
+             SELECT 2 ::METRIC;\n\
+             CREATE TEMP VIEW v AS SELECT 1;\n\
+             SELECT 'dark'::THEME;\n\
+             -- @requires gone\nSELECT 'A1'::SUBTAB;\n\
+             SELECT 'B'::TAB;\n\
+             -- @requires here\nSELECT 'B1'::SUBTAB;\n\
+             SELECT 3 ::METRIC;\n\
+             -- @requires gone\nSELECT 'B2'::SUBTAB;\n\
+             SELECT 4 ::METRIC;\n\
+             SELECT 'B3'::SUBTAB;\n\
+             SELECT 5 ::METRIC",
+        );
+        let mut asked = Vec::new();
+        let mut sec = Sections::default();
+        let h: Vec<Option<String>> = p
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                sec.step(p, |r| {
+                    asked.push(i);
+                    (r[0][0] == "gone").then(|| r[0][0].clone())
+                })
+            })
+            .collect();
+        let g = Some("gone".to_string());
+        assert_eq!(
+            h,
+            [
+                None,
+                g.clone(),
+                g.clone(),
+                None, // setup runs
+                None, // chrome applies
+                g.clone(),
+                None,
+                None,
+                None,
+                g.clone(),
+                g,
+                None,
+                None
+            ]
+        );
+        // the sub-tab inside the hidden tab is not checked
+        assert_eq!(asked, [1, 7, 9]);
     }
 
     #[test]

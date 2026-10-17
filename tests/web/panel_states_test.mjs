@@ -53,6 +53,51 @@ assert.equal(requiresName("${rd}/part_${n}.csv"), "part_3.csv");
 assert.equal(requiresName("${unset}"), "${unset}");
 assert.equal(requiresName("${rd}"), "${rd}"); // an expression: not shown as a value
 
+// A ::TAB / ::SUBTAB with `-- @requires` (#163): shown when each requirement
+// has an existing alternative. Builder: `${name}` is the variable's value, a
+// relative path resolves against anofox_data, glob() finds it; served: the
+// server answers the tab's own statement.
+{
+  const m = src.match(/^async function tabShown\([\s\S]*?^}/m);
+  assert.ok(m, "tabShown not found in app.js");
+  const reqsOfSrc = src.match(/^const reqsOf = .*$/m)[0];
+  const isOptSrc = src.match(/^const isOptionalMissing = .*$/m)[0];
+  const mk = (served, files, vars, fail) => {
+    const asked = [];
+    const runSql = async (sql) => {
+      asked.push(sql);
+      if (fail) throw new Error(fail);
+      const g = /FROM glob\('((?:[^']|'')*)'\)/.exec(sql);
+      if (g) return JSON.stringify([{ n: String(files.filter((f) => f === g[1].replace(/''/g, "'")).length) }]);
+      const row = {};
+      [...sql.matchAll(/getvariable\('(\w+)'\) AS VARCHAR\) AS (v\d+)/g)].forEach(([, n, k]) => (row[k] = vars[n] ?? null));
+      return JSON.stringify([row]);
+    };
+    const f = new Function("runSql", "servedMode", `${grab("isMissingInputError")}\n${reqsOfSrc}\n${isOptSrc}\n${m[0]}\nreturn tabShown;`)(runSql, served);
+    return { tabShown: f, asked };
+  };
+  const tab = (requires) => ({ sql: "SELECT 'A' AS c0", requires, roles: [[0, "TAB"]] });
+  let t = mk(false, ["/srv/runs/r1/fc.parquet"], { rd: "/srv/runs/r1", anofox_data: "/srv/runs" });
+  assert.equal(await t.tabShown(tab([])), true);
+  assert.equal(t.asked.length, 0, "no requires: no query");
+  assert.equal(await t.tabShown(tab([["${rd}/x.parquet", "${rd}/fc.parquet"]])), true);
+  assert.equal(await t.tabShown(tab([["${rd}/fc.parquet"], ["${rd}/x.parquet"]])), false, "every requirement");
+  assert.equal(await t.tabShown(tab([["r1/fc.parquet"]])), true, "relative to anofox_data");
+  assert.equal(await t.tabShown(tab([["${unset}/fc.parquet"]])), false, "an unset variable: missing");
+  t = mk(false, ["a'b.csv"], {});
+  assert.equal(await t.tabShown(tab([["a'b.csv"]])), true, "quotes are escaped");
+  t = mk(false, [], {}, "IO Error: glob failed");
+  assert.equal(await t.tabShown(tab([["x.csv"]])), false, "a failing glob: missing");
+  // Served: the server's answer to the tab statement.
+  t = mk(true, [], {}, "optional input missing: no files found for this panel's -- @requires");
+  assert.equal(await t.tabShown(tab([["${rd}/fc.parquet"]])), false);
+  assert.deepEqual(t.asked, ["SELECT 'A' AS c0"]);
+  t = mk(true, [], {}, "Binder Error: something else");
+  assert.equal(await t.tabShown(tab([["${rd}/fc.parquet"]])), true, "another error: shown (its panels report)");
+  t = mk(true, [], {});
+  assert.equal(await t.tabShown(tab([["${rd}/fc.parquet"]])), true);
+}
+
 // Which variables a panel reads (its re-query trigger).
 assert.deepEqual(varsOf("SELECT 1 WHERE a = getvariable('region') AND list_contains(GETVARIABLE( 'channel' ), c)"), ["region", "channel"]);
 assert.deepEqual(varsOf("SELECT 1"), []);

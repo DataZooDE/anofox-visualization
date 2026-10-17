@@ -54,8 +54,10 @@ pub struct Diagnostic {
     /// ::Q1 / ::MEDIAN / ::Q3, unpaired whiskers, no ::XAXIS, or beside a chart
     /// measure) | `box/unordered` | `box/null` (warnings) |
     /// `requires/unknown-variable` | `requires/empty-alternative` |
-    /// `requires/bad-variable` (warnings) | `optional/missing` (a note: a
-    /// `-- @requires` input is missing, so the panel shows "Not available").
+    /// `requires/bad-variable` | `requires/on-setup` |
+    /// `requires/tab-always-hidden` (warnings) | `optional/missing` (a note: a
+    /// `-- @requires` input is missing, so the panel shows "Not available" —
+    /// a ::TAB / ::SUBTAB is hidden with its panels).
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
@@ -141,6 +143,7 @@ where
     // Cross-panel design counters (only used when opts.design).
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
+    let mut sections = sql::requires::Sections::default(); // hidden tabs
     let mut group_depth = 0i32;
     let mut kpi_run = 0usize; // consecutive top-level KPI tiles
     let mut kpi_run_stmt = 0usize; // stmt index where the current run started
@@ -197,9 +200,56 @@ where
                 sql: short.clone(),
             });
         }
+        // A ::TAB / ::SUBTAB whose optional input is missing is hidden: its
+        // statements are left out (setup still runs, as in the browser).
+        let tab = p.tab_kind();
+        let mut tab_unknown = Vec::new();
+        let mut decided_here = false; // (not a sub-tab of a hidden tab)
+        if let Some(path) = sections.step(&p, |reqs| {
+            let u = unmet_requirement(&mut run_query, &prelude, reqs);
+            tab_unknown = u.unknown;
+            decided_here = u.missing.is_some();
+            u.missing
+        }) {
+            has_tabs |= tab.is_some();
+            if tab.is_some() && !tab_unknown.is_empty() {
+                diags.push(tab_always_hidden(
+                    stmt,
+                    &tab_unknown,
+                    raws.get(i + 1..).unwrap_or_default(),
+                    &short,
+                ));
+            }
+            if decided_here {
+                diags.push(Diagnostic {
+                    severity: Severity::Note,
+                    stmt,
+                    code: "optional/missing",
+                    message: format!(
+                        "optional input `{path}` is missing — this {} is hidden, with its panels \
+                         (`-- @requires`)",
+                        if tab == Some(true) {
+                            "::SUBTAB"
+                        } else {
+                            "::TAB"
+                        }
+                    ),
+                    sql: short.clone(),
+                });
+            }
+            continue;
+        }
         // An optional input that is missing: the statement is skipped (setup
         // never reaches the prelude) and its panel reads "Not available".
-        let unmet = unmet_requirement(&mut run_query, &prelude, &p.requires);
+        let unmet = if tab.is_some() {
+            // (checked above; a met tab can still name an unset variable)
+            sql::requires::Unmet {
+                missing: None,
+                unknown: tab_unknown,
+            }
+        } else {
+            unmet_requirement(&mut run_query, &prelude, &p.requires)
+        };
         for v in &unmet.unknown {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
@@ -222,6 +272,8 @@ where
                     "optional input `{path}` is missing — {} (`-- @requires`)",
                     if p.setup {
                         "this statement is skipped"
+                    } else if crate::track::is_track(&p.roles) {
+                        "this strip is left out of its chart"
                     } else {
                         "this panel shows \"Not available\""
                     }
@@ -264,7 +316,14 @@ where
                     sql: short.clone(),
                 });
             } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
-                diags.push(sql_error(stmt, &p.requires, &e, &short));
+                // In a hidden tab, a setup statement that reads its missing
+                // input fails as expected.
+                let reqs = if sections.hiding() {
+                    [p.requires.clone(), p.tab_requires.clone()].concat()
+                } else {
+                    p.requires.clone()
+                };
+                diags.push(sql_error(stmt, &reqs, &e, &short));
             } else {
                 // Genuine setup succeeded — keep it in scope for later panels.
                 prelude.push_str(&p.sql);
@@ -1936,83 +1995,76 @@ fn reads_a_file(sql: &str) -> bool {
         .any(|e| code.contains(e))
 }
 
-/// The outcome of a statement's `-- @requires` lines.
-#[derive(Default)]
-struct Unmet {
-    /// The first requirement none of whose alternatives exists (as written).
-    missing: Option<String>,
-    /// Variables named by `${…}` that have no value here.
-    unknown: Vec<String>,
-}
-
-/// Check `requires` the way the locked server does: expand each `${name}`
-/// with the value the prelude gives it, resolve a relative path against
-/// `anofox_data` (when set), and look for at least one existing alternative
-/// per requirement.
+/// Check `requires` the way the locked server does (see
+/// [`sql::requires::check`]), with the prelude's session state.
 fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
     requires: &[sql::requires::Requirement],
-) -> Unmet
+) -> sql::requires::Unmet
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
-    use sql::requires as rq;
-    let mut out = Unmet::default();
-    if requires.is_empty() {
-        return out;
-    }
-    let mut names = rq::all_vars(requires);
-    names.push(rq::DATA_VAR.to_string());
-    let row = run_query(&format!("{prelude}{};", rq::vars_sql(&names)))
-        .ok()
-        .and_then(|r| r.into_iter().next())
-        .unwrap_or_default();
-    let value = |name: &str| -> Option<String> {
-        let i = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
-        row.get(&format!("v{i}"))?.as_str().map(str::to_string)
-    };
-    let root = value(rq::DATA_VAR);
-    for req in requires {
-        let mut met = false;
-        for alt in req {
-            match rq::expand(alt, value) {
-                Ok(path) => {
-                    if !input_missing(run_query, &rq::resolve(&path, root.as_deref())) {
-                        met = true;
-                        break;
-                    }
-                }
-                Err(rq::Unexpanded::Unknown(v)) => {
-                    if !out.unknown.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
-                        out.unknown.push(v);
-                    }
-                }
-                // (reported as requires/bad-variable)
-                Err(rq::Unexpanded::Malformed(_)) => {}
-            }
-        }
-        if !met && out.missing.is_none() {
-            out.missing = Some(req.join(" | "));
-        }
-    }
-    out
+    sql::requires::check(requires, |q, session| {
+        let rows = run_query(&if session {
+            format!("{prelude}{q};")
+        } else {
+            q.to_string()
+        })?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    Value::Null => None,
+                    Value::String(s) => Some(s),
+                    v => Some(v.to_string()),
+                };
+                (k, v)
+            })
+            .collect())
+    })
 }
 
-/// Is a `-- @requires` path missing? Asks DuckDB (`glob`, so patterns work);
-/// an error (e.g. a remote URL glob cannot list) counts as present — the
-/// statement then runs and a missing-file error is still a note.
-fn input_missing<F>(run_query: &mut F, path: &str) -> bool
-where
-    F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
-{
-    match run_query(&sql::requires::glob_sql(path)) {
-        Ok(rows) => rows
-            .first()
-            .and_then(|r| r.get("n"))
-            .map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()) == Some(0))
-            .unwrap_or(false),
-        Err(_) => false,
+/// `requires/tab-always-hidden`: a `${name}` of a tab's `-- @requires` has no
+/// value where the tab is decided. When a statement after the tab sets it
+/// (`SET VARIABLE name = …`), the browser has it (it runs every SET VARIABLE
+/// first) but a locked server decides the tab before that statement: the tab
+/// is hidden there whatever the data.
+fn tab_always_hidden(stmt: usize, unknown: &[String], after: &[String], short: &str) -> Diagnostic {
+    let set_later = unknown.iter().find(|v| {
+        after.iter().any(|raw| {
+            let w: Vec<&str> = raw.split_whitespace().take(3).collect();
+            w.len() == 3
+                && w[0].eq_ignore_ascii_case("SET")
+                && w[1].eq_ignore_ascii_case("VARIABLE")
+                && w[2].trim_end_matches('=').eq_ignore_ascii_case(v)
+        })
+    });
+    Diagnostic {
+        severity: Severity::Warning,
+        stmt,
+        code: if set_later.is_some() {
+            "requires/tab-always-hidden"
+        } else {
+            "requires/unknown-variable"
+        },
+        message: match set_later {
+            Some(v) => format!(
+                "`${{{v}}}` in this tab's `-- @requires` is set only below the tab — a locked \
+                 server decides the tab before that and always hides it; move the SET VARIABLE \
+                 above the ::TAB"
+            ),
+            None => format!(
+                "`${{{}}}` in this tab's `-- @requires` names no variable set here (a SET \
+                 VARIABLE above, an input, or `anofox_data`, which `dashboard --check --data \
+                 <dir>` and the locked server set) — the tab is hidden",
+                unknown.join("}`, `${")
+            ),
+        },
+        sql: short.to_string(),
     }
 }
 
@@ -2231,6 +2283,89 @@ mod design_tests {
         let d = lint("${rd/a", &vars, &[]);
         assert_eq!(codes(&d), ["requires/bad-variable", "optional/missing"]);
         assert!(d.iter().all(|d| d.severity != Severity::Error), "{d:?}");
+    }
+
+    #[test]
+    fn a_tab_with_a_missing_input_is_hidden() {
+        let globbed = std::cell::RefCell::new(Vec::new());
+        let vars = [("rd", "/srv/runs/r1"), ("anofox_data", "/srv/runs")];
+        let lint = |script: &str| {
+            check_opts(
+                script,
+                requires_session(&vars, &["/srv/runs/r1/here.parquet"], &globbed),
+                LintOptions { design: false },
+            )
+        };
+        let codes = |d: &[Diagnostic]| d.iter().map(|d| (d.stmt, d.code)).collect::<Vec<_>>();
+        // One note at the tab; its panels (with or without their own
+        // @requires) are left out; the next tab is checked as usual.
+        let d = lint(
+            "-- @requires ${rd}/gone.parquet\nSELECT 'Forecastability'::TAB;\n\
+             SELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             -- @requires ${rd}/gone.parquet\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             SELECT 'Inner'::SUBTAB;\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             SELECT 'Other'::TAB;\n\
+             -- @requires ${rd}/gone.parquet\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+        );
+        assert_eq!(
+            codes(&d),
+            [(1, "optional/missing"), (7, "optional/missing")],
+            "{d:?}"
+        );
+        assert!(d[0].message.contains("::TAB is hidden"), "{}", d[0].message);
+        assert!(d[1].message.contains("Not available"), "{}", d[1].message);
+        // A sub-tab: hidden alone, its siblings stay.
+        let d = lint(
+            "SELECT 'A'::TAB;\n\
+             -- @requires ${rd}/here.parquet\nSELECT 'Shown'::SUBTAB;\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             -- @requires ${rd}/gone.parquet\nSELECT 'Hidden'::SUBTAB;\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             SELECT 'Next'::SUBTAB;\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+        );
+        assert_eq!(codes(&d), [(4, "optional/missing")], "{d:?}");
+        assert!(
+            d[0].message.contains("::SUBTAB is hidden"),
+            "{}",
+            d[0].message
+        );
+        // A setup statement in a hidden tab still runs; reading the missing
+        // input, it fails as expected (a note, not an error).
+        let d = check_opts(
+            "-- @requires gone.parquet\nSELECT 'A'::TAB;\n\
+             CREATE TEMP VIEW v AS SELECT * FROM 'gone.parquet';",
+            |q: &str| {
+                if q.contains("glob(") {
+                    Ok(vec![json!({ "n": 0 }).as_object().unwrap().clone()])
+                } else if q.contains("CREATE") {
+                    Err("IO Error: No files found that match the pattern \"gone.parquet\"".into())
+                } else {
+                    Ok(vec![Map::new()])
+                }
+            },
+            LintOptions { design: false },
+        );
+        assert_eq!(
+            codes(&d),
+            [(1, "optional/missing"), (2, "optional/missing")],
+            "{d:?}"
+        );
+        // `${x}` set only below the tab: a locked server always hides it.
+        let d = lint(
+            "-- @requires ${later}/here.parquet\nSELECT 'A'::TAB;\n\
+             SET VARIABLE later = '/srv/runs/r1';\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+        );
+        assert_eq!(
+            codes(&d),
+            [(1, "requires/tab-always-hidden"), (1, "optional/missing")],
+            "{d:?}"
+        );
+        let d = lint(
+            "-- @requires ${nope}/x\nSELECT 'A'::TAB;\nSELECT a ::XAXIS, b ::BARCHART FROM t;",
+        );
+        assert_eq!(
+            codes(&d),
+            [(1, "requires/unknown-variable"), (1, "optional/missing")],
+            "{d:?}"
+        );
     }
 
     #[test]

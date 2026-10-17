@@ -98,7 +98,27 @@ fn cmd_render(args: &[String]) {
     // SET VARIABLE and LOAD, the inputs' defaults) is replayed before each
     // statement.
     let mut vars = String::new();
+    let mut sections = sql::requires::Sections::default();
     for p in sql::plan(&script) {
+        // A ::TAB whose `-- @requires` input is missing is hidden: none of
+        // its panels are drawn (the tabs themselves are flattened here).
+        let hidden = sections.step(&p, |reqs| {
+            sql::requires::check(reqs, |q, session| {
+                let pre = if session { vars.as_str() } else { "" };
+                let json = run(&db, &format!("{pre}{q};"), true);
+                Ok(sql::parse_rows_json(json.trim())?
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| (k, v.as_str().map(str::to_string)))
+                    .collect())
+            })
+            .missing
+        });
+        if hidden.is_some() {
+            continue;
+        }
         if p.setup {
             if is_session_state(&p.sql) {
                 vars.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';')));

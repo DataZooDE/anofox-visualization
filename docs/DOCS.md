@@ -1433,7 +1433,7 @@ with the browser through wasm):
 | `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
-| `-- @requires <path>` | Directly above one statement: see *Loading, empty, error and "not available" panels*. |
+| `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
 `dashboard --check` warns about an empty `@group` (`header/empty-group`), one
 longer than 80 characters (`header/long-group`), more than 10 tags
@@ -1557,13 +1557,49 @@ Every panel carries its own state — there is no full-page spinner:
   reads a file *and* filters rows, which `requires/on-setup` cannot detect).
   Put it on the statement that reads the file, and keep filtering elsewhere.
 
+  **A strip** (`::TRACK`) with a missing `-- @requires` input is left out of
+  its chart: the chart and its other strips render, nothing marks the gap
+  (never a card of its own).
+
+  **A tab.** `-- @requires` directly above a `::TAB` or `::SUBTAB` statement
+  applies to the whole tab. When it is not met, the tab is **hidden**: no
+  button, no pane, and its panels are not run — rather than a tab full of
+  *Not available* cards. A hidden `::TAB` takes its sub-tabs with it; a
+  hidden `::SUBTAB` leaves its siblings. `?tab=` naming a hidden tab opens the
+  first shown one. The paths follow the rules above; `${name}` takes the value
+  set *above* the tab statement.
+
+  ```sql
+  SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+  -- @requires ${rd}/forecastability.parquet
+  SELECT 'Forecastability'::SUBTAB;
+  SELECT entropy::METRIC FROM read_parquet(getvariable('rd') || '/forecastability.parquet');
+  ```
+
+  Setup statements in a hidden tab's section still run (a `CREATE TEMP VIEW`
+  there may serve later tabs); one that fails because the tab's input is
+  missing is expected and silent. `@requires` on the tab and on its panels as
+  well is fine. Chrome directives (`::THEME`, `::DASHBOARD_TITLE`, `::ASOF`,
+  …) apply to the whole dashboard wherever they sit, so they still run in a
+  hidden tab's section: keep them above the first tab. Hiding is
+  presentation, not secrecy: a served page's source still holds the hidden
+  tab's SQL. On a locked server the tab is decided on the server (it
+  answers the tab's statement *Not available*), and so is every panel in it,
+  whoever asks: a hidden tab's panels never run. As for panels, a locked
+  server checks the paths only with a data folder. The static renderers
+  (`dashboard file.sql`, `dashboard --svg`) leave the tab's panels out.
+
   `dashboard --check` reports a missing input as a **note** (`optional/missing`),
   not an error — `--strict` still passes. It warns about a `${name}` with no
   value (`requires/unknown-variable`: the path counts as missing), an empty
   alternative (`requires/empty-alternative`: `a |`, `a || b`, a line with no
   path), a malformed `${…}` (`requires/bad-variable`) and `@requires` on a
   setup statement that reads no file (`requires/on-setup`); `--strict` fails
-  on these warnings. On the locked server a pattern (`*`, `?`, `[…]`) counts
+  on these warnings. A hidden tab is one note at its `::TAB` / `::SUBTAB`
+  (*this ::TAB is hidden, with its panels*); its panels are not checked. A
+  tab whose `${name}` is set only by a `SET VARIABLE` below it is always hidden
+  on a locked server (it decides the tab before that statement):
+  `requires/tab-always-hidden`. On the locked server a pattern (`*`, `?`, `[…]`) counts
   only in the `@requires` text itself, not in a variable's value.
 
 ### Interactivity

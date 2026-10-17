@@ -11,7 +11,10 @@
 #     NODE_PATH (Playwright), the same in a real browser (locked-vars-e2e.mjs,
 #     also ::INFO in a ::PAGED table, #152).
 #   * `-- @requires` with `${var}` and alternatives over a data folder, and
-#     the path rule: an expanded path stays inside the folder (#156).
+#     the path rule: an expanded path stays inside the folder (#156);
+#   * `-- @requires` on a ::TRACK (#162) and on a ::TAB / ::SUBTAB, whose
+#     panels then never run (#163) — with NODE_PATH also in a browser
+#     (requires-tabs-e2e.mjs).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -261,3 +264,75 @@ na "$(panel 10 '{"run":"r1"}' r)" "a match outside the folder through a symlink"
 stop
 echo "OK: -- @requires: \${var}, alternatives, and paths confined to the data folder"
 echo "OK: -- @requires: no patterns from values, no matches through symlinks, no leaked errors"
+
+# 6. `-- @requires` on a ::TRACK strip (#162) and on a ::TAB / ::SUBTAB
+# (#163): a hidden tab's statement answers "Not available", and so does every
+# panel in its section — also one that reads no file — so the server never
+# runs them, whoever asks.
+mkdir -p "$T/truns/r1" "$T/truns/r2" "$T/tdash"
+"$DUCKDB" -c "COPY (SELECT DATE '2026-01-01' + to_days(i::INT) AS day, i AS v FROM range(10) t(i)) TO $(q "$T/truns/r1/present.parquet");
+  COPY (SELECT DATE '2026-01-01' + to_days(i::INT) AS day, i AS v FROM range(10) t(i)) TO $(q "$T/truns/r2/present.parquet");
+  COPY (SELECT 7 AS v) TO $(q "$T/truns/r1/fc.parquet");" >/dev/null
+cat > "$T/tdash/tabs.sql" <<'SQL'
+SELECT unnest(['r1', 'r2']) AS run ::DROPDOWN;
+SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+SELECT day::XAXIS, v::LINECHART, 'A chart with two strips'::TITLE FROM read_parquet(getvariable('rd') || '/present.parquet') ORDER BY day;
+-- @requires ${rd}/present.parquet
+SELECT day::XAXIS, 'Present'::TRACK FROM read_parquet(getvariable('rd') || '/present.parquet') WHERE v % 3 = 0;
+-- @requires ${rd}/missing.parquet
+SELECT day::XAXIS, 'Missing'::TRACK FROM read_parquet(getvariable('rd') || '/missing.parquet');
+SELECT 'Overview'::TAB;
+SELECT 1::BIGINT AS one ::METRIC;
+-- @requires ${rd}/fc.parquet
+SELECT 'Forecastability'::TAB;
+SELECT count(*)::BIGINT AS n ::METRIC FROM read_parquet(getvariable('rd') || '/fc.parquet');
+SELECT 2::BIGINT AS two ::METRIC;
+-- @requires ${rd}/sub.parquet
+SELECT 'Detail'::SUBTAB;
+SELECT 3::BIGINT AS three ::METRIC;
+SELECT 'Other'::SUBTAB;
+SELECT 4::BIGINT AS four ::METRIC;
+-- @requires ${later}/fc.parquet
+SELECT 'Late'::TAB;
+SET VARIABLE later = getvariable('rd');
+SELECT v::BIGINT AS v ::METRIC FROM read_parquet(getvariable('rd') || '/fc.parquet');
+SELECT 'Again'::TAB;
+SELECT 2::BIGINT AS two ::METRIC;
+-- @requires ${rd}/present.parquet
+SELECT 'Detail'::SUBTAB;
+SELECT 5::BIGINT AS five ::METRIC;
+SQL
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/tdash"), $PORT,
+  json_object('data', $(q "$T/truns"), 'path_vars', ['run']));" || fail "tabs server"
+# #162: the missing strip answers "Not available" (the page leaves it out).
+[ "$(panel 3 '{"run":"r1"}' tabs)" = 200 ] || fail "present track: $(cat "$T/body")"
+na "$(panel 4 '{"run":"r1"}' tabs)" "missing track"
+grep -q "$T" "$T/body" && fail "the track's answer leaks the path: $(cat "$T/body")"
+# #163: the tab with its input is shown, its panels run …
+[ "$(panel 7 '{"run":"r1"}' tabs)" = 200 ] || fail "shown tab: $(cat "$T/body")"
+[ "$(panel 8 '{"run":"r1"}' tabs)" = 200 ] && grep -q '"c0":"1"\|"c0":1' "$T/body" || fail "shown tab's panel: $(cat "$T/body")"
+# … without it: the tab and each of its panels are "Not available".
+for i in 7 8 9 10 11 12 13; do na "$(panel $i '{"run":"r2"}' tabs)" "hidden tab, statement $i"; done
+# A sub-tab on its own: hidden with its panels; the next sub-tab is shown.
+na "$(panel 10 '{"run":"r1"}' tabs)" "hidden sub-tab"
+na "$(panel 11 '{"run":"r1"}' tabs)" "hidden sub-tab's panel"
+[ "$(panel 12 '{"run":"r1"}' tabs)" = 200 ] || fail "the next sub-tab: $(cat "$T/body")"
+[ "$(panel 13 '{"run":"r1"}' tabs)" = 200 ] || fail "the next sub-tab's panel: $(cat "$T/body")"
+# Before the tabs and in another tab: unaffected.
+[ "$(panel 2 '{"run":"r2"}' tabs)" = 200 ] || fail "a panel before the tabs: $(cat "$T/body")"
+[ "$(panel 6 '{"run":"r2"}' tabs)" = 200 ] || fail "a panel of another tab: $(cat "$T/body")"
+# A tab is decided where it stands: `${later}` is set only below the tab, so
+# the tab is hidden — and so are its panels, though `later` is set by then.
+na "$(panel 14 '{"run":"r1"}' tabs)" "a tab whose variable is set below it"
+na "$(panel 16 '{"run":"r1"}' tabs)" "the panel of a tab whose variable is set below it"
+# The same SQL in two tabs: each statement answers by its own tab.
+[ "$(panel 18 '{"run":"r2"}' tabs)" = 200 ] || fail "a KPI whose twin is in a hidden tab: $(cat "$T/body")"
+[ "$(panel 19 '{"run":"r1"}' tabs)" = 200 ] || fail "a sub-tab whose twin is hidden: $(cat "$T/body")"
+echo "OK: -- @requires on a ::TRACK; a hidden ::TAB / ::SUBTAB's panels never run"
+if [ -n "${NODE_PATH:-}" ]; then
+  node "$(dirname "$0")/requires-tabs-e2e.mjs" "http://127.0.0.1:$PORT" || fail "browser checks (requires-tabs-e2e.mjs)"
+  echo "OK: in a browser — a hidden tab has no button and no requests; a missing strip is left out"
+else
+  echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
+fi
+stop
