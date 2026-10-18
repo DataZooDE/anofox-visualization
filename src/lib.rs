@@ -27,6 +27,7 @@ pub mod contract;
 pub mod dashboard;
 pub mod diagram;
 mod downsample;
+mod facet_position;
 pub mod format;
 pub mod freshness;
 pub mod host;
@@ -2770,8 +2771,12 @@ fn cartesian(
             .position(position_dodge(dodge_width)),
         // (A slotted x is already dodged, see `dodge_discrete`.)
         Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
-        Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
-        Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
+        Kind::BarStacked => plot
+            .geom_col_with(card_col(o))
+            .position(facet_position::PerFacet(PositionStack)),
+        Kind::BarStackedPercent => plot
+            .geom_col_with(card_col(o))
+            .position(facet_position::PerFacet(PositionFill)),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
         Kind::Line | Kind::LinePercent => plot
@@ -2872,7 +2877,7 @@ fn cartesian(
                 alpha: 0.85,
                 ..Default::default()
             })
-            .position(PositionStack),
+            .position(facet_position::PerFacet(PositionStack)),
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
         Kind::Point | Kind::Bubble => match fixed_size {
@@ -4548,7 +4553,8 @@ fn data_annotations(
 }
 
 /// The top of a chart's data in y units — where event / range labels sit
-/// (above it, in the scale's headroom). Stacked marks stack per x.
+/// (above it, in the scale's headroom). Stacked marks stack per x (and per
+/// `::FACET` panel).
 fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) -> Option<f64> {
     let col = |n: &str| data.iter().find(|(k, _)| k == n).map(|(_, v)| v);
     let max = |it: &mut dyn Iterator<Item = f64>| it.filter(|f| f.is_finite()).reduce(f64::max);
@@ -4556,10 +4562,12 @@ fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) ->
         Kind::BarStackedPercent => return Some(1.0),
         Kind::BarStacked | Kind::AreaStacked => {
             let (x, y) = (col("x")?, col("y")?);
-            let mut sums: std::collections::HashMap<String, f64> = Default::default();
-            for (xv, yv) in x.iter().zip(y) {
+            let facet = col("facet");
+            let mut sums: std::collections::HashMap<(String, String), f64> = Default::default();
+            for (i, (xv, yv)) in x.iter().zip(y).enumerate() {
                 if let Some(f) = yv.as_f64().filter(|f| f.is_finite() && *f > 0.0) {
-                    *sums.entry(value_str(xv)).or_default() += f;
+                    let panel = facet.map(|c| value_str(&c[i])).unwrap_or_default();
+                    *sums.entry((panel, value_str(xv))).or_default() += f;
                 }
             }
             return max(&mut sums.into_values());

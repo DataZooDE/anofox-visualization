@@ -1767,3 +1767,165 @@ fn bullet_bands_stay_quiet_in_dark_mode() {
         }
     }
 }
+
+// ── #208: stacked marks under ::FACET ────────────────────────────────────
+/// Cost per day by component, faceted by plan (two panels side by side).
+fn stacked_facets(kind: Kind, flip: bool) -> Vec<Column> {
+    let mut cols = vec![
+        Column::new(
+            "day",
+            Role::X,
+            strs(&["D1", "D1", "D2", "D2", "D1", "D1", "D2", "D2"]),
+        ),
+        Column::new(
+            "part",
+            Role::Category,
+            strs(&["a", "b", "a", "b", "a", "b", "a", "b"]),
+        ),
+        Column::new(
+            "cost",
+            Role::Value(kind),
+            nums(&[3.0, 5.0, 7.0, 2.0, 4.0, 1.0, 2.0, 6.0]),
+        ),
+        Column::new(
+            "plan",
+            Role::Facet,
+            strs(&["P", "P", "P", "P", "Q", "Q", "Q", "Q"]),
+        ),
+        Column::new("n", Role::FacetCols, nums(&[2.0])),
+    ];
+    if flip {
+        cols.push(Column::new("f", Role::Flip, nums(&[1.0])));
+    }
+    cols
+}
+/// `(x, y, width, height)` of every data `<rect>` (one per stacked segment).
+fn segments(svg: &str) -> Vec<[f64; 4]> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<rect ") {
+        let tag = &rest[i..i + rest[i..].find('>').unwrap()];
+        if tag.contains("data-series=\"") {
+            let attr = |a: &str| -> f64 {
+                let k = tag.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap()
+            };
+            out.push([attr("x"), attr("y"), attr("width"), attr("height")]);
+        }
+        rest = &rest[i + 5..];
+    }
+    out
+}
+
+#[test]
+fn stacked_bars_start_at_zero_in_every_facet_panel() {
+    for kind in [Kind::BarStacked, Kind::BarStackedPercent] {
+        let s = svg(stacked_facets(kind, false));
+        let segs = segments(&s);
+        assert_eq!(segs.len(), 8, "{kind:?}: one rect per segment");
+        // Bars (one per panel × day) keyed by their left edge; each bar's
+        // lowest segment sits on the shared baseline.
+        let baseline = segs.iter().map(|r| r[1] + r[3]).fold(f64::MIN, f64::max);
+        let mut lefts: Vec<f64> = segs.iter().map(|r| r[0]).collect();
+        lefts.sort_by(f64::total_cmp);
+        lefts.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        assert_eq!(lefts.len(), 4, "{kind:?}: 2 panels × 2 days");
+        for l in lefts {
+            let bottom = segs
+                .iter()
+                .filter(|r| (r[0] - l).abs() < 0.01)
+                .map(|r| r[1] + r[3])
+                .fold(f64::MIN, f64::max);
+            assert!(
+                (bottom - baseline).abs() < 0.05,
+                "{kind:?}: bar at x={l} floats ({bottom} vs {baseline})"
+            );
+        }
+    }
+    // Plain stacks: the y axis ends near the largest panel total (9), not at
+    // the pooled one (8 + 5 = 13).
+    let s = svg(stacked_facets(Kind::BarStacked, false));
+    assert!(
+        !s.contains(">12</text>") && !s.contains(">16</text>"),
+        "pooled y range"
+    );
+}
+
+#[test]
+fn horizontal_stacked_bars_start_at_zero_in_every_facet_panel() {
+    let mut segs = segments(&svg(stacked_facets(Kind::BarStacked, true)));
+    assert_eq!(segs.len(), 8);
+    // ::FLIP: a bar is a row of touching segments; its left end is 0, i.e.
+    // its panel's left edge — so there are exactly 2 distinct left ends.
+    segs.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
+    let mut starts: Vec<f64> = Vec::new();
+    for (k, r) in segs.iter().enumerate() {
+        let joined = k > 0 && {
+            let p = segs[k - 1];
+            (p[1] - r[1]).abs() < 0.05 && (p[0] + p[2] - r[0]).abs() < 0.05
+        };
+        if !joined {
+            starts.push(r[0]);
+        }
+    }
+    assert_eq!(starts.len(), 4, "2 panels × 2 days: {starts:?}");
+    starts.sort_by(f64::total_cmp);
+    starts.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    assert_eq!(
+        starts.len(),
+        2,
+        "every bar starts at its panel's 0: {starts:?}"
+    );
+}
+
+#[test]
+fn stacked_areas_start_at_zero_in_every_facet_panel() {
+    let s = svg(stacked_facets(Kind::AreaStacked, false));
+    // Each band is a polygon; the lowest band of each panel closes on the
+    // shared baseline (the largest y of all polygon points).
+    let polys: Vec<Vec<(f64, f64)>> = s
+        .match_indices("<polygon points=\"")
+        .map(|(i, m)| {
+            let rest = &s[i + m.len()..];
+            rest[..rest.find('"').unwrap()]
+                .split_whitespace()
+                .map(|p| {
+                    let (x, y) = p.split_once(',').unwrap();
+                    (x.parse().unwrap(), y.parse().unwrap())
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(polys.len(), 4, "2 panels × 2 bands");
+    let baseline = polys.iter().flatten().map(|p| p.1).fold(f64::MIN, f64::max);
+    let on_baseline = polys
+        .iter()
+        .filter(|ps| ps.iter().filter(|p| (p.1 - baseline).abs() < 0.05).count() >= 2)
+        .count();
+    assert_eq!(on_baseline, 2, "one band per panel sits on 0");
+}
+
+#[test]
+fn event_labels_over_stacked_facets_sit_above_the_panel_totals() {
+    // An ::XLINE_LABEL sits just above the tallest stack of any one panel
+    // (9), not above the pooled stacks of all panels (13).
+    let mut cols = stacked_facets(Kind::BarStacked, false);
+    cols[0] = Column::new(
+        "day",
+        Role::X,
+        nums(&[1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0]),
+    );
+    cols.push(Column::new("e", Role::VLine, nums(&[1.5; 8])));
+    cols.push(Column::new("el", Role::VLineLabel, strs(&["go-live"; 8])));
+    let s = svg(cols);
+    assert!(s.contains("go-live"), "label drawn");
+    let ticks: Vec<f64> = s
+        .match_indices("</text>")
+        .filter_map(|(i, _)| s[..i].rsplit('>').next()?.parse().ok())
+        .collect();
+    let top = ticks.iter().copied().fold(f64::MIN, f64::max);
+    assert!(
+        top < 12.0,
+        "y axis stretched to the pooled stacks: {ticks:?}"
+    );
+}
