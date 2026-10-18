@@ -11,7 +11,8 @@ import assert from "assert/strict";
 import * as A from "../../web/assist.js";
 import { current as currentGuide, GUIDE } from "../../scripts/gen-assist-guide.mjs";
 import { scratchRunner } from "../../web/lint.js";
-import { BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "../../web/assist/functions.js";
+import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "../../web/assist/functions.js";
+import { build as buildFunctions } from "../../scripts/gen-assist-functions.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
@@ -172,6 +173,46 @@ assert.deepEqual(A.splitStatements("DESCRIBE SELECT E'\\''; DROP TABLE memory.ma
   assert.deepEqual(danger.map((s) => s.sql), ["INSTALL spatial", "COPY v TO 'x.csv'"]);
 }
 assert.deepEqual(A.pathsOf("SELECT 'x' FROM read_csv('data/a.csv') -- 'b.csv'"), ["data/a.csv"]);
+// R3-4 (#225): GDAL's driver prefixes, vsi file systems and spatial's suffixes
+// name a file or URL; labels with a colon stay text
+for (const s of ["WFS:http://e.example/x.gpkg", "GPKG:http://e.example/x", "CSV:http://e.example/x", "GeoJSON:http://e.example/x", "vsicurl/http://e.example/x", "PG:dbname=x", "x.gpkg", "x.fgb", "x.shp.zip", "x.kml"])
+  assert.ok(A.looksLikePath(s), s);
+for (const s of ["Depot:neutral; Late stop:bad", "Critical:bad; Watch:warn; OK:good", "g: a > b", "CSV: 3 files", "data:image/svg+xml;base64,AAAA", "EU", "12:30"])
+  assert.ok(!A.looksLikePath(s), s);
+assert.equal(A.classifyStatement("SELECT count(*) ::METRIC FROM 'WFS:http://e.example/x.gpkg'").cls, 3);
+// R3-5 (#225): a qualified temp object's name is its last part
+assert.equal(A.macroDefined("CREATE TEMP MACRO temp.main.lower(x) AS 'shadow'"), "lower");
+assert.equal(A.macroDefined('CREATE OR REPLACE TEMP MACRO "temp"."main"."Lower"(x) AS 1'), "lower");
+assert.equal(A.macroDefined("CREATE TEMP MACRO mine(x) AS x + 1"), "mine");
+assert.equal(A.isTableMacro("CREATE TEMP MACRO temp.main.t() AS TABLE SELECT 1 AS a"), true);
+assert.equal(A.isTableMacro("CREATE TEMP MACRO temp.main.t() AS 1"), false);
+assert.equal(A.relationDefined("CREATE TEMP TABLE temp.main.h AS SELECT 1 AS a"), "h");
+// #224: the generator reads a table macro's relation argument in one shape
+// only; any other query_table() / query() stops the write (fake rows)
+{
+  const b = buildFunctions([
+    { f: "ts_demo_by", t: "table_macro", p: ["source", "x"], m: 'SELECT * FROM query_table(CAST("source" AS VARCHAR))' },
+    { f: "ts_plain_by", t: "table_macro", p: ["tbl"], m: "SELECT * FROM query_table(CAST(tbl AS VARCHAR))" },
+    { f: "ts_combine_keys", t: "table", p: ["col0", "col1"], m: null },
+    { f: "ts_new_operator", t: "table", p: ["col0"], m: null },
+    { f: "ts_wraps_by", t: "table_macro", p: ["source"], m: "SELECT * FROM ts_new_operator(source)" },
+  ]);
+  assert.deepEqual(b.review, []);
+  assert.deepEqual(b.tables, ["ts_combine_keys", "ts_demo_by", "ts_plain_by"], "an operator, and a macro that calls one, are left out");
+  assert.deepEqual(b.left, ["ts_new_operator", "ts_wraps_by"]);
+  assert.deepEqual(b.rel.ts_demo_by, [[0, "source"]]);
+  assert.deepEqual(b.rel.ts_plain_by, [[0, "tbl"]]);
+  for (const m of [
+    "SELECT * FROM query_table(source)",
+    "SELECT * FROM query_table(CAST(source || '' AS VARCHAR))",
+    "SELECT * FROM query_table([source])",
+    "SELECT * FROM query('SELECT 1')",
+    'SELECT * FROM query_table(CAST("other" AS VARCHAR))',
+  ])
+    assert.equal(buildFunctions([{ f: "ts_odd_by", t: "table_macro", p: ["source"], m }]).review.length, 1, m);
+  assert.match(buildFunctions([{ f: "ts_brand_new", t: "table", p: [], m: null }]).review[0], /^ts_brand_new: a native table function/);
+  assert.equal(buildFunctions([{ f: "sneaky", t: "macro", p: ["x"], m: "(SELECT count(*) FROM t, query_table(x))" }]).denied.get("sneaky"), "its body reads a table function");
+}
 
 // ---- what is sent: masking, context, prefix ----
 const card = (name, kind, extra = {}) => ({ name, type: kind === "num" ? "DOUBLE" : "VARCHAR", kind, n: 100, nonnull: 100, nullPct: 0, distinct: 4, ...extra });
@@ -934,10 +975,10 @@ const tools = A.wasmTools({
   {
     for (const f of ["json_serialize_plan", "json_execute_serialized_sql", "nextval", "currval", "setseed", "write_log", "error", "make_type", "current_setting"])
       assert.ok(!SCALAR_ALLOWED.has(f), f);
-    // "today" is also a scalar call the parser emits, but it has no
-    // duckdb_functions() row of any kind (unlike unnest/unlist), so the
-    // generator cannot see it: reported to the lead as a gap (not widened here).
-    for (const f of ["json_serialize_sql", "getvariable", "unnest", "unlist", "sum"]) assert.ok(SCALAR_ALLOWED.has(f), f);
+    // today() and get_current_time() are icu's (autoloaded in the browser),
+    // which the generator's DuckDB-Wasm can't load: listed by hand (#225)
+    for (const f of ["json_serialize_sql", "getvariable", "unnest", "unlist", "sum", "today", "get_current_time"]) assert.ok(SCALAR_ALLOWED.has(f), f);
+    assert.ok(BUILTIN.has("today") && BUILTIN.has("get_current_time"));
     assert.deepEqual(RELATION_ARGS.histogram_values, [[0, "source"]]);
     assert.ok(RELATION_ARGS.ols_tidy_by.some(([, p]) => p === "source"));
     assert.ok(BUILTIN.has("enable_logging") && BUILTIN.has("test_all_types"));
@@ -1094,6 +1135,48 @@ const tools = A.wasmTools({
     const [x, y] = await Promise.all([scratchRunner(db)("SELECT current_database() AS d"), scratchRunner(db)("SELECT current_database() AS d")]);
     assert.notEqual(JSON.parse(x)[0].d, JSON.parse(y)[0].d);
   }
+}
+{
+  // ---- follow-ups of sec-review-192 re-review 3 (#223, #225) ----
+  // R3-2 (#223): the native *_operator functions (and the two that trap
+  // DuckDB-Wasm) are refused; this test DB has no anofox extension, and the
+  // refusal comes before anything runs
+  for (const f of ["ts_fill_forward_operator", "anofox_fcst_ts_fill_forward_operator", "ts_features_list", "ts_features_config_template"]) {
+    assert.equal(A.tableAllowed(f), false, f);
+    assert.ok(!ANOFOX_TABLES.has(f) && !(f in RELATION_ARGS), f);
+  }
+  for (const f of ["ts_fill_forward_by", "anofox_fcst_ts_fill_forward_by", "ts_stats_by", "ts_combine_keys", "ts_aggregate_hierarchy"]) assert.ok(A.tableAllowed(f), f);
+  const op = "SELECT count(*) ::METRIC FROM ts_fill_forward_operator('sales', 'region', 'day', 'amount', TIMESTAMP '2026-03-08', '1d');";
+  const gop = await tools.gate(op);
+  assert.equal(gop.allowed, false);
+  assert.match(gop.statements[0].reason, /ts_fill_forward_operator\(\), a table function the assistant may not use/);
+  await assert.rejects(
+    tools.run_sql({ sql: "SELECT * FROM ts_fill_forward_operator('sales', 'region', 'day', 'amount', TIMESTAMP '2026-03-08', '1d')", purpose: "x" }),
+    /refused: .*ts_fill_forward_operator/
+  );
+  // R3-4: a GDAL-prefixed name is a file the dashboard does not use
+  for (const n of ["WFS:http://e.example/x.gpkg", "GPKG:http://e.example/x.gpkg", "vsicurl/http://e.example/x.gpkg"])
+    assert.equal((await tools.gate(`SELECT count(*) ::METRIC FROM '${n}';`)).allowed, false, n);
+  // R3-5: a qualified temp macro may not shadow a built-in either; one with
+  // its own name still works
+  const shadow = await tools.gate("CREATE TEMP MACRO temp.main.lower(x) AS 'shadow';\nSELECT lower('A') ::METRIC;");
+  assert.equal(shadow.allowed, false);
+  assert.match(JSON.stringify(shadow.statements), /a macro named lower/);
+  assert.equal((await tools.gate("CREATE TEMP MACRO temp.main.plus_one(x) AS x + 1;\nSELECT plus_one(1) ::METRIC;")).allowed, true);
+  // usability: icu's today() and get_current_time() pass the gate
+  assert.equal((await tools.gate("SELECT today() ::METRIC;\nSELECT get_current_time() ::TITLE;")).allowed, true);
+  // I-1: the tools' own queries (the catalog, a profile, the parser) are not
+  // prepared; the model's SQL is, and only once the guard passed it
+  const prepared = [];
+  const pt = A.wasmTools({ db, prepare: async (s) => void prepared.push(s), lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+  await pt.list_tables({ filter: "" });
+  await pt.profile_table({ table: "sales" });
+  assert.equal((await pt.gate("SELECT count(*) ::METRIC FROM sales WHERE region <> 'data/m5/x.csv';")).allowed, false);
+  assert.equal((await pt.gate("SELECT count(*) ::METRIC FROM sales;")).allowed, true);
+  await assert.rejects(pt.run_sql({ sql: op.replace(" ::METRIC", "").replace(/;$/, ""), purpose: "x" }), /refused/);
+  assert.deepEqual(prepared, []);
+  await pt.run_sql({ sql: "SELECT region FROM sales", purpose: "x" });
+  assert.ok(prepared.length > 0 && prepared.every((s) => !/json_serialize_sql/.test(s)), JSON.stringify(prepared));
 }
 {
   // M1 (#200): a late query is cancelled in the worker, not just abandoned
