@@ -2600,9 +2600,12 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 `anofox_data` is set by the server; a `path_vars` value must be a plain name
 (`[A-Za-z0-9_.-]`, no leading `.`), so `../` never reaches DuckDB, which refuses
-any path outside the folder anyway. New runs are readable immediately. With
-`data` set, every statement must be a query (or `SET VARIABLE` / `CREATE TEMP
-TABLE|VIEW … AS <query>`); mount the folder read-only for a hard guarantee
+any path outside the folder anyway. New runs are readable immediately.
+Parquet footers are cached for the snapshot's lifetime (setup views over
+large files aren't re-read per request); DuckDB re-checks each file, so a
+file rewritten in place is read fresh. With `data` set, every statement must
+be a query (or `SET VARIABLE` / `CREATE TEMP TABLE|VIEW … AS <query>`); mount
+the folder read-only for a hard guarantee
 ([`secure-serving.md`](secure-serving.md)).
 
 **Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy

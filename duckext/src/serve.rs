@@ -14,7 +14,8 @@
 //!   filter as a prepared-statement parameter. Queries run on a private
 //!   read-only snapshot with external access, extension loading and config
 //!   changes disabled, one fresh connection per request (no variable leakage
-//!   between viewers), under a row cap and a query timeout. Results are cached
+//!   between viewers), with parquet footers cached across requests, under a
+//!   row cap and a query timeout. Results are cached
 //!   per snapshot, identical concurrent requests run once, and a request
 //!   superseded by the same viewer's newer one is interrupted
 //!   ([`crate::panel_cache`]). The snapshot can be rebuilt while serving
@@ -1507,6 +1508,15 @@ fn build_snapshot(
                 "SET allowed_directories = [{}]",
                 sql_string_literal(&d)
             ))?;
+        }
+        // Keep parquet footers across requests: every request re-runs the
+        // setup statements on a fresh connection, and their views would
+        // otherwise read each file's footer again (#209). DuckDB re-validates
+        // a cached footer against the file, so a rewritten file in `data` is
+        // read fresh. A parquet extension setting, so not part of `cfg`.
+        if let Err(err) = c.exec("SET GLOBAL parquet_metadata_cache = true") {
+            let first = err.lines().next().unwrap_or("").to_string();
+            warnings.push(format!("parquet_metadata_cache: {first}"));
         }
         c.exec("SET enable_external_access = false")?;
         c.exec("SET lock_configuration = true")?;

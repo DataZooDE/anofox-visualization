@@ -242,9 +242,11 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - Error messages sent to viewers show the folder as `<data>`; the log keeps
   the full path.
 - Files appear live: a new run is readable as soon as it is written, without a
-  refresh. The result cache does *not* see file changes — runs that are
-  rewritten in place need a refresh (which starts a new cache) or
-  `cache_mb: 0`.
+  refresh. Parquet footers are cached across requests (`parquet_metadata_cache`,
+  set by the server and locked); DuckDB re-validates them against the file, so
+  a rewritten file is never read with a stale footer. The result cache does
+  *not* see file changes — runs that are rewritten in place need a refresh
+  (which starts a new cache) or `cache_mb: 0`.
 - Views in the session over files in the folder (`CREATE VIEW v AS SELECT …
   FROM read_parquet('/srv/runs/…')`) are copied into the snapshot as views and
   read the files live too.

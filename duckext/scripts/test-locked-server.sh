@@ -15,6 +15,8 @@
 #   * `-- @requires` on a ::TRACK (#162) and on a ::TAB / ::SUBTAB, whose
 #     panels then never run (#163) — with NODE_PATH also in a browser
 #     (requires-tabs-e2e.mjs).
+#   * parquet footers are cached across requests and a rewritten file is read
+#     fresh (#209).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -336,3 +338,39 @@ else
   echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
 fi
 stop
+
+# 7. Parquet footers are cached across requests (#209): the snapshot has
+# parquet_metadata_cache on (viewers can't turn it off), and a file rewritten
+# in the data folder is read fresh — in place or replaced by a rename — also
+# through a setup view. `cache_mb: 0`: the result cache doesn't see file
+# changes (documented), this is about the footers.
+mkdir -p "$T/pruns" "$T/pdash"
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(10)) TO $(q "$T/pruns/f.parquet");" >/dev/null
+cat > "$T/pdash/p.sql" <<'SQL'
+SELECT (current_setting('parquet_metadata_cache')::VARCHAR = 'true')::INT::BIGINT AS cached ::METRIC;
+CREATE OR REPLACE TEMP VIEW pv AS SELECT * FROM read_parquet(getvariable('anofox_data') || '/f.parquet');
+SELECT count(*)::BIGINT AS n ::METRIC FROM pv;
+SELECT sum(x)::BIGINT AS s ::METRIC FROM pv;
+SQL
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/pdash"), $PORT,
+  json_object('data', $(q "$T/pruns"), 'cache_mb', 0));" || fail "parquet cache server"
+[ "$(panel 0 '{}' p)" = 200 ] && grep -qE '"c0":1(\.0)?[,}]' "$T/body" || fail "parquet_metadata_cache is not on: $(cat "$T/body")"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":10(\.0)?[,}]' "$T/body" || fail "first read: $(cat "$T/body")"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":10(\.0)?[,}]' "$T/body" || fail "cached read: $(cat "$T/body")"
+# rewritten in place by another process
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(1000)) TO $(q "$T/pruns/f.parquet");" >/dev/null
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "in-place rewrite served a stale footer: $(cat "$T/body")"
+[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":499500(\.0)?[,}]' "$T/body" || fail "in-place rewrite (sum): $(cat "$T/body")"
+# replaced by a rename (how a writer publishes a run atomically)
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(7)) TO $(q "$T/pnew.parquet");" >/dev/null
+mv "$T/pnew.parquet" "$T/pruns/f.parquet"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":7(\.0)?[,}]' "$T/body" || fail "renamed-in file served a stale footer: $(cat "$T/body")"
+[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":21(\.0)?[,}]' "$T/body" || fail "renamed-in file (sum): $(cat "$T/body")"
+# the rebuilt snapshot has it too
+echo "SELECT anofox_serve_refresh($PORT);" >&3
+for _ in $(seq 50); do grep -q "epoch 2" "$T/out" && break; sleep 0.2; done
+grep -q "epoch 2" "$T/out" || fail "parquet cache refresh: $(cat "$T/out")"
+[ "$(panel 0 '{}' p)" = 200 ] && grep -qE '"c0":1(\.0)?[,}]' "$T/body" || fail "parquet_metadata_cache off after a refresh: $(cat "$T/body")"
+grep -q "parquet_metadata_cache:" "$T/out" && fail "parquet_metadata_cache warning: $(cat "$T/out")"
+stop
+echo "OK: parquet footers cached across requests; rewritten files read fresh, also after a refresh"
