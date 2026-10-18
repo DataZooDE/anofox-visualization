@@ -54,7 +54,11 @@ jobs:
     env:
       PLATFORM: ${{ matrix.platform }}
     steps:
+      # Full history + tags: the binaries and the embedded web/pkg show the
+      # build version from git describe — exactly the tag on a release (#216).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Tag matches the Cargo.toml version
         if: env.RELEASE_TAG != ''

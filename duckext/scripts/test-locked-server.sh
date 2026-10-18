@@ -134,11 +134,11 @@ codes="$(cat "$T/slowc1" "$T/slowc2" "$T/slowc3" | fold -w3 | sort | tr '\n' ' '
 [ "$codes" = "400 400 503 " ] || fail "max_queries: expected two timeouts and one 503, got $codes"
 grep -qi "^Retry-After: 1" "$T"/slowh* || fail "503 without Retry-After"
 health="$(curl -s "http://127.0.0.1:$PORT/healthz")"
-for k in '"max_queries":1' '"max_response_bytes":1048576' '"refused_queries":1' '"inflight_bytes":0'; do
+for k in '"version":"v' '"max_queries":1' '"max_response_bytes":1048576' '"refused_queries":1' '"inflight_bytes":0'; do
   [[ "$health" == *"$k"* ]] || fail "/healthz lacks $k: $health"
 done
 stop
-echo "OK: size cap (413), query slots (503 + Retry-After), limits in /healthz"
+echo "OK: size cap (413), query slots (503 + Retry-After), limits + version in /healthz"
 
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting

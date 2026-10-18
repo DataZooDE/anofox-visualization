@@ -1766,6 +1766,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             let gen = st.current.get();
             let body = serde_json::json!({
                 "status": "ok",
+                "version": anofox_visualization::BUILD_VERSION,
                 "dashboards": st.dashboards.len(),
                 "epoch": gen.epoch,
                 "snapshot_age_s": gen.built.elapsed().as_secs(),

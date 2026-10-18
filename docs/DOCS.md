@@ -1768,7 +1768,9 @@ Every panel carries its own state — there is no full-page spinner:
   value (`requires/unknown-variable`: the path counts as missing), an empty
   alternative (`requires/empty-alternative`: `a |`, `a || b`, a line with no
   path), a malformed `${…}` (`requires/bad-variable`) and `@requires` on a
-  setup statement that reads no file (`requires/on-setup`); `--strict` fails
+  setup statement that reads no file (`requires/on-setup`: a `SET VARIABLE x =
+  (SELECT … FROM read_parquet(…))` reads one, a `SET VARIABLE` that only
+  builds a path does not); `--strict` fails
   on these warnings. A hidden tab is one note at its `::TAB` / `::SUBTAB`
   (*this ::TAB is hidden, with its panels*); its panels are not checked. A
   tab whose `${name}` is set only by a `SET VARIABLE` below it is always hidden
