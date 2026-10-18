@@ -3,11 +3,16 @@
 # (the C-API "full toolkit" build: rendering + anofox_serve*).
 # Produces $OUT (default /tmp/anofox_visualization.duckdb_extension) for
 # `duckdb -unsigned`. Extra args go to `cargo build` (e.g. --release).
+# Any OUT name builds and smoke-tests, but `LOAD '<file>'` needs the name
+# anofox_visualization.duckdb_extension or anofox_visualization.<x>.duckdb_extension
+# (DuckDB takes the entry point from the file name up to the first dot, #201).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CORE="$(cd "$HERE/.." && pwd)"
 DUCKDB="${DUCKDB:-$(command -v duckdb || echo "$HOME/.local/bin/duckdb")}"
 OUT="${OUT:-/tmp/anofox_visualization.duckdb_extension}"
+# Relative to the caller's directory (the build below runs in $CORE).
+case "$OUT" in /*|[A-Za-z]:*) ;; *) OUT="$PWD/$OUT" ;; esac
 PLATFORM="${PLATFORM:-$("$DUCKDB" -noheader -list -c 'PRAGMA platform;')}"
 # Single version source of truth: [workspace.package] in the root Cargo.toml.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$CORE/Cargo.toml" | head -1)"
@@ -43,16 +48,30 @@ echo "== package (C_STRUCT metadata footer, C-API v1.2.0, platform $PLATFORM) ==
   -p "$PLATFORM" -dv v1.2.0 -ev "v$VERSION" --abi-type C_STRUCT -o "$OUT" | grep -i "output file"
 
 echo "== smoke test =="
+# LOAD derives <name>_init_c_api from the file name up to the first dot and the
+# library exports anofox_visualization_init_c_api only: test any other OUT name
+# through a symlink with the canonical name (#201).
+case "$(basename "$OUT")" in
+  anofox_visualization.duckdb_extension|anofox_visualization.*.duckdb_extension)
+    EXT="$OUT"; RENAMED= ;;
+  *)
+    SMOKE_DIR="$(mktemp -d)"; trap 'rm -rf "$SMOKE_DIR"' EXIT
+    EXT="$SMOKE_DIR/anofox_visualization.duckdb_extension"; ln -s "$OUT" "$EXT"; RENAMED=1 ;;
+esac
 "$DUCKDB" -unsigned -noheader -list -c "
-LOAD '$OUT';
+LOAD '$EXT';
 WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
 SELECT CASE WHEN anofox_render(json_object(
   'rows',  (SELECT to_json(list({c0: ch, c1: n})) FROM d),
   'roles', json('[[0,\"XAXIS\"],[1,\"BARCHART\"]]'),
   'width', 400, 'height', 260)) LIKE '<svg%<rect%'
   THEN 'OK: rendered a bar chart' ELSE 'FAIL' END;"
-if "$DUCKDB" -unsigned -c "LOAD '$OUT'; SELECT anofox_render('not json');" >/dev/null 2>&1; then
+if "$DUCKDB" -unsigned -c "LOAD '$EXT'; SELECT anofox_render('not json');" >/dev/null 2>&1; then
   echo "FAIL: a bad spec must raise a SQL error"; exit 1
 fi
 echo "OK: bad spec raises a SQL error"
 echo "== done → $OUT =="
+if [ -n "$RENAMED" ]; then
+  echo "NOTE: LOAD '$OUT' fails (DuckDB looks for $(basename "$OUT" | cut -d. -f1)_init_c_api)."
+  echo "      Rename it to anofox_visualization.duckdb_extension, or LOAD a symlink with that name."
+fi

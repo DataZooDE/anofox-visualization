@@ -27,6 +27,7 @@ GEN=ninja make && make test
 
 # full toolkit (needs Rust, libclang for bindgen, wasm-pack, python3, a duckdb CLI)
 duckext/scripts/build-native.sh --release        # → /tmp/anofox_visualization.duckdb_extension
+#   OUT=<path> picks another file; LOAD needs anofox_visualization[.<x>].duckdb_extension (#201)
 
 # core, CLIs, web
 cargo test --locked --features serve

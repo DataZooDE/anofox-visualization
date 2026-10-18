@@ -13,7 +13,11 @@
 #
 # Needs the pinned duckdb CLI (DUCKDB, default `duckdb`), curl and python3.
 set -euo pipefail
-EXT=$(realpath "$1")
+EXT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+case "$(basename "$EXT")" in
+  anofox_visualization.duckdb_extension|anofox_visualization.*.duckdb_extension) ;;
+  *) echo "$EXT: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '$EXT' /tmp/anofox_visualization.duckdb_extension" >&2; exit 2 ;;
+esac
 PORT=${2:-8880}
 DUCKDB=${DUCKDB:-duckdb}
 W=$(mktemp -d)

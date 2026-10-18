@@ -323,6 +323,11 @@ def main() -> int:
     ap.add_argument("--no-montage", action="store_true")
     a = ap.parse_args()
     ext = os.path.abspath(a.ext)
+    if not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
+        print(f"--ext {ext}: LOAD takes the entry point from the file name, so it must be named "
+              "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
+              f"Rename it, or: ln -s '{ext}' /tmp/anofox_visualization.duckdb_extension", file=sys.stderr)
+        return 2
     out_dir = os.path.abspath(a.out)
     os.makedirs(out_dir, exist_ok=True)
     setdir = f"SET extension_directory = '{os.path.abspath(a.extension_dir)}'; " if a.extension_dir else ""

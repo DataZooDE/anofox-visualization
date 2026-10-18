@@ -259,7 +259,7 @@ LOAD './build/release/extension/anofox_visualization/anofox_visualization.duckdb
 git clone https://github.com/DataZooDE/anofox-visualization
 cd anofox-visualization
 duckext/scripts/build-native.sh --release   # builds web/pkg, the extension, packages + smoke-tests it
-# → /tmp/anofox_visualization.duckdb_extension   (OUT=… to change)
+# → /tmp/anofox_visualization.duckdb_extension   (OUT=… to change; LOAD needs a name starting anofox_visualization.)
 ```
 
 ```sql
@@ -336,7 +336,7 @@ schema:
 
 ```bash
 duckdb -c "INSTALL anofox_tabular FROM community"   # signed, DuckDB v1.5.6
-python3 scripts/tabular_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/tabular-viz
+python3 scripts/tabular_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/tabular-viz
 ```
 
 CI job *anofox-tabular conformance*.
@@ -358,7 +358,7 @@ script — what you would write today). It runs on a three-series daily panel
 ```bash
 duckdb -c "INSTALL anofox_forecast FROM community"                                  # the release
 duckdb -unsigned -c "FORCE INSTALL anofox_forecast FROM 'https://get.erpl.io'"      # or main
-python3 scripts/forecast_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/forecast-viz
+python3 scripts/forecast_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/forecast-viz
 ```
 
 Producer bugs of a released build are listed in the script (`KNOWN`) and

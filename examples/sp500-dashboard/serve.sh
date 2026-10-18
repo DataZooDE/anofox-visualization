@@ -18,6 +18,10 @@ PORT="${PORT:-8123}"
 
 [ -x "$DUCKDB" ] || { echo "duckdb not found (set DUCKDB=…)"; exit 1; }
 [ -f "$EXT" ]    || { echo "extension not found at $EXT — build it with ../../duckext/scripts/build-native.sh, or set EXT=…"; exit 1; }
+case "$(basename "$EXT")" in
+  anofox_visualization.duckdb_extension|anofox_visualization.*.duckdb_extension) ;;
+  *) echo "$EXT: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '$EXT' /tmp/anofox_visualization.duckdb_extension" >&2; exit 2 ;;
+esac
 
 echo "building data layer + serving dash/ on :$PORT (Ctrl-C to stop)…"
 # anofox_serve_dashboards returns immediately; keep the session alive with a
