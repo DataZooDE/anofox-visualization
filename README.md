@@ -216,7 +216,7 @@ Both run queries through a `duckdb` CLI on your `PATH`:
 ```sh
 tar xzf anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu.tar.gz
 cd anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu
-./dashboard --version
+./dashboard --version                     # dashboard v2026.10.18 (a dev build: v2026.10.18+37 · 739aba4)
 ./dashboard my_dashboard.sql out.html     # static interactive HTML
 ./dashboard --check my_dashboard.sql      # which panels error / are empty
 ./serve my.duckdb                         # builder on http://127.0.0.1:8080

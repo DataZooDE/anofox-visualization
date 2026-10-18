@@ -46,7 +46,9 @@ fn main() {
         Some("--theme-css") => cmd_theme_css(&args[1..]),
         // The DOCS.md role table (generated from the registry).
         Some("--roles-md") => print!("{}", anofox_visualization::roles::markdown_table()),
-        Some("--version") | Some("-V") => println!("dashboard {}", env!("CARGO_PKG_VERSION")),
+        Some("--version") | Some("-V") => {
+            println!("dashboard {}", anofox_visualization::BUILD_VERSION)
+        }
         // An explicit --help is a successful request (exit 0, stdout); no
         // arguments at all is a usage error (exit 2, stderr).
         Some("--help") | Some("-h") => println!("{USAGE}"),

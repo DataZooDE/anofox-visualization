@@ -117,6 +117,16 @@ dashboards/sessions.sql`. The extension file name must start with
   builds get the git tag via `EXT_VERSION_ANOFOX_VISUALIZATION`);
   `build-native.sh` and `extension.yml` stamp `v<version>` into the C-API
   artifact. `duckext/description.yml` must carry the same value.
+- The **build version** people see (#216) comes from `git describe` at build
+  time (root `build.rs` → `anofox_visualization::BUILD_VERSION`): `v2026.10.18`
+  for a build of a release tag, `v2026.10.18+37 · 739aba4` (commits since the
+  tag · short sha, `-dirty` with uncommitted changes) for any other build, and
+  `v<version>` for a build without git (a source tarball, the docker image).
+  It is what the builder's sidebar footer, `dashboard --version`,
+  `serve --version` and the locked server's `/healthz` (`"version"`) report.
+  Extension metadata, asset names and the files the release bumps stay plain
+  CalVer. CI checks out full history (`fetch-depth: 0`) where it builds what it
+  ships, and the release build fails unless `--version` prints exactly the tag.
 - DuckDB: the C++ build is pinned to the `duckdb` submodule (v1.5.6) and
   `MainDistributionPipeline.yml`'s `duckdb_version`; bump both together. The
   C-API build requests C-API v1.2.0 (so its metadata footer says `v1.2.0`, not

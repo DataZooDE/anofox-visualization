@@ -51,6 +51,17 @@ mod variance;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(test)]
+mod build_version;
+
+/// The build's version as people see it — the builder's sidebar footer,
+/// `dashboard`/`serve --version`, the locked server's `/healthz`:
+/// `v2026.10.18` for a release tag build, else `v2026.10.18+37 · 739aba4`
+/// (commits since the tag · short sha, `-dirty` with uncommitted changes),
+/// `v<Cargo.toml version>` without git. Stamped by build.rs from `git
+/// describe` (#216). Extension metadata keeps the plain CalVer.
+pub const BUILD_VERSION: &str = env!("ANOFOX_VIZ_BUILD_VERSION");
+
 /// The kind of chart, taken from the cast on the *value* column (e.g.
 /// `count()::BARCHART` etc.).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

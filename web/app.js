@@ -1485,7 +1485,7 @@ async function boot() {
   appBrandLoad(); // the app bar (in parallel; the bar shows when it's known)
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
   const sideVer = document.getElementById("side-ver");
-  if (sideVer) sideVer.textContent = "v" + wasmVersion();
+  if (sideVer) sideVer.textContent = wasmVersion(); // "v2026.10.18" or "v2026.10.18+37 · 739aba4" (#216)
   loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
