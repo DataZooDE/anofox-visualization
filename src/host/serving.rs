@@ -484,6 +484,25 @@ pub struct PanelRequest {
     pub page: Option<PageRequest>,
 }
 
+/// DuckDB's variable names are case-insensitive: of two spellings of one name
+/// the later `SET` wins. Keep only that one (dropping the earlier), so
+/// whoever builds the cache key and whoever runs the `SET VARIABLE`s agree on
+/// one value per name — used both on the request's own `vars` (here) and,
+/// after a credential's locked variables are appended
+/// ([`crate::host::auth::Scope::lock_vars`]), on the combined list, so two
+/// spellings of a locked variable can't collide with each other either
+/// (security review of #210/#222, M2).
+pub fn dedup_last_spelling(vars: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut vars: Vec<(String, String)> = vars
+        .into_iter()
+        .rev()
+        .filter(|(k, _)| seen.insert(k.to_ascii_lowercase()))
+        .collect();
+    vars.reverse();
+    vars
+}
+
 /// Parse + validate a locked-mode panel request body.
 pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     let v: serde_json::Value =
@@ -523,16 +542,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
             vars.push((k.clone(), lit));
         }
     }
-    // DuckDB's variable names are case-insensitive: of two spellings of one
-    // name the later SET wins. Keep only that one, so the cache key and the
-    // query see the same value.
-    let mut seen = std::collections::HashSet::new();
-    let mut vars: Vec<(String, String)> = vars
-        .into_iter()
-        .rev()
-        .filter(|(k, _)| seen.insert(k.to_ascii_lowercase()))
-        .collect();
-    vars.reverse();
+    let vars = dedup_last_spelling(vars);
     let page = match o.get("page") {
         None | Some(serde_json::Value::Null) => None,
         Some(p) => Some(parse_page(p)?),

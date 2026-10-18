@@ -367,6 +367,17 @@ mod tests {
         assert_eq!(reads("SELECT query FROM log", &none()), v(&[]));
     }
 
+    /// Security review of #210/#222 (I1): a `--` comment that a lone CR ends
+    /// (DuckDB ends it there too, not only at LF) must not hide a real read —
+    /// the analysed text must match what DuckDB executes.
+    #[test]
+    fn a_cr_ended_comment_does_not_hide_a_read() {
+        assert_eq!(
+            reads("SELECT 1 --c\r, getvariable('secret') AS z", &none()),
+            v(&["secret"])
+        );
+    }
+
     // --- fallbacks to All ---
     #[test]
     fn unresolvable_getvariable_uses_are_all() {

@@ -113,7 +113,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             }
             kind = TokKind::Whitespace;
         } else if c == '-' && at(i + 1) == Some('-') {
-            while i < n && chars[i].1 != '\n' {
+            // DuckDB also ends a `--` comment at a lone CR, not only LF
+            // (`SELECT 1 --c\r, 2 AS after` has `after` as a real column).
+            while i < n && chars[i].1 != '\n' && chars[i].1 != '\r' {
                 i += 1;
             }
             kind = TokKind::LineComment;
@@ -462,5 +464,44 @@ mod tests {
             let joined: String = toks.iter().map(|t| t.text(s)).collect();
             assert_eq!(joined, s);
         }
+    }
+
+    /// DuckDB ends a `--` comment at a lone CR too, not only LF: `SELECT 1
+    /// --c\r, 2 AS after` has `after` as a real column. The lexer must agree,
+    /// so `deps` (and `strip_comments`) never hide code DuckDB actually runs
+    /// (security review of #210/#222).
+    #[test]
+    fn a_line_comment_ends_at_a_lone_cr_too() {
+        let s = "SELECT 1 --c\r, 2 AS after_cr";
+        let toks = tokenize(s);
+        let joined: String = toks.iter().map(|t| t.text(s)).collect();
+        assert_eq!(joined, s, "round-trips");
+        let kinds: Vec<(TokKind, &str)> = toks
+            .iter()
+            .filter(|t| !matches!(t.kind, TokKind::Whitespace))
+            .map(|t| (t.kind, t.text(s)))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (TokKind::Word, "SELECT"),
+                (TokKind::Number, "1"),
+                (TokKind::LineComment, "--c"),
+                (TokKind::Punct, ","),
+                (TokKind::Number, "2"),
+                (TokKind::Word, "AS"),
+                (TokKind::Word, "after_cr"),
+            ]
+        );
+        // CRLF still works as one comment ending at the CR (the LF is
+        // ordinary trailing whitespace, same as today).
+        let crlf = "SELECT 1 --c\r\n, 2";
+        assert_eq!(
+            tokenize(crlf)
+                .into_iter()
+                .find(|t| t.kind == TokKind::LineComment)
+                .map(|t| t.text(crlf)),
+            Some("--c")
+        );
     }
 }

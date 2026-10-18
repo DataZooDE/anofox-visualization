@@ -231,6 +231,51 @@ curl -s "http://127.0.0.1:$PORT/d/vs" | grep -q '"deps":\[\[\],\["run","sel"\],\
 echo "OK: #210 cache keys follow the variables a panel can depend on (SET VARIABLE closure, conservative fallback)"
 stop
 
+# 4c. Security review of #210/#222 (M1): a variable a panel doesn't read must
+# never reach a `SET VARIABLE`, so a value chosen to make that SET fail (a
+# reserved word as the name, a mixed-type list as the value) can't poison a
+# single-flight shared with another request that only agrees on the
+# variables the panel actually reads. Panel 0 is slow and holds the only
+# query slot; panel 1 depends only on `region` (#210 narrows its key/SETs to
+# that). An attacker (A) posts panel 1 with a poisoned extra variable while
+# a victim (B) posts the same `region` alone; both must succeed, and B must
+# never see A's text.
+mkdir "$T/dashm1"
+cat > "$T/dashm1/sf.sql" <<'SQL'
+SELECT sum(i)::BIGINT AS s ::METRIC FROM range(100000000000) r(i) WHERE getvariable('hold') IS NOT NULL;
+SELECT count(*)::BIGINT AS n ::METRIC FROM runs WHERE name = getvariable('region');
+SQL
+start "$T/runs.duckdb" "-readonly" \
+  "SELECT anofox_serve_dashboards($(q "$T/dashm1"), $PORT, $(q "{\"log\": \"$T/reqm1.log\", \"max_queries\": 1, \"timeout_ms\": 3000}"));" \
+  || fail "#222 M1 server"
+# postm1 <pidvar> <tag> <vars JSON>: POST panel 1 in the background, write
+# body/code to $T/m1<tag>.*, and the job's PID into variable $pidvar. (Must
+# be called directly, never through `$(...)`: a command substitution runs
+# this in a subshell, and a job backgrounded there is reparented away the
+# moment the subshell exits, so the caller's `wait` can no longer see it.)
+postm1() {
+  curl -s -o "$T/m1body$2" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+    -d "{\"dashboard\":\"sf\",\"panel\":1,\"vars\":$3}" > "$T/m1code$2" &
+  eval "$1=\$!"
+}
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/api/panel" -d '{"dashboard":"sf","panel":0,"vars":{"hold":1}}' &
+h=$!
+sleep 0.3
+postm1 a A '{"region":"a","z":[1,"attacker-text"]}'
+sleep 0.3
+postm1 b B '{"region":"a"}'
+wait "$h" "$a" "$b" 2>/dev/null
+[ "$(cat "$T/m1codeA")" = 200 ] || fail "#222 M1: the attacker's own request (z dropped, never SET) should succeed too: $(cat "$T/m1codeA") $(cat "$T/m1bodyA")"
+[ "$(cat "$T/m1codeB")" = 200 ] && grep -q '"c0":1' "$T/m1bodyB" || fail "#222 M1: victim B: $(cat "$T/m1codeB") $(cat "$T/m1bodyB")"
+grep -qi "attacker-text" "$T/m1bodyB" "$T/m1bodyA" && fail "#222 M1: the attacker's text leaked into a response"
+# `{"select": 1}` — a reserved word as the variable *name* — must be refused
+# just as safely (dropped before any SET, since panel 1 doesn't read it).
+postm1 c C '{"region":"a","select":1}'
+wait "$c" 2>/dev/null
+[ "$(cat "$T/m1codeC")" = 200 ] && grep -q '"c0":1' "$T/m1bodyC" || fail "#222 M1: reserved word 'select' as a name: $(cat "$T/m1codeC") $(cat "$T/m1bodyC")"
+echo "OK: #222 M1 — a variable a panel doesn't read is dropped before any SET, so it can't fail a shared single-flight for another request"
+stop
+
 # 5. `-- @requires` over a data folder (#156): `${var}` expands to the
 # request's value, `a | b` is met by either, and an expanded path must stay
 # inside the folder — a viewer's own variable, `..`, an absolute path outside

@@ -1942,10 +1942,16 @@ fn valid_supersede(v: &str) -> bool {
 /// The cache key of a panel request: everything its result depends on
 /// besides the snapshot (each snapshot has its own cache), the `data` files
 /// (a refresh drops the cache) and the dashboards — the parsed request, with
-/// only the variables the statement can depend on (`deps`, #210; lower
-/// case — DuckDB's variable names are case-insensitive), in a canonical
-/// order. Debug formatting quotes and escapes every string, so distinct
-/// requests never collide.
+/// only the variables in `deps` (#210; lower case — DuckDB's variable names
+/// are case-insensitive), in a canonical order. `deps` is the caller's own
+/// variable-dependency analysis **extended with any credential-locked
+/// variables** (security review of #210/#222, L1): those always count,
+/// whatever the analysis says a panel reads, because they act like
+/// authorization. `r.vars` must already hold exactly the variables `deps`
+/// covers — `locked_panel` retains it before calling this, so the key and
+/// the `SET VARIABLE`s that actually run agree by construction (M1). Debug
+/// formatting quotes and escapes every string, so distinct requests never
+/// collide.
 /// With a login the viewer's claims are part of the key, always in full, so
 /// one viewer's result (or running query) is never handed to a viewer with
 /// other claims.
@@ -2028,6 +2034,11 @@ fn locked_panel(
         // A locked variable that names a path obeys the same rule as a
         // viewer's (checked above for those).
         check_path_values(&st.opts.path_vars, &s.vars)?;
+        // Two spellings of one name can collide again here even though the
+        // request's own vars were already deduped: the credential's locked
+        // variables are appended afterwards, unconditionally (security
+        // review of #210/#222, M2). The later SET (DuckDB's own rule) wins.
+        r.vars = sv::dedup_last_spelling(r.vars);
     }
     info.vars = r.vars.clone();
     // The variables whose values the viewer chose (not a path variable, not
@@ -2079,7 +2090,9 @@ fn locked_panel(
         }
     };
     // Only the variables this statement can depend on (#210; All when
-    // the analysis can't tell).
+    // the analysis can't tell). Credential-locked variables are never
+    // narrowed (security review of #210/#222, L1): they act like
+    // authorization, so they always count, whatever the analysis says.
     let deps = gen
         .snap
         .deps
@@ -2087,7 +2100,23 @@ fn locked_panel(
         .and_then(|d| d.get(r.panel))
         .cloned()
         .unwrap_or(Deps::All);
-    let key = panel_key(&r, claims, &deps);
+    let mut key_deps = deps;
+    if let Some(s) = scope {
+        key_deps.extend(&Deps::Vars(
+            s.vars.iter().map(|(n, _)| n.to_ascii_lowercase()).collect(),
+        ));
+    }
+    // Execute exactly what the key records (security review of #210/#222,
+    // M1): a variable outside `key_deps` is never `SET`, so it can't make a
+    // shared single-flight fail for every joiner (a reserved word or a
+    // mixed-type value a viewer chose for a variable the panel doesn't read
+    // would otherwise poison requests that only share that panel's real
+    // inputs), and a miss in the analysis gives NULL for that variable to
+    // every viewer instead of leaking a value computed for another one.
+    if !key_deps.is_all() {
+        r.vars.retain(|(n, _)| key_deps.contains(n));
+    }
+    let key = panel_key(&r, claims, &key_deps);
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
@@ -2782,6 +2811,79 @@ mod tests {
         assert_eq!((out.unwrap().as_str(), how), ("bob", Served::Executed));
     }
 
+    /// Security review of #210/#222 (M1): `locked_panel` must execute exactly
+    /// what the key records, so a variable outside the panel's deps (which a
+    /// viewer could set to make its own `SET VARIABLE` fail: a reserved word,
+    /// a mixed-type list, …) is dropped before either the key or the `SET`s
+    /// are built — the same step `locked_panel` performs on `r.vars`.
+    #[test]
+    fn a_variable_outside_deps_is_dropped_before_the_key_and_the_sets() {
+        let mut r = sv::parse_panel_request(
+            r#"{"dashboard":"d","panel":1,"vars":{"region":"EU","z":[1,2]}}"#,
+        )
+        .unwrap();
+        let deps = Deps::Vars(["region".to_string()].into());
+        r.vars.retain(|(n, _)| deps.contains(n));
+        assert_eq!(r.vars, vec![("region".to_string(), "'EU'".to_string())]);
+        let sets = request_sets(&r, None, None);
+        assert!(!sets.iter().any(|s| s.contains('z')), "{sets:?}");
+        // The key no longer differs by `z`: two requests that agree on
+        // `region` but not on `z` now share one key (the whole point — they
+        // compute the same true answer), instead of two keys whose `SET`s
+        // disagreed with what the key recorded.
+        let mut r2 = sv::parse_panel_request(
+            r#"{"dashboard":"d","panel":1,"vars":{"region":"EU","z":[9,9]}}"#,
+        )
+        .unwrap();
+        r2.vars.retain(|(n, _)| deps.contains(n));
+        assert_eq!(panel_key(&r, None, &deps), panel_key(&r2, None, &deps));
+    }
+
+    /// Security review of #210/#222 (L1): a credential's locked variable is
+    /// never narrowed away, whatever the analysis says a panel reads —
+    /// always in the key, always `SET`.
+    #[test]
+    fn credential_locked_variables_are_never_narrowed() {
+        let mut r = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+        let scope = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("tenant".into(), "'acme'".into())],
+        };
+        scope.lock_vars(&mut r.vars);
+        // The analysis says this panel reads nothing at all — not even
+        // `tenant` — yet the locked variable must still count.
+        let deps = Deps::default();
+        let mut key_deps = deps.clone();
+        key_deps.extend(&Deps::Vars(
+            scope
+                .vars
+                .iter()
+                .map(|(n, _)| n.to_ascii_lowercase())
+                .collect(),
+        ));
+        assert!(key_deps.contains("tenant"));
+        r.vars.retain(|(n, _)| key_deps.contains(n));
+        assert_eq!(r.vars, vec![("tenant".to_string(), "'acme'".to_string())]);
+        let sets = request_sets(&r, None, None);
+        assert!(
+            sets.iter()
+                .any(|s| s.contains("tenant") || s.contains("TENANT")),
+            "{sets:?}"
+        );
+        // A different tenant must give a different key even though `deps`
+        // alone says nothing is read.
+        let mut r2 = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+        let scope2 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("tenant".into(), "'globex'".into())],
+        };
+        scope2.lock_vars(&mut r2.vars);
+        assert_ne!(
+            panel_key(&r, None, &key_deps),
+            panel_key(&r2, None, &key_deps)
+        );
+    }
+
     #[test]
     fn refresh_and_data_options() {
         let o = LockedOptions::parse(Some(r#"{"refresh_s":60}"#)).unwrap();
@@ -3149,6 +3251,71 @@ mod tests {
         assert!(!sets.iter().any(|s| s.contains("'US'")), "{sets:?}");
         assert!(pos("q =") < pos("REGION = 'EU'"));
         assert!(pos("REGION = 'EU'") < pos("__claim_user"));
+    }
+
+    /// Security review of #210/#222 (M2): two embed links with the same
+    /// claims (no `user`: both are `embed:d`) whose locked variables spell
+    /// `tenant` twice, in opposite orders. Canonicalizing `r.vars` once,
+    /// after `lock_vars`, keeps only the spelling DuckDB actually runs (the
+    /// later `SET` wins), so the two links — which execute to *different*
+    /// tenants — get different keys, instead of colliding on one.
+    #[test]
+    fn two_spellings_of_a_locked_variable_no_longer_collide() {
+        let claims = Claims {
+            user: "embed:d".into(),
+            ..Default::default()
+        };
+        let s1 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![
+                ("Tenant".into(), "'acme'".into()),
+                ("tenant".into(), "'globex'".into()),
+            ],
+        };
+        let s2 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![
+                ("tenant".into(), "'globex'".into()),
+                ("Tenant".into(), "'acme'".into()),
+            ],
+        };
+        let deps = Deps::Vars(["tenant".to_string()].into());
+        let canon = |s: &Scope| {
+            let mut r =
+                sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+            s.lock_vars(&mut r.vars);
+            r.vars = sv::dedup_last_spelling(r.vars);
+            r
+        };
+        let r1 = canon(&s1);
+        let r2 = canon(&s2);
+        let k1 = panel_key(&r1, Some(&claims), &deps);
+        let k2 = panel_key(&r2, Some(&claims), &deps);
+        let sets1 = request_sets(&r1, Some(&claims), None);
+        let sets2 = request_sets(&r2, Some(&claims), None);
+        // Each link now runs exactly one SET per name (the one DuckDB would
+        // keep: the later of the two in that link's own declared order).
+        assert_eq!(
+            sets1
+                .iter()
+                .filter(|s| s.contains("TENANT") || s.contains("Tenant") || s.contains("tenant"))
+                .count(),
+            1,
+            "{sets1:?}"
+        );
+        assert_eq!(
+            sets2
+                .iter()
+                .filter(|s| s.contains("TENANT") || s.contains("Tenant") || s.contains("tenant"))
+                .count(),
+            1,
+            "{sets2:?}"
+        );
+        assert_ne!(
+            k1, k2,
+            "different effective tenants must get different keys"
+        );
+        assert_ne!(sets1, sets2, "and indeed they run different SETs");
     }
 
     #[test]
