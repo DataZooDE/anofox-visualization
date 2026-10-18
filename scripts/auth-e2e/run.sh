@@ -13,6 +13,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 EXT="$(cd "$(dirname "${1:?usage: run.sh <extension>}")" && pwd)/$(basename "$1")"
+case "$(basename "$EXT")" in
+  anofox_visualization.duckdb_extension|anofox_visualization.*.duckdb_extension) ;;
+  *) echo "$EXT: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '$EXT' /tmp/anofox_visualization.duckdb_extension" >&2; exit 2 ;;
+esac
 DUCKDB="${DUCKDB:-duckdb}"
 SERVE="${SERVE:-$REPO/target/debug/serve}"
 export PORT="${PORT:-8950}" IDP_PORT="${IDP_PORT:-8953}"

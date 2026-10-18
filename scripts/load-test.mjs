@@ -37,7 +37,7 @@
 import { spawn } from "child_process";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir, loadavg, cpus } from "os";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { randomBytes } from "crypto";
 import http from "http";
@@ -67,6 +67,10 @@ const rssOverheadMb = Number(arg("--rss-overhead-mb", "400"));
 const target = arg("--url", ext ? `http://127.0.0.1:${port}` : "");
 if (!target) {
   console.error("usage: node scripts/load-test.mjs --ext <extension> | --url <server> (see the header)");
+  process.exit(2);
+}
+if (ext && !/^anofox_visualization(\..+)?\.duckdb_extension$/.test(basename(ext))) {
+  console.error(`--ext ${ext}: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '${ext}' /tmp/anofox_visualization.duckdb_extension`);
   process.exit(2);
 }
 

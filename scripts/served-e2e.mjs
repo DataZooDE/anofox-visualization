@@ -35,6 +35,10 @@ if (!ext || !existsSync(ext)) {
   console.error("usage: served-e2e.mjs --ext <anofox_visualization.duckdb_extension> (build it with duckext/scripts/build-native.sh)");
   process.exit(2);
 }
+if (!/^anofox_visualization(\..+)?\.duckdb_extension$/.test(path.basename(ext))) {
+  console.error(`--ext ${ext}: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '${ext}' /tmp/anofox_visualization.duckdb_extension`);
+  process.exit(2);
+}
 if (shots) mkdirSync(shots, { recursive: true });
 const tag = `${width <= 820 ? "phone" : "desktop"}${theme ? "-" + theme : ""}`;
 const fail = (m) => {

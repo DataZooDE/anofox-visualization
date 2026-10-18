@@ -3,13 +3,16 @@
 queries return (name, svg) with the anofox_visualization extension loaded and
 write <out_dir>/<name>.svg. Uses the `duckdb` CLI (env DUCKDB) with -unsigned;
 the extension path defaults to env ANOFOX_VIZ_EXT or the installed one."""
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 
 script, out = sys.argv[1], sys.argv[2]
 ext = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("ANOFOX_VIZ_EXT", "anofox_visualization")
 duckdb = os.environ.get("DUCKDB", "duckdb")
 os.makedirs(out, exist_ok=True)
 load = f"LOAD '{ext}';" if ext.endswith(".duckdb_extension") else f"LOAD {ext};"
+if ext.endswith(".duckdb_extension") and not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
+    sys.exit(f"{ext}: LOAD takes the entry point from the file name, so it must be named "
+             "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension)")
 sql = load + "\n" + open(script).read()
 res = subprocess.run([duckdb, "-unsigned", "-jsonlines", "-c", sql], capture_output=True, text=True)
 if res.returncode != 0:

@@ -32,11 +32,11 @@ directory.
 
 Usage
 -----
-    SKIP_WASM=1 DUCKDB=duckdb OUT=/path/viz.duckdb_extension \\
+    SKIP_WASM=1 DUCKDB=duckdb OUT=/path/anofox_visualization.duckdb_extension \\
         duckext/scripts/build-native.sh --release
     cargo build --release --bin dashboard
     python3 scripts/validate_skills_sql.py --duckdb duckdb \\
-        --ext /path/viz.duckdb_extension --dashboard target/release/dashboard
+        --ext /path/anofox_visualization.duckdb_extension --dashboard target/release/dashboard
     python3 scripts/validate_skills_sql.py ... --file plugins/anofox-visualization/skills/anofox-visualization-charts/SKILL.md
 """
 
@@ -206,6 +206,12 @@ def run_block(env: Env, idx: int, tag: str, body: str) -> tuple[bool, str]:
 
 def main() -> int:
     a = parse_args()
+    ext = os.path.abspath(a.ext)
+    if not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
+        print(f"--ext {ext}: LOAD takes the entry point from the file name, so it must be named "
+              "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
+              f"Rename it, or: ln -s '{ext}' /tmp/anofox_visualization.duckdb_extension", file=sys.stderr)
+        return 2
     if a.file:
         files = [in_repo(f) for f in a.file]
     else:

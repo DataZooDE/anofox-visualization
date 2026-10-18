@@ -12,6 +12,10 @@ set -euo pipefail
 EXT="${1:?usage: smoke-extension.sh <file.duckdb_extension>}"
 # A bare relative name would be looked up on the dynamic-loader path.
 case "$EXT" in /*|./*|../*|[A-Za-z]:*) ;; *) EXT="./$EXT" ;; esac
+case "$(basename "$EXT")" in
+  anofox_visualization.duckdb_extension|anofox_visualization.*.duckdb_extension) ;;
+  *) echo "$EXT: LOAD takes the entry point from the file name, so it must be named anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). Rename it, or: ln -s '$EXT' /tmp/anofox_visualization.duckdb_extension" >&2; exit 2 ;;
+esac
 DUCKDB="${DUCKDB:-$("$ROOT/scripts/release/install-duckdb-cli.sh")}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 q() { "$DUCKDB" -unsigned -noheader -list -c "LOAD '$EXT'; $1" | tr -d '\r'; }
