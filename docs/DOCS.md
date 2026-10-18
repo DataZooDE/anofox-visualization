@@ -2602,9 +2602,18 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 `anofox_data` is set by the server; a `path_vars` value must be a plain name
 (`[A-Za-z0-9_.-]`, no leading `.`), so `../` never reaches DuckDB, which refuses
-any path outside the folder anyway. New runs are readable immediately. With
-`data` set, every statement must be a query (or `SET VARIABLE` / `CREATE TEMP
-TABLE|VIEW … AS <query>`); mount the folder read-only for a hard guarantee
+any path outside the folder anyway. New runs are readable immediately.
+Parquet footers are cached for the snapshot's lifetime (setup views over
+large files aren't re-read per request) — in RAM well past what
+`memory_limit` counts for them, so size for it ([`deployment.md`](deployment.md)
+§6); only a refresh drops the cache. DuckDB re-checks each file's size and
+modification time (to the second) before using a cached footer: publish a
+run by renaming a new file into place (`mv`), which is always read fresh; a
+file overwritten in place at the same size within the same second, or with
+its mtime restored, can be read with its old footer until a refresh. With
+`data` set, every statement must be a query (or `SET VARIABLE` / `CREATE
+TEMP TABLE|VIEW … AS <query>`); mount the folder read-only for a hard
+guarantee
 ([`secure-serving.md`](secure-serving.md)).
 
 **Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy
