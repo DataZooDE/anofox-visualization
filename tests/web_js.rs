@@ -116,3 +116,11 @@ fn web_sidebar_search_and_zip() {
 fn web_served_nav_groups() {
     run_node("served_nav_test.mjs");
 }
+
+/// The builder assistant's core (#145): the loop with scripted model turns,
+/// the classifier, masking, the cache prefix, transport (a) against a local
+/// fake API and the tools in DuckDB-Wasm; and web/assist/guide.md is current.
+#[test]
+fn web_assistant_core() {
+    run_node("assist_test.mjs");
+}

@@ -1,8 +1,9 @@
 {
   "name": "anofox-visualization-web-tests",
   "private": true,
-  "description": "Optional deps of tests/web (npm install --prefix tests/web): DuckDB-Wasm for the wasm-extension smoke test.",
+  "description": "Optional deps of tests/web (npm install --prefix tests/web): DuckDB-Wasm for the wasm-extension smoke test, the Anthropic SDK for the assistant transport test (against a local fake server; no API call).",
   "dependencies": {
+    "@anthropic-ai/sdk": "0.135.0",
     "@duckdb/duckdb-wasm": "1.33.1-dev65.0"
   }
 }

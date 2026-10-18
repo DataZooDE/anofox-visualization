@@ -18,14 +18,15 @@ export const MAX_STEPS = 40;
 // error. `strict` and `design` are `--strict` and the inverse of
 // `--no-design`. `onStep(n, queries)` reports progress; `cancelled()` stops
 // before the next query. Resolves to {diagnostics, ok, summary, spans, steps,
-// queries}, or null when cancelled.
+// queries, answers} (answers: query -> {rows} | {error}), or null when
+// cancelled.
 export async function lintScript(script, { step, run, strict = false, design = true, onStep, cancelled }) {
   const opts = JSON.stringify({ strict, design });
   const known = new Map(); // query -> {rows} | {error}
   for (let n = 1; n <= MAX_STEPS; n++) {
     const res = JSON.parse(step(script, knownJson(known), opts));
     if (res.error) throw new Error(res.error);
-    if (res.done) return { ...res, steps: n, queries: known.size };
+    if (res.done) return { ...res, steps: n, queries: known.size, answers: known };
     onStep?.(n, known.size + res.need.length);
     for (const sql of res.need) {
       if (cancelled?.()) return null;
@@ -52,21 +53,49 @@ function knownJson(known) {
 // follow on the search path), so a script over an added file still lints.
 // `prepare(sql)` readies what a statement needs first (extensions, files);
 // `toRows(result)` turns a DuckDB-Wasm result into the rows' JSON text.
+// `guard(piece, {query, state})` sees every statement before anything of the
+// query runs (prepare included) and throws to refuse it; `query(sql)` runs a
+// helper query in the same scratch session, `state` lives for one call (the
+// assistant's parse-tree check at the execution point).
 // Works with the async (browser) and the blocking (Node) DuckDB-Wasm alike.
-export function scratchRunner(db, { prepare, toRows = rowsJson } = {}) {
-  let n = 0;
+let scratchSeq = 0; // unique across runners: two may run at once
+export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0, guard } = {}) {
   return async (sql) => {
-    if (prepare) await prepare(sql);
     const c = await db.connect();
-    const name = `anofox_lint_${++n}`;
+    const name = `anofox_lint_${++scratchSeq}`;
     let home = null;
+    let timer;
     try {
       home = `"${String((await c.query("SELECT current_database() AS d")).toArray()[0].toJSON().d).replace(/"/g, '""')}"`;
       await c.query(`ATTACH ':memory:' AS ${name}`);
       await c.query(`USE ${name}`);
       await c.query(`SET search_path = '${name}.main,${home.replace(/'/g, "''")}.main'`);
-      return toRows(await c.query(sql));
+      const pieces = splitStatements(sql);
+      if (guard) {
+        const ctx = { query: async (q) => rowsJson(await runOne(c, q)), state: {} };
+        for (const piece of pieces) await guard(piece, ctx);
+      }
+      if (prepare) await prepare(sql);
+      const work = (async () => {
+        let last = null;
+        for (const piece of pieces) last = await runOne(c, piece);
+        return toRows(last || { schema: { fields: [] }, toArray: () => [] });
+      })();
+      if (!timeoutMs) return await work;
+      // A query past its time is cancelled in the worker (the page's later
+      // queries would wait behind it), not just abandoned.
+      const late = new Promise((_, reject) => {
+        timer = setTimeout(async () => {
+          try {
+            await c.cancelSent?.();
+          } catch (_) {}
+          reject(new Error(`the query took longer than ${timeoutMs / 1000} s and was cancelled`));
+        }, timeoutMs);
+      });
+      work.catch(() => {}); // (rejects after a cancel; the timeout error wins)
+      return await Promise.race([work, late]);
     } finally {
+      clearTimeout(timer);
       try {
         if (home) {
           await c.query(`USE ${home}`);
@@ -78,6 +107,81 @@ export function scratchRunner(db, { prepare, toRows = rowsJson } = {}) {
       await c.close();
     }
   };
+}
+
+// Run exactly one statement. DuckDB's own parser decides what one statement
+// is: a text prepare() refuses as "multiple statements" never runs (a split
+// that differs from DuckDB's, e.g. around E'\'' strings, can't hide a
+// second statement). Sent, not queried, so a timeout can cancel it.
+async function runOne(c, sql) {
+  try {
+    const st = await c.prepare(sql);
+    await st.close();
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/multiple statements/i.test(msg)) throw new Error(`not run: DuckDB reads more than one statement in: ${sql.slice(0, 80)}`);
+    if (/^Parser Error/i.test(msg)) throw e;
+    // Any other prepare() error (a binder error, a missing table) is left to
+    // send(), which reports it and also takes a single statement only.
+  }
+  const reader = await c.send(sql);
+  const schema = reader.schema;
+  const batches = [];
+  for await (const b of reader) batches.push(b);
+  return { schema: batches[0]?.schema || schema || { fields: [] }, toArray: () => batches.flatMap((b) => b.toArray()) };
+}
+
+// The statements of a script, split on `;` outside literals ('…', E'…' with
+// backslash escapes, "…", $tag$…$tag$) and comments.
+export function splitStatements(sql) {
+  const out = [];
+  let cur = "";
+  let real = false; // the current statement has more than comments
+  const s = String(sql);
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    const two = s.slice(i, i + 2);
+    if (c === "'" || c === '"') {
+      const esc = c === "'" && /[Ee]/.test(s[i - 1] || "") && !/[\w$]/.test(s[i - 2] || "");
+      let j = i + 1;
+      for (; j < s.length; j++) {
+        if (esc && s[j] === "\\") j++;
+        else if (s[j] === c) {
+          if (s[j + 1] === c) j++;
+          else break;
+        }
+      }
+      cur += s.slice(i, j + 1);
+      i = j;
+      real = true;
+    } else if (two === "--") {
+      const j = s.indexOf("\n", i);
+      const end = j < 0 ? s.length : j;
+      cur += s.slice(i, end);
+      i = end - 1;
+    } else if (two === "/*") {
+      const j = s.indexOf("*/", i + 2);
+      const end = j < 0 ? s.length : j + 2;
+      cur += s.slice(i, end);
+      i = end - 1;
+    } else if (c === "$" && /^\$[A-Za-z_]*\$/.test(s.slice(i)) && !/[\w$]/.test(s[i - 1] || "")) {
+      const tag = s.slice(i).match(/^\$[A-Za-z_]*\$/)[0];
+      const j = s.indexOf(tag, i + tag.length);
+      const end = j < 0 ? s.length : j + tag.length;
+      cur += s.slice(i, end);
+      i = end - 1;
+      real = true;
+    } else if (c === ";") {
+      if (real) out.push(cur.trim());
+      cur = "";
+      real = false;
+    } else {
+      cur += c;
+      if (!/\s/.test(c)) real = true;
+    }
+  }
+  if (real) out.push(cur.trim());
+  return out;
 }
 
 // A DuckDB-Wasm result as rows' JSON text ([{col: value, …}, …]) — what
