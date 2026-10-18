@@ -204,7 +204,7 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
 // The delivery-routing maps: both ::MAP panels of the Map tab carry a
 // ::CATEGORY (the van), a ::LABEL (the hover text), the same ::SYNC_ZOOM group
 // and a ::COLORS level map, and the renderer keys each feature by its van
-// (data-series) and row (data-row); the Stop list's route map is a ::STORY
+// (data-series) and row (data-row), over the street grid (::BASEMAP); the Stop list's route map is a ::STORY
 // keyed by stop number (::XAXIS).
 {
   const sql = readFileSync(new URL("../../web/examples/optimize-delivery.sql", import.meta.url), "utf8");
@@ -215,14 +215,14 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   assert.equal(story.length, 1, "one route map on the Stop list tab");
   for (const r of ["XAXIS", "STORY", "COLORS"]) assert.ok(story[0].roles.some((x) => x[1] === r), `route map without ::${r}`);
   for (const s of maps) {
-    for (const r of ["CATEGORY", "LABEL", "SYNC_ZOOM", "COLORS"]) assert.ok(s.roles.some((x) => x[1] === r), `map without ::${r}`);
+    for (const r of ["CATEGORY", "LABEL", "BASEMAP", "SYNC_ZOOM", "COLORS"]) assert.ok(s.roles.some((x) => x[1] === r), `map without ::${r}`);
     const z = s.roles.find((x) => x[1] === "SYNC_ZOOM")[0];
     assert.match(s.sql, new RegExp(`'routes' AS c${z}\\b`), "both maps zoom as 'routes'");
   }
   const rows = JSON.stringify([
-    { c0: "LINESTRING(0 0, 1 2, 0 0)", c1: "Van 1", c2: "Van 1: 4 km, back 07:10, 1 stop late", c3: "routes", c4: "Depot:neutral; Late stop:bad", c5: "Today" },
-    { c0: "POINT(1 2)", c1: "Van 1", c2: "Backstube 3 — bakery\nVan 1, stop #1", c3: "routes", c4: "Depot:neutral; Late stop:bad", c5: "Today" },
-    { c0: "MULTIPOLYGON(((1 3.1, 2.1 2, 1.6 2, 1 2.6, 1 3.1)))", c1: "Late stop", c2: "Backstube 3 — bakery", c3: "routes", c4: "Depot:neutral; Late stop:bad", c5: "Today" },
+    { c0: "LINESTRING(0 0, 1 2, 0 0)", c1: "Van 1", c2: "Van 1: 4 km, back 07:10, 1 stop late", c3: null, c4: "routes", c5: "Depot:neutral; Late stop:bad", c6: "Today" },
+    { c0: "POINT(1 2)", c1: "Van 1", c2: "Backstube 3 — bakery\nVan 1, stop #1", c3: null, c4: "routes", c5: "Depot:neutral; Late stop:bad", c6: "Today" },
+    { c0: "MULTIPOLYGON(((1 3.1, 2.1 2, 1.6 2, 1 2.6, 1 3.1)))", c1: "Late stop", c2: "Backstube 3 — bakery", c3: null, c4: "routes", c5: "Depot:neutral; Late stop:bad", c6: "Today" },
   ]);
   const svg = wasm.render_panel(rows, JSON.stringify(maps[0].roles), 460, 300, "", "");
   assert.match(svg, /^<svg[^>]* data-map=""/);

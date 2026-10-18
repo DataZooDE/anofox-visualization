@@ -8,9 +8,13 @@ example of the [live demo](https://datazoode.github.io/anofox-visualization/)
 **Who asks:** the dispatcher of a made-up food wholesaler at 15:00 the day
 before. 40 bakeries, cafés, restaurants, shops and a canteen around the depot,
 each with a deadline (bakeries before 07:30, restaurants before lunch prep)
-and 1–3 roll cages; a van takes 32 cages, leaves at 06:00 and drives 40 km/h on
-roads 1.3× the straight line. Today each driver has a fixed district and drives
-the order list.
+and 1–3 roll cages; a van takes 32 cages, leaves at 06:00 and drives 40 km/h.
+The town is a street grid — a street every kilometre each way, the depot and
+every stop on a crossing — so the distance between two places is the street
+distance |dx| + |dy|: the solvers get it, every km on the dashboard is a
+street km, and the routes are drawn along the streets (east-west, then
+north-south). Today each driver has a fixed district and drives the order
+list.
 
 **The story (4 vans):** today's districts drive 516 km, 13 stops are late and
 one van carries 33 cages for 32 places. The shortest routes drive 268 km but
@@ -59,19 +63,22 @@ cd web && ../target/release/dashboard --check --strict examples/optimize-deliver
 
 ## Inputs and tabs
 
-Inputs: the new plan to compare with today's (deadline-aware / shortest route)
-and the vans on the road (4–6) as buttons, the van for the stop list, and the
-cost per km, per driver hour and per van day — the cost inputs re-price the
-stored plans. "Today's plan" is the stored plan `today: districts, order list`.
-The KPI row compares the selected plan with today's plan at the same van count:
-stops on time, kilometres, driver hours and cost per day.
+Above the tabs (the KPI row uses them): the new plan to compare with today's
+(deadline-aware / shortest route) and the vans on the road (4–6). The van for
+the stop list sits in the Stop list tab, the cost assumptions (€ per street
+km, per driver hour, per van day, per late delivery) in the Decision tab — an
+input placed after a `::TAB` renders in that tab. "Today's plan" is the stored
+plan `today: districts, order list`. The KPI row compares the selected plan
+with today's plan at the same van count: stops on time, street km, driver
+hours and cost per day.
 
 Every number the dashboard shows beyond the stored tables (first and last
-arrival per van, minutes late, the legs and arrowheads of the maps) is derived
-in SQL from `dr_route`; nothing was regenerated for this layout.
+arrival per van, minutes late, the legs, arrowheads and street backdrop of
+the maps, the cost components) is derived in SQL from the stored tables.
 
-1. **Map** — today's plan next to the new one (`::MAP` of WKT in km): routes
-   with an arrowhead per leg pointing the way the van drives, the depot as a
+1. **Map** — today's plan next to the new one (`::MAP` of WKT in km) over
+   the street grid (`::BASEMAP`): routes along the streets with an arrowhead
+   per leg pointing the way the van drives, the depot as a
    grey square, a red ring around every late stop (`::COLORS` pins the depot
    and late-stop colours; the vans keep the palette). Hovering a route, arrow
    or stop lights that van up on both maps; a click picks it out in the van
@@ -82,9 +89,8 @@ in SQL from `dr_route`; nothing was regenerated for this layout.
 3. **Stop list** — one van's route as a `::STORY` on the map (`::XAXIS` = stop
    number: ▶ Play steps leg by leg with arrival and deadline), the minutes to
    spare per stop, and the driver's list.
-4. **Van count** — late stops, daily cost and kilometres for every plan × van
-   count (the cost bars move to their new values as the cost inputs change).
-5. **Decision** — the cheapest stored plan that serves every stop on time,
-   against today's plan with as many vans: the recommendation as a share of
-   today's plan, and a bridge of where it saves per day (kilometres, driver
-   hours).
+4. **Decision** — the cost assumptions; the cheapest stored plan that serves
+   every stop on time against today's plan with as many vans, and what one
+   more van would cost; cost per day by component (street km, driver time,
+   van day rates, late penalties) for every plan × van count; late stops by
+   van count; the recommendation as a share of today's plan; every plan priced.

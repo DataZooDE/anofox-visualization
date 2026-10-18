@@ -232,6 +232,19 @@ the variable can stay a short identifier:
 SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
 ```
 
+An input renders **where it appears in the script**: before the first `::TAB`
+it sits above the tabs, after a `::TAB` (or `::SUBTAB`) inside that tab, shown
+only while the tab is. Put an input in the tab whose panels it changes, and
+keep only those that act on every tab (or on a KPI row above the tabs) at the
+top. Its variable is global either way — any panel can read it, it lands in
+the URL as `?v.name=` — and a `#Tab?v.name=…` link still sets it.
+
+```sql
+SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
+SELECT 'Detail'::TAB;
+SELECT 10 AS min_n ::NUMBER, 'Minimum orders'::LABEL;  -- only on "Detail"
+```
+
 Inputs work in the **browser builder** and **`serve`** (they re-query on change).
 The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 `serve --dashboards` page) draw no control but bind each input's **default**
