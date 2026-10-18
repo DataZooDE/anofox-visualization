@@ -429,3 +429,112 @@ fn headless_dark_has_no_white_cards() {
     assert!(!svg.to_ascii_lowercase().contains("fill=\"#ffffff\""));
     assert!(svg.contains("data-variant=\"dark\""));
 }
+
+// ───────────────────────── status tiles under CVD ─────────────────────────
+
+/// CIELAB of an sRGB colour seen through a colour-vision-deficiency matrix
+/// (Machado et al. 2009, severity 1.0; identity = normal vision).
+fn lab_seen(c: (u8, u8, u8), m: &[[f64; 3]; 3]) -> [f64; 3] {
+    let lin = |v: u8| {
+        let s = v as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let l = [lin(c.0), lin(c.1), lin(c.2)];
+    let [r, g, b] =
+        [0, 1, 2].map(|i| (m[i][0] * l[0] + m[i][1] * l[1] + m[i][2] * l[2]).clamp(0.0, 1.0));
+    let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+    let f = |t: f64| {
+        if t > 0.008856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    [
+        116.0 * f(y) - 16.0,
+        500.0 * (f(x) - f(y)),
+        200.0 * (f(y) - f(z)),
+    ]
+}
+
+/// The status tiles of a heatmap `::COLORSCALE` / `::THRESHOLDS` (good, warn,
+/// bad) stay apart — ΔE ≥ 12 between neighbours — in normal vision and under
+/// simulated deuteranopia, protanopia and tritanopia, in every built-in theme
+/// and both variants; lightness runs good → bad one way (pale → strong).
+#[test]
+fn status_tiles_stay_apart_under_cvd() {
+    const VISION: [(&str, [[f64; 3]; 3]); 4] = [
+        (
+            "normal",
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ),
+        (
+            "deuteranopia",
+            [
+                [0.367322, 0.860646, -0.227968],
+                [0.280085, 0.672501, 0.047413],
+                [-0.011820, 0.042940, 0.968881],
+            ],
+        ),
+        (
+            "protanopia",
+            [
+                [0.152286, 1.052583, -0.204868],
+                [0.114503, 0.786281, 0.099216],
+                [-0.003882, -0.048116, 1.051998],
+            ],
+        ),
+        (
+            "tritanopia",
+            [
+                [1.255528, -0.076749, -0.178779],
+                [-0.078411, 0.930809, 0.147602],
+                [0.004733, 0.691367, 0.303900],
+            ],
+        ),
+    ];
+    let de = |a: [f64; 3], b: [f64; 3]| {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    };
+    for (name, _) in BUILTINS {
+        let set = theme::resolve(name).unwrap();
+        for t in [&set.light, &set.dark] {
+            let tiles = t.status_tiles();
+            let [bad, good] = t.status_arms();
+            for (vision, m) in &VISION {
+                let s = tiles.map(|c| lab_seen(c, m));
+                for (a, b) in [(0, 1), (1, 2)] {
+                    let d = de(s[a], s[b]);
+                    assert!(
+                        d >= 12.0,
+                        "{name} {:?} {vision}: tiles {a}/{b} ΔE {d:.1}",
+                        t.variant
+                    );
+                }
+                let d = de(lab_seen(bad, m), lab_seen(good, m));
+                assert!(
+                    d >= 12.0,
+                    "{name} {:?} {vision}: diverging ends ΔE {d:.1}",
+                    t.variant
+                );
+            }
+            let l = tiles.map(theme::luminance);
+            let card_light = theme::luminance(t.colors.card) > 0.5;
+            assert!(
+                if card_light {
+                    l[0] > l[1] && l[1] > l[2]
+                } else {
+                    l[0] < l[1] && l[1] < l[2]
+                },
+                "{name} {:?}: tile lightness runs good → bad ({l:?})",
+                t.variant
+            );
+        }
+    }
+}

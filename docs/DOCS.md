@@ -118,7 +118,7 @@ terminal.
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
-| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
+| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
@@ -144,9 +144,9 @@ terminal.
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
-| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red) |
-| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells, high = green (scores, accuracy) |
-| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells around zero: negative red, positive green (deltas) |
+| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red); on a ::HEATMAP / ::CALENDAR its tiles, good → warn → bad |
+| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells (or a ::HEATMAP's tiles), high = green (scores, accuracy) |
+| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells (or a ::HEATMAP's tiles) around zero: negative red, positive green (deltas) |
 | `::LINK` | `::DRILLTHROUGH`, `::DRILL_THROUGH`, `::HREF` | table | drill-through on a chart click / a table link cell: '#Tab', '?v.x={value}', '/d/<id>?v.x={value}' or an https: URL ({value}, {column} placeholders) |
 | `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
 | `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
@@ -956,6 +956,31 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   ramp is used instead: two hues around a neutral midpoint at 0, both arms
   scaled to the larger |end|, so −2…+10 reads as a little red and a lot of blue.
   A theme's explicit `sequential` pair is used as given.
+- **Status colours** — when a value is good or bad, not just big or small:
+  - `''::COLORSCALE` — a continuous green → yellow → red ramp, low = good
+    (`::COLORSCALE_HIGH_GOOD`: high = good; `::COLORSCALE_DIVERGING`: negative
+    red, positive green around a neutral 0). The colourbar keeps the value
+    format.
+  - `'>=50:bad; >=20:warn; good'::THRESHOLDS` — one status colour per band
+    (the same rules as a KPI, gauge or table cell), with a stepped legend
+    naming the bands high to low: `≥ 50%`, `20%–50%`, `< 20%`. A value no
+    rule covers is neutral grey. `::THRESHOLDS` win over a `::COLORSCALE`.
+
+  The colours are the theme's `positive` / `warning` / `negative`, tinted
+  towards the card — palest for good, strongest for bad (in dark mode dimmest →
+  brightest) — so the steps differ in lightness too and stay apart in the
+  `colorblind` theme, under colour-vision deficiency and in greyscale. Tooltips
+  still show the value. `::CALENDAR` and `::TRACK` heatmap strips take the same
+  roles. The linter flags a colour scale on a chart without tiles, both roles
+  at once, and rules in another unit than the values (fractions 0–1 against
+  `>=50`).
+
+  ```sql
+  SELECT ds::XAXIS, item::YAXIS, 100 * p_out::HEATMAP, 'percent'::YFORMAT,
+         '>=50:bad; >=20:warn; good'::THRESHOLDS,
+         'Chance each item has run out by that day'::TITLE
+  FROM projection ORDER BY rnk, ds;
+  ```
 - **Labels** (`::DATALABELS`): the short value (`$1,235`, `12K`, `1,2 Mio.` in
   `de-DE`), dark text on light cells and light text on dark ones; the font size
   fits the cell unless the role's value sets it.

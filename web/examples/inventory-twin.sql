@@ -242,8 +242,9 @@ SELECT 6::COL;
 SELECT 380::HEIGHT;
 SELECT p.ds ::XAXIS, c.rnk || '. ' || p.model_id || ' · ' || c.status ::YAXIS, 100 * p.cumulative_stockout_probability ::HEATMAP,
        'percent' ::YFORMAT,
+       '>=50:bad; >=20:warn; good' ::THRESHOLDS,
        'When: the chance each item has run out by that day (%)'::TITLE,
-       'The share of the 400 simulated futures in which the item has had at least one day out of stock by that day, over the next 28 days. Rows: most critical first.'::INFO
+       'The share of the 400 simulated futures in which the item has had at least one day out of stock by that day, over the next 28 days. Colour: red from 50 %, amber from 20 %, green below — the cut-offs of Critical, Watch and OK. Rows: most critical first.'::INFO
 FROM it_projection p JOIN it_crit() c ON c.sku = p.model_id
 WHERE p.level = it_level()
 ORDER BY c.rnk, p.ds;

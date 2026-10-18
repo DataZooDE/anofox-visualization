@@ -850,6 +850,86 @@ pub fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     (l(a.0, b.0), l(a.1, b.1), l(a.2, b.2))
 }
 
+/// `c` tinted towards `card`: OKLCH lightness `t` of the way from the
+/// card's to `c`'s, `c`'s hue and chroma kept (as far as sRGB allows) — a
+/// pale tint that stays a colour, where an sRGB mix towards white greys out.
+/// A warm amber (hue 30°–85°) leans yellow as it lightens, like a natural
+/// amber ramp (a dark text amber → a yellow tile).
+pub fn tint(card: Rgb, c: Rgb, t: f64) -> Rgb {
+    let (lc, _, _) = oklch(card);
+    let (l, ch, h) = oklch(c);
+    let lt = lc + (l - lc) * t.clamp(0.0, 1.0);
+    let deg = h.to_degrees().rem_euclid(360.0);
+    let h = if (30.0..=85.0).contains(&deg) && lt > l {
+        let k = ((lt - l) / (1.0 - l).max(1e-6) * 2.0).clamp(0.0, 1.0);
+        (deg + (85.0 - deg) * k).to_radians()
+    } else {
+        h
+    };
+    from_oklch(lt, ch, h)
+}
+
+fn srgb_to_linear(v: u8) -> f64 {
+    let s = v as f64 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(x: f64) -> u8 {
+    let x = x.clamp(0.0, 1.0);
+    let s = if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
+}
+
+/// OKLCH `(L, C, h radians)` of an sRGB colour.
+fn oklch(c: Rgb) -> (f64, f64, f64) {
+    let (r, g, b) = (
+        srgb_to_linear(c.0),
+        srgb_to_linear(c.1),
+        srgb_to_linear(c.2),
+    );
+    let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+    let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+    let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+    let ll = 0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s;
+    let a = 1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s;
+    let bb = 0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s;
+    (ll, a.hypot(bb), bb.atan2(a))
+}
+
+/// The sRGB colour of OKLCH `(L, C, h)`, chroma reduced until it fits.
+fn from_oklch(l: f64, c: f64, h: f64) -> Rgb {
+    let lin = |c: f64| {
+        let (a, b) = (c * h.cos(), c * h.sin());
+        let l_ = (l + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+        let m_ = (l - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+        let s_ = (l - 0.089_484_177_5 * a - 1.291_485_548 * b).powi(3);
+        [
+            4.076_741_662_1 * l_ - 3.307_711_591_3 * m_ + 0.230_969_929_2 * s_,
+            -1.268_438_004_6 * l_ + 2.609_757_401_1 * m_ - 0.341_319_396_5 * s_,
+            -0.004_196_086_3 * l_ - 0.703_418_614_7 * m_ + 1.707_614_701 * s_,
+        ]
+    };
+    let mut c = c.max(0.0);
+    let mut rgb = lin(c);
+    while c > 0.0 && rgb.iter().any(|v| !(-1e-4..=1.0 + 1e-4).contains(v)) {
+        c = (c - 0.002).max(0.0);
+        rgb = lin(c);
+    }
+    (
+        linear_to_srgb(rgb[0]),
+        linear_to_srgb(rgb[1]),
+        linear_to_srgb(rgb[2]),
+    )
+}
+
 /// Relative luminance (WCAG).
 pub fn luminance(c: Rgb) -> f64 {
     let ch = |v: u8| {
@@ -961,6 +1041,43 @@ impl ResolvedTheme {
         mix(self.colors.line, self.colors.card, 0.25)
     }
 
+    /// The tile fills of a status colour scale (a heatmap / calendar / track
+    /// with `::COLORSCALE` or `::THRESHOLDS`): `[good, warn, bad]`, the
+    /// semantic colours tinted towards the card at their own hue and chroma
+    /// ([`tint`]) — palest for good, strongest for bad (dark: dimmest →
+    /// brightest). The steps differ in lightness as well as hue, so they stay
+    /// apart under colour-vision deficiency and in greyscale.
+    pub fn status_tiles(&self) -> [Rgb; 3] {
+        let c = &self.colors;
+        let [g, w, b] = match self.variant {
+            Variant::Light => [0.3, 0.45, 0.9],
+            Variant::Dark => [0.35, 0.65, 1.0],
+        };
+        [
+            tint(c.card, c.positive, g),
+            tint(c.card, c.warning, w),
+            tint(c.card, c.negative, b),
+        ]
+    }
+
+    /// The tile fill of a neutral status (a value no `::THRESHOLDS` rule
+    /// covers).
+    pub fn neutral_tile(&self) -> Rgb {
+        mix(self.colors.card, self.colors.muted, 0.3)
+    }
+
+    /// The ends `[bad, good]` of a diverging status scale
+    /// (`::COLORSCALE_DIVERGING`): both strong, the good end a step lighter
+    /// (light) or dimmer (dark) than the bad one so they part in lightness.
+    pub fn status_arms(&self) -> [Rgb; 2] {
+        let c = &self.colors;
+        let [b, g] = match self.variant {
+            Variant::Light => [0.9, 0.7],
+            Variant::Dark => [1.0, 0.6],
+        };
+        [tint(c.card, c.negative, b), tint(c.card, c.positive, g)]
+    }
+
     /// Text on a filled cell (heatmap / calendar labels): ink or card,
     /// whichever reads better on `fill`.
     pub fn text_on(&self, fill: Rgb) -> Rgb {
@@ -1058,6 +1175,35 @@ impl ResolvedTheme {
     }
 
     /// The dark-ramp image of a neutral colour (`None` = keep).
+    /// Is `c` a tile of a diverging heatmap fill — on the way from the
+    /// midpoint to either end of the theme's diverging ramp or of a
+    /// `::COLORSCALE_DIVERGING` ramp? Near the midpoint those tiles are
+    /// greyish, but they are data colours of this variant already.
+    fn on_diverging_fill(&self, c: Rgb) -> bool {
+        let [lo, mid, hi] = self.diverging_ramp();
+        let [bad, good] = self.status_arms();
+        let f = |v: u8| v as f64;
+        let d = |a: Rgb, b: Rgb| {
+            (f(a.0) - f(b.0))
+                .hypot(f(a.1) - f(b.1))
+                .hypot(f(a.2) - f(b.2))
+        };
+        [lo, hi, bad, good].iter().any(|&end| {
+            let v = (
+                f(end.0) - f(mid.0),
+                f(end.1) - f(mid.1),
+                f(end.2) - f(mid.2),
+            );
+            let w = (f(c.0) - f(mid.0), f(c.1) - f(mid.1), f(c.2) - f(mid.2));
+            let len2 = v.0 * v.0 + v.1 * v.1 + v.2 * v.2;
+            if len2 <= 0.0 {
+                return false;
+            }
+            let t = ((w.0 * v.0 + w.1 * v.1 + w.2 * v.2) / len2).clamp(0.0, 1.0);
+            d(c, mix(mid, end, t)) <= 2.5
+        })
+    }
+
     fn neutral(&self, c: Rgb) -> Option<Rgb> {
         let (mx, mn) = (c.0.max(c.1).max(c.2), c.0.min(c.1).min(c.2));
         // The theme's own colours (series, the ends of a sequential fill) are
@@ -1066,7 +1212,9 @@ impl ResolvedTheme {
             || c == self.seq_low()
             || c == self.calendar_low()
             || self.sequential.is_some_and(|s| s.contains(&c))
-            || self.owns(c);
+            || self.owns(c)
+            || c == self.neutral_tile()
+            || self.on_diverging_fill(c);
         if mx - mn > 32 || own {
             return None;
         }

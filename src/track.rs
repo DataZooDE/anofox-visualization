@@ -13,8 +13,8 @@
 //! the plotting engine are needed.
 
 use crate::{
-    chart_theme, dz_scale, find_role, guard, role_str, value_fmt, value_str, Column, FmtGradient,
-    Kind, Panel, RenderError, RenderOptions, Role,
+    chart_theme, dz_scale, find_role, guard, role_str, value_fmt, value_str, Column, Kind, Panel,
+    RenderError, RenderOptions, Role,
 };
 use ggplot_rs::prelude::*;
 use ggplot_rs::theme::{ElementLine, ElementText, LegendPosition, Margin, ThemeUpdate};
@@ -380,12 +380,12 @@ fn lanes(
     };
     let gradient = match (cat, value, &fmt) {
         (None, Some(v), Some(fmt)) => {
-            data.push(("fill".to_string(), pick(&|i| v.values[i].clone())));
             let nums: Vec<f64> = rows.iter().filter_map(|&i| num(&v.values[i])).collect();
             let min = nums.iter().copied().fold(f64::INFINITY, f64::min);
             let max = nums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let ramp = crate::Ramp::new(o, o.theme.seq_low(), min, max);
-            Some(FmtGradient::new(&ramp, fmt.clone(), o.locale))
+            let fill = crate::TileFill::of(o, cols, o.theme.seq_low(), min, max)?;
+            data.push(("fill".to_string(), pick(&|i| v.values[i].clone())));
+            Some((fill, fmt))
         }
         _ => None,
     };
@@ -425,8 +425,8 @@ fn lanes(
     if let Some(s) = filled {
         plot = plot.scale_fill(s);
     }
-    if let Some(g) = gradient {
-        plot = plot.scale_fill(g);
+    if let Some((fill, fmt)) = gradient {
+        plot = fill.scale(plot, o, fmt);
     }
     let shown = levels.iter().any(|l| !l.is_empty());
     let plot = plot
