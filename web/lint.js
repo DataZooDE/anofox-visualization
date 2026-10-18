@@ -58,11 +58,11 @@ function knownJson(known) {
 // helper query in the same scratch session, `state` lives for one call (the
 // assistant's parse-tree check at the execution point).
 // Works with the async (browser) and the blocking (Node) DuckDB-Wasm alike.
+let scratchSeq = 0; // unique across runners: two may run at once
 export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0, guard } = {}) {
-  let n = 0;
   return async (sql) => {
     const c = await db.connect();
-    const name = `anofox_lint_${++n}`;
+    const name = `anofox_lint_${++scratchSeq}`;
     let home = null;
     let timer;
     try {

