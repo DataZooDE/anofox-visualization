@@ -484,6 +484,25 @@ pub struct PanelRequest {
     pub page: Option<PageRequest>,
 }
 
+/// DuckDB's variable names are case-insensitive: of two spellings of one name
+/// the later `SET` wins. Keep only that one (dropping the earlier), so
+/// whoever builds the cache key and whoever runs the `SET VARIABLE`s agree on
+/// one value per name — used both on the request's own `vars` (here) and,
+/// after a credential's locked variables are appended
+/// ([`crate::host::auth::Scope::lock_vars`]), on the combined list, so two
+/// spellings of a locked variable can't collide with each other either
+/// (security review of #210/#222, M2).
+pub fn dedup_last_spelling(vars: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut vars: Vec<(String, String)> = vars
+        .into_iter()
+        .rev()
+        .filter(|(k, _)| seen.insert(k.to_ascii_lowercase()))
+        .collect();
+    vars.reverse();
+    vars
+}
+
 /// Parse + validate a locked-mode panel request body.
 pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     let v: serde_json::Value =
@@ -523,6 +542,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
             vars.push((k.clone(), lit));
         }
     }
+    let vars = dedup_last_spelling(vars);
     let page = match o.get("page") {
         None | Some(serde_json::Value::Null) => None,
         Some(p) => Some(parse_page(p)?),
@@ -1167,6 +1187,28 @@ mod tests {
         );
         assert!(
             parse_panel_request(r#"{"dashboard":"a","panel":0,"vars":{"x":{"a":1}}}"#).is_err()
+        );
+    }
+
+    /// #210: DuckDB's variable names are case-insensitive, and of two
+    /// spellings of one name in a request the later `SET` wins — so the
+    /// parsed request keeps only that spelling, matching what the server
+    /// would actually run.
+    #[test]
+    fn panel_request_keeps_the_last_spelling_of_a_variable() {
+        let r = parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{"A":1,"a":2}}"#).unwrap();
+        assert_eq!(r.vars, vec![("a".to_string(), "2".to_string())]);
+
+        let r = parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{"a":2,"A":1}}"#).unwrap();
+        assert_eq!(r.vars, vec![("A".to_string(), "1".to_string())]);
+
+        let r = parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{"a":1,"b":2}}"#).unwrap();
+        assert_eq!(
+            r.vars,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string())
+            ]
         );
     }
 

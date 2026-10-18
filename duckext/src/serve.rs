@@ -44,6 +44,7 @@ use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
     RequestMeta,
 };
+use anofox_visualization::sql::deps::{self, Deps};
 use anofox_visualization::sql::requires::{self as rq, Requirement};
 use include_dir::{include_dir, Dir};
 use std::collections::BTreeMap;
@@ -194,16 +195,20 @@ impl AsRef<[u8]> for SharedBody {
     }
 }
 
-fn respond_panel(req: Request, body: Arc<String>, etag: &str) {
+fn respond_panel(req: Request, body: Arc<String>, etag: &str, deps: &str) {
     let len = body.len();
+    let mut headers = vec![
+        header("Content-Type", "application/json"),
+        header("X-Content-Type-Options", "nosniff"),
+        header("Cache-Control", "no-store"),
+        header("ETag", etag),
+    ];
+    if !deps.is_empty() {
+        headers.push(header("X-Anofox-Deps", deps));
+    }
     let resp = Response::new(
         200.into(),
-        vec![
-            header("Content-Type", "application/json"),
-            header("X-Content-Type-Options", "nosniff"),
-            header("Cache-Control", "no-store"),
-            header("ETag", etag),
-        ],
+        headers,
         std::io::Cursor::new(SharedBody(body)),
         Some(len),
         None,
@@ -837,6 +842,13 @@ struct Snapshot {
     /// The access policy, checked against this snapshot, and the dashboards
     /// rewritten for it (indexed like `Locked::dashboards`).
     policy: Option<Enforced>,
+    /// Per dashboard (like `Locked::dashboards`), per statement: the
+    /// request variables its answer can depend on (#210), for this
+    /// snapshot's catalog (and, under a policy, its rewritten statements).
+    deps: Vec<Vec<Deps>>,
+    /// Per dashboard: a digest of `deps` (`window.__served.depsTag`, the
+    /// `X-Anofox-Deps` response header).
+    deps_tags: Vec<String>,
     _dir: SnapshotDir,
 }
 
@@ -877,6 +889,63 @@ fn enforce(
     Ok(())
 }
 
+/// The catalog's macros and views with their definitions ([`deps::catalog_reads`]).
+const CATALOG_SQL: &str =
+    "SELECT function_name, coalesce(macro_definition, '') FROM duckdb_functions() \
+     WHERE function_type IN ('macro', 'table_macro') \
+     UNION ALL SELECT view_name, coalesce(sql, '') FROM duckdb_views()";
+
+/// Work out every statement's variables ([`deps::script_deps`]) on a new
+/// snapshot: which of its macros and views read variables comes from the
+/// snapshot itself. Under a policy, the rewritten statements count too.
+fn analyze_deps(snap: &mut Snapshot, dashboards: &[Dash]) -> Result<(), String> {
+    let c = snap.db.connect()?;
+    let objects: Vec<(String, String)> = c
+        .query(CATALOG_SQL)?
+        .string_rows(10_000_000)?
+        .into_iter()
+        .filter_map(|r| {
+            let name = r.first()?.clone()?;
+            Some((name, r.get(1).cloned().flatten().unwrap_or_default()))
+        })
+        .collect();
+    let implicit = deps::catalog_reads(&objects);
+    let (mut all, mut tags) = (Vec::new(), Vec::new());
+    for (di, d) in dashboards.iter().enumerate() {
+        let of = |stmts: &[(bool, String)]| {
+            let view: Vec<deps::Stmt> = stmts
+                .iter()
+                .enumerate()
+                .map(|(i, (setup, sql))| deps::Stmt {
+                    setup: *setup,
+                    sql,
+                    requires: d.requires.get(i).map_or(&[][..], Vec::as_slice),
+                    tabs: d.tabs.get(i).map_or(&[][..], Vec::as_slice),
+                })
+                .collect();
+            deps::script_deps(&view, &implicit)
+        };
+        let mut ds = of(&d.stmts);
+        if let Some(p) = &snap.policy {
+            for (a, b) in ds.iter_mut().zip(of(&p.scripts[di].stmts)) {
+                a.extend(&b);
+            }
+        }
+        tags.push(deps_tag(&ds));
+        all.push(ds);
+    }
+    snap.deps = all;
+    snap.deps_tags = tags;
+    Ok(())
+}
+
+fn deps_tag(ds: &[Deps]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{ds:?}").hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 struct Locked {
     port: u16,
     dashboards: Vec<Dash>,
@@ -909,6 +978,7 @@ impl Locked {
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(&mut snap, &self.dashboards, p, k)?;
         }
+        analyze_deps(&mut snap, &self.dashboards)?;
         Ok((snap, warnings))
     }
 
@@ -1006,6 +1076,7 @@ pub fn start_locked(
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(&mut snap, &dashboards, p, k)?;
     }
+    analyze_deps(&mut snap, &dashboards)?;
     let policy_note = match (&opts.policy, &opts.auth) {
         (Some(p), Some(_)) => format!(
             "; access policy on {} table(s) — every other table is refused",
@@ -1536,6 +1607,8 @@ fn build_snapshot(
                 .map_or(current, |(db, _)| db.clone()),
             enter,
             policy: None,
+            deps: Vec::new(),
+            deps_tags: Vec::new(),
             _dir: dir,
         },
         warnings,
@@ -1723,9 +1796,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
                 &mut charge,
             ) {
-                Ok((json, etag)) => {
+                Ok((json, etag, deps)) => {
                     info.bytes = Some(json.len());
-                    respond_panel(req, json, &etag);
+                    respond_panel(req, json, &etag, &deps);
                     200
                 }
                 Err((code, e)) => {
@@ -1870,12 +1943,26 @@ fn valid_supersede(v: &str) -> bool {
 /// The cache key of a panel request: everything its result depends on
 /// besides the snapshot (each snapshot has its own cache), the `data` files
 /// (a refresh drops the cache) and the dashboards — the parsed request, with
-/// the variables in a canonical order. Debug formatting quotes and escapes
-/// every string, so distinct requests never collide.
-/// With a login the viewer's claims are part of the key, so one viewer's
-/// result (or running query) is never handed to a viewer with other claims.
-fn panel_key(r: &sv::PanelRequest, claims: Option<&Claims>) -> String {
-    let mut vars: Vec<&(String, String)> = r.vars.iter().collect();
+/// only the variables in `deps` (#210; lower case — DuckDB's variable names
+/// are case-insensitive), in a canonical order. `deps` is the caller's own
+/// variable-dependency analysis **extended with any credential-locked
+/// variables** (security review of #210/#222, L1): those always count,
+/// whatever the analysis says a panel reads, because they act like
+/// authorization. `r.vars` must already hold exactly the variables `deps`
+/// covers — `locked_panel` retains it before calling this, so the key and
+/// the `SET VARIABLE`s that actually run agree by construction (M1). Debug
+/// formatting quotes and escapes every string, so distinct requests never
+/// collide.
+/// With a login the viewer's claims are part of the key, always in full, so
+/// one viewer's result (or running query) is never handed to a viewer with
+/// other claims.
+fn panel_key(r: &sv::PanelRequest, claims: Option<&Claims>, deps: &Deps) -> String {
+    let mut vars: Vec<(String, &String)> = r
+        .vars
+        .iter()
+        .filter(|(n, _)| deps.contains(n))
+        .map(|(n, lit)| (n.to_ascii_lowercase(), lit))
+        .collect();
     vars.sort();
     format!(
         "{:?}",
@@ -1907,7 +1994,7 @@ fn locked_panel(
     scope: Option<&Scope>,
     info: &mut LogInfo,
     charge: &mut Charge,
-) -> Result<(Arc<String>, String), (u16, String)> {
+) -> Result<(Arc<String>, String, String), (u16, String)> {
     let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
@@ -1932,6 +2019,7 @@ fn locked_panel(
         .position(|d| d.id == r.dashboard)
         .ok_or((404, "no such dashboard".to_string()))?;
     let dash = &st.dashboards[di];
+    let deps_tag = gen.snap.deps_tags.get(di).cloned().unwrap_or_default();
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
     if let Some(allowed) = &dash.meta.vars {
         r.vars
@@ -1947,6 +2035,11 @@ fn locked_panel(
         // A locked variable that names a path obeys the same rule as a
         // viewer's (checked above for those).
         check_path_values(&st.opts.path_vars, &s.vars)?;
+        // Two spellings of one name can collide again here even though the
+        // request's own vars were already deduped: the credential's locked
+        // variables are appended afterwards, unconditionally (security
+        // review of #210/#222, M2). The later SET (DuckDB's own rule) wins.
+        r.vars = sv::dedup_last_spelling(r.vars);
     }
     info.vars = r.vars.clone();
     // The variables whose values the viewer chose (not a path variable, not
@@ -1981,6 +2074,7 @@ fn locked_panel(
         return Ok((
             Arc::new("[]".into()),
             etag(&st.server_id, gen.epoch, "setup"),
+            deps_tag,
         ));
     }
     let ticket = match supersede {
@@ -1996,7 +2090,34 @@ fn locked_panel(
             ))
         }
     };
-    let key = panel_key(&r, claims);
+    // Only the variables this statement can depend on (#210; All when
+    // the analysis can't tell). Credential-locked variables are never
+    // narrowed (security review of #210/#222, L1): they act like
+    // authorization, so they always count, whatever the analysis says.
+    let deps = gen
+        .snap
+        .deps
+        .get(di)
+        .and_then(|d| d.get(r.panel))
+        .cloned()
+        .unwrap_or(Deps::All);
+    let mut key_deps = deps;
+    if let Some(s) = scope {
+        key_deps.extend(&Deps::Vars(
+            s.vars.iter().map(|(n, _)| n.to_ascii_lowercase()).collect(),
+        ));
+    }
+    // Execute exactly what the key records (security review of #210/#222,
+    // M1): a variable outside `key_deps` is never `SET`, so it can't make a
+    // shared single-flight fail for every joiner (a reserved word or a
+    // mixed-type value a viewer chose for a variable the panel doesn't read
+    // would otherwise poison requests that only share that panel's real
+    // inputs), and a miss in the analysis gives NULL for that variable to
+    // every viewer instead of leaking a value computed for another one.
+    if !key_deps.is_all() {
+        r.vars.retain(|(n, _)| key_deps.contains(n));
+    }
+    let key = panel_key(&r, claims, &key_deps);
     let t0 = std::time::Instant::now();
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
@@ -2028,7 +2149,7 @@ fn locked_panel(
             if cancelled { " (superseded)" } else { "" }
         );
     }
-    out.map(|json| (json, etag(&st.server_id, gen.epoch, &key)))
+    out.map(|json| (json, etag(&st.server_id, gen.epoch, &key), deps_tag))
 }
 
 /// The `SET VARIABLE`s that open every panel request, in order: the viewer's
@@ -2306,8 +2427,8 @@ fn requires_met(
 /// What a viewer sees when a panel fails under an access policy.
 const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log has the details)";
 
-/// index.html with `window.__served = {id,title,sql,nav,locked}` injected
-/// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
+/// index.html with `window.__served = {id,title,sql,nav,locked,deps,depsTag}`
+/// injected (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
 /// dashboard's SQL cannot break out).
 /// The served page of `dash`. `scope` limits the navigation to the
 /// dashboards the viewer may read; `session` is an embed link's page session
@@ -2324,6 +2445,15 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
     });
     if let Some(s) = session {
         cfg["session"] = serde_json::json!(s);
+    }
+    // What each statement depends on (#210): the page re-requests a panel
+    // only when one of its variables changed.
+    let gen = st.current.get();
+    if let Some(di) = st.dashboards.iter().position(|d| d.id == dash.id) {
+        if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
+            cfg["deps"] = serde_json::json!(ds.iter().map(Deps::to_json).collect::<Vec<_>>());
+            cfg["depsTag"] = serde_json::json!(tag);
+        }
     }
     let cfg = json_for_script(&cfg);
     html.replacen("<head>", "<head><base href=\"/\">", 1)
@@ -2542,7 +2672,7 @@ mod tests {
         assert!(LockedOptions::parse(Some(r#"{"duckdb_threads":0}"#)).is_err());
         // The variables' order doesn't matter; their values, the panel, the
         // dashboard and the page do.
-        let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap(), None);
+        let key = |body: &str| panel_key(&sv::parse_panel_request(body).unwrap(), None, &Deps::All);
         let k = key(r#"{"dashboard":"d","panel":1,"vars":{"a":1,"b":"x"}}"#);
         assert_eq!(
             k,
@@ -2564,6 +2694,195 @@ mod tests {
         assert!(etag("s1", 1, &k).starts_with("\"s1.1-"));
         assert_ne!(etag("s1", 1, &k), etag("s1", 2, &k));
         assert_ne!(etag("s1", 1, &k), etag("s2", 1, &k));
+    }
+
+    /// #210: the key holds only the variables `deps` says the panel can
+    /// depend on; claims, panel and page still always distinguish it.
+    #[test]
+    fn keys_follow_the_variables_a_statement_reads() {
+        let s = Deps::Vars(["series".to_string()].into());
+        let key =
+            |body: &str, d: &Deps| panel_key(&sv::parse_panel_request(body).unwrap(), None, d);
+
+        let k1 = key(
+            r#"{"dashboard":"d","panel":0,"vars":{"series":"a","region":"x"}}"#,
+            &s,
+        );
+        assert_eq!(
+            k1,
+            key(
+                r#"{"dashboard":"d","panel":0,"vars":{"series":"a","region":"y"}}"#,
+                &s
+            )
+        );
+        assert_eq!(
+            k1,
+            key(r#"{"dashboard":"d","panel":0,"vars":{"series":"a"}}"#, &s)
+        );
+        assert_ne!(
+            k1,
+            key(r#"{"dashboard":"d","panel":0,"vars":{"series":"b"}}"#, &s)
+        );
+        // Unset differs from set.
+        assert_ne!(
+            key(r#"{"dashboard":"d","panel":0,"vars":{}}"#, &s),
+            key(r#"{"dashboard":"d","panel":0,"vars":{"series":"a"}}"#, &s)
+        );
+        // Case-insensitive.
+        assert_eq!(
+            key(r#"{"dashboard":"d","panel":0,"vars":{"Series":"a"}}"#, &s),
+            key(r#"{"dashboard":"d","panel":0,"vars":{"series":"a"}}"#, &s)
+        );
+
+        // With Deps::default() (none): any variable value gives the same
+        // key, but claims, panel and page still differ it.
+        let none = Deps::default();
+        let ka = key(r#"{"dashboard":"d","panel":0,"vars":{"a":1}}"#, &none);
+        assert_eq!(
+            ka,
+            key(r#"{"dashboard":"d","panel":0,"vars":{"a":2}}"#, &none)
+        );
+        let r = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{"a":1}}"#).unwrap();
+        let alice = Claims {
+            user: "alice".into(),
+            ..Default::default()
+        };
+        let bob = Claims {
+            user: "bob".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            panel_key(&r, Some(&alice), &none),
+            panel_key(&r, Some(&bob), &none)
+        );
+        assert_ne!(
+            panel_key(&r, Some(&alice), &none),
+            panel_key(&r, None, &none)
+        );
+        assert_ne!(
+            ka,
+            key(r#"{"dashboard":"d","panel":1,"vars":{"a":1}}"#, &none)
+        );
+        assert_ne!(
+            ka,
+            key(
+                r#"{"dashboard":"d","panel":0,"vars":{"a":1},"page":{"limit":10}}"#,
+                &none
+            )
+        );
+
+        // With Deps::All (today's behaviour): every variable keys the result.
+        assert_ne!(
+            key(
+                r#"{"dashboard":"d","panel":0,"vars":{"region":"x"}}"#,
+                &Deps::All
+            ),
+            key(
+                r#"{"dashboard":"d","panel":0,"vars":{"region":"y"}}"#,
+                &Deps::All
+            )
+        );
+
+        // Through a real PanelCache: a variable outside `deps` is a hit; one
+        // inside it runs again. Claims never filter — bob still gets his own
+        // run even with empty deps.
+        let cache = crate::panel_cache::PanelCache::new(1 << 20);
+        let k_a_x = key(
+            r#"{"dashboard":"d","panel":0,"vars":{"series":"a","region":"x"}}"#,
+            &s,
+        );
+        let (out, how) = cache.run(&k_a_x, None, |_| Ok("a@x".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("a@x", Served::Executed));
+        let k_a_y = key(
+            r#"{"dashboard":"d","panel":0,"vars":{"series":"a","region":"y"}}"#,
+            &s,
+        );
+        let (out, how) = cache.run(&k_a_y, None, |_| Ok("rerun".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("a@x", Served::Hit));
+        let k_b = key(r#"{"dashboard":"d","panel":0,"vars":{"series":"b"}}"#, &s);
+        let (out, how) = cache.run(&k_b, None, |_| Ok("b".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("b", Served::Executed));
+
+        let r = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+        let alice_key = panel_key(&r, Some(&alice), &Deps::default());
+        let (out, how) = cache.run(&alice_key, None, |_| Ok("alice".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("alice", Served::Executed));
+        let bob_key = panel_key(&r, Some(&bob), &Deps::default());
+        let (out, how) = cache.run(&bob_key, None, |_| Ok("bob".to_string()));
+        assert_eq!((out.unwrap().as_str(), how), ("bob", Served::Executed));
+    }
+
+    /// Security review of #210/#222 (M1): `locked_panel` must execute exactly
+    /// what the key records, so a variable outside the panel's deps (which a
+    /// viewer could set to make its own `SET VARIABLE` fail: a reserved word,
+    /// a mixed-type list, …) is dropped before either the key or the `SET`s
+    /// are built — the same step `locked_panel` performs on `r.vars`.
+    #[test]
+    fn a_variable_outside_deps_is_dropped_before_the_key_and_the_sets() {
+        let mut r = sv::parse_panel_request(
+            r#"{"dashboard":"d","panel":1,"vars":{"region":"EU","z":[1,2]}}"#,
+        )
+        .unwrap();
+        let deps = Deps::Vars(["region".to_string()].into());
+        r.vars.retain(|(n, _)| deps.contains(n));
+        assert_eq!(r.vars, vec![("region".to_string(), "'EU'".to_string())]);
+        let sets = request_sets(&r, None, None);
+        assert!(!sets.iter().any(|s| s.contains('z')), "{sets:?}");
+        // The key no longer differs by `z`: two requests that agree on
+        // `region` but not on `z` now share one key (the whole point — they
+        // compute the same true answer), instead of two keys whose `SET`s
+        // disagreed with what the key recorded.
+        let mut r2 = sv::parse_panel_request(
+            r#"{"dashboard":"d","panel":1,"vars":{"region":"EU","z":[9,9]}}"#,
+        )
+        .unwrap();
+        r2.vars.retain(|(n, _)| deps.contains(n));
+        assert_eq!(panel_key(&r, None, &deps), panel_key(&r2, None, &deps));
+    }
+
+    /// Security review of #210/#222 (L1): a credential's locked variable is
+    /// never narrowed away, whatever the analysis says a panel reads —
+    /// always in the key, always `SET`.
+    #[test]
+    fn credential_locked_variables_are_never_narrowed() {
+        let mut r = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+        let scope = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("tenant".into(), "'acme'".into())],
+        };
+        scope.lock_vars(&mut r.vars);
+        // The analysis says this panel reads nothing at all — not even
+        // `tenant` — yet the locked variable must still count.
+        let deps = Deps::default();
+        let mut key_deps = deps.clone();
+        key_deps.extend(&Deps::Vars(
+            scope
+                .vars
+                .iter()
+                .map(|(n, _)| n.to_ascii_lowercase())
+                .collect(),
+        ));
+        assert!(key_deps.contains("tenant"));
+        r.vars.retain(|(n, _)| key_deps.contains(n));
+        assert_eq!(r.vars, vec![("tenant".to_string(), "'acme'".to_string())]);
+        let sets = request_sets(&r, None, None);
+        assert!(
+            sets.iter()
+                .any(|s| s.contains("tenant") || s.contains("TENANT")),
+            "{sets:?}"
+        );
+        // A different tenant must give a different key even though `deps`
+        // alone says nothing is read.
+        let mut r2 = sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+        let scope2 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("tenant".into(), "'globex'".into())],
+        };
+        scope2.lock_vars(&mut r2.vars);
+        assert_ne!(
+            panel_key(&r, None, &key_deps),
+            panel_key(&r2, None, &key_deps)
+        );
     }
 
     #[test]
@@ -2935,6 +3254,71 @@ mod tests {
         assert!(pos("REGION = 'EU'") < pos("__claim_user"));
     }
 
+    /// Security review of #210/#222 (M2): two embed links with the same
+    /// claims (no `user`: both are `embed:d`) whose locked variables spell
+    /// `tenant` twice, in opposite orders. Canonicalizing `r.vars` once,
+    /// after `lock_vars`, keeps only the spelling DuckDB actually runs (the
+    /// later `SET` wins), so the two links — which execute to *different*
+    /// tenants — get different keys, instead of colliding on one.
+    #[test]
+    fn two_spellings_of_a_locked_variable_no_longer_collide() {
+        let claims = Claims {
+            user: "embed:d".into(),
+            ..Default::default()
+        };
+        let s1 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![
+                ("Tenant".into(), "'acme'".into()),
+                ("tenant".into(), "'globex'".into()),
+            ],
+        };
+        let s2 = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![
+                ("tenant".into(), "'globex'".into()),
+                ("Tenant".into(), "'acme'".into()),
+            ],
+        };
+        let deps = Deps::Vars(["tenant".to_string()].into());
+        let canon = |s: &Scope| {
+            let mut r =
+                sv::parse_panel_request(r#"{"dashboard":"d","panel":0,"vars":{}}"#).unwrap();
+            s.lock_vars(&mut r.vars);
+            r.vars = sv::dedup_last_spelling(r.vars);
+            r
+        };
+        let r1 = canon(&s1);
+        let r2 = canon(&s2);
+        let k1 = panel_key(&r1, Some(&claims), &deps);
+        let k2 = panel_key(&r2, Some(&claims), &deps);
+        let sets1 = request_sets(&r1, Some(&claims), None);
+        let sets2 = request_sets(&r2, Some(&claims), None);
+        // Each link now runs exactly one SET per name (the one DuckDB would
+        // keep: the later of the two in that link's own declared order).
+        assert_eq!(
+            sets1
+                .iter()
+                .filter(|s| s.contains("TENANT") || s.contains("Tenant") || s.contains("tenant"))
+                .count(),
+            1,
+            "{sets1:?}"
+        );
+        assert_eq!(
+            sets2
+                .iter()
+                .filter(|s| s.contains("TENANT") || s.contains("Tenant") || s.contains("tenant"))
+                .count(),
+            1,
+            "{sets2:?}"
+        );
+        assert_ne!(
+            k1, k2,
+            "different effective tenants must get different keys"
+        );
+        assert_ne!(sets1, sets2, "and indeed they run different SETs");
+    }
+
     #[test]
     fn claims_isolate_cache_entries() {
         let claims = |user: &str, groups: &[&str]| Claims {
@@ -2945,11 +3329,11 @@ mod tests {
         let (alice, bob) = (claims("alice", &[]), claims("bob", &[]));
         let alice_hr = claims("alice", &["hr"]);
         let r = sv::parse_panel_request(r#"{"dashboard":"d","panel":1,"vars":{"a":1}}"#).unwrap();
-        let ka = panel_key(&r, Some(&alice));
-        assert_eq!(ka, panel_key(&r, Some(&alice.clone())));
-        assert_ne!(ka, panel_key(&r, Some(&bob)));
-        assert_ne!(ka, panel_key(&r, Some(&alice_hr)));
-        assert_ne!(ka, panel_key(&r, None));
+        let ka = panel_key(&r, Some(&alice), &Deps::All);
+        assert_eq!(ka, panel_key(&r, Some(&alice.clone()), &Deps::All));
+        assert_ne!(ka, panel_key(&r, Some(&bob), &Deps::All));
+        assert_ne!(ka, panel_key(&r, Some(&alice_hr), &Deps::All));
+        assert_ne!(ka, panel_key(&r, None, &Deps::All));
         // through the real cache: bob never gets alice's rows
         let cache = crate::panel_cache::PanelCache::new(1 << 20);
         let (out, how) = cache.run(&ka, None, |_| Ok("alice rows".to_string()));
@@ -2959,7 +3343,7 @@ mod tests {
         );
         let (out, how) = cache.run(&ka, None, |_| Ok("rerun".to_string()));
         assert_eq!((out.unwrap().as_str(), how), ("alice rows", Served::Hit));
-        let kb = panel_key(&r, Some(&bob));
+        let kb = panel_key(&r, Some(&bob), &Deps::All);
         let (out, how) = cache.run(&kb, None, |_| Ok("bob rows".to_string()));
         assert_eq!((out.unwrap().as_str(), how), ("bob rows", Served::Executed));
     }
@@ -3048,7 +3432,7 @@ mod tests {
                             "no progress: {i} requests, snapshots seen {seen:?}"
                         );
                         let gen = current.get();
-                        let key = panel_key(&r, Some(&claims));
+                        let key = panel_key(&r, Some(&claims), &Deps::All);
                         let (out, _) = gen.cache.run(&key, None, |_| {
                             // The "session": what the panel reads is what the
                             // request's SETs put there.
@@ -3111,7 +3495,7 @@ mod tests {
             user: "alice".into(),
             ..Default::default()
         };
-        let key = panel_key(&r, Some(&alice));
+        let key = panel_key(&r, Some(&alice), &Deps::All);
         let gen = current.get();
         let (out, how) = gen.cache.run(&key, None, |_| {
             current.rebuild(true, || Ok(2)).unwrap(); // mid-request

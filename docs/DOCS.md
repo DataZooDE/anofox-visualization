@@ -2573,8 +2573,10 @@ with external access, extension loading and configuration changes disabled.
 Each request gets its own connection, a row cap and a timeout (optional third
 argument: `'{"max_rows": …, "timeout_ms": …, "threads": …, "cache_mb": …}'`).
 Panel results are cached per snapshot (`cache_mb`, default 64, `0` = off),
-identical concurrent requests run once, and a `::PAGED` table that is paged or
-scrolled quickly cancels its superseded queries.
+keyed by the variables each panel can depend on — changing a variable re-runs
+only the panels that read it, directly or through a `SET VARIABLE` before
+them —, identical concurrent requests run once, and a `::PAGED` table that is
+paged or scrolled quickly cancels its superseded queries.
 
 **Deployment options.** `bind` sets the listen address (default `127.0.0.1`;
 `"0.0.0.0"` in a container or behind a load balancer on another host — the
