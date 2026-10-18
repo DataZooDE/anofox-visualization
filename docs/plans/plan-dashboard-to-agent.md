@@ -1,6 +1,7 @@
 # Plan: publish a dashboard as a guarded agent
 
-Status: **design note for owner review (2026-10-18)**, based on master `95845bc`.
+Status: **design note, owner decisions taken (2026-10-18, §11)**, based on master `95845bc`.
+A design security review is required before the A-phase.
 No product code yet. Refs #194. It builds on the Ask mode,
 [plan-ai-assistant.md](plan-ai-assistant.md) §12 (#195), and in particular on
 §12.13, which keeps this follow-up unblocked. The reference product is
@@ -505,29 +506,28 @@ every serving PR gets an independent security review, as there.
 That is about 15 days plus reviews. A5 depends on Triton's adapter contract,
 which we should confirm with the Triton owners before A5.
 
-## 11. Open questions for the owner
+## 11. Owner decisions (2026-10-18)
 
-1. **One runtime or two?** Should published agents run in our locked server
-   with Ask (Claude, or any OpenAI-compatible endpoint), or should we
-   generate a supplier-risk-style adk-rust agent (Gemini by default) from
-   the dashboard? *Recommendation:* ours, as a mode of the locked server plus
-   a thin `anofox-agent` image for the Kamal / substrate deployment. One
-   place for policies, claims, limits and logs, and no second copy of the
-   panel SQL.
-2. **Declared only for published agents?** *Recommendation:* yes. Published
-   agents answer only declared questions, which makes them sellable,
-   testable and reviewable. Open Ask stays in the dashboard UI. Refusals feed
+The owner accepted all five recommendations.
+
+1. **One runtime.** Published agents run in our locked server with Ask
+   (Claude, or any OpenAI-compatible endpoint), as a mode of that server plus
+   a thin `anofox-agent` image for the Kamal / substrate deployment. We do not
+   generate a supplier-risk-style adk-rust agent. One place for policies,
+   claims, limits and logs, and no second copy of the panel SQL.
+2. **Declared questions only.** Published agents answer only the questions
+   the dashboard declares. Open Ask stays in the dashboard UI. Refusals feed
    the backlog of new `@question` lines.
-3. **Which canonical definition of "on time"?** Theirs (attributable only,
-   excused external disruptions) or ours (by the promised date)?
-   *Recommendation:* adopt theirs as the canonical measure, and keep ours as
+3. **"On time".** The canonical measure is supplier-risk's (attributable
+   only, excused external disruptions). Ours (by the promised date) stays as
    a labelled alternative. The spike confirms it on NorthBike.
-4. **A knowledge base (Escurel policies, reference docs) in v1?**
-   *Recommendation:* not in v1. The dashboard's own text (`::INFO`,
+4. **No knowledge base in v1.** The dashboard's own text (`::INFO`,
    `@description`, `::MARKDOWN`) is the agent's knowledge. A `-- @reference`
    link to a reviewed document can come later, once a customer needs policy
-   answers ("what is our single-source policy?").
-5. **Charts in channels: our renderer or peacock?** *Recommendation:* our
-   server-side SVG/PNG of the cited panel. It is the same picture as the
-   dashboard and the same theme, with no extra service. Peacock stays an
-   option where a customer already runs it.
+   answers.
+5. **Our own chart renderer.** Channels get our server-side SVG/PNG of the
+   cited panel: the same picture and theme as the dashboard, with no extra
+   service. Peacock stays an option where a customer already runs it.
+
+Before the A-phase starts, the design gets an independent adversarial
+security review, and its findings are fixed in this note.
