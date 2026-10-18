@@ -11733,6 +11733,16 @@ function xTickLabel(el, x) {
 // again (or the background) clears.
 let dpSelected = null;
 
+// Hovering a map feature emphasises its series (a van's whole route and
+// stops) on every map that has it, so two maps side by side read together.
+function mapHoverEmph(series) {
+  for (const svg of document.querySelectorAll(".panel svg[data-map]")) {
+    const els = [...svg.querySelectorAll(".dp-hit")];
+    const has = series != null && els.some((el) => el.getAttribute("data-series") === series);
+    dpAnim.emph(svg, "hover", has ? (el) => (el.classList.contains("dp-hit") && el.getAttribute("data-series") !== series ? 0.2 : null) : null);
+  }
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -11797,6 +11807,20 @@ function attachHover() {
       pad.addEventListener("click", (e) => e.stopPropagation());
       el.after(pad);
     }
+    // A map's line (a route) is as thin to hover: a transparent, wider twin
+    // under the next features hands it hover and click.
+    if (isMapMark && el.tagName === "path" && el.getAttribute("fill") === "none") {
+      const pad = el.cloneNode(false);
+      for (const [k, v] of [["stroke", "transparent"], ["stroke-width", "9"], ["aria-hidden", "true"], ["class", "dp-map-pad"]])
+        pad.setAttribute(k, v);
+      for (const k of ["data-series", "data-row", "data-x", "data-label", "data-tip", "data-value", "style"]) pad.removeAttribute(k);
+      for (const type of ["mouseenter", "mousemove", "mouseleave", "click"])
+        pad.addEventListener(type, (e) => {
+          if (type === "click") e.stopPropagation();
+          el.dispatchEvent(new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey }));
+        });
+      el.after(pad);
+    }
     // The panel-level crosshair shows the tooltips of the chart's own marks;
     // a ::TRACK strip's marks show their own.
     const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
@@ -11813,6 +11837,7 @@ function attachHover() {
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
         tipRow(info, fill);
       tip.classList.add("show");
+      if (isMapMark) mapHoverEmph(series);
     });
     el.addEventListener("mousemove", (e) => {
       if (pointered()) return;
@@ -11820,6 +11845,7 @@ function attachHover() {
       tip.style.top = e.clientY + 14 + "px";
     });
     el.addEventListener("mouseleave", () => {
+      if (isMapMark) mapHoverEmph(null);
       if (pointered()) return;
       tip.classList.remove("show");
     });

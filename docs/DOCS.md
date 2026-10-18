@@ -120,7 +120,7 @@ terminal.
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
-| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
+| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
@@ -230,6 +230,19 @@ the variable can stay a short identifier:
 
 ```sql
 SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
+```
+
+An input renders **where it appears in the script**: before the first `::TAB`
+it sits above the tabs, after a `::TAB` (or `::SUBTAB`) inside that tab, shown
+only while the tab is. Put an input in the tab whose panels it changes, and
+keep only those that act on every tab (or on a KPI row above the tabs) at the
+top. Its variable is global either way — any panel can read it, it lands in
+the URL as `?v.name=` — and a `#Tab?v.name=…` link still sets it.
+
+```sql
+SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
+SELECT 'Detail'::TAB;
+SELECT 10 AS min_n ::NUMBER, 'Minimum orders'::LABEL;  -- only on "Detail"
 ```
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change).
@@ -1901,7 +1914,9 @@ route, a point) is a mark keyed by its **`::CATEGORY`** — or, without one, by
 its **`::LABEL`** (a choropleth's region name):
 
 - **Hover** shows the feature's `::LABEL` as the heading (several lines with
-  `chr(10)`), then its series and measure. The plain `<title>` is unchanged.
+  `chr(10)`), then its series and measure, and lights that key up on every
+  map that has it (a van's whole route on both maps); a line is hoverable a
+  few pixels either side. The plain `<title>` is unchanged.
 - **Click** highlights every feature of that key and dims the rest, linked
   across panels like any series — clicking `Van 3` on one map picks out van 3
   on every map (and every chart) that has it. It sets `getvariable('selected')`
@@ -1930,7 +1945,15 @@ Features are drawn grouped by colour (in the order of the legend), so a layer
 meant to sit on top — a marker around some points — needs a key that sorts
 after the others, and should leave the point it marks uncovered (a ring rather
 than a disc) so the point stays clickable. The brush and the ◧ value filter
-are not offered on maps. See *"Which van serves which stop tomorrow?"*.
+are not offered on maps.
+
+A **`::COLORS`** level map beside the `::CATEGORY` (`'Depot:neutral; Late
+stop:bad'`) pins the levels it names to a status colour or `#rrggbb`, first in
+the legend; the other levels keep the palette in sorted order from its first
+slot, so a named level missing from one map doesn't shift the colours of the
+rest. An **`::XAXIS`** keys each feature for a **`::STORY`**: one caption per
+x, and a step lights the features with that x — a route leg by leg, with a
+Play button. See *"Which van serves which stop tomorrow?"*.
 
 #### Viewer state in the URL
 

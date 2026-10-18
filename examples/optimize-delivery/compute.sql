@@ -10,7 +10,11 @@
 -- bakeries, cafés, restaurants, shops and canteens around its depot. Every stop
 -- has a "deliver by" deadline (bakeries before they open, restaurants before
 -- lunch) and a number of roll cages; a van takes 32 cages, leaves at 06:00 and
--- drives at 40 km/h on roads 1.3× the straight line.
+-- drives at 40 km/h. The town is a street grid, a street every kilometre each
+-- way: every stop and the depot sit on a crossing, a van drives along the
+-- streets, so the distance between two places is the street distance
+-- |dx| + |dy| (km) — the matrix the solvers get, the km on the dashboard, and
+-- the routes drawn along the streets (dr_legs) all use it.
 --
 -- The plan is "cluster first, route second":
 --   1. assign stops to vans — today by fixed districts (one per driver);
@@ -26,7 +30,7 @@ LOAD anofox_optimize;
 
 CREATE OR REPLACE MACRO dr_unif(a, b, c) AS
     ((hash(md5(concat_ws('|', a, b, c))) >> 11)::DOUBLE + 0.5) / 9007199254740992.0;
-CREATE OR REPLACE MACRO dr_km(x1, y1, x2, y2) AS 1.3 * sqrt((x1 - x2) ^ 2 + (y1 - y2) ^ 2);
+CREATE OR REPLACE MACRO dr_km(x1, y1, x2, y2) AS abs(x1 - x2) + abs(y1 - y2);   -- street km on the grid
 CREATE OR REPLACE MACRO dr_drive(km) AS km * 60.0 / 40.0;   -- minutes at 40 km/h
 
 -- ── Stops: 40 customers, depot at (0, 0), coordinates in km ─────────────────
@@ -37,10 +41,16 @@ WITH s AS (
            2 * pi() * dr_unif('a', i, 0) AS ang,
            3 + 15 * sqrt(dr_unif('r', i, 0)) AS rad
     FROM range(1, 41) t(i)
+), g AS (
+    -- on the street grid: the nearest crossing; a crossing taken by an earlier
+    -- stop pushes the next one a block further east
+    SELECT *, round(rad * cos(ang)) + row_number() OVER (PARTITION BY round(rad * cos(ang)), round(rad * sin(ang)) ORDER BY i) - 1 AS gx,
+           round(rad * sin(ang)) AS gy
+    FROM s
 ), k AS (
     SELECT *, CASE WHEN u_k < 0.25 THEN 'bakery' WHEN u_k < 0.45 THEN 'café' WHEN u_k < 0.65 THEN 'restaurant'
                    WHEN u_k < 0.90 THEN 'shop' ELSE 'canteen' END AS kind
-    FROM s
+    FROM g
 )
 SELECT i AS stop_id,
        (CASE kind WHEN 'bakery' THEN ['Backstube', 'Bäckerei Korn', 'Brotzeit', 'Bäckerei Hahn', 'Mühlenbäcker']
@@ -52,7 +62,7 @@ SELECT i AS stop_id,
        kind,
        CASE WHEN ang < pi() / 2 THEN 'North-East' WHEN ang < pi() THEN 'North-West'
             WHEN ang < 3 * pi() / 2 THEN 'South-West' ELSE 'South-East' END AS district,
-       round(rad * cos(ang), 2) AS x_km, round(rad * sin(ang), 2) AS y_km,
+       gx::DOUBLE AS x_km, gy::DOUBLE AS y_km,
        1 + floor(3 * dr_unif('c', i, 0))::INTEGER AS cages,
        round(8 + 12 * dr_unif('s', i, 0)) AS service_min,
        -- deadline in minutes after 06:00
@@ -69,7 +79,7 @@ WITH tot AS (SELECT sum(cages) AS c FROM dr_stops),
      -- today: the four districts, split further when there are more vans
      today AS (
         SELECT v.vans, 0 AS rot, p.stop_id,
-               1 + floor(v.vans * ((p.a + pi()) / (2 * pi())))::INTEGER AS van
+               least(v.vans, 1 + floor(v.vans * ((p.a + pi()) / (2 * pi())))::INTEGER) AS van   -- a = π (due west) stays in the last district
         FROM polar p, (VALUES (4), (5), (6)) v(vans)
      ),
      sweep AS (
@@ -221,7 +231,13 @@ SELECT plan, vans, CASE WHEN plan LIKE 'today%' THEN 1 WHEN plan = 'shortest rou
        max(cages) AS max_cages, max(stops) AS max_stops
 FROM dr_vans GROUP BY ALL;
 
--- The routes as WKT lines (km coordinates), one per van.
+-- The routes as WKT lines (km coordinates) along the streets, one per van:
+-- each leg runs east-west first, then north-south (one of the shortest
+-- street paths).
 CREATE OR REPLACE TABLE dr_legs AS
-SELECT plan, vans, van, 'LINESTRING(' || string_agg(x_km || ' ' || y_km, ', ' ORDER BY pos) || ')' AS wkt
-FROM dr_route GROUP BY ALL;
+WITH c AS (
+    SELECT *, lag(y_km, 1, 0) OVER (PARTITION BY plan, vans, van ORDER BY pos) AS py FROM dr_route
+)
+SELECT plan, vans, van,
+       'LINESTRING(0.0 0.0, ' || string_agg(x_km || ' ' || py || ', ' || x_km || ' ' || y_km, ', ' ORDER BY pos) FILTER (WHERE pos > 0) || ')' AS wkt
+FROM c GROUP BY ALL;
