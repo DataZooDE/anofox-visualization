@@ -343,8 +343,8 @@ stop
 # 7. Parquet footers are cached across requests (#209): the snapshot has
 # parquet_metadata_cache on (viewers can't turn it off). A file renamed into
 # the data folder is always read fresh, also through a setup view; an
-# in-place rewrite at the same size, with the new file's mtime copied onto
-# the old one, is read stale (security review L1 — this is pre-existing
+# in-place rewrite at the same size that keeps the old mtime (to the second)
+# can be read stale (security review L1 — this is pre-existing
 # DuckDB behaviour the PR doesn't change, not something the cache fixes).
 # `cache_mb: 0`: the result cache doesn't see file changes (documented), this
 # is about the footers.
@@ -393,4 +393,4 @@ grep -q "epoch 2" "$T/out" || fail "parquet cache refresh: $(cat "$T/out")"
 [ "$(panel 0 '{}' p)" = 200 ] && grep -qE '"c0":1(\.0)?[,}]' "$T/body" || fail "parquet_metadata_cache off after a refresh: $(cat "$T/body")"
 grep -q "parquet_metadata_cache:" "$T/out" && fail "parquet_metadata_cache warning: $(cat "$T/out")"
 stop
-echo "OK: parquet footers cached across requests; rewritten files read fresh, also after a refresh"
+echo "OK: parquet footers cached across requests; a file renamed into place reads fresh, also after a refresh"
