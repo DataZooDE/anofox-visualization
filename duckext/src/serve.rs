@@ -1511,9 +1511,12 @@ fn build_snapshot(
         }
         // Keep parquet footers across requests: every request re-runs the
         // setup statements on a fresh connection, and their views would
-        // otherwise read each file's footer again (#209). DuckDB re-validates
-        // a cached footer against the file, so a rewritten file in `data` is
-        // read fresh. A parquet extension setting, so not part of `cfg`.
+        // otherwise read each file's footer again (#209). DuckDB checks a
+        // cached footer's size and mtime (to the second) against the file, so
+        // a file renamed into `data` is read fresh; an in-place rewrite at the
+        // same size within the same second can still read a stale footer
+        // (docs/secure-serving.md). A parquet extension setting, so not part
+        // of `cfg`.
         if let Err(err) = c.exec("SET GLOBAL parquet_metadata_cache = true") {
             let first = err.lines().next().unwrap_or("").to_string();
             warnings.push(format!("parquet_metadata_cache: {first}"));

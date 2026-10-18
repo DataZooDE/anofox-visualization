@@ -2607,10 +2607,11 @@ large files aren't re-read per request) — in RAM well past what
 §6); only a refresh drops the cache. DuckDB re-checks each file's size and
 modification time (to the second) before using a cached footer: publish a
 run by renaming a new file into place (`mv`), which is always read fresh; a
-file overwritten in place at the same size within the same second can be
-read with its old footer until a refresh. With `data` set, every statement
-must be a query (or `SET VARIABLE` / `CREATE TEMP TABLE|VIEW … AS <query>`);
-mount the folder read-only for a hard guarantee
+file overwritten in place at the same size within the same second, or with
+its mtime restored, can be read with its old footer until a refresh. With
+`data` set, every statement must be a query (or `SET VARIABLE` / `CREATE
+TEMP TABLE|VIEW … AS <query>`); mount the folder read-only for a hard
+guarantee
 ([`secure-serving.md`](secure-serving.md)).
 
 **Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy

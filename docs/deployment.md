@@ -360,9 +360,10 @@ health check keeps traffic off a replica until its snapshot is ready.
   7–10× that in RSS (measured: a 9.1 MB footer costs ~84–92 MB RSS; a
   3.7 MB footer costs ~30 MB RSS). There is one entry per distinct file path
   a viewer has reached (every value a `path_vars` or a glob pattern can
-  reach counts separately), it is not otherwise bounded by `memory_limit`'s
-  own budget, and it grows for the snapshot's whole lifetime; only a
-  refresh (`refresh_s`, `anofox_serve_refresh`) drops it;
+  reach counts separately), and it grows for the snapshot's whole lifetime
+  (only a refresh — `refresh_s`, `anofox_serve_refresh` — drops it); DuckDB
+  does evict entries once their *counted* size reaches `memory_limit`, so the
+  real worst case is about 10× `memory_limit`, not unbounded;
 - one thread stack per worker and per DuckDB thread.
 
 In the load test, ordinary viewers stayed under 450 MB on 2 million rows,
