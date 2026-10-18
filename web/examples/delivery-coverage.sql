@@ -80,7 +80,7 @@ SELECT 1::ENDGROUP;
 
 -- ── 1 · Coverage ─────────────────────────────────────────────────────────────
 SELECT 'Coverage'::TAB;
-SELECT 8::COL;
+SELECT 7::COL;
 SELECT 560::HEIGHT;
 SELECT ags ::REGION,
        round(per_10k, 2) AS "Customers per 10,000 people" ::BARCHART,
@@ -90,10 +90,12 @@ SELECT ags ::REGION,
        'Customers in the district for every 10,000 inhabitants, in five classes of about 80 districts each (the palest includes the districts with none). The road distance is to the district''s nearest DC.'::INFO
 FROM dc_cover ORDER BY ags;
 
-SELECT 4::COL;
+SELECT 5::COL;
 SELECT 560::HEIGHT;
-SELECT district AS "District" ::TABLE, population AS "People" ::COMPACT,
-       round(per_10k, 2) AS "Per 10k", round(dc_km)::INTEGER AS "km to DC",
+-- rates and distances don't add up: no totals row
+SELECT 'none'::TOTALS;
+SELECT district AS "District" ::TABLE, round(per_10k, 2) AS "Per 10k",
+       round(dc_km)::INTEGER AS "km to DC", population AS "People" ::COMPACT,
        'The 15 least covered districts'::TITLE,
        'Fewest customers per 10,000 inhabitants first (most have none); ties broken by the larger population — more people we don''t reach.'::INFO
 FROM dc_cover ORDER BY per_10k, population DESC LIMIT 15;
