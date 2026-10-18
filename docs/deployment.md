@@ -354,6 +354,16 @@ health check keeps traffic off a replica until its snapshot is ready.
   state, which `memory_limit` doesn't count. It grows with the queries that
   run at once, so `max_queries` bounds it: up to 100–350 MB per query for
   the heaviest requests on 2M rows (a column profile of every column);
+- with a live data folder (`data`), cached parquet footers (`parquet_metadata_cache`,
+  always on for a locked server's snapshot): DuckDB charges each cached
+  footer to `memory_limit` at about its on-disk size, but keeps roughly
+  7–10× that in RSS (measured: a 9.1 MB footer costs ~84–92 MB RSS; a
+  3.7 MB footer costs ~30 MB RSS). There is one entry per distinct file path
+  a viewer has reached (every value a `path_vars` or a glob pattern can
+  reach counts separately), and it grows for the snapshot's whole lifetime
+  (only a refresh — `refresh_s`, `anofox_serve_refresh` — drops it); DuckDB
+  does evict entries once their *counted* size reaches `memory_limit`, so the
+  real worst case is about 10× `memory_limit`, not unbounded;
 - one thread stack per worker and per DuckDB thread.
 
 In the load test, ordinary viewers stayed under 450 MB on 2 million rows,
@@ -362,6 +372,13 @@ including a snapshot refresh. The abusive clients pushed the server to
 `max_queries` existed (§7). A safe `MemoryMax`:
 
     memory_limit + cache_mb + max_inflight_mb + max_queries × 100 MB + 200 MB
+    + (distinct parquet files reachable through `data`) × (footer size on disk) × 10
+
+The last term applies only with a live data folder; it is 0 without one.
+Count "distinct files reachable" generously: every `path_vars` value and
+every match of a glob in the dashboard's SQL, not just the ones a real run
+produces. Refresh on a schedule (`refresh_s`) to keep it from growing
+without bound over a long-lived snapshot.
 
 `threads` no longer matters here: workers beyond `max_queries` answer from
 the cache or wait. Lower `max_queries` when heavy requests (statistics,

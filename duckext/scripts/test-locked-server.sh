@@ -15,6 +15,9 @@
 #   * `-- @requires` on a ::TRACK (#162) and on a ::TAB / ::SUBTAB, whose
 #     panels then never run (#163) — with NODE_PATH also in a browser
 #     (requires-tabs-e2e.mjs).
+#   * parquet footers are cached across requests; a file renamed into place is
+#     always read fresh, an in-place rewrite at the same size and mtime second
+#     is not (#209).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -336,3 +339,58 @@ else
   echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
 fi
 stop
+
+# 7. Parquet footers are cached across requests (#209): the snapshot has
+# parquet_metadata_cache on (viewers can't turn it off). A file renamed into
+# the data folder is always read fresh, also through a setup view; an
+# in-place rewrite at the same size that keeps the old mtime (to the second)
+# can be read stale (security review L1 — this is pre-existing
+# DuckDB behaviour the PR doesn't change, not something the cache fixes).
+# `cache_mb: 0`: the result cache doesn't see file changes (documented), this
+# is about the footers.
+mkdir -p "$T/pruns" "$T/pdash"
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(10)) TO $(q "$T/pruns/f.parquet");" >/dev/null
+cat > "$T/pdash/p.sql" <<'SQL'
+SELECT (current_setting('parquet_metadata_cache')::VARCHAR = 'true')::INT::BIGINT AS cached ::METRIC;
+CREATE OR REPLACE TEMP VIEW pv AS SELECT * FROM read_parquet(getvariable('anofox_data') || '/f.parquet');
+SELECT count(*)::BIGINT AS n ::METRIC FROM pv;
+SELECT sum(x)::BIGINT AS s ::METRIC FROM pv;
+SELECT count(*)::BIGINT AS f ::METRIC FROM pv WHERE x >= 1000;
+SQL
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/pdash"), $PORT,
+  json_object('data', $(q "$T/pruns"), 'cache_mb', 0));" || fail "parquet cache server"
+[ "$(panel 0 '{}' p)" = 200 ] && grep -qE '"c0":1(\.0)?[,}]' "$T/body" || fail "parquet_metadata_cache is not on: $(cat "$T/body")"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":10(\.0)?[,}]' "$T/body" || fail "first read: $(cat "$T/body")"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":10(\.0)?[,}]' "$T/body" || fail "cached read: $(cat "$T/body")"
+# rewritten in place by another process. Uncompressed: it becomes the "old"
+# file for the rename case below, which needs an equal-size replacement to
+# rule out a size change as the reason a rename reads fresh.
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(1000)) TO $(q "$T/pruns/f.parquet") (COMPRESSION uncompressed);" >/dev/null
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "in-place rewrite served a stale footer: $(cat "$T/body")"
+[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":499500(\.0)?[,}]' "$T/body" || fail "in-place rewrite (sum): $(cat "$T/body")"
+# replaced by a rename (how a writer publishes a run atomically): same row
+# count, same on-disk size (uncompressed, like the file it replaces) and the
+# old file's mtime copied onto the new one with touch -r — so a size or
+# mtime difference can't be why this reads fresh. DuckDB's cache validity
+# check is size + mtime-to-the-second, keyed by the inode (security review
+# L1): a rename is read fresh regardless, an in-place rewrite at this same
+# size and mtime is not. count(*) and sum() alone can't tell a stale footer
+# from a fresh one here (both files have the same shape); only a predicate
+# that prunes on footer min/max statistics can (panel 4: `x >= 1000`, which
+# the old file's footer would report as impossible).
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(1000, 2000)) TO $(q "$T/pnew.parquet") (COMPRESSION uncompressed);" >/dev/null
+touch -r "$T/pruns/f.parquet" "$T/pnew.parquet"
+[ "$(stat -c %s "$T/pruns/f.parquet")" = "$(stat -c %s "$T/pnew.parquet")" ] \
+  || fail "setup: rename-case files are not the same size"
+mv "$T/pnew.parquet" "$T/pruns/f.parquet"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "renamed-in file served a stale footer: $(cat "$T/body")"
+[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":1499500(\.0)?[,}]' "$T/body" || fail "renamed-in file (sum): $(cat "$T/body")"
+[ "$(panel 4 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "renamed-in file (footer-pruned filter) served a stale footer: $(cat "$T/body")"
+# the rebuilt snapshot has it too
+echo "SELECT anofox_serve_refresh($PORT);" >&3
+for _ in $(seq 50); do grep -q "epoch 2" "$T/out" && break; sleep 0.2; done
+grep -q "epoch 2" "$T/out" || fail "parquet cache refresh: $(cat "$T/out")"
+[ "$(panel 0 '{}' p)" = 200 ] && grep -qE '"c0":1(\.0)?[,}]' "$T/body" || fail "parquet_metadata_cache off after a refresh: $(cat "$T/body")"
+grep -q "parquet_metadata_cache:" "$T/out" && fail "parquet_metadata_cache warning: $(cat "$T/out")"
+stop
+echo "OK: parquet footers cached across requests; a file renamed into place reads fresh, also after a refresh"
