@@ -351,7 +351,7 @@ SELECT 1::ENDGROUP;
 
 SELECT 12::COL;
 SELECT 'contract'::SUBTOTAL;
-SELECT 'sum'::TOTALS;
+SELECT 'Share of MRR at risk (%): none; sum'::TOTALS;
 SELECT 'Risk bands by contract — a few high-risk monthly accounts hold most of the expected loss'::TITLE,
        contract AS "Contract" ::TABLE, band AS "Risk band", count(*) AS "Customers",
        round(sum(p_now), 1) AS "Expected churners", round(sum(p_now * mrr)) AS "MRR at risk",

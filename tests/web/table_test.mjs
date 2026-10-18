@@ -30,6 +30,13 @@ const { tableNumText, humanHeader } = new Function(
     `${grab("fmtNum")}\n${grab("tableNumText")}\n${grab("humanHeader")}\nreturn { tableNumText, humanHeader };`
 )(wasm.format_number, wasm.format_number_locale, wasm.human_header, () => LOCALE);
 
+const aggsLine = src.match(/^const AGGS = .*;$/m);
+assert.ok(aggsLine, "const AGGS not found in app.js");
+const { parseTotals, defaultAgg } = new Function(
+  `${aggsLine[0]}\n${grab("parseTotals")}\n${grab("defaultAgg")}\nreturn { parseTotals, defaultAgg };`
+)();
+let nTot = 0;
+
 const norm = (s) => String(s).replace(/[  ]/g, " ");
 const vectors = JSON.parse(readFileSync(new URL("../fixtures/table_vectors.json", import.meta.url), "utf8"));
 let n = 0;
@@ -41,6 +48,10 @@ for (const c of vectors.cases) {
     )
   );
   c.cols.forEach((col, k) => {
+    if (col.total) {
+      assert.equal(defaultAgg(profiles[k]), col.total, `total of ${c.locale} ${col.name}`);
+      nTot++;
+    }
     if (!col.head) return;
     const p = profiles[k];
     const at = `${c.locale} ${col.name}`;
@@ -51,4 +62,5 @@ for (const c of vectors.cases) {
   });
 }
 assert.equal(humanHeader("load_pct"), "Load %");
-console.log(`table_test: ${n} columns ok`);
+for (const tv of vectors.totals) assert.deepEqual(parseTotals(tv.spec), { all: tv.all, col: tv.col }, tv.spec);
+console.log(`table_test: ${n} columns, ${nTot} totals, ${vectors.totals.length} ::TOTALS values ok`);

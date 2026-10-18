@@ -862,7 +862,7 @@ fn table_svg(
             .map(|v| display_text(v, &c.p, c.fmt, l, neg))
             .unwrap_or_default()
     };
-    // totals: the browser's default (≥ 3 rows and an amount column)
+    // totals: the browser's default (≥ 3 rows and an amount column; none for rates)
     let totals: Vec<Option<String>> = cols
         .iter()
         .enumerate()

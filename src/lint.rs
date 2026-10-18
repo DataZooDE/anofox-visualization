@@ -12,7 +12,7 @@
 //! returns the rows, or a DuckDB error string.
 
 use crate::inputs::{input_defaults, input_index, input_kind};
-use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role};
+use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role, TableOpt};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +137,8 @@ where
     };
     // A ::EMPTY message is waiting for the next panel (its 0 rows are expected).
     let mut empty_msg = false;
+    // A ::TOTALS value waiting for the next table (totals/summed-rate).
+    let mut next_totals: Option<String> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -881,6 +883,16 @@ where
         // Layout directives don't render a chart — nothing to check.
         if roles::is_directive_panel(&p.roles) {
             empty_msg |= p.roles.iter().any(|(_, r)| *r == Role::Empty);
+            if p.roles
+                .iter()
+                .any(|(_, r)| *r == Role::TableOpt(TableOpt::Totals))
+            {
+                next_totals = rows
+                    .first()
+                    .and_then(|row| row.values().next())
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -893,6 +905,7 @@ where
         }
 
         let expect_empty = std::mem::take(&mut empty_msg);
+        let totals_spec = next_totals.take();
         if rows.is_empty() && (expect_empty || is_track) {
             // the author wrote a message for this case (::EMPTY); a track
             // without events still shows its lanes
@@ -910,6 +923,14 @@ where
                 sql: short.clone(),
             });
             continue;
+        }
+        if let Some(spec) = totals_spec.as_deref() {
+            if p.roles
+                .iter()
+                .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+            {
+                diags.extend(summed_rate_diag(&p.roles, &rows, spec, stmt, &short));
+            }
         }
 
         // Let the render engine validate the role/column combination (this
@@ -1874,6 +1895,85 @@ fn cells(rows: &[Map<String, Value>], idx: usize) -> Vec<Option<String>> {
             }
         })
         .collect()
+}
+
+/// `totals/summed-rate` (#207): a `::TOTALS` value whose all-columns
+/// aggregation is `sum` ('sum', or a bare 'sum' in a list) over a table with a
+/// rate or percentage column it does not name — a sum of rates means nothing.
+/// A column named in the value ('Per 10k: sum') is deliberate and passes.
+fn summed_rate_diag(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+    spec: &str,
+    stmt: usize,
+    short: &str,
+) -> Option<Diagnostic> {
+    use crate::table::{human_header, parse_totals, profile_column, Cell, ColumnSpec};
+    let t = parse_totals(spec);
+    if t.all.as_deref() != Some("sum") {
+        return None;
+    }
+    let first = rows.first()?;
+    let skip = |i: usize| {
+        roles
+            .iter()
+            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Info))
+    };
+    let fmt_of = |i: usize| {
+        roles
+            .iter()
+            .find(|(j, r)| *j == i && crate::roles::is_table_format(*r))
+            .map(|(_, r)| r.token())
+    };
+    let named = |name: &str| {
+        let (a, b) = (name.to_lowercase(), human_header(name).to_lowercase());
+        t.col.iter().any(|(n, _)| {
+            let n = n.to_lowercase();
+            n == a || n == b
+        })
+    };
+    let l = crate::format::Locale::default();
+    let mut hits: Vec<String> = Vec::new();
+    let mut k = 0usize; // visible position: the first column is the row key
+    for (i, name) in first.keys().enumerate() {
+        if skip(i) {
+            continue;
+        }
+        k += 1;
+        if k == 1 || named(name) {
+            continue;
+        }
+        let cells: Vec<Cell> = rows
+            .iter()
+            .map(|r| r.values().nth(i).map_or(Cell::Null, Cell::from_json))
+            .collect();
+        let fmt = fmt_of(i);
+        let spec_c = ColumnSpec {
+            name,
+            fmt,
+            first: false,
+            range: None,
+            many: rows.len() > 1,
+        };
+        if matches!(fmt, Some("SPARKLINE" | "BADGE")) {
+            continue;
+        }
+        if profile_column(&spec_c, &cells, &l).rate {
+            hits.push(name.clone());
+        }
+    }
+    let first_hit = hits.first()?.clone();
+    Some(Diagnostic {
+        severity: Severity::Note,
+        stmt,
+        code: "totals/summed-rate",
+        message: format!(
+            "::TOTALS '{spec}' sums every column, `{}` too — a rate or percentage does not \
+             add up; give it its own total: '{first_hit}: none' (or mean)",
+            hits.join("`, `")
+        ),
+        sql: short.to_string(),
+    })
 }
 
 /// Region and point inputs of a map: an unknown `::BOUNDARIES` layer,
@@ -2971,6 +3071,62 @@ mod design_tests {
             rows(2, |i| json!({ "region": "N", "m": i, "x": "<0:bad" })),
         );
         assert!(has(&d, "thresholds/in-table"), "{d:?}");
+    }
+
+    /// Lint `'<spec>'::TOTALS` before a table (district, Per 10k, people, on_time ::PERCENT).
+    fn lint_totals(spec: &str, tables: usize) -> Vec<Diagnostic> {
+        let table = rows(3, |i| {
+            json!({ "district": format!("D{i}"), "Per 10k": 0.1 * i as f64 + 0.05,
+                    "people": 1000 + i, "on_time": 0.8 + 0.01 * i as f64 })
+        });
+        let t = "SELECT district::TABLE, \"Per 10k\", people, on_time::PERCENT FROM t;\n";
+        let sql = format!("SELECT '{spec}'::TOTALS;\n{}", t.repeat(tables));
+        let spec = spec.to_string();
+        check(&sql, move |q| {
+            Ok(if q.contains("FROM t") {
+                table.clone()
+            } else {
+                rows(1, |_| json!({ "c0": spec }))
+            })
+        })
+    }
+
+    #[test]
+    fn totals_that_sum_a_rate_are_noted() {
+        let n = |d: &[Diagnostic]| d.iter().filter(|x| x.code == "totals/summed-rate").count();
+        let d = lint_totals("sum", 1);
+        assert_eq!(n(&d), 1, "{d:?}");
+        let m = &d.iter().find(|x| x.code == "totals/summed-rate").unwrap();
+        assert!(
+            m.severity == Severity::Note
+                && m.message.contains("Per 10k")
+                && m.message.contains("on_time"),
+            "{m:?}"
+        );
+        // named columns are deliberate; no all-columns sum, no note
+        for spec in [
+            "Per 10k: sum; on_time: mean; sum",
+            "mean",
+            "none",
+            "people: sum",
+            "Per 10k: none; sum; on_time: none",
+        ] {
+            assert_eq!(n(&lint_totals(spec, 1)), 0, "{spec}");
+        }
+        // the value is for the next table only
+        assert_eq!(n(&lint_totals("sum", 2)), 1);
+        // no ::TOTALS: the defaults never sum a rate
+        let plain = rows(
+            3,
+            |i| json!({ "district": format!("D{i}"), "Per 10k": 0.1 * i as f64 }),
+        );
+        assert_eq!(
+            n(&lint_one(
+                "SELECT district::TABLE, \"Per 10k\" FROM t;",
+                plain
+            )),
+            0
+        );
     }
 
     #[test]

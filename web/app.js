@@ -8916,8 +8916,30 @@ const ROW_H_COMPACT = 29; // … compact density
 const SCROLL_BLOCK = 100; // rows per fetch of a ::PAGED table in Scroll view
 // the aggregations a totals cell can show (::TOTALS, or the viewer's pick)
 const AGGS = ["sum", "mean", "median", "min", "max", "count"];
-const AGG_WORD = { sum: "sum", mean: "mean", median: "median", min: "minimum", max: "maximum", count: "count of values" };
-const AGG_LABEL = { sum: "Sum", mean: "Mean", median: "Median", min: "Min", max: "Max", count: "Count" };
+const AGG_WORD = { sum: "sum", mean: "mean", median: "median", min: "minimum", max: "maximum", count: "count of values", none: "no total" };
+const AGG_LABEL = { sum: "Sum", mean: "Mean", median: "Median", min: "Min", max: "Max", count: "Count", none: "None" };
+// ::TOTALS 'sum' | 'Revenue: sum; Margin: mean' → {all, col: [[name, agg], …]}
+// (#207; the Rust table::parse_totals: entries split on ';' when there is one,
+// else ',' — so a header may hold commas; avg / average read as mean)
+function parseTotals(spec) {
+  const s = String(spec || "");
+  const out = { all: null, col: [] };
+  for (const part of s.split(s.includes(";") ? ";" : ",")) {
+    const m = part.match(/^\s*(?:(.+?)\s*:\s*)?([a-z]+)\s*$/i);
+    const a = m ? m[2].toLowerCase().replace(/^(avg|average)$/, "mean") : "";
+    if (![...AGGS, "none"].includes(a)) continue;
+    if (!m[1]) out.all = a;
+    else if (m[1].trim()) out.col.push([m[1].trim(), a]);
+  }
+  return out;
+}
+// A column's total without ::TOTALS or a viewer's pick (the Rust
+// table::default_total): Σ for amounts and counts, none for rates and
+// percentages, else the mean.
+function defaultAgg(p) {
+  if (p.additive) return "sum";
+  return p.rate ? "none" : "mean";
+}
 // The open totals menu closes on a click elsewhere or Esc (one listener for all tables).
 let totMenuWired = false;
 function wireTotMenuClose() {
@@ -8977,15 +8999,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     return cols.find((c) => c.toLowerCase() === n || humanHeader(c).toLowerCase() === n);
   };
   // ::TOTALS: one aggregation for every numeric column ('none' hides the row),
-  // and / or per column ('Revenue: sum, Margin: mean')
-  const totSpec = { all: null, col: {} };
-  for (const part of String(opts.totals || "").split(",")) {
-    const m = part.match(/^\s*(?:(.+?)\s*:\s*)?([a-z]+)\s*$/i);
-    const a = m ? m[2].toLowerCase().replace(/^(avg|average)$/, "mean") : "";
-    if (![...AGGS, "none"].includes(a)) continue;
-    if (!m[1]) totSpec.all = a;
-    else if (colNamed(m[1])) totSpec.col[colNamed(m[1])] = a;
-  }
+  // and / or per column ('Revenue: sum; Per 10k: none' — parseTotals)
+  const totParsed = parseTotals(opts.totals);
+  const totSpec = { all: totParsed.all, col: {} };
+  for (const [name, a] of totParsed.col) if (colNamed(name)) totSpec.col[colNamed(name)] = a;
   const totalsOff = totSpec.all === "none" && !Object.values(totSpec.col).some((a) => a !== "none");
   // ::COLGROUP 'Backtest: mae, rmse | Holdout: mae_h': a label over adjacent columns
   const groupOf = {};
@@ -9114,8 +9131,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   let showStats = !!saved.showStats; // the column-stats strip under the header
   let showFilters =
     !!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0;
-  // Σ for amounts and counts; a column named like a rate / share / score is averaged (table_profile)
-  const additive = (c) => info[c].additive;
+  // Σ for amounts and counts, none for rates and percentages, else the mean (defaultAgg, table_profile)
   const hasAdditive = cols.some((c) => ["MONEY", "COMPACT"].includes(info[c].f));
   const nTotal = () => (server ? server.total : filtered.length);
   let showTotals =
@@ -9312,7 +9328,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       barRight.appendChild(
         mkBtn(
           "Σ Totals",
-          `a totals row over all ${server ? "matching rows (computed in SQL)" : "matching rows"}: sums of amounts and counts, means of rates — click a total's aggregation to change it`,
+          `a totals row over all ${server ? "matching rows (computed in SQL)" : "matching rows"}: sums of amounts and counts, none for rates and percentages, means of the rest — click a total's aggregation to change it`,
           showTotals,
           () => {
             showTotals = !showTotals;
@@ -10205,9 +10221,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   };
 
   // ── totals row: per numeric column one aggregation — the viewer's pick in the
-  // cell, else ::TOTALS, else Σ for amounts and counts / mean for rates; counts
-  // for badges. A ::PAGED table's come from the SQL statistics (n, s, m, md, lo, hi).
-  const aggOf = (c) => aggPick[c] ?? totSpec.col[c] ?? totSpec.all ?? (additive(c) ? "sum" : "mean");
+  // cell, else ::TOTALS, else the default (defaultAgg: Σ for amounts and counts,
+  // none for rates and percentages, else the mean); counts for badges. A
+  // ::PAGED table's come from the SQL statistics (n, s, m, md, lo, hi).
+  const aggOf = (c) => aggPick[c] ?? totSpec.col[c] ?? totSpec.all ?? defaultAgg(info[c]);
+  // 'none' the author wrote (::TOTALS) leaves the cell empty; a default or
+  // picked 'none' keeps the tag, to choose another
+  const authorNone = (c) => aggPick[c] == null && (totSpec.col[c] ?? totSpec.all) === "none";
   const aggValue = (c, a, of = null) => {
     if (server && !of) {
       const st = sstat(c);
@@ -10289,8 +10309,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       }
       if (!i.numeric || i.label || i.f === "SPARKLINE") return;
       const a = aggOf(c);
-      if (a === "none") return;
-      const v = aggValue(c, a);
+      if (a === "none" && authorNone(c)) return;
+      const v = a === "none" ? null : aggValue(c, a);
       td.classList.add("num");
       // the aggregation: a quiet small-caps label that opens a menu previewing
       // every aggregation's value for this column
@@ -10314,8 +10334,8 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           menu.remove();
           w.setAttribute("aria-expanded", "false");
         };
-        for (const x of AGGS) {
-          const xv = aggValue(c, x);
+        for (const x of [...AGGS, "none"]) {
+          const xv = x === "none" ? null : aggValue(c, x);
           const it = document.createElement("button");
           it.type = "button";
           it.className = "tot-mi" + (x === a ? " on" : "");
@@ -10345,11 +10365,14 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       };
       const val = document.createElement("span");
       val.className = "tot-v";
-      val.textContent = v == null ? "–" : aggText(v, c, a);
+      val.textContent = a === "none" ? "" : v == null ? "–" : aggText(v, c, a);
       if (v != null && v < 0 && negStyle === "red") td.classList.add("neg");
-      td.title = `${head(c)}: ${AGG_WORD[a]} over ${n} rows`;
+      td.title =
+        a === "none"
+          ? `${head(c)}: no total — rates and percentages don't add up; choose one if it means something`
+          : `${head(c)}: ${AGG_WORD[a]} over ${n} rows`;
       td.append(w, val);
-      (byAgg[a] ||= []).push(head(c));
+      if (a !== "none") (byAgg[a] ||= []).push(head(c));
     });
     // what each total is, in words
     const parts = Object.entries(byAgg).map(([a, hs]) => `${AGG_WORD[a]} of ${hs.join(", ")}`);

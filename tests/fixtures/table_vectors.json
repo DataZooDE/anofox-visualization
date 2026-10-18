@@ -1,5 +1,5 @@
 {
-  "_doc": "Table formatting vectors shared by the Rust table module (tests/table.rs) and the browser table (tests/web/table_test.mjs: wasm table_profile + app.js tableNumText). Each case: the columns of a table and, per column, the header people read and the text of each numeric cell. Group separators compare with narrow / no-break spaces read as spaces.",
+  "_doc": "Table formatting vectors shared by the Rust table module (tests/table.rs) and the browser table (tests/web/table_test.mjs: wasm table_profile + app.js tableNumText). Each case: the columns of a table and, per column, the header people read and the text of each numeric cell. Group separators compare with narrow / no-break spaces read as spaces. Columns may carry \"total\": the default aggregation of their total (sum | mean | none). \"totals\": ::TOTALS values and how both parsers read them (#207).",
   "cases": [
     {
       "locale": "en-US",
@@ -52,6 +52,32 @@
         { "name": "commandes", "values": [18400, 1234567],
           "head": "Commandes", "cells": ["18 400", "1 234 567"] }
       ]
+    },
+    {
+      "locale": "en-US",
+      "cols": [
+        { "name": "District", "values": ["A", "B", "C"] },
+        { "name": "Per 10k", "values": [0.05, 0.12, 0.35], "total": "none" },
+        { "name": "km to DC", "values": [412, 388, 305], "total": "sum" },
+        { "name": "People", "fmt": "COMPACT", "values": [125000, 98000, 210000], "total": "sum" },
+        { "name": "on_time", "fmt": "PERCENT", "values": [0.91, 0.84, 0.88], "total": "none" },
+        { "name": "avg_basket", "values": [23.4, 19.1, 21.75], "total": "mean" },
+        { "name": "orders", "values": [120, 98, 143], "total": "sum" },
+        { "name": "Orders per day", "values": [12, 9, 14], "total": "none" },
+        { "name": "load_pct", "values": [4, 12, 30], "total": "none" },
+        { "name": "Supermarket visits", "values": [3, 4, 5], "total": "sum" },
+        { "name": "weight", "values": [1.5, 2.25, 3.0], "total": "mean" }
+      ]
     }
+  ],
+  "totals": [
+    { "spec": "sum", "all": "sum", "col": [] },
+    { "spec": "none", "all": "none", "col": [] },
+    { "spec": "revenue: sum, Margin %: mean, accuracy: median", "all": null,
+      "col": [["revenue", "sum"], ["Margin %", "mean"], ["accuracy", "median"]] },
+    { "spec": "People: sum; Customers per 10,000 people: none; km to DC: avg", "all": null,
+      "col": [["People", "sum"], ["Customers per 10,000 people", "none"], ["km to DC", "mean"]] },
+    { "spec": "Revenue: sum; mean", "all": "mean", "col": [["Revenue", "sum"]] },
+    { "spec": "Revenue: total, : sum, bogus", "all": null, "col": [] }
   ]
 }

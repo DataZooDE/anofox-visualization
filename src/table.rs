@@ -280,8 +280,11 @@ pub struct ColumnProfile {
     pub min: f64,
     pub max: f64,
     pub max_abs: f64,
-    /// The default total sums the column (amounts, counts); else it averages.
+    /// The default total sums the column (amounts, counts).
     pub additive: bool,
+    /// A rate or percentage (`::PERCENT`, or a rate name) that is not
+    /// additive: its default total is none (#207).
+    pub rate: bool,
     /// Slim in-cell bars (plain numeric columns that vary, not the row key).
     pub bars: bool,
     pub unit: Option<Unit>,
@@ -293,7 +296,7 @@ impl ColumnProfile {
         serde_json::json!({
             "head": self.head, "name": self.name, "numeric": self.numeric, "bool": self.bool,
             "label": self.label, "ints": self.ints, "dec": self.dec, "min": self.min, "max": self.max,
-            "maxAbs": self.max_abs, "additive": self.additive, "bars": self.bars,
+            "maxAbs": self.max_abs, "additive": self.additive, "rate": self.rate, "bars": self.bars,
             "unit": self.unit.as_ref().map(|u| serde_json::json!({
                 "div": u.div, "dec": u.dec, "pre": u.pre, "post": u.post, "word": u.word,
                 "label": u.label, "inHead": u.in_head,
@@ -329,15 +332,35 @@ fn metric_of(f: &str) -> MetricFmt {
     }
 }
 
-/// Rate-like names (averaged, not summed, by default).
-fn rate_like(name: &str) -> bool {
+/// Rate and percentage names (#207): no default total — a sum or a plain mean
+/// of rates reads as the overall rate and is not. Substrings as before, plus
+/// `per` / `pro` as a word (`Per 10k`, `customers_per_10k`, `per10k`, `km_per_h`).
+fn rate_word(name: &str) -> bool {
     let n = name.to_lowercase();
     [
-        "pct", "percent", "%", "rate", "ratio", "share", "avg", "mean", "median", "score", "index",
-        "quote", "anteil",
+        "pct", "percent", "%", "rate", "ratio", "share", "quote", "anteil",
     ]
     .iter()
     .any(|w| n.contains(w))
+        || n.split(|c: char| !c.is_alphanumeric()).any(|t| {
+            t == "per"
+                || t == "pro"
+                || t.strip_prefix("per")
+                    .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+        })
+}
+
+/// Average-like names: the default total is the mean.
+fn mean_word(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["avg", "mean", "median", "score", "index"]
+        .iter()
+        .any(|w| n.contains(w))
+}
+
+/// Rate- or average-like names (never summed by default).
+fn rate_like(name: &str) -> bool {
+    rate_word(name) || mean_word(name)
 }
 
 /// `(^|[_\s-])(id|no|nr|nummer|number|code|key|zip|plz|postcode|postal)$|^#|^id[_\s]`
@@ -459,6 +482,7 @@ pub fn profile_column(spec: &ColumnSpec, values: &[Cell], locale: &Locale) -> Co
         && (f == "MONEY"
             || f == "COMPACT"
             || ((f.is_empty() || f == "PLAIN") && ints && !rate_like(spec.name)));
+    let rate = numeric && !label && !additive && (f == "PERCENT" || rate_word(spec.name));
     ColumnProfile {
         head,
         name,
@@ -475,6 +499,7 @@ pub fn profile_column(spec: &ColumnSpec, values: &[Cell], locale: &Locale) -> Co
         max: hi,
         max_abs,
         additive,
+        rate,
         bars: numeric && f.is_empty() && !label && hi != lo && !spec.first && spec.many,
         unit,
     }
@@ -672,13 +697,55 @@ pub fn short_number(n: f64, l: &Locale, neg: Negatives) -> String {
 }
 
 /// The default aggregation of a column's total: `sum` for amounts and counts,
-/// `mean` for rates / shares / scores; `None` when the column has no total.
+/// `mean` for averages, scores and other measures; `None` when the column has
+/// no total — not a number, a label, a sparkline / badge, or a rate or
+/// percentage (#207; the browser shows its tag as "none").
 pub fn default_total(p: &ColumnProfile, fmt: Option<&str>) -> Option<&'static str> {
     let f = fmt.unwrap_or("");
-    if !p.numeric || p.label || f == "SPARKLINE" || f == "BADGE" {
+    if !p.numeric || p.label || p.rate || f == "SPARKLINE" || f == "BADGE" {
         return None;
     }
     Some(if p.additive { "sum" } else { "mean" })
+}
+
+/// The aggregations a `::TOTALS` value may name.
+pub const TOTAL_AGGS: &[&str] = &["sum", "mean", "median", "min", "max", "count", "none"];
+
+/// A `::TOTALS` value: one aggregation for every numeric column (`all`) and /
+/// or one per column (names as written; the caller matches them).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TotalsSpec {
+    pub all: Option<String>,
+    pub col: Vec<(String, String)>,
+}
+
+/// Parse a `::TOTALS` value (#207): entries split on `;` when the value has
+/// one (so a header may hold commas: 'Customers per 10,000 people: none'),
+/// else on `,`; `name: agg` or a bare `agg`; `avg` / `average` read as `mean`;
+/// unknown entries are skipped. The browser's `parseTotals` (web/app.js) is
+/// the same rule (shared vectors: tests/fixtures/table_vectors.json).
+pub fn parse_totals(spec: &str) -> TotalsSpec {
+    let sep = if spec.contains(';') { ';' } else { ',' };
+    let mut out = TotalsSpec::default();
+    for part in spec.split(sep) {
+        let (name, agg) = match part.rsplit_once(':') {
+            Some((n, a)) => (Some(n.trim()), a.trim()),
+            None => (None, part.trim()),
+        };
+        let mut a = agg.to_lowercase();
+        if a == "avg" || a == "average" {
+            a = "mean".into();
+        }
+        if !TOTAL_AGGS.contains(&a.as_str()) {
+            continue;
+        }
+        match name {
+            None => out.all = Some(a),
+            Some(n) if !n.is_empty() => out.col.push((n.to_string(), a)),
+            Some(_) => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -711,5 +778,32 @@ mod tests {
         assert!(
             id_like("zip") && id_like("PLZ") && id_like("customer_postcode") && !id_like("zipper")
         );
+    }
+
+    #[test]
+    fn rate_and_mean_words() {
+        for n in [
+            "Per 10k",
+            "customers_per_10k",
+            "per10k",
+            "km_per_h",
+            "Kunden pro Kopf",
+            "load_pct",
+            "Margin %",
+            "on-time rate",
+        ] {
+            assert!(rate_word(n), "{n}");
+        }
+        for n in [
+            "Supermarket visits",
+            "person_count",
+            "period",
+            "properties",
+            "avg_basket",
+            "km to DC",
+        ] {
+            assert!(!rate_word(n), "{n}");
+        }
+        assert!(mean_word("avg_basket") && rate_like("avg_basket") && rate_like("Per 10k"));
     }
 }
