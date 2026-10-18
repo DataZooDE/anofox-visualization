@@ -15,7 +15,7 @@
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
 import { lintScript, rowsJson, scratchRunner, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
-import { BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
+import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // The SDK as one vendored ES module (web/vendor/, built by
@@ -175,6 +175,12 @@ function literals(sql) {
   return out;
 }
 
+// GDAL's connection prefixes and virtual file systems (spatial opens a
+// FROM 'x.gpkg' or ST_Read name through GDAL): 'WFS:http://…', 'GPKG:…' and
+// 'vsicurl/…' name a file or URL too (#225). Only these driver names, and only
+// with no space after the colon, so 'Depot:neutral' or 'CSV: 3 files' stay text.
+const GDAL_PREFIX =
+  /^(vsi[a-z0-9_]*\/|(WFS|WMS|WCS|WMTS|OAPIF|OGCAPI|STACIT|STACTA|PG|MySQL|OCI|ODBC|MSSQL|PGeo|ElasticSearch|CARTO|AmigoCloud|CouchDB|MongoDBv3|PLScenes|NGW|EEDA|DAAS|GPSBabel|GPKG|CSV|GeoJSON|GeoJSONSeq|ESRIJSON|TopoJSON|GML|KML|LIBKML|SQLite|MBTiles|VRT|NETCDF|HDF4|HDF4_SDS|HDF5|GTIFF_DIR|GTIFF_RAW|NITF_IM|RASTERLITE|TILEDB|ZARR|PDF|ODS|XLSX|Parquet|Arrow|ADBC|MVT|OSM|OpenFileGDB|FileGDB|GTI|GTiff|COG):(?=\S))/i;
 // A literal that names a file or a URL.
 export function looksLikePath(s) {
   const t = String(s).trim();
@@ -183,7 +189,8 @@ export function looksLikePath(s) {
     /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ||
     /^(\/|\.\.?\/|~\/)/.test(t) ||
     /^[A-Za-z]:[\\/]/.test(t) ||
-    /\.(csv|tsv|txt|parquet|json|jsonl|ndjson|gz|zst|xlsx|duckdb|db|sqlite|geojson|shp|arrow|avro)(\?.*)?$/i.test(t) ||
+    GDAL_PREFIX.test(t) ||
+    /\.(csv|tsv|txt|parquet|json|jsonl|ndjson|gz|zst|xlsx|duckdb|db|sqlite|sqlite3|geojson|shp|arrow|avro|gpkg|fgb|kml|kmz|gml|gpx|dbf|shx|osm|pbf|mbtiles|gdb|vrt|tif|tiff|nc|zip|xml|ods)(\?.*)?$/i.test(t) ||
     /^data\//.test(t)
   );
 }
@@ -315,38 +322,47 @@ const READER = /^(read_\w+|\w+_scan|glob|sniff_csv|parquet_\w+|st_read\w*|iceber
 // list can't hold them; its readers are table functions (READER).
 const SPATIAL_SCALAR = /^st_[a-z0-9_]+$/;
 // The table functions the assistant may use: the readers (checked for their
-// paths), generators and the catalog, and the anofox extensions' families
-// (anofox_forecast's ts_* / anofox_fcst_ts_*, anofox_statistics' models and
-// curves); plus the script's own temp table macros (made AS TABLE, before the
-// call; bodies checked when made).
+// paths), generators and the catalog, and the anofox extensions' table
+// functions of the generated list (ANOFOX_TABLES: anofox_forecast's ts_* /
+// anofox_fcst_ts_* and anofox_statistics' models and curves, their table
+// macros and reviewed native ones, never a native *_operator: #223); plus the
+// script's own temp table macros (made AS TABLE, before the call; bodies
+// checked when made).
 const TABLE_READERS = new Set(
   "read_csv read_csv_auto read_parquet parquet_scan read_json read_json_auto read_json_objects read_json_objects_auto read_ndjson read_ndjson_auto read_ndjson_objects read_text read_blob glob sniff_csv parquet_metadata parquet_schema parquet_file_metadata parquet_kv_metadata st_read read_xlsx".split(" ")
 );
 const TABLE_ALLOWED = new Set(
   "range generate_series unnest repeat repeat_row json_each json_tree histogram histogram_values summary duckdb_tables duckdb_views duckdb_columns duckdb_schemas duckdb_databases duckdb_types duckdb_functions duckdb_keywords duckdb_constraints duckdb_indexes duckdb_sequences duckdb_dependencies duckdb_extensions duckdb_variables pragma_table_info pragma_version pragma_platform".split(" ")
 );
-const ANOFOX_TABLE =
-  /^((anofox_fcst_)?ts_[a-z0-9_]+|(ols|wls|ridge|elasticnet|huber|quantile|logistic|poisson|binomial|gamma|negbinom|tweedie|theil_sen|ransac|bls|rls|pls|nnls|lars|isotonic|alm|aft|glmm)_[a-z_]+_by|(acf|pacf|roc_curve|pr_curve|calibration_curve|kaplan_meier|eb_shrink|tukey_hsd|dunn_test|pairwise_t_test|aid|aid_anomaly)_by)$/;
 // A reader is checked for its paths; any other table function must be one the
 // generated list has seen (web/assist/functions.js), so a new extension's or
 // a newer DuckDB's table macro, whose relation arguments the list doesn't
 // know, is refused until the list is regenerated and reviewed.
-export const tableAllowed = (f) => TABLE_READERS.has(f) || (BUILTIN.has(f) && (TABLE_ALLOWED.has(f) || ANOFOX_TABLE.test(f)));
+export const tableAllowed = (f) => TABLE_READERS.has(f) || (BUILTIN.has(f) && (TABLE_ALLOWED.has(f) || ANOFOX_TABLES.has(f)));
 
+// An object name as CREATE writes it: up to three parts (catalog.schema.name),
+// each a word or "quoted".
+const OBJ_NAME = String.raw`(?:"(?:[^"]|"")*"|\w+)(?:\s*\.\s*(?:"(?:[^"]|"")*"|\w+)){0,2}`;
+const CREATE_TEMP = String.raw`^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+`;
+// A (qualified) name's last part, unquoted and lower-case: the name a call
+// uses (temp.main.lower makes lower, R3-5).
+function lastPart(name) {
+  return name.match(/"(?:[^"]|"")*"|\w+/g).at(-1).replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase();
+}
 // The temp macro a statement makes (its lower-case name), or null.
 export function macroDefined(sql) {
-  const m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|\w+)/i.exec(code(sql));
-  return m ? m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase() : null;
+  const m = new RegExp(`${CREATE_TEMP}(?:MACRO|FUNCTION)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${OBJ_NAME})`, "i").exec(code(sql));
+  return m ? lastPart(m[1]) : null;
 }
 // A temp macro made AS TABLE (only these are callable as tables: a scalar
 // macro does not shadow a built-in table function of its name).
 export function isTableMacro(sql) {
-  return /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"(?:[^"]|"")*"|\w+)\s*\([^()]*\)\s*AS\s+TABLE\b/i.test(code(sql));
+  return new RegExp(`${CREATE_TEMP}(?:MACRO|FUNCTION)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${OBJ_NAME}\\s*\\([^()]*\\)\\s*AS\\s+TABLE\\b`, "i").test(code(sql));
 }
 // The temp table or view a statement makes (its lower-case name), or null.
 export function relationDefined(sql) {
-  const m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|\w+)/i.exec(code(sql));
-  return m ? m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase() : null;
+  const m = new RegExp(`${CREATE_TEMP}(?:TABLE|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${OBJ_NAME})`, "i").exec(code(sql));
+  return m ? lastPart(m[1]) : null;
 }
 // What a statement adds to the script's objects: {tables, scalars, relations}.
 function noteMade(sql, objs) {
@@ -922,9 +938,12 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     }
     return trees.get(sql);
   };
-  // `own`: the tools' own fixed queries (the catalog, profiles, the parser);
-  // SQL the model wrote runs in a runner with the guard, made per call.
-  const own = scratchRunner(db, { prepare, timeoutMs: checkQueryMs });
+  // `own`: the tools' own fixed queries (the catalog, profiles, the parser),
+  // without `prepare`: the parser's query holds the model's SQL as a string,
+  // and prepare would fetch the data files it names before the gate has read
+  // it (sec-review-192 I-1). SQL the model wrote runs in a runner with the
+  // guard, made per call, and is prepared only once the guard passed it.
+  const own = scratchRunner(db, { timeoutMs: checkQueryMs });
   const toRows = (res) => ({ types: res.schema.fields.map((f) => [f.name, String(f.type)]), rows: JSON.parse(rowsJson(res)) });
   const rowsOf = async (sql) => JSON.parse(await own(sql));
   let catalog = null;

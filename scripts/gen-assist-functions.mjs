@@ -5,6 +5,9 @@
 // the reviewed denials below; a function this list has not seen (another
 // extension, a newer DuckDB) is refused by the assistant's gate. After a
 // DuckDB-Wasm or extension upgrade: run it, review what it prints, commit.
+// CI's web job runs --check with the extensions scripts/fetch-wasm-extensions.sh
+// fetches (#224), so a new get.erpl.io build fails it until the list is
+// regenerated.
 //
 //   node scripts/gen-assist-functions.mjs           write web/assist/functions.js
 //   node scripts/gen-assist-functions.mjs --check   exit 1 if it is stale
@@ -39,11 +42,33 @@ const REVIEWED = new Set(
   "aft_survival cast_to_type current_catalog current_query current_query_id elasticnet_path_agg format_pg_type format_type formatreadabledecimalsize formatreadablesize get_type has_sequence_privilege in_search_path json_deserialize_sql json_extract_path json_extract_path_text json_serialize_sql json_type kaplan_meier_agg lars_path_agg log log10 log2 log_loss_agg log_rank_test_agg logistic_augment_agg logistic_fit_agg logistic_partial_residuals_agg normalized_interval parse_dirpath parse_duckdb_log_message parse_filename parse_path pg_conf_load_time replace_type ridge_path_agg ts_matrix_profile_period url_decode url_encode vector_type".split(" ")
 );
 const LOOKS = /(sql|query|plan|path|file|url|http|read|load|exec|setting|env|secret|log|seq|seed|sleep|val$|write|error|type$|attach|extension)/;
-// Table functions the parser also emits as a scalar call (SELECT unnest(l)).
-const PARSER_EXTRA = ["unnest", "unlist"];
+// Table functions the parser also emits as a scalar call (SELECT unnest(l)),
+// and icu's today() and get_current_time(): the browser autoloads icu, the
+// Node DuckDB-Wasm this list is made from has no icu to load (#225).
+const PARSER_EXTRA = ["unnest", "unlist", "today", "get_current_time"];
 // Native table functions whose VARCHAR first argument names a relation (the
 // table macros' relation arguments come from their bodies).
-const NATIVE_RELATION = { pragma_table_info: [[0, "col0"]], ts_fill_forward_operator: [[0, "col0"]], anofox_fcst_ts_fill_forward_operator: [[0, "col0"]] };
+const NATIVE_RELATION = { pragma_table_info: [[0, "col0"]] };
+// The anofox extensions' table function families (anofox_forecast's ts_* /
+// anofox_fcst_ts_*, anofox_statistics' models and curves): their table macros
+// go into ANOFOX_TABLES, their native table functions only when reviewed.
+const ANOFOX_FAMILY =
+  /^((anofox_fcst_)?ts_[a-z0-9_]+|(ols|wls|ridge|elasticnet|huber|quantile|logistic|poisson|binomial|gamma|negbinom|tweedie|theil_sen|ransac|bls|rls|pls|nnls|lars|isotonic|alm|aft|glmm)_[a-z_]+_by|(acf|pacf|roc_curve|pr_curve|calibration_curve|kaplan_meier|eb_shrink|tukey_hsd|dunn_test|pairwise_t_test|aid|aid_anomaly)_by)$/;
+// Reviewed native table functions of those families: they read a subquery
+// argument and run no SQL of their own.
+const NATIVE_TABLE_ALLOWED = new Set(["ts_aggregate_hierarchy", "ts_combine_keys", "ts_split_keys", "ts_validate_separator"]);
+// Reviewed and left out, with why.
+const NATIVE_TABLE_DENIED = {
+  ts_features_list: "traps DuckDB-Wasm (memory access out of bounds)",
+  ts_features_config_template: "traps DuckDB-Wasm (memory access out of bounds)",
+};
+// A native *_operator is left out without a review: anofox_forecast's run SQL
+// built from their string arguments, and trap DuckDB-Wasm (#223).
+const NATIVE_OPERATOR = /_operator$/;
+// Every query_table() / query() call of a macro body, and the one shape whose
+// relation argument build() reads: query_table(CAST(<parameter> AS VARCHAR)).
+const QUERY_CALL = /\bquery(?:_table)?\s*\(/gi;
+const QUERY_TABLE_PARAM = /\bquery_table\(\s*CAST\(\s*"?([a-z_][a-z0-9_]*)"?\s+AS\s+VARCHAR\s*\)\s*\)/gi;
 
 // The DuckDB-Wasm connection the browser (and the tests) use, with json,
 // anofox_statistics and anofox_forecast loaded from web/localext, served
@@ -84,16 +109,52 @@ async function collect() {
   }
 }
 
-// {scalars, denied (Map), builtin, rel, review} from one duckdb_functions() rowset.
-function build(fns) {
+// {scalars, denied (Map), builtin, rel, tables, left, review} from one
+// duckdb_functions() rowset; a non-empty `review` stops the write.
+export function build(fns) {
   const scalarTypes = new Set(["scalar", "aggregate", "macro"]);
   const denied = new Map(Object.entries(DENIED));
+  const review = [];
   for (const r of fns) if (r.t === "macro" && /\bFROM\s+(?!duckdb_)[a-z_][a-z0-9_]*\s*\(/i.test(r.m || "")) denied.set(r.f, "its body reads a table function");
-  const scalars = [...new Set([...fns.filter((r) => scalarTypes.has(r.t)).map((r) => r.f), ...PARSER_EXTRA])].filter((f) => !denied.has(f)).sort();
-  const review = scalars.filter((f) => LOOKS.test(f) && !REVIEWED.has(f));
-  const builtin = [...new Set(fns.map((r) => r.f))].sort();
+  // A macro body reads a relation by name only as query_table(CAST(<one of
+  // its parameters> AS VARCHAR)), the shape RELATION_ARGS is read from: a
+  // table macro with any other query_table() / query() stops the write
+  // (#224), a scalar macro with one is denied.
   const relNames = new Set();
-  for (const r of fns) if (r.t === "table_macro") for (const m of (r.m || "").matchAll(/query_table\(\s*CAST\(\s*"?([a-z_][a-z0-9_]*)"?\s+AS\s+VARCHAR/gi)) relNames.add(m[1].toLowerCase());
+  for (const r of fns) {
+    const body = r.m || "";
+    const calls = (body.match(QUERY_CALL) || []).length;
+    if (!calls) continue;
+    if (r.t !== "table_macro") {
+      if (r.t === "macro") denied.set(r.f, "its body reads a table function");
+      continue;
+    }
+    const params = new Set((r.p || []).map((p) => String(p).toLowerCase()));
+    const read = [...body.matchAll(QUERY_TABLE_PARAM)].map((m) => m[1].toLowerCase());
+    if (read.length !== calls) review.push(`${r.f}: query_table() or query() in a shape this script does not read`);
+    for (const p of read) {
+      if (!params.has(p)) review.push(`${r.f}: query_table() of ${p}, which is not one of its parameters`);
+      relNames.add(p);
+    }
+  }
+  const scalars = [...new Set([...fns.filter((r) => scalarTypes.has(r.t)).map((r) => r.f), ...PARSER_EXTRA])].filter((f) => !denied.has(f)).sort();
+  for (const f of scalars) if (LOOKS.test(f) && !REVIEWED.has(f)) review.push(f);
+  const builtin = [...new Set([...fns.map((r) => r.f), ...PARSER_EXTRA])].sort();
+  // The anofox families' table functions (#223): their table macros and the
+  // reviewed native ones. Any other native one is left out (an *_operator
+  // without a review; one not reviewed yet stops the write), and so is a table
+  // macro whose body calls one.
+  const left = new Set();
+  for (const r of fns)
+    if (r.t === "table" && ANOFOX_FAMILY.test(r.f) && !NATIVE_TABLE_ALLOWED.has(r.f)) {
+      left.add(r.f);
+      if (!NATIVE_OPERATOR.test(r.f) && !Object.hasOwn(NATIVE_TABLE_DENIED, r.f)) review.push(`${r.f}: a native table function (add it to NATIVE_TABLE_ALLOWED or NATIVE_TABLE_DENIED)`);
+    }
+  const natives = [...left];
+  for (const r of fns) if (r.t === "table_macro" && natives.some((f) => new RegExp(`\\b${f}\\s*\\(`, "i").test(r.m || ""))) left.add(r.f);
+  const tables = [...new Set(fns.filter((r) => ANOFOX_FAMILY.test(r.f) && (r.t === "table_macro" || (r.t === "table" && NATIVE_TABLE_ALLOWED.has(r.f)))).map((r) => r.f))]
+    .filter((f) => !left.has(f))
+    .sort();
   const rel = { ...NATIVE_RELATION };
   for (const r of fns)
     if (r.t === "table_macro") {
@@ -103,7 +164,7 @@ function build(fns) {
       for (const x of pairs) if (!cur.some(([i, p]) => i === x[0] && p === x[1])) cur.push(x);
       rel[r.f] = cur.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
     }
-  return { scalars, denied, builtin, rel, review };
+  return { scalars, denied, builtin, rel, tables, left: [...left].sort(), review: [...new Set(review)].sort() };
 }
 
 // ---- rendering web/assist/functions.js ----
@@ -154,15 +215,19 @@ function renderRelationArgs(rel) {
   return `export const RELATION_ARGS = {\n${lines.join("\n")}\n};\n`;
 }
 
-// What the four exports are: the allow-list a scalar/aggregate/window call is
+// What the five exports are: the allow-list a scalar/aggregate/window call is
 // checked against (SCALAR_ALLOWED), the reviewed denials kept apart for their
 // reasons (SCALAR_DENIED), every function name of every type so a temp macro
-// can be refused when it shadows one (BUILTIN), and which argument of a table
-// macro must name a relation of the catalog (RELATION_ARGS).
+// can be refused when it shadows one (BUILTIN), the anofox table functions
+// the assistant may call (ANOFOX_TABLES), and which argument of a table macro
+// must name a relation of the catalog (RELATION_ARGS).
 const EXPORTS_COMMENT = `// SCALAR_ALLOWED: the scalar, aggregate and window functions the assistant's
 // SQL may call directly. SCALAR_DENIED: reviewed denials, with why, kept out
 // of SCALAR_ALLOWED (defence in depth with web/assist.js's ALWAYS_DENIED).
 // BUILTIN: every function name of every type (a temp macro may not take one).
+// ANOFOX_TABLES: the anofox extensions' table functions the assistant may
+// call: their families' table macros and reviewed native ones, never a native
+// *_operator.
 // RELATION_ARGS: per table macro, the [index, parameter name] pairs whose
 // argument must name a table of the catalog (the macro's body reads it
 // through query_table()).
@@ -170,17 +235,20 @@ const EXPORTS_COMMENT = `// SCALAR_ALLOWED: the scalar, aggregate and window fun
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { version, exts, fns } = await collect();
-  const { scalars, denied, builtin, rel, review } = build(fns);
-  console.log(`scalars: ${scalars.length}, denied: ${denied.size}, builtin: ${builtin.length}, relation keys: ${Object.keys(rel).length}`);
+  const { scalars, denied, builtin, rel, tables, left, review } = build(fns);
+  console.log(`scalars: ${scalars.length}, denied: ${denied.size}, builtin: ${builtin.length}, anofox tables: ${tables.length}, relation keys: ${Object.keys(rel).length}`);
+  console.log(`left out: ${JSON.stringify(left)}`);
   console.log(`review: ${JSON.stringify(review)}`);
   if (review.length) {
-    console.error(`review is not empty: resolve each name (add to DENIED or REVIEWED in ${path.relative(root, fileURLToPath(import.meta.url))}) before writing.`);
+    console.error(
+      `review is not empty: resolve each entry in ${path.relative(root, fileURLToPath(import.meta.url))} before writing (a scalar: DENIED or REVIEWED; a native table function: NATIVE_TABLE_ALLOWED or NATIVE_TABLE_DENIED; a macro body: teach build() its shape).`
+    );
     process.exit(2);
   }
   const wasmVersion = JSON.parse(readFileSync(path.join(root, "tests/web/package.json"), "utf8")).dependencies["@duckdb/duckdb-wasm"];
   const extsText = exts.map((e) => `${e.n} ${e.v}`).join(", ");
   const header = `// Generated by scripts/gen-assist-functions.mjs from duckdb_functions() of DuckDB ${version} (DuckDB-Wasm ${wasmVersion}) with ${extsText}; do not edit.\n`;
-  const body = [header, EXPORTS_COMMENT, renderNameSet("SCALAR_ALLOWED", scalars), renderDeniedMap(denied), renderNameSet("BUILTIN", builtin), renderRelationArgs(rel)].join("\n");
+  const body = [header, EXPORTS_COMMENT, renderNameSet("SCALAR_ALLOWED", scalars), renderDeniedMap(denied), renderNameSet("BUILTIN", builtin), renderNameSet("ANOFOX_TABLES", tables), renderRelationArgs(rel)].join("\n");
   const file = path.join(root, OUT);
   if (process.argv.includes("--check")) {
     if (!existsSync(file) || readFileSync(file, "utf8") !== body) {
