@@ -14,8 +14,17 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
+        // A checkout's own `core.fsmonitor` already runs during `describe`
+        // (same trust as running any other git command in it); don't also
+        // invoke a configured fsmonitor hook from inside a build script.
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // A cargo invoked from a git hook inherits these and would point
+        // our `-C` at the wrong worktree/index.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .ok()?;
     if !out.status.success() {
@@ -28,10 +37,23 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 
 /// Re-run when HEAD moves, the branch gets a commit or a tag appears. Only
 /// paths that exist: cargo re-runs on every build for a missing one.
+///
+/// A loose branch ref is watched only while it exists as a loose file: once
+/// `git gc`/`fetch`/`pack-refs` packs it into `packed-refs`, the branch's own
+/// path disappears from this set, and a later commit (which re-creates the
+/// loose ref) reruns nothing for it (#216 security review, F1). `logs/HEAD`
+/// — the reflog — is appended on every commit, checkout, reset and merge
+/// regardless of whether the branch ref is loose or packed, and already
+/// exists whenever reflogs are on (the default), so it closes that gap.
+/// Watched in both the worktree's own private git dir (its own HEAD/reflog)
+/// and the common dir (shared refs/tags/packed-refs, and — for the main
+/// worktree — the same files again, harmlessly).
 fn watch_git(dir: &Path) {
     let mut paths = Vec::new();
     if let Some(g) = git(dir, &["rev-parse", "--absolute-git-dir"]) {
-        paths.push(PathBuf::from(g).join("HEAD"));
+        let g = PathBuf::from(g);
+        paths.push(g.join("HEAD"));
+        paths.push(g.join("logs").join("HEAD"));
     }
     if let Some(c) = git(
         dir,
@@ -43,6 +65,7 @@ fn watch_git(dir: &Path) {
         }
         paths.push(c.join("refs").join("tags"));
         paths.push(c.join("packed-refs"));
+        paths.push(c.join("logs").join("HEAD"));
     }
     for p in paths.into_iter().filter(|p| p.exists()) {
         println!("cargo:rerun-if-changed={}", p.display());
