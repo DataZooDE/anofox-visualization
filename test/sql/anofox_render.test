@@ -25,6 +25,12 @@ SELECT count(*) FROM (
 ----
 5
 
+# A TITLE role draws a title bar above the chart (#178).
+query I
+SELECT anofox_render('{"rows":[{"c0":"a","c1":1,"c2":"Bins used"},{"c0":"b","c1":2,"c2":"Bins used"}],"roles":[[0,"XAXIS"],[1,"BARCHART"],[2,"TITLE"]]}') LIKE '%>Bins used</text>%';
+----
+true
+
 # ----------------------------------------------------------------------------
 # NULL in -> NULL out (not an empty string)
 # ----------------------------------------------------------------------------

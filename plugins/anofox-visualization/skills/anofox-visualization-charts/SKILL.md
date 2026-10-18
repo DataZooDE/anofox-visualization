@@ -80,6 +80,8 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 | `max_line_points` | LTTB downsampling threshold per line series (default 5,000) |
 | `plot` + `options` | a contract plot instead of `roles` (`terms`, `prediction`, `curve`, `summary`, `obs`, `diagnostics`, `tests`, `compare`, `partial`, `auto`) — what the `anofox_plot_*` macros send |
 
+A `[i, "TITLE"]` role draws a title bar above the chart — its first non-NULL value, as on a dashboard card (the panel keeps `height`; the chart gets 26 px less). A KPI tile (`METRIC`, `MONEY`, …) has no title bar: its caption is `LABEL`.
+
 Limits: 200,000 rows and 64 MiB per spec. Build the spec with `json_object` / `to_json(list({c0: …, c1: …}))` so values are quoted correctly.
 
 ## Themes and locale
