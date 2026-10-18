@@ -31,6 +31,7 @@
 //! Chain a role after a type cast to get both: `ts::DATE::XAXIS`.
 
 pub mod contract_call;
+pub mod deps;
 pub mod lex;
 pub mod requires;
 

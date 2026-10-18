@@ -18,6 +18,7 @@
 #   * parquet footers are cached across requests; a file renamed into place is
 #     always read fresh, an in-place rewrite at the same size and mtime second
 #     is not (#209).
+#   * the result cache keys on the variables a panel can depend on (#210).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -43,7 +44,9 @@ cat > "$T/dash/t.sql" <<'SQL'
 SELECT count(*)::BIGINT AS n ::METRIC FROM t;
 SELECT x::BIGINT AS x ::METRIC FROM u;
 SELECT repeat('x', 1000) AS s ::TABLE FROM range(3000);
-SELECT sum(i)::BIGINT AS s ::METRIC FROM range(100000000000) r(i);
+-- #210: reads k, so the three slow requests below (distinct k) stay on
+-- separate cache keys instead of sharing one single-flight execution.
+SELECT sum(i)::BIGINT AS s ::METRIC FROM range(100000000000) r(i) WHERE getvariable('k') IS NOT NULL;
 SQL
 "$DUCKDB" "$T/main.duckdb" -c "CREATE TABLE t AS FROM range(3);" >/dev/null
 "$DUCKDB" "$T/w.duckdb" -c "CREATE TABLE t AS FROM range(7); CREATE SCHEMA s2; CREATE TABLE s2.u AS SELECT 42 AS x;" >/dev/null
@@ -191,6 +194,41 @@ if [ -n "${NODE_PATH:-}" ]; then
 else
   echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
 fi
+stop
+
+# 4b. #210: the result cache keys on the variables a statement can depend on
+# — its own getvariable()s and, through a SET VARIABLE before it, what that
+# reads; a statement the analysis can't see through keys on every variable.
+mkdir "$T/dash210"
+cat > "$T/dash210/vs.sql" <<'SQL'
+SET VARIABLE sel = coalesce(nullif(getvariable('run'), ''), 'a');
+SELECT count(*)::BIGINT AS n ::METRIC, getvariable('sel') AS s ::LABEL FROM runs WHERE name = getvariable('sel');
+SELECT count(*)::BIGINT AS n ::METRIC FROM runs;
+SELECT count(*)::BIGINT AS n ::METRIC FROM runs WHERE name = getvariable(lower('RUN'));
+SQL
+start "$T/runs.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/dash210"), $PORT, $(q "{\"log\": \"$T/req210.log\"}"));" || fail "#210 server"
+# p210 <panel> <vars JSON>: POST it; print how the server answered ("run", "hit", "shared")
+p210() {
+  local before n code
+  before=$(wc -l < "$T/req210.log")
+  code=$(curl -s -o "$T/body" -D "$T/headers" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+    -d "{\"dashboard\":\"vs\",\"panel\":$1,\"vars\":$2}")
+  [ "$code" = 200 ] || fail "#210 panel $1 $2: $code $(cat "$T/body")"
+  for _ in $(seq 100); do n=$(wc -l < "$T/req210.log"); [ "$n" -gt "$before" ] && break; sleep 0.05; done
+  tail -1 "$T/req210.log" | sed -n 's/.*"cache":"\([a-z]*\)".*/\1/p'
+}
+[ "$(p210 2 '{"run":"a"}')" = run ] || fail "#210: first request"
+[ "$(p210 2 '{"run":"b"}')" = hit ] || fail "#210: a variable panel 2 doesn't read re-ran it"
+[ "$(p210 2 '{}')" = hit ] || fail "#210: no variables"
+[ "$(p210 1 '{"run":"a"}')" = run ] && grep -q '"c1":"a"' "$T/body" || fail "#210: panel 1 run=a: $(cat "$T/body")"
+[ "$(p210 1 '{"run":"b"}')" = run ] && grep -q '"c1":"b"' "$T/body" || fail "#210: run read through SET VARIABLE sel: $(cat "$T/body")"
+[ "$(p210 1 '{"run":"a","other":"z"}')" = hit ] && grep -q '"c1":"a"' "$T/body" || fail "#210: unrelated variable: $(cat "$T/body")"
+[ "$(p210 1 '{"RUN":"b"}')" = hit ] && grep -q '"c1":"b"' "$T/body" || fail "#210: names are case-insensitive: $(cat "$T/body")"
+[ "$(p210 3 '{"run":"a"}')" = run ] || fail "#210: panel 3 first"
+[ "$(p210 3 '{"run":"a","other":"z"}')" = run ] || fail "#210: a non-literal getvariable must key on every variable"
+grep -qi '^X-Anofox-Deps: [0-9a-f]\{16\}' "$T/headers" || fail "#210: no X-Anofox-Deps header"
+curl -s "http://127.0.0.1:$PORT/d/vs" | grep -q '"deps":\[\[\],\["run","sel"\],\[\],null\]' || fail "#210: window.__served.deps"
+echo "OK: #210 cache keys follow the variables a panel can depend on (SET VARIABLE closure, conservative fallback)"
 stop
 
 # 5. `-- @requires` over a data folder (#156): `${var}` expands to the

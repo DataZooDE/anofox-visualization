@@ -319,9 +319,8 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 **Result cache and single-flight.** A snapshot never changes, so a panel's
 result is a pure function of its request. Results are cached per snapshot (a
-refresh starts an empty cache), keyed by the parsed request — dashboard, panel, every variable value
-(in a canonical order) and the `page` object — so a different value is a
-different entry and nothing is shared across dashboards or servers. Identical
+refresh starts an empty cache),
+keyed by the parsed request — dashboard, panel, the `page` object, the viewer's claims and the values of the variables the statement can depend on (in a canonical order) — so a different value of one of those is a different entry, and nothing is shared across dashboards or servers. Identical
 requests that arrive while one is running wait for it instead of running again
 (errors are shared with them, but never cached).
 
@@ -336,6 +335,26 @@ requests that arrive while one is running wait for it instead of running again
 - A cache hit answers faster than a query, so a viewer can tell whether some
   other viewer requested exactly the same panel + values recently. All viewers
   can request every value anyway; if even that matters, use `cache_mb: 0`.
+
+**Which variables a panel depends on** is worked out once per snapshot, from
+the server's own SQL and the snapshot's catalog (never from the request):
+`getvariable('name')` with a literal name, `${name}` in its `-- @requires` and
+its tab's, and — through the setup statements before it — what those read:
+`SET VARIABLE sel = coalesce(getvariable('series'), …)` makes every reader of
+`sel` depend on `series`, and any other setup statement (a `TEMP` view or
+macro can hide a read) adds what it reads to every statement after it. A
+macro or view of the snapshot that reads variables counts where a statement
+uses it. Whatever the analysis can't see through makes the statement depend
+on every variable, as before: a `getvariable` whose argument is not a plain
+string literal, `duckdb_variables()`, `query()`, `query_table()`,
+`json_execute_serialized_sql()`, a string literal that mentions `getvariable`
+or names such a macro or view, a `SET` / `RESET VARIABLE` in another form.
+Variable names are case-insensitive, as in DuckDB; of two spellings in one
+request the later wins. The page gets the same analysis
+(`window.__served.deps`) and, when a viewer changes a variable, re-requests
+only the panels that depend on it. To keep clicks cheap, read selection
+variables in panels or in a `SET VARIABLE`, not in a setup view: a view that
+reads `series` makes every statement after it depend on `series`.
 
 **Superseded requests.** A viewer who pages or scrolls a `::PAGED` table quickly
 would otherwise leave a query running per step. The client sends
@@ -512,8 +531,10 @@ selections, `?v.` values) — never a dashboard's own `SET VARIABLE` text.
 **Per-viewer caching.** The result cache and the single-flight key include the
 viewer's claims (user, groups, every extra claim), so a result computed for one
 viewer is never served to — and a running query never shared with — a viewer
-with different claims. The static server's `--cache` key includes the claims
-too. Supersession tickets are scoped to the user as well.
+with different claims. The claims are always part of the key in full, whatever
+variables a panel reads — the access policy's row filters read them. The
+static server's `--cache` key includes the claims too. Supersession tickets are
+scoped to the user as well.
 
 ### Proxy recipes
 
@@ -921,6 +942,7 @@ signed the request in.
 | `/healthz` leaks snapshot state | With `auth`, only `status` without a login |
 | A panel filters on a viewer-settable variable | Documented rule: filter only on `__claim_*`; `-- @vars` limits what viewers can set |
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (both servers) |
+| A result computed for other variable values served to a viewer | The key holds every variable the statement can depend on, worked out from the server's SQL and snapshot catalog, never from the request; whatever the analysis can't see through depends on every variable; claims always in full; the later of two spellings of a name wins, as in DuckDB |
 | One viewer cancels another's query | Supersession tickets are scoped to user + 128-bit page id |
 | A misconfigured `auth` serves without login | A bad `auth` fails the start; there is no fallback to anonymous |
 | Server reachable from the network without login | `serve --bind` beyond loopback without `--auth` prints a `WARNING`; so does the extension's start message for `bind` beyond loopback without `auth` (the default is loopback) |
@@ -1121,6 +1143,7 @@ could show it (`duckdb_views()`, `current_query()`, `json_serialize_plan`,
 | An error message quotes a value the viewer may not see | Under a policy viewers get a generic error; the details go to the log |
 | A dashboard author deletes `policy.json` from the dashboard folder | With `auth`, no policy refuses the start unless `"policy": "none"`; keep the policy outside the folder (`options.policy`: a missing file stops the start) |
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (P1) |
+| A result computed for other variable values served to a viewer | The key holds every variable the statement can depend on, worked out from the server's SQL and snapshot catalog, never from the request; whatever the analysis can't see through depends on every variable; claims always in full; the later of two spellings of a name wins, as in DuckDB |
 | A refresh brings a renamed table or column | The policy is re-checked; the refresh fails and the previous snapshot stays |
 | A rewrite bug lets a table through | The rewritten SQL is parsed again and verified against an allowlist of names; a mismatch stops the start |
 

@@ -1200,6 +1200,32 @@ const isAbort = (e) => e && e.name === "AbortError";
 // only column a page request may leave out (`omit`).
 const INFO_COLUMN = "__anofox_info";
 
+// Answers this page already has (#210): a served statement's result is
+// reused while the variables it depends on keep their values —
+// window.__served.deps[i], the server's own analysis (null: every variable).
+// A full run clears it; an answer whose X-Anofox-Deps differs from
+// __served.depsTag (a refresh changed the server's analysis) turns the
+// narrowing off for this page.
+const servedCache = new Map(); // key -> response text
+const SERVED_CACHE_MAX = 400;
+let servedDepsOff = false;
+
+// The variables statement `idx` of the served dashboard depends on (lower
+// case), or null: all of them.
+function servedDepsOf(served, planLen, idx) {
+  const all = served && Array.isArray(served.deps) && served.deps.length === planLen ? served.deps : null;
+  return all && Array.isArray(all[idx]) ? all[idx] : null;
+}
+// The values of those variables in `vars`, as one string. Names compare
+// case-insensitively and the later of two spellings wins, as in DuckDB and
+// on the server. An unset variable differs from NULL.
+function servedVarSig(deps, vars) {
+  const low = new Map();
+  for (const [k, v] of Object.entries(vars)) low.set(k.toLowerCase(), v);
+  const names = (deps ? [...deps] : [...low.keys()]).map((n) => n.toLowerCase()).sort();
+  return JSON.stringify(names.map((n) => (low.has(n) ? [n, low.get(n)] : [n])));
+}
+
 // Parse a SQL literal the client itself produced ('…', [ '…', … ], number,
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
 function sqlLiteralToJson(lit) {
@@ -1234,10 +1260,21 @@ async function servedRequest(sql, page, kind, at) {
   const want = page ? page.base : sql;
   const idx = Number.isInteger(at) && servedPlan[at] && servedPlan[at].sql === want ? at : servedIndex.get(want);
   if (idx === undefined) throw new Error("this dashboard is served locked: only its own statements can run");
-  const body = { dashboard: window.__served.id, panel: idx, vars: servedVars };
+  // Setup runs on the server with every panel request; asked on its own it
+  // answers [] (duckext/src/serve.rs): no request.
+  if (servedPlan[idx].setup) return "[]";
+  // A copy, so a retry sends the same values that the cache key was computed from.
+  const vars = { ...servedVars };
+  const body = { dashboard: window.__served.id, panel: idx, vars };
   if (page) {
     const { base, ...rest } = page;
     body.page = rest;
+  }
+  const deps = servedDepsOff ? null : servedDepsOf(window.__served, servedPlan.length, idx);
+  const ckey = JSON.stringify([idx, body.page ?? null, servedVarSig(deps, vars)]);
+  if (servedCache.has(ckey)) {
+    performance.mark("dp:served-hit");
+    return servedCache.get(ckey);
   }
   const headers = { "Content-Type": "application/json" };
   // An embed link's page session (the server put it in the page): the
@@ -1263,7 +1300,18 @@ async function servedRequest(sql, page, kind, at) {
     }
     if (r.status === 409) throw new DOMException("superseded", "AbortError");
     if (!r.ok) throw new Error(await r.text());
-    return (await r.text()) || "[]";
+    const tag = r.headers.get("X-Anofox-Deps");
+    if (tag && window.__served.depsTag && tag !== window.__served.depsTag && !servedDepsOff) {
+      servedDepsOff = true;
+      servedCache.clear();
+    }
+    const text = (await r.text()) || "[]";
+    // (not when this answer's key was narrowed by an analysis now known stale)
+    if (text.length < 4e6 && !(deps && servedDepsOff)) {
+      servedCache.set(ckey, text);
+      if (servedCache.size > SERVED_CACHE_MAX) servedCache.delete(servedCache.keys().next().value);
+    }
+    return text;
   } finally {
     if (slot && servedAborts.get(slot) === ac) servedAborts.delete(slot);
   }
@@ -6731,6 +6779,7 @@ async function runOnce(fresh = true) {
     dpSetupRan = new Map();
     dpCreated = new Set();
     dpResults.clear();
+    servedCache.clear();
   }
   // Lazy tabs: this run's deferred setup statements and panel jobs.
   const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
