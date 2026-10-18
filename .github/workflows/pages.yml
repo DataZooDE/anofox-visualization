@@ -38,7 +38,10 @@ jobs:
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
+      # Full history + tags: the app's footer shows the build version (#216).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:

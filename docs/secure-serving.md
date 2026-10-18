@@ -114,15 +114,17 @@ rebuilt while the server runs — no restart, no failed requests:
   ETags carry the snapshot's epoch.
 - A failed rebuild leaves the current snapshot in service; the error goes to
   the log (and to the caller of `anofox_serve_refresh`).
-- `GET /healthz` reports `epoch` (1 at start, +1 per refresh),
-  `snapshot_age_s`, `refresh_s`, `refreshing` and `refresh_failed` (no error
-  text — `/healthz` is public), and `limits`: the effective limits (`threads`,
-  `max_queries`, `max_rows`, `max_response_bytes`, `max_inflight_bytes`,
-  `cache_bytes`, `timeout_ms`, `memory_limit`, `duckdb_threads`) and their use
-  (`queries_running`, `queries_waiting`, `inflight_bytes`,
-  `inflight_peak_bytes`, `refused_inflight`, `refused_queries`). With `auth`,
-  a caller that is not signed in through the proxy gets only
-  `{"status":"ok"}`.
+- `GET /healthz` reports `version` (the build version, #216), `epoch` (1 at
+  start, +1 per refresh), `snapshot_age_s`, `refresh_s`, `refreshing` and
+  `refresh_failed` (no error text — `/healthz` is public), and `limits`: the
+  effective limits (`threads`, `max_queries`, `max_rows`,
+  `max_response_bytes`, `max_inflight_bytes`, `cache_bytes`, `timeout_ms`,
+  `memory_limit`, `duckdb_threads`) and their use (`queries_running`,
+  `queries_waiting`, `inflight_bytes`, `inflight_peak_bytes`,
+  `refused_inflight`, `refused_queries`). With `auth`, a caller that is not
+  signed in through the proxy gets only `{"status":"ok"}`; `version` (like the
+  rest of this body) appears only without `auth`, or for a caller signed in
+  with no dashboard scoping.
 - While a rebuild runs, the old and the new snapshot both exist: plan for twice
   the snapshot's disk and memory.
 

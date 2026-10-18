@@ -293,7 +293,7 @@ is 216 MB, and each replica used about 190 MB with the 2M-row demo data:
 
 ```sh
 docker compose -f deploy/compose.yaml up --build -d
-curl -k -u viewer:demo https://localhost:8443/healthz      # {"status":"ok","dashboards":1,"epoch":1,...}
+curl -k -u viewer:demo https://localhost:8443/healthz      # {"status":"ok","version":"v2026.10.18","dashboards":1,"epoch":1,...}
 # open https://localhost:8443/d/ops (user viewer, password demo)
 docker compose -f deploy/compose.yaml stop dash1           # its viewers move to dash2 at once
 docker compose -f deploy/compose.yaml down

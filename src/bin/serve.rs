@@ -121,7 +121,7 @@ fn parse_args() -> Opts {
                 std::process::exit(0)
             }
             "--version" | "-V" => {
-                println!("serve {}", env!("CARGO_PKG_VERSION"));
+                println!("serve {}", anofox_visualization::BUILD_VERSION);
                 std::process::exit(0)
             }
             "--port" | "-p" => {

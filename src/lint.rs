@@ -2435,26 +2435,52 @@ fn sql_error(
 
 /// Does a statement read a file: a `read_…` / `glob` / `parquet_…` table
 /// function, or a quoted path with a data-file extension (`FROM 'x.parquet'`)?
-/// (`requires/on-setup`; a `SET VARIABLE` that builds a path reads nothing.)
+/// (`requires/on-setup`.) A `SET` is read token by token (#166): one whose
+/// subquery reads a file reads it, one that builds a path reads nothing.
 fn reads_a_file(sql: &str) -> bool {
     let code = sql.to_ascii_lowercase();
-    if code.trim_start().starts_with("set ") {
-        return false;
+    if sql::lex::first_keyword(&code).as_deref() == Some("SET") {
+        return set_reads_a_file(&code);
     }
     ["read_", "glob(", "parquet_", "sniff_csv("]
         .iter()
         .any(|f| code.contains(f))
-        || [
-            ".parquet'",
-            ".csv'",
-            ".json'",
-            ".jsonl'",
-            ".tsv'",
-            ".xlsx'",
-            ".ndjson'",
-        ]
-        .iter()
-        .any(|e| code.contains(e))
+        || DATA_FILE_EXTS
+            .iter()
+            .any(|e| code.contains(&format!("{e}'")))
+}
+
+/// The extensions of a quoted data-file path (`FROM 'x.parquet'`).
+const DATA_FILE_EXTS: [&str; 7] = [
+    ".parquet", ".csv", ".json", ".jsonl", ".tsv", ".xlsx", ".ndjson",
+];
+
+/// A `SET` (lowercased) reads a file when it calls a read function
+/// (`read_parquet(…)`, `glob(…)`, …) or selects `FROM` a quoted data-file
+/// path. Strings are tokens of their own, so `… || '/a.parquet'` or
+/// `'read_parquet(x)'` read nothing.
+fn set_reads_a_file(code: &str) -> bool {
+    use sql::lex::TokKind;
+    let toks: Vec<_> = sql::lex::tokenize(code)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    toks.windows(2).any(|w| {
+        let (word, next) = (w[0].text(code), &w[1]);
+        match w[0].kind {
+            TokKind::Word if next.is_punct(code, '(') => {
+                word.starts_with("read_")
+                    || word.starts_with("parquet_")
+                    || word == "glob"
+                    || word == "sniff_csv"
+            }
+            TokKind::Word if word == "from" && next.kind == TokKind::String => {
+                let path = next.text(code).trim_end_matches('\'');
+                DATA_FILE_EXTS.iter().any(|e| path.ends_with(e))
+            }
+            _ => false,
+        }
+    })
 }
 
 /// Check `requires` the way the locked server does (see
@@ -2739,6 +2765,26 @@ mod design_tests {
         )
         .is_empty());
         assert!(set("CREATE TEMP VIEW v AS SELECT * FROM 'data/a.parquet';").is_empty());
+        // A SET VARIABLE whose subquery reads the file reads it (#166) …
+        assert!(set(
+            "SET VARIABLE x = (SELECT max(v) FROM read_parquet(getvariable('rd') || '/a'));"
+        )
+        .is_empty());
+        assert!(set("SET VARIABLE x = (SELECT max(v) FROM 'data/a.parquet');").is_empty());
+        assert!(
+            set("SET VARIABLE n = (SELECT count(*) FROM glob(getvariable('rd') || '/*'));")
+                .is_empty()
+        );
+        // … one that builds a path, reads a table, or names a read function
+        // only in a string reads nothing.
+        for stmt in [
+            "SET VARIABLE f = getvariable('rd') || '/a.parquet';",
+            "SET\nVARIABLE f = 'data/a.parquet';",
+            "SET VARIABLE f = 'read_parquet(x)';",
+            "SET VARIABLE x = (SELECT max(v) FROM t);",
+        ] {
+            assert_eq!(codes(&set(stmt)), ["requires/on-setup"], "{stmt}");
+        }
         // Malformed lines.
         let d = lint("${rd}/a |", &vars, &["/srv/runs/r1/a"]);
         assert_eq!(codes(&d), ["requires/empty-alternative"]);
