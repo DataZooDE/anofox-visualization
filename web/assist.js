@@ -100,7 +100,7 @@ export function keyStore(session, local) {
 //   send(request, {signal, onText, onToolInput}) → Message
 // in the Anthropic Messages shape. The loop sees nothing else.
 
-// The SDK as a module (the browser imports it from jsDelivr).
+// The SDK as an ES module (the vendored file, SDK_URL).
 export async function loadSdk(url = SDK_URL) {
   return (await import(url)).default;
 }
@@ -278,6 +278,7 @@ export function classifyStatement(sql, { known = new Set() } = {}) {
     case "CREATE": {
       const rest = (w1 === "OR" && w2 === "REPLACE" ? words.slice(3) : words.slice(1)).filter((w) => w !== "IF" && w !== "NOT" && w !== "EXISTS");
       if ((rest[0] === "TEMP" || rest[0] === "TEMPORARY") && ["TABLE", "VIEW", "MACRO", "FUNCTION", "SEQUENCE"].includes(rest[1])) return reach(2, "temp");
+      if (["TABLE", "VIEW", "MACRO", "FUNCTION", "SEQUENCE"].includes(rest[0])) return write("create", `CREATE ${rest[0]} (a CREATE TEMP ${rest[0]} is allowed)`);
       return write("create", `CREATE ${rest.slice(0, 1).join(" ") || "…"}`);
     }
     case "LOAD":
@@ -298,16 +299,40 @@ export function classifyScript(sql, opts) {
 
 // ---- the parse tree: what a statement reads ----
 // DuckDB's parser (json_serialize_sql: parse only, nothing runs or binds)
-// gives every function and table a statement names. Never run for the
-// assistant, whatever the keyword class: a dynamic query (query,
-// query_table), a reader (read_*, *_scan, glob, …) of anything but a literal
-// path the dashboard already uses, a table named like a path or URL, and the
-// secrets and settings functions.
-const ALWAYS_DENIED = /^(query|query_table|getenv|duckdb_secrets|which_secret|current_setting|duckdb_settings|load_aws_credentials|http_\w+|httpfs_\w+)$/i;
+// gives every function and table a statement names. While the assistant
+// works, a table function runs only when it is on the allow-list below (an
+// unknown one, json_execute_serialized_sql, query() or an extension's
+// scanner included, is refused); a reader only with literal paths the
+// dashboard already uses; a scalar function never when it reaches outside
+// the session (secrets, settings, the environment, HTTP, another database,
+// a query held in a string); a table never when it is named like a path or
+// URL.
+const ALWAYS_DENIED =
+  /^(query|query_table|json_execute_serialized_sql|getenv|duckdb_secrets|which_secret|current_setting|duckdb_settings|load_aws_credentials|read_duckdb|http_\w+|httpfs_\w+|\w+_(attach|query|execute|exec|scan_attach)|(sqlite|postgres|mysql|odbc|shell|system)\w*)$/i;
 const READER = /^(read_\w+|\w+_scan|glob|sniff_csv|parquet_\w+|st_read\w*|iceberg_\w+|delta_\w+)$/i;
+// The table functions the assistant may use: the readers (checked for their
+// paths), generators and the catalog, and the anofox extensions' families
+// (anofox_forecast's ts_* / anofox_fcst_ts_*, anofox_statistics' models and
+// curves); plus the script's own temp table macros (bodies checked when made).
+const TABLE_READERS = new Set(
+  "read_csv read_csv_auto read_parquet parquet_scan read_json read_json_auto read_json_objects read_json_objects_auto read_ndjson read_ndjson_auto read_ndjson_objects read_text read_blob glob sniff_csv parquet_metadata parquet_schema parquet_file_metadata parquet_kv_metadata st_read read_xlsx".split(" ")
+);
+const TABLE_ALLOWED = new Set(
+  "range generate_series unnest repeat repeat_row json_each json_tree histogram histogram_values summary duckdb_tables duckdb_views duckdb_columns duckdb_schemas duckdb_databases duckdb_types duckdb_functions duckdb_keywords duckdb_constraints duckdb_indexes duckdb_sequences duckdb_dependencies duckdb_extensions duckdb_variables pragma_table_info pragma_version pragma_platform".split(" ")
+);
+const ANOFOX_TABLE =
+  /^((anofox_fcst_)?ts_[a-z0-9_]+|(ols|wls|ridge|elasticnet|huber|quantile|logistic|poisson|binomial|gamma|negbinom|tweedie|theil_sen|ransac|bls|rls|pls|nnls|lars|isotonic|alm|aft|glmm)_[a-z_]+_by|(acf|pacf|roc_curve|pr_curve|calibration_curve|kaplan_meier|eb_shrink|tukey_hsd|dunn_test|pairwise_t_test|aid|aid_anomaly)_by)$/;
+export const tableAllowed = (f) => TABLE_READERS.has(f) || TABLE_ALLOWED.has(f) || ANOFOX_TABLE.test(f);
+
+// The temp macro a statement makes (its lower-case name), or null.
+export function macroDefined(sql) {
+  const m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TEMP(?:ORARY)?\s+(?:MACRO|FUNCTION)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|\w+)/i.exec(code(sql));
+  return m ? m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase() : null;
+}
 
 // The parse-tree findings of one tree: [reason, …] (empty: nothing denied).
-export function treeDenials(tree, known = new Set()) {
+// `macros` = the script's temp macros made so far (callable as tables).
+export function treeDenials(tree, known = new Set(), macros = new Set()) {
   const out = [];
   const strings = (n) => {
     if (n?.class === "CONSTANT") return n.value?.value != null && !n.value.is_null ? [String(n.value.value)] : [];
@@ -320,6 +345,11 @@ export function treeDenials(tree, known = new Set()) {
   const walk = (n) => {
     if (Array.isArray(n)) return n.forEach(walk);
     if (!n || typeof n !== "object") return;
+    if (n.type === "TABLE_FUNCTION" && typeof n.function?.function_name === "string") {
+      const f = n.function.function_name.toLowerCase();
+      const own = macros.has(f) && !n.function.catalog && !n.function.schema;
+      if (!own && !tableAllowed(f)) out.push(`${f}(), a table function the assistant may not use`);
+    }
     if (typeof n.function_name === "string") {
       const f = n.function_name;
       if (ALWAYS_DENIED.test(f)) out.push(`${f}()`);
@@ -352,10 +382,14 @@ export function embeddedQueries(sql) {
 }
 
 // What DuckDB's parser finds in one statement: [] (fine) or the reasons it
-// must not run. `run` = a scratch runner.
-export async function inspect(sql, run, known = new Set()) {
+// must not run. `run` = a scratch runner; `macros` = the script's temp macros
+// made before this statement (one named like a denied function or a reader is
+// itself refused).
+export async function inspect(sql, run, known = new Set(), macros = new Set()) {
   const qs = embeddedQueries(sql);
   if (qs === null) return ["a statement whose query can't be checked"];
+  const made = macroDefined(sql);
+  if (made && (ALWAYS_DENIED.test(made) || READER.test(made))) return [`a macro named ${made}`];
   const out = [];
   for (const q of qs) {
     let j;
@@ -366,7 +400,7 @@ export async function inspect(sql, run, known = new Set()) {
     }
     if (j.error !== false) return [`DuckDB can't read it as a query (${String(j.error_message || "").slice(0, 80)})`];
     if ((j.statements || []).length !== 1) return ["more than one statement"];
-    out.push(...treeDenials(j.statements, known));
+    out.push(...treeDenials(j.statements, known, macros));
   }
   return out;
 }
@@ -813,13 +847,43 @@ async function checkProposal(input, tools) {
 // sample_rows_allowed): only then does run_sql return text values; `known` = the
 // paths and URLs the current SQL already reads.
 export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Set(), commonValues = () => true, sampleRows = () => false, timeoutMs = LIMITS.timeoutMs, checkQueryMs = LIMITS.checkQueryMs, checkMs = LIMITS.checkMs, profiles = new Map() }) {
-  const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs });
+  // The check at the execution point: every statement of every query a tool
+  // runs from the model's SQL (the planned statements, the lint's prelude, its
+  // input SETs, its @requires globs, run_sql's query) is classified and its
+  // parse tree inspected in the scratch session, just before it runs.
+  let allowed = known; // + a check's literal @requires paths
+  const trees = new Map(); // the parser's answers (prelude statements repeat)
+  const guard = async (piece, { query, state }) => {
+    const macros = (state.macros ||= new Set());
+    const k = classifyStatement(piece, { known: allowed });
+    const why = k.cls === 3 ? [k.reason || k.kind] : await inspect(piece, cachedParse(query), allowed, macros);
+    if (why.length) throw new Error(`not run: ${why.join("; ")}`);
+    const made = macroDefined(piece);
+    if (made) macros.add(made);
+  };
+  const cachedParse = (query) => async (sql) => {
+    if (!trees.has(sql)) {
+      if (trees.size > 5000) trees.clear();
+      trees.set(sql, await query(sql));
+    }
+    return trees.get(sql);
+  };
+  // `own`: the tools' own fixed queries (the catalog, profiles, the parser);
+  // `run` and `typed`: SQL the model wrote, through the guard.
+  const own = scratchRunner(db, { prepare, timeoutMs: checkQueryMs });
+  const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs, guard });
   const typed = scratchRunner(db, {
     prepare,
     timeoutMs,
+    guard,
     toRows: (res) => ({ types: res.schema.fields.map((f) => [f.name, String(f.type)]), rows: JSON.parse(rowsJson(res)) }),
   });
-  const rowsOf = async (sql) => JSON.parse(await run(sql));
+  const rowsOf = async (sql) => JSON.parse(await own(sql));
+  // Without sample rows no text value leaves, error messages included (a
+  // conversion error quotes the value it could not read).
+  const quiet = () => !(sampleRows() && commonValues());
+  const hush = (msg) => (quiet() ? String(msg).replace(/'(?:[^']|'')*'/g, "'…'") : String(msg));
+  let columnNames = null; // every column name of the catalog's tables
   let catalog = null;
   const tables = async () => {
     if (!catalog)
@@ -863,19 +927,43 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
       if (/^\s*(DESCRIBE|SHOW|SUMMARIZE|EXPLAIN)\b/i.test(code(s))) throw new Error("refused: use profile_table, or a SELECT, instead");
       const k = classifyStatement(s, { known });
       if (k.cls !== 1) throw new Error(`refused: run_sql runs read-only queries only (${k.reason || k.kind})`);
-      if ((await serializable(s, run)) !== true) throw new Error("refused: DuckDB does not read this as one read-only query");
-      const denied = await inspect(s, run, known);
+      if ((await serializable(s, own)) !== true) throw new Error("refused: DuckDB does not read this as one read-only query");
+      const denied = await inspect(s, own, known);
       if (denied.length) throw new Error(`refused: ${denied.join("; ")}`);
       const q = `SELECT * FROM (${s.replace(/;\s*$/, "")}) AS _q LIMIT ${LIMITS.runRows + 1}`;
-      const { types, rows } = await typed(q);
-      return resultProfile(types, rows, { values: sampleRows() && commonValues() });
+      allowed = known;
+      let res;
+      try {
+        res = await typed(q);
+      } catch (e) {
+        throw new Error(hush((e && e.message) || e));
+      }
+      if (!quiet()) return resultProfile(res.types, res.rows, { values: true });
+      // A column name the query does not write and no table has may come
+      // from the data (PIVOT … ON a column): withheld.
+      if (!columnNames) columnNames = new Set((await rowsOf("SELECT DISTINCT lower(column_name) AS c FROM duckdb_columns()")).map((r) => r.c));
+      const written = new Set(literals(s).concat(code(s).match(/[A-Za-z_][\w$]*/g) || []).map((w) => w.toLowerCase()));
+      const compact = code(s).replace(/\s+/g, "").toLowerCase();
+      const named = (n) => {
+        const l = String(n).toLowerCase();
+        return written.has(l) || columnNames.has(l) || (l.includes("(") && compact.includes(l.replace(/\s+/g, ""))); // an expression's own text (sum(amount))
+      };
+      return resultProfile(res.types, res.rows, { names: named });
     },
     // The strict check of a whole script: {ok, text, issues}.
     async check(sql) {
       const until = Date.now() + checkMs;
-      const res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => Date.now() > until });
-      if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
       const planned = JSON.parse(plan(sql));
+      // A literal @requires path (the gate refuses URLs and ${…}) is one the
+      // dashboard uses: the lint may glob() it.
+      allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
+      let res;
+      try {
+        res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => Date.now() > until });
+      } finally {
+        allowed = known;
+      }
+      if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
       const answer = (p) => {
         for (const [q, a] of res.answers) if (q.endsWith(`${p.sql};`)) return a;
         return null;
@@ -886,7 +974,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         const a = answer(p);
         const out = { n: i + 1, kind };
         if (roles.length) out.roles = roles;
-        if (a?.error) out.error = a.error.split("\n")[0].slice(0, 200);
+        if (a?.error) out.error = hush(a.error.split("\n")[0]).slice(0, 200);
         else if (a && kind !== "setup") out.rows = JSON.parse(a.rows || "[]").length;
         return out;
       });
@@ -896,7 +984,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         ok: res.ok,
         summary: res.summary,
         statements,
-        diagnostics: res.diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: d.message })),
+        diagnostics: res.diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: d.code === "sql-error" ? hush(d.message) : d.message })),
       });
       return { ok: res.ok, text, issues, diagnostics: res.diagnostics, statements };
     },
@@ -906,14 +994,20 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     // secrets / settings function is not run during the loop at all: such a
     // statement can only reach the user's session through Apply, where it is
     // listed (proposalReaders) and confirmed.
+    // An @requires alternative that is a URL, or that names a variable
+    // (${…}: its value comes from the session, and the lint would glob() it),
+    // is refused too.
     async gate(sql) {
       const refused = [];
+      const macros = new Set();
       for (const p of JSON.parse(plan(sql))) {
         const k = classifyStatement(p.sql, { known });
         let why = k.cls === 3 ? [k.reason || k.kind] : [];
-        for (const alt of (p.requires || []).flat(2)) if (typeof alt === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(alt)) why.push(`@requires ${alt}`);
-        if (!why.length) why = await inspect(p.sql, run, known);
+        for (const alt of requiresOf(p)) if (looksLikeUrl(alt) || alt.includes("${")) why.push(`@requires ${alt}`);
+        if (!why.length) why = await inspect(p.sql, own, known, macros);
         if (why.length) refused.push({ sql: p.sql, reason: why.join("; ") });
+        const made = macroDefined(p.sql);
+        if (made) macros.add(made);
       }
       return { allowed: !refused.length, statements: refused };
     },
@@ -921,23 +1015,31 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
   return tools;
 }
 
+// A planned statement's @requires alternatives (its own and its tab's).
+const requiresOf = (p) => [p.requires || [], p.tab_requires || []].flat(3).filter((x) => typeof x === "string");
+const looksLikeUrl = (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+
 const INPUT_ROLES = new Set(["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"]);
 
-// A query result as the model gets it: no rows, a profile per column.
-export function resultProfile(types, rows, { values = false } = {}) {
+// A query result as the model gets it: no rows, a profile per column. Without
+// `values` (sample rows off) no text value is in it: the range of numbers
+// and of DATE / TIMESTAMP columns only, and a column whose name `names(n)`
+// rejects (one the data may have made) is listed by its type alone.
+export function resultProfile(types, rows, { values = false, names = () => true } = {}) {
   const capped = rows.length > LIMITS.runRows;
   const data = capped ? rows.slice(0, LIMITS.runRows) : rows;
+  let withheld = 0;
   const columns = types.map(([name, type]) => {
     const vals = data.map((r) => r[name]);
     const nonnull = vals.filter((v) => v != null);
-    const c = { name, type, empty: vals.length - nonnull.length };
+    const c = values || names(name) ? { name, type, empty: vals.length - nonnull.length } : { name: `column ${++withheld}`, name_withheld: true, type, empty: vals.length - nonnull.length };
     const distinct = new Set(nonnull.map((v) => JSON.stringify(v)));
     c.distinct = distinct.size;
     const nums = nonnull.filter((v) => typeof v === "number" && Number.isFinite(v));
     if (nums.length === nonnull.length && nums.length) {
       c.min = Math.min(...nums);
       c.max = Math.max(...nums);
-    } else if (nonnull.length && nonnull.every((v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v))) {
+    } else if (nonnull.length && /^(date|timestamp)/i.test(type) && nonnull.every((v) => typeof v === "string")) {
       const s = [...nonnull].sort();
       c.min = s[0];
       c.max = s[s.length - 1];

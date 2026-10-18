@@ -53,11 +53,14 @@ function knownJson(known) {
 // follow on the search path), so a script over an added file still lints.
 // `prepare(sql)` readies what a statement needs first (extensions, files);
 // `toRows(result)` turns a DuckDB-Wasm result into the rows' JSON text.
+// `guard(piece, {query, state})` sees every statement before anything of the
+// query runs (prepare included) and throws to refuse it; `query(sql)` runs a
+// helper query in the same scratch session, `state` lives for one call (the
+// assistant's parse-tree check at the execution point).
 // Works with the async (browser) and the blocking (Node) DuckDB-Wasm alike.
-export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0 } = {}) {
+export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0, guard } = {}) {
   let n = 0;
   return async (sql) => {
-    if (prepare) await prepare(sql);
     const c = await db.connect();
     const name = `anofox_lint_${++n}`;
     let home = null;
@@ -67,9 +70,15 @@ export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0 } 
       await c.query(`ATTACH ':memory:' AS ${name}`);
       await c.query(`USE ${name}`);
       await c.query(`SET search_path = '${name}.main,${home.replace(/'/g, "''")}.main'`);
+      const pieces = splitStatements(sql);
+      if (guard) {
+        const ctx = { query: async (q) => rowsJson(await runOne(c, q)), state: {} };
+        for (const piece of pieces) await guard(piece, ctx);
+      }
+      if (prepare) await prepare(sql);
       const work = (async () => {
         let last = null;
-        for (const piece of splitStatements(sql)) last = await runOne(c, piece);
+        for (const piece of pieces) last = await runOne(c, piece);
         return toRows(last || { schema: { fields: [] }, toArray: () => [] });
       })();
       if (!timeoutMs) return await work;
@@ -112,6 +121,8 @@ async function runOne(c, sql) {
     const msg = String((e && e.message) || e);
     if (/multiple statements/i.test(msg)) throw new Error(`not run: DuckDB reads more than one statement in: ${sql.slice(0, 80)}`);
     if (/^Parser Error/i.test(msg)) throw e;
+    // Any other prepare() error (a binder error, a missing table) is left to
+    // send(), which reports it and also takes a single statement only.
   }
   const reader = await c.send(sql);
   const schema = reader.schema;
