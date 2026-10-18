@@ -1032,6 +1032,12 @@ const tools = A.wasmTools({
     ["SELECT (SELECT max(email) FROM customers) ::LOCALE;", "locale/unknown"],
     ["SELECT (SELECT max(email) FROM customers) ::ASOF;", "asof/unparseable"],
     ["SELECT 1 ::METRIC, (SELECT max(email) FROM customers) ::TRANSITION;", "transition/unknown"],
+    // R3-1: ::DRILL levels from row values name the clashing variables
+    [
+      "SELECT (SELECT 'g: a > ' || string_agg(regexp_replace(email, '[^A-Za-z0-9]', '_', 'g'), ' > ') FROM customers) ::DRILL, 'a' AS x ::XAXIS, 1 AS y ::BARCHART;\n" +
+        "SELECT (SELECT 'h: b > ' || string_agg(regexp_replace(email, '[^A-Za-z0-9]', '_', 'g'), ' > ') FROM customers) ::DRILL, 'a' AS x ::XAXIS, 1 AS y ::BARCHART;",
+      "interaction/name-clash",
+    ],
   ]) {
     const r = await tools.check(sql);
     const d = JSON.parse(r.text).diagnostics.find((x) => x.code === code);

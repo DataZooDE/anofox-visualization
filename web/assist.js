@@ -1119,12 +1119,13 @@ export function quietError(msg, named = () => false) {
 // message only for a reviewed code whose message holds fixed text, counts,
 // role tokens or the script's own text (headers, @requires, variable names);
 // sql-error as quietError; any other code (a new one included) keeps its
-// code, statement and severity only.
+// code, statement and severity only. interaction/name-clash is not on it:
+// it names variables that ::DRILL / ::SELECT_AS take from row values.
 const SAFE_CODES = new Set(
   ("animate/reveal-no-xline annotation/unpaired callout/no-text chart/needs-xaxis colors/no-category design/many-series " +
    "design/pie-slices design/raw-table design/too-many-panels design/ungrouped-kpis design/unsorted-bars design/untitled-chart " +
    "header/bad-certified header/empty-group header/empty-owner header/long-description header/long-group header/too-many-tags " +
-   "input/many-buttons interaction/name-clash kpi/no-delta kpi/sparkline-not-list map/lat-lon-swapped map/mercator-choropleth " +
+   "input/many-buttons kpi/no-delta kpi/sparkline-not-list map/lat-lon-swapped map/mercator-choropleth " +
    "map/too-many-marks requires/bad-variable requires/empty-alternative requires/on-setup requires/tab-always-hidden " +
    "requires/unknown-variable theme/multiple thresholds/in-table thresholds/no-column track/no-chart").split(" ")
 );
