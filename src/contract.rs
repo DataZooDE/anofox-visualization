@@ -128,6 +128,8 @@ fn render_plot(
         _ => rows,
     };
     let name = match plot {
+        // No rows have no schema: the "No data" note, as for every macro.
+        "auto" if rows.is_empty() => "auto",
         "auto" => detect(rows)?,
         p if PLOTS.contains(&p) => p,
         p => {
@@ -655,6 +657,8 @@ impl Table<'_> {
         let hints: Vec<String> = missing
             .iter()
             .filter_map(|m| match (names::near(m, &keys), names::also(m)) {
+                // present, but NULL (or NaN, which to_json writes as null) throughout
+                _ if keys.contains(m) => Some(format!("{m} is NULL in every row")),
                 (Some(k), _) => Some(format!("did you mean `{k}` for {m}?")),
                 (None, Some(a)) => Some(format!("{m} is also read from {a}")),
                 (None, None) => None,
@@ -1303,6 +1307,19 @@ mod tests {
     }
 
     #[test]
+    fn tests_label_group_and_method() {
+        // ts_stationarity_by reshaped: two tests per series, no test_id.
+        let rows = r#"[{"id":"A","method":"ADF","statistic":-0.7,"p_value":0.85},
+            {"id":"A","method":"KPSS","statistic":2.1,"p_value":0.01},
+            {"id":"B","method":"ADF","statistic":-0.2,"p_value":0.94},
+            {"id":"B","method":"KPSS","statistic":2.0,"p_value":0.01}]"#;
+        let s = go("auto", rows, "{}").unwrap();
+        for l in ["A · ADF", "A · KPSS", "B · ADF", "B · KPSS"] {
+            assert!(s.contains(l), "{l}");
+        }
+    }
+
+    #[test]
     fn missing_columns_are_explained() {
         // Misnamed: the near miss is suggested.
         let e = go("terms", r#"[{"term":"a","estimat":1}]"#, "{}")
@@ -1315,6 +1332,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("estimate is also read from coef, params"), "{e}");
+        // Present but NULL throughout (a producer's NaN): said so.
+        let e = go("summary", r#"[{"metric":"m","value":null}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("value is NULL in every row"), "{e}");
         // A renamed column shows as such among the columns got.
         let e = go("diagnostics", r#"[{".fitted":1}]"#, "{}")
             .unwrap_err()
@@ -1542,7 +1564,9 @@ mod tests {
 
     #[test]
     fn empty_input_is_a_note() {
-        let s = go("terms", "[]", "{}").unwrap();
-        assert!(s.contains("No data"));
+        for plot in ["terms", "auto"] {
+            let s = go(plot, "[]", "{}").unwrap();
+            assert!(s.contains("No data"), "{plot}");
+        }
     }
 }

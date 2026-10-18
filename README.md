@@ -341,6 +341,29 @@ python3 scripts/tabular_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_ext
 
 CI job *anofox-tabular conformance*.
 
+### Conformance with anofox-forecast
+
+`scripts/forecast_conformance.py` does the same for
+[anofox-forecast](https://github.com/DataZooDE/anofox-forecast). That extension
+does not tag its functions yet, so the producers are a curated registry: every
+`ts_*` table macro and aggregate of the loaded build is either a producer (51
+today: forecasts, backtests, conformal intervals, decompositions, changepoints,
+peaks, periods, metrics, residual tests, features) or listed as out of scope
+with a reason (fills, drops, CV splits, validators); an unlisted function fails
+the run. A producer is *direct* when its output plots as returned and an
+*adapter* when the harness reshapes it first (the reshaping SQL is in the
+script — what you would write today). It runs on a three-series daily panel
+(weekly season, a level shift, an exogenous driver) and accepts both builds:
+
+```bash
+duckdb -c "INSTALL anofox_forecast FROM community"                                  # the release
+duckdb -unsigned -c "FORCE INSTALL anofox_forecast FROM 'https://get.erpl.io'"      # or main
+python3 scripts/forecast_conformance.py --duckdb duckdb --ext /tmp/viz.duckdb_extension --out /tmp/forecast-viz
+```
+
+Producer bugs of a released build are listed in the script (`KNOWN`) and
+reported `XFAIL`. CI runs both builds (job *anofox-forecast conformance*).
+
 ## Claude Code plugin
 
 The repository ships a [Claude Code](https://claude.com/claude-code) plugin with five skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.

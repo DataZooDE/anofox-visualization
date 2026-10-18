@@ -60,6 +60,11 @@ SELECT anofox_plot_terms(c) LIKE '<svg%No data%' FROM (SELECT * FROM coefs WHERE
 ----
 true
 
+query I
+SELECT anofox_plot(c) LIKE '<svg%No data%' FROM (SELECT * FROM coefs WHERE false) c;
+----
+true
+
 # ── prediction ───────────────────────────────────────────────────────────────
 statement ok
 CREATE TABLE pred AS SELECT i AS x, CASE WHEN i < 8 THEN i + 0.5 END AS y, i::DOUBLE AS yhat,
