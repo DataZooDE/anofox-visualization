@@ -378,7 +378,7 @@ pub(super) fn tests(
         || levels(t, "effect_name").iter().any(|e| e.contains("ratio"))
         || t.has("odds_ratio");
     // Rows without a comparison label: one test per group → the group is the
-    // label; else the method.
+    // label; else the method; several methods per group → both (`A · ADF`).
     let labelled = rows.iter().any(|r| r.label.is_some());
     let mut panels: Vec<(Option<String>, Vec<&TestRow>)> = Vec::new();
     if labelled && group.is_some() {
@@ -392,10 +392,15 @@ pub(super) fn tests(
         panels.push((None, rows.iter().collect()));
     }
     let label_of = |r: &TestRow| -> String {
+        let method = (methods.len() > 1).then(|| r.method.clone()).flatten();
         r.label
             .clone()
+            .or_else(|| match (&r.group, &method) {
+                (Some(g), Some(m)) => Some(format!("{g} · {m}")),
+                _ => None,
+            })
             .or_else(|| r.group.clone())
-            .or_else(|| (methods.len() > 1).then(|| r.method.clone()).flatten())
+            .or(method)
             .unwrap_or_else(|| "test".into())
     };
     let level = t

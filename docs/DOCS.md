@@ -118,9 +118,9 @@ terminal.
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
-| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines; alone: the next table's 'column: rules \| …' |
+| `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
-| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
+| `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
 | `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
@@ -144,9 +144,9 @@ terminal.
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
-| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red) |
-| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells, high = green (scores, accuracy) |
-| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells around zero: negative red, positive green (deltas) |
+| `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red); on a ::HEATMAP / ::CALENDAR its tiles, good → warn → bad |
+| `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells (or a ::HEATMAP's tiles), high = green (scores, accuracy) |
+| `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells (or a ::HEATMAP's tiles) around zero: negative red, positive green (deltas) |
 | `::LINK` | `::DRILLTHROUGH`, `::DRILL_THROUGH`, `::HREF` | table | drill-through on a chart click / a table link cell: '#Tab', '?v.x={value}', '/d/<id>?v.x={value}' or an https: URL ({value}, {column} placeholders) |
 | `::BADGE` | `::STATUS`, `::PILL` | table | render a table column as status pills |
 | `::PLAIN` | `::NOBAR` | table | a plain table column (no in-cell bar) |
@@ -230,6 +230,19 @@ the variable can stay a short identifier:
 
 ```sql
 SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
+```
+
+An input renders **where it appears in the script**: before the first `::TAB`
+it sits above the tabs, after a `::TAB` (or `::SUBTAB`) inside that tab, shown
+only while the tab is. Put an input in the tab whose panels it changes, and
+keep only those that act on every tab (or on a KPI row above the tabs) at the
+top. Its variable is global either way — any panel can read it, it lands in
+the URL as `?v.name=` — and a `#Tab?v.name=…` link still sets it.
+
+```sql
+SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
+SELECT 'Detail'::TAB;
+SELECT 10 AS min_n ::NUMBER, 'Minimum orders'::LABEL;  -- only on "Detail"
 ```
 
 Inputs work in the **browser builder** and **`serve`** (they re-query on change).
@@ -956,6 +969,31 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   ramp is used instead: two hues around a neutral midpoint at 0, both arms
   scaled to the larger |end|, so −2…+10 reads as a little red and a lot of blue.
   A theme's explicit `sequential` pair is used as given.
+- **Status colours** — when a value is good or bad, not just big or small:
+  - `''::COLORSCALE` — a continuous green → yellow → red ramp, low = good
+    (`::COLORSCALE_HIGH_GOOD`: high = good; `::COLORSCALE_DIVERGING`: negative
+    red, positive green around a neutral 0). The colourbar keeps the value
+    format.
+  - `'>=50:bad; >=20:warn; good'::THRESHOLDS` — one status colour per band
+    (the same rules as a KPI, gauge or table cell), with a stepped legend
+    naming the bands high to low: `≥ 50%`, `20%–50%`, `< 20%`. A value no
+    rule covers is neutral grey. `::THRESHOLDS` win over a `::COLORSCALE`.
+
+  The colours are the theme's `positive` / `warning` / `negative`, tinted
+  towards the card — palest for good, strongest for bad (in dark mode dimmest →
+  brightest) — so the steps differ in lightness too and stay apart in the
+  `colorblind` theme, under colour-vision deficiency and in greyscale. Tooltips
+  still show the value. `::CALENDAR` and `::TRACK` heatmap strips take the same
+  roles. The linter flags a colour scale on a chart without tiles, both roles
+  at once, and rules in another unit than the values (fractions 0–1 against
+  `>=50`).
+
+  ```sql
+  SELECT ds::XAXIS, item::YAXIS, 100 * p_out::HEATMAP, 'percent'::YFORMAT,
+         '>=50:bad; >=20:warn; good'::THRESHOLDS,
+         'Chance each item has run out by that day'::TITLE
+  FROM projection ORDER BY rnk, ds;
+  ```
 - **Labels** (`::DATALABELS`): the short value (`$1,235`, `12K`, `1,2 Mio.` in
   `de-DE`), dark text on light cells and light text on dark ones; the font size
   fits the cell unless the role's value sets it.
@@ -1876,7 +1914,9 @@ route, a point) is a mark keyed by its **`::CATEGORY`** — or, without one, by
 its **`::LABEL`** (a choropleth's region name):
 
 - **Hover** shows the feature's `::LABEL` as the heading (several lines with
-  `chr(10)`), then its series and measure. The plain `<title>` is unchanged.
+  `chr(10)`), then its series and measure, and lights that key up on every
+  map that has it (a van's whole route on both maps); a line is hoverable a
+  few pixels either side. The plain `<title>` is unchanged.
 - **Click** highlights every feature of that key and dims the rest, linked
   across panels like any series — clicking `Van 3` on one map picks out van 3
   on every map (and every chart) that has it. It sets `getvariable('selected')`
@@ -1905,7 +1945,15 @@ Features are drawn grouped by colour (in the order of the legend), so a layer
 meant to sit on top — a marker around some points — needs a key that sorts
 after the others, and should leave the point it marks uncovered (a ring rather
 than a disc) so the point stays clickable. The brush and the ◧ value filter
-are not offered on maps. See *"Which van serves which stop tomorrow?"*.
+are not offered on maps.
+
+A **`::COLORS`** level map beside the `::CATEGORY` (`'Depot:neutral; Late
+stop:bad'`) pins the levels it names to a status colour or `#rrggbb`, first in
+the legend; the other levels keep the palette in sorted order from its first
+slot, so a named level missing from one map doesn't shift the colours of the
+rest. An **`::XAXIS`** keys each feature for a **`::STORY`**: one caption per
+x, and a step lights the features with that x — a route leg by leg, with a
+Play button. See *"Which van serves which stop tomorrow?"*.
 
 #### Viewer state in the URL
 

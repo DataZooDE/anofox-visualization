@@ -250,9 +250,12 @@ SELECT 'Heatmap, calendar & candlestick'::TAB;
 -- Heatmap (::HEATMAP): x × y tiles; rows keep the SQL order (first on top),
 -- ::DATALABELS writes each value into its cell, a click cross-filters by the row.
 SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, ''::DATALABELS, 'Heatmap — week × channel'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
+-- Status colours: ::COLORSCALE (low = good), ::COLORSCALE_HIGH_GOOD or ::COLORSCALE_DIVERGING
+-- run green → yellow → red; '>=50:bad; >=20:warn; good'::THRESHOLDS colours in steps instead.
+SELECT 6::COL; SELECT week::XAXIS, channel::YAXIS, round(avg(value),1)::HEATMAP, ''::COLORSCALE_HIGH_GOOD, ''::DATALABELS, 'Status colours — high is good'::TITLE FROM m GROUP BY ALL ORDER BY week, channel;
 -- Candlestick (::CANDLESTICK): date + ::OPEN/::HIGH/::LOW + close as the measure.
-SELECT 6::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
-SELECT 12::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
+SELECT 4::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 30-day OHLC'::TITLE FROM ohlc WHERE d < DATE '2024-01-31' ORDER BY d;
+SELECT 8::COL; SELECT d::XAXIS, open::OPEN, high::HIGH, low::LOW, close::CANDLESTICK, 'Candlestick — 120-day OHLC'::TITLE FROM ohlc ORDER BY d;
 -- Calendar heatmap (::CALENDAR): a date axis + a daily value, laid out
 -- GitHub-style with month labels on top and weekday rows.
 SELECT 165::HEIGHT;
@@ -993,6 +996,7 @@ const FILE_SAMPLES = [
   "examples/inventory-twin.sql",
   "examples/optimize-replenishment.sql",
   "examples/supplier-lead-times.sql",
+  "examples/delivery-coverage.sql",
   "examples/supply-chain.sql",
   "examples/optimize-showcase.sql",
   "examples/optimize-production.sql",
@@ -11729,6 +11733,16 @@ function xTickLabel(el, x) {
 // again (or the background) clears.
 let dpSelected = null;
 
+// Hovering a map feature emphasises its series (a van's whole route and
+// stops) on every map that has it, so two maps side by side read together.
+function mapHoverEmph(series) {
+  for (const svg of document.querySelectorAll(".panel svg[data-map]")) {
+    const els = [...svg.querySelectorAll(".dp-hit")];
+    const has = series != null && els.some((el) => el.getAttribute("data-series") === series);
+    dpAnim.emph(svg, "hover", has ? (el) => (el.classList.contains("dp-hit") && el.getAttribute("data-series") !== series ? 0.2 : null) : null);
+  }
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -11793,6 +11807,20 @@ function attachHover() {
       pad.addEventListener("click", (e) => e.stopPropagation());
       el.after(pad);
     }
+    // A map's line (a route) is as thin to hover: a transparent, wider twin
+    // under the next features hands it hover and click.
+    if (isMapMark && el.tagName === "path" && el.getAttribute("fill") === "none") {
+      const pad = el.cloneNode(false);
+      for (const [k, v] of [["stroke", "transparent"], ["stroke-width", "9"], ["aria-hidden", "true"], ["class", "dp-map-pad"]])
+        pad.setAttribute(k, v);
+      for (const k of ["data-series", "data-row", "data-x", "data-label", "data-tip", "data-value", "style"]) pad.removeAttribute(k);
+      for (const type of ["mouseenter", "mousemove", "mouseleave", "click"])
+        pad.addEventListener(type, (e) => {
+          if (type === "click") e.stopPropagation();
+          el.dispatchEvent(new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey }));
+        });
+      el.after(pad);
+    }
     // The panel-level crosshair shows the tooltips of the chart's own marks;
     // a ::TRACK strip's marks show their own.
     const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
@@ -11809,6 +11837,7 @@ function attachHover() {
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
         tipRow(info, fill);
       tip.classList.add("show");
+      if (isMapMark) mapHoverEmph(series);
     });
     el.addEventListener("mousemove", (e) => {
       if (pointered()) return;
@@ -11816,6 +11845,7 @@ function attachHover() {
       tip.style.top = e.clientY + 14 + "px";
     });
     el.addEventListener("mouseleave", () => {
+      if (isMapMark) mapHoverEmph(null);
       if (pointered()) return;
       tip.classList.remove("show");
     });

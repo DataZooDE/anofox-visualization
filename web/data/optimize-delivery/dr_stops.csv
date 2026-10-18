@@ -1,41 +1,41 @@
 stop_id,name,kind,district,x_km,y_km,cages,service_min,deliver_by_min,weight
-1,Bistro 12 1,restaurant,North-West,-4.17,13.94,1,18.0,240,1.0
-2,Thai Garden 2,restaurant,South-West,-13.23,-9.2,3,13.0,300,1.0
-3,Backstube 3,bakery,North-West,-6.27,11.22,3,18.0,120,1.0
-4,Feinkost Weber 4,shop,North-West,-1.69,9.85,3,10.0,270,1.0
-5,Bio-Laden 5,shop,North-West,-4.13,12.28,3,13.0,210,3.0
-6,Trattoria Sole 6,restaurant,North-West,-3.96,4.89,1,19.0,270,1.0
-7,Trattoria Sole 7,restaurant,South-West,-2.76,-8.61,1,12.0,240,3.0
-8,Bäckerei Hahn 8,bakery,North-East,14.09,7.78,1,13.0,120,1.0
-9,Dorfladen 9,shop,North-West,-10.72,4.57,1,15.0,270,3.0
-10,Markthalle 10,shop,South-East,12.16,-4.04,1,8.0,240,1.0
-11,Feinkost Weber 11,shop,North-West,-14.38,0.05,2,18.0,270,1.0
-12,Werkskantine 12,canteen,North-East,9.6,14.23,3,16.0,240,3.0
-13,Bio-Laden 13,shop,South-East,9.95,-1.81,3,14.0,240,1.0
-14,Bistro 12 14,restaurant,North-West,-5.86,3.58,3,12.0,270,1.0
-15,Thai Garden 15,restaurant,South-West,-12.06,-10.87,3,17.0,270,3.0
-16,Kaffeehaus 16,café,South-East,1.88,-3.89,1,15.0,150,3.0
-17,Café Linde 17,café,North-East,4.04,10.25,1,19.0,180,1.0
-18,Trattoria Sole 18,restaurant,North-West,-10.1,9.95,2,9.0,270,3.0
-19,Trattoria Sole 19,restaurant,South-East,15.41,-2.71,3,19.0,300,3.0
-20,Trattoria Sole 20,restaurant,North-East,15.09,0.61,2,11.0,270,1.0
-21,Markthalle 21,shop,South-East,14.49,-2.64,3,9.0,240,1.0
-22,Gasthaus Krone 22,restaurant,South-East,6.64,-14.89,2,16.0,300,1.0
-23,Kaffeehaus 23,café,South-East,4.09,-15.43,1,17.0,180,1.0
-24,Thai Garden 24,restaurant,North-East,4.68,6.5,1,10.0,270,3.0
-25,Zum Anker 25,restaurant,North-West,-7.81,3.21,2,11.0,270,1.0
-26,Brotzeit 26,bakery,North-West,-3.77,2.36,2,11.0,90,1.0
-27,Bäckerei Korn 27,bakery,North-East,9.07,3.4,3,9.0,150,3.0
-28,Feinkost Weber 28,shop,North-West,-10.22,10.92,1,19.0,240,1.0
-29,Bistro 12 29,restaurant,North-East,11.45,11.28,3,18.0,240,1.0
-30,Trattoria Sole 30,restaurant,North-East,8.97,13.57,3,17.0,270,1.0
-31,Bäckerei Hahn 31,bakery,North-West,-10.89,3.67,2,17.0,150,1.0
-32,Feinkost Weber 32,shop,North-West,-14.44,4.85,3,12.0,270,1.0
-33,Espressobar 33,café,North-East,5.66,10.7,3,11.0,180,1.0
-34,Thai Garden 34,restaurant,South-West,-4.62,-16.13,1,9.0,300,1.0
-35,Kaffeehaus 35,café,North-East,10.17,2.23,3,8.0,180,1.0
-36,Trattoria Sole 36,restaurant,North-West,-3.52,13.19,3,14.0,240,1.0
-37,Café Linde 37,café,North-West,-16.77,4.47,1,18.0,180,1.0
-38,Backstube 38,bakery,North-East,14.13,2.11,2,10.0,120,1.0
-39,Bäckerei Korn 39,bakery,South-West,-6.59,-9.44,2,11.0,90,1.0
-40,Thai Garden 40,restaurant,North-East,13.14,10.92,3,12.0,240,1.0
+1,Bistro 12 1,restaurant,North-West,-4.0,14.0,1,18.0,240,1.0
+2,Thai Garden 2,restaurant,South-West,-13.0,-9.0,3,13.0,300,1.0
+3,Backstube 3,bakery,North-West,-6.0,11.0,3,18.0,120,1.0
+4,Feinkost Weber 4,shop,North-West,-2.0,10.0,3,10.0,270,1.0
+5,Bio-Laden 5,shop,North-West,-4.0,12.0,3,13.0,210,3.0
+6,Trattoria Sole 6,restaurant,North-West,-4.0,5.0,1,19.0,270,1.0
+7,Trattoria Sole 7,restaurant,South-West,-3.0,-9.0,1,12.0,240,3.0
+8,Bäckerei Hahn 8,bakery,North-East,14.0,8.0,1,13.0,120,1.0
+9,Dorfladen 9,shop,North-West,-11.0,5.0,1,15.0,270,3.0
+10,Markthalle 10,shop,South-East,12.0,-4.0,1,8.0,240,1.0
+11,Feinkost Weber 11,shop,North-West,-14.0,0.0,2,18.0,270,1.0
+12,Werkskantine 12,canteen,North-East,10.0,14.0,3,16.0,240,3.0
+13,Bio-Laden 13,shop,South-East,10.0,-2.0,3,14.0,240,1.0
+14,Bistro 12 14,restaurant,North-West,-6.0,4.0,3,12.0,270,1.0
+15,Thai Garden 15,restaurant,South-West,-12.0,-11.0,3,17.0,270,3.0
+16,Kaffeehaus 16,café,South-East,2.0,-4.0,1,15.0,150,3.0
+17,Café Linde 17,café,North-East,4.0,10.0,1,19.0,180,1.0
+18,Trattoria Sole 18,restaurant,North-West,-10.0,10.0,2,9.0,270,3.0
+19,Trattoria Sole 19,restaurant,South-East,15.0,-3.0,3,19.0,300,3.0
+20,Trattoria Sole 20,restaurant,North-East,15.0,1.0,2,11.0,270,1.0
+21,Markthalle 21,shop,South-East,14.0,-3.0,3,9.0,240,1.0
+22,Gasthaus Krone 22,restaurant,South-East,7.0,-15.0,2,16.0,300,1.0
+23,Kaffeehaus 23,café,South-East,4.0,-15.0,1,17.0,180,1.0
+24,Thai Garden 24,restaurant,North-East,5.0,7.0,1,10.0,270,3.0
+25,Zum Anker 25,restaurant,North-West,-8.0,3.0,2,11.0,270,1.0
+26,Brotzeit 26,bakery,North-West,-4.0,2.0,2,11.0,90,1.0
+27,Bäckerei Korn 27,bakery,North-East,9.0,3.0,3,9.0,150,3.0
+28,Feinkost Weber 28,shop,North-West,-10.0,11.0,1,19.0,240,1.0
+29,Bistro 12 29,restaurant,North-East,11.0,11.0,3,18.0,240,1.0
+30,Trattoria Sole 30,restaurant,North-East,9.0,14.0,3,17.0,270,1.0
+31,Bäckerei Hahn 31,bakery,North-West,-11.0,4.0,2,17.0,150,1.0
+32,Feinkost Weber 32,shop,North-West,-14.0,5.0,3,12.0,270,1.0
+33,Espressobar 33,café,North-East,6.0,11.0,3,11.0,180,1.0
+34,Thai Garden 34,restaurant,South-West,-5.0,-16.0,1,9.0,300,1.0
+35,Kaffeehaus 35,café,North-East,10.0,2.0,3,8.0,180,1.0
+36,Trattoria Sole 36,restaurant,North-West,-4.0,13.0,3,14.0,240,1.0
+37,Café Linde 37,café,North-West,-17.0,4.0,1,18.0,180,1.0
+38,Backstube 38,bakery,North-East,14.0,2.0,2,10.0,120,1.0
+39,Bäckerei Korn 39,bakery,South-West,-7.0,-9.0,2,11.0,90,1.0
+40,Thai Garden 40,restaurant,North-East,13.0,11.0,3,12.0,240,1.0

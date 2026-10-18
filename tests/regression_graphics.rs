@@ -1321,6 +1321,129 @@ fn heatmap_diverges_around_zero() {
     }
 }
 
+fn status_heatmap(extra: Column) -> Vec<Column> {
+    vec![
+        Column::new("w", Role::X, strs(&["a", "b", "c"])),
+        Column::new("c", Role::Y, strs(&["r", "r", "r"])),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&[10.0, 30.0, 60.0])),
+        Column::new("f", Role::YFormat, strs(&["percent"])),
+        Column::new("l", Role::DataLabels, strs(&[""])),
+        extra,
+    ]
+}
+
+/// `::COLORSCALE` on a heatmap: a status ramp good → warn → bad in the
+/// theme's status tiles (light, dark, colour-blind), reversed for
+/// `_HIGH_GOOD`; tooltips keep the formatted value.
+#[test]
+fn heatmap_colorscale_runs_good_to_bad() {
+    use anofox_visualization::Scale;
+    for spec in ["light", "colorblind", "high-contrast"] {
+        for dark in [false, true] {
+            let set = anofox_visualization::theme::resolve(spec).unwrap();
+            let t = if dark { &set.dark } else { &set.light };
+            let [good, _, bad] = t.status_tiles();
+            let cs = |sc| Column::new("s", Role::ColorScale(sc), strs(&[""]));
+            let s = render_in(&status_heatmap(cs(Scale::LowGood)), spec, dark);
+            let fill_at = |s: &str, label: &str| -> String {
+                let i = s.find(&format!("data-fvalue=\"{label}\"")).expect(label);
+                let tag = &s[s[..i].rfind('<').unwrap()..i];
+                let k = tag.find("fill=\"").unwrap() + 6;
+                tag[k..k + 7].to_string()
+            };
+            assert_eq!(fill_at(&s, "10%"), hexu(good), "{spec} dark={dark}");
+            assert_eq!(fill_at(&s, "60%"), hexu(bad), "{spec} dark={dark}");
+            let s = render_in(&status_heatmap(cs(Scale::HighGood)), spec, dark);
+            assert_eq!(fill_at(&s, "10%"), hexu(bad), "{spec} dark={dark}");
+            assert_eq!(fill_at(&s, "60%"), hexu(good), "{spec} dark={dark}");
+        }
+    }
+}
+
+/// `::THRESHOLDS` on a heatmap: one status colour per band, a stepped legend
+/// naming the bands high to low, data labels legible on each band.
+#[test]
+fn heatmap_thresholds_step_by_band() {
+    for dark in [false, true] {
+        let set = anofox_visualization::theme::resolve("light").unwrap();
+        let t = if dark { &set.dark } else { &set.light };
+        let [good, warn, bad] = t.status_tiles();
+        let rules = Column::new("t", Role::Thresholds, strs(&[">=50:bad; >=20:warn; good"]));
+        let s = render_in(&status_heatmap(rules), "light", dark);
+        for c in [good, warn, bad] {
+            assert!(s.contains(&hexu(c)), "{} in {s}", hexu(c));
+        }
+        let hi = s.find(">≥ 50%<").expect("≥ 50% band");
+        let mid = s.find(">20%–50%<").expect("20–50% band");
+        let lo = s
+            .find(">< 20%<")
+            .or_else(|| s.find(">&lt; 20%<"))
+            .expect("< 20% band");
+        assert!(hi < mid && mid < lo, "bands listed high to low");
+        for (v, fill) in [("10%", good), ("30%", warn), ("60%", bad)] {
+            let ink = hexu(t.text_on(fill));
+            assert!(s.contains(&format!("fill=\"{ink}\">{v}<")), "{v} ink {ink}");
+        }
+        assert!(s.contains("data-fvalue=\"30%\""), "tooltips keep the value");
+    }
+}
+
+/// `::COLORSCALE_DIVERGING`: negative bad, positive good, the neutral midpoint
+/// at 0 — and in the dark variant the near-midpoint tiles stay data colours
+/// (the dark remap greys neither them nor the theme's own diverging tiles).
+#[test]
+fn heatmap_diverging_status_and_dark_midpoint() {
+    use anofox_visualization::Scale;
+    let cols = |extra: Option<Column>| {
+        let mut v = vec![
+            Column::new("w", Role::X, strs(&["a", "b", "c", "d"])),
+            Column::new("c", Role::Y, strs(&["r", "r", "r", "r"])),
+            Column::new(
+                "v",
+                Role::Value(Kind::Heatmap),
+                nums(&[-10.0, -1.0, 0.0, 10.0]),
+            ),
+        ];
+        v.extend(extra);
+        v
+    };
+    for dark in [false, true] {
+        let set = anofox_visualization::theme::resolve("light").unwrap();
+        let t = if dark { &set.dark } else { &set.light };
+        let [bad, good] = t.status_arms();
+        let mid = t.diverging_ramp()[1];
+        let div = Column::new("s", Role::ColorScale(Scale::Diverging), strs(&[""]));
+        let s = render_in(&cols(Some(div)), "light", dark);
+        for c in [bad, mid, good] {
+            assert!(s.contains(&hexu(c)), "{} in {s}", hexu(c));
+        }
+        // The tile just below zero: a hint of the bad (red) end, not a grey the
+        // dark remap inverted; likewise on the theme's own diverging ramp.
+        let fill_of = |s: &str| -> (u8, u8, u8) {
+            let i = s.find("data-value=\"-1\"").expect("tile -1");
+            let tag = &s[s[..i].rfind('<').unwrap()..i];
+            let k = tag.find("fill=\"#").unwrap() + 7;
+            let p = |j: usize| u8::from_str_radix(&tag[k + j..k + j + 2], 16).unwrap();
+            (p(0), p(2), p(4))
+        };
+        let near = fill_of(&s);
+        let d = |a: (u8, u8, u8), b: (u8, u8, u8)| {
+            (a.0 as i32 - b.0 as i32).abs()
+                + (a.1 as i32 - b.1 as i32).abs()
+                + (a.2 as i32 - b.2 as i32).abs()
+        };
+        assert!(
+            near.0 > near.1 && d(near, mid) < 60,
+            "near-zero {near:?} (dark={dark})"
+        );
+        let near = fill_of(&render_in(&cols(None), "light", dark));
+        assert!(
+            d(near, t.diverging_ramp()[1]) < 60,
+            "theme near-zero {near:?} (dark={dark})"
+        );
+    }
+}
+
 #[test]
 fn tooltip_values_follow_yformat_and_locale() {
     use anofox_visualization::{format::Locale, render_with, RenderOptions};

@@ -3548,7 +3548,8 @@ fn render_qq(
 ///
 /// Cells part with a thin card-coloured gap; the fill is the theme's
 /// sequential ramp (pale → brand → deep brand; dark-mode aware), or its
-/// diverging ramp around zero when the values span it. Discrete axes keep
+/// diverging ramp around zero when the values span it — or, with a
+/// `::COLORSCALE…` / `::THRESHOLDS` column, the status colours ([`TileFill`]). Discrete axes keep
 /// the SQL row order (first level at the top, like a table). `::DATALABELS`
 /// writes each value into its cell (dark text on light cells, light text on
 /// dark ones); `::YFORMAT` formats the values (labels, legend, tooltip).
@@ -3580,7 +3581,7 @@ fn render_heatmap(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
             (a.min(v), b.max(v))
         });
-    let ramp = Ramp::new(o, o.theme.seq_low(), min, max);
+    let fill = TileFill::of(o, cols, o.theme.seq_low(), min, max)?;
     let tips: Vec<Value> = value
         .values
         .iter()
@@ -3600,15 +3601,14 @@ fn render_heatmap(
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
     th.legend_key.color = Some(o.theme.colors.card);
     th.legend_key_width = 9.0;
-    let mut plot = GGPlot::new(data.clone())
+    let plot = GGPlot::new(data.clone())
         .aes(Aes::new().x("x").y("y").fill("fill").label("label"))
         .geom_tile_with(GeomTile {
             color: o.theme.colors.card,
             line_width: 2.0,
             ..Default::default()
-        })
-        .scale_fill(FmtGradient::new(&ramp, fmt.clone(), o.locale))
-        .theme(th);
+        });
+    let mut plot = fill.scale(plot, o, &fmt).theme(th);
     if let Some(levels) = str_levels(&x.values) {
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
@@ -3649,7 +3649,7 @@ fn render_heatmap(
             let Some(f) = v.as_f64().filter(|f| f.is_finite()) else {
                 continue;
             };
-            let ink = o.theme.text_on(ramp.color_of(f));
+            let ink = o.theme.text_on(fill.color_of(o, f));
             match by_ink.iter_mut().find(|(c, _)| *c == ink) {
                 Some((_, rows)) => rows.push(i),
                 None => by_ink.push((ink, vec![i])),
@@ -3801,6 +3801,161 @@ impl Ramp {
     }
 }
 
+impl Ramp {
+    /// A status ramp over `[min, max]` in the theme's status tile colours
+    /// ([`theme::ResolvedTheme::status_tiles`]): `::COLORSCALE` runs good →
+    /// warn → bad from low to high, `::COLORSCALE_HIGH_GOOD` the other way,
+    /// `::COLORSCALE_DIVERGING` from bad (negative) through the neutral
+    /// midpoint at 0 to good (positive), both arms scaled to the larger |end|.
+    pub(crate) fn status(o: &RenderOptions, scale: Scale, min: f64, max: f64) -> Ramp {
+        let t = &o.theme;
+        let [good, warn, bad] = t.status_tiles();
+        let stops = match scale {
+            Scale::LowGood => vec![(0.0, good), (0.5, warn), (1.0, bad)],
+            Scale::HighGood => vec![(0.0, bad), (0.5, warn), (1.0, good)],
+            Scale::Diverging => {
+                let mid = t.diverging_ramp()[1];
+                let [neg, pos] = t.status_arms();
+                let m = min.abs().max(max.abs());
+                let at = |v: f64| match v {
+                    _ if m <= 0.0 || !v.is_finite() => mid,
+                    v if v < 0.0 => theme::mix(mid, neg, -v / m),
+                    v => theme::mix(mid, pos, v / m),
+                };
+                let span = max - min;
+                if min < 0.0 && max > 0.0 && span > 0.0 {
+                    vec![(0.0, at(min)), (-min / span, mid), (1.0, at(max))]
+                } else {
+                    vec![(0.0, at(min)), (1.0, at(max))]
+                }
+            }
+        };
+        Ramp { min, max, stops }
+    }
+}
+
+/// How a heatmap / calendar / track colours its tiles: the theme's
+/// sequential ramp (default), a status ramp good → warn → bad (a
+/// `::COLORSCALE…` column, [`Ramp::status`]), or one status colour per
+/// `::THRESHOLDS` band with a stepped legend naming the bands.
+pub(crate) enum TileFill {
+    Ramp(Ramp),
+    Steps(Vec<thresholds::Band>),
+}
+
+impl TileFill {
+    /// The panel's tile fill over the values `[min, max]`; `low` is the
+    /// default ramp's pale end. `::THRESHOLDS` win over a `::COLORSCALE`.
+    pub(crate) fn of(
+        o: &RenderOptions,
+        cols: &[Column],
+        low: (u8, u8, u8),
+        min: f64,
+        max: f64,
+    ) -> Result<TileFill, String> {
+        if let Some(rules) = thresholds_of(cols)? {
+            return Ok(TileFill::Steps(rules.bands()));
+        }
+        let scale = cols.iter().find_map(|c| match c.role {
+            Role::ColorScale(s) => Some(s),
+            _ => None,
+        });
+        Ok(TileFill::Ramp(match scale {
+            Some(s) => Ramp::status(o, s, min, max),
+            None => Ramp::new(o, low, min, max),
+        }))
+    }
+
+    /// The band holding `v` (stepped fills).
+    fn band(&self, v: f64) -> Option<&thresholds::Band> {
+        match self {
+            TileFill::Steps(bands) => bands.iter().find(|b| b.contains(v)),
+            TileFill::Ramp(_) => None,
+        }
+    }
+
+    /// The colour a value's tile gets (data-label ink is chosen against it).
+    pub(crate) fn color_of(&self, o: &RenderOptions, v: f64) -> (u8, u8, u8) {
+        match self {
+            TileFill::Ramp(r) => r.color_of(v),
+            TileFill::Steps(_) => self
+                .band(v)
+                .map_or(thresholds::Status::Neutral, |b| b.status)
+                .tile(&o.theme),
+        }
+    }
+
+    /// Add the fill scale: the formatted colourbar, or a stepped legend of
+    /// the bands high to low (`≥ 50`, `20–50`, `< 20` — like a colourbar,
+    /// high on top) in their status colours. The tiles keep their values (a
+    /// tooltip reads the value, not its band).
+    pub(crate) fn scale(&self, plot: GGPlot, o: &RenderOptions, fmt: &format::ValueFmt) -> GGPlot {
+        match self {
+            TileFill::Ramp(r) => plot.scale_fill(FmtGradient::new(r, fmt.clone(), o.locale)),
+            TileFill::Steps(bands) => plot.scale_fill(StepFill {
+                bands: bands
+                    .iter()
+                    .rev()
+                    .map(|b| (b.clone(), band_label(o, b, fmt), b.status.tile(&o.theme)))
+                    .collect(),
+                name: String::new(),
+            }),
+        }
+    }
+}
+
+/// The stepped fill scale of `::THRESHOLDS` tiles: a number takes its band's
+/// status colour; the legend lists the bands by label (discrete keys).
+#[derive(Clone)]
+struct StepFill {
+    bands: Vec<(thresholds::Band, String, (u8, u8, u8))>,
+    name: String,
+}
+
+impl ggplot_rs::scale::Scale for StepFill {
+    fn aesthetic(&self) -> Aesthetic {
+        Aesthetic::Fill
+    }
+    fn train(&mut self, _values: &[Value]) {}
+    fn map(&self, value: &Value) -> f64 {
+        let i = match value {
+            Value::Str(s) => self.bands.iter().position(|(_, l, _)| l == s),
+            v => v
+                .as_f64()
+                .and_then(|f| self.bands.iter().position(|(b, _, _)| b.contains(f))),
+        };
+        i.map_or(f64::NAN, |i| i as f64)
+    }
+    fn breaks(&self) -> Vec<(f64, String)> {
+        self.bands
+            .iter()
+            .enumerate()
+            .map(|(i, (_, l, _))| (i as f64, l.clone()))
+            .collect()
+    }
+    fn is_discrete(&self) -> bool {
+        true
+    }
+    fn map_to_color(&self, value: &Value) -> Option<(u8, u8, u8)> {
+        let i = self.map(value);
+        (i.is_finite()).then(|| self.bands[i as usize].2)
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn set_name(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+    fn clone_box(&self) -> Box<dyn ggplot_rs::scale::Scale> {
+        Box::new(self.clone())
+    }
+}
+
+/// A `::THRESHOLDS` band as the legend names it, in the panel's format.
+fn band_label(o: &RenderOptions, b: &thresholds::Band, fmt: &format::ValueFmt) -> String {
+    b.label(|v| fmt.short(v, &o.locale))
+}
+
 /// A continuous fill scale over a [`Ramp`] whose colourbar labels use the
 /// panel's value format (`$1.2M`, `12 %`).
 #[derive(Clone)]
@@ -3935,7 +4090,7 @@ fn render_calendar(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
             (a.min(v), b.max(v))
         });
-    let ramp = Ramp::new(o, o.theme.calendar_low(), min, max);
+    let fill = TileFill::of(o, cols, o.theme.calendar_low(), min, max)?;
     let data = vec![
         ("x".to_string(), dates),
         ("fill".to_string(), vals),
@@ -3955,7 +4110,7 @@ fn render_calendar(
         width: (tile * 0.22).clamp(2.0, 5.0),
         ..Default::default()
     };
-    let mut plot = GGPlot::new(data)
+    let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").fill("fill").label("label"))
         .geom_calendar_with(
             GeomTile {
@@ -3964,11 +4119,8 @@ fn render_calendar(
                 ..Default::default()
             },
             false,
-        )
-        .scale_fill(FmtGradient::new(&ramp, fmt, o.locale))
-        .xlab("")
-        .ylab("")
-        .theme(th);
+        );
+    let mut plot = fill.scale(plot, o, &fmt).xlab("").ylab("").theme(th);
     if let Some(t) = title {
         plot = plot.title(t);
     }

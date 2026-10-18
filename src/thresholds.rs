@@ -69,6 +69,18 @@ impl Status {
             Status::Neutral => t.colors.muted,
         }
     }
+
+    /// The tile fill for this status on a heatmap / calendar / track
+    /// ([`ResolvedTheme::status_tiles`]).
+    pub fn tile(self, t: &ResolvedTheme) -> Rgb {
+        let [good, warn, bad] = t.status_tiles();
+        match self {
+            Status::Good => good,
+            Status::Warn => warn,
+            Status::Bad => bad,
+            Status::Neutral => t.neutral_tile(),
+        }
+    }
 }
 
 /// One `cond:status` rule; `None` bounds are open (`else` has neither).
@@ -92,6 +104,39 @@ impl Rule {
             .hi
             .is_none_or(|(b, inc)| if inc { v <= b } else { v < b });
         lo_ok && hi_ok
+    }
+}
+
+/// A contiguous stretch of values with one status ([`Rules::bands`]); `None`
+/// bounds are open, the flags say whether the bound belongs to the band.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Band {
+    pub lo: Option<(f64, bool)>,
+    pub hi: Option<(f64, bool)>,
+    pub status: Status,
+}
+
+impl Band {
+    pub fn contains(&self, v: f64) -> bool {
+        Rule {
+            lo: self.lo,
+            hi: self.hi,
+            status: self.status,
+            text: String::new(),
+        }
+        .matches(v)
+    }
+
+    /// The band as a legend reads it — `≥ 50`, `20–50`, `< 20`, `= 0` —
+    /// with `fmt` writing the numbers.
+    pub fn label(&self, fmt: impl Fn(f64) -> String) -> String {
+        match (self.lo, self.hi) {
+            (None, None) => "all".into(),
+            (None, Some((b, inc))) => format!("{} {}", if inc { "≤" } else { "<" }, fmt(b)),
+            (Some((a, inc)), None) => format!("{} {}", if inc { "≥" } else { ">" }, fmt(a)),
+            (Some((a, _)), Some((b, _))) if a == b => format!("= {}", fmt(a)),
+            (Some((a, _)), Some((b, _))) => format!("{}–{}", fmt(a), fmt(b)),
+        }
     }
 }
 
@@ -235,6 +280,35 @@ impl Rules {
                 Some(last) if last.2 == s => last.1 = w[1],
                 _ => out.push((w[0], w[1], s)),
             }
+        }
+        out
+    }
+
+    /// The whole number line split into status bands, low to high:
+    /// neighbours of equal status merged, a point rule (`=0:bad`) its own
+    /// band, values without a rule neutral. `'>=50:bad; >=20:warn; good'` →
+    /// `< 20` good, `20–50` warn, `≥ 50` bad.
+    pub fn bands(&self) -> Vec<Band> {
+        let side = |v: f64| self.status(v).unwrap_or(Status::Neutral);
+        let cuts = self.cuts();
+        let mut out: Vec<Band> = Vec::new();
+        let mut push = |lo: Option<(f64, bool)>, hi: Option<(f64, bool)>, status: Status| match out
+            .last_mut()
+        {
+            Some(last) if last.status == status => last.hi = hi,
+            _ => out.push(Band { lo, hi, status }),
+        };
+        if cuts.is_empty() {
+            push(None, None, side(0.0));
+            return out;
+        }
+        let step = |c: f64| c.abs().max(1.0);
+        push(None, Some((cuts[0], false)), side(cuts[0] - step(cuts[0])));
+        for (i, &c) in cuts.iter().enumerate() {
+            push(Some((c, true)), Some((c, true)), side(c));
+            let next = cuts.get(i + 1).copied();
+            let mid = next.map_or(c + step(c), |n| (c + n) / 2.0);
+            push(Some((c, false)), next.map(|n| (n, false)), side(mid));
         }
         out
     }
@@ -423,6 +497,27 @@ mod tests {
         );
         // A cut outside the range doesn't split it.
         assert_eq!(r.zones(0.0, 40.0), vec![(0.0, 40.0, Status::Bad)]);
+    }
+
+    #[test]
+    fn bands_split_the_number_line() {
+        let r = Rules::parse(">=50:bad; >=20:warn; good").unwrap();
+        let b = r.bands();
+        let fmt = |v: f64| format!("{v}");
+        let labels: Vec<String> = b.iter().map(|b| b.label(fmt)).collect();
+        assert_eq!(labels, ["< 20", "20–50", "≥ 50"]);
+        assert_eq!(
+            b.iter().map(|b| b.status).collect::<Vec<_>>(),
+            [Status::Good, Status::Warn, Status::Bad]
+        );
+        assert!(b[1].contains(20.0) && !b[1].contains(50.0) && b[2].contains(50.0));
+        // Exclusive bounds, a point rule, no catch-all (neutral).
+        let r = Rules::parse(">80:bad; =0:warn; >0:good").unwrap();
+        let labels: Vec<String> = r.bands().iter().map(|b| b.label(fmt)).collect();
+        assert_eq!(labels, ["< 0", "= 0", "0–80", "> 80"]);
+        assert_eq!(r.bands()[0].status, Status::Neutral);
+        assert!(r.bands()[2].contains(80.0) && !r.bands()[2].contains(0.0));
+        assert_eq!(Rules::parse("good").unwrap().bands().len(), 1);
     }
 
     #[test]

@@ -828,3 +828,66 @@ fn labels_go_where_they_fit_with_a_halo() {
     // Berlin, Hamburg and Bremen are too small for their names at this size
     assert!(!l.contains(&"Bremen".to_string()), "{l:?}");
 }
+
+/// The fill of the first feature of `series`.
+fn fill_of<'a>(svg: &'a str, series: &str) -> &'a str {
+    let f = features(svg)
+        .into_iter()
+        .find(|t| attr(t, "data-series") == Some(series))
+        .unwrap_or_else(|| panic!("a feature of {series}"));
+    attr(f, "fill").unwrap()
+}
+
+#[test]
+fn a_colors_level_map_pins_named_levels_and_keeps_the_rest_in_palette_order() {
+    let points = |n: usize| strs(&["POINT(0 0)", "POINT(1 1)", "POINT(2 0)", "POINT(3 1)"][..n]);
+    let map = |series: &[&str], colors: Option<&str>| {
+        let n = series.len();
+        let mut cols = vec![
+            Column::new("g", Role::Geometry, points(n)),
+            Column::new("s", Role::Category, strs(series)),
+        ];
+        if let Some(c) = colors {
+            cols.push(Column::new("c", Role::GaugeColors, konst(c, n)));
+        }
+        svg(cols)
+    };
+    let spec = "Depot:#123456; Late stop:#ff0000";
+    let plain = map(&["Van 1", "Van 2"], None);
+    let all = map(&["Van 1", "Van 2", "Late stop", "Depot"], Some(spec));
+    let some = map(&["Van 1", "Van 2", "Depot"], Some(spec));
+    assert_eq!(fill_of(&all, "Late stop"), "#ff0000");
+    assert_eq!(fill_of(&all, "Depot"), "#123456");
+    // the vans take palette slots 0, 1 — as without the named levels, and
+    // whether or not 'Late stop' is on the map
+    for s in ["Van 1", "Van 2"] {
+        assert_eq!(fill_of(&all, s), fill_of(&plain, s));
+        assert_eq!(fill_of(&some, s), fill_of(&plain, s));
+    }
+    // the legend: the named levels first, in the written order
+    let legend = &all[all.find("dp-legend").unwrap()..];
+    let (d, l, v) = (
+        legend.find(">Depot<").unwrap(),
+        legend.find(">Late stop<").unwrap(),
+        legend.find(">Van 1<").unwrap(),
+    );
+    assert!(d < l && l < v, "legend order");
+}
+
+#[test]
+fn an_xaxis_keys_the_features_for_a_story() {
+    let cols = vec![
+        Column::new(
+            "g",
+            Role::Geometry,
+            strs(&["POINT(0 0)", "LINESTRING(0 0, 1 1)", "POINT(1 1)"]),
+        ),
+        Column::new("l", Role::Label, strs(&["Depot", "Leg 1", "Stop 1"])),
+        Column::new("x", Role::X, nums(&[0.0, 1.0, 1.0])),
+        Column::new("t", Role::Story, strs(&["", "06:12 · stop 1", ""])),
+    ];
+    let s = svg(cols);
+    let xs: Vec<_> = features(&s).iter().map(|t| attr(t, "data-x")).collect();
+    assert_eq!(xs, [Some("0"), Some("1"), Some("1")]);
+    assert!(root(&s).contains("data-story="), "{}", root(&s));
+}
