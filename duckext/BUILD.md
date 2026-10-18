@@ -34,6 +34,7 @@ SELECT anofox_serve_stop(8095);
 `anofox_render(spec)` is the raw form — `spec` is the same JSON the browser
 renderer takes: `rows` (row objects keyed `c0`,`c1`,…), `roles`
 (`[[colIdx,"ROLE","displayName"?],…]`), optional `width`/`height`/`primary`.
+A `TITLE` role draws a title bar above the chart (its first non-NULL value), as a dashboard card does.
 
 Behaviour at the boundary (shared with the C++ build via
 `anofox_visualization::host::render_spec_checked`):

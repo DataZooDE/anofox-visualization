@@ -1104,6 +1104,9 @@ pub fn clamp_dim(v: u64) -> u32 {
 /// `{"rows":[{c0:…,c1:…},…], "roles":[[idx,"ROLE","name"],…], "width":W,
 /// "height":H, "primary":"rrggbb", "max_categories":N, "max_line_points":N}`.
 ///
+/// A `TITLE` role draws a title bar above the chart (its first non-NULL
+/// value), as a dashboard card does; a KPI tile has none.
+///
 /// Never panics (a caught panic becomes [`RenderError::Panic`]). Bare
 /// `NaN`/`Infinity` tokens (as DuckDB's JSON may emit) are read as `null`.
 pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
@@ -1165,8 +1168,56 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             });
         }
         let cols = columns_from_entries(&rows, &entries);
-        render_with(&cols, width, height, &opts)
+        match spec_title(&cols, &opts) {
+            Some(title) => render_titled(&cols, &title, width, height, &opts),
+            None => render_with(&cols, width, height, &opts),
+        }
     })
+}
+
+/// Height of the `::TITLE` bar above a single panel (a dashboard card's).
+const TITLE_BAR_H: u32 = 26;
+
+/// The `::TITLE` of a single-panel spec: its first non-NULL, non-blank value.
+/// A KPI tile has none (its caption is `::LABEL`), as in a dashboard.
+fn spec_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
+    let title = cols
+        .iter()
+        .find(|c| c.role == Role::Title)?
+        .values
+        .iter()
+        .find(|v| !matches!(v, Value::Na))
+        .map(value_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    kpi::Kpi::from_columns(cols, &o.locale)
+        .is_none()
+        .then_some(title)
+}
+
+/// [`render_with`] under a `::TITLE` bar, drawn as a dashboard card draws it
+/// (`dashboard::render_panel_svg`): the chart is nested below the bar, the
+/// panel keeps the requested height and its build warnings go on the root.
+fn render_titled(
+    cols: &[Column],
+    title: &str,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<String, RenderError> {
+    let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+    let body_h = h.saturating_sub(TITLE_BAR_H).max(MIN_DIM);
+    let (body, warnings) = render_placed(cols, Place::Doc, w, body_h, o)?;
+    let svg = format!(
+        "{open}<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
+         font-weight=\"700\" fill=\"{ink}\">{title}</text>\
+         <g transform=\"translate(0,{TITLE_BAR_H})\">{body}</g></svg>",
+        open = svg_open(Place::Doc, w, body_h + TITLE_BAR_H),
+        font = format::escape_xml(&o.theme.font.display),
+        ink = theme::hex(o.theme.colors.heading),
+        title = format::escape_xml(title),
+    );
+    Ok(with_warnings_attr(svg, &warnings))
 }
 
 /// The last step of every contract render: drop non-finite marks, apply the
