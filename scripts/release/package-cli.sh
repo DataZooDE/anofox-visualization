@@ -36,11 +36,17 @@ command -v duckdb >/dev/null || { echo "FAIL: duckdb not on PATH ($DUCKDB_DIR)";
 out() { "$@" 2>&1 | tr -d '\r'; }
 DV="$(out "$BIN/dashboard$EXE" --version)"; SV="$(out "$BIN/serve$EXE" --version)"
 DH="$(out "$BIN/dashboard$EXE" --help)";    SH="$(out "$BIN/serve$EXE" --help)"
-[ "$DV" = "dashboard $VERSION" ] || { echo "FAIL: dashboard --version: $DV"; exit 1; }
-[ "$SV" = "serve $VERSION" ]     || { echo "FAIL: serve --version: $SV"; exit 1; }
+# The build version (#216): a release tag build prints exactly the tag; any
+# other build "v<last tag>+<commits> · <sha>" (v<version> without git).
+if [ -n "${RELEASE_TAG:-}" ]; then
+  [ "$DV" = "dashboard $RELEASE_TAG" ] || { echo "FAIL: dashboard --version: $DV (want $RELEASE_TAG)"; exit 1; }
+else
+  case "$DV" in "dashboard v"?*) ;; *) echo "FAIL: dashboard --version: $DV"; exit 1 ;; esac
+fi
+[ "${SV#serve }" = "${DV#dashboard }" ] || { echo "FAIL: serve --version: $SV (dashboard: $DV)"; exit 1; }
 case "$DH" in *--check*) ;; *) echo "FAIL: dashboard --help"; exit 1 ;; esac
 case "$SH" in *--dashboards*) ;; *) echo "FAIL: serve --help"; exit 1 ;; esac
-echo "OK: --version / --help ($VERSION)"
+echo "OK: --version / --help (${DV#dashboard })"
 "$BIN/dashboard$EXE" --check "$ROOT/dashboards/sessions.sql"
 echo "OK: dashboard --check dashboards/sessions.sql"
 if [ "${SKIP_WASM:-0}" != "1" ]; then
