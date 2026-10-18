@@ -361,11 +361,15 @@ start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/pdash"), $PORT
 "$DUCKDB" -c "COPY (SELECT range AS x FROM range(1000)) TO $(q "$T/pruns/f.parquet");" >/dev/null
 [ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "in-place rewrite served a stale footer: $(cat "$T/body")"
 [ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":499500(\.0)?[,}]' "$T/body" || fail "in-place rewrite (sum): $(cat "$T/body")"
-# replaced by a rename (how a writer publishes a run atomically)
-"$DUCKDB" -c "COPY (SELECT range AS x FROM range(7)) TO $(q "$T/pnew.parquet");" >/dev/null
+# replaced by a rename (how a writer publishes a run atomically): same row
+# count as the file it replaces (1,000), different values. DuckDB's identity
+# check for a cached footer is the inode, not just size/mtime (security
+# review L1): a rename is read fresh even at the same size, which the
+# in-place case above (a different row count) doesn't prove by itself.
+"$DUCKDB" -c "COPY (SELECT range AS x FROM range(1000, 2000)) TO $(q "$T/pnew.parquet");" >/dev/null
 mv "$T/pnew.parquet" "$T/pruns/f.parquet"
-[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":7(\.0)?[,}]' "$T/body" || fail "renamed-in file served a stale footer: $(cat "$T/body")"
-[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":21(\.0)?[,}]' "$T/body" || fail "renamed-in file (sum): $(cat "$T/body")"
+[ "$(panel 2 '{}' p)" = 200 ] && grep -qE '"c0":1000(\.0)?[,}]' "$T/body" || fail "renamed-in file served a stale footer: $(cat "$T/body")"
+[ "$(panel 3 '{}' p)" = 200 ] && grep -qE '"c0":1499500(\.0)?[,}]' "$T/body" || fail "renamed-in file (sum): $(cat "$T/body")"
 # the rebuilt snapshot has it too
 echo "SELECT anofox_serve_refresh($PORT);" >&3
 for _ in $(seq 50); do grep -q "epoch 2" "$T/out" && break; sleep 0.2; done

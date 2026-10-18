@@ -243,10 +243,16 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   the full path.
 - Files appear live: a new run is readable as soon as it is written, without a
   refresh. Parquet footers are cached across requests (`parquet_metadata_cache`,
-  set by the server and locked); DuckDB re-validates them against the file, so
-  a rewritten file is never read with a stale footer. The result cache does
-  *not* see file changes — runs that are rewritten in place need a refresh
-  (which starts a new cache) or `cache_mb: 0`.
+  set by the server and locked) — and kept in RAM well past what `memory_limit`
+  counts for them, bounded only by the footer sizes of the files the panels can
+  reach and dropped on a refresh ([`deployment.md`](deployment.md) §6). DuckDB
+  re-checks each file's size and modification time (to the second) before
+  using a cached footer: publish a run by writing a new file and renaming it
+  into place (`mv`), which is always read fresh. A file overwritten in place
+  at the same size within the same second, or with its mtime restored, can be
+  read with its old footer until a refresh. The result cache does *not* see
+  file changes — runs that are rewritten in place need a refresh (which starts
+  a new cache) or `cache_mb: 0`.
 - Views in the session over files in the folder (`CREATE VIEW v AS SELECT …
   FROM read_parquet('/srv/runs/…')`) are copied into the snapshot as views and
   read the files live too.
