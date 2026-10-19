@@ -22,7 +22,7 @@
 use crate::format::escape_xml as esc;
 use crate::format::Locale;
 use crate::sql::contract_call;
-use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant, CREDIT_TEXT, CREDIT_URL};
+use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant};
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
     Role, TableOpt,
@@ -534,9 +534,7 @@ fn render_inner(
             new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
         }
     }
-    // The mandatory credit line, below the last row.
-    let credit_y = row_y + row_h + gap + 14.0;
-    let total_h = credit_y + 12.0 + pad;
+    let total_h = row_y + row_h + pad;
 
     // Compose.
     let mut out = format!(
@@ -562,7 +560,6 @@ fn render_inner(
     for h in &headings {
         out.push_str(h);
     }
-    out.push_str(&credit_svg(t, opts.width as f64 / 2.0, credit_y));
     out.push_str("</svg>");
     Ok(out)
 }
@@ -622,15 +619,6 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
     }
     s.push_str("</svg>");
     Some((s, h))
-}
-
-/// The mandatory "Powered by DataZoo GmbH" credit, centred at (cx, y).
-fn credit_svg(t: &ResolvedTheme, cx: f64, y: f64) -> String {
-    format!(
-        "<a href=\"{CREDIT_URL}\" class=\"dp-credit\"><text x=\"{cx:.0}\" y=\"{y:.0}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"12\" fill=\"{m}\">{CREDIT_TEXT}</text></a>",
-        font = esc(&t.font.family),
-        m = hex(t.colors.muted),
-    )
 }
 
 /// A column result as JSON row maps keyed by output column name (`c{i}`).

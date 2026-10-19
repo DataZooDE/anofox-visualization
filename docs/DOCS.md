@@ -1496,11 +1496,6 @@ unknown keys) is an error. `?theme=` only switches light/dark — a URL never
 injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
 `de-locale.sql`).
 
-**The credit.** "Powered by DataZoo GmbH" is shown on every dashboard, in every
-output and under every theme (it takes the theme's colours so it stays
-readable). Author branding is shown *in addition*; there is no role to hide or
-replace the credit.
-
 **Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
 `en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
 formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
@@ -2413,7 +2408,7 @@ The bar at the top of the builder shows **anofox-visualization** and
 *Dashboards from SQL* by default. An installation can put its own name,
 tagline and logo there. This is the deployment's bar, not a dashboard's
 header: a dashboard still brands itself with `::BRAND`, `::DASHBOARD_TITLE`,
-`::LOGO` and `::FAVICON`. The *Powered by DataZoo GmbH* credit always stays.
+`::LOGO` and `::FAVICON`.
 
 | Setting   | What it does |
 |-----------|--------------|

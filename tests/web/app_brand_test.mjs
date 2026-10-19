@@ -45,7 +45,7 @@ assert.deepEqual(appBrandMerge(file, server), {
 // an empty name keeps the previous one; an empty logo clears it
 assert.equal(appBrandMerge(file, { name: "  " }).name, "Acme Insights");
 assert.equal(appBrandMerge(file, { logo: "" }).logo, "");
-// non-strings and unknown keys are ignored (the footer credit is not a setting)
+// non-strings and unknown keys are ignored (e.g. an arbitrary "credit" key)
 const m = appBrandMerge({ name: 42, credit: "Someone else", footer: "x", tagline: null });
 assert.deepEqual(m, APP_BRAND_DEFAULT);
 // text: control characters dropped, whitespace collapsed, length capped
@@ -111,7 +111,7 @@ const apply = grab("appBrandApply");
 assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(apply), "appBrandApply must not parse markup");
 assert.ok(/img\.alt = cfg\.name_visible \? "" : cfg\.name/.test(apply), "a wordmark logo carries the name as alt");
 assert.ok(/createElement\("img"\)/.test(apply) && !/createElementNS|<svg/.test(apply), "the logo is an <img>");
-// the mandatory credits are not driven by the settings
+// the sidebar company line is not driven by the app-brand settings
 const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
 assert.ok(!html.includes("© DataZoo GmbH"), "no company line in the sidebar footer");
 assert.ok(!/app(Brand|-brand)[\s\S]{0,40}side-foot/.test(apply), "footer untouched");

@@ -1,4 +1,4 @@
-//! Theme model, design tokens, locale and the mandatory credit (plan M1).
+//! Theme model, design tokens and locale (plan M1).
 
 use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions, DataProvider};
 use anofox_visualization::format::{format_number_l, metric_fmt_of, Locale};
@@ -310,7 +310,7 @@ fn locale_vectors_match_the_shared_fixture() {
     }
 }
 
-// ───────────────────────── headless dashboard + credit ───────────────────
+// ───────────────────────── headless dashboard + branding ──────────────────
 
 /// A provider answering every query from canned data.
 struct Canned;
@@ -366,20 +366,19 @@ const BRANDED: &str = "\
     SELECT w::XAXIS, n::BARCHART FROM t;";
 
 #[test]
-fn headless_branding_locale_and_credit() {
+fn headless_branding_and_locale() {
     let svg = render_dashboard_svg(BRANDED, &mut Canned, &DashboardOptions::default()).unwrap();
     assert!(svg.contains("Sales cockpit"));
     assert!(svg.contains(">ACME<"));
     assert!(svg.contains("href=\"logo.svg\""));
     assert!(svg.contains(">1.234.567,5<"), "de-DE KPI");
-    assert!(svg.contains(theme::CREDIT_TEXT));
-    assert!(svg.contains(theme::CREDIT_URL));
 }
 
-/// The DataZoo credit is mandatory: every output, every built-in theme,
-/// both variants.
+/// The owner removed the "Powered by DataZoo GmbH" credit from every output
+/// (2026-10-19): it must not reappear in the headless SVG, the static page
+/// HTML/landing page, or the browser builder, under any built-in theme.
 #[test]
-fn credit_in_every_output_under_every_theme() {
+fn no_powered_by_credit_anywhere() {
     for (name, _) in BUILTINS {
         for variant in [Variant::Light, Variant::Dark] {
             let o = DashboardOptions {
@@ -389,7 +388,7 @@ fn credit_in_every_output_under_every_theme() {
             };
             let svg = render_dashboard_svg(BRANDED, &mut Canned, &o).unwrap();
             assert!(
-                svg.contains(theme::CREDIT_TEXT),
+                !svg.contains("Powered by DataZoo"),
                 "headless {name}/{variant:?}"
             );
             let set = theme::resolve(name).unwrap();
@@ -402,18 +401,14 @@ fn credit_in_every_output_under_every_theme() {
                     controls_html: String::new(),
                     panels_html: String::new(),
                 });
-            assert!(
-                html.contains("Powered by <a href=\"https://data-zoo.de\""),
-                "page {name}"
-            );
+            assert!(!html.contains("Powered by DataZoo"), "page {name}");
             let list = anofox_visualization::page::list(set.pick(variant), "D", &[]);
-            assert!(list.contains("DataZoo GmbH"), "list {name}");
+            assert!(!list.contains("Powered by DataZoo"), "list {name}");
         }
     }
-    // The browser appends the same credit on every render (web/app.js).
+    // The browser no longer appends any credit on render (web/app.js).
     let js = read("web/app.js");
-    assert!(js.contains("credit.append(\"Powered by \", creditLink)"));
-    assert!(js.contains("creditLink.href = \"https://data-zoo.de\""));
+    assert!(!js.contains("Powered by DataZoo"));
     // and there is no role to hide it
     assert!(anofox_visualization::parse_role("CREDIT").is_none());
 }
