@@ -143,6 +143,18 @@ const os = xp.starterDashboard({ name: "odd", fq: '"odd"', cards: odd });
 assert.match(os, /"it's ""x"""/);
 assert.match(os, /'It''s "x"'::LABEL/);
 
+// ---- column-name words: the Rust rule (#227), whole words (#248) ----
+const nv = JSON.parse(readFileSync(new URL("../fixtures/name_vectors.json", import.meta.url), "utf8"));
+for (const c of nv.tokens) assert.deepEqual(xp.nameTokens(c.name), c.tokens, c.name);
+for (const c of nv.rate_like) assert.equal(xp.rateLike(c.name), c.rate_like, c.name);
+for (const n of ["win_rate", "unit_price", "unitPrice", "temp_c", "temperature", "customer_age", "lat", "Longitude", "lng", "win_prob", "probability", "service_level", "gross_margin", "AOV", "avg_basket", "zscore", "Per 10k"])
+  assert.equal(xp.avgLike(n), true, n);
+for (const n of ["page_views", "usage", "attempts", "problems", "plate_count", "stage", "translations", "colon_count", "generated", "accurate", "shareholders", "operations", "meaning", "revenue"])
+  assert.equal(xp.avgLike(n), false, n);
+const kpiSql = (name) => xp.starterDashboard({ name: "k", fq: '"k"', cards: xp.buildCards([{ name, type: "INTEGER" }], { stats: { n: 10, n0: 10, d0: 9, lo0: 1, hi0: 9 } }) });
+assert.match(kpiSql("attempts"), /sum\("attempts"\)::COMPACT, 'Total attempts'::LABEL/);
+assert.match(kpiSql("win_rate"), /avg\("win_rate"\)::COMPACT, 'Average win rate'::LABEL/);
+
 // ---- anofox_tabular checks and comparisons (#111) ----
 const dupHint = { code: "duplicate-keys" };
 assert.deepEqual(xp.hintCheck('"t"', oid, dupHint), { table: '"t"', column: "order_id", params: null, lower: null, upper: 0, type: "duplicate_count" });

@@ -2517,9 +2517,11 @@ otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
 - **Chart this** on a card previews a histogram, box plot, top-value bars, a
   line over time or a scatter; **Add to dashboard** appends its annotated SQL
   to the dashboard editor. **New dashboard from this table** writes a starter
-  dashboard: KPI tiles, the data's latest date (`::ASOF`), a `::PERIOD` and a
-  `::BUTTONS` / `::DROPDOWN` filter, a line over time, top-N bars, the main
-  measure's distribution and the paged rows.
+  dashboard: KPI tiles (an average for a rate, score, price, age, margin,
+  coordinate …: whole words of the column name, as the table totals read
+  them — `attempts` and `page_views` are summed), the data's latest date
+  (`::ASOF`), a `::PERIOD` and a `::BUTTONS` / `::DROPDOWN` filter, a line
+  over time, top-N bars, the main measure's distribution and the paged rows.
 - **Queries**: the SQL box highlights, completes `::` roles, runs on
   Ctrl/⌘+Enter, keeps your recent queries and shows errors at their line and
   column. A result shows its rows and time, downloads as CSV / Excel /
