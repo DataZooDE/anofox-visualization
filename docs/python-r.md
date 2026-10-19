@@ -330,7 +330,7 @@ av.plot(av.from_scipy({"b − a": stats.ttest_ind(b, a)}), "tests")
 | `from_statsforecast(df, level=None, history=None)` | `forecast()` / `cross_validation()` output | `prediction` (long) |
 | `from_prophet(forecast, history=None, model_id="prophet")` | `predict()` output | `prediction` |
 | `plot(data, chart=None, *, by=None, con=None, **options)` | a table (pandas, polars, Arrow) or a `from_*` dict | an `SVG` (`str` with `_repr_svg_` and `.save()`), or `{value: SVG}` with `by=` |
-| `connect(extension=None, con=None)` | the extension file, else `$ANOFOX_VIZ_EXTENSION`, an installed extension, the community repository, the project's release repository | a DuckDB connection with the extension loaded |
+| `connect(extension=None, con=None)` | the extension file (named `anofox_visualization.duckdb_extension` or `anofox_visualization.<x>.duckdb_extension`; another name raises `ValueError`), else `$ANOFOX_VIZ_EXTENSION`, an installed extension, the community repository, the project's release repository | a DuckDB connection with the extension loaded |
 
 [`examples/python/plot-results.ipynb`](../examples/python/plot-results.ipynb)
 uses the package end to end on a synthetic online shop: an OLS model, two
