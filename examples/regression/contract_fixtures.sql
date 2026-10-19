@@ -103,5 +103,14 @@ FROM range(60) r(i);
 SELECT 'partial' AS name, anofox_plot_partial(p) AS svg FROM partial p;
 SELECT 'added_variable' AS name, anofox_plot_partial(p, kind := 'added_variable') AS svg FROM partial p;
 
+-- checks: a data-quality band, one panel per check -------------------------
+CREATE TABLE checks AS SELECT * FROM (VALUES
+  ('rows', 'pass', 120.0, 100.0, NULL, NULL),
+  ('customer present', 'fail', 0.08, NULL, 0.05, 'app'),
+  ('customer present', 'fail', 0.03, NULL, 0.05, 'web'),
+  ('status known', 'pass', 1.0, 1.0, NULL, NULL)
+) t(check_name, status, value, lower_threshold, upper_threshold, identifier);
+SELECT 'checks' AS name, anofox_plot_checks(c) AS svg FROM checks c;
+
 -- anofox_plot: dispatch on the column signature ------------------------------
 SELECT 'auto_terms' AS name, anofox_plot(c) AS svg FROM coefs c;

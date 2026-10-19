@@ -283,6 +283,20 @@ to anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e)).",
         tags: &[("anofox.consumes", "events"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_checks",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("kind", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("checks", "'x', x, 'kind', kind, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Data-quality checks from a `check` table (anofox-tabular run_checks / agg_check as they come; \
+the other checks with their measure as value): one panel per check (own scale), the value as a dot coloured by \
+status (fail red, warn amber, pass green) against the lower_threshold..upper_threshold acceptance band, one lane \
+per identifier, the message on hover. Over several run_ts / ds values (or kind := 'strip') a status strip: one \
+lane per check, a dot per run. x := names the time column.",
+        example: "SELECT anofox_plot_checks(c) FROM (VALUES ('rows', 'pass', 120.0, 100.0, NULL), \
+('customer present', 'fail', 0.083, NULL, 0.05)) c(check_name, status, value, lower_threshold, upper_threshold)",
+        tags: &[("anofox.consumes", "check"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_diagram",
         params: &["tbl"],
         named: &[("edges", "NULL"), ("id", "NULL"), ("mainstat", "NULL"), ("format", "NULL"), ("source", "NULL"), ("target", "NULL"), ("value", "NULL"), ("direction", "NULL"), ("style", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "800"), ("height", "400")],
@@ -305,11 +319,15 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
-metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests, \
-kind|severity + ds|period -> events. Use the specific anofox_plot_* macro for options.",
+metric+value -> summary, check_name|thresholds + status + value -> checks, partial_residual -> partial \
+(component + residual), p_value/test_id -> tests, kind|severity + ds|period -> events. Use the specific \
+anofox_plot_* macro for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
-            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,events"),
+            (
+                "anofox.consumes",
+                "terms,prediction,curve,summary,obs,test,partial_residuals,events,check",
+            ),
             CONTRACT_TAG,
         ],
     },

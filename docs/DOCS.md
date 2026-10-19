@@ -669,8 +669,9 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
+| `anofox_plot_checks(tbl, x := NULL, kind := NULL)` | **check_name, status, value**, lower_threshold, upper_threshold, identifier, message, run_ts \| ds, check_type, table_name, column_name | a data-quality check band (default): one panel per check (own x scale, sorted), the value as a dot coloured by status (fail red, warn amber, pass green, else muted) against the lower_threshold..upper_threshold acceptance band (light green), one lane per `identifier`; over several `run_ts` / `ds` values (or `kind := 'strip'`) a status strip instead, one lane per check, a dot per run. The status, check label, identifier and message are on hover; `x :=` names the time column (default `run_ts`, else `ds`) |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -785,7 +786,8 @@ to 1.00 (0.9952 reads "AUC 0.995").
   none matches, the closest one and what it misses — *…; closest: terms,
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
-  \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
+  \`yhat\`, \`curve_type\`, \`metric\`, \`check_name\` / \`lower_threshold\` /
+  \`upper_threshold\`, \`fitted\` / \`residual\`, \`partial_residual\`,
   \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
   or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
   name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
@@ -974,6 +976,38 @@ that are not in the rows are not drawn and reported as a render warning
 anofox-decide's outputs, through the SQL that makes them contract tables.
 `scripts/tabular_conformance.py` does the same for anofox-tabular, whose
 outputs need an adapter to a contract schema first.
+
+### Plotting anofox-tabular results
+
+[anofox-tabular](https://github.com/DataZooDE/anofox-tabular)'s suite check
+(`anofox_tab_run_checks`) and its single-check aggregate
+(`anofox_tab_agg_check`) already emit the `check` schema (`check_name`,
+`status`, `value`, `lower_threshold`, `upper_threshold`, …) as they come, so
+they plot without reshaping:
+
+```sql
+SELECT anofox_plot(t) FROM anofox_tab_run_checks('checks') t;
+```
+
+The other one-row checks (`null_rate`, `compliance`, `distinct_count`, …) use
+their own column names for the measure and its bounds, so name them in a
+subquery (the adapter `scripts/tabular_conformance.py` uses):
+
+```sql
+SELECT anofox_plot_checks(t) FROM (
+  SELECT 'customer present' AS check_name, status, null_rate AS value,
+         NULL::DOUBLE AS lower_threshold, threshold AS upper_threshold, message
+  FROM anofox_tab_null_rate('d', 'customer', 0.05)
+) t;
+```
+
+The time-aware checks (`metric_anomaly_iqr`, `rel_count_change`,
+`rolling_values_in_set`) read as `events` (`reference_date` → `ds`, `fail` /
+`warn` → `alarm` / `warning`, `message` → `label`) for a timeline, or as
+`check` (`reference_date` → `ds`) for a status strip over several runs. See
+`docs/plans/integration-contract.md` ("anofox-tabular producers") for the
+full adapter table, and `scripts/tabular_conformance.py` for every producer
+rendered end to end.
 
 ### Heatmaps
 
