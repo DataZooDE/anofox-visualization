@@ -27,12 +27,19 @@ pub const HOVER_SCRIPT: &str = r#"(function(){
 
 /// Keeps a `::ASOF` chip current: re-reads `data-asof` against the viewer's
 /// clock and writes the time in the viewer's zone and the page language
-/// (same wording as `web/app.js`'s chip); amber past `data-stale` seconds.
+/// (same wording as `web/app.js`'s chip); amber past `data-stale` seconds. A
+/// date-only chip (`data-asof-day`) reads as a calendar day instead — no
+/// time, no time-zone shift (#282).
 pub const ASOF_SCRIPT: &str = r#"(function(){
   var c=document.querySelector('.dp-asof[data-asof]'); if(!c) return;
   var at=+c.getAttribute('data-asof'), st=+c.getAttribute('data-stale')||0, lang=document.documentElement.lang||undefined;
+  var day=c.getAttribute('data-asof-day');
   function rel(s){s=Math.max(0,s);return s<60?'just now':s<3600?Math.floor(s/60)+' min ago':s<172800?Math.floor(s/3600)+' h ago':Math.floor(s/86400)+' d ago';}
-  function tick(){var d=new Date(at),now=Date.now(),age=(now-at)/1000,t;
+  function tick(){
+    if(day){var p=day.split('-'),d=new Date(+p[0],+p[1]-1,+p[2]),now=Date.now(),n=new Date(now),days=Math.round((new Date(n.getFullYear(),n.getMonth(),n.getDate())-d)/864e5),t,age=(now-d.getTime())/1000;
+      try{t=d.toLocaleDateString(lang);}catch(e){t=day;}
+      c.textContent='Data as of '+t+' ('+(days<=0?'today':days+' d ago')+')'; c.title=day; c.classList.toggle('stale',st>0&&age>st); return;}
+    var d=new Date(at),now=Date.now(),age=(now-at)/1000,t;
     try{t=d.toLocaleTimeString(lang,{hour:'2-digit',minute:'2-digit'});if(d.toDateString()!==new Date(now).toDateString())t=d.toLocaleDateString(lang)+' '+t;}catch(e){t=d.toISOString().slice(0,16).replace('T',' ');}
     c.textContent='Data as of '+t+' ('+rel(age)+')'; c.title=d.toString(); c.classList.toggle('stale',st>0&&age>st);}
   tick(); setInterval(tick,60000);
