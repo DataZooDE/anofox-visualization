@@ -13,6 +13,27 @@
 // later panels read); this bounds a script that never would.
 export const MAX_STEPS = 40;
 
+// sec-review-256 (final check): a null-prototype, *shallow* copy of `o`'s
+// own enumerable properties — every other value (a Map, a Set, an array,
+// a function, a service object such as a `pageAdapter()`, or a nested
+// plain object) passes through by reference, untouched. Every function
+// here and in web/assist.js, web/assist-engine.js and web/assist-csp.js
+// that takes an options/config object runs it through this first, so a
+// missing key is always `undefined` — never read off a polluted
+// `Object.prototype`. A caller whose *nested* field is itself read
+// key-by-key from untrusted input (`assistConfig`'s `a.models`,
+// `runAssistant`'s `limits`) calls `ownOpts` again on that field
+// specifically — shallow, not automatic, so this never silently reaches
+// into (and needlessly clones) a service object such as `buildEngine`'s
+// `page`, which is a plain object literal too but is never meant to be
+// copied.
+export function ownOpts(o) {
+  const out = Object.create(null);
+  if (!o || typeof o !== "object") return out;
+  for (const k of Object.keys(o)) out[k] = o[k];
+  return out;
+}
+
 // Lint `script`. `step` is the wasm lint_step; `run(sql)` resolves to the
 // rows as JSON text (as render_panel takes them) or rejects with the DuckDB
 // error. `strict` and `design` are `--strict` and the inverse of
@@ -59,7 +80,8 @@ function knownJson(known) {
 // assistant's parse-tree check at the execution point).
 // Works with the async (browser) and the blocking (Node) DuckDB-Wasm alike.
 let scratchSeq = 0; // unique across runners: two may run at once
-export function scratchRunner(db, { prepare, toRows = rowsJson, timeoutMs = 0, guard } = {}) {
+export function scratchRunner(db, opts = {}) {
+  const { prepare, toRows = rowsJson, timeoutMs = 0, guard } = ownOpts(opts);
   return async (sql) => {
     const c = await db.connect();
     const name = `anofox_lint_${++scratchSeq}`;
