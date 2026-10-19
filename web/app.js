@@ -5199,7 +5199,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
