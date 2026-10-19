@@ -82,4 +82,14 @@ assert.equal(legendBand("62.05 119.50 572.45 240.45", 400), 119.5, "a five-row l
 assert.equal(legendBand(null, 400), 64);
 assert.equal(legendBand("0.00 0.00 640.00 400.00", 400), 64, "a panel at the top: no band");
 
+// #213: hovering a mark focuses its series only where a series is a group of marks.
+const { seriesFocusable } = new Function(`const HOVER_FOCUS_MAX = 2000;\n${grab("seriesFocusable")}\nreturn { seriesFocusable };`)();
+assert.equal(seriesFocusable(["2024", "2024", "2025", "2025"]), true, "grouped / stacked bars");
+assert.equal(seriesFocusable(["A", "A", "A"]), false, "one series");
+assert.equal(seriesFocusable(["Jan", "Feb", "Mar"]), false, "a single-series bar: each bar its own series");
+assert.equal(seriesFocusable([]), false);
+const two = (n) => Array.from({ length: n }, (_, i) => (i % 2 ? "a" : "b"));
+assert.equal(seriesFocusable(two(2000)), true, "at the cap");
+assert.equal(seriesFocusable(two(2001)), false, "a dense chart keeps the plain hover");
+
 console.log("interaction_test: ok");

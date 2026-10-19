@@ -242,6 +242,28 @@ fn tween_rides_on_the_root() {
     assert!(!svg.contains("data-transition"));
 }
 
+#[test]
+fn hover_focus_none_rides_on_the_root() {
+    let svg = line(vec![Column::new("h", Role::HoverFocus, strs(&["None"; 4]))]);
+    assert!(
+        root(&svg).contains(r#"data-hover-focus="none""#),
+        "{}",
+        root(&svg)
+    );
+    // the default, 'series' and an unknown value: nothing (the browser focuses)
+    assert!(!line(vec![]).contains("data-hover-focus"));
+    assert!(!line(vec![Column::new(
+        "h",
+        Role::HoverFocus,
+        strs(&["series"; 4])
+    )])
+    .contains("data-hover-focus"));
+    assert!(
+        !line(vec![Column::new("h", Role::HoverFocus, strs(&["dim"; 4]))])
+            .contains("data-hover-focus")
+    );
+}
+
 /// Every `data-story` key of the SVG, unescaped.
 fn story_keys(svg: &str) -> Vec<String> {
     let r = root(svg);

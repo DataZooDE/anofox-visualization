@@ -68,16 +68,36 @@ serve_sql() {
 # Serve read-only, keeping the session alive (anofox_serve_dashboards returns
 # immediately). Against a prebuilt --db we attach it read-only; otherwise --init
 # builds the tables in an in-memory session.
-pkill -x duckdb 2>/dev/null; sleep 0.3
-if [ -n "$DB" ]; then
-  ( serve_sql; tail -f /dev/null ) | "$DUCKDB" -readonly "$DB" -unsigned >"$LOG" 2>&1 &
-else
-  ( serve_sql; tail -f /dev/null ) | "$DUCKDB" -unsigned >"$LOG" 2>&1 &
+# Never kill other processes: refuse a busy port, and stop only the server
+# this script starts (its PID and its stdin feeder's).
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  echo "port $PORT is already in use; stop that server or pass --port N" >&2; exit 2
 fi
+FEED_PID_FILE="$(mktemp)"
+SERVER_PID=""
+cleanup() {
+  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
+  [ -s "$FEED_PID_FILE" ] && kill "$(cat "$FEED_PID_FILE")" 2>/dev/null
+  rm -f "$FEED_PID_FILE" "$LOG"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+# The feeder keeps the CLI's stdin open; `exec` keeps its PID for cleanup.
+feed() { echo "$BASHPID" >"$FEED_PID_FILE"; serve_sql; exec tail -f /dev/null; }
+if [ -n "$DB" ]; then
+  feed | "$DUCKDB" -readonly "$DB" -unsigned >"$LOG" 2>&1 &
+else
+  feed | "$DUCKDB" -unsigned >"$LOG" 2>&1 &
+fi
+SERVER_PID=$!
 
 # Wait for the server to report it's up.
-for _ in $(seq 1 40); do grep -q 'serving .* locked' "$LOG" && break; sleep 0.25; done
-if ! grep -q 'serving .* locked' "$LOG"; then echo "server didn't start:" >&2; cat "$LOG" >&2; pkill -x duckdb; exit 1; fi
+for _ in $(seq 1 40); do
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  grep -q 'serving .* locked' "$LOG" && break
+  sleep 0.25
+done
+if ! grep -q 'serving .* locked' "$LOG"; then echo "server didn't start:" >&2; cat "$LOG" >&2; exit 1; fi
 echo "serving $DASH_ABS on :$PORT"
 
 urlencode() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
@@ -104,5 +124,4 @@ for f in "$DASH_ABS"/*.sql; do
   fi
 done
 
-pkill -x duckdb 2>/dev/null
 echo "→ PNGs in $OUT"
