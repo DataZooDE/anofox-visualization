@@ -75,7 +75,7 @@ The macros are aggregates: `list({…} ORDER BY x, y)` makes the row order deter
 | `width`, `height` | integers in 16–8192 (default 640 × 400) |
 | `primary` | brand colour `rrggbb` for single-series marks (default: the theme's) |
 | `theme` | `light` (default: graphite + electric blue; alias `default`, `datazoo`) · `dark` · `print` · `colorblind` · `high-contrast` · `'a+b'` · a theme JSON object/string; `variant` `light`/`dark` picks the side of an auto theme |
-| `locale` | `en-US` (default) · `en-GB` · `de-DE` · `fr-FR`: axis/legend numbers, currency and month names |
+| `locale` | `en-US` (default) · `en-GB` · `en-IE` (English, €) · `de-DE` · `fr-FR`: axis/legend numbers, currency and month names |
 | `max_categories` | discrete axis / colour cap (default 30: the largest 29 + "Other"; `0` = off) |
 | `max_line_points` | LTTB downsampling threshold per line series (default 5,000) |
 | `plot` + `options` | a contract plot instead of `roles` (`terms`, `prediction`, `curve`, `summary`, `obs`, `diagnostics`, `tests`, `compare`, `partial`, `auto`) — what the `anofox_plot_*` macros send |

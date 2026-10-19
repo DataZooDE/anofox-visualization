@@ -190,7 +190,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
@@ -1513,9 +1513,11 @@ injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
 `de-locale.sql`).
 
 **Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
-`en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
-formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
-legends / month names identically in the browser and the CLI:
+`en-GB`, `en-IE`, `de-DE`, `fr-FR` (other regions fall back to their
+language; English with a euro-area region, e.g. `en-DE`, `en-NL` or `en-EU`,
+reads as `en-IE`). It formats KPI tiles, table cells (numbers and ISO dates)
+and chart axes / legends / month names identically in the browser and the
+CLI:
 
 | | en-US | de-DE | fr-FR |
 |---|---|---|---|
@@ -1525,6 +1527,9 @@ legends / month names identically in the browser and the CLI:
 | `::COMPACT` 1234567 | 1.2M | 1,2 Mio. | 1,2 M |
 | date 2026-10-15 (tables) | 2026-10-15 (unchanged) | 15.10.2026 | 15/10/2026 |
 | axis | `1,000` · `Oct 2026` | `1.000` · `Okt. 2026` | `1 000` · `oct. 2026` |
+
+`en-IE` is English with the euro: `€12,400`, `12.5%`, `1,234,567.5`, dates
+`15/10/2026`, the choice for English labels with euro amounts.
 
 `?locale=de-DE` overrides it for one viewer (not in served/locked mode).
 
