@@ -35,8 +35,37 @@ export function colKind(type) {
 
 // A column name that reads as an identifier / key rather than a measure.
 export const idLike = (name) => /(^|_)(id|key|uuid|guid|code|zip|postcode|sku)$|^id_|Id$/i.test(String(name));
-// … a rate / level that is averaged, not summed.
-const avgLike = (name) => /(rate|ratio|pct|percent|share|score|price|avg|average|mean|median|aov|temp|age|lat|lon|lng|latitude|longitude|margin|prob|level)/i.test(String(name));
+// Column-name words: a faithful port of src/table.rs name_tokens (#227) —
+// split at non-alphanumerics, lower→Upper (churnRate) and letter↔digit
+// (per10k); lowercased. Shared vectors: tests/fixtures/name_vectors.json.
+export function nameTokens(name) {
+  const out = [];
+  let cur = "", prev = null;
+  for (const c of String(name)) {
+    if (!/[\p{Alphabetic}\p{N}]/u.test(c)) { if (cur) { out.push(cur); cur = ""; } prev = null; continue; }
+    if (prev !== null) {
+      const camel = /\p{Lowercase}/u.test(prev) && /\p{Uppercase}/u.test(c);
+      const digit = /[0-9]/.test(prev) !== /[0-9]/.test(c);
+      if ((camel || digit) && cur) { out.push(cur); cur = ""; }
+    }
+    cur += c.toLowerCase();
+    prev = c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+// src/table.rs RATE_WORDS / MEAN_WORDS (keep in sync; the vectors check it).
+const RATE_WORDS = new Set(["pct", "percent", "percentage", "percentages", "rate", "rates", "ratio", "ratios", "share", "shares", "per", "pro"]);
+const MEAN_WORDS = new Set(["avg", "average", "mean", "median", "score", "scores", "index", "percentile"]);
+// src/table.rs rate_like: a rate / percentage or an average (whole words).
+export function rateLike(name) {
+  const s = String(name);
+  return s.includes("%") || nameTokens(s).some((t) => RATE_WORDS.has(t) || MEAN_WORDS.has(t) || t.endsWith("quote") || t.endsWith("anteil") || t.endsWith("score"));
+}
+// … a rate / level that is averaged, not summed: rateLike, or a measure a sum
+// misreads — whole words, so attempts / page_views / problems are summed (#248).
+const AVG_WORDS = new Set(["price", "prices", "aov", "temp", "temperature", "age", "lat", "lon", "lng", "latitude", "longitude", "margin", "margins", "prob", "probability", "level", "levels"]);
+export const avgLike = (name) => rateLike(name) || nameTokens(name).some((t) => AVG_WORDS.has(t));
 
 // A column name as words for a title or label: "order_total" → "Order total".
 export function words(name) {

@@ -519,3 +519,57 @@ fn svg_table_totals_are_for_the_next_table_and_show_from_two_rows() {
     let t = render_totals(Some("units: sum"), 1, 2);
     assert!(t.len() == 1 && t[0].contains(">3<"), "{t:?}");
 }
+
+// #246: the headless card's ::TITLE is the first non-NULL value, trimmed.
+#[test]
+fn headless_title_is_the_first_non_null_value() {
+    let script = "SELECT week::XAXIS, sum(n)::BARCHART, t::TITLE FROM t GROUP BY ALL;";
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&["W1", "W2", "W3"])),
+        ("c1".into(), f(&[3.0, 4.0, 5.0])),
+        (
+            "c2".into(),
+            vec![
+                Value::Na,
+                Value::Str("  Weekly  ".into()),
+                Value::Str("Other".into()),
+            ],
+        ),
+    ]);
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(svg.contains(">Weekly</text>"), "{svg}");
+    assert!(!svg.contains("Other") && !svg.contains("  Weekly"), "{svg}");
+}
+#[test]
+fn headless_kpi_tile_has_no_title() {
+    let mut db = Fixed(vec![
+        ("c0".into(), f(&[7.0])),
+        ("c1".into(), s(&["Revenue"])),
+    ]);
+    let svg = render_dashboard_svg(
+        "SELECT 7::METRIC, 'Revenue'::TITLE;",
+        &mut db,
+        &DashboardOptions::default(),
+    )
+    .unwrap();
+    assert!(!svg.contains(">Revenue</text>"), "{svg}");
+}
+#[test]
+fn headless_contract_title_is_the_first_non_null_value() {
+    let rows = r#"[{"term":"price","estimate":-18.2,"conf_low":-20.1,"conf_high":-16.3}]"#;
+    let mut db = Fixed(vec![
+        ("c0".into(), s(&["ols", "huber"])),
+        ("c1".into(), s(&[rows, rows])),
+        ("c2".into(), s(&["{}", "{}"])),
+        (
+            "c3".into(),
+            vec![Value::Na, Value::Str(" Coefficients ".into())],
+        ),
+    ]);
+    let script = "SELECT model_id, anofox_plot_terms(t), c::TITLE FROM tidy t GROUP BY model_id;";
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        svg.contains("Coefficients — ols") && svg.contains("Coefficients — huber"),
+        "{svg}"
+    );
+}

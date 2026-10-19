@@ -428,3 +428,9 @@ statement error
 SELECT anofox_plot(t) FROM (SELECT 3 AS period, 'x' AS note) t;
 ----
 closest: events, missing kind
+
+# A short identifying name one letter off (team ~ term) gives no hint (#255).
+statement error
+SELECT anofox_plot(t) FROM (SELECT 'x' AS team, 'binary' AS kind, 0.7 AS probability) t;
+----
+<!REGEX>:.*closest.*
