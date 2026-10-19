@@ -234,8 +234,9 @@ export function animKit(win) {
   }
 
   // ---- emphasis: one opacity per mark from every layer that dims ----------
-  // Hover/click selection, brush & named selections, legend focus and story
-  // steps each own a layer: `fn(el)` → an opacity below 1 to dim, or null.
+  // Hover/click selection, brush & named selections, legend focus, a hovered
+  // mark's series focus (#213) and story steps each own a layer: `fn(el)` →
+  // an opacity below 1 to dim, or null.
   // A mark shows the lowest of them, so clearing one layer never undoes
   // another (keyboard focus overrides all in CSS).
   const dimmable = (svg) => {
