@@ -1,5 +1,6 @@
-//! The builder's app bar, per installation: the name, tagline and logo shown at
-//! the top of the browser builder (not a dashboard's own `::BRAND` header).
+//! The builder's app bar, per installation: the name, tagline and logo (plus
+//! an optional `logo_dark`, the dark-theme variant) shown at the top of the
+//! browser builder (not a dashboard's own `::BRAND` header).
 //!
 //! The serving processes take it from flags (`serve --app-name …`) or options
 //! (`anofox_serve(port, '{"name": …}')`), validate it here, and put it in
@@ -23,7 +24,7 @@ const MAX_TAGLINE: usize = 160;
 
 /// The text keys, in the order the builder documents them (plus the boolean
 /// `name_visible`).
-pub const KEYS: [&str; 5] = ["name", "tagline", "logo", "link", "favicon"];
+pub const KEYS: [&str; 6] = ["name", "tagline", "logo", "logo_dark", "link", "favicon"];
 
 /// Validated app-bar settings; `None` = not set here (the builder's default
 /// applies). An empty tagline hides it; `name_visible: false` shows the logo
@@ -33,6 +34,7 @@ pub struct AppBrand {
     pub name: Option<String>,
     pub tagline: Option<String>,
     pub logo: Option<String>,
+    pub logo_dark: Option<String>,
     pub link: Option<String>,
     pub favicon: Option<String>,
     pub name_visible: Option<bool>,
@@ -160,7 +162,7 @@ impl AppBrand {
                 }
                 self.link = Some(v.into());
             }
-            "logo" | "favicon" => {
+            "logo" | "logo_dark" | "favicon" => {
                 let url = if v.is_empty() || image_url_ok(v) {
                     v.to_string()
                 } else if files && !v.contains("://") && !v.starts_with("data:") {
@@ -175,10 +177,10 @@ impl AppBrand {
                         }
                     ));
                 };
-                if key == "logo" {
-                    self.logo = Some(url);
-                } else {
-                    self.favicon = Some(url);
+                match key {
+                    "logo" => self.logo = Some(url),
+                    "logo_dark" => self.logo_dark = Some(url),
+                    _ => self.favicon = Some(url),
                 }
             }
             "name_visible" => {
@@ -202,6 +204,11 @@ impl AppBrand {
     pub fn check(&self) -> Result<(), String> {
         if self.name_visible == Some(false) && self.logo.as_deref().unwrap_or("").is_empty() {
             return Err("name_visible: false needs a logo (the bar would be empty)".into());
+        }
+        if !self.logo_dark.as_deref().unwrap_or("").is_empty()
+            && self.logo.as_deref().unwrap_or("").is_empty()
+        {
+            return Err("logo_dark needs a logo (it is the logo's dark-theme variant)".into());
         }
         Ok(())
     }
@@ -236,6 +243,7 @@ impl AppBrand {
             &self.name,
             &self.tagline,
             &self.logo,
+            &self.logo_dark,
             &self.link,
             &self.favicon,
         ]) {
@@ -323,6 +331,15 @@ mod tests {
         assert!(e.contains("the limit is 512 KB"), "{e}");
         // the extension never reads files
         assert!(b.set("logo", svg.to_str().unwrap(), false).is_err());
+        b.set("logo_dark", svg.to_str().unwrap(), true).unwrap();
+        assert!(b
+            .logo_dark
+            .as_deref()
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,"));
+        let e = b.set("logo_dark", txt.to_str().unwrap(), true).unwrap_err();
+        assert!(e.contains("not a PNG"), "{e}");
+        assert!(b.set("logo_dark", svg.to_str().unwrap(), false).is_err());
         assert!(b.set("name", "", true).is_err());
         assert!(b.set("name", &"x".repeat(81), true).is_err());
         assert!(b.set("link", "ftp://x", true).is_err());
@@ -353,5 +370,19 @@ mod tests {
         assert!(AppBrand::from_json(r#"{"logo":"","name_visible":false}"#).is_err());
         assert!(AppBrand::from_json(r#"{"name_visible":"no"}"#).is_err());
         assert!(AppBrand::from_json("[]").is_err());
+        // logo_dark (#198): the logo's dark-theme variant, needs a logo
+        let b = AppBrand::from_json(r#"{"logo":"https://x/l.svg","logo_dark":"https://x/d.svg"}"#)
+            .unwrap();
+        assert!(
+            b.script().contains(r#""logo_dark":"https://x/d.svg""#),
+            "{}",
+            b.script()
+        );
+        let e = AppBrand::from_json(r#"{"logo_dark":"https://x/d.svg"}"#).unwrap_err();
+        assert!(e.contains("needs a logo"), "{e}");
+        assert!(AppBrand::from_json(
+            r#"{"logo":"https://x/l.svg","logo_dark":"javascript:alert(1)"}"#
+        )
+        .is_err());
     }
 }

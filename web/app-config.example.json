@@ -2,6 +2,7 @@
   "name": "Acme Insights",
   "tagline": "Sales and stock, every morning",
   "logo": "https://intranet.acme.example/brand/logo.svg",
+  "logo_dark": "https://intranet.acme.example/brand/logo-dark.svg",
   "link": "https://intranet.acme.example/",
   "favicon": "https://intranet.acme.example/brand/favicon.png"
 }

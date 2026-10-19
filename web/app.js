@@ -10712,11 +10712,12 @@ function safeUrl(u, { image = false } = {}) {
   if (image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);/.test(probe)) return s;
   return "";
 }
-// ---- the app bar, per installation: name, tagline, logo, link, favicon ----
+// ---- the app bar, per installation: name, tagline, logo, logo_dark, link,
+// favicon ----
 // Layers, later wins: these defaults → app-config.json next to index.html
 // (static hosting) → window.__anofoxApp from the serving process (serve
 // --app-*, anofox_serve(port, options); checked by src/host/app_brand.rs).
-const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "", name_visible: true };
+const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", logo_dark: "", link: "", favicon: "", name_visible: true };
 let appBrand = { ...APP_BRAND_DEFAULT };
 let pageBrand = {}; // the open dashboard's brand (applyTheme)
 // An image the app bar may draw: data:image/(png|jpeg|gif|webp|svg+xml),
@@ -10760,6 +10761,10 @@ function appBrandMerge(...layers) {
     console.warn("app bar: name_visible: false needs a logo — the name is shown");
     out.name_visible = true;
   }
+  if (out.logo_dark && !out.logo) {
+    console.warn("app bar: logo_dark needs a logo — ignored");
+    out.logo_dark = "";
+  }
   return out;
 }
 // Draw the bar (text via textContent, the logo as an <img>) and reveal it.
@@ -10770,18 +10775,34 @@ function appBrandApply(cfg) {
   const name = document.createElement("span");
   name.className = "app-name";
   name.textContent = cfg.name;
-  if (cfg.logo) {
+  const logoImg = (src, variant) => {
     const img = document.createElement("img");
-    img.className = "app-logo";
+    img.className = "app-logo" + (variant ? " app-logo-" + variant : "");
     // the name next to it, or (a wordmark, name_visible: false) as its alt text
     img.alt = cfg.name_visible ? "" : cfg.name;
     img.decoding = "async";
-    img.onerror = () => {
-      img.replaceWith(...(cfg.name_visible ? [] : [name]));
-      h1.classList.remove("has-logo");
-    };
-    img.src = cfg.logo;
+    img.src = src;
+    return img;
+  };
+  // a logo that fails to load: the other variant shows in both themes, else the name
+  const lost = (img, other) => () => {
+    if (other && other.isConnected) {
+      img.remove();
+      other.className = "app-logo";
+      return;
+    }
+    img.replaceWith(...(cfg.name_visible ? [] : [name]));
+    h1.classList.remove("has-logo");
+  };
+  if (cfg.logo) {
+    const img = logoImg(cfg.logo, cfg.logo_dark ? "light" : "");
+    const dark = cfg.logo_dark ? logoImg(cfg.logo_dark, "dark") : null; // #198: shown while body.dark
+    img.onerror = lost(img, dark);
     kids.push(img);
+    if (dark) {
+      dark.onerror = lost(dark, img);
+      kids.push(dark);
+    }
   }
   if (cfg.name_visible) kids.push(name);
   if (cfg.link) {

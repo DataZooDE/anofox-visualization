@@ -33,25 +33,18 @@ switched off for every process (DATAZOO_DISABLE_TELEMETRY=1), and the PII
 scans use the pattern recognizers only (no NER model download). Exit status 1
 when any plot call fails or a producer has no recipe.
 
-`run`, `svgs_of`, `check_out` and `montage` repeat statistics_conformance.py
-(and the forecast / decide / optimize harnesses); a shared helper module could
-be factored out once all of them have landed.
+The runner, the SVG check, the montage and the arguments come from
+`scripts/conformance_lib.py`.
 """
 
 from __future__ import annotations
 
-import argparse
-import concurrent.futures as cf
-import html
-import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 
-# anofox_tabular sends usage telemetry unless this is set; every process here inherits it.
-os.environ["DATAZOO_DISABLE_TELEMETRY"] = "1"
+from conformance_lib import check as _check
+from conformance_lib import NO_SCHEMA, check_raw, ext_path, parser, run_all, run_duckdb, svg_names, write_montage
 
 # ── demo data ────────────────────────────────────────────────────────────────
 # 120 orders over a month plus two duplicated rows; planted problems: NULL
@@ -297,107 +290,21 @@ ALLOWED_WARNINGS: list[str] = []
 PII_TYPES = ("EMAIL,CREDIT_CARD,US_SSN,IBAN,DE_TAX_ID,IP_ADDRESS,URL,MAC_ADDRESS,UK_NINO,US_PASSPORT,PHONE,"
              "CRYPTO_ADDRESS,API_KEY")
 
-# The error anofox_plot gives a table that follows no schema.
-NO_SCHEMA = "match no plottable schema"
-
 
 def run(duckdb: str, ext: str, sql: str, mode: str = "-list", ext_dir: str | None = None) -> tuple[bool, str]:
     pre = f"SET extension_directory = '{ext_dir}'; " if ext_dir else ""
     script = (f"{pre}LOAD anofox_tabular; LOAD '{ext}'; SET anofox_telemetry_enabled = false; "
               f"SET anofox_pii_enabled_types = '{PII_TYPES}';\n{SETUP}\n{sql};")
-    p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
-                       capture_output=True, text=True, timeout=600)
-    # anofox_tabular logs its module registration ("[anofox] [info] …") to stderr.
-    err = "\n".join(l for l in (p.stderr or "").splitlines() if not l.startswith("[anofox] [info]"))
-    return p.returncode == 0 and not err.strip(), (p.stdout or "") + err
+    return run_duckdb(duckdb, script, mode, timeout=600, quiet=("[anofox] [info]",))
 
 
-def svgs_of(out: str) -> list[str]:
-    """Every SVG cell of the `-json` results (grids nest <svg> elements)."""
-    dec, i, cells = json.JSONDecoder(), 0, []
-    while (j := out.find("[", i)) >= 0:
-        try:
-            rows, i = dec.raw_decode(out, j)
-        except ValueError:
-            i = j + 1
-            continue
-        cells += [v for r in rows if isinstance(r, dict) for v in r.values()
-                  if isinstance(v, str) and v.startswith("<svg")]
-    return cells
-
-
-def check_out(ok: bool, out: str) -> tuple[str, list[str], str]:
-    svgs = svgs_of(out) if ok else []
-    if not svgs:
-        return "FAIL", [], out.strip().replace("\n", " ")[:400]
-    warnings = []
-    for s in svgs:
-        w = re.search(r'data-warnings="([^"]*)"', s)
-        if w:
-            warnings += json.loads(html.unescape(w.group(1)))
-    bad = [w for w in warnings if not any(a in w for a in ALLOWED_WARNINGS)]
-    if bad:
-        return "WARN", svgs, "; ".join(bad)[:400]
-    return "OK", svgs, ""
-
-
-def check_raw(ok: bool, out: str) -> tuple[str, list[str], str]:
-    """The raw output: no schema is the expected answer, a render an XPASS."""
-    if not ok and NO_SCHEMA in out:
-        return "NOSCHEMA", [], ""
-    status, svgs, msg = check_out(ok, out)
-    return ("XPASS" if status == "OK" else status), svgs, msg or "raw output renders: tag it and add a contract case"
-
-
-def montage(out_dir: str, names: list[str]) -> str | None:
-    if not shutil.which("rsvg-convert"):
-        return None
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        return None
-    pngs = []
-    png_dir = os.path.join(out_dir, "png")
-    os.makedirs(png_dir, exist_ok=True)
-    for n in names:
-        svg = os.path.join(out_dir, n + ".svg")
-        png = os.path.join(png_dir, n + ".png")
-        r = subprocess.run(["rsvg-convert", "-b", "white", "-w", "480", svg, "-o", png],
-                           capture_output=True)
-        if r.returncode == 0:
-            pngs.append((n, png))
-    if not pngs:
-        return None
-    cols, tw, th = 6, 480, 330
-    rows = (len(pngs) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * tw, rows * (th + 18)), "white")
-    draw = ImageDraw.Draw(sheet)
-    for k, (n, png) in enumerate(pngs):
-        im = Image.open(png).convert("RGB")
-        im.thumbnail((tw, th))
-        x, y = (k % cols) * tw, (k // cols) * (th + 18)
-        sheet.paste(im, (x, y + 18))
-        draw.text((x + 4, y + 2), n, fill=(180, 30, 30))
-    path = os.path.join(out_dir, "montage.png")
-    sheet.save(path)
-    return path
+check_out = lambda ok, out: _check(ok, out, ALLOWED_WARNINGS)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--duckdb", default=os.environ.get("DUCKDB", "duckdb"))
-    ap.add_argument("--ext", required=True, help="anofox_visualization extension file to LOAD")
-    ap.add_argument("--out", default="tabular-conformance")
-    ap.add_argument("--extension-directory", help="DuckDB extension_directory holding anofox_tabular")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--only", help="regex: run only matching case names")
-    ap.add_argument("--no-montage", action="store_true")
-    a = ap.parse_args()
-    ext = os.path.abspath(a.ext)
-    if not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
-        print(f"--ext {ext}: LOAD takes the entry point from the file name, so it must be named "
-              "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
-              f"Rename it, or: ln -s '{ext}' /tmp/anofox_visualization.duckdb_extension", file=sys.stderr)
+    a = parser(__doc__, "tabular-conformance", extension_directory="DuckDB extension_directory holding anofox_tabular").parse_args()
+    ext = ext_path(a.ext)
+    if ext is None:
         return 2
     os.makedirs(a.out, exist_ok=True)
 
@@ -432,22 +339,13 @@ def main() -> int:
 
     def one(c):
         ok, out = q(c["sql"], "-json")
-        return c, (check_raw if c["which"] == "raw" else check_out)(ok, out)
+        return c, (check_raw(ok, out, ALLOWED_WARNINGS) if c["which"] == "raw" else check_out(ok, out))
 
-    results = []
-    with cf.ThreadPoolExecutor(a.jobs) as pool:
-        for c, (status, svgs, msg) in pool.map(one, runs):
-            key = f"{c['key']}.{c['which']}"
-            for k, s in enumerate(svgs):
-                fn = key if len(svgs) == 1 else f"{key}.{k}"
-                with open(os.path.join(a.out, fn + ".svg"), "w") as f:
-                    f.write(s)
-            results.append((key, status, msg, len(svgs), c))
-    names = []
-    for key, status, msg, n, _ in sorted(results, key=lambda r: r[0]):
+    results = run_all(runs, one, a.jobs, a.out, key=lambda c: f"{c['key']}.{c['which']}")
+    names = svg_names(results)
+    for key, status, msg, n, c in results:
         if status != "NOSCHEMA":
             print(f"{status:4s} {key:48s} {msg}")
-        names += [key] if n == 1 else [f"{key}.{k}" for k in range(n)]
     for m in missing:
         print(f"MISS {m}: no recipe in the harness")
     for n in sorted(NOT_RESULTS & set(producers)):
@@ -469,11 +367,9 @@ def main() -> int:
     noschema = sum(1 for s in raw.values() if s == "NOSCHEMA")
     print(f"\n{covered}/{len(results_)} producers covered, {passed}/{total} plot calls OK, "
           f"{noschema}/{len(raw)} raw outputs match no contract schema")
+    keep = lambda n: not n.endswith(".auto") and ".raw" not in n
     if not a.no_montage:
-        names = [n for n in names if os.path.exists(os.path.join(a.out, n + ".svg"))]
-        m = montage(a.out, [n for n in names if not n.endswith(".auto") and ".raw" not in n])
-        if m:
-            print(f"montage: {m}")
+        write_montage(a.out, names, keep)
     return 0 if not failed and not missing else 1
 
 
