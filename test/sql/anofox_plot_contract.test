@@ -169,6 +169,28 @@ SELECT anofox_plot_tests(t, value := 'nope') FROM tests t;
 ----
 is not one of 'estimate', 'statistic', 'p'
 
+# Several tests' statistics are not one scale (#190): a panel per method,
+# titled by the method, the groups on one shared y axis.
+statement ok
+CREATE TABLE stat2 AS SELECT * FROM (VALUES
+  ('A', 'ADF', -0.7, 0.85), ('A', 'KPSS', 2.1, 0.01),
+  ('B', 'ADF', -0.2, 0.94), ('B', 'KPSS', 2.0, 0.01)) t(id, method, statistic, p_value);
+
+query III
+SELECT (length(svg) - length(replace(svg, 'data-panel="', ''))) // 12,
+       svg LIKE '%>ADF</text>%>KPSS</text>%',
+       len(list_distinct(regexp_extract_all(svg, 'data-ydomain="([^"]*)"', 1)))
+FROM (SELECT anofox_plot_tests(t) AS svg FROM stat2 t);
+----
+2	true	1
+
+# On −log10(p) every test shares one scale: one panel, rows "A · ADF".
+query II
+SELECT svg LIKE '%data-panel=%', svg LIKE '%A · ADF%'
+FROM (SELECT anofox_plot_tests(t, value := 'p') AS svg FROM stat2 t);
+----
+false	true
+
 statement ok
 CREATE TABLE obs3 AS SELECT CASE i % 3 WHEN 0 THEN 'a' WHEN 1 THEN 'b' ELSE 'c' END AS g,
   (i % 3) * 0.8 + sin(i) AS y FROM range(30) r(i);
@@ -389,3 +411,20 @@ FROM (SELECT anofox_plot_diagnostics(o) AS svg FROM (
   SELECT i AS row_id, i::DOUBLE AS fitted, sin(i) AS residual FROM range(30) r(i)) o);
 ----
 true	true
+
+# ── anofox_plot: no "closest" hint from a generic column (#180) ──────────────
+statement error
+SELECT anofox_plot(t) FROM (SELECT 'q1' AS question_id, 'binary' AS kind, 0.7 AS probability) t;
+----
+match no plottable schema
+
+statement error
+SELECT anofox_plot(t) FROM (SELECT 'q1' AS question_id, 'binary' AS kind, 0.7 AS probability) t;
+----
+<!REGEX>:.*closest.*
+
+# The schema's identifying column still earns the hint (period stands in for ds).
+statement error
+SELECT anofox_plot(t) FROM (SELECT 3 AS period, 'x' AS note) t;
+----
+closest: events, missing kind

@@ -17,6 +17,7 @@ are per-row scalars, the quality metrics single numbers. So the harness
   * pins the raw outputs that do not plot (`decide_table`, `decide_answers`)
     as known gaps: they must fail with the clean "match no plottable schema"
     error, and a gap that starts to render fails too, so this list follows.
+    The error must not name a "closest" schema.
 
 Every call must return an SVG with no SQL error and no unexpected render
 warning. Every SVG is written to the output directory, plus a PNG montage when
@@ -206,6 +207,9 @@ GAPS = {
                                   "unnest(map_values(team_dist)) AS probability FROM runs WHERE id = 3) t",
 }
 GAP_ERROR = "match no plottable schema"
+# …with no "closest" hint: decide's generic columns (kind, probability, …)
+# are no near miss of any schema (#180).
+GAP_NO_HINT = "; closest:"
 
 # Extra cases: grouping, options.
 EXTRA = {
@@ -268,6 +272,8 @@ def check_gap(ok: bool, out: str) -> tuple[str, list[str], str]:
     if ok and svgs_of(out):
         return "XPASS", svgs_of(out), "renders now: move it from GAPS to BRIDGES"
     if not ok and GAP_ERROR in out:
+        if GAP_NO_HINT in out:
+            return "FAIL", [], "misleading closest hint (#180): " + out.strip().splitlines()[-1][:200]
         return "GAP", [], out.strip().splitlines()[-1][:200]
     return "FAIL", [], out.strip().replace("\n", " ")[:400]
 

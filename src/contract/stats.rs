@@ -277,6 +277,9 @@ struct TestRow {
 /// significance at `alpha`, the (adjusted) p-value written beside each row.
 /// Several groups (`id` / `model_id` / an unnested aggregate's GROUP BY
 /// column) become one panel each.
+/// Several methods (ADF and KPSS) are not on one scale: unless the axis is
+/// −log10(p), each method gets a panel — its own x, the groups on a shared y
+/// axis (#190).
 pub(super) fn tests(
     t: &Table,
     options: &Row,
@@ -372,16 +375,26 @@ pub(super) fn tests(
     let adjusted = rows.iter().any(|r| r.p.is_some()) && p_adj.iter().any(|v| fin(v).is_some());
     let note_style = opt_str(options, "label").unwrap_or_else(|| "p".into());
     // Odds ratios (Fisher's exact test, …) are compared with 1, not 0.
-    let ratio = methods
-        .iter()
-        .any(|m| m.to_ascii_lowercase().contains("fisher"))
-        || levels(t, "effect_name").iter().any(|e| e.contains("ratio"))
-        || t.has("odds_ratio");
+    let fisher = |m: &str| m.to_ascii_lowercase().contains("fisher");
+    let ratio_cols =
+        levels(t, "effect_name").iter().any(|e| e.contains("ratio")) || t.has("odds_ratio");
+    let ratio = methods.iter().any(|m| fisher(m)) || ratio_cols;
+    // Different tests' statistics (and estimates) are not on one scale (#190):
+    // several methods → one panel per method, each its own x, the groups on a
+    // shared y. −log10(p) is one scale for every test: one panel.
+    let by_method = methods.len() > 1 && mode != "p";
     // Rows without a comparison label: one test per group → the group is the
     // label; else the method; several methods per group → both (`A · ADF`).
     let labelled = rows.iter().any(|r| r.label.is_some());
     let mut panels: Vec<(Option<String>, Vec<&TestRow>)> = Vec::new();
-    if labelled && group.is_some() {
+    if by_method {
+        for r in &rows {
+            match panels.iter_mut().find(|(m, _)| *m == r.method) {
+                Some((_, v)) => v.push(r),
+                None => panels.push((r.method.clone(), vec![r])),
+            }
+        }
+    } else if labelled && group.is_some() {
         for r in &rows {
             match panels.iter_mut().find(|(g, _)| *g == r.group) {
                 Some((_, v)) => v.push(r),
@@ -403,6 +416,47 @@ pub(super) fn tests(
             .or(method)
             .unwrap_or_else(|| "test".into())
     };
+    // In a method's panel the method is the title: a row is its group and
+    // comparison.
+    let facet_label = |r: &TestRow| -> String {
+        match (&r.group, &r.label) {
+            (Some(g), Some(l)) => format!("{g} · {l}"),
+            (None, Some(l)) => l.clone(),
+            (Some(g), None) => g.clone(),
+            (None, None) => "test".into(),
+        }
+    };
+    // Each panel's row labels; by method, a label repeated within a panel is
+    // numbered ("test (2)") and all panels share one axis of every label.
+    let keyed: Vec<Vec<String>> = panels
+        .iter()
+        .map(|(_, prs)| {
+            if !by_method {
+                return prs.iter().map(|r| label_of(r)).collect();
+            }
+            let mut seen: Vec<String> = Vec::new();
+            prs.iter()
+                .map(|r| {
+                    let base = facet_label(r);
+                    let k = seen.iter().filter(|s| **s == base).count();
+                    seen.push(base.clone());
+                    if k == 0 {
+                        base
+                    } else {
+                        format!("{base} ({})", k + 1)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut shared: Vec<String> = Vec::new();
+    for k in keyed.iter().flatten() {
+        if !shared.contains(k) {
+            shared.push(k.clone());
+        }
+    }
+    // One legend for the grid: every panel lists the call's classes.
+    let present: Vec<String> = rows.iter().map(|r| sig_class(r.p, alpha)).collect();
     let level = t
         .num("conf_level")
         .ok()
@@ -419,7 +473,28 @@ pub(super) fn tests(
     };
     let small = panels.len() > 1;
     let mut plots = Vec::new();
-    for (g, prs) in &panels {
+    for ((g, prs), keys) in panels.iter().zip(&keyed) {
+        let (axis, slots): (Vec<String>, Vec<f64>) = if by_method {
+            let n = shared.len();
+            let slots = keys
+                .iter()
+                .map(|k| {
+                    slot(
+                        shared.iter().position(|s| s == k).expect("key on the axis"),
+                        n,
+                    )
+                })
+                .collect();
+            (shared.clone(), slots)
+        } else {
+            let n = keys.len();
+            (keys.clone(), (0..n).map(|i| slot(i, n)).collect())
+        };
+        let panel_ratio = if by_method {
+            ratio_cols || g.as_deref().is_some_and(fisher)
+        } else {
+            ratio
+        };
         // The automatic −log10(p) fallback has its own axis: an x_label
         // written for the estimate would mislabel it.
         let xl = if fallback {
@@ -427,11 +502,25 @@ pub(super) fn tests(
         } else {
             labels.x_or(&xlab)
         };
-        let mut plot = test_panel(prs, mode, ratio, alpha, &note_style, &label_of, o, small)?
-            .xlab(&xl)
-            .ylab(&labels.y_or(""));
+        let mut plot = test_panel(
+            prs,
+            keys,
+            &slots,
+            &axis,
+            &present,
+            mode,
+            panel_ratio,
+            alpha,
+            &note_style,
+            o,
+            small,
+        )?
+        .xlab(&xl)
+        .ylab(&labels.y_or(""));
         if let Some(g) = g {
             plot = plot.title(g);
+        } else if by_method {
+            plot = plot.title("no method");
         } else if let Some(tt) = &labels.title {
             plot = plot.title(tt);
         }
@@ -472,6 +561,15 @@ pub(super) fn pair_label(
     }
 }
 
+/// A test's significance class at `alpha`: its colour and legend entry.
+fn sig_class(p: Option<f64>, alpha: f64) -> String {
+    match p {
+        Some(p) if p <= alpha => format!("p ≤ {}", fmt_num(alpha)),
+        Some(_) => "n.s.".into(),
+        None => "no p-value".into(),
+    }
+}
+
 /// The note beside a test: `p = 0.012 *` (`label := 'p'`, forests) or the
 /// stars only (`'stars'`).
 fn p_note(p: f64, style: &str) -> String {
@@ -491,16 +589,18 @@ fn p_note(p: f64, style: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn test_panel(
     rows: &[&TestRow],
+    keys: &[String],
+    slots: &[f64],
+    axis: &[String],
+    present: &[String],
     mode: &str,
     ratio: bool,
     alpha: f64,
     note_style: &str,
-    label_of: &dyn Fn(&TestRow) -> String,
     o: &RenderOptions,
     small: bool,
 ) -> Result<GGPlot, String> {
     let n = rows.len();
-    let labels: Vec<String> = rows.iter().map(|r| label_of(r)).collect();
     let value = |r: &TestRow| -> Option<f64> {
         match mode {
             "estimate" => r.est,
@@ -509,14 +609,8 @@ fn test_panel(
         }
     };
     let sig_label = format!("p ≤ {}", fmt_num(alpha));
-    let sig = |r: &TestRow| -> String {
-        match r.p {
-            Some(p) if p <= alpha => sig_label.clone(),
-            Some(_) => "n.s.".into(),
-            None => "no p-value".into(),
-        }
-    };
-    let ys: Vec<Value> = (0..n).map(|i| Value::Float(slot(i, n))).collect();
+    let sig = |r: &TestRow| -> String { sig_class(r.p, alpha) };
+    let ys: Vec<Value> = slots.iter().map(|&y| Value::Float(y)).collect();
     let xs: Vec<Value> = rows
         .iter()
         .map(|r| value(r).map_or(Value::Float(f64::NAN), Value::Float))
@@ -524,7 +618,7 @@ fn test_panel(
     let sigs: Vec<Value> = rows.iter().map(|r| s(sig(r))).collect();
     let tips: Vec<Value> = rows
         .iter()
-        .zip(&labels)
+        .zip(keys)
         .map(|(r, l)| s(format!("{l}: {}", r.p.map(fmt_p).unwrap_or_default())))
         .collect();
     let mut extent: Vec<f64> = rows.iter().filter_map(|r| value(r)).collect();
@@ -579,7 +673,7 @@ fn test_panel(
                 })
                 .layer_data(vec![
                     ("x".into(), vec![Value::Float(r + (xhi - xlo) * 0.01)]),
-                    ("y".into(), vec![Value::Float(n as f64 + 0.42)]),
+                    ("y".into(), vec![Value::Float(axis.len() as f64 + 0.42)]),
                     ("note".into(), vec![s(format!("p = {}", fmt_num(alpha)))]),
                 ])
                 .layer_aes(Aes::new().x("x").y("y").label("note"));
@@ -684,7 +778,6 @@ fn test_panel(
             ])
             .layer_aes(Aes::new().x("x").y("y").label("note"));
     }
-    let present: Vec<String> = rows.iter().map(|r| sig(r)).collect();
     let palette: Vec<(&str, RGBAColor)> = [
         (sig_label.as_str(), rgba(ACCENT)),
         ("n.s.", rgba(GREY)),
@@ -696,7 +789,7 @@ fn test_panel(
     plot = plot
         .scale_color_manual(palette)
         .scale_x_continuous(ScaleContinuous::new().with_limits(xlo, xhi))
-        .scale_y_continuous(label_axis(&labels));
+        .scale_y_continuous(label_axis(axis));
     Ok(styled(plot, o, small))
 }
 
