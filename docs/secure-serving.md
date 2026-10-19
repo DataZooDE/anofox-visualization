@@ -242,6 +242,20 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
     and check. **Hiding a tab is presentation, not secrecy:** the served page
     carries the dashboard's SQL, so its source still lists the tab, its
     `@requires` lines and its panels' SQL (never the data folder's path).
+  - **A `::VIEW` alternative's `@requires`** (#214) is gated the same way, as
+    a third level under `::TAB` / `::SUBTAB`: a direct request for a hidden
+    alternative's marker or any of its panels answers *Not available*,
+    whoever asks, and the group's other alternatives are unaffected. Which
+    alternative a viewer is looking at is never sent to the server — it is
+    not a DuckDB variable, never part of an `/api/panel` body and never part
+    of a cache key, so `?view.<id>=` in the URL is a client-only bookmark:
+    the script-free server ignores it (it reads only declared `@param`s), and
+    a locked server's response to `/d/<id>` does not change with it.
+    **Showing one alternative by default is presentation, not secrecy:** a
+    non-hidden alternative's panels can be requested directly whether or not
+    it is the one currently shown, exactly like a shown tab's — they carry
+    only data the viewer may already read, gated by the same scope, claims,
+    `@vars` and policy as any other request.
   - **A viewer can skip a setup statement that carries `@requires`** (by
     picking a run without the file). Never guard a statement that narrows what
     a viewer sees with it — neither a statement that reads no file

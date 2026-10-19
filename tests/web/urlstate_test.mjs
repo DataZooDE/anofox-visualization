@@ -21,6 +21,11 @@ assert.deepEqual(readUrlSeed("?tab=X&v.region=EU&v.ch=a&v.ch=b&v.bad-name=1&v.x%
   ch: ["a", "b"],
 });
 assert.deepEqual(readUrlSeed("?v.note=it%27s%20%3B--"), { note: ["it's ;--"] });
+// "view." never collides with "v." (#214: ::VIEW's own ?view.<id>=<label>
+// deep-link prefix, tests/web/views_test.mjs) — readUrlSeed must not pick up
+// a view.* key just because it starts with "v".
+assert.deepEqual(readUrlSeed("?view.yoy=Bars"), {});
+assert.deepEqual(readUrlSeed("?view.yoy=Bars&v.region=EU"), { region: ["EU"] });
 
 const opts = ["EU", "US"];
 assert.equal(validSeed("DROPDOWN", ["US"], opts), "US");

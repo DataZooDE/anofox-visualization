@@ -149,9 +149,14 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
     let mut chrome = DashboardChrome::default();
     let mut steps = Vec::new();
     let mut sections = sql::requires::Sections::default();
+    // A static (non-interactive) render shows only a ::VIEW group's first
+    // shown alternative (#214) — the other alternatives' non-setup
+    // statements never even reach a query.
+    let mut view_pick = sql::views::StaticPick::default();
     for panel in sql::plan(script) {
-        // A ::TAB whose `-- @requires` input is missing is hidden: none of
-        // its panels are drawn (the tabs themselves are flattened here).
+        // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
+        // is hidden: none of its panels are drawn (the tabs themselves are
+        // flattened here).
         let hidden = sections.step(&panel, |reqs| {
             sql::requires::check(reqs, |q, _| {
                 let cols = provider.query(q)?;
@@ -168,7 +173,7 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             })
             .missing
         });
-        if hidden.is_some() {
+        if hidden.is_some() || view_pick.drop_panel(&panel) {
             continue;
         }
         if panel.setup {
@@ -202,7 +207,10 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
         }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
         // ::TOTALS is kept for the next table (#226), like the other layout
-        // directives below, so its value reaches render_inner as a Step.
+        // directives below, so its value reaches render_inner as a Step. A
+        // surviving (default-alternative) ::VIEW marker is kept too, so
+        // render_inner can apply its group's pending ::COL width (#214) —
+        // it never draws a box itself (see render_inner's own check).
         let layout = has(&|r| {
             matches!(
                 r,
@@ -211,6 +219,7 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
                     | Role::Height
                     | Role::Section
                     | Role::TableOpt(TableOpt::Totals)
+                    | Role::View
             )
         });
         if roles::is_directive_panel(&panel.roles) && !layout {
@@ -262,6 +271,13 @@ fn render_inner(
     // A ::TOTALS value for the next panel — a table reads it (#226); like the
     // browser's nextTableOpts, any next panel consumes it.
     let mut next_totals: Option<String> = None;
+    // A ::VIEW group's width (#214): a ::COL pending when the group's
+    // (surviving) marker is reached sets it; absent one, the group spans
+    // the full row. `current_group_span` is `(group id, width)` for
+    // whichever group the panel just placed belongs to, so it is cleared —
+    // not leaked onto later, non-view panels — the moment a step's own
+    // group no longer matches.
+    let mut current_group_span: Option<(usize, u32)> = None;
 
     // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO).
     if let Some((svg, h)) = header_svg(t, pad, row_y, content_w) {
@@ -310,6 +326,42 @@ fn render_inner(
                     .and_then(|v| v.as_f64())
             })
         };
+
+        // Entering/leaving a ::VIEW group (#214): a group's width must not
+        // leak onto a later panel once we're no longer in the group that
+        // set it (whether that group's statements simply ran out, or this
+        // step belongs to a different one).
+        if current_group_span.is_some_and(|(g, _)| Some(g) != panel.view.as_ref().map(|v| v.group))
+        {
+            current_group_span = None;
+        }
+        // The (surviving, default-alternative) ::VIEW marker itself never
+        // draws a box — it only sets its group's width: a ::COL pending
+        // when the group opens, else the full row (12).
+        if has(&|r| matches!(r, Role::View)) {
+            if let Some(v) = &panel.view {
+                current_group_span = Some((
+                    v.group,
+                    if next_span == 0 {
+                        12
+                    } else {
+                        next_span.clamp(1, 12)
+                    },
+                ));
+            }
+            next_span = 0;
+            continue;
+        }
+        // A panel inside a tracked ::VIEW group takes its group's width,
+        // unless it sets its own (an inner ::COL is a deliberate escape
+        // hatch, not the common case).
+        if next_span == 0 {
+            if let Some((g, w)) = current_group_span {
+                if panel.view.as_ref().is_some_and(|v| v.group == g) {
+                    next_span = w;
+                }
+            }
+        }
 
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {

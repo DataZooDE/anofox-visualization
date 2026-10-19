@@ -129,3 +129,11 @@ fn web_served_nav_groups() {
 fn web_assistant_core() {
     run_node("assist_test.mjs");
 }
+
+/// ::VIEW / ::ENDVIEW deep-linking (#214): readViewSeed's seed validation,
+/// setViewParam's default-key deletion, and the "view." / "v." prefix
+/// non-collision.
+#[test]
+fn web_view_switcher_url_state() {
+    run_node("views_test.mjs");
+}

@@ -2555,6 +2555,44 @@ mod tests {
         assert!(nav_json(&ds, Some(&none)).is_empty());
     }
 
+    /// #214: a `::VIEW` alternative's own `-- @requires` must gate its
+    /// statements through the exact same mechanism a `::TAB`/`::SUBTAB`
+    /// already does: its marker's plan index lands in [`Dash::tabs`] (built
+    /// here exactly the way [`load_dashboards`] builds it, from the core's
+    /// `sql::plan` → `Panel::tabs`), so `run_panel`'s
+    /// `gates.contains(&i) && !met(c, i)` walks it with no server code of
+    /// its own — the whole point of #214's locked-server step: no logic
+    /// change, only this test.
+    #[test]
+    fn a_view_alternatives_requires_lands_in_dash_tabs_like_a_tab() {
+        let sql = "SELECT 'Lines' AS yoy ::VIEW;\n\
+                    SELECT a::XAXIS, b::BARCHART FROM t;\n\
+                    -- @requires ${rd}/forecasts.parquet\n\
+                    SELECT 'Bars' AS yoy2 ::VIEW;\n\
+                    SELECT a::XAXIS, c::BARCHART FROM t;";
+        let planned = anofox_visualization::sql::plan(sql);
+        assert_eq!(planned.len(), 4);
+        // Exactly `load_dashboards`'s mapping from `planned` into `Dash`.
+        let tabs: Vec<Vec<usize>> = planned
+            .iter()
+            .map(|p| if p.setup { Vec::new() } else { p.tabs.clone() })
+            .collect();
+        let requires: Vec<Vec<Requirement>> = planned.iter().map(|p| p.requires.clone()).collect();
+        // Statement 2 is the hidden alternative's own `::VIEW` marker: its
+        // own `-- @requires` is what `met(c, 2)` would check.
+        assert!(!requires[2].is_empty(), "{requires:?}");
+        assert!(requires[0].is_empty() && requires[1].is_empty() && requires[3].is_empty());
+        // Statement 3 (the alternative's panel) is gated by statement 2 —
+        // the same list shape `run_panel`'s
+        // `dash.tabs.get(r.panel).map_or(&[][..], Vec::as_slice)` reads for
+        // a ::SUBTAB's panel, gated by the ::SUBTAB's own index.
+        assert_eq!(tabs[3], vec![2]);
+        // The first (shown) alternative's marker (0) carries no requires of
+        // its own, so a request for its panel (1) is gated on index 0 but
+        // trivially met (`met()` is `true` when `reqs.is_empty()`).
+        assert_eq!(tabs[1], vec![0]);
+    }
+
     #[test]
     fn options() {
         let o = LockedOptions::parse(Some(

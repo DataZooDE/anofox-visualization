@@ -355,6 +355,13 @@ pub enum Role {
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
     SubTab,
+    /// Layout: `::VIEW` opens (or extends) a group of alternative views of
+    /// one panel; consecutive `::VIEW` markers with no closer between them
+    /// are alternatives of the same group (#214).
+    View,
+    /// Layout: `::ENDVIEW` closes the current `::VIEW` group (`::TAB`,
+    /// `::SUBTAB` and `::SECTION` also close it).
+    ViewEnd,
     /// Bubble size for a scatter — maps a measure to point area (`::SIZE`).
     Size,
     /// Format the y-axis tick labels (`::YFORMAT`) — the column's (string) value

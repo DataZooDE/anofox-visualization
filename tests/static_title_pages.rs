@@ -189,3 +189,103 @@ fn serve_static_page_draws_title_bars() {
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     check_page(&http_body(&resp));
 }
+
+/// #214: a `::VIEW` group's two alternatives, each with its own title —
+/// only the default (first) one should ever reach the static page.
+const VIEW_SCRIPT: &str = "\
+SELECT 'Lines' AS yoy ::VIEW;
+SELECT x::XAXIS, y::BARCHART, 'Weekly'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+SELECT 'Bars' AS yoy2 ::VIEW;
+SELECT x::XAXIS, y::LINECHART, 'Other'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+";
+
+fn check_view_page(html: &str) {
+    assert_eq!(html.matches("</figure>").count(), 1, "{html}");
+    let f = figures(html);
+    assert!(f[0].contains(">Weekly</text></svg><svg"), "{}", f[0]);
+    assert!(!html.contains("Other"), "{html}");
+}
+
+#[test]
+fn dashboard_cli_html_draws_only_the_default_view() {
+    if !have_duckdb("dashboard_cli_html_draws_only_the_default_view") {
+        return;
+    }
+    let s = Scratch::new("cli-view");
+    let (sql, out) = (s.0.join("views.sql"), s.0.join("views.html"));
+    std::fs::write(&sql, VIEW_SCRIPT).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+        .arg(&sql)
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    check_view_page(&std::fs::read_to_string(&out).unwrap());
+}
+
+#[cfg(feature = "serve")]
+#[test]
+fn serve_static_page_draws_only_the_default_view() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    if !have_duckdb("serve_static_page_draws_only_the_default_view") {
+        return;
+    }
+    let s = Scratch::new("serve-view");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(dash.join("views.sql"), VIEW_SCRIPT).unwrap();
+    let init = s.0.join("init.sql");
+    std::fs::write(&init, "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS one;\n").unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut conn = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        conn,
+        "GET /d/views HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut resp = String::new();
+    conn.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    check_view_page(&http_body(&resp));
+}
