@@ -57,7 +57,13 @@ pub struct Diagnostic {
     /// `requires/bad-variable` | `requires/on-setup` |
     /// `requires/tab-always-hidden` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available" —
-    /// a ::TAB / ::SUBTAB is hidden with its panels).
+    /// a ::TAB / ::SUBTAB / ::VIEW alternative is hidden with its panels).
+    /// `::VIEW` groups ([`view_diags`], #214): `view/duplicate-label` |
+    /// `view/empty-label` | `view/duplicate-name` | `view/bad-name` |
+    /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
+    /// `view/mixed-names` | `view/empty` | `view/open-ended` |
+    /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
+    /// (notes).
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
@@ -146,6 +152,9 @@ where
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
     let mut sections = sql::requires::Sections::default(); // hidden tabs
+                                                           // design/too-many-panels counts only a ::VIEW group's shown (first
+                                                           // reached) alternative (#214) — a switcher only ever shows one.
+    let mut view_pick = sql::views::StaticPick::default();
     let mut group_depth = 0i32;
     let mut kpi_run = 0usize; // consecutive top-level KPI tiles
     let mut kpi_run_stmt = 0usize; // stmt index where the current run started
@@ -223,24 +232,32 @@ where
                 ));
             }
             if decided_here {
+                let what = if p.view.as_ref().is_some_and(|v| v.marker) {
+                    "::VIEW"
+                } else if tab == Some(true) {
+                    "::SUBTAB"
+                } else {
+                    "::TAB"
+                };
                 diags.push(Diagnostic {
                     severity: Severity::Note,
                     stmt,
                     code: "optional/missing",
                     message: format!(
-                        "optional input `{path}` is missing — this {} is hidden, with its panels \
-                         (`-- @requires`)",
-                        if tab == Some(true) {
-                            "::SUBTAB"
-                        } else {
-                            "::TAB"
-                        }
+                        "optional input `{path}` is missing — this {what} is hidden, with its \
+                         panels (`-- @requires`)",
                     ),
                     sql: short.clone(),
                 });
             }
             continue;
         }
+        // Count only the group's shown (first-reached) alternative toward
+        // the cross-panel design counters — a switcher only ever shows one
+        // of them (#214). Computed right after the hidden-section check, so
+        // a requires-hidden alternative's marker never advances this (the
+        // first alternative StaticPick does see is the first *shown* one).
+        let counts_for_design = !view_pick.drop_panel(&p);
         // An optional input that is missing: the statement is skipped (setup
         // never reaches the prelude) and its panel reads "Not available".
         let unmet = if tab.is_some() {
@@ -285,7 +302,7 @@ where
             // Its "Not available" card still takes the panel's place: a KPI
             // tile stays in its run, any other panel ends it — with or
             // without the file, the same verdict.
-            if opts.design && !p.setup && is_content_panel(&p.roles) {
+            if opts.design && !p.setup && is_content_panel(&p.roles) && counts_for_design {
                 count_design_panel(
                     &p.roles,
                     group_depth == 0,
@@ -406,7 +423,7 @@ where
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
                 // (its "Not available" / error card takes the panel's place)
-                if opts.design && is_content_panel(&p.roles) {
+                if opts.design && is_content_panel(&p.roles) && counts_for_design {
                     count_design_panel(
                         &p.roles,
                         group_depth == 0,
@@ -873,7 +890,7 @@ where
                     });
                 }
             }
-            if opts.design {
+            if opts.design && counts_for_design {
                 rendered_panels += 1;
                 flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
             }
@@ -1034,16 +1051,20 @@ where
             // Count content panels (charts/tables/markdown) toward the
             // scan-budget, but NOT individual KPI tiles — a strip of KPIs is one
             // band to scan, not N panels. A non-KPI content panel ends a run of
-            // top-level KPI tiles.
-            count_design_panel(
-                &p.roles,
-                group_depth == 0,
-                stmt,
-                &mut kpi_run,
-                &mut kpi_run_stmt,
-                &mut rendered_panels,
-                &mut diags,
-            );
+            // top-level KPI tiles. Only a ::VIEW group's shown alternative
+            // counts (#214) — the checks below still run for every
+            // alternative; only the scan-budget total excludes the rest.
+            if counts_for_design {
+                count_design_panel(
+                    &p.roles,
+                    group_depth == 0,
+                    stmt,
+                    &mut kpi_run,
+                    &mut kpi_run_stmt,
+                    &mut rendered_panels,
+                    &mut diags,
+                );
+            }
 
             if let Some(k) = chart_kind(&p.roles) {
                 let titled = p.roles.iter().any(|(_, r)| matches!(r, Role::Title));
@@ -1155,6 +1176,215 @@ where
         }
     }
 
+    diags.extend(view_diags(&sql::plan(script)));
+    diags
+}
+
+/// `::VIEW` group structure checks (#214): see [`Diagnostic::code`] for the
+/// full `view/*` list. Run once over the whole plan (not interleaved into
+/// the main statement loop above, since several of these need to see a
+/// whole group, or every group, at once).
+fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let scan = sql::views::scan(plan);
+
+    for &i in &scan.stray_ends {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: i + 1,
+            code: "view/stray-end",
+            message: "::ENDVIEW with no open ::VIEW group to close".into(),
+            sql: short(i),
+        });
+    }
+
+    let mut seen_ids: Vec<(String, usize)> = Vec::new();
+    for g in &scan.groups {
+        let marker_stmt = g.markers[0] + 1;
+        if g.markers.len() == 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "view/lone",
+                message: "a ::VIEW group with a single alternative draws a switcher with one \
+                          option — add another alternative, or drop the ::VIEW"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if g.unbalanced_group {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "view/unbalanced-group",
+                message: "a ::GROUP opened inside this ::VIEW group is never closed before it \
+                          ends — add its ::ENDGROUP, or close the box after the ::VIEW group \
+                          instead"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if !g.named && scan.groups.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Note,
+                stmt: marker_stmt,
+                code: "view/unnamed",
+                message: "this ::VIEW group has no alias (`AS name`) — with more than one group \
+                          on the dashboard, name each so `?view.<name>=` can address it"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if let Some((_, other)) = seen_ids.iter().find(|(id, _)| *id == g.id) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "view/duplicate-name",
+                message: format!(
+                    "this ::VIEW group's id `{}` is also statement {other}'s — group ids must \
+                     be unique on one dashboard",
+                    g.id
+                ),
+                sql: short(g.markers[0]),
+            });
+        } else {
+            seen_ids.push((g.id.clone(), marker_stmt));
+        }
+
+        // Per-alternative: alias validity, label diagnostics, and whether it
+        // has anything to show.
+        let mut aliases: Vec<String> = Vec::new();
+        let mut labels: Vec<(String, usize)> = Vec::new(); // (label text, marker stmt), non-empty only
+        for (alt, &mi) in g.markers.iter().enumerate() {
+            let p = &plan[mi];
+            if let Some(alias) = sql::views::marker_alias(p) {
+                if !sql::views::valid_id(&alias) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Error,
+                        stmt: mi + 1,
+                        code: "view/bad-name",
+                        message: format!(
+                            "::VIEW alias `{alias}` is not a plain identifier — use \
+                             `^[A-Za-z_][A-Za-z0-9_]*$`"
+                        ),
+                        sql: short(mi),
+                    });
+                }
+                aliases.push(alias);
+            }
+            match p.view.as_ref().and_then(|v| v.label.clone()) {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "view/computed-label",
+                    message: "this alternative's label is a computed expression, not a plain \
+                              string literal — its button text can't be checked here"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) if t.is_empty() => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: mi + 1,
+                    code: "view/empty-label",
+                    message: "this alternative's label is empty (or NULL) — it needs text for \
+                              its switcher button"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) => labels.push((t, mi + 1)),
+            }
+            // Does this alternative have anything that actually draws?
+            let end = g.markers.get(alt + 1).copied().unwrap_or(g.end);
+            let has_content = (mi + 1..end).any(|j| {
+                let m = &plan[j];
+                !m.setup && !roles::is_directive_panel(&m.roles)
+            });
+            if !has_content {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "view/empty",
+                    message: "this alternative has no rendering statement — it would show a \
+                              blank view"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            // An input inside a view: it would need its own getvariable()
+            // binding re-primed per alternative, which no renderer does.
+            for (j, m) in plan.iter().enumerate().take(end).skip(mi + 1) {
+                if input_kind(&m.roles).is_some() {
+                    diags.push(Diagnostic {
+                        severity: Severity::Note,
+                        stmt: j + 1,
+                        code: "view/input-inside",
+                        message: "an input inside a ::VIEW group only takes effect while that \
+                                  alternative happens to be the one shown"
+                            .into(),
+                        sql: short(j),
+                    });
+                }
+            }
+        }
+        if aliases
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "view/mixed-names",
+                message: "this ::VIEW group's alternatives use different aliases — one name \
+                          identifies the whole group; the others are ignored"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        for (k, (text, stmt)) in labels.iter().enumerate() {
+            if let Some((_, other)) = labels[..k].iter().find(|(t, _)| t == text) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: *stmt,
+                    code: "view/duplicate-label",
+                    message: format!(
+                        "this alternative's label `{text}` is also statement {other}'s — each \
+                         alternative needs a distinct label"
+                    ),
+                    sql: short(*stmt - 1),
+                });
+            }
+        }
+        // No ::ENDVIEW, and the last alternative holds more panels than any
+        // other: likely a missing ::ENDVIEW swallowed what followed it.
+        if !g.closed_by_endview && g.markers.len() > 1 {
+            let counts: Vec<usize> = g
+                .markers
+                .iter()
+                .enumerate()
+                .map(|(alt, &mi)| {
+                    let end = g.markers.get(alt + 1).copied().unwrap_or(g.end);
+                    (mi + 1..end).filter(|&j| !plan[j].setup).count()
+                })
+                .collect();
+            if let (Some(&last), rest) = (counts.last(), &counts[..counts.len() - 1]) {
+                if rest.iter().all(|&n| n < last) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: *g.markers.last().unwrap() + 1,
+                        code: "view/open-ended",
+                        message: "no ::ENDVIEW closes this group, and its last alternative holds \
+                                  more panels than any other — check whether a missing \
+                                  ::ENDVIEW swallowed statements meant to follow it"
+                            .into(),
+                        sql: short(*g.markers.last().unwrap()),
+                    });
+                }
+            }
+        }
+    }
     diags
 }
 
@@ -3701,6 +3931,158 @@ mod design_tests {
         let tabbed = format!("SELECT 'Page'::TAB;\n{flat}");
         let d2 = check(&tabbed, |_q| Ok(data.clone()));
         assert!(!has(&d2, "design/too-many-panels"), "{d2:?}");
+    }
+
+    /// #214: `design/too-many-panels` counts only a ::VIEW group's shown
+    /// (first) alternative — a switcher only ever shows one at a time.
+    #[test]
+    fn too_many_panels_counts_only_the_shown_alternative() {
+        let panel = "SELECT a::XAXIS, b::BARCHART, 'T'::TITLE FROM t;\n";
+        let five = panel.repeat(5); // under the threshold alone; 2x would not be
+        let script = format!("SELECT 'A'::VIEW;\n{five}SELECT 'B'::VIEW;\n{five}");
+        let data = rows(
+            3,
+            |i| json!({ "c0": format!("c{i}"), "c1": (3 - i) as f64 }),
+        );
+        let d = check(&script, |_q| Ok(data.clone()));
+        assert!(!has(&d, "design/too-many-panels"), "{d:?}");
+    }
+
+    #[test]
+    fn view_lone_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/lone"), "{d:?}");
+    }
+
+    #[test]
+    fn view_duplicate_label_errors() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/duplicate-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_empty_label_errors() {
+        let d = check(
+            "SELECT ''::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty-label"), "{d:?}");
+        let d = check(
+            "SELECT NULL::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_computed_label_warns() {
+        let d = check(
+            "SELECT a||'x'::VIEW FROM t;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/computed-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_mixed_names_warns() {
+        let d = check(
+            "SELECT 'Lines' AS yoy ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars' AS qoq ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/mixed-names"), "{d:?}");
+    }
+
+    #[test]
+    fn view_duplicate_name_errors() {
+        let d = check(
+            "SELECT 'Lines' AS g1 ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 1::ENDVIEW;\n\
+             SELECT 'Bars' AS g1 ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/duplicate-name"), "{d:?}");
+    }
+
+    #[test]
+    fn view_bad_name_errors() {
+        let d = check(
+            "SELECT 'Lines' AS \"2x\" ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/bad-name"), "{d:?}");
+    }
+
+    #[test]
+    fn view_empty_alternative_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT 'Bars'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty"), "{d:?}");
+    }
+
+    #[test]
+    fn view_open_ended_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;\n\
+             SELECT a::XAXIS, d::LINECHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/open-ended"), "{d:?}");
+    }
+
+    #[test]
+    fn view_unbalanced_group_errors() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT 1::GROUP;\nSELECT 1::ENDVIEW;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/unbalanced-group"), "{d:?}");
+    }
+
+    #[test]
+    fn view_stray_end_warns() {
+        let d = check(
+            "SELECT a::XAXIS, b::BARCHART FROM t;\nSELECT 1::ENDVIEW;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/stray-end"), "{d:?}");
+    }
+
+    #[test]
+    fn view_input_inside_notes() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT DISTINCT zone::DROPDOWN FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/input-inside"), "{d:?}");
+    }
+
+    #[test]
+    fn view_unnamed_notes_with_multiple_groups() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 1::ENDVIEW;\n\
+             SELECT 'Bars' AS g2 ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/unnamed"), "{d:?}");
+        // the single-group case is not flagged — nothing else to tell it apart from
+        let d2 = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d2, "view/unnamed"), "{d2:?}");
     }
 
     #[test]
