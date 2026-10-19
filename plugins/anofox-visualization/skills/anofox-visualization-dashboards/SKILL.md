@@ -36,7 +36,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 
 1. **Ground on the schema (required).** Never invent columns. `dashboard --describe <table | 'file.parquet' | read_csv(…)> [--db file.duckdb]` prints each column's type, min / max, approx-distinct (low = discrete → bar / category; high = search / paged) and null %.
 2. **Pick panels**: KPIs for headline numbers, a line for trends, bars for category comparisons, a table for detail, inputs for filtering (table *Pick the chart* below).
-3. **Lay it out**: `SELECT n::COLUMNS;`, `::COL` per panel, KPIs in a `::GROUP` box, `::TAB` / `::SUBTAB` for sections.
+3. **Lay it out**: `SELECT n::COLUMNS;`, `::COL` per panel, KPIs in a `::GROUP` box, `::TAB` / `::SUBTAB` for sections, `::VIEW` for alternative views of one panel (a Lines/Bars/Table switcher over the same query).
 4. **Write the SQL**: one annotated `SELECT` per panel, top to bottom.
 5. **Wire interactivity** if asked: inputs and cross-filter.
 6. **Validate and repair (required).** `dashboard --check file.sql [--json] [--strict] [--no-design] [--db prebuilt.duckdb]` runs every statement in a fresh session. Repeat until it prints clean (exit 0). Do not finish on unvalidated SQL.
@@ -57,6 +57,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `totals/unknown-column` | note | a `::TOTALS 'name: agg'` entry names no column of the next table (raw name or header, case-insensitive) — it is ignored; fix the name, or separate entries with `;` when a header holds a comma |
 | `box/missing`, `box/unordered`, `box/null` | error / warning / warning | a box from statistics without `::Q1`/`::MEDIAN`/`::Q3`, with one whisker, without `::XAXIS` or beside a chart measure; Q1 ≤ median ≤ Q3 broken or a whisker inside the box; a NULL quartile (not drawn) |
 | `requires/unknown-variable`, `requires/empty-alternative`, `requires/bad-variable`, `requires/on-setup`, `requires/tab-always-hidden` | warning (`--strict` fails) | a `${name}` in `-- @requires` with no value here (that path counts as missing; `--check --data <dir>` sets `anofox_data`); `a \|` / `a \|\| b` / a line with no path; a malformed `${…}`; `@requires` on a setup statement that reads no file (a viewer could skip it: put it on the statement that reads the file); a tab's `${name}` set only by a `SET VARIABLE` below the tab (a locked server always hides it: set it above) |
+| `view/duplicate-label`, `view/empty-label`, `view/duplicate-name`, `view/bad-name`, `view/unbalanced-group` (error) · `view/lone`, `view/computed-label`, `view/mixed-names`, `view/empty`, `view/open-ended`, `view/stray-end` (warning) · `view/input-inside`, `view/unnamed` (note) | mostly warning, five are errors | a `::VIEW` switcher's label repeated / blank / a computed expression; two groups sharing one id, or an alias that isn't a plain identifier; a `::GROUP` opened inside a view not closed inside it; a group with only one alternative; different aliases inside one group; an alternative with no rendering statement; no `::ENDVIEW` with the last view holding the most panels; a stray `::ENDVIEW`; an input inside a view (its control only shows there); 2+ groups in the script with one unnamed |
 | `animate/unknown`, `animate/reveal-no-xline`, `linestyle/unknown`, `story/bad-by`, `transition/unknown` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from; a `::LINESTYLE` that is not `flow`/`dashed`/`solid`; a `::STORY_BY` that is not `x`/`series` (or `series` without a `::CATEGORY`); a `::TRANSITION` that is not `tween`/`none` |
 | `track/no-chart` | warning | a `::TRACK` that does not directly follow a chart with a numeric / date `::XAXIS` (only a `::HEIGHT` may sit between): it is drawn as a panel of its own |
 | `annotation/unpaired` | warning | a label / range end without its partner, or unequal numbers of `::BAND_LOWER` and `::BAND_UPPER` |
@@ -88,7 +89,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name, for an input it is the variable name, in a table the header.
@@ -368,6 +369,31 @@ GROUP BY ALL ORDER BY 2 DESC;
 
 In the browser the Markdown placeholders and formula render, the drill chart drills on click and tweens when the buttons change; the static `--svg` / PNG output draws panels only.
 
+```sql dashboard
+-- Alternative views of one panel: lines, bars or a table over the same weekly revenue
+CREATE TABLE weekly AS
+SELECT 'W' || lpad((w + 1)::VARCHAR, 2, '0') AS week,
+       (900 + 40 * w + (hash(w) % 60)::INTEGER) AS revenue
+FROM range(10) r(w);
+
+SELECT 'Lines' AS layout ::VIEW;           -- opens the group "layout", view 0 (the default)
+SELECT 12::COL; SELECT 320::HEIGHT;
+SELECT week::XAXIS, revenue::LINECHART, '€'::YFORMAT, 'Revenue by week'::TITLE FROM weekly ORDER BY week;
+SELECT 'Bars' AS layout ::VIEW;            -- next alternative (repeating the alias is optional)
+SELECT 12::COL; SELECT 320::HEIGHT;
+SELECT week::XAXIS, revenue::BARCHART, '€'::YFORMAT, 'Revenue by week'::TITLE FROM weekly ORDER BY week;
+SELECT 'Table' ::VIEW;
+SELECT 'none'::TOTALS;
+SELECT week AS "Week" ::TABLE, revenue AS "Revenue" ::MONEY FROM weekly ORDER BY week;
+SELECT 1::ENDVIEW;                         -- optional here (end of script follows)
+```
+
+The three alternatives share one segmented switcher (button labels "Lines" /
+"Bars" / "Table") in place of the panel; only the open alternative's query
+runs — switching views re-runs just that one, never all three up front. The
+group's id for the URL (`?view.layout=Bars`) comes from the `layout` alias on
+its first marker.
+
 ## Design contract
 
 Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`design/*`).
@@ -494,6 +520,7 @@ These silently break a panel (it renders wrong or vanishes):
 11. **Say what an empty result means**: `SELECT 'No orders in range — widen the dates'::EMPTY;` before a filtered panel replaces the generic "No data for this selection". **Optional outputs** (a file only some runs write): put `-- @requires data/run/x.parquet` on its own line directly above the statement — a missing file then shows "Not available" instead of an error card. Commas = all needed; `a.parquet | b.parquet` = either name will do; `${name}` = `getvariable('name')` (e.g. `-- @requires ${rd}/forecasts.parquet` after `SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run')`); a relative path resolves against `anofox_data` when set. On a locked server `${name}` must be server-side (`anofox_data`, a `path_vars` variable, or set by the dashboard) and the path must stay inside the data folder. Above a `::TRACK` a missing input leaves the strip out. **Optional tabs:** `-- @requires` directly above `SELECT 'Forecastability'::TAB;` (or a `::SUBTAB`) hides the whole tab — button, pane, panels (never run, also on a locked server) — when the input is missing, instead of a tab of "Not available" cards; `?tab=` to it opens the first shown tab. Set the tab's `${name}` above the tab statement.
 12. **Annotations are per row.** `::XLINE_LABEL`, `::XBAND_FROM`/`_TO`/`_LABEL` and `::ANNOTATE` read the row they are on: `LEFT JOIN events e ON e.day = s.day` and select `e.day::XLINE, e.note::XLINE_LABEL` — only the rows that carry an event draw it.
 13. **`::THRESHOLDS` inside a `::TABLE` statement is just a column.** Put the table's rules in their own statement before it, naming the columns.
+14. **`::VIEW` switchers**: shared controls (inputs, KPIs, filters) go *above* the first `::VIEW` marker, not inside one of the alternatives — a view's own panels only show while that view is open. Close the group with `::ENDVIEW` if panels that are not part of it follow (another `::GROUP`, another `::VIEW` group, or plain panels); it's optional when a `::TAB` / `::SUBTAB` / `::SECTION` or the end of the script follows instead.
 
 <!-- assist:end -->
 
