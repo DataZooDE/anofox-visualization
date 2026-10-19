@@ -98,6 +98,22 @@ function fakeDocument() {
   const untouched = fakeDocument();
   await assert.rejects(C.assistCspProven(untouched), /not applied/);
 }
+// sec-review-256 R-1 check: a caller-supplied `base` that isn't same-origin
+// with the page (pollution or not) must never reach the real policy —
+// applyAssistCsp drops it and falls back to appBase() instead.
+{
+  const doc = fakeDocument();
+  const origCreate = doc.createElement;
+  doc.createElement = (tag) => {
+    const el = origCreate(tag);
+    if (tag === "img") setTimeout(() => doc.__fire({ effectiveDirective: "img-src", blockedURI: el._src?.split("?")[0] }), 0);
+    return el;
+  };
+  await C.applyAssistCsp(doc, { base: "https://evil.example/" });
+  const meta = doc.head.children.find((c) => c.tag === "meta");
+  assert.doesNotMatch(meta._c, /evil\.example/, "a cross-origin base is never applied");
+  assert.match(meta._c, new RegExp(`script-src ${C.appBase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `), "falls back to appBase() instead");
+}
 
 // ---- 6. index.html's static baseline ----
 {

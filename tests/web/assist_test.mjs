@@ -14,6 +14,7 @@ import { scratchRunner } from "../../web/lint.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "../../web/assist/functions.js";
 import { build as buildFunctions } from "../../scripts/gen-assist-functions.mjs";
 import { buildEngine, engineLocked, pageAdapter } from "../../web/assist-engine.js";
+import { assistCsp } from "../../web/assist-csp.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
@@ -1306,14 +1307,27 @@ const tools = A.wasmTools({
     assert.ok(JSON.parse(previewRows).length > 0);
     assert.deepEqual(seen, [], "nothing of the loop or the preview reached the page's own connection");
 
-    // ---- sec-review-256 R-1: Object.prototype pollution must not switch
-    // off the lock check or the gate. wasmTools used to read its options
-    // by destructuring, which reads *inherited* properties too — a
-    // polluted Object.prototype.requireLocked = false (or the old
-    // __testing.admitAll gate bypass, now removed outright) would have
-    // silently disabled the per-call lock check / the guard for every
-    // caller, with nothing ever passing those options itself.
-    const dirty = { requireLocked: false, __testing: { admitAll: true }, admitAll: true, prepare: async () => {} };
+    // ---- sec-review-256 R-1 (+ the R-1 check's follow-up): Object.prototype
+    // pollution must not switch off the lock check, the gate, the CSP's
+    // base/imgOrigins, or assistConfig's enabled/remember. Every one of
+    // these used to read its options by destructuring (or a plain `?.`
+    // chain), which reads *inherited* properties too — a polluted
+    // Object.prototype.requireLocked = false (or the old __testing.admitAll
+    // gate bypass, now removed outright), .base/.imgOrigins (an attacker
+    // origin in script-src/connect-src/img-src), or .enabled/.remember
+    // (turning the assistant and *Remember* on) would all have taken
+    // effect with nothing ever passing those options itself.
+    const cleanCsp = assistCsp({}); // recorded before polluting, compared after
+    const dirty = {
+      requireLocked: false,
+      __testing: { admitAll: true },
+      admitAll: true,
+      prepare: async () => {},
+      base: "https://evil.example/",
+      imgOrigins: ["https://evil.example"],
+      enabled: true,
+      remember: true,
+    };
     for (const k of Object.keys(dirty)) Object.prototype[k] = dirty[k];
     try {
       // requireLocked must still default to true: the raw, unlocked page
@@ -1327,6 +1341,15 @@ const tools = A.wasmTools({
       const pollutedEngineTools = A.wasmTools({ db: engine.db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, snapshot: new Map(engine.tables.map((t) => [t.fq, t])) });
       const pollutedPreview = pollutedEngineTools.previewRunner("INSTALL spatial;");
       await assert.rejects(pollutedPreview("INSTALL spatial"), /not run/, "the gate still refuses INSTALL under Object.prototype pollution");
+      // assistCsp()'s text must be byte-identical to the unpolluted call:
+      // no attacker origin from a polluted base/imgOrigins.
+      const polluted = assistCsp({});
+      assert.equal(polluted, cleanCsp, "assistCsp({}) is unaffected by polluted base/imgOrigins");
+      assert.doesNotMatch(polluted, /evil\.example/, "no attacker origin leaked into the policy");
+      // assistConfig(undefined) must stay off: no installation configured
+      // anything, polluted enabled/remember notwithstanding.
+      assert.deepEqual(A.assistConfig(undefined), { enabled: false, reason: "disabled" }, "assistConfig(undefined) stays off under Object.prototype pollution");
+      assert.equal(A.assistConfig({ enabled: true }).remember, false, "remember stays off (no installation opt-in) under Object.prototype pollution");
     } finally {
       for (const k of Object.keys(dirty)) delete Object.prototype[k];
     }
