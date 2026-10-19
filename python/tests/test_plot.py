@@ -44,6 +44,26 @@ def test_argument_errors():
         av.plot([1, 2, 3])
 
 
+def test_connect_names_the_file_name_rule(tmp_path, monkeypatch):
+    # DuckDB takes the entry point from the file name (#201, #230).
+    bad = tmp_path / "viz.duckdb_extension"
+    bad.write_bytes(b"")
+    with pytest.raises(ValueError, match=r"must be named anofox_visualization\.duckdb_extension"):
+        av.connect(bad)
+    with pytest.raises(ValueError, match="must be named"):
+        av.connect(str(tmp_path / "anofox_visualization-v1.duckdb_extension"))
+    monkeypatch.setenv("ANOFOX_VIZ_EXTENSION", str(bad))
+    with pytest.raises(ValueError, match="must be named"):
+        av.connect()
+    monkeypatch.delenv("ANOFOX_VIZ_EXTENSION")
+    # The canonical names pass the check and reach DuckDB (here: file not found).
+    for name in ("anofox_visualization.duckdb_extension",
+                 "anofox_visualization.v1.linux_amd64.duckdb_extension"):
+        with pytest.raises(Exception) as e:
+            av.connect(tmp_path / name)
+        assert "must be named" not in str(e.value)
+
+
 # ── with the extension ──────────────────────────────────────────────────────
 
 

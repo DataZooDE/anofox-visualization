@@ -31,6 +31,9 @@ _TABLE_FOR_CHART = {"diagnostics": "obs", "compare": None, "partial": None}
 #: Repository of the project's extension builds (DuckDB v1.5.6, unsigned).
 RELEASE_REPO = "https://datazoode.github.io/anofox-visualization/extensions"
 
+#: LOAD derives the entry point from the file name up to the first dot (#201).
+_EXT_NAME = re.compile(r"anofox_visualization(\..+)?\.duckdb_extension")
+
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _default_con: Any = None
@@ -73,6 +76,10 @@ def connect(extension: str | os.PathLike | None = None, con: Any = None) -> Any:
     repository are tried in that order. ``con`` loads into an existing
     connection (it needs ``allow_unsigned_extensions`` for a local file).
     The connection becomes the one :func:`plot` uses without ``con=``.
+
+    A file of another name raises ``ValueError``: DuckDB takes the entry point
+    from the file name, so it must be ``anofox_visualization.duckdb_extension``
+    or ``anofox_visualization.<x>.duckdb_extension``.
     """
     import duckdb
 
@@ -89,7 +96,14 @@ def _load(con: Any, extension: str | os.PathLike | None) -> None:
         return
     path = extension or os.environ.get("ANOFOX_VIZ_EXTENSION")
     if path:
-        con.execute(f"LOAD {_literal(str(path))}")
+        path = str(path)
+        if path.endswith(".duckdb_extension") and not _EXT_NAME.fullmatch(os.path.basename(path)):
+            raise ValueError(
+                f"{path}: LOAD takes the entry point from the file name, so it must be named "
+                "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
+                f"Rename it, or: ln -s '{path}' /tmp/anofox_visualization.duckdb_extension"
+            )
+        con.execute(f"LOAD {_literal(path)}")
         return
     errors = []
     for install in (
