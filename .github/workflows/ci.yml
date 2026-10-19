@@ -167,7 +167,7 @@ jobs:
       - name: Explore starter dashboards pass --check --strict
         run: |
           # the hints' anofox_tabular checks run when the extension installs (#111)
-          duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'" || echo "anofox_tabular not installed"
+          duckdb -c "INSTALL anofox_tabular FROM community" || echo "anofox_tabular not installed"
           node scripts/explore-starters.mjs --dashboard target/debug/dashboard --out "$RUNNER_TEMP/explore-starters"
 
   statistics-conformance:
