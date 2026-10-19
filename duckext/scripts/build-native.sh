@@ -58,14 +58,16 @@ case "$(basename "$OUT")" in
     SMOKE_DIR="$(mktemp -d)"; trap 'rm -rf "$SMOKE_DIR"' EXIT
     EXT="$SMOKE_DIR/anofox_visualization.duckdb_extension"; ln -s "$OUT" "$EXT"; RENAMED=1 ;;
 esac
-"$DUCKDB" -unsigned -noheader -list -c "
+SMOKE="$("$DUCKDB" -unsigned -noheader -list -c "
 LOAD '$EXT';
 WITH d AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
 SELECT CASE WHEN anofox_render(json_object(
   'rows',  (SELECT to_json(list({c0: ch, c1: n})) FROM d),
   'roles', json('[[0,\"XAXIS\"],[1,\"BARCHART\"]]'),
   'width', 400, 'height', 260)) LIKE '<svg%<rect%'
-  THEN 'OK: rendered a bar chart' ELSE 'FAIL' END;"
+  THEN 'OK: rendered a bar chart' ELSE 'FAIL' END;" | tr -d '\r')"
+echo "$SMOKE"
+[ "$SMOKE" = "OK: rendered a bar chart" ] || { echo "FAIL: the bar-chart smoke render returned '$SMOKE'" >&2; exit 1; }
 if "$DUCKDB" -unsigned -c "LOAD '$EXT'; SELECT anofox_render('not json');" >/dev/null 2>&1; then
   echo "FAIL: a bad spec must raise a SQL error"; exit 1
 fi
