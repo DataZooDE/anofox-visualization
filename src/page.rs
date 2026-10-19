@@ -1,8 +1,7 @@
 //! Static dashboard pages — the CLI's `dashboard file.sql out.html` and
 //! `serve --dashboards`. Both share one page shell: the theme's CSS tokens +
 //! `web/theme-base.css` (the browser's dashboard stylesheet), the dashboard
-//! header (title / brand / logo), the panels, the mandatory DataZoo credit
-//! and a small hover script.
+//! header (title / brand / logo), the panels and a small hover script.
 
 use crate::format::escape_xml as esc;
 use crate::theme::{self, ResolvedTheme};
@@ -73,7 +72,7 @@ pub fn render(p: &StaticPage) -> String {
         "<!doctype html><html lang=\"{lang}\" data-theme=\"{name}\" data-variant=\"{variant}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}</style></head>\
-<body class=\"dp-static\"><div class=\"grid\">{header}{sub}{controls}{panels}{credit}</div>\
+<body class=\"dp-static\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
 <div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
@@ -89,7 +88,6 @@ pub fn render(p: &StaticPage) -> String {
         },
         controls = p.controls_html,
         panels = p.panels_html,
-        credit = theme::credit_html(),
     )
 }
 
@@ -389,7 +387,7 @@ pub fn landing(l: &Landing) -> String {
 <body class=\"dp-static dp-landing\"><div class=\"lp\">\
 <header class=\"lp-head\">{logo}<div class=\"lp-head-text\">{h1}<p class=\"lp-tagline\">{tagline}</p></div></header>\
 <main class=\"lp-main\">{tools}{body}<p id=\"lp-none\" class=\"lp-empty\" hidden>No dashboard matches.</p></main>\
-{credit}</div>{script}</body></html>",
+</div>{script}</body></html>",
         tname = esc(&l.theme.name),
         scheme = match l.theme.mode {
             theme::Mode::Auto => "light dark",
@@ -397,7 +395,6 @@ pub fn landing(l: &Landing) -> String {
             theme::Mode::Dark => "dark",
         },
         title = esc(name),
-        credit = theme::credit_html(),
     )
 }
 
@@ -462,7 +459,7 @@ mod tests {
             html.contains("prefers-color-scheme: dark"),
             "the default theme follows the viewer"
         );
-        assert!(html.contains("Powered by"));
+        assert!(!html.contains("Powered by"));
         assert!(
             !html.contains("id=\"lp-q\"") && !html.contains("<script>"),
             "no filters for 4"

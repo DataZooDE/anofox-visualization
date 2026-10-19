@@ -33,6 +33,5 @@ body.dp-landing{padding:0}
 .lp-tags{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.3rem}
 .lp-tags li{font-size:.72rem;font-weight:600;color:var(--ax-muted);border:1px solid var(--ax-line);border-radius:999px;padding:.05rem .5rem}
 .lp-empty{color:var(--ax-ink)}
-.dp-landing .dp-credit{margin-top:1.4rem;color:var(--ax-ink)}
 @media (max-width:600px){.lp{padding:1.2rem 16px}.lp-title{font-size:1.35rem}.lp-cards{grid-template-columns:1fr}.lp-head{gap:.7rem}}
 .dp-landing .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
