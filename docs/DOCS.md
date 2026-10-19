@@ -774,8 +774,9 @@ to 1.00 (0.9952 reads "AUC 0.995").
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`): a shared generic name such as \`kind\`, \`value\`,
-  \`x\` or \`y\` alone gives no hint;
+  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
+  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
+  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
