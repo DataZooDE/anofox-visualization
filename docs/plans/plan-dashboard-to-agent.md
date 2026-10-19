@@ -1,10 +1,11 @@
 # Plan: publish a dashboard as a guarded agent
 
 Status: **design note, owner decisions taken (2026-10-18, §11), security design
-review #211 adopted (2026-10-19)**, based on master `43762b1`. The review's
-required changes are folded into the sections below, not kept as separate
-notes; see §12, "Security review (#211): required conditions before A1", and
-§13 for the finding-by-finding map. No product code yet. Refs #194, #211. It
+review #211 adopted (2026-10-19), re-check of PR #295 folded in
+(2026-10-19)**, based on master `43762b1`. The review's required changes
+are folded into the sections below, not kept as separate notes; see §12,
+"Security review (#211): required conditions before A1", and §13 for the
+finding-by-finding map. No product code yet. Refs #194, #211. It
 builds on the Ask mode, [plan-ai-assistant.md](plan-ai-assistant.md) §12
 (#195), and in particular on §12.13, which keeps this follow-up unblocked.
 The reference product is DataZooDE/datazoo-agent-supplier-risk (private;
@@ -335,7 +336,10 @@ contract in the header:
 - a `-- @optional` comment marks an optional one;
 - a `-- @scope tenant` comment marks a **scope column**: a row-policy column
   (tenant, region, buyer, …) that a customer mapping must fill correctly for
-  the policy on it to mean anything at all (M9);
+  the policy on it to mean anything at all (M9). A mapping that is
+  legitimately constant for this customer — `tenant` in a single-tenant
+  deployment — says so explicitly with `-- @scope tenant constant` in the
+  mapping file, which `--conform` then prints rather than refusing (R2);
 - keys are declared with `PRIMARY KEY` / `REFERENCES`, for the check only.
 
 The dashboard reads only those names (`agent/non-canonical-read`). The
@@ -346,17 +350,27 @@ canonical views and columns (M9).
 **A mapping per customer.** `customer-mapping/<customer>/views.sql` may hold
 **only** `CREATE [OR REPLACE] VIEW <name> AS <query>` statements, one per
 canonical contract table, each reading only `source.*` (H1). Each query is
-checked by the same policy classifier the server runs in agent mode
-(§8.1, H2): the function allowlist, no macros, no `query` / `query_table` /
-`json_execute_serialized_sql`, no table functions except `range` /
-`generate_series` / `unnest`. Anything else — a `COPY`, a file reader, an
-`ATTACH` of another customer's database, an `INSTALL` / `LOAD`, a
-`CREATE MACRO`, a `SET`, or a helper view or table outside the contract —
-fails both `dashboard --conform` and the agent start (H1). The mapping
-author is often a different person from the dashboard author and the
-operator — an integration engineer working per customer — and the mapping
-is reviewed code in the release, read with the same weight as the dashboard
-SQL (H1).
+checked by the **mapping variant** of the same policy classifier the
+server runs in agent mode (§8.1, H2): the function allowlist, no macros, no
+`query` / `query_table` / `json_execute_serialized_sql`, no table functions
+except `range` / `generate_series` / `unnest`, and — unlike the panel
+variant below — database-qualified names are allowed, but **only** for
+`source`; a reference to any other attached database still fails (R6).
+Anything else — a `COPY`, a file reader, an `ATTACH` of another customer's
+database, an `INSTALL` / `LOAD`, a `CREATE MACRO`, a `SET`, or a helper view
+or table outside the contract — fails both `dashboard --conform` and the
+agent start (H1). The mapping author is often a different person from the
+dashboard author and the operator — an integration engineer working per
+customer — and the mapping is reviewed code in the release, read with the
+same weight as the dashboard SQL (H1).
+
+The **panel variant** of the classifier (the one §2.2 and §8.1 run on the
+dashboard's own panels, setup statements and option queries) keeps refusing
+**every** database-qualified name, including `source.*`: a panel reads only
+the bare canonical view names, never the mapping's own source tables (R6).
+`"policy": "none"` in agent mode (§7, M4) turns off an explicit policy
+file; it does not turn off either variant of this implicit classifier,
+which always runs (R6).
 
 The views are built in a **separate DuckDB instance**, never the operator's
 own serving session: that instance has only `source` attached `READ_ONLY`,
@@ -377,8 +391,16 @@ dashboard --conform canonical/supplier-reliability.sql \
 It reports:
 - every canonical table and column present, with a compatible type;
 - `NOT NULL` columns without NULLs;
-- each scope column non-NULL, with its distinct values a subset of an
-  operator-supplied list (M9);
+- each scope column's **view projection**: by inspecting the view's AST,
+  the column must be a reference into a `source.*` column, never a literal
+  or an expression with no source column in it, unless the mapping marks it
+  `-- @scope … constant` (R2). A merely non-NULL check cannot catch
+  `'acme' AS region` when `acme` happens to be on the operator's list, so
+  the AST check is required, not optional (R2, M9);
+- for a non-constant scope column, its distinct values a subset of an
+  operator-supplied list; if that list has more than one value, the
+  column must also show more than one distinct value, or the report says
+  why not (R2, M9);
 - primary keys unique, references resolving (as counts, so it is fast on
   big data);
 - for each optional column, whether it is present;
@@ -416,7 +438,11 @@ panel certified 2026-10-01 · summary AI-generated · mapping: acme
 
 **The facts block** holds the verified cells the citations point at, or,
 when there are none, the routed panel's top rows within the caps — taken
-directly from the panel result, never from the model (M3).
+directly from the panel result, never from the model (M3). It is still
+data, and a cell can carry a hostile value just as a prompt can: it gets
+the same per-channel escaping and URL/mention defanging as model text
+(§8, H5), and a **channel row cap** (for example 10 rows), printed as
+"first 10 of N" when the panel result is longer (R3).
 
 **The model's sentence**, if the channel allows one at all (§3.3 step 4,
 §8.1, H5), is always labelled "AI summary", so a reader does not mistake it
@@ -437,16 +463,20 @@ from data the runtime already holds:
   else the snapshot time;
 - `@owner`, and `@certified` only when it matches a **certification
   record** that sits outside the author's control: the reviewer and the
-  hash of the panel SQL plus its prelude plus the mapping, kept with the
-  operator or signed into the bundle. Without a matching record the footer
-  prints no certification, and the lint fails with an error on a
-  `@certified` line that has none (M3);
+  hash of the panel SQL plus its prelude plus the mapping. "Signed into
+  the bundle" means a signature with the **certifier's own key**, whose
+  public key the operator configures — the author who builds the bundle
+  cannot produce a valid signature, so `@certified` can't be self-granted
+  (R4). Without a matching, verifiable record the footer prints no
+  certification, and the lint fails with an error on a `@certified` line
+  that has none (M3);
 - the mapping id.
 
 The model doesn't write the footer or the facts block, so neither can be
 wrong or forged. The footer and the clarifying reply's candidate list
 (§3.3 step 2) get the same per-channel escaping as answer text — no
-mentions, no links (L3).
+mentions, no links (L3), and the facts block gets the same treatment plus
+its row cap, above (R3).
 
 ## 6. What-if through inputs and tabs
 
@@ -475,7 +505,13 @@ customer** (H6) and contains:
 - the generated files of §3.4;
 - the last eval results, as **aggregates only**: scores, cost, model and
   date — no rows, no slot values, no entity names (H6);
-- a digest of every file in the bundle, checked at start (M4).
+- a digest of every file in the bundle.
+
+A digest **stored inside the bundle** only detects corruption in transit,
+since whoever can rewrite the bundle can rewrite its own digest too. The
+digest the server checks against (or the bundle's signature) is pinned in
+the deployment config — the Kamal PR — **outside** the bundle, not read
+back from a file the bundle carries (R4).
 
 There is **one version** for all of it: plain-date CalVer
 (`-- @version 2026.11.02`, checked by the lint). A change to any part is a
@@ -484,7 +520,9 @@ version in `/healthz` and in the footer.
 
 **What the server trusts at start.** The server rebuilds `agent.json` from
 the `.sql` and refuses to start on any difference from the bundle's copy
-(§3.4, M4). Fixed declaration values (`-- @question … where fails = on`) are
+(§3.4, M4), and checks the bundle's digest against the value pinned in the
+deployment config, not a copy inside the bundle (R4). Fixed declaration
+values (`-- @question … where fails = on`) are
 carried only through `@vars`, and may not name a `__claim_*` or
 `anofox_data` (M4). A bundle may **not** contain `policy.json`: agent mode
 with `auth` configured requires `options.policy` outside the bundle
@@ -590,7 +628,21 @@ A release with a regression doesn't ship.
     per-agent opt-in that names a **channel principal**: fixed,
     least-privilege claims used for every question asked in that channel,
     whoever asks. It is refused for channels that have external members
-    (Slack Connect, or a Teams shared channel with guests) (H4).
+    (Slack Connect, or a Teams shared channel with guests) (H4). The
+    channel principal only **chooses the data**, never who may ask: the
+    asker still authenticates (H3), must pass `allow`, and is charged
+    against their own budget, exactly as on any other channel — the
+    opt-in is not a way to let an unauthenticated or over-quota member
+    spend the key (R1). Because the channel principal can be **wider**
+    than some members' own claims, the opt-in is the operator's explicit
+    attestation that every member of that channel may see what the
+    channel principal can see; the start message prints the channel
+    principal's claims, and it may never be broader than the default
+    viewer role (R1). Channel membership is **re-checked on every post**,
+    not only at opt-in time, since members can be added afterwards: if the
+    channel now has an external member, or a member who isn't a linked
+    identity, the answer is not posted to the channel at all — it falls
+    back to a private, ephemeral reply under the asker's own claims (R1).
   - A follow-up button is **re-evaluated under the identity of the person
     who clicked it**, never under the identity that produced the original
     answer; it carries only `question_id` + slots, which are validated
@@ -603,13 +655,19 @@ A release with a regression doesn't ship.
     <canonical question>. Returns: <column names>." — never free `::INFO`
     / `@description` text, because that author text would otherwise sit
     inside a desktop agent that has other tools, where our own escaping
-    can't reach it (M7). The `question/unsafe-text` lint (§3.1) flags a
-    `@question` with a URL or imperative, instruction-like text before it
-    ever reaches that template. The slots are typed parameters (`string` /
-    `number` / `date`); their domain is resolved server-side per caller,
-    never shipped as values (H6). The MCP transport follows the MCP
-    authorization spec: OAuth with this agent as the resource and audience
-    (H3), and no token passthrough. MCP calls are deterministic by default
+    can't reach it (M7). The `<column names>` are display names
+    (`AS "…"`), which are author text too: they pass the same
+    `question/unsafe-text` lint and a character/length cap before they go
+    into the template, or else the template reduces them to
+    identifier-like strings (`[A-Za-z0-9 _%-]`, at most 40 characters each,
+    at most 12 columns) — the template as a whole is never a channel for
+    uncapped author text (R5). The `question/unsafe-text` lint (§3.1)
+    flags a `@question` with a URL or imperative, instruction-like text
+    before it ever reaches that template. The slots are typed parameters
+    (`string` / `number` / `date`); their domain is resolved server-side
+    per caller, never shipped as values (H6). The MCP transport follows
+    the MCP authorization spec: OAuth with this agent as the resource and
+    audience (H3), and no token passthrough. MCP calls are deterministic by default
     (H5) and count against the same per-caller budget (M7, M8).
   - **A2UI:**
     - the answer text, built as the facts block ahead of any model sentence
@@ -691,7 +749,13 @@ required it:
   walk; `data-requirements.md` (§3.4) is built from the rewritten,
   re-verified statement, not the raw AST (H2). A table macro, a scalar
   macro and a `query_table(getvariable(...))` panel each fail `--publish`
-  and the agent start, with a test for each of the three (H2).
+  and the agent start, with a test for each of the three (H2). This is the
+  **panel variant** of the classifier, which refuses every
+  database-qualified name, including `source.*`; the mapping's own
+  `views.sql` is checked by a separate **mapping variant** that allows a
+  qualified name only for `source` (§4, R6). `"policy": "none"` (§7, M4)
+  turns off an explicit policy file, never this implicit classifier, which
+  always runs in agent mode (R6).
 - **Capacity:** its own worker pool, 1 question per caller, a query-slot
   sub-limit, and one deadline per question (Ask H2). Every model call —
   route, answer, retries — is reserved and charged against the caller's
@@ -843,9 +907,9 @@ and A3** (§8.1, required condition 16).
 |---|---|---|
 | **A1. Declarations and generation** | `@question`, `@name`, `@schema`, `@version` in `parse_dashboard_meta` and the plan; the lint checks of §2.2 and §3.1 (including `question/unsafe-text`, M7); `dashboard --publish` (the manifest with domains as references only, H6; `capabilities.md`; `data-requirements.md` from the verified rewrite, H2; `questions.jsonl` with slot-sampling rules only, no values, H6); the two-user byte-identical manifest/MCP/`/api/agent` test (H6); CI regeneration check on the examples | 3 d + review |
 | **A2. Declared mode** | `ask.mode: "declared"` in `src/host/ask.rs`: template match, `route`, deterministic slot resolution over input domains with no model pick (M8), the restricted `get_panel` with server-fixed `vars` and a server-computed allowed panel set (M2), refusals with the capability list and budgeted model calls (M8); `GET /api/agent`; `question_id` in `/api/ask` with the deterministic-by-default response (H5) | 3 d + review |
-| **A3. Canonical schema and conformance** | `canonical/*.sql` parsing with scope columns (M9); `dashboard --conform` (JSON + text) including the mapping classifier check (H1) and the scope-column check (M9); the separate locked DuckDB instance that builds a customer's views (H1); the per-customer question availability; the mapping e2e test plus the refused-mapping test for a macro, a `query_table` call and a constant scope column (H1, M9) | 3 d + review |
-| **A4. Bundle, drift and regression** | the one-customer bundle format with a digest (H6, M4); no `policy.json` in the bundle, `options.policy` required or an explicit `"policy": "none"` (M4); `/healthz` version; the drift job in the server (after refresh + nightly) under a configured `drift_principal`, aggregates only, with question switch-off and the L6 refusal wording; the eval under a configured `eval_principal` (M5); the deterministic regression suite in CI | 3 d + review |
-| **A5. Channels** | the Triton adapter manifest with body logging off (L1); MCP tools from declarations with fixed-template descriptions and OAuth audience (H3, M7); the A2UI surface with server-rendered PNG panels (restricted resource resolver, claims-keyed render cache or none, M6) and the footer / facts block (M3); DM-only default and the channel-principal opt-in for shared channels, with buttons re-evaluated under the clicker's identity (H4); Slack / Teams through Triton, with account linking confirmed as a Triton precondition (H3) | 3 d + review |
+| **A3. Canonical schema and conformance** | `canonical/*.sql` parsing with scope columns, including an explicit `constant` marker (M9, R2); `dashboard --conform` (JSON + text) including the mapping-variant classifier check with `source`-only qualification (H1, R6), the panel-variant classifier refusing every qualified name (R6), and the scope-column AST check plus the distinct-values check (M9, R2); the separate locked DuckDB instance that builds a customer's views (H1); the per-customer question availability; the mapping e2e test plus the refused-mapping test for a macro, a `query_table` call and a constant scope column without the marker (H1, M9, R2) | 3 d + review |
+| **A4. Bundle, drift and regression** | the one-customer bundle format with a digest pinned in the deployment config, outside the bundle (H6, M4, R4); no `policy.json` in the bundle, `options.policy` required or an explicit `"policy": "none"` that never disables the implicit classifier (M4, R6); `/healthz` version; the drift job in the server (after refresh + nightly) under a configured `drift_principal`, aggregates only, with question switch-off and the L6 refusal wording; the eval under a configured `eval_principal` (M5); the deterministic regression suite in CI | 3 d + review |
+| **A5. Channels** | the Triton adapter manifest with body logging off (L1); MCP tools from declarations with fixed-template descriptions, length/character-capped column names (M7, R5), and OAuth audience (H3, M7); the A2UI surface with server-rendered PNG panels (restricted resource resolver, claims-keyed render cache or none, M6) and the footer / facts block, with the facts block's own escaping and row cap (M3, R3); DM-only default and the channel-principal opt-in for shared channels — the asker still authenticated, allowed and charged, membership re-checked on every post (H4, R1); buttons re-evaluated under the clicker's identity; Slack / Teams through Triton, with account linking confirmed as a Triton precondition (H3) | 3 d + review |
 
 That is about 15 days plus reviews. A5 depends on Triton's adapter contract
 and on the Slack/Teams account-linking precondition (H3), both of which we
@@ -899,7 +963,10 @@ lists its 16 conditions for the A-phase to start.
 ## 12. Security review (#211): required conditions before A1
 
 The review's own checklist, each condition linked to the section of this
-note that now satisfies it:
+note that now satisfies it. The 2026-10-19 re-check of PR #295 found
+conditions 4 and 15 only partly met and required six further fixes
+(R1–R6); those are folded into conditions 4 and 15 below, and into the
+sections they point at (§13).
 
 1. Mappings limited to `CREATE VIEW <canonical> AS <classified query over
    source.*>`, built in a separate locked instance, never the operator's
@@ -915,7 +982,12 @@ note that now satisfies it:
    precondition (H3) — §8 Auth, §11 (decision 1), §10 (A5).
 4. DMs or ephemeral replies by default; shared channels only with a
    channel principal and no external members; buttons under the clicker's
-   identity (H4) — §8 Channels.
+   identity (H4). The channel principal only chooses the data — the asker
+   still authenticates, passes `allow` and is charged; the opt-in is the
+   operator's attestation that every member may see that data; and
+   membership (including external members) is re-checked on every post,
+   falling back to a private, ephemeral reply otherwise (R1) — §8
+   Channels.
 5. Per-channel plain text, unfurls off, URL and mail defanging, no
    model-built card elements or mentions; MCP and A2A results structured
    and deterministic by default (H5) — §3.3 step 4, §8, §8.1.
@@ -928,21 +1000,27 @@ note that now satisfies it:
    §11 (decision 2).
 8. The answer model gets the canonical phrasing, vars fixed by the server,
    a static allowed panel set (M2) — §3.3 step 3.
-9. A server-built facts block; prose labelled AI; `@certified` bound to an
-   external record and SQL hash (M3) — §5.
+9. A server-built facts block, escaped and row-capped like answer text;
+   prose labelled AI; `@certified` bound to an external record, signed with
+   the certifier's own key rather than the author's (M3, R3, R4) — §5.
 10. The manifest rebuilt from `.sql` at start and compared; a bundle
-    digest; no `policy.json` in the bundle; no upload endpoint (M4) — §3.4,
-    §7.
+    digest pinned outside the bundle, in the deployment config; no
+    `policy.json` in the bundle; no upload endpoint (M4, R4) — §3.4, §7.
 11. Drift and eval through `locked_panel` under configured principals,
     aggregates only (M5) — §7, §3.5.
 12. A rasteriser without file or URL resolution, render limits, a
     claims-keyed render cache or none, bytes not URLs to channels (M6) —
     §8, §11 (decision 5).
-13. Templated MCP tool descriptions, OAuth audience, no passthrough (M7) —
-    §8 MCP, §3.1.
+13. Templated MCP tool descriptions, with the column names in the template
+    held to the same lint and length caps as the rest of it, OAuth
+    audience, no passthrough (M7, R5) — §8 MCP, §3.1.
 14. Every model call budgeted; deterministic entity resolution; the
     API-key stance stated (M8) — §3.2, §3.3, §8.1.
-15. Scope columns in the contract and checked by `--conform` (M9) — §4.
+15. Scope columns in the contract and checked by `--conform` by an AST
+    check of the view's projection, not a value check alone, with an
+    explicit `constant` marker for a single-tenant mapping, and both
+    classifier variants (mapping: `source`-qualified only; panel: no
+    qualified name at all) spelled out (M9, R2, R6) — §4.
 16. The security-review gates cover A1 and A3, not only serving PRs, since
     A1 builds `--publish` (carries H6's data) and A3 executes mappings
     (H1) — §8.1, §10.
@@ -972,3 +1050,9 @@ note that now satisfies it:
 | L4 | `GET /api/agent` access and caching | §8 |
 | L5 | Knowledge base gate, out of v1 | §8.1, §11 (decision 4) |
 | L6 | `@requires` and conformance switch-off semantics | §4, §7 |
+| R1 | Channel principal can widen what an asker sees; membership checked only once | §8 (Channels), §10 (A5), §12 (4) |
+| R2 | A constant scope column passes the conformance check as written | §4, §10 (A3), §12 (15) |
+| R3 | The facts block is data and needs channel escaping and a row cap too | §5, §10 (A5), §12 (9) |
+| R4 | Certification and the bundle digest must be outside the author's reach | §5, §7, §10 (A4), §12 (9, 10) |
+| R5 | The MCP template still interpolates uncapped author text (column names) | §8 (MCP), §10 (A5), §12 (13) |
+| R6 | The classifier's mapping and panel variants, and `"policy": "none"`, need precise definitions | §4, §8.1, §10 (A3, A4), §12 (15) |
