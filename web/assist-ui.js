@@ -393,6 +393,8 @@ export function mountAssistant(hostArg) {
     const ctx = mk("div", "ai-ctx");
     const chips = mk("button", "ai-chips", { type: "button" });
     chips.id = "ai-chips";
+    chips.textContent = chipsText({});
+    chips.setAttribute("aria-label", chipsLabel({}));
     const commonLbl = mk("label", "ai-opt");
     const commonInput = mk("input", "", { type: "checkbox" });
     commonInput.id = "ai-common";
@@ -409,7 +411,11 @@ export function mountAssistant(hostArg) {
     noticeBtn.textContent = "Add key";
     notice.append(noticeText, noticeBtn);
 
-    const log = mk("ol", "ai-log", { role: "log", "aria-label": "Conversation", "aria-live": "polite", tabindex: "0" });
+    // A <div>, not <ol>/<li> (axe: role="log" overrides the ol's implicit
+    // "list" role, and a child with role="listitem" then fails
+    // aria-required-parent — there is no tag/role combination that is both
+    // a list and a log; "log" is the one the live region actually needs).
+    const log = mk("div", "ai-log", { role: "log", "aria-label": "Conversation", "aria-live": "polite", tabindex: "0" });
     log.id = "ai-log";
     const stream = mk("div", "ai-stream", { "aria-hidden": "true" });
 
@@ -898,6 +904,12 @@ export function mountAssistant(hostArg) {
       cardsOf.set(t.fq, S.profiles.get(t.fq)?.cards);
     }
     const tables = [...inScope.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows, cards: cardsOf.get(t.fq) })), ...rest.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows }))];
+    if (el.chips) {
+      const scopeNames = inScope.map((t) => t.fq.replace(/"/g, ""));
+      const cols = inScope.reduce((n, t) => n + (cardsOf.get(t.fq)?.length || 0), 0);
+      el.chips.textContent = chipsText({ scope: scopeNames, cols, commonValues: S.commonValues });
+      el.chips.setAttribute("aria-label", chipsLabel({ scope: scopeNames, cols, commonValues: S.commonValues }));
+    }
     return buildContext({ mode: editorSql.trim() ? "edit" : "new", tables, sql: editorSql, spans: statementSpans(editorSql), commonValues: S.commonValues });
   }
 
@@ -906,7 +918,7 @@ export function mountAssistant(hostArg) {
     el.statusEl.textContent = statusText(s) || "";
   }
   function logEntry(cls, text, extraBtn) {
-    const li = mk("li", "ai-msg " + cls);
+    const li = mk("div", "ai-msg " + cls);
     textBlock(doc, li, text);
     if (extraBtn) li.appendChild(extraBtn);
     el.log.appendChild(li);
