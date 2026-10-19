@@ -40,15 +40,14 @@ producer is not covered.
 
 from __future__ import annotations
 
-import argparse
-import concurrent.futures as cf
 import html
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
+
+from conformance_lib import (NO_SCHEMA, ext_path, parser, run_all, run_duckdb, svg_names, svgs_of,
+                              write_montage)
 
 # ── demo data ────────────────────────────────────────────────────────────────
 # 90 support tickets in two groups (A, B): a team (billing / defect / other),
@@ -206,7 +205,7 @@ GAPS = {
     "decide_choice_distribution": "SELECT anofox_plot(t) FROM (SELECT id, unnest(map_keys(team_dist)) AS option, "
                                   "unnest(map_values(team_dist)) AS probability FROM runs WHERE id = 3) t",
 }
-GAP_ERROR = "match no plottable schema"
+GAP_ERROR = NO_SCHEMA
 # …with no "closest" hint: decide's generic columns (kind, probability, …)
 # are no near miss of any schema (#180).
 GAP_NO_HINT = "; closest:"
@@ -226,31 +225,10 @@ EXTRA = {
 # Build warnings the harness accepts (none today).
 ALLOWED_WARNINGS: list[str] = []
 
-ENV = {**os.environ, "DATAZOO_DISABLE_TELEMETRY": "1"}
-
 
 def run(duckdb: str, prelude: str, sql: str, mode: str = "-list") -> tuple[bool, str]:
-    script = f"{prelude}\n{sql};"
-    p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
-                       capture_output=True, text=True, timeout=1800, env=ENV)
     # anofox_decide prints "[anofox] …" notices (model downloads, banners) on stderr.
-    err = "\n".join(l for l in (p.stderr or "").splitlines() if not l.startswith("[anofox]"))
-    out = (p.stdout or "") + err
-    return p.returncode == 0 and not err.strip(), out
-
-
-def svgs_of(out: str) -> list[str]:
-    """Every SVG cell of the `-json` results (grids nest <svg> elements)."""
-    dec, i, cells = json.JSONDecoder(), 0, []
-    while (j := out.find("[", i)) >= 0:
-        try:
-            rows, i = dec.raw_decode(out, j)
-        except ValueError:
-            i = j + 1
-            continue
-        cells += [v for r in rows if isinstance(r, dict) for v in r.values()
-                  if isinstance(v, str) and v.startswith("<svg")]
-    return cells
+    return run_duckdb(duckdb, f"{prelude}\n{sql};", mode, timeout=1800, quiet=("[anofox]",))
 
 
 def check(ok: bool, out: str) -> tuple[str, list[str], str]:
@@ -278,46 +256,8 @@ def check_gap(ok: bool, out: str) -> tuple[str, list[str], str]:
     return "FAIL", [], out.strip().replace("\n", " ")[:400]
 
 
-def montage(out_dir: str, names: list[str]) -> str | None:
-    if not shutil.which("rsvg-convert"):
-        return None
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        return None
-    pngs = []
-    png_dir = os.path.join(out_dir, "png")
-    os.makedirs(png_dir, exist_ok=True)
-    for n in names:
-        svg = os.path.join(out_dir, n + ".svg")
-        png = os.path.join(png_dir, n + ".png")
-        r = subprocess.run(["rsvg-convert", "-b", "white", "-w", "480", svg, "-o", png],
-                           capture_output=True)
-        if r.returncode == 0:
-            pngs.append((n, png))
-    if not pngs:
-        return None
-    cols, tw, th = 5, 480, 330
-    rows = (len(pngs) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * tw, rows * (th + 18)), "white")
-    draw = ImageDraw.Draw(sheet)
-    for k, (n, png) in enumerate(pngs):
-        im = Image.open(png).convert("RGB")
-        im.thumbnail((tw, th))
-        x, y = (k % cols) * tw, (k // cols) * (th + 18)
-        sheet.paste(im, (x, y + 18))
-        draw.text((x + 4, y + 2), n, fill=(180, 30, 30))
-    path = os.path.join(out_dir, "montage.png")
-    sheet.save(path)
-    return path
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--duckdb", default=os.environ.get("DUCKDB", "duckdb"))
-    ap.add_argument("--ext", required=True, help="anofox_visualization extension file to LOAD")
-    ap.add_argument("--out", default="decide-conformance")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    ap = parser(__doc__, "decide-conformance")
     ap.add_argument("--model", help="a real registered decide model to score next to the fixture "
                                     "(e.g. laya-multilingual)")
     ap.add_argument("--statistics", choices=("auto", "yes", "no"), default="auto",
@@ -325,14 +265,9 @@ def main() -> int:
                          "(auto: when it loads)")
     ap.add_argument("--extension-dir", help="DuckDB extension_directory holding anofox_decide "
                                             "(default: DuckDB's own)")
-    ap.add_argument("--only", help="regex: run only matching case names")
-    ap.add_argument("--no-montage", action="store_true")
     a = ap.parse_args()
-    ext = os.path.abspath(a.ext)
-    if not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
-        print(f"--ext {ext}: LOAD takes the entry point from the file name, so it must be named "
-              "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
-              f"Rename it, or: ln -s '{ext}' /tmp/anofox_visualization.duckdb_extension", file=sys.stderr)
+    ext = ext_path(a.ext)
+    if ext is None:
         return 2
     out_dir = os.path.abspath(a.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -403,19 +338,10 @@ def main() -> int:
         ok, out = run(a.duckdb, prelude, c["sql"], "-json")
         return c, (check_gap if c["kind"] == "gap" else check)(ok, out)
 
-    results = []
-    with cf.ThreadPoolExecutor(a.jobs) as pool:
-        for c, (status, svgs, msg) in pool.map(one, runs):
-            key = f"{c['name']}.{c['which']}"
-            for k, s in enumerate(svgs):
-                fn = key if len(svgs) == 1 else f"{key}.{k}"
-                with open(os.path.join(out_dir, fn + ".svg"), "w") as f:
-                    f.write(s)
-            results.append((key, status, msg, len(svgs)))
-    names = []
-    for key, status, msg, n in sorted(results):
+    results = run_all(runs, one, a.jobs, out_dir)
+    names = svg_names(results)
+    for key, status, msg, n, c in results:
         print(f"{status:5s} {key:44s} {msg}")
-        names += [key] if n == 1 else [f"{key}.{k}" for k in range(n)]
     for m in missing:
         print(f"MISS  {m}: tagged producer without a recipe in the harness")
     good = {"OK", "GAP"}
@@ -423,12 +349,9 @@ def main() -> int:
     gaps = sum(1 for r in results if r[1] == "GAP")
     print(f"\n{len(BRIDGES)} decide bridges, {len(producers)} tagged producers, "
           f"{passed}/{len(results)} calls as expected ({gaps} known gaps)")
+    keep = lambda n: not n.startswith("contract_version") and not n.endswith(".auto")
     if not a.no_montage:
-        names = [n for n in names if os.path.exists(os.path.join(out_dir, n + ".svg"))]
-        m = montage(out_dir, [n for n in names if not n.startswith("contract_version")
-                              and not n.endswith(".auto")])
-        if m:
-            print(f"montage: {m}")
+        write_montage(out_dir, names, keep, cols=5)
     return 0 if passed == len(results) and not missing else 1
 
 
