@@ -1603,10 +1603,13 @@ SELECT max(loaded_at)::ASOF, 'stale=24h' FROM etl_log;   -- s, m, h, d or w
 
 The value is a `TIMESTAMP`, `TIMESTAMPTZ` or `DATE`; a timestamp without a time
 zone is read as **UTC** (prefer `TIMESTAMPTZ`, e.g. `now()` or a `loaded_at`
-written with one). The chip shows the time in the viewer's zone and the
-dashboard locale (the date is added when it isn't today) and keeps its relative
-age current while the page is open. It is in every output: the browser, a
-locked server, the static HTML of `dashboard file.sql out.html` /
+written with one). A `DATE` (or `'YYYY-MM-DD'` text) is a calendar day: the
+chip shows the date alone, with no time and no time-zone shift ("Data as of
+01.01.2026 (291 d ago)", "today" on the day). The chip shows the time in the
+viewer's zone and the dashboard locale (the date is added when it isn't today)
+and keeps its relative age current while the page is open. It is in every
+output: the browser, a locked server, the static HTML of
+`dashboard file.sql out.html` /
 `serve --dashboards` (rendered at build time, then refreshed by the page's
 script against the viewer's clock) and headless SVG (`dashboard --svg`,
 `render_dashboard_svg`: rendered at render time, in UTC). `--check` warns when

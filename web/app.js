@@ -5362,7 +5362,7 @@ function axToken(name, fallback = "") {
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
 // ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
-let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+let dpAsof = null; // {at: epoch ms | null, day: 'YYYY-MM-DD' | null, stale: seconds | 0}
 // A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
 // ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
 function asofParse(v) {
@@ -5391,13 +5391,26 @@ function asofRelative(sec) {
   if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
   return `${Math.floor(sec / 86400)} d ago`;
 }
-// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
-// dashboard locale (a date is added when it isn't today); amber once stale.
-function paintAsof(el, a) {
+// A date-only ::ASOF value ('2026-01-01', a DATE) → that day, else null: it
+// reads as a calendar day — no time, no time-zone shift (#282).
+function asofDay(v) {
+  const m = typeof v === "string" && v.trim().match(/^"?(\d{4}-\d{2}-\d{2})"?$/);
+  return m ? m[1] : null;
+}
+// The chip at `now` (epoch ms) in locale `loc`: {text, title, stale}.
+function asofText(a, now, loc) {
+  if (a.day) {
+    const [y, mo, dd] = a.day.split("-").map(Number);
+    const day = new Date(y, mo - 1, dd);
+    const n = new Date(now);
+    const days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()) - day) / 86400000);
+    let t;
+    try { t = day.toLocaleDateString(loc); } catch (_) { t = a.day; }
+    const age = (now - day.getTime()) / 1000;
+    return { text: `Data as of ${t} (${days <= 0 ? "today" : `${days} d ago`})`, title: a.day, stale: a.stale > 0 && age > a.stale };
+  }
   const d = new Date(a.at);
-  const now = Date.now();
   const age = (now - a.at) / 1000;
-  const loc = dashLocale() || undefined;
   let t;
   try {
     t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
@@ -5405,9 +5418,15 @@ function paintAsof(el, a) {
   } catch (_) {
     t = d.toISOString().slice(0, 16).replace("T", " ");
   }
-  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
-  el.title = d.toString();
-  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+  return { text: `Data as of ${t} (${asofRelative(age)})`, title: d.toString(), stale: a.stale > 0 && age > a.stale };
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const r = asofText(a, Date.now(), dashLocale() || undefined);
+  el.textContent = r.text;
+  el.title = r.title;
+  el.classList.toggle("stale", r.stale);
 }
 let asofTimer = null;
 function mkAsof() {
@@ -7032,7 +7051,8 @@ async function runOnce(fresh = true) {
         else if (cr === "ASOF") {
           // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
           const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
-          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+          const raw = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+          dpAsof = { at: asofParse(raw), day: asofDay(raw), stale: asofStale(opt) };
         } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }

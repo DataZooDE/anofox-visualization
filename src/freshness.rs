@@ -107,19 +107,59 @@ pub fn relative(age: i64) -> String {
     }
 }
 
+/// Is `s` a date without a time (`2026-01-01`, a `DATE`)? It reads as a
+/// calendar day: no time, no time-zone shift (#282).
+pub fn is_date_only(s: &str) -> bool {
+    let s = s.trim().trim_matches('"');
+    s.len() == 10 && parse_timestamp(s).is_some()
+}
+
+/// `YYYY-MM-DD` of the UTC day of `epoch` (seconds).
+pub fn iso_day(epoch: i64) -> String {
+    let (y, m, d) = civil_from_days(epoch.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// "today" or "3 d ago" for a calendar day `days` before today.
+fn day_relative(days: i64) -> String {
+    if days <= 0 {
+        "today".into()
+    } else {
+        format!("{days} d ago")
+    }
+}
+
 /// The chip text and whether it is stale: "Data as of 14:02 UTC (2 h ago)"
-/// on the same day as `now`, else with the date in the dashboard locale.
-pub fn chip_text(asof: i64, stale_secs: Option<u64>, now: i64, l: &Locale) -> (String, bool) {
+/// on the same day as `now`, else with the date in the dashboard locale. A
+/// date-only `::ASOF` (`date_only`) reads as a calendar day instead: "Data as
+/// of 01.01.2026 (today)" / "(3 d ago)", with no time and no time-zone shift
+/// (#282).
+pub fn chip_text(
+    asof: i64,
+    stale_secs: Option<u64>,
+    now: i64,
+    l: &Locale,
+    date_only: bool,
+) -> (String, bool) {
+    let age = now - asof;
+    let stale = stale_secs.is_some_and(|s| age > s as i64);
+    if date_only {
+        return (
+            format!(
+                "Data as of {} ({})",
+                l.format_date(&iso_day(asof)),
+                day_relative(now.div_euclid(86_400) - asof.div_euclid(86_400))
+            ),
+            stale,
+        );
+    }
     let (day, hm) = (asof.div_euclid(86_400), asof.rem_euclid(86_400));
     let time = format!("{:02}:{:02} UTC", hm / 3600, hm % 3600 / 60);
     let when = if day == now.div_euclid(86_400) {
         time
     } else {
-        let (y, m, d) = civil_from_days(day);
-        format!("{} {time}", l.format_date(&format!("{y:04}-{m:02}-{d:02}")))
+        format!("{} {time}", l.format_date(&iso_day(asof)))
     };
-    let age = now - asof;
-    let stale = stale_secs.is_some_and(|s| age > s as i64);
     (format!("Data as of {when} ({})", relative(age)), stale)
 }
 
@@ -235,10 +275,10 @@ mod tests {
     fn chip_reads_relative_and_turns_stale() {
         let l = Locale::default();
         let at = parse_timestamp("2026-10-16 14:02:00").unwrap();
-        let (t, stale) = chip_text(at, Some(86_400), at + 2 * 3600 + 5, &l);
+        let (t, stale) = chip_text(at, Some(86_400), at + 2 * 3600 + 5, &l, false);
         assert_eq!(t, "Data as of 14:02 UTC (2 h ago)");
         assert!(!stale);
-        let (t, stale) = chip_text(at, Some(86_400), at + 3 * 86_400, &l);
+        let (t, stale) = chip_text(at, Some(86_400), at + 3 * 86_400, &l, false);
         assert!(
             t.starts_with("Data as of ") && t.ends_with("14:02 UTC (3 d ago)"),
             "{t}"
@@ -247,7 +287,27 @@ mod tests {
         assert_eq!(relative(-30), "just now");
         assert_eq!(relative(600), "10 min ago");
         let de = Locale::from_tag("de-DE").unwrap();
-        let (t, _) = chip_text(at, None, at + 86_400 * 2, &de);
+        let (t, _) = chip_text(at, None, at + 86_400 * 2, &de, false);
         assert!(t.contains("16.10.2026"), "{t}");
+    }
+
+    #[test]
+    fn date_only_reads_as_a_day() {
+        assert!(is_date_only("2026-01-01"));
+        assert!(is_date_only("\"2026-01-01\""));
+        assert!(!is_date_only("2026-01-01 00:00:00"));
+        let de = Locale::from_tag("de-DE").unwrap();
+        let at = parse_timestamp("2026-01-01").unwrap();
+        let now = parse_timestamp("2026-10-19 12:00:00").unwrap();
+        assert_eq!(
+            chip_text(at, None, now, &de, true).0,
+            "Data as of 01.01.2026 (291 d ago)"
+        );
+        let now = at + 3600;
+        assert_eq!(
+            chip_text(at, None, now, &de, true).0,
+            "Data as of 01.01.2026 (today)"
+        );
+        assert!(chip_text(at, Some(86_400), at + 3 * 86_400, &de, true).1);
     }
 }
