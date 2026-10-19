@@ -11,6 +11,13 @@
 // statistics and distributions come from its page_sql() builder, passed in as
 // `pageSql`, which counts only finite values (#74) — and the extra statistics
 // written here use the same isfinite() guard.
+//
+// sec-review-256 last check: every exported function here that takes an
+// options object (destructured in its signature, or read key by key off a
+// parameter named `opts`) runs it through ownOpts first — a null-prototype,
+// shallow copy of its own enumerable properties — so a missing key is
+// always `undefined`, never read off a polluted Object.prototype.
+import { ownOpts } from "./lint.js";
 
 // Above this many rows a table is profiled on a sample of SAMPLE_ROWS rows.
 export const SAMPLE_OVER = 200000;
@@ -150,7 +157,10 @@ const num = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? 
 // hi_i), `prof` = its distribution rows (c, t, k, v, n), `extras` = the
 // extrasSql row, `series` = the seriesSql rows. Indices are per batch: pass
 // `at` = the batch's first column index to merge batches.
-export function buildCards(cols, { stats = {}, prof = [], extras = {}, series = [] } = {}) {
+// sec-review-256 last check: ownOpts first (a signature-destructured
+// parameter reads inherited properties too).
+export function buildCards(cols, opts = {}) {
+  const { stats = {}, prof = [], extras = {}, series = [] } = ownOpts(opts);
   return cols.map((c, i) => {
     const kind = c.kind || colKind(c.type);
     const n = num(stats.n ?? extras.n) ?? 0;
@@ -276,7 +286,9 @@ const grainOf = (c) => (c && c.grain && c.grain !== "year" ? c.grain : c && c.gr
 
 // The annotated SQL of a column chart (one dashboard statement, `;`-ended).
 // `opts.vs` = the other measure of a scatter.
+// sec-review-256 last check: ownOpts first (same reason as profileTable).
 export function columnChartSql(fq, card, kind, cards = [], opts = {}) {
+  const o = ownOpts(opts);
   const q = qid(card.name);
   const nm = String(card.name);
   switch (kind) {
@@ -287,7 +299,7 @@ export function columnChartSql(fq, card, kind, cards = [], opts = {}) {
     case "bars":
       return `SELECT coalesce(CAST(${q} AS VARCHAR), '(empty)')::XAXIS, count(*)::BARCHART, ${sqlStr("Most common " + nm)}::TITLE\nFROM ${fq} GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 15;`;
     case "scatter": {
-      const vs = opts.vs || (cards.find((c) => c.kind === "num" && c.name !== card.name && !idLike(c.name)) || {}).name;
+      const vs = o.vs || (cards.find((c) => c.kind === "num" && c.name !== card.name && !idLike(c.name)) || {}).name;
       if (!vs) return "";
       return `SELECT ${qid(vs)}::XAXIS, ${q}::SCATTER, ${sqlStr(nm + " against " + vs)}::TITLE\nFROM (SELECT ${qid(vs)}, ${q} FROM ${fq} WHERE ${q} IS NOT NULL AND ${qid(vs)} IS NOT NULL) _s USING SAMPLE reservoir(2000 ROWS) REPEATABLE (97);`;
     }
@@ -371,7 +383,9 @@ export function starterPlan(cards) {
 // for a category with few values), a line over time, top-N bars for the main
 // categories, the main measure's distribution, and the paged table. `cards` =
 // the table's column cards (buildCards). Returns the dashboard SQL.
-export function starterDashboard({ name, fq, cards }) {
+// sec-review-256 last check: ownOpts first (same reason as buildCards).
+export function starterDashboard(opts) {
+  const { name, fq, cards } = ownOpts(opts);
   const p = starterPlan(cards);
   const title = String(name || "Table");
   const out = [
@@ -614,8 +628,12 @@ export class Superseded extends Error {
 // step — "columns" (names and types known), "stats", "dist", "extras",
 // "series" — so the page fills in progressively. Resolves to
 // {total, sampled, rows, cards}.
+// sec-review-256 last check: ownOpts first — `opts.alive`/`opts.total`/
+// `opts.onStage` were read straight off the parameter, which reads
+// inherited properties too (the same issue as a destructured signature).
 export async function profileTable(run, pageSql, fq, opts = {}) {
-  const alive = opts.alive || (() => true);
+  const o = ownOpts(opts);
+  const alive = o.alive || (() => true);
   const step = async (sql) => {
     if (!alive()) throw new Superseded();
     const rows = await run(sql);
@@ -627,14 +645,14 @@ export async function profileTable(run, pageSql, fq, opts = {}) {
     if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
     return sql;
   };
-  const total = opts.total ?? Number((await step(countSql(fq)))[0]?.n ?? 0);
+  const total = o.total ?? Number((await step(countSql(fq)))[0]?.n ?? 0);
   const cols = (await step(describeSql(fq))).map((r) => ({ name: String(r.column_name), type: String(r.column_type), kind: colKind(r.column_type) }));
   const { base, sampled, rows } = profileBase(fq, total);
   const state = { total, sampled, rows, cards: cols.map((c) => ({ name: c.name, type: c.type, kind: c.kind, pending: true })) };
-  opts.onStage?.("columns", state);
+  o.onStage?.("columns", state);
   if (!total) {
     state.cards = buildCards(cols, { stats: { n: 0 } });
-    opts.onStage?.("done", state);
+    o.onStage?.("done", state);
     return state;
   }
   const parts = Array.from({ length: Math.ceil(cols.length / STAT_BATCH) }, (_, b) => cols.slice(b * STAT_BATCH, (b + 1) * STAT_BATCH));
@@ -643,7 +661,7 @@ export async function profileTable(run, pageSql, fq, opts = {}) {
   // 1. counts, distinct values and the ::PAGED statistics of numbers
   for (const [b, p] of parts.entries()) res[b].stats = (await step(paged(base, { stats: p.map((c) => c.name) })))[0] || {};
   merge();
-  opts.onStage?.("stats", state);
+  o.onStage?.("stats", state);
   // 2. histograms and top values (the ::PAGED distributions)
   for (const [b, p] of parts.entries()) {
     const idx = p.map((c, i) => (c.kind === "other" || c.kind === "date" || c.kind === "time" ? -1 : i)).filter((i) => i >= 0);
@@ -652,11 +670,11 @@ export async function profileTable(run, pageSql, fq, opts = {}) {
     res[b].prof = rows.map((r) => ({ ...r, c: idx[Number(r.c)] }));
   }
   merge();
-  opts.onStage?.("dist", state);
+  o.onStage?.("dist", state);
   // 3. percentiles, time ranges, exact key counts, mixed types
   for (const [b, p] of parts.entries()) res[b].extras = (await step(extrasSql(base, p)))[0] || {};
   merge();
-  opts.onStage?.("extras", state);
+  o.onStage?.("extras", state);
   // 4. rows per day / week / month of each time column
   for (const [b, p] of parts.entries()) {
     const ts = p
@@ -665,7 +683,7 @@ export async function profileTable(run, pageSql, fq, opts = {}) {
     if (ts.length) res[b].series = await step(seriesSql(base, ts));
   }
   merge();
-  opts.onStage?.("done", state);
+  o.onStage?.("done", state);
   return state;
 }
 
@@ -816,8 +834,10 @@ export function overlaySql(baseA, baseB, cols) {
 // Profile both sides (`a`, `b`: {src, label, total?}) and compare them:
 // {a, b (profiles), cols (compareCards), key, diff, overlay: Map col -> {a, b}}.
 // Same `alive` / `onStage(stage, state)` contract as profileTable.
+// sec-review-256 last check: ownOpts first (same reason as profileTable).
 export async function compareTables(run, pageSql, a, b, opts = {}) {
-  const alive = opts.alive || (() => true);
+  const o = ownOpts(opts);
+  const alive = o.alive || (() => true);
   const step = async (sql) => {
     if (!alive()) throw new Superseded();
     const r = await run(sql);
@@ -826,10 +846,10 @@ export async function compareTables(run, pageSql, a, b, opts = {}) {
   };
   const state = { a: null, b: null, cols: [], key: null, diff: null, overlay: new Map() };
   state.a = await profileTable(run, pageSql, a.src, { alive, total: a.total });
-  opts.onStage?.("a", state);
+  o.onStage?.("a", state);
   state.b = await profileTable(run, pageSql, b.src, { alive, total: b.total });
   state.cols = compareCards(state.a.cards, state.b.cards);
-  opts.onStage?.("b", state);
+  o.onStage?.("b", state);
   const nums = state.cols
     .map((r, i) => ({ r, i }))
     .filter(({ r }) => r.a && r.b && r.a.kind === "num" && r.b.kind === "num" && r.a.min != null && r.b.min != null)
@@ -843,13 +863,13 @@ export async function compareTables(run, pageSql, a, b, opts = {}) {
       state.overlay.set(c.name, h);
     }
   }
-  opts.onStage?.("overlay", state);
+  o.onStage?.("overlay", state);
   state.key = compareKey(state.a.cards, state.b.cards);
   if (state.key) {
     const common = state.cols.filter((r) => r.a && r.b && r.a.kind !== "other").map((r) => ({ name: r.name, num: r.a.kind === "num" && r.b.kind === "num" }));
     state.diff = (await step(keyDiffSql(a.src, b.src, state.key, common)))[0] || null;
   }
-  opts.onStage?.("done", state);
+  o.onStage?.("done", state);
   return state;
 }
 
@@ -857,7 +877,9 @@ export async function compareTables(run, pageSql, a, b, opts = {}) {
 // with B against A as a ::DELTA, key changes, the schema differences, rows by
 // the main category per side, the main measure's spread per side and, for
 // two tables with a date, both over time. Passes dashboard --check --strict.
-export function compareDashboard({ a, b, cmp }) {
+// sec-review-256 last check: ownOpts first (same reason as buildCards).
+export function compareDashboard(opts) {
+  const { a, b, cmp } = ownOpts(opts);
   const A = a.src,
     B = b.src;
   const la = String(a.label),

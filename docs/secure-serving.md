@@ -21,6 +21,14 @@ other two never accept SQL from the client at all.
 Available in the **from-source build** only (`duckext/`, see
 [`BUILD.md`](../BUILD.md)); the community extension is render-only.
 
+**The AI assistant (#204) is not available on any served or embedded
+page** in this release — `assistConfig()` turns it off for `served`,
+`embed` and the `live` backend unconditionally, regardless of
+`app-config.json`. It stays available only on static hosting (mode-free,
+no server at all) and on the authoring UI's DuckDB-Wasm path. A real CSP
+*header* (not a meta tag, with nonces and `frame-ancestors 'none'`) for a
+future served `/assist` is a follow-up issue.
+
 ---
 
 ## Authoring — `anofox_serve(port)` and `serve <db>`

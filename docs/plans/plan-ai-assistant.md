@@ -78,7 +78,8 @@ served dashboards. There the model call runs on the server.
 | MotherDuck | The token is kept in `localStorage["dp_md"]` and substituted only at connect time, never into the SQL | `web/app.js:4826-4881` |
 | Per-installation config | `app-config.json` (static hosting) → `window.__anofoxApp` (serve `--app-*`). Brand only so far. | `web/app.js:10414-10520`, `web/app-config.example.json` |
 | My dashboards | `makeDashStorage(ls)` → `dashDB.list / get / put / remove` (v2 store) | `web/app.js:1919-1960` |
-| CSP | None in `index.html` today. If one is added later, `connect-src` must allow the model endpoint. | `web/index.html` |
+| CSP | A static baseline (`object-src 'none'; base-uri 'none'`) in `index.html`, plus a tab-wide ratchet applied by `web/assist-csp.js` (#204) whenever an assistant key is stored or the panel opens — `connect-src` there already allows the model endpoint. | `web/index.html`, `web/assist-csp.js` |
+| The assistant's own DuckDB-Wasm instance | `buildEngine` (#204): a second, locked `AsyncDuckDB`, loaded with a fixed extension set and an Arrow snapshot of the page's tables before the lock. Every tool, the lint and (M1-3) the proposal preview run against it, not the page's. | `web/assist-engine.js` |
 | Public demo | `https://datazoode.github.io/anofox-visualization/`. The **origin `datazoode.github.io` is shared by every DataZooDE Pages site.** | `README.md:26`, `.github/workflows/pages.yml` |
 
 What is missing: a lint the browser can call, a read-only query classifier
@@ -362,6 +363,13 @@ classifier is in `web/assist.js` and is tested against a table of cases.
   DuckDB-Wasm connection, so temporary objects and variables never touch the
   user's session. On serve, the statements are run as the lint does, each
   replay with its own prelude.
+- **#204: every one of these scratch sessions, for every tool, runs in the
+  assistant's own locked DuckDB-Wasm engine (`web/assist-engine.js`), not
+  the page's.** The classifier and the parse-tree check above are still
+  enforced (defence in depth, §9), but they no longer have to be: the
+  engine has no network, no file access beyond an exact allow-list fixed
+  before it was built, and a re-check before every call that it is still
+  locked. See §3.6.
 - A proposal that contains class 3 statements is **not run** until the user
   confirms. A dialog lists exactly those statements ("This dashboard wants to
   run: `INSTALL spatial`, `ATTACH 'sales.duckdb'`"), with *Allow once* and
@@ -406,6 +414,12 @@ same diagnostics as the CLI, with links to the statements.
 - **The preview.** The proposal is rendered in the dashboard area with a
   "Preview: not applied" bar. The editor is unchanged. The bar holds
   *Apply*, *Discard* and *Show changes*.
+  **#204 (H-1): every query the preview runs — its panels, its input option
+  queries, and drill / cross-filter re-queries — runs in the locked
+  assistant engine, through `tools.previewRunner()` (§3.6), never on the
+  page's own DuckDB.** The page only ever receives the result rows, handed
+  to `render_panel`. The page's DuckDB runs model-written SQL for the first
+  time on *Apply*, below.
 - **The diff.** It is a line diff (Myers, about 80 lines of JS) between the
   editor text and the proposal. It is grouped by statement and summarised
   in words ("2 panels added, panel 3 changed, 1 filter added"). The model's
@@ -423,6 +437,42 @@ same diagnostics as the CLI, with links to the statements.
 - **A stale proposal.** If the user changed the editor while the assistant
   was working, *Apply* warns and offers to re-run the request on the new
   text.
+
+### 3.6 The assistant engine (#204)
+
+Everything in §3.3–§3.5 that runs model-influenced SQL (tools, lint, the
+preview) runs in a **second DuckDB-Wasm instance**, built and locked before
+any of it touches a byte of the request:
+
+1. A fresh `AsyncDuckDB`, in its own Worker, created only after the tab's
+   CSP is proven enforced (`web/assist-csp.js`'s `assistCspProven`). A
+   Worker created after the CSP meta is inserted inherits the policy; the
+   page's own DuckDB Worker, created at boot, keeps its network so remote
+   dashboards keep working.
+2. Its extensions (json, parquet, icu, anofox_forecast, anofox_statistics
+   always; spatial only when the page or the editor's own SQL needs it) and
+   its allow-listed files are loaded **before** the lock — the only point at
+   which it can still reach a network at all.
+3. The lock: `enable_external_access=false`, autoload/autoinstall/community
+   extensions off, an exact `allowed_paths`, `lock_configuration=true`. A
+   per-call re-check (`engineLocked`) runs before every tool call and every
+   preview batch, because one DuckDB setting (`enable_logging`) is outside
+   `lock_configuration` upstream; a mismatch rebuilds the engine.
+4. A **snapshot**: the page's own tables and views, copied in by Arrow
+   (`insertArrowTable`), with row, byte and time limits; remote-attached and
+   non-DuckDB databases (MotherDuck included) are excluded, not pulled.
+
+`wasmTools` (`web/assist.js`) takes this engine as its `db` and refuses to
+run against anything else: `requireLocked` (default on) re-checks the lock
+before every call, and refuses a `prepare` callback outright — the engine
+never needs one, because its extensions and files are fixed before it is
+built, from the **editor's own text**, never the model's.
+`tools.previewRunner()` is the same locked-engine contract for M1-3's
+preview (§3.5).
+
+Full design, the evidence against DuckDB-Wasm 1.33.1-dev65.0 and the
+independent security review (approved, with findings mapped to changes):
+issue #204 and its PR.
 
 ## 4. Grounding and caching
 
@@ -625,7 +675,8 @@ it is useful without any AI.
 |---|---|---|---|---|
 | **M1-1. Lint in the browser** | `lint_step` wasm export (§3.4); Edit-mode *Check* button listing diagnostics with statement links | `src/wasm.rs`, `src/lint.rs` (a small replay adapter), `web/app.js`, `web/index.html` | Rust: `lint_step` = native lint on all `web/examples/*.sql` and the explore starters; node test of the JS fixed-point loop; e2e: *Check* on a broken example | 1.5 d |
 | **M1-2. Assistant core** | `web/assist.js`: transport interface, (a) browser-key via the SDK, the loop, the tools, the statement classifier and write gate, the budget and cancel; `web/assist/instructions.md`; `scripts/gen-assist-guide.mjs` + markers in the dashboards skill; the role reference from `roles_json()` | `web/assist.js`, `web/assist/*`, `scripts/gen-assist-guide.mjs`, the dashboards `SKILL.md` (markers only), `tests/web_js.rs` | `tests/web/assist_test.mjs`: the loop with a fake transport (self-correction, the round limit, cancel, refusal, `max_tokens`), the classifier table (≥ 60 cases), prefix stability hash; CI check that `guide.md` is current | 2.5 d |
-| **M1-3. Panel and new-from-question** | the panel, *What will be sent*, preview, diff, apply / undo (native + history + toast), the key dialog, the *New dashboard* entry, phone sheet, a11y; `assistant` block in `app-config.json`; 10-prompt eval seed + `scripts/assist-eval.mjs` (live, manual) | `web/assist-ui.js` (new module, not in the 12.7 K-line `app.js`), `web/app.js` (hooks), `web/index.html`, `web/app-config.example.json`, `tests/assist-eval/` | `scripts/assist-e2e.mjs` (Playwright with a mocked Messages endpoint: prompt → preview → apply → Ctrl+Z → undo toast; the write-confirmation dialog; nothing sent before *Send*); `a11y-e2e` + phone; a test that the module is never loaded with `window.__served` or `?embed=1` | 2 d |
+| **#204. The assistant engine + tab CSP** | `web/assist-csp.js` (the meta CSP, proven by an enforcement probe), `web/assist-engine.js` (`buildEngine`, the lock, the Arrow snapshot), `wasmTools`' `requireLocked`/`previewRunner` (§3.6); the boot ratchet; `app-config.json`'s `assistant.remember` (opt-in; always off on `*.github.io`/`*.gitlab.io`) | `web/assist-csp.js`, `web/assist-engine.js`, `web/assist.js`, `web/app.js`, `web/index.html` | `tests/web/assist_engine_test.mjs`, `tests/web/assist_csp_test.mjs`, `scripts/assist-sandbox-e2e.mjs` (manual, Playwright) | — |
+| **M1-3. Panel and new-from-question** | **Depends on #204** (the locked assistant engine + the tab CSP): call `applyAssistCsp` before `loadSdk`/the key dialog; build the engine with `assistDeps()` (`web/app.js`), keyed by `pageFingerprint()` so it rebuilds when the page's tables change; every preview query (panels, inputs, drills, cross-filter, `::PAGED` pages, lazy tabs) through `tools.previewRunner()` — **C-1 (carried over from #204's security review): the preview must be structurally unable to reach the page's own `conn`**, not just guarded by the gate; the panel, *What will be sent*, preview, diff, apply / undo (native + history + toast), the key dialog, `assistConfig.framed`/`.remember`, the *New dashboard* entry, phone sheet, a11y; `assistant` block in `app-config.json`; 10-prompt eval seed + `scripts/assist-eval.mjs` (live, manual) | `web/assist-ui.js` (new module, not in the 12.7 K-line `app.js`), `web/app.js` (hooks), `web/index.html`, `web/app-config.example.json`, `tests/assist-eval/` | `scripts/assist-e2e.mjs` (Playwright with a mocked Messages endpoint: prompt → preview → apply → Ctrl+Z → undo toast; the write-confirmation dialog; nothing sent before *Send*; **C-1's spy: inputs, drills, pages and tab switches in a preview, with a spy on the page connection seeing zero statements and the recorder seeing nothing**; **C-2: the boot ratchet and this panel's open handler share one memoised `applyAssistCsp` — a failed probe on either path clears the key**); `a11y-e2e` + phone; a test that the module is never loaded with `window.__served` or `?embed=1` | 2 d |
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |
@@ -659,9 +710,9 @@ README feature list.
 
 | Risk | Mitigation |
 |---|---|
-| A browser key is stolen (XSS, CDN, the shared `github.io` origin) | `sessionStorage` by default, the spend-limit advice, a custom demo domain (Q1), the key never in the SQL, links or logs; (b) is the default wherever it's possible |
+| A browser key is stolen (XSS, CDN, the shared `github.io` origin) | `sessionStorage` by default, the spend-limit advice, a custom demo domain (Q1), the key never in the SQL, links or logs; (b) is the default wherever it's possible; **#204: the tab-wide CSP applies at boot whenever a key is stored (holds across reloads), and *Remember* (localStorage) is opt-in and always off on `*.github.io`/`*.gitlab.io`** |
 | Personal data in profiles | top values only for low-cardinality, non-PII-looking columns, the preview, the installation switch |
-| Prompt injection through data | data in a labelled block; read-only tools; the write gate; nothing applied without the user |
+| Prompt injection through data | data in a labelled block; read-only tools; the write gate; nothing applied without the user; **#204: every pre-Apply tool, lint and preview query runs in the locked assistant engine, which has no network and no file access beyond an exact allow-list — independent of the classifier's function-name lists, which stay as defence in depth** |
 | A proposal writes to the live `anofox_serve` session | the scratch session plus class 3 confirmation; the e2e asserts no write without the dialog |
 | Cost runaway | per-request turn, round and token caps; the per-server hourly budget; *Cancel* |
 | The guide drifts from the product | generated from the skill, CI freshness check, the skill's SQL executed in CI, the eval freshness hash |
