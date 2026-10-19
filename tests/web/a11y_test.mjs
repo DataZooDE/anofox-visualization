@@ -79,4 +79,25 @@ assert.deepEqual(chartMarks({ querySelectorAll: () => [point, today] }), [point]
   assert.ok(html.includes("<td>$980</td><td>2 of 2: 100 – 1K</td>"), html);
   assert.ok(!/POLYGON|POINT/.test(html));
 }
+
+// M2a: graduated symbols add a "size" column (data-fsize), sorted by
+// data-size when the colour measure is the size itself (no colour measure).
+{
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmtTipValue = (v) => String(Math.round(Number(v) * 1000) / 1000);
+  const mapTableHtml = new Function("escapeHtml", "fmtTipValue", `${grab("mapTableHtml")}\nreturn mapTableHtml;`)(
+    escapeHtml,
+    fmtTipValue
+  );
+  const f = (a) => el(a);
+  const marks = [
+    f({ "data-row": "0", "data-label": "Dortmund", "data-value": "104", "data-size": "104", "data-fsize": "104" }),
+    f({ "data-row": "1", "data-label": "Hamburg", "data-value": "76", "data-size": "76", "data-fsize": "76" }),
+  ];
+  const svg = { getAttribute: () => null, querySelectorAll: () => marks };
+  const html = mapTableHtml(svg, 200, "Customers");
+  assert.ok(html.includes('<th scope="col">size</th>'), html);
+  const rows = [...html.matchAll(/<tr><td>(.*?)<\/td>/g)].map((m) => m[1]);
+  assert.deepEqual(rows, ["Dortmund", "Hamburg"]);
+}
 console.log("a11y_test: ok");
