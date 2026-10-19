@@ -80,10 +80,16 @@ const stop = (s) => {
 
 const browser = await chromium.launch();
 const errs = [];
+// #244: a served (locked) page never has the assistant — it has no SQL
+// endpoint for the panel to drive, and app-config.json/window.__anofoxApp's
+// `assistant` block never reaches it. Every request on every page this
+// script opens is logged here; the assertion is at the end.
+const allRequests = [];
 async function page(url) {
   const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce", colorScheme: theme === "dark" ? "dark" : "light" });
   const p = await ctx.newPage();
   p.on("pageerror", (e) => errs.push(String(e)));
+  p.on("request", (r) => allRequests.push(r.url()));
   await p.goto(url + (theme ? `?theme=${theme}` : ""));
   return p;
 }
@@ -201,6 +207,9 @@ try {
 }
 
 check(!errs.length, `no page errors ${errs.join(" | ")}`);
+// #244: never requested on a served (locked) page.
+const assistLeak = allRequests.filter((u) => /assist-ui\.(js|css)|vendor\/anthropic-sdk|assist\/(guide|instructions)\.md/.test(u));
+check(assistLeak.length === 0, `no assistant request on a served page (${JSON.stringify(assistLeak)})`);
 await browser.close();
 for (const d of [small, big]) rmSync(d, { recursive: true, force: true });
 if (!process.exitCode) console.log(`served-e2e (${tag}): ok`);

@@ -7,12 +7,20 @@
 // ::STORY chart's first step must light some marks, dim the rest and draw
 // its connector.
 //
+// #244: the assistant panel's own a11y (the key/sent/diff dialogs, the
+// phone sheet, the preview bar) lives in scripts/assist-e2e.mjs, not here —
+// --assist <pkg dir> spawns it (--only a11y,phone) as a subprocess.
+//
 //   python3 serve_nocache.py 8791 &
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/a11y-e2e.mjs \
 //       [--url http://127.0.0.1:8791/] [--dashboard "Selections & drill"] [--axe axe.min.js]
 //       [--sql file.sql]   (a dashboard from a file, passed in the #sql hash)
+//       [--assist <wasm pkg dir>]   (also runs the assistant's a11y, scripts/assist-e2e.mjs)
 import { createRequire } from "module";
 import { existsSync, readFileSync } from "fs";
+import { spawnSync } from "child_process";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -24,10 +32,19 @@ const base = arg("--url", "http://127.0.0.1:8791/");
 const dash = arg("--dashboard", "Overview");
 const axe = arg("--axe", "");
 const sqlFile = arg("--sql", "");
+const assistPkg = arg("--assist", "");
 const fail = (m) => {
   console.error("FAIL: " + m);
   process.exitCode = 1;
 };
+
+if (assistPkg) {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const assistArgs = ["scripts/assist-e2e.mjs", "--pkg", assistPkg, "--only", "a11y,phone"];
+  if (axe) assistArgs.push("--axe", axe);
+  const r = spawnSync(process.execPath, assistArgs, { cwd: path.resolve(here, ".."), stdio: "inherit", env: process.env });
+  if (r.status !== 0) fail("the assistant's own a11y (scripts/assist-e2e.mjs --only a11y,phone) failed");
+}
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
