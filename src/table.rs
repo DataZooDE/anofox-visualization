@@ -332,30 +332,87 @@ fn metric_of(f: &str) -> MetricFmt {
     }
 }
 
-/// Rate and percentage names (#207): no default total — a sum or a plain mean
-/// of rates reads as the overall rate and is not. Substrings as before, plus
-/// `per` / `pro` as a word (`Per 10k`, `customers_per_10k`, `per10k`, `km_per_h`).
+/// A column name's words, lower-cased (#227): split at every character that
+/// is not a letter or digit, between a lower-case and an upper-case letter
+/// (`churnRate` → churn, rate) and between letters and digits (`per10k` →
+/// per, 10, k). The name rules below match whole words, so `generated` and
+/// `accurate` are no rates and `operations` holds no `ratio`.
+fn name_tokens(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut prev: Option<char> = None;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            prev = None;
+            continue;
+        }
+        if let Some(p) = prev {
+            let camel = p.is_lowercase() && c.is_uppercase();
+            let digit = p.is_ascii_digit() != c.is_ascii_digit();
+            if (camel || digit) && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.extend(c.to_lowercase());
+        prev = Some(c);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Words that make a column a rate or percentage.
+const RATE_WORDS: &[&str] = &[
+    "pct",
+    "percent",
+    "percentage",
+    "percentages",
+    "rate",
+    "rates",
+    "ratio",
+    "ratios",
+    "share",
+    "shares",
+    "per",
+    "pro",
+];
+
+/// Rate and percentage names (#207, #227): no default total — a sum or a
+/// plain mean of rates reads as the overall rate and is not. A `%` anywhere,
+/// a whole word of [`RATE_WORDS`] (`Per 10k`, `customers_per_10k`, `per10k`,
+/// `km_per_h`, `churnRate`, `load_pct`), or a German compound ending in
+/// `quote` / `anteil` (`Abschlussquote`, `Marktanteil`). Words, not parts of
+/// words: `generated`, `accurate`, `operations`, `shareholders` are no rates.
+/// The browser table reads the same rule (wasm `table_profile`).
 fn rate_word(name: &str) -> bool {
-    let n = name.to_lowercase();
-    [
-        "pct", "percent", "%", "rate", "ratio", "share", "quote", "anteil",
-    ]
-    .iter()
-    .any(|w| n.contains(w))
-        || n.split(|c: char| !c.is_alphanumeric()).any(|t| {
-            t == "per"
-                || t == "pro"
-                || t.strip_prefix("per")
-                    .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+    name.contains('%')
+        || name_tokens(name).iter().any(|t| {
+            RATE_WORDS.contains(&t.as_str()) || t.ends_with("quote") || t.ends_with("anteil")
         })
 }
 
-/// Average-like names: the default total is the mean.
+/// Words that make a column an average: its default total is the mean.
+const MEAN_WORDS: &[&str] = &[
+    "avg",
+    "average",
+    "mean",
+    "median",
+    "score",
+    "scores",
+    "index",
+    "percentile",
+];
+
+/// Average-like names (#227: whole words, as [`rate_word`]; `zscore` /
+/// `fscore` end in `score`): the default total is the mean.
 fn mean_word(name: &str) -> bool {
-    let n = name.to_lowercase();
-    ["avg", "mean", "median", "score", "index"]
+    name_tokens(name)
         .iter()
-        .any(|w| n.contains(w))
+        .any(|t| MEAN_WORDS.contains(&t.as_str()) || t.ends_with("score"))
 }
 
 /// Rate- or average-like names (never summed by default).
@@ -748,6 +805,49 @@ pub fn parse_totals(spec: &str) -> TotalsSpec {
     out
 }
 
+/// Whether a next-table option entry (`::TOTALS 'Revenue: sum'`) names the
+/// column `col`: its raw name or its header ([`human_header`]),
+/// case-insensitive — the browser's `colNamed` (web/app.js `renderTable`).
+pub fn names_column(col: &str, wanted: &str) -> bool {
+    let w = wanted.trim().to_lowercase();
+    col.to_lowercase() == w || human_header(col).to_lowercase() == w
+}
+
+/// One aggregation of a column's numbers — the browser's totals `aggValue`
+/// (web/app.js `renderTable`): `count` is the number of values (0 without
+/// any); `sum`, `mean`, `median`, `min`, `max` are `None` without numbers,
+/// as is an unknown name.
+pub fn aggregate(nums: &[f64], agg: &str) -> Option<f64> {
+    if agg == "count" {
+        return Some(nums.len() as f64);
+    }
+    if nums.is_empty() {
+        return None;
+    }
+    Some(match agg {
+        "sum" => nums.iter().sum(),
+        "mean" => nums.iter().sum::<f64>() / nums.len() as f64,
+        "min" => nums.iter().copied().fold(f64::INFINITY, f64::min),
+        "max" => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "median" => {
+            let mut s = nums.to_vec();
+            s.sort_by(f64::total_cmp);
+            let h = s.len() / 2;
+            if s.len() % 2 == 1 {
+                s[h]
+            } else {
+                (s[h - 1] + s[h]) / 2.0
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// A count total: a grouped whole number in the locale (`toLocaleString`).
+pub fn count_text(n: usize, l: &Locale) -> String {
+    fixed(n as f64, 0, true, l)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,6 +891,16 @@ mod tests {
             "load_pct",
             "Margin %",
             "on-time rate",
+            "conversion_rate",
+            "churnRate",
+            "MarginPct",
+            "win_rates",
+            "price_ratio",
+            "Share of MRR at risk (%)",
+            "percentage_done",
+            "Abschlussquote",
+            "Marktanteil",
+            "pro10k",
         ] {
             assert!(rate_word(n), "{n}");
         }
@@ -801,9 +911,64 @@ mod tests {
             "properties",
             "avg_basket",
             "km to DC",
+            "generated",
+            "accurate",
+            "Accurate forecasts",
+            "generated_leads",
+            "operations",
+            "iterations",
+            "shareholders",
+            "corporate_sales",
+            "moderated",
+            "latency_percentile",
         ] {
             assert!(!rate_word(n), "{n}");
         }
         assert!(mean_word("avg_basket") && rate_like("avg_basket") && rate_like("Per 10k"));
+        for n in [
+            "average_price",
+            "avgMae",
+            "nps_score",
+            "zscore",
+            "Gini-Index",
+            "latency_percentile",
+            "Median wait",
+        ] {
+            assert!(mean_word(n), "{n}");
+        }
+        for n in [
+            "meaning_count",
+            "scoreboard_rank",
+            "reindexed_pages",
+            "generated",
+        ] {
+            assert!(!mean_word(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn name_tokens_split_words() {
+        assert_eq!(name_tokens("churnRate"), ["churn", "rate"]);
+        assert_eq!(name_tokens("per10k"), ["per", "10", "k"]);
+        assert_eq!(name_tokens("Per 10k"), ["per", "10", "k"]);
+        assert_eq!(name_tokens("on-time_rate (%)"), ["on", "time", "rate"]);
+        assert_eq!(name_tokens("generated"), ["generated"]);
+        assert!(name_tokens("").is_empty() && name_tokens("—").is_empty());
+    }
+
+    #[test]
+    fn aggregations_and_column_names() {
+        let v = [4.0, 1.0, 2.0];
+        assert_eq!(aggregate(&v, "sum"), Some(7.0));
+        assert_eq!(aggregate(&v, "median"), Some(2.0));
+        assert_eq!(aggregate(&[1.0, 2.0, 4.0, 10.0], "median"), Some(3.0));
+        assert_eq!(aggregate(&v, "min"), Some(1.0));
+        assert_eq!(aggregate(&v, "max"), Some(4.0));
+        assert_eq!(aggregate(&[], "count"), Some(0.0));
+        assert_eq!(aggregate(&[], "sum"), None);
+        assert_eq!(aggregate(&v, "bogus"), None);
+        assert_eq!(count_text(12345, &Locale::default()), "12,345");
+        assert!(names_column("on_time", "On time") && names_column("Per 10k", " per 10K "));
+        assert!(!names_column("people", "peoples"));
     }
 }

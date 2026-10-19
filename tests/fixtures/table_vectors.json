@@ -1,5 +1,5 @@
 {
-  "_doc": "Table formatting vectors shared by the Rust table module (tests/table.rs) and the browser table (tests/web/table_test.mjs: wasm table_profile + app.js tableNumText). Each case: the columns of a table and, per column, the header people read and the text of each numeric cell. Group separators compare with narrow / no-break spaces read as spaces. Columns may carry \"total\": the default aggregation of their total (sum | mean | none). \"totals\": ::TOTALS values and how both parsers read them (#207).",
+  "_doc": "Table formatting vectors shared by the Rust table module (tests/table.rs) and the browser table (tests/web/table_test.mjs: wasm table_profile + app.js tableNumText). Each case: the columns of a table and, per column, the header people read and the text of each numeric cell. Group separators compare with narrow / no-break spaces read as spaces. Columns may carry \"total\": the default aggregation of their total (sum | mean | none). \"totals\": ::TOTALS values and how both parsers read them (#207); rate names are whole words (#227).",
   "cases": [
     {
       "locale": "en-US",
@@ -67,6 +67,23 @@
         { "name": "load_pct", "values": [4, 12, 30], "total": "none" },
         { "name": "Supermarket visits", "values": [3, 4, 5], "total": "sum" },
         { "name": "weight", "values": [1.5, 2.25, 3.0], "total": "mean" }
+      ]
+    },
+    {
+      "locale": "en-US",
+      "cols": [
+        { "name": "Region", "values": ["A", "B", "C"] },
+        { "name": "generated", "values": [12, 30, 7], "total": "sum" },
+        { "name": "Accurate forecasts", "values": [3, 4, 5], "total": "sum" },
+        { "name": "operations", "values": [120, 98, 143], "total": "sum" },
+        { "name": "shareholders", "values": [10, 12, 9], "total": "sum" },
+        { "name": "conversion_rate", "values": [0.12, 0.08, 0.1], "total": "none" },
+        { "name": "churnRate", "values": [0.02, 0.05, 0.03], "total": "none" },
+        { "name": "Marktanteil", "values": [0.2, 0.3, 0.5], "total": "none" },
+        { "name": "Abschlussquote", "values": [0.4, 0.5, 0.6], "total": "none" },
+        { "name": "latency_percentile", "values": [120, 180, 95], "total": "mean" },
+        { "name": "average_price", "values": [10, 12, 14], "total": "mean" },
+        { "name": "zscore", "values": [1, 2, 3], "total": "mean" }
       ]
     }
   ],
