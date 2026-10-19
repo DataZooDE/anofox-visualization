@@ -106,6 +106,38 @@ fn check_page(html: &str) {
     );
 }
 
+/// GET `path` from the test server on `port` (#297): connect, send and read,
+/// retried as a whole while the server is starting (a refused or reset
+/// connection, or an empty answer) for up to 20 s.
+#[cfg(feature = "serve")]
+fn http_get(port: u16, path: &str) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let attempt = (|| -> std::io::Result<String> {
+            let mut conn = TcpStream::connect(("127.0.0.1", port))?;
+            conn.set_read_timeout(Some(Duration::from_secs(60)))?;
+            write!(
+                conn,
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )?;
+            let mut resp = String::new();
+            conn.read_to_string(&mut resp)?;
+            Ok(resp)
+        })();
+        match attempt {
+            Ok(r) if !r.is_empty() => return r,
+            Ok(_) | Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Ok(_) => panic!("serve on {port} answered nothing"),
+            Err(e) => panic!("serve on {port}: {e}"),
+        }
+    }
+}
+
 #[test]
 fn dashboard_cli_html_draws_title_bars() {
     if !have_duckdb("dashboard_cli_html_draws_title_bars") {
@@ -130,9 +162,7 @@ fn dashboard_cli_html_draws_title_bars() {
 #[cfg(feature = "serve")]
 #[test]
 fn serve_static_page_draws_title_bars() {
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant};
+    use std::net::TcpListener;
 
     if !have_duckdb("serve_static_page_draws_title_bars") {
         return;
@@ -169,23 +199,7 @@ fn serve_static_page_draws_title_bars() {
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/titles HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/titles");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     check_page(&http_body(&resp));
 }
@@ -230,9 +244,7 @@ fn dashboard_cli_html_draws_only_the_default_view() {
 #[cfg(feature = "serve")]
 #[test]
 fn serve_static_page_draws_only_the_default_view() {
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant};
+    use std::net::TcpListener;
 
     if !have_duckdb("serve_static_page_draws_only_the_default_view") {
         return;
@@ -269,23 +281,7 @@ fn serve_static_page_draws_only_the_default_view() {
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/views HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/views");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     check_view_page(&http_body(&resp));
 }
@@ -294,9 +290,7 @@ fn serve_static_page_draws_only_the_default_view() {
 /// as a raw HTTP/1.1 response (status line and headers plus body).
 #[cfg(feature = "serve")]
 fn serve_get(tag: &str, id: &str, script: &str) -> String {
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant};
+    use std::net::TcpListener;
 
     let s = Scratch::new(tag);
     let dash = s.0.join("dash");
@@ -330,23 +324,7 @@ fn serve_get(tag: &str, id: &str, script: &str) -> String {
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/{id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, &format!("/d/{id}"));
     resp
 }
 
