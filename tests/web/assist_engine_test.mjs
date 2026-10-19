@@ -7,7 +7,8 @@
 // DuckDB-Wasm throughout (no document, no CSP to prove: buildEngine is
 // called with `doc: undefined`).
 import { createRequire } from "module";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import os from "os";
 import path from "path";
 import assert from "assert/strict";
 import * as E from "../../web/assist-engine.js";
@@ -134,28 +135,57 @@ assert.equal(await E.engineLocked(engine.db), true, "the engine is locked");
 }
 
 // ---- 2. the lock: a representative subset of plan-204 §1.2 (fresh engine) ----
-{
+// sec-review-256 L-1: run from a scratch cwd with no `data/` directory, so
+// a normalised spelling that happens to fall through to the host
+// filesystem can't silently find a same-named file there and hide the bug
+// the way the repo's own cwd (which has no top-level data/ either, but a
+// reviewer's or a future test's cwd might) would.
+const prevCwd = process.cwd();
+const noDataCwd = mkdtempSync(path.join(os.tmpdir(), "assist-engine-nodata-"));
+try {
+  process.chdir(noDataCwd);
   const e2 = await E.buildEngine({ makeDb: rawDb, page: E.pageAdapter(spyPageDb, {}), extensions: ["json"], files: ["data/x/y.csv"], doc: undefined });
   const c = await e2.db.connect();
   const throws = (sql, re, msg) => rejects(() => c.query(sql), re, msg || sql);
   const ok = async (sql, msg) => {
     await c.query(sql);
   };
+  const rowsOf = async (sql) => (await c.query(sql)).toArray().map((r) => r.toJSON());
   await throws("SELECT * FROM read_csv('http://127.0.0.1:1/x.csv')", /Permission|external access/i, "URL reader");
   await throws("SELECT * FROM glob('*')", /Permission|external access/i, "glob");
   await throws("SELECT * FROM glob('data/x/*')", /Permission|external access/i, "glob of a dir");
   await throws("SELECT * FROM read_text('/etc/hostname')", /Permission|external access/i, "absolute path");
   await throws("SELECT * FROM read_text('other.csv')", /Permission|external access/i, "a registered file not allow-listed");
   await throws("SELECT * FROM read_text('DATA/X/Y.CSV')", /Permission|external access/i, "an allowed file, wrong case (still refused)");
-  // I-1-style correction, found empirically against this DuckDB-Wasm
-  // build (not in the plan's own table): './x', 'a/../a', a doubled '/'
-  // and a trailing '/' are lexically normalised to the same allowed path
-  // before the allowed_paths check, so they read too — harmless (they
-  // resolve to the one allowed file, not to anything else), but not a
-  // byte-exact string match the way plan-204 §1.2 describes it. Only a
-  // case difference is still refused.
-  for (const spelling of ["./data/x/y.csv", "data/x/../x/y.csv", "data//x/y.csv", "data/x/y.csv/"]) await ok(`SELECT * FROM read_text('${spelling}')`, `normalised to the allowed name: ${spelling}`);
-  await ok("SELECT * FROM read_text('data/x/y.csv')", "the exact allowed name reads");
+  // sec-review-256 L-1 (correcting the earlier, wrong claim): DuckDB's
+  // *permission check* normalises './x', 'a/../a', a doubled '/' and a
+  // trailing '/' before comparing against allowed_paths, so the check
+  // itself passes them — but the file is then opened by its **raw**,
+  // unnormalised spelling, which is not a name DuckDB-Wasm's registry
+  // knows (only the exact string 'data/x/y.csv' is registered). So these
+  // never read the registered bytes. They read nothing at all here
+  // (Chromium: confirmed the same way; zero rows, no request recorded).
+  // With a `data/x/y.csv` file actually sitting on the *host* disk at the
+  // raw spelling's resolved path, the Node build's DuckDB falls through to
+  // the real filesystem and reads (or, via COPY, overwrites) that file —
+  // which is exactly why this test runs from a cwd with no `data/` at all.
+  const exact = await rowsOf("SELECT * FROM read_text('data/x/y.csv')");
+  assert.equal(exact.length, 1, "the exact allowed name reads one row");
+  assert.match(String(exact[0].content ?? exact[0]), /a,b/, "… and it is the registered bytes");
+  for (const spelling of ["./data/x/y.csv", "data/x/../x/y.csv", "data//x/y.csv", "data/x/y.csv/"]) {
+    const got = await rowsOf(`SELECT * FROM read_text('${spelling}')`);
+    assert.equal(got.length, 0, `a normalised spelling must not read the registered file's bytes: ${spelling}`);
+  }
+  // COPY ... (USE_TMP_FILE false) is a write to an allowed path: the gate
+  // (web/assist.js's classifier) already denies COPY outright as class 3,
+  // so the model can never reach this — but run directly on the engine
+  // connection (as this vector table does, with no gate), it succeeds and
+  // overwrites the engine's own *registered buffer*, not anything on the
+  // page or the host.
+  await ok("COPY (SELECT 'W2' AS w) TO 'data/x/y.csv' (FORMAT csv, USE_TMP_FILE false)", "COPY to an allowed path overwrites the engine's own copy");
+  const afterCopy = await rowsOf("SELECT * FROM read_text('data/x/y.csv')");
+  assert.match(String(afterCopy[0].content ?? afterCopy[0]), /W2/, "the engine's own buffer changed");
+  assert.equal(new TextDecoder().decode(await pageDb.copyFileToBuffer("data/x/y.csv")), "a,b\n1,2\n", "the page's own buffer is unchanged");
   await throws("COPY (SELECT 1) TO 'new.csv'", /Permission|external access/i, "COPY to a new file");
   await throws("ATTACH 'new.duckdb'", /disabled|Permission/i, "ATTACH a new file");
   await throws("ATTACH 'md:'", /disabled|external/i, "ATTACH md:");
@@ -170,8 +200,10 @@ assert.equal(await E.engineLocked(engine.db), true, "the engine is locked");
   await ok("PRAGMA enable_profiling; PRAGMA disable_profiling", "the bare PRAGMA enable_profiling is allowed (it just prints to the worker console)");
   await throws("PRAGMA enable_profiling='no_output'", /locked|Cannot change/i, "the =value form is a setting, and is locked");
   await c.close();
-  engine.close();
   e2.close();
+} finally {
+  process.chdir(prevCwd);
+  rmSync(noDataCwd, { recursive: true, force: true });
 }
 
 // ---- 3. the snapshot: names, counts, types, hostile names ----
@@ -217,9 +249,127 @@ assert.equal(await E.engineLocked(engine.db), true, "the engine is locked");
   await c.close();
 }
 
+// ---- 4. caps (L-2, plan-204 §5.1 item 4; sec-review-256 M-2) ----
+{
+  // totalRows: the budget runs out after the first 10-row table, so the
+  // rest are excluded — not sampled, not partially copied.
+  const capPage = await rawDb();
+  capPage.open({});
+  const cp = capPage.connect();
+  cp.query("CREATE TABLE a10 AS SELECT i FROM range(10) t(i)");
+  cp.query("CREATE TABLE b10 AS SELECT i FROM range(10) t(i)");
+  cp.query("CREATE TABLE c10 AS SELECT i FROM range(10) t(i)");
+  const eRows = await E.buildEngine({ makeDb: rawDb, page: E.pageAdapter(capPage, {}), extensions: ["json"], limits: { ...E.SNAPSHOT_LIMITS, totalRows: 10 }, doc: undefined });
+  const byRows = Object.fromEntries(eRows.tables.map((t) => [t.fq, t]));
+  assert.equal(byRows['"memory"."main"."a10"'].rows, 10);
+  assert.equal(byRows['"memory"."main"."a10"'].excluded, undefined);
+  assert.equal(byRows['"memory"."main"."b10"'].excluded, "too large", "totalRows ran out after a10");
+  assert.equal(byRows['"memory"."main"."c10"'].excluded, "too large");
+  eRows.close();
+
+  // totalBytes: a tiny budget excludes even the first table.
+  const eBytes = await E.buildEngine({ makeDb: rawDb, page: E.pageAdapter(capPage, {}), extensions: ["json"], limits: { ...E.SNAPSHOT_LIMITS, totalBytes: 8 }, doc: undefined });
+  const byBytes = Object.fromEntries(eBytes.tables.map((t) => [t.fq, t]));
+  assert.equal(byBytes['"memory"."main"."a10"'].excluded, "too large");
+  eBytes.close();
+  capPage.terminate?.();
+
+  // Remote database exclusion: a MotherDuck-typed database injected
+  // alongside the real page's own — its table is excluded, and `rows()`
+  // (the expensive part) is never called for it. The real tables still
+  // snapshot normally through the same, otherwise-unmodified pageAdapter.
+  {
+    const realPage = E.pageAdapter(spyPageDb, { handles });
+    let cloudRowsCalls = 0;
+    const withCloud = {
+      ...realPage,
+      async databases(ms) {
+        return [...(await realPage.databases(ms)), { database_name: "cloud", path: "md:mydb", type: "motherduck" }];
+      },
+      async catalog(ms) {
+        return [...(await realPage.catalog(ms)), { database_name: "cloud", schema_name: "main", table_name: "secret", kind: "table", n: 1, cols: 1 }];
+      },
+      async rows(fq, kind, n, ms) {
+        if (fq.includes("cloud")) cloudRowsCalls++;
+        return realPage.rows(fq, kind, n, ms);
+      },
+    };
+    const eCloud = await E.buildEngine({ makeDb: rawDb, page: withCloud, extensions: ["json"], doc: undefined });
+    const byFq = Object.fromEntries(eCloud.tables.map((t) => [t.fq, t]));
+    assert.equal(byFq['"cloud"."main"."secret"']?.excluded, "remote database");
+    assert.equal(cloudRowsCalls, 0, "rows() is never called for an excluded remote database");
+    assert.ok(byFq['"memory"."main"."sales"'] && !byFq['"memory"."main"."sales"'].excluded, "the real tables still snapshot normally alongside it");
+    eCloud.close();
+  }
+
+  // The timeout: a fake connection whose send() yields batches slowly (a
+  // real async delay, not a microtask, the same reason M-1's unit test
+  // needs one) — pageAdapter.rows() must reject around `ms`, call
+  // cancelSent(), and never wait for the rest of the batches.
+  {
+    class FakeTable {
+      constructor(batches) {
+        this.batches = batches;
+        this.numRows = batches.length;
+      }
+      toArray() {
+        return [];
+      }
+      slice() {
+        return this;
+      }
+    }
+    function fakeSlowConn() {
+      let cancelled = false;
+      let cancelCalls = 0;
+      return {
+        query: async () => ({ constructor: FakeTable, toArray: () => [] }), // the tableCtor() probe only
+        send: async () => ({
+          [Symbol.asyncIterator]() {
+            let yielded = 0;
+            return {
+              async next() {
+                if (cancelled || yielded++ >= 500) return { done: true, value: undefined };
+                await new Promise((r) => setTimeout(r, 50));
+                return { done: false, value: { data: { byteLength: 10 } } };
+              },
+            };
+          },
+        }),
+        cancelSent: async () => {
+          cancelled = true;
+          cancelCalls++;
+          return true;
+        },
+        get cancelCalls() {
+          return cancelCalls;
+        },
+        close: async () => {},
+        prepare: async () => ({ close: async () => {} }),
+      };
+    }
+    const conn = fakeSlowConn();
+    const fakeDb = { connect: async () => conn, copyFileToBuffer: async () => new Uint8Array() };
+    const slowPage = E.pageAdapter(fakeDb, {});
+    const t0 = Date.now();
+    await rejects(() => slowPage.rows('"memory"."main"."heavy"', "view", 10, 200), /took longer than 0\.2 s and was cancelled/);
+    const dt = Date.now() - t0;
+    assert.ok(dt < 1000, `the timeout actually bounded the wait, not the 500×50 ms of slow batches (took ${dt} ms)`);
+    assert.equal(conn.cancelCalls, 1, "cancelSent() was called on expiry");
+    // The connection is left usable (not permanently wedged by the abort):
+    // a later request on the very same connection object still answers.
+    const again = await slowPage.describe('"memory"."main"."heavy"', 0);
+    assert.deepEqual(again, []);
+  }
+}
+
 // ---- 5. the page is read only through pageAdapter (fixed statement shapes) ----
 {
-  const shape = /^(SELECT database_name, path, type FROM duckdb_databases\(\)|SELECT database_name, schema_name, table_name|SELECT sql FROM duckdb_views\(\)|DESCRIBE SELECT \* FROM "[^"]*"\."[^"]*"\."[^"]*"|SELECT \* FROM "[^"]*"\."[^"]*"\."[^"]*" (LIMIT \d+|USING SAMPLE reservoir\(\d+ ROWS\) REPEATABLE \(42\)))/;
+  // "SELECT 1" is pageAdapter's own one-time Table-class probe (M-2's
+  // withTimeout fix: a fixed, dataless bookkeeping query, not a read of
+  // anything page-owned) — part of the same closed set, so it's allowed
+  // here too.
+  const shape = /^(SELECT 1|SELECT database_name, path, type FROM duckdb_databases\(\)|SELECT database_name, schema_name, table_name|SELECT sql FROM duckdb_views\(\)|DESCRIBE SELECT \* FROM "[^"]*"\."[^"]*"\."[^"]*"|SELECT \* FROM "[^"]*"\."[^"]*"\."[^"]*" (LIMIT \d+|USING SAMPLE reservoir\(\d+ ROWS\) REPEATABLE \(42\)))/;
   for (const s of snapshotSeen) assert.match(s, shape, s);
   assert.ok(snapshotSeen.length > 0);
 }
@@ -233,6 +383,60 @@ assert.deepEqual(E.engineExtensions({}), ["json", "parquet", "icu", "anofox_fore
 assert.ok(E.engineExtensions({ pageLoaded: ["spatial"] }).includes("spatial"));
 assert.ok(E.engineExtensions({ editorNeeds: ["spatial"] }).includes("spatial"));
 await rejects(() => E.buildEngine({ makeDb: rawDb, page: E.pageAdapter(spyPageDb, {}), extensions: ["inet"], doc: undefined }), /not an engine extension/);
+
+// ---- sec-review-256 M-1: a timed-out extension load fails closed ----
+// A fake db whose query() has a *real* async delay (setTimeout, not a
+// microtask) for LOAD/INSTALL — the only way a Node unit test can see the
+// race the real browser hits (the Node *blocking* driver answers
+// synchronously, so it never raced anything, which is exactly how M-1 got
+// through review the first time).
+{
+  const emptyPage = { databases: async () => [], catalog: async () => [], viewSql: async () => "", describe: async () => [], rows: async () => ({ table: { numRows: 0, toArray: () => [], batches: [] }, sampled: false, truncated: false }), files: async () => [], handle: () => undefined, copyFile: async () => new Uint8Array() };
+  function fakeDelayedDb(delayMs) {
+    let terminated = false;
+    const conn = {
+      query: async (sql) => {
+        if (/^(LOAD|INSTALL)\b/i.test(sql)) await new Promise((r) => setTimeout(r, delayMs));
+        if (/current_setting/i.test(sql)) return { toArray: () => [{ toJSON: () => ({ e: false, l: true, a: false, i: false, g: false }) }] };
+        return { toArray: () => [] };
+      },
+      send: async () => {
+        throw new Error("fakeDelayedDb: send() unused in this fixture");
+      },
+      prepare: async () => ({ close: async () => {} }),
+      close: async () => {},
+      cancelSent: async () => true,
+    };
+    return {
+      open: async () => {},
+      connect: async () => conn,
+      terminate: async () => {
+        terminated = true;
+      },
+      get terminated() {
+        return terminated;
+      },
+    };
+  }
+  // extMs (1 ms) shorter than the fake LOAD's delay (30 ms): the build must
+  // reject — never resolve with engine.extensions silently missing json.
+  {
+    const db = fakeDelayedDb(30);
+    await rejects(
+      () => E.buildEngine({ makeDb: async () => db, page: emptyPage, extensions: ["json"], limits: { ...E.SNAPSHOT_LIMITS, extMs: 1 }, doc: undefined }),
+      /extension "json" did not load within 1 ms/
+    );
+    assert.equal(db.terminated, true, "the Worker is terminated on a timed-out load, not left running behind the lock");
+  }
+  // extMs comfortably longer than the delay: succeeds normally, and
+  // engine.extensions correctly reports what was actually loaded.
+  {
+    const db = fakeDelayedDb(5);
+    const engineFast = await E.buildEngine({ makeDb: async () => db, page: emptyPage, extensions: ["json"], limits: { ...E.SNAPSHOT_LIMITS, extMs: 500 }, doc: undefined });
+    assert.deepEqual(engineFast.extensions, ["json"]);
+    engineFast.close();
+  }
+}
 
 // ---- 11. the fingerprint ----
 {
