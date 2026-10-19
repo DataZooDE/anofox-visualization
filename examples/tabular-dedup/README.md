@@ -27,10 +27,10 @@ The truth label of each pair (same customer / same household / different
 customers) is known because the data is made up; in a real project it is
 the steward-reviewed sample the threshold is tuned on.
 
-Regenerate (DuckDB v1.5.6, `-unsigned`, from the repository root):
+Regenerate (DuckDB v1.5.6, from the repository root):
 
 ```sh
-duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'"   # once
+duckdb -c "INSTALL anofox_tabular FROM community"   # once (signed; FORCE INSTALL replaces a get.erpl.io install)
 DUCKDB=duckdb scripts/gen-tabular-cases.sh dedup
 cd web && ../target/release/dashboard --check --strict ../examples/tabular-dedup/showcase.sql
 ```

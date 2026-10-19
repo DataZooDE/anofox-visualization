@@ -72,6 +72,16 @@ if "$DUCKDB" -unsigned -c "LOAD '$EXT'; SELECT anofox_render('not json');" >/dev
   echo "FAIL: a bad spec must raise a SQL error"; exit 1
 fi
 echo "OK: bad spec raises a SQL error"
+# #179: after USE <other db> the macros are reached qualified or via search_path (BUILD.md, "macro caveat").
+USE_OK="$("$DUCKDB" -unsigned -noheader -list -c "
+LOAD '$EXT';
+ATTACH ':memory:' AS other; USE other;
+CREATE TABLE s AS SELECT 'A' AS model_id, 'mae' AS metric, 1.0 AS value;
+SELECT CASE WHEN memory.anofox_plot_summary(s) LIKE '<svg%' THEN 'qualified' ELSE 'FAIL' END FROM s;
+SET search_path = 'other.main,memory.main';
+SELECT CASE WHEN anofox_plot_summary(s) LIKE '<svg%' THEN 'search_path' ELSE 'FAIL' END FROM s;" | tr -d '\r' | tr '\n' ' ')"
+[ "$USE_OK" = "qualified search_path " ] || { echo "FAIL: plot macros after USE: '$USE_OK'" >&2; exit 1; }
+echo "OK: plot macros after USE (qualified, search_path)"
 echo "== done → $OUT =="
 if [ -n "$RENAMED" ]; then
   echo "NOTE: LOAD '$OUT' fails (DuckDB looks for $(basename "$OUT" | cut -d. -f1)_init_c_api)."

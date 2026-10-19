@@ -7,8 +7,7 @@
 -- ACME's own indigo corporate theme (inlined as JSON so the example also
 -- runs in the browser; from a file it is
 --   SELECT content::THEME FROM read_text('examples/theming/acme.json');),
--- its name, title, logo and favicon. The "Powered by DataZoo GmbH" credit is
--- always shown in addition.
+-- its name, title, logo and favicon.
 --
 -- The data is synthetic and deterministic: two years of daily orders
 -- (Oct 2024 – Sep 2026) for 4 regions × 3 channels × 5 product lines, with

@@ -28,7 +28,6 @@
 //                8.8 px; less means the chart was rendered wider than shown),
 //                or if an x tick label is clipped by its chart's edge or
 //                overlaps its neighbour (measured with getBBox)
-// Every run also fails when the "Powered by DataZoo GmbH" credit is missing.
 import { createRequire } from "module";
 import { mkdirSync, readFileSync } from "fs";
 import path from "path";
@@ -211,9 +210,7 @@ const shoot = async (name) => {
           return white(f) && vb && w >= vb.width * 0.9 && h >= vb.height * 0.9;
         });
       }).length;
-    const credit = document.querySelector(".dash .dp-credit");
-    const creditOk = !!credit && /Powered by\s*DataZoo GmbH/.test(credit.textContent) &&
-      !!credit.querySelector('a[href^="https://data-zoo.de"]');
+    const hasCreditEl = !!document.querySelector(".dash .dp-credit");
     // --width: no displayed chart tool may sit on its panel's title text, and
     // chart text must be drawn at a readable size (font size × shown / drawn
     // width; the largest, as heatmap cell and radar grid labels are drawn
@@ -300,7 +297,7 @@ const shoot = async (name) => {
           }
         }
       }
-    return { errs, svgErr, notes, panels, whiteCards, whiteSvg, creditOk, covered, tiny, clipped };
+    return { errs, svgErr, notes, panels, whiteCards, whiteSvg, hasCreditEl, covered, tiny, clipped };
   }, width);
   for (const e of [...found.errs, ...found.svgErr]) problems.push(`${name}: ${e}`);
   for (const n of found.notes) console.log(`  note (${name}): ${n}`);
@@ -309,7 +306,7 @@ const shoot = async (name) => {
   for (const t of found.covered) problems.push(`${name}: the chart toolbox covers the title of "${t}"`);
   for (const t of found.tiny) problems.push(`${name}: chart text too small in "${t}"`);
   for (const t of found.clipped) problems.push(`${name}: x tick label ${t}`);
-  if (!found.creditOk) problems.push(`${name}: the "Powered by DataZoo GmbH" credit is missing`);
+  if (found.hasCreditEl) problems.push(`${name}: a .dp-credit element still exists`);
   const file = path.join(out, `${slug(name)}.png`);
   await page.screenshot({ path: file, fullPage: true });
   console.log(`${name}: ${found.panels} panels → ${file}`);
