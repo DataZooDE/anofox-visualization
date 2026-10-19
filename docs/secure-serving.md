@@ -441,6 +441,12 @@ Consumers pick a dashboard id and whitelisted params
 - A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
   value, trimmed and escaped, at most 200 characters; none on a KPI tile), as
   on a dashboard card.
+- A panel whose query fails answers `400` with a generic message ("this
+  dashboard could not be shown (the server log has the details)"). The
+  DuckDB error, which can quote file paths, SQL and values, goes to the
+  server's stderr only (`[anofox-serve] dashboard '<id>' failed: …`,
+  escaped, at most 512 characters). A timeout and the `--max-rows` cap still
+  say what happened.
 - `--auth '<json>'` (or `--auth @auth.json`) — login via an auth proxy, the
   same object as `options.auth` below; `--log <path|stderr>` and
   `--log-vars none|names|values` — the request log. With `--auth` the render
