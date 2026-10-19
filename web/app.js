@@ -956,7 +956,7 @@ SELECT 420::HEIGHT;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::LINECHART, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'Table'::VIEW;
-SELECT week, channel, sum(revenue)::MONEY AS revenue ::TABLE
+SELECT week::TABLE, channel, sum(revenue) AS revenue ::MONEY
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'By channel'::SUBTAB;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
