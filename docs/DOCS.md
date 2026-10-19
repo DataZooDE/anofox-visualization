@@ -1653,6 +1653,8 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
 | `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
+| `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
+| `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -1674,6 +1676,76 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Alternative views of one panel (`::VIEW`)
+
+`::VIEW` is a statement of its own, like `::SUBTAB`: it opens one alternative
+of a segmented switcher that lets a viewer flip between a few ways of looking
+at the same data (Lines / Bars / Table, say) without leaving the layout:
+
+```sql
+SELECT 'Lines' AS yoy ::VIEW;      -- opens group "yoy", view 0 (the default)
+SELECT 12::COL; SELECT 420::HEIGHT;
+SELECT week::XAXIS, revenue::LINECHART, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY 1;
+SELECT 'Bars' AS yoy ::VIEW;       -- the next alternative (repeating the alias is optional)
+SELECT week::XAXIS, revenue::BARCHART, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY 1;
+SELECT 'Table' ::VIEW;
+SELECT 'none'::TOTALS;
+SELECT week::TABLE, revenue::MONEY FROM sales GROUP BY ALL ORDER BY 1;
+SELECT 1::ENDVIEW;                 -- optional when a ::TAB/::SUBTAB/::SECTION or the end of the script follows
+```
+
+- **Grammar.** A `::VIEW` statement opens a view section; it runs until the
+  next `::VIEW` (the next alternative, same group) or a closer. A run of view
+  sections with no closer between them is one group. Views do not nest — put
+  `::ENDVIEW` between two groups that follow each other directly.
+- **Closers**: `::ENDVIEW`; `::TAB` / `::SUBTAB`; `::SECTION`; an `::ENDGROUP`
+  closing a `::GROUP` opened before the group; end of script.
+- **Label**: the marker's value is the button text and should be a string
+  literal (a computed label still works but gets a lint warning
+  `view/computed-label`).
+- **Group id** (used in the URL, `?view.<id>=<label>`): the alias of the
+  first marker that has one (`AS yoy` above; must match
+  `^[A-Za-z_][A-Za-z0-9_]{0,63}$`), else the group's 1-based position in the
+  script (`?view.2=Bars`).
+- **Default view**: the first alternative that is shown (not hidden by a
+  `-- @requires` on its `::VIEW` marker). To make another alternative the
+  default, reorder the views — there is no default marker in v1.
+- **Width**: a `::COL` pending when the group opens sets the whole group's
+  width; otherwise the group spans the full row (12). Inside a view, panels
+  lay out on the group's own 12-column grid, and a panel with no `::COL`
+  fills the group.
+- **Shared controls**: inputs and other panels placed above the first
+  `::VIEW` of a group are shared by every view in it; an input placed inside
+  a view still works, but its control only shows while that view is open
+  (the variable itself stays global — lint note `view/input-inside`).
+- **Lazy**: a view that isn't the one showing is not queried — there is no
+  idle prefetch of the other alternatives. Switching views re-runs only the
+  queries of the view being opened.
+- **Static output and the script-free served page** (`--svg`, the CLI
+  `dashboard file.sql out.html`, a dashboard served with no `.sql` on the
+  page) draw the **default view only** — the other alternatives are never
+  queried, and `?view.*` is ignored on the script-free page (it reads only
+  declared `@param`s).
+- **Accessibility**: the switcher is a `tablist` of `tab`s, one per
+  alternative, each owning a `tabpanel`; arrow keys move focus between the
+  buttons, Enter/Space opens the focused one, matching the `::TAB` /
+  `::SUBTAB` pattern.
+
+`dashboard --check` reports `view/lone` (warning: a group with a single
+alternative), `view/duplicate-label` and `view/empty-label` (error),
+`view/computed-label` (warning), `view/mixed-names` (warning: different
+aliases used in one group), `view/duplicate-name` (error: two groups share
+one id), `view/bad-name` (error: the alias is not a plain identifier),
+`view/empty` (warning: an alternative with no rendering statement),
+`view/open-ended` (warning: no `::ENDVIEW`, and the last view holds more
+panels than any other), `view/unbalanced-group` (error: a `::GROUP` opened
+inside a view was not closed inside it), `view/stray-end` (warning: an
+`::ENDVIEW` with no open group), `view/input-inside` (note) and
+`view/unnamed` (note: 2+ groups in the script, one without an alias).
+`optional/missing` also covers a `-- @requires`-hidden alternative ("this
+::VIEW is hidden"), and `design/too-many-panels` counts only the shown
+alternative of each group.
 
 ### Loading, empty, error and "not available" panels
 
@@ -1771,6 +1843,13 @@ Every panel carries its own state — there is no full-page spinner:
   SELECT 'Forecastability'::SUBTAB;
   SELECT entropy::METRIC FROM read_parquet(getvariable('rd') || '/forecastability.parquet');
   ```
+
+  **An alternative view.** `-- @requires` directly above a `::VIEW` marker
+  gates that whole alternative the same way: its button, pane and panels
+  disappear and never run. If the default (first) alternative is hidden, the
+  first shown one becomes the default; if every alternative of the group is
+  hidden, the whole switcher disappears. See *Alternative views of one panel*
+  above.
 
   Setup statements in a hidden tab's section still run (a `CREATE TEMP VIEW`
   there may serve later tabs); one that fails because the tab's input is
@@ -1981,10 +2060,11 @@ Play button. See *"Which van serves which stop tomorrow?"*.
 
 #### Viewer state in the URL
 
-The URL carries the view: `?tab=<name>` opens a tab and `?v.<name>=<value>`
-seeds a variable — an input's value, the shared `selected`, or a named
-selection. After every change the address bar is rewritten (no reload) with the
-inputs that differ from their defaults and the live selections, so a reload, a
+The URL carries the view: `?tab=<name>` opens a tab, `?view.<id>=<label>`
+picks an alternative of a `::VIEW` switcher, and `?v.<name>=<value>` seeds a
+variable — an input's value, the shared `selected`, or a named selection.
+After every change the address bar is rewritten (no reload) with the inputs
+that differ from their defaults and the live selections, so a reload, a
 bookmark or **Share** restores the same view.
 
 | Parameter | Seeds |
@@ -1997,6 +2077,7 @@ bookmark or **Share** restores the same view.
 | `?v.p=ytd` · `?v.p=2026-01-01..2026-03-31` · `&v.p_grain=week&v.p_compare=yoy` | a `::PERIOD` named `p`: a preset it offers or a custom range, a grain its switch offers, `prev` / `yoy` / `none` — each part checked on its own |
 | `?v.selected=web` | the shared click cross-filter |
 | `?v.sku=SKU-A&v.sku=SKU-C` | a named selection (a `::ROWSELECT` table's first column, a chart's `::SELECT_AS`) |
+| `?view.2=Bars` · `?view.yoy=Bars` | a `::VIEW` group's open alternative, by its button label — the group's alias (`AS yoy`) when it has one, else its 1-based position in the script; never a cache key, and ignored on the script-free served page |
 
 A value that fails its input's check is ignored (the input keeps its default).
 Only variable **values** travel, never SQL: on a locked server
@@ -2712,8 +2793,11 @@ hold the data in the client and can't. Reference and threat model:
 [`secure-serving.md`](secure-serving.md#row-and-column-policies-access-control-p2).
 
 **Multi-page & navigation.** `::TAB` (alias `::PAGE`; `::SUBTAB` nests) makes
-pages within a dashboard, deep-linkable via `?tab=<name>`. A folder of `.sql`
-files is a linked set, served with a shared cross-dashboard nav bar.
+pages within a dashboard, deep-linkable via `?tab=<name>`. A `::VIEW` group
+switches between a few alternative renderings of one panel in place, without
+a new page, deep-linkable via `?view.<id>=<label>` (see *Alternative views of
+one panel*). A folder of `.sql` files is a linked set, served with a shared
+cross-dashboard nav bar.
 
 **Grouped folders.** The folder stays flat (ids are file names, so the id,
 policy and path rules don't change); the header comments group it. The nav
