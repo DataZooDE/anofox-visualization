@@ -409,6 +409,45 @@ fn headless_header_shows_the_freshness_chip() {
     );
 }
 
+/// A date-only `::ASOF` (#282) renders as a calendar day: no time, no
+/// time-zone shift ("Data as of 01/01/2020 (…)", never "… UTC").
+#[test]
+fn date_only_asof_renders_as_a_day() {
+    struct Fresh(&'static str);
+    impl DataProvider for Fresh {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("stale") {
+                return Ok(vec![
+                    ("c0".into(), s(&[self.0])),
+                    ("o".into(), s(&["stale=24h"])),
+                ]);
+            }
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+            ])
+        }
+    }
+    let script = "SELECT '2020-01-01'::ASOF, 'stale=24h';\n\
+                  SELECT week::XAXIS, sum(n)::BARCHART FROM t GROUP BY ALL;";
+    let svg = render_dashboard_svg(
+        script,
+        &mut Fresh("2020-01-01"),
+        &DashboardOptions::default(),
+    )
+    .unwrap();
+    let chip = svg
+        .split("class=\"dp-asof\"")
+        .nth(1)
+        .and_then(|s| s.split("</text>").next())
+        .expect("a freshness chip");
+    assert!(chip.contains("Data as of 01/01/2020 ("), "{chip}");
+    assert!(!chip.contains("UTC"), "{chip}");
+}
+
 /// `::INFO` (#36): headless panels carry an ⓘ whose SVG `<title>` is the
 /// definition (a hover tooltip wherever the SVG is shown).
 #[test]

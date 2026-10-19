@@ -662,7 +662,7 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
             .as_deref()
             .and_then(Locale::from_tag)
             .unwrap_or_default();
-        let (text, stale) = crate::freshness::chip_text(at, b.stale_secs, now, &l);
+        let (text, stale) = crate::freshness::chip_text(at, b.stale_secs, now, &l, b.asof_date);
         s.push_str(&format!(
             "<text class=\"dp-asof\" x=\"{w:.0}\" y=\"30\" text-anchor=\"end\" font-family=\"{f}\" font-size=\"12\" font-weight=\"600\" fill=\"{c}\">{}</text>",
             esc(&text),

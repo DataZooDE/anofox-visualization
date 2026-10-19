@@ -157,6 +157,8 @@ pub struct Brand {
     /// `::ASOF`: the data's timestamp (epoch seconds, UTC) — the header's
     /// "Data as of …" chip. Set by the dashboard, never by a theme.
     pub asof: Option<i64>,
+    /// `::ASOF` is a date without a time: the chip shows the day alone (#282).
+    pub asof_date: bool,
     /// `::ASOF`'s `'stale=24h'`: the chip turns amber past this age (seconds).
     pub stale_secs: Option<u64>,
 }
@@ -762,6 +764,7 @@ fn build(full: &J, name: &str, variant: Variant) -> Result<ResolvedTheme, String
             favicon: url("favicon")?,
             title_suffix: text(&brand, "title_suffix"),
             asof: None,
+            asof_date: false,
             stale_secs: None,
         },
         locale,
@@ -1740,6 +1743,10 @@ impl DashboardChrome {
                 .asof
                 .as_deref()
                 .and_then(crate::freshness::parse_timestamp);
+            t.brand.asof_date = self
+                .asof
+                .as_deref()
+                .is_some_and(crate::freshness::is_date_only);
             t.brand.stale_secs = self
                 .stale
                 .as_deref()
@@ -1793,11 +1800,17 @@ pub fn asof_html(t: &ResolvedTheme) -> String {
         .as_deref()
         .and_then(crate::format::Locale::from_tag)
         .unwrap_or_default();
-    let (text, stale) = crate::freshness::chip_text(at, t.brand.stale_secs, now, &l);
+    let (text, stale) =
+        crate::freshness::chip_text(at, t.brand.stale_secs, now, &l, t.brand.asof_date);
     format!(
-        "<div class=\"dp-asof{}\" role=\"status\" data-asof=\"{}\"{}>{}</div>",
+        "<div class=\"dp-asof{}\" role=\"status\" data-asof=\"{}\"{}{}>{}</div>",
         if stale { " stale" } else { "" },
         at * 1000,
+        if t.brand.asof_date {
+            format!(" data-asof-day=\"{}\"", crate::freshness::iso_day(at))
+        } else {
+            String::new()
+        },
         t.brand
             .stale_secs
             .map(|s| format!(" data-stale=\"{s}\""))
@@ -1906,6 +1919,21 @@ mod tests {
         ] {
             assert!(!safe_url(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn asof_date_only_chip_carries_the_day() {
+        let t = DashboardChrome {
+            asof: Some("2026-01-01".into()),
+            ..Default::default()
+        }
+        .resolve(None)
+        .unwrap()
+        .default_variant()
+        .clone();
+        let html = asof_html(&t);
+        assert!(html.contains("data-asof-day=\"2026-01-01\""), "{html}");
+        assert!(!html.contains("UTC"), "{html}");
     }
 
     #[test]
