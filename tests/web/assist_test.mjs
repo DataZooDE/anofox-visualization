@@ -63,10 +63,14 @@ assert.equal(A.rememberAllowed("DataZooDE.GitHub.IO", true), false, "case-insens
   };
   const s = mem(),
     l = mem();
-  const ks = A.keyStore(s, l);
+  // sec-review-256 final check: remember now defaults to false (L-R2-1's
+  // opt-in applies to the default itself) — this test exercises the set/
+  // remembered *mechanics* when remembering is explicitly allowed, so it
+  // passes { remember: true } rather than relying on the old default.
+  const ks = A.keyStore(s, l, { remember: true });
   ks.set(" sk-ant-test ");
   assert.equal(ks.get(), "sk-ant-test");
-  assert.equal(s.m.get(A.KEY_SLOT), "sk-ant-test", "sessionStorage by default");
+  assert.equal(s.m.get(A.KEY_SLOT), "sk-ant-test", "sessionStorage by default (not remembered yet)");
   assert.equal(l.m.size, 0);
   ks.set("sk-ant-keep", true);
   assert.equal(l.m.get(A.KEY_SLOT), "sk-ant-keep", "remembered: localStorage");
@@ -76,6 +80,14 @@ assert.equal(A.rememberAllowed("DataZooDE.GitHub.IO", true), false, "case-insens
   assert.equal(ks.get(), "");
   const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => {} };
   assert.equal(A.keyStore(broken, broken).get(), "", "blocked storage reads as no key");
+  // The bare default (no options at all): remember is false, so set(_, true)
+  // never reaches localStorage.
+  const s2 = mem(),
+    l2 = mem();
+  const ksDefault = A.keyStore(s2, l2);
+  ksDefault.set("sk-ant-bare", true);
+  assert.equal(l2.m.size, 0, "remember defaults to false — set(_, true) stays in sessionStorage");
+  assert.equal(s2.m.get(A.KEY_SLOT), "sk-ant-bare");
 }
 // M-2/T13: when `remember` is not allowed, construction demotes any key
 // already remembered (e.g. the host became shared, or the installation
@@ -1327,6 +1339,9 @@ const tools = A.wasmTools({
       imgOrigins: ["https://evil.example"],
       enabled: true,
       remember: true,
+      baseURL: "https://evil.example/",
+      limits: { turns: 1e9, tokens: 1e12, rounds: 1e9, calls: 1e9, callsPerTurn: 1e9 },
+      model: "claude-evil",
     };
     for (const k of Object.keys(dirty)) Object.prototype[k] = dirty[k];
     try {
@@ -1350,6 +1365,48 @@ const tools = A.wasmTools({
       // anything, polluted enabled/remember notwithstanding.
       assert.deepEqual(A.assistConfig(undefined), { enabled: false, reason: "disabled" }, "assistConfig(undefined) stays off under Object.prototype pollution");
       assert.equal(A.assistConfig({ enabled: true }).remember, false, "remember stays off (no installation opt-in) under Object.prototype pollution");
+      // assistConfig's nested models object: an empty {} must not pick up
+      // Object.prototype.default as the model id.
+      assert.equal(A.assistConfig({ enabled: true, models: {} }).models.default, A.MODELS.default, "a polluted models.default is not picked up");
+      // keyStore: remember defaults to false, bare options object or not —
+      // set(_, true) must stay in sessionStorage under pollution too.
+      {
+        const mem = () => {
+          const m = new Map();
+          return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), m };
+        };
+        const s3 = mem(),
+          l3 = mem();
+        const ksPolluted = A.keyStore(s3, l3, {});
+        ksPolluted.set("sk-ant-polluted", true);
+        assert.equal(l3.m.size, 0, "remember stays off under Object.prototype pollution");
+      }
+      // browserKeyTransport: a polluted baseURL must never reach the SDK —
+      // only the real API_HOST (no caller passes baseURL as its own
+      // property here, so the default must win regardless of pollution).
+      {
+        let seen;
+        class FakeAnthropic {
+          constructor(o) {
+            seen = o;
+          }
+        }
+        A.browserKeyTransport({ Anthropic: FakeAnthropic, apiKey: "sk-ant-x" });
+        assert.equal(seen.baseURL, A.API_HOST, "a polluted baseURL never reaches the SDK");
+      }
+      // runAssistant: a polluted limits/model must not lift the turn cap
+      // or change the model — the request limit must still stop at the
+      // real LIMITS.turns (12), and the model sent must still be the
+      // installation's default.
+      {
+        const manyPolluted = Array.from({ length: 15 }, () => turn([use("list_tables", { filter: "" })]));
+        const trPolluted = scripted(manyPolluted);
+        const rPolluted = await run(trPolluted, fakeTools());
+        assert.equal(rPolluted.kind, "stopped");
+        assert.match(rPolluted.reason, /12 model calls/, "the real LIMITS.turns still applies under a polluted Object.prototype.limits");
+        assert.equal(trPolluted.sent.length, 12);
+        assert.equal(trPolluted.sent[0].model, A.MODELS.default, "a polluted Object.prototype.model is not used");
+      }
     } finally {
       for (const k of Object.keys(dirty)) delete Object.prototype[k];
     }
