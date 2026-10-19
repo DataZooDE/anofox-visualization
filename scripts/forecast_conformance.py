@@ -13,8 +13,9 @@ A producer is `direct` when its output plots as returned, `adapter` when it
 needs the reshaping SQL shown in its recipe (that SQL is what a user writes
 today; each adapter is a gap listed in the PR). Each output goes to
 `anofox_plot(...)` and to its schema's macro; the run fails on a SQL error, a
-missing SVG or an unexpected render warning. Every SVG is written to the
-output directory, plus a PNG montage when `rsvg-convert` and Pillow exist.
+missing SVG or an unexpected render warning. A multi-method test table must
+draw one panel per method (PANELS). Every SVG is written to the output
+directory, plus a PNG montage when `rsvg-convert` and Pillow exist.
 
     python3 scripts/forecast_conformance.py \
         --duckdb ./duckdb --ext ./anofox_visualization.duckdb_extension \
@@ -348,10 +349,28 @@ EXTRA = {
                           "ts_coverage(list(y ORDER BY ds), list(yhat_lower ORDER BY ds), list(yhat_upper ORDER BY ds)) AS coverage "
                           "FROM bt GROUP BY 1) ON mae, rmse, smape, coverage INTO NAME metric VALUE value) m",
     "tests_struct_column": "SELECT anofox_plot_tests(r) FROM ts_ljung_box_by('s', id, ds, y) r",
+    # the #190 repro: two tests' statistics → a panel per method …
+    "tests_two_methods": "SELECT anofox_plot_tests(t) FROM (SELECT id, 'ADF' AS method, (adf).statistic AS statistic, "
+                         "(adf).p_value AS p_value FROM ts_adf_by('s', id, ds, y) UNION ALL "
+                         "SELECT id, 'KPSS', (kpss).statistic, (kpss).p_value FROM ts_kpss_by('s', id, ds, y)) t",
+    # … and on −log10(p), one scale for every test, one panel
+    "tests_two_methods_p": "SELECT anofox_plot_tests(t, value := 'p') FROM (SELECT id, 'ADF' AS method, "
+                           "(adf).statistic AS statistic, (adf).p_value AS p_value FROM ts_adf_by('s', id, ds, y) "
+                           "UNION ALL SELECT id, 'KPSS', (kpss).statistic, (kpss).p_value "
+                           "FROM ts_kpss_by('s', id, ds, y)) t",
 }
 
 # Build warnings the harness accepts (none today).
 ALLOWED_WARNINGS: list[str] = []
+
+# Cases whose plot must have this many grid panels (`data-panel`, 0 = one
+# plot): several tests' statistics get a panel per method (#190).
+PANELS: dict[str, int] = {
+    "ts_stationarity_by": 2,          # ADF, KPSS
+    "ts_residual_diagnostics_by": 3,  # Ljung-Box, Jarque-Bera, Durbin-Watson (no p)
+    "tests_two_methods": 2,
+    "tests_two_methods_p": 0,
+}
 
 # Producer bugs of a released anofox_forecast build (by extension_version),
 # reported XFAIL instead of failing; an XFAIL case that passes says XPASS.
@@ -455,7 +474,13 @@ def main() -> int:
 
     def one(c):
         ok, out = run(a.duckdb, ext, c["sql"], pre, "-json")
-        return c, check(ok, out)
+        status, svgs, msg = check(ok, out)
+        want = PANELS.get(c["name"])
+        if status == "OK" and want is not None:
+            got = sum(s.count('data-panel="') for s in svgs)
+            if got != want:
+                status, msg = "FAIL", f"{got} panels, expected {want} (a panel per test method, #190)"
+        return c, (status, svgs, msg)
 
     results = []
     with cf.ThreadPoolExecutor(a.jobs) as pool:

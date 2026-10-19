@@ -559,50 +559,61 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
     })
 }
 
-/// The required columns of each schema [`detect`] tells apart.
-const SCHEMAS: &[(&str, &[&str])] = &[
-    ("terms", &["term", "estimate"]),
-    ("prediction", &["yhat"]),
-    ("curve", &["curve_type", "x", "y"]),
-    ("summary", &["metric", "value"]),
-    ("diagnostics", &["fitted", "residual"]),
-    ("partial", &["term", "x", "partial_residual"]),
-    ("tests", &["p_value"]),
-    ("events", &["ds", "kind"]),
+/// The required columns of each schema [`detect`] tells apart, and those among
+/// them that identify it. A schema is only suggested when one identifying
+/// column is present or misspelled: a shared generic name (`kind`, `value`,
+/// `x`, `y`) alone is no near miss (#180).
+const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
+    ("terms", &["term", "estimate"], &["term", "estimate"]),
+    ("prediction", &["yhat"], &["yhat"]),
+    ("curve", &["curve_type", "x", "y"], &["curve_type"]),
+    ("summary", &["metric", "value"], &["metric"]),
+    (
+        "diagnostics",
+        &["fitted", "residual"],
+        &["fitted", "residual"],
+    ),
+    (
+        "partial",
+        &["term", "x", "partial_residual"],
+        &["partial_residual"],
+    ),
+    ("tests", &["p_value"], &["p_value"]),
+    ("events", &["ds", "kind"], &["ds"]),
 ];
 
+/// Columns [`detect`] also reads in place of a required one: `events` takes
+/// `period` for `ds` and `severity` for `kind`.
+const STAND_INS: &[(&str, &str)] = &[("ds", "period"), ("kind", "severity")];
+
 /// For an undetected table: the schema whose required columns are nearest —
-/// present or misspelled — with what is missing (`""` when none is close).
+/// present or misspelled — with what is missing (`""` when none is close, or
+/// when only generic names match).
 fn closest(keys: &[&str]) -> String {
+    let present =
+        |c: &str| keys.contains(&c) || STAND_INS.iter().any(|(k, a)| *k == c && keys.contains(a));
     // max_by_key keeps the last of equals: walk backwards so the first wins.
     let best = SCHEMAS
         .iter()
         .rev()
-        .map(|(name, req)| {
+        .map(|(name, req, ident)| {
             let found: Vec<(&str, Option<&str>)> = req
                 .iter()
-                .map(|c| {
-                    (
-                        *c,
-                        (!keys.contains(c)).then(|| names::near(c, keys)).flatten(),
-                    )
-                })
+                .map(|c| (*c, (!present(c)).then(|| names::near(c, keys)).flatten()))
                 .collect();
-            let score = req.len()
-                - found
-                    .iter()
-                    .filter(|(c, n)| !keys.contains(c) && n.is_none())
-                    .count();
-            (score, name, found)
+            let hit = |c: &str| present(c) || found.iter().any(|(f, n)| *f == c && n.is_some());
+            let score = found.iter().filter(|(c, _)| hit(c)).count();
+            let identified = ident.iter().any(|c| hit(c));
+            (score, identified, name, found)
         })
-        .filter(|(score, ..)| *score > 0)
+        .filter(|(score, identified, ..)| *score > 0 && *identified)
         .max_by_key(|(score, ..)| *score);
-    let Some((_, name, found)) = best else {
+    let Some((_, _, name, found)) = best else {
         return String::new();
     };
     let hints: Vec<String> = found
         .iter()
-        .filter(|(c, _)| !keys.contains(c))
+        .filter(|(c, _)| !present(c))
         .map(|(c, n)| match n {
             Some(n) => format!("{c} (did you mean `{n}`?)"),
             None => c.to_string(),
@@ -1306,17 +1317,73 @@ mod tests {
         assert!(go("auto", pg, "{}").unwrap().contains("p = 0.04"));
     }
 
+    /// ts_stationarity_by reshaped: two tests per series, no test_id.
+    const STATIONARITY: &str = r#"[{"id":"A","method":"ADF","statistic":-0.7,"p_value":0.85},
+        {"id":"A","method":"KPSS","statistic":2.1,"p_value":0.01},
+        {"id":"B","method":"ADF","statistic":-0.2,"p_value":0.94},
+        {"id":"B","method":"KPSS","statistic":2.0,"p_value":0.01}]"#;
+
+    /// `name="a b"` attributes of `svg`, in document order.
+    fn pairs(svg: &str, name: &str) -> Vec<(f64, f64)> {
+        svg.split(&format!("{name}=\""))
+            .skip(1)
+            .map(|r| {
+                let v: Vec<f64> = r[..r.find('"').unwrap()]
+                    .split(' ')
+                    .map(|x| x.parse().unwrap())
+                    .collect();
+                (v[0], v[1])
+            })
+            .collect()
+    }
+
     #[test]
     fn tests_label_group_and_method() {
-        // ts_stationarity_by reshaped: two tests per series, no test_id.
-        let rows = r#"[{"id":"A","method":"ADF","statistic":-0.7,"p_value":0.85},
-            {"id":"A","method":"KPSS","statistic":2.1,"p_value":0.01},
-            {"id":"B","method":"ADF","statistic":-0.2,"p_value":0.94},
-            {"id":"B","method":"KPSS","statistic":2.0,"p_value":0.01}]"#;
-        let s = go("auto", rows, "{}").unwrap();
+        // On −log10(p), one scale for every test: one panel, rows "A · ADF".
+        let s = go("auto", STATIONARITY, r#"{"value":"p"}"#).unwrap();
+        assert!(!s.contains("data-panel="), "one panel");
         for l in ["A · ADF", "A · KPSS", "B · ADF", "B · KPSS"] {
             assert!(s.contains(l), "{l}");
         }
+    }
+
+    #[test]
+    fn tests_panel_per_method() {
+        // Statistics of different tests: a panel per method (#190) …
+        for plot in ["tests", "auto"] {
+            let s = go(plot, STATIONARITY, "{}").unwrap();
+            dump(&format!("tests_per_method_{plot}"), &s);
+            assert_eq!(s.matches("data-panel=\"").count(), 2, "{plot}");
+            assert!(s.contains(">ADF<") && s.contains(">KPSS<"), "method titles");
+            assert!(
+                !s.contains("A · ADF"),
+                "the method is the title, not in the row"
+            );
+            // … each with its own x: ADF near its statistics, KPSS near 2 …
+            let x = pairs(&s, "data-xdomain");
+            assert_eq!(x.len(), 2, "{x:?}");
+            assert!(x[0].1 < 1.0, "ADF axis: {x:?}");
+            assert!(x[1].0 > -1.0 && x[1].1 > 2.0, "KPSS axis: {x:?}");
+            // … and the groups on one shared y.
+            let y = pairs(&s, "data-ydomain");
+            assert_eq!(y.len(), 2, "{y:?}");
+            assert_eq!(y[0], y[1], "shared y");
+        }
+        // A group one test lacks keeps its slot: the axes still match.
+        let more = STATIONARITY.replace(
+            "]",
+            r#",{"id":"C","method":"KPSS","statistic":1.9,"p_value":0.02}]"#,
+        );
+        let s = go("tests", &more, "{}").unwrap();
+        let y = pairs(&s, "data-ydomain");
+        assert_eq!(y.len(), 2, "{y:?}");
+        assert_eq!(y[0], y[1], "shared y");
+        assert!(y[0].1 > 3.0, "three groups: {y:?}");
+        // One method keeps today's single statistic axis.
+        let one = r#"[{"id":"A","method":"ADF","statistic":-0.7,"p_value":0.85},
+            {"id":"B","method":"ADF","statistic":-0.2,"p_value":0.94}]"#;
+        let s = go("tests", one, "{}").unwrap();
+        assert!(!s.contains("data-panel="), "one panel");
     }
 
     #[test]
@@ -1368,6 +1435,38 @@ mod tests {
         );
         let e = go("auto", r#"[{"a":1}]"#, "{}").unwrap_err().to_string();
         assert!(!e.contains("closest"), "{e}");
+        // A generic name shared with a schema is no near miss (#180): decide's
+        // `kind` column does not make an events table.
+        let e = go(
+            "auto",
+            r#"[{"question_id":"q1","kind":"binary","probability":0.7}]"#,
+            "{}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("match no plottable schema") && !e.contains("closest"),
+            "{e}"
+        );
+        for generic in [r#"[{"id":"a","value":1}]"#, r#"[{"x":1,"y":2}]"#] {
+            let e = go("auto", generic, "{}").unwrap_err().to_string();
+            assert!(!e.contains("closest"), "{generic}: {e}");
+        }
+        // The schema's own column still earns the hint; period stands in for ds.
+        let e = go("auto", r#"[{"period":3,"note":"x"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("; closest: events, missing kind") && !e.contains("missing ds"),
+            "{e}"
+        );
+        let e = go("auto", r#"[{"curve_typ":"roc","x":0,"y":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("closest: curve, missing curve_type (did you mean `curve_typ`?)"),
+            "{e}"
+        );
         // A list where a number belongs.
         let e = go("terms", r#"[{"term":"a","estimate":[1,2]}]"#, "{}")
             .unwrap_err()
