@@ -238,8 +238,9 @@ stop
 # variables the panel actually reads. Panel 0 is slow and holds the only
 # query slot; panel 1 depends only on `region` (#210 narrows its key/SETs to
 # that). An attacker (A) posts panel 1 with a poisoned extra variable while
-# a victim (B) posts the same `region` alone; both must succeed, and B must
-# never see A's text.
+# a victim (B) posts the same `region` alone; both must succeed, B must never
+# see A's text, and B must have joined A's single-flight (`"cache":"shared"`
+# in the request log, #237); otherwise the section never exercised M1.
 mkdir "$T/dashm1"
 cat > "$T/dashm1/sf.sql" <<'SQL'
 SELECT sum(i)::BIGINT AS s ::METRIC FROM range(100000000000) r(i) WHERE getvariable('hold') IS NOT NULL;
@@ -268,12 +269,17 @@ wait "$h" "$a" "$b" 2>/dev/null
 [ "$(cat "$T/m1codeA")" = 200 ] || fail "#222 M1: the attacker's own request (z dropped, never SET) should succeed too: $(cat "$T/m1codeA") $(cat "$T/m1bodyA")"
 [ "$(cat "$T/m1codeB")" = 200 ] && grep -q '"c0":1' "$T/m1bodyB" || fail "#222 M1: victim B: $(cat "$T/m1codeB") $(cat "$T/m1bodyB")"
 grep -qi "attacker-text" "$T/m1bodyB" "$T/m1bodyA" && fail "#222 M1: the attacker's text leaked into a response"
+# #237: B (vars ["region"] only) must have joined A's flight; if it ran on its
+# own, nothing above exercised M1. The log line lands just after the response.
+m1shared() { grep -E '"panel":1[,}]' "$T/reqm1.log" | grep -F '"vars":["region"]' | grep -F '"cache":"shared"' >/dev/null; }
+for _ in $(seq 100); do m1shared && break; sleep 0.05; done
+m1shared || fail "#222 M1: victim B did not join the attacker's single-flight (no \"cache\":\"shared\"), so 4c did not exercise M1: $(cat "$T/reqm1.log")"
 # `{"select": 1}` — a reserved word as the variable *name* — must be refused
 # just as safely (dropped before any SET, since panel 1 doesn't read it).
 postm1 c C '{"region":"a","select":1}'
 wait "$c" 2>/dev/null
 [ "$(cat "$T/m1codeC")" = 200 ] && grep -q '"c0":1' "$T/m1bodyC" || fail "#222 M1: reserved word 'select' as a name: $(cat "$T/m1codeC") $(cat "$T/m1bodyC")"
-echo "OK: #222 M1 — a variable a panel doesn't read is dropped before any SET, so it can't fail a shared single-flight for another request"
+echo "OK: #222 M1 — a variable a panel doesn't read is dropped before any SET, so it can't fail a shared single-flight for another request (B shared A's flight)"
 stop
 
 # 5. `-- @requires` over a data folder (#156): `${var}` expands to the
