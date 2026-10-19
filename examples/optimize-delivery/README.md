@@ -18,7 +18,7 @@ list.
 
 **The story (4 vans):** today's districts drive 502 km, 13 stops are late and
 one van carries 33 cages for 32 places. The shortest routes drive 260 km but
-6 stops are late; the deadline-aware plan drives 292 km and serves every stop
+4 stops are late; the deadline-aware plan drives 292 km and serves every stop
 on time, back at the depot by 10:45 — 4 vans are enough, a fifth only adds cost.
 
 ## How it is computed
