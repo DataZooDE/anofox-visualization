@@ -12,6 +12,7 @@
 import { applyAssistCsp, assistCspProven } from "../assist-csp.js";
 import { buildEngine, engineExtensions, engineLocked, pageAdapter, __testing } from "../assist-engine.js";
 import { wasmTools } from "../assist.js";
+import { scratchRunner } from "../lint.js";
 import init, { plan as wasmPlan, lint_step as wasmLintStep, page_sql as wasmPageSql } from "../pkg/anofox_visualization.js";
 
 await init(); // the core wasm (plan/lint_step) — harmless to the CSP: same-origin, part of appBase
@@ -175,12 +176,14 @@ window.__e2e = {
     await c.close();
     return { buildMs, excluded: heavy?.excluded, pageAnsweredMs };
   },
-  // plan-204 §5.3 step 8 / sec-review-256 L-3, implemented as planned: a
-  // test-only gate bypass (__testing.admitAll), a preview statement that
-  // reads the recorder, a markdown panel's <img> pointed at the recorder,
-  // and a spy on the page connection — all three must show nothing
-  // reached the page or the network outside the engine's own
-  // (CSP-blocked) attempt.
+  // plan-204 §5.3 step 8 / sec-review-256 L-3 and R-1: no gate-bypass
+  // option in shipped code — this drives a *guard-free* `scratchRunner`
+  // straight from the test harness instead, which proves the same thing
+  // (the lock, not the gate, is what stops a model-shaped read) without
+  // any bypass that production code could ever reach. A markdown panel's
+  // <img> pointed at the recorder, and a spy on the page connection, run
+  // alongside it — all three must show nothing reached the page or the
+  // network outside the engine's own (CSP-blocked) attempt.
   async previewGateBypass(recUrl) {
     const pageSeen = [];
     const spiedPageDb = {
@@ -196,8 +199,7 @@ window.__e2e = {
     const engine = await buildEngine({ makeDb, page, extensions: ["json"], doc: document });
     try {
       pageSeen.length = 0; // only the preview below is spied on
-      const tools = wasmTools({ db: engine.db, lintStep: wasmLintStep, plan: wasmPlan, pageSql: wasmPageSql, snapshot: new Map(engine.tables.map((t) => [t.fq, t])), __testing: { admitAll: true } });
-      const preview = tools.previewRunner(`SELECT * ::TABLE FROM read_csv('${recUrl}/preview.csv');`);
+      const preview = scratchRunner(engine.db, { timeoutMs: 10000 }); // no guard: the lock alone must refuse this
       let previewOk = false,
         previewError = null;
       try {

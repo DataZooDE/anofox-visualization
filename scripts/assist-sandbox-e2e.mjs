@@ -186,16 +186,17 @@ async function runBrowser(launcher, name) {
     r = await page.evaluate(() => window.__e2e.previewOnLockedEngine());
     record("8a preview runs in the locked engine, with a result", name, r.ok === true && Array.isArray(JSON.parse(r.rows || "[]")) && recSince(n).length === 0, JSON.stringify(r).slice(0, 200));
 
-    // 8b. plan-204 §5.3 step 8, as planned: a test-only gate bypass, a
-    // preview statement reading the recorder, a markdown panel's <img>
-    // (a real, connected <img src>, the same as a markdown renderer would
-    // produce) pointed at the recorder, and a spy on the page connection
-    // throughout — both the model-driven read and the image must still be
-    // stopped (the engine's lock for the first, the ratchet's img-src for
-    // the second).
+    // 8b. plan-204 §5.3 step 8, as planned — sec-review-256 R-1: no gate
+    // bypass in shipped code; the fixture drives a guard-free
+    // scratchRunner on the engine directly. A preview-shaped statement
+    // reading the recorder, a markdown panel's <img> (a real, connected
+    // <img src>, the same as a markdown renderer would produce) pointed
+    // at the recorder, and a spy on the page connection throughout — both
+    // the model-shaped read and the image must still be stopped (the
+    // engine's lock for the first, the ratchet's img-src for the second).
     n = recLog.length;
     r = await page.evaluate((u) => window.__e2e.previewGateBypass(u), RECBASE);
-    record("8b the gate-bypassed preview's URL read is still refused by the lock", name, r.previewOk === false && /Permission|external access/i.test(r.previewError || ""), JSON.stringify(r.previewError));
+    record("8b a guard-free read is still refused by the lock alone", name, r.previewOk === false && /Permission|external access/i.test(r.previewError || ""), JSON.stringify(r.previewError));
     record("8b the page connection saw nothing during the preview", name, Array.isArray(r.pageSeen) && r.pageSeen.length === 0, JSON.stringify(r.pageSeen));
     record("8b nothing reached the recorder — the preview's read, and the markdown <img>, both blocked", name, recSince(n).length === 0, JSON.stringify(recSince(n)));
 
