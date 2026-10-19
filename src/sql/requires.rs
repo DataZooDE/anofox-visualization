@@ -403,22 +403,34 @@ where
     out
 }
 
-/// Which statements a hidden tab leaves out, decided statement by statement
-/// as a script runs (the tab's `${…}` take the values set above it). Setup
-/// statements and chrome directives are never left out.
+/// Which statements a hidden tab (or `::VIEW` alternative) leaves out,
+/// decided statement by statement as a script runs (the tab's `${…}` take
+/// the values set above it). Setup statements and chrome directives are
+/// never left out.
+///
+/// A `::VIEW` alternative's own `-- @requires` gates it exactly like a
+/// `::SUBTAB`'s gates its statements: hidden by itself, not the group. There
+/// is no special "the default moved" bookkeeping here — a caller that steps
+/// through alternatives in order and skips the hidden ones (every static
+/// renderer does, via [`super::views::StaticPick`]) naturally lands on the
+/// first *shown* one as its default, and if every alternative is hidden,
+/// every one of them is skipped — the whole group is invisible, with no
+/// extra code needed for either case.
 #[derive(Debug, Default)]
 pub struct Sections {
     /// The unmet requirement of the current `::TAB` (as written).
     tab: Option<String>,
     /// … of the current `::SUBTAB`.
     sub: Option<String>,
+    /// … of the current `::VIEW` alternative.
+    view: Option<String>,
 }
 
 impl Sections {
     /// The next statement: `Some(requirement)` when it is left out (a hidden
-    /// tab, or a statement in one). `unmet(reqs)` checks a tab's own
-    /// requirements (`Some(path)` = missing); it is not called for a sub-tab
-    /// inside a hidden tab.
+    /// tab/subtab/view alternative, or a statement in one). `unmet(reqs)`
+    /// checks a section's own requirements (`Some(path)` = missing); it is
+    /// not called for a section nested inside an already-hidden one.
     pub fn step(
         &mut self,
         p: &super::Panel,
@@ -428,6 +440,7 @@ impl Sections {
         match p.tab_kind() {
             Some(false) => {
                 self.sub = None;
+                self.view = None;
                 self.tab = if own { unmet(&p.requires) } else { None };
                 return self.tab.clone();
             }
@@ -437,20 +450,35 @@ impl Sections {
                 } else {
                     None
                 };
+                self.view = None;
                 return self.tab.clone().or(self.sub.clone());
             }
             None => {}
         }
-        // (`tab_requires` is empty for what a hidden tab never leaves out)
+        if p.view.as_ref().is_some_and(|v| v.marker) {
+            self.view = if own && self.tab.is_none() && self.sub.is_none() {
+                unmet(&p.requires)
+            } else {
+                None
+            };
+            return self.tab.clone().or(self.sub.clone()).or(self.view.clone());
+        }
+        // (`tab_requires` is empty for what a hidden tab/subtab never leaves
+        // out — chrome directives too, see `super::section_requires`.)
         if p.setup || p.tab_requires.is_empty() {
             return None;
         }
-        self.tab.clone().or(self.sub.clone())
+        // `self.view` only applies to a statement `assign_views` actually
+        // put in a group — it would otherwise be stale once that group
+        // closed without a new ::TAB/::SUBTAB to clear it (a ::SECTION, an
+        // outer ::ENDGROUP, or end of script all close a group in place).
+        let view = p.view.is_some().then(|| self.view.clone()).flatten();
+        self.tab.clone().or(self.sub.clone()).or(view)
     }
 
     /// Is the current section hidden (a setup statement in it still runs)?
     pub fn hiding(&self) -> bool {
-        self.tab.is_some() || self.sub.is_some()
+        self.tab.is_some() || self.sub.is_some() || self.view.is_some()
     }
 }
 
@@ -701,6 +729,51 @@ mod tests {
         );
         // the sub-tab inside the hidden tab is not checked
         assert_eq!(asked, [1, 7, 9]);
+    }
+
+    /// A hidden default `::VIEW` alternative's own statements are left out;
+    /// the next (shown) alternative is not — so a caller stepping through in
+    /// order (every static renderer, via `views::StaticPick`) lands on it as
+    /// the default with no extra bookkeeping here.
+    #[test]
+    fn a_hidden_default_view_leaves_the_next_shown_one_alone() {
+        let p = super::super::plan(
+            "-- @requires gone\nSELECT 'Lines' AS yoy ::VIEW;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars' AS yoy2 ::VIEW;\n\
+             SELECT a::XAXIS, c::BARCHART FROM t;",
+        );
+        assert_eq!(p.len(), 4);
+        let mut sec = Sections::default();
+        let h: Vec<Option<String>> = p
+            .iter()
+            .map(|p| {
+                sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone()))
+            })
+            .collect();
+        let g = Some("gone".to_string());
+        assert_eq!(h, [g.clone(), g, None, None], "alt 0 hidden, alt 1 shown");
+    }
+
+    /// Every alternative hidden: every statement of the group is left out —
+    /// the group itself ends up with no shown alternative at all.
+    #[test]
+    fn a_view_group_with_every_alternative_hidden_is_fully_hidden() {
+        let p = super::super::plan(
+            "-- @requires gone\nSELECT 'Lines' AS yoy ::VIEW;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\n\
+             -- @requires gone\nSELECT 'Bars' AS yoy2 ::VIEW;\n\
+             SELECT a::XAXIS, c::BARCHART FROM t;",
+        );
+        let mut sec = Sections::default();
+        let h: Vec<Option<String>> = p
+            .iter()
+            .map(|p| {
+                sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone()))
+            })
+            .collect();
+        let g = Some("gone".to_string());
+        assert_eq!(h, [g.clone(), g.clone(), g.clone(), g]);
     }
 
     #[test]
