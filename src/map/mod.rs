@@ -31,6 +31,7 @@
 
 pub(crate) mod boundaries;
 pub(crate) mod classes;
+mod flows;
 mod labels;
 mod legend;
 pub(crate) mod project;
@@ -44,6 +45,7 @@ use crate::{
     RenderOptions, Role,
 };
 use classes::{Classes, Method};
+use flows::Flows;
 use ggplot_rs::prelude::Value;
 use ggplot_rs::spatial::{parse_wkt, Geometry};
 use legend::{legend_of, legend_svg, legend_title, Legend, LegendBox};
@@ -152,7 +154,10 @@ fn parse_column(c: Option<&Column>, n: usize) -> Vec<Vec<Shape>> {
 pub(crate) fn is_map(cols: &[Column]) -> bool {
     let has =
         |r: Role| find_role(cols, r).is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
-    geometry(cols).is_some() || has(Role::Region) || (has(Role::Lat) && has(Role::Lon))
+    geometry(cols).is_some()
+        || has(Role::Region)
+        || (has(Role::Lat) && has(Role::Lon))
+        || (has(Role::Origin) && has(Role::Dest))
 }
 
 /// A `::REGION` column's codes (trimmed text; `None` when missing).
@@ -188,6 +193,42 @@ pub(crate) fn needed_layers(cols: &[Column]) -> Vec<&'static str> {
     if let Some(b) = role_str(cols, Role::Basemap).and_then(|s| layer_name(&s)) {
         if !out.contains(&b) {
             out.push(b);
+        }
+    }
+    // ::ORIGIN/::DEST cells that look like region codes (not a JSON struct
+    // or a WKT POINT) also guess layers, the same as ::REGION.
+    let flow_codes = |r: Role| -> Vec<Option<String>> {
+        find_role(cols, r)
+            .map(|c| {
+                c.values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(s) => {
+                            let t = s.trim();
+                            if t.starts_with('{')
+                                || (t.len() >= 5 && t[..5].eq_ignore_ascii_case("POINT"))
+                            {
+                                None
+                            } else {
+                                Some(t.to_string()).filter(|s| !s.is_empty())
+                            }
+                        }
+                        Value::Na => None,
+                        v => Some(value_str(v)).filter(|s| !s.is_empty()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if forced.is_none() {
+        let mut codes = flow_codes(Role::Origin);
+        codes.extend(flow_codes(Role::Dest));
+        if codes.iter().any(Option::is_some) {
+            for l in boundaries::guess_layers(&codes) {
+                if !out.contains(&l) {
+                    out.push(l);
+                }
+            }
         }
     }
     out
@@ -398,6 +439,8 @@ struct Model<'a> {
     fill: Fill,
     /// Graduated symbols (`::SIZE`), when it applies (M2a).
     symbols: Option<Symbols>,
+    /// A flow map (`::ORIGIN`/`::DEST`), when it applies (M2b).
+    flows: Option<Flows>,
     /// Whether `base` counts toward the fitted extent — true unless a
     /// symbol map's backdrop was built automatically from a region layer
     /// (D4): that backdrop isn't used for fitting, only an explicit
@@ -455,6 +498,92 @@ fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
 impl<'a> Model<'a> {
     fn new(o: &RenderOptions, cols: &'a [Column]) -> Option<Model<'a>> {
         let german = o.locale.tag.starts_with("de");
+        let is_flow = find_role(cols, Role::Origin)
+            .is_some_and(|c| c.values.iter().any(|v| *v != Value::Na))
+            && find_role(cols, Role::Dest)
+                .is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
+        if is_flow {
+            let raw = flows::of(cols, german)?;
+            let rows = raw.rows;
+            let (mut base, mut base_layer) = backdrop(cols, rows);
+            let has_explicit_basemap = find_role(cols, Role::Basemap).is_some();
+            // D4: flow ends from region codes, no explicit ::BASEMAP -> the
+            // whole matched layer as an unfitted backdrop (M2a's region_backdrop).
+            let flow_backdrop = !has_explicit_basemap
+                && raw.layer.as_deref().is_some_and(|l| {
+                    if let Some(layer) = boundaries::layer(l) {
+                        base = layer
+                            .regions
+                            .iter()
+                            .filter(|r| !(layer.name.starts_with("world") && r.key == "ATA"))
+                            .map(|r| r.shapes.clone())
+                            .collect();
+                        base_layer = Some(layer.name.clone());
+                        true
+                    } else {
+                        false
+                    }
+                });
+            let base_fitted = !flow_backdrop;
+            let mut layers: Vec<String> = Vec::new();
+            if let Some(l) = &raw.layer {
+                layers.push(l.clone());
+            }
+            if let Some(l) = &base_layer {
+                if !layers.contains(l) {
+                    layers.push(l.clone());
+                }
+            }
+            let projection = role_str(cols, Role::Projection)
+                .and_then(|s| Projection::parse(&s))
+                .unwrap_or(Projection::Auto);
+            let mut extent = Extent::new();
+            for f in &raw.flows {
+                extent.add(f.o);
+                extent.add(f.d);
+            }
+            if base_fitted {
+                for s in base.iter().flatten() {
+                    for_coords(s, &mut |c| extent.add(c));
+                }
+            }
+            let (projection, proj) = Proj::setup(projection, &extent);
+            let lonlat = extent;
+            let base: Vec<Vec<Shape>> = base
+                .iter()
+                .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
+                .collect();
+            let flows_model = flows::project(raw, &proj);
+            let category = find_role(cols, Role::Category)
+                .filter(|c| c.values.iter().any(|v| *v != Value::Na));
+            let measure = measure_of(cols, None);
+            let has_base = has_explicit_basemap || flow_backdrop;
+            let fill = match (&measure, category) {
+                (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
+                (None, Some(c)) => category_fill(o, cols, c, rows),
+                (None, None) => Fill::Plain(crate::wash(o, o.brand(), 0.55)),
+            };
+            return Some(Model {
+                rows,
+                features: vec![Vec::new(); rows],
+                base,
+                names: vec![String::new(); rows],
+                core: None,
+                layers,
+                lonlat,
+                label: find_role(cols, Role::Label),
+                category,
+                alpha: role_num(cols, Role::Alpha)
+                    .map(|a| a.clamp(0.05, 1.0))
+                    .unwrap_or(1.0),
+                projection,
+                proj,
+                fill,
+                symbols: None,
+                flows: Some(flows_model),
+                base_fitted,
+            });
+        }
         let inp = input(cols, german)?;
         let rows = inp.features.len();
         let (mut base, mut base_layer) = backdrop(cols, rows);
@@ -559,6 +688,7 @@ impl<'a> Model<'a> {
             proj,
             fill,
             symbols,
+            flows: None,
             base_fitted,
         })
     }
@@ -567,9 +697,19 @@ impl<'a> Model<'a> {
     /// backdrop only when it's fitted — [`Model::base_fitted`]).
     fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
         let mut e = Extent::new();
-        let features = self.core.as_ref().unwrap_or(&self.features);
+        if let Some(fl) = &self.flows {
+            for f in &fl.flows {
+                e.add(f.o);
+                e.add(f.d);
+            }
+        } else {
+            let features = self.core.as_ref().unwrap_or(&self.features);
+            for s in features.iter().flatten() {
+                for_coords(s, &mut |c| e.add(c));
+            }
+        }
         let base: &[Vec<Shape>] = if self.base_fitted { &self.base } else { &[] };
-        for s in features.iter().chain(base).flatten() {
+        for s in base.iter().flatten() {
             for_coords(s, &mut |c| e.add(c));
         }
         (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
@@ -792,15 +932,20 @@ impl Frame {
     }
 }
 
-/// The box with a 4% margin (a lone point gets a small neighbourhood).
-fn padded((x0, y0, x1, y1): (f64, f64, f64, f64), planar: bool) -> (f64, f64, f64, f64) {
+/// The box with a margin (a lone point gets a small neighbourhood); flow
+/// maps use a wider 8% margin so the arcs' bulge fits.
+fn padded(
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+    planar: bool,
+    margin: f64,
+) -> (f64, f64, f64, f64) {
     let (w, h) = (x1 - x0, y1 - y0);
     let unit = if planar { 1.0 } else { 1_000.0 };
-    let m = 0.04 * w.max(h);
+    let m = margin * w.max(h);
     let (mx, my) = if w <= 0.0 && h <= 0.0 {
         (unit, unit)
     } else {
-        (m.max(0.04 * w), m.max(0.04 * h))
+        (m.max(margin * w), m.max(margin * h))
     };
     (x0 - mx, y0 - my, x1 + mx, y1 + my)
 }
@@ -843,7 +988,8 @@ pub(crate) struct Drawn {
 /// covers the fewest vertices — or, when every corner would cover some,
 /// beside or above the map (whichever keeps it larger).
 fn layout(m: &Model, lg: &LegendBox, w: f64, h: f64) -> Option<(Frame, (f64, f64))> {
-    let b = padded(m.bbox()?, matches!(m.proj, Proj::Identity));
+    let margin = if m.flows.is_some() { 0.08 } else { 0.04 };
+    let b = padded(m.bbox()?, matches!(m.proj, Proj::Identity), margin);
     let full = Frame::fit(b, (2.0, 2.0, w - 4.0, h - 4.0));
     if lg.w <= 0.0 {
         return Some((full, (0.0, 0.0)));
@@ -1297,6 +1443,194 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         out.push_str("</g>");
     }
 
+    // ---- flows (::ORIGIN/::DEST, M2b): one bent arc + arrowhead per flow,
+    // largest-width first (D5), then one dot per distinct end.
+    let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
+    if let Some(fl) = &m.flows {
+        const FLOW_BEND: f64 = 0.2;
+        let linestyle_col = find_role(cols, Role::LineStyle);
+        let mut arcs_g = String::new();
+        let mut end_pts: std::collections::HashMap<&str, (f64, f64)> =
+            std::collections::HashMap::new();
+        for fl_ in &fl.flows {
+            let i = fl_.row;
+            let label = m.label_of(i);
+            let cat = m.text(m.category, i);
+            let series = if cat.is_empty() {
+                fl_.o_name.clone()
+            } else {
+                cat.clone()
+            };
+            let (color, value, class, nd) = match &m.fill {
+                Fill::Measure(s) => match s.values[i] {
+                    Some(v) => {
+                        let (c, k) = s.color(v);
+                        (c, Some(v), k, false)
+                    }
+                    None => (hatch_bg, None, None, true),
+                },
+                Fill::Category { of_row, levels } => (
+                    of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
+                    None,
+                    None,
+                    false,
+                ),
+                Fill::Plain(c) => (*c, None, None, false),
+            };
+            let p0 = frame.at(fl_.o);
+            let p1 = frame.at(fl_.d);
+            let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+            let l = dx.hypot(dy);
+            if l < 2.0 {
+                extra_self += 1;
+                continue;
+            }
+            let (nx, ny) = (-dy / l, dx / l);
+            let mid = ((p0.0 + p1.0) / 2.0, (p0.1 + p1.1) / 2.0);
+            let c = (mid.0 + nx * FLOW_BEND * l, mid.1 + ny * FLOW_BEND * l);
+            let bt = |t: f64| -> (f64, f64) {
+                let mt = 1.0 - t;
+                (
+                    mt * mt * p0.0 + 2.0 * mt * t * c.0 + t * t * p1.0,
+                    mt * mt * p0.1 + 2.0 * mt * t * c.1 + t * t * p1.1,
+                )
+            };
+            let tangent = |t: f64| -> (f64, f64) {
+                let mt = 1.0 - t;
+                (
+                    2.0 * mt * (c.0 - p0.0) + 2.0 * t * (p1.0 - c.0),
+                    2.0 * mt * (c.1 - p0.1) + 2.0 * t * (p1.1 - c.1),
+                )
+            };
+            let linestyle = linestyle_col
+                .and_then(|lc| lc.values.get(i))
+                .map(value_str)
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            let (class_attr, dash_attr) = match linestyle.as_str() {
+                "flow" => (" class=\"dp-flow\"", " stroke-dasharray=\"6 4\""),
+                "dashed" => ("", " stroke-dasharray=\"6 4\""),
+                _ => ("", ""),
+            };
+            let shown = match (&m.fill, value) {
+                (Fill::Measure(s), Some(v)) => fmt_full(s, v),
+                (Fill::Measure(_), None) => "no data".to_string(),
+                (Fill::Category { .. }, _) => cat.clone(),
+                (Fill::Plain(_), _) if fl.has_size => {
+                    fl.fmt.full(fl_.raw.unwrap_or(fl_.w), &o.locale)
+                }
+                _ => String::new(),
+            };
+            let flow_label = if label.is_empty() {
+                format!("{} → {}", fl_.o_name, fl_.d_name)
+            } else {
+                label.clone()
+            };
+            let mut title = format!("{flow_label}: {shown}");
+            if title.ends_with(": ") {
+                title.truncate(title.len() - 2);
+            }
+            if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
+                if let Some((_, cl, _)) = &s.classes {
+                    title.push_str(&format!(
+                        " (class {} of {}: {})",
+                        k + 1,
+                        cl.len(),
+                        cl.label(k, &|v| s.fmt.short(v, &o.locale))
+                    ));
+                }
+            }
+            let key = format!("{}→{}", fl_.ok, fl_.dk);
+            let mut data = String::new();
+            data.push_str(&format!(" data-x=\"{}\"", attr(&key)));
+            if let Some(k) = class {
+                data.push_str(&format!(" data-class=\"{}\"", k + 1));
+            }
+            data.push_str(&format!(" data-row=\"{i}\""));
+            data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
+            let data_value = value.unwrap_or(fl_.raw.unwrap_or(fl_.w));
+            data.push_str(&format!(" data-value=\"{data_value}\""));
+            data.push_str(&format!(" data-label=\"{}\"", attr(&flow_label)));
+            data.push_str(&format!(" data-orig=\"{}\"", attr(&fl_.o_name)));
+            data.push_str(&format!(" data-dest=\"{}\"", attr(&fl_.d_name)));
+            if let Some(raw) = fl_.raw {
+                data.push_str(&format!(" data-size=\"{raw}\""));
+                data.push_str(&format!(
+                    " data-fsize=\"{}\"",
+                    attr(&fl.fmt.full(raw, &o.locale))
+                ));
+                if !matches!(m.fill, Fill::Measure(_)) {
+                    data.push_str(&format!(
+                        " data-fvalue=\"{}\"",
+                        attr(&fl.fmt.full(raw, &o.locale))
+                    ));
+                }
+            }
+            let fill_attr = if nd {
+                format!("url(#{id}-nd)")
+            } else {
+                hex(color)
+            };
+            let so = if m.alpha < 1.0 {
+                format!(" stroke-opacity=\"{:.2}\"", m.alpha)
+            } else {
+                " stroke-opacity=\".85\"".to_string()
+            };
+            let dd = format!(
+                "M{:.1} {:.1} Q{:.1} {:.1} {:.1} {:.1}",
+                p0.0, p0.1, c.0, c.1, p1.0, p1.1
+            );
+            arcs_g.push_str(&format!(
+                "<path d=\"{dd}\" fill=\"none\" stroke=\"{fill_attr}\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"{so}{class_attr}{dash_attr}{data}><title>{}</title></path>",
+                fl_.w,
+                esc(&title)
+            ));
+            marks += 1;
+            // the arrowhead, at t = 0.85 along the arc
+            let tip_t = 0.85;
+            let b = bt(tip_t);
+            let (tx, ty) = tangent(tip_t);
+            let tl = tx.hypot(ty).max(1e-9);
+            let (ux, uy) = (tx / tl, ty / tl);
+            let (px, py) = (-uy, ux);
+            let hl = (2.2 * fl_.w).max(5.0);
+            let hw = (1.1 * fl_.w).max(2.5);
+            let tip = (b.0 + ux * hl / 2.0, b.1 + uy * hl / 2.0);
+            let base = (b.0 - ux * hl / 2.0, b.1 - uy * hl / 2.0);
+            let c1 = (base.0 + px * hw, base.1 + py * hw);
+            let c2 = (base.0 - px * hw, base.1 - py * hw);
+            arcs_g.push_str(&format!(
+                "<path d=\"M{:.1} {:.1}L{:.1} {:.1}L{:.1} {:.1}z\" fill=\"{fill_attr}\"{} data-head=\"\" data-series=\"{}\" data-x=\"{}\" pointer-events=\"none\" aria-hidden=\"true\"/>",
+                tip.0, tip.1, c1.0, c1.1, c2.0, c2.1,
+                if m.alpha < 1.0 { format!(" fill-opacity=\"{:.2}\"", m.alpha) } else { String::new() },
+                attr(&series),
+                attr(&key)
+            ));
+            end_pts.entry(fl_.ok.as_str()).or_insert(p0);
+            end_pts.entry(fl_.dk.as_str()).or_insert(p1);
+        }
+        out.push_str(&format!("<g class=\"dp-flows\">{arcs_g}</g>"));
+        let mut ends_g = String::new();
+        for (x, y) in end_pts.values() {
+            ends_g.push_str(&format!(
+                "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"2.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\".75\"/>",
+                hex(mix(t.colors.ink, card, 0.25)),
+                hex(card)
+            ));
+        }
+        out.push_str(&format!(
+            "<g class=\"dp-flow-ends\" pointer-events=\"none\" aria-hidden=\"true\">{ends_g}</g>"
+        ));
+        if fl.total > flows::FLOW_CAP {
+            warnings.push(format!(
+                "map: {} flows, the {} widest drawn — aggregate in SQL",
+                fl.total,
+                flows::FLOW_CAP
+            ));
+        }
+    }
+
     if marks > MARK_WARN {
         warnings.push(format!(
             "map: {marks} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light"
@@ -1327,7 +1661,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     out.push_str(&foot_svg(o, &m, &ft, &frame, (w, h), &font));
 
     // ---- summary and root attributes
-    let summary = summary(o, &m);
+    let summary = summary(o, &m, extra_self);
     out.insert_str(0, &format!("<desc>{}</desc>", esc(&summary)));
     let mut attrs = vec![
         ("data-map", String::new()),
@@ -1613,6 +1947,55 @@ fn labels_svg(
     if top.is_none() && find_role(cols, Role::DataLabels).is_none() {
         return String::new();
     }
+    // flow maps (M2b): ::LABEL_TOP/::DATALABELS label the distinct ends,
+    // not the arcs; priority is the sum of the sizes touching each end.
+    if let Some(fl) = &m.flows {
+        let mut ends: std::collections::HashMap<&str, (labels::Pt, f64, String)> =
+            std::collections::HashMap::new();
+        for f in &fl.flows {
+            let w = f.raw.unwrap_or(f.w);
+            let e = ends
+                .entry(f.ok.as_str())
+                .or_insert((frame.at(f.o), 0.0, f.o_name.clone()));
+            e.1 += w;
+            let e = ends
+                .entry(f.dk.as_str())
+                .or_insert((frame.at(f.d), 0.0, f.d_name.clone()));
+            e.1 += w;
+        }
+        let cands: Vec<labels::Candidate> = ends
+            .into_values()
+            .filter(|(_, _, name)| !name.is_empty())
+            .map(|(at, priority, text)| labels::Candidate {
+                at,
+                text,
+                priority,
+                room: None,
+                dx: 5.0,
+            })
+            .collect();
+        let placed = labels::place(cands, top, blocked, size, FONT);
+        if placed.is_empty() {
+            return String::new();
+        }
+        let t = &o.theme;
+        let mut g = format!(
+            "<g class=\"dp-map-labels\" font-family=\"{font}\" font-size=\"{FONT}\" font-weight=\"600\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2.4\" stroke-linejoin=\"round\" paint-order=\"stroke\" pointer-events=\"none\">",
+            hex(t.colors.ink),
+            hex(t.colors.card)
+        );
+        for p in placed {
+            g.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>",
+                p.x,
+                p.y,
+                if p.start { "start" } else { "middle" },
+                esc(&p.text)
+            ));
+        }
+        g.push_str("</g>");
+        return g;
+    }
     let rank = find_role(cols, Role::Rank);
     let rmax_px = m.symbols.as_ref().map(|_| symbols::rmax(size.0, size.1));
     let mut cands = Vec::new();
@@ -1733,7 +2116,10 @@ fn labels_svg(
 /// One sentence for screen readers: what the map shows, its projection,
 /// the highest and lowest feature, the classes and their counts, and how
 /// many rows have no value.
-fn summary(o: &RenderOptions, m: &Model) -> String {
+fn summary(o: &RenderOptions, m: &Model, extra_self: usize) -> String {
+    if let Some(fl) = &m.flows {
+        return flows_summary(o, m, fl, extra_self);
+    }
     if let Some(sym) = &m.symbols {
         return symbols_summary(o, m, sym);
     }
@@ -1918,6 +2304,57 @@ fn symbols_summary(o: &RenderOptions, m: &Model, sym: &Symbols) -> String {
         .count();
     if skipped > 0 {
         out.push_str(&format!("; {skipped} not drawn (zero or negative size)"));
+    }
+    out.push('.');
+    out
+}
+
+/// One sentence for a flow map: the count and distinct origins/destinations,
+/// the largest and smallest flow, then how many weren't drawn (no location,
+/// self-flows).
+fn flows_summary(o: &RenderOptions, m: &Model, fl: &Flows, extra_self: usize) -> String {
+    let n = fl.flows.len();
+    let origins: std::collections::HashSet<&str> = fl.flows.iter().map(|f| f.ok.as_str()).collect();
+    let dests: std::collections::HashSet<&str> = fl.flows.iter().map(|f| f.dk.as_str()).collect();
+    let mut out = format!(
+        "{n} flow{} between {} origin{} and {} destination{} ({})",
+        if n == 1 { "" } else { "s" },
+        origins.len(),
+        if origins.len() == 1 { "" } else { "s" },
+        dests.len(),
+        if dests.len() == 1 { "" } else { "s" },
+        m.projection.describe()
+    );
+    if !fl.flows.is_empty() {
+        let hi = fl.flows.iter().max_by(|a, b| a.w.total_cmp(&b.w)).unwrap();
+        let lo = fl.flows.iter().min_by(|a, b| a.w.total_cmp(&b.w)).unwrap();
+        let f = |v: Option<f64>, w: f64| fl.fmt.full(v.unwrap_or(w), &o.locale);
+        if std::ptr::eq(hi, lo) {
+            out.push_str(&format!(
+                ". {} → {} {}",
+                hi.o_name,
+                hi.d_name,
+                f(hi.raw, hi.w)
+            ));
+        } else {
+            out.push_str(&format!(
+                ". Largest: {} → {} {}; smallest: {} → {} {}",
+                hi.o_name,
+                hi.d_name,
+                f(hi.raw, hi.w),
+                lo.o_name,
+                lo.d_name,
+                f(lo.raw, lo.w)
+            ));
+        }
+    }
+    let unplaced = fl.unplaced;
+    if unplaced > 0 {
+        out.push_str(&format!("; {unplaced} not drawn (no location)"));
+    }
+    let selfs = fl.self_flows + extra_self;
+    if selfs > 0 {
+        out.push_str(&format!("; {selfs} start and end at the same place"));
     }
     out.push('.');
     out

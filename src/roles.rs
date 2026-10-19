@@ -166,6 +166,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name"),
     e("LAT", &["LATITUDE"], R::Lat, "chart", true, "a map point's latitude (degrees, WGS84), with ::LON"),
     e("LON", &["LONGITUDE", "LNG"], R::Lon, "chart", true, "a map point's longitude (degrees, WGS84), with ::LAT"),
+    e("ORIGIN", &["FROM_PLACE"], R::Origin, "chart", true, "a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE"),
+    e("DEST", &["DESTINATION", "TO_PLACE"], R::Dest, "chart", true, "a flow map's end (see ::ORIGIN)"),
     e("BASEMAP", &["MAPBASE", "BACKDROP"], R::Basemap, "chart", true,
       "a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts'"),
     e("DIAGRAM", &["NODE"], R::Diagram, "chart", true,
@@ -767,6 +769,8 @@ mod tests {
             Role::Region,
             Role::Lat,
             Role::Lon,
+            Role::Origin,
+            Role::Dest,
             Role::Boundaries,
             Role::Tab,
             Role::SubTab,
@@ -892,6 +896,8 @@ mod tests {
                 | Role::Region
                 | Role::Lat
                 | Role::Lon
+                | Role::Origin
+                | Role::Dest
                 | Role::Boundaries
                 | Role::Tab
                 | Role::SubTab

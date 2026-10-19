@@ -347,6 +347,11 @@ pub enum Role {
     Lat,
     /// A point's longitude on a map (`::LON`), with `::LAT`.
     Lon,
+    /// A flow map's start (`::ORIGIN`): a region code, WKT POINT, or
+    /// `{'lon':…,'lat':…,'name':…}` struct-as-JSON. With `::DEST`.
+    Origin,
+    /// A flow map's end (`::DEST`), see `Origin`.
+    Dest,
     /// The pack layer a map's `::REGION` codes are looked up in
     /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
     /// `'de-districts'`. Read from the first value.
@@ -2214,7 +2219,7 @@ fn render_inner(
     if cols.iter().any(|c| {
         matches!(
             c.role,
-            Role::Geometry | Role::Region | Role::Lat | Role::Lon
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
         )
     }) {
         return Ok(match map::render(o, cols, width, height) {
