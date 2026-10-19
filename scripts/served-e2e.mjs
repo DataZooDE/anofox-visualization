@@ -6,8 +6,12 @@
 // redirects `/`. The nav on a dashboard page groups its links, and above 8
 // dashboards becomes one button with a searchable, grouped list (keyboard:
 // Enter opens, the search takes the focus, Esc closes back onto the button).
-// Runs three servers (4 and 10 dashboards, and one with options.home), each
-// started and stopped by this script.
+// A ::VIEW switcher (#214) on its own locked server: axe on the view bar,
+// keyboard (ArrowRight moves + activates, focus stays on the tab), and at
+// --width 390 no horizontal overflow, the view bar visible and tappable, the
+// panel full width.
+// Runs four servers (4 and 10 dashboards, one with options.home, one with a
+// ::VIEW switcher), each started and stopped by this script.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8930] \
@@ -200,7 +204,61 @@ try {
   stop(srv);
 }
 
+// ── 4. A ::VIEW switcher (#214): axe on the view bar, keyboard (ArrowRight
+// moves + activates, aria-selected updates, focus stays on the tab — so the
+// document-level arrow-key chart-paging handler never also fires), and (at
+// --width 390) no horizontal overflow, the view bar visible and tappable,
+// the panel full width ──
+const viewsDir = folder([
+  [
+    "views",
+    "-- @title Views\nSELECT 'Bars' AS yoy ::VIEW;\nSELECT i::XAXIS, i::BARCHART FROM range(5) t(i);\nSELECT 'Lines'::VIEW;\nSELECT i::XAXIS, i::LINECHART FROM range(5) t(i);\nSELECT 1::ENDVIEW;",
+  ],
+]);
+const port3 = port0 + 3;
+srv = await serve(viewsDir, port3);
+try {
+  const p = await page(`http://127.0.0.1:${port3}/d/views`);
+  await p.waitForSelector(".dp-viewbar [role='tab']", { timeout: 60000 });
+  await axeCheck(p, ".dp-views", "::VIEW switcher");
+  const tabs = () => p.$$eval(".dp-viewbar [role='tab']", (l) => l.map((b) => b.textContent));
+  check(JSON.stringify(await tabs()) === '["Bars","Lines"]', `::VIEW switcher: two alternatives ${JSON.stringify(await tabs())}`);
+  await p.focus(".dp-viewbar [role='tab']:first-child");
+  await p.keyboard.press("ArrowRight");
+  // activateView's refocus() lands on the next animation frame.
+  await p.waitForFunction(() => document.activeElement === document.querySelectorAll(".dp-viewbar [role='tab']")[1], null, { timeout: 5000 });
+  const st = await p.evaluate(() => {
+    const btns = [...document.querySelectorAll(".dp-viewbar [role='tab']")];
+    const pane = document.getElementById(btns[1].getAttribute("aria-controls"));
+    return { sel: btns.map((b) => b.getAttribute("aria-selected")), focused: document.activeElement === btns[1], shown: pane?.style.display !== "none" };
+  });
+  check(st.sel[1] === "true" && st.focused && st.shown, `::VIEW switcher: ArrowRight moves + activates, focus stays on the tab: ${JSON.stringify(st)}`);
+  if (shots) await p.screenshot({ path: `${shots}/${tag}-view-switcher.png` });
+  if (width <= 820) {
+    const r = await p.evaluate(() => {
+      const bar = document.querySelector(".dp-viewbar");
+      const btn = bar?.querySelector('[role="tab"][aria-selected="true"]');
+      const pane = btn && document.getElementById(btn.getAttribute("aria-controls"));
+      const br = btn?.getBoundingClientRect();
+      const pr = pane?.getBoundingClientRect();
+      return {
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        barVisible: !!bar && getComputedStyle(bar).display !== "none" && bar.getBoundingClientRect().width > 0,
+        tapSize: br ? Math.min(br.width, br.height) : 0,
+        paneWidth: pr?.width ?? 0,
+      };
+    });
+    console.log(`::VIEW switcher at ${width}px:`, JSON.stringify(r));
+    check(r.overflow <= 1, `::VIEW switcher: no horizontal overflow at ${width}px (${r.overflow}px)`);
+    check(r.barVisible, `::VIEW switcher: the view bar is visible at ${width}px`);
+    check(r.tapSize >= 24, `::VIEW switcher: the tab is tappable at ${width}px (${r.tapSize}px)`);
+    check(r.paneWidth >= width * 0.75, `::VIEW switcher: the panel is full width at ${width}px (${r.paneWidth}px)`);
+  }
+} finally {
+  stop(srv);
+}
+
 check(!errs.length, `no page errors ${errs.join(" | ")}`);
 await browser.close();
-for (const d of [small, big]) rmSync(d, { recursive: true, force: true });
+for (const d of [small, big, viewsDir]) rmSync(d, { recursive: true, force: true });
 if (!process.exitCode) console.log(`served-e2e (${tag}): ok`);
