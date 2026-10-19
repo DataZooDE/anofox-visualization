@@ -201,9 +201,11 @@ format that column; `::TITLE` becomes the table's title bar.
 
 **`::TITLE`** is a panel's title bar in every output: the browser, the locked
 server, `dashboard --svg`, the static HTML of `dashboard file.sql out.html` /
-`serve --dashboards` and `anofox_render`. The static pages and `anofox_render`
-draw its first non-NULL value in a 26 px bar above the chart (the chart gets
-26 px less); a KPI tile has none (its caption is `::LABEL`).
+`serve --dashboards` and `anofox_render`. `anofox_render`, `dashboard --svg`
+and the static pages draw its first non-NULL value, trimmed (a blank one
+draws none), in a 26 px bar above the chart (the chart gets 26 px less); a
+KPI tile has none (its caption is `::LABEL`). The static pages cut a title
+longer than 200 characters to 200 and an ellipsis.
 
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and
@@ -772,8 +774,9 @@ to 1.00 (0.9952 reads "AUC 0.995").
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`): a shared generic name such as \`kind\`, \`value\`,
-  \`x\` or \`y\` alone gives no hint;
+  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
+  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
+  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
@@ -2509,9 +2512,11 @@ otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
 - **Chart this** on a card previews a histogram, box plot, top-value bars, a
   line over time or a scatter; **Add to dashboard** appends its annotated SQL
   to the dashboard editor. **New dashboard from this table** writes a starter
-  dashboard: KPI tiles, the data's latest date (`::ASOF`), a `::PERIOD` and a
-  `::BUTTONS` / `::DROPDOWN` filter, a line over time, top-N bars, the main
-  measure's distribution and the paged rows.
+  dashboard: KPI tiles (an average for a rate, score, price, age, margin,
+  coordinate …: whole words of the column name, as the table totals read
+  them — `attempts` and `page_views` are summed), the data's latest date
+  (`::ASOF`), a `::PERIOD` and a `::BUTTONS` / `::DROPDOWN` filter, a line
+  over time, top-N bars, the main measure's distribution and the paged rows.
 - **Queries**: the SQL box highlights, completes `::` roles, runs on
   Ctrl/⌘+Enter, keeps your recent queries and shows errors at their line and
   column. A result shows its rows and time, downloads as CSV / Excel /

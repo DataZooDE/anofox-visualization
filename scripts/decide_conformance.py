@@ -209,9 +209,6 @@ GAP_ERROR = NO_SCHEMA
 # …with no "closest" hint: decide's generic columns (kind, probability, …)
 # are no near miss of any schema (#180).
 GAP_NO_HINT = "; closest:"
-# Gaps whose "closest" hint is a known false near miss, tracked elsewhere:
-# decide_answers' `team` reads as a misspelling of `term` (#255).
-HINT_KNOWN = {"decide_answers": "#255"}
 
 # Extra cases: grouping, options.
 EXTRA = {
@@ -249,11 +246,11 @@ def check(ok: bool, out: str) -> tuple[str, list[str], str]:
     return "OK", svgs, ""
 
 
-def check_gap(ok: bool, out: str, name: str = "") -> tuple[str, list[str], str]:
+def check_gap(ok: bool, out: str) -> tuple[str, list[str], str]:
     if ok and svgs_of(out):
         return "XPASS", svgs_of(out), "renders now: move it from GAPS to BRIDGES"
     if not ok and GAP_ERROR in out:
-        if GAP_NO_HINT in out and name not in HINT_KNOWN:
+        if GAP_NO_HINT in out:
             return "FAIL", [], "misleading closest hint (#180): " + out.strip().splitlines()[-1][:200]
         return "GAP", [], out.strip().splitlines()[-1][:200]
     return "FAIL", [], out.strip().replace("\n", " ")[:400]
@@ -331,7 +328,7 @@ def main() -> int:
                 runs.append({"name": f"statistics.{name}", "which": which, "kind": "case",
                              "sql": f"SELECT {call} FROM {src} t"})
     for name, sql in GAPS.items():
-        runs.append({"name": f"gap.{name}", "which": "auto", "kind": "gap", "sql": sql, "gap": name})
+        runs.append({"name": f"gap.{name}", "which": "auto", "kind": "gap", "sql": sql})
     for name, sql in EXTRA.items():
         runs.append({"name": name, "which": "extra", "kind": "case", "sql": sql})
     if a.only:
@@ -339,7 +336,7 @@ def main() -> int:
 
     def one(c):
         ok, out = run(a.duckdb, prelude, c["sql"], "-json")
-        return c, (check_gap(ok, out, c["gap"]) if c["kind"] == "gap" else check(ok, out))
+        return c, (check_gap if c["kind"] == "gap" else check)(ok, out)
 
     results = run_all(runs, one, a.jobs, out_dir)
     names = svg_names(results)
