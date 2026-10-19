@@ -411,6 +411,8 @@ Consumers pick a dashboard id and whitelisted params
   doubles as the freshness knob).
 - `--init setup.sql` runs once, read-write, before serving (attach sources,
   create views/tables). CLI dot-commands are refused there too.
+- A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
+  value, escaped; none on a KPI tile), as on a dashboard card.
 - `--auth '<json>'` (or `--auth @auth.json`) — login via an auth proxy, the
   same object as `options.auth` below; `--log <path|stderr>` and
   `--log-vars none|names|values` — the request log. With `--auth` the render

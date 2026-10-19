@@ -199,6 +199,12 @@ terminal.
 `::COLORSCALE`, `::BADGE`, `::SPARKLINE` (a `list()` column) and `::PLAIN`
 format that column; `::TITLE` becomes the table's title bar.
 
+**`::TITLE`** is a panel's title bar in every output: the browser, the locked
+server, `dashboard --svg`, the static HTML of `dashboard file.sql out.html` /
+`serve --dashboards` and `anofox_render`. The static pages and `anofox_render`
+draw its first non-NULL value in a 26 px bar above the chart (the chart gets
+26 px less); a KPI tile has none (its caption is `::LABEL`).
+
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and
 `{{x:percent}}` in Markdown all take the value **in percent, 0–100**: `12.5`

@@ -24,7 +24,7 @@ use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
 use anofox_visualization::theme::DashboardChrome;
-use anofox_visualization::{page, render_with, sql, track, RenderOptions, Role};
+use anofox_visualization::{page, render_with_title, sql, track, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -1258,13 +1258,9 @@ fn render_dashboard_page(
         while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
+        // Its ::TITLE bar, as on a dashboard card (#232).
         let svg = anofox_visualization::host::catch_panic(|| {
-            if tracks.is_empty() {
-                render_with(&cols, 460, 300, &opts)
-            } else {
-                track::render_stack(&cols, &tracks, 460, 300, &opts).map(|svgs| svgs.concat())
-            }
-            .map_err(|e| e.to_string())
+            render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
         })
         .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));

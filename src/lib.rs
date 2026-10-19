@@ -1180,19 +1180,20 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             });
         }
         let cols = columns_from_entries(&rows, &entries);
-        match spec_title(&cols, &opts) {
+        match panel_title(&cols, &opts) {
             Some(title) => render_titled(&cols, &title, width, height, &opts),
             None => render_with(&cols, width, height, &opts),
         }
     })
 }
 
-/// Height of the `::TITLE` bar above a single panel (a dashboard card's).
+/// Height of the `::TITLE` bar above a single panel (a dashboard card's):
+/// `anofox_render` and the static pages.
 const TITLE_BAR_H: u32 = 26;
 
-/// The `::TITLE` of a single-panel spec: its first non-NULL, non-blank value.
+/// The `::TITLE` of a single panel: its first non-NULL, non-blank value.
 /// A KPI tile has none (its caption is `::LABEL`), as in a dashboard.
-fn spec_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
+fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
     let title = cols
         .iter()
         .find(|c| c.role == Role::Title)?
@@ -1221,15 +1222,61 @@ fn render_titled(
     let body_h = h.saturating_sub(TITLE_BAR_H).max(MIN_DIM);
     let (body, warnings) = render_placed(cols, Place::Doc, w, body_h, o)?;
     let svg = format!(
-        "{open}<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
-         font-weight=\"700\" fill=\"{ink}\">{title}</text>\
-         <g transform=\"translate(0,{TITLE_BAR_H})\">{body}</g></svg>",
+        "{open}{text}<g transform=\"translate(0,{TITLE_BAR_H})\">{body}</g></svg>",
         open = svg_open(Place::Doc, w, body_h + TITLE_BAR_H),
+        text = title_bar_text(title, o),
+    );
+    Ok(with_warnings_attr(svg, &warnings))
+}
+
+/// The `::TITLE` bar's text as a dashboard card draws it
+/// (`dashboard::render_panel_svg`), the title XML-escaped.
+fn title_bar_text(title: &str, o: &RenderOptions) -> String {
+    format!(
+        "<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
+         font-weight=\"700\" fill=\"{ink}\">{title}</text>",
         font = format::escape_xml(&o.theme.font.display),
         ink = theme::hex(o.theme.colors.heading),
         title = format::escape_xml(title),
-    );
-    Ok(with_warnings_attr(svg, &warnings))
+    )
+}
+
+/// A static page's chart (`dashboard file.sql out.html`, `serve
+/// --dashboards`): [`render_with`] (or, with `::TRACK`s under it,
+/// [`track::render_stack`]) under the `::TITLE` bar a dashboard card draws —
+/// the first non-NULL, non-blank title; none on a KPI tile. The bar is its own
+/// `width`×26 `<svg>` before the chart, which gets the requested height less
+/// 26 px, so every `<svg>` stays top-level in the page (the page CSS sizes
+/// each one). The title is XML-escaped. Without a title this is exactly
+/// `render_with` / the concatenated `render_stack`.
+pub fn render_with_title(
+    cols: &[Column],
+    tracks: &[(Vec<Column>, u32)],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<String, RenderError> {
+    let title = panel_title(cols, o);
+    let h = if title.is_some() {
+        clamp_dim(height as u64)
+            .saturating_sub(TITLE_BAR_H)
+            .max(MIN_DIM)
+    } else {
+        height
+    };
+    let chart = if tracks.is_empty() {
+        render_with(cols, width, h, o)?
+    } else {
+        track::render_stack(cols, tracks, width, h, o)?.concat()
+    };
+    Ok(match title {
+        Some(t) => format!(
+            "{open}{text}</svg>{chart}",
+            open = svg_open(Place::Doc, clamp_dim(width as u64), TITLE_BAR_H),
+            text = title_bar_text(&t, o),
+        ),
+        None => chart,
+    })
 }
 
 /// The last step of every contract render: drop non-finite marks, apply the
