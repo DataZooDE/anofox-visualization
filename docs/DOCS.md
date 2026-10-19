@@ -87,6 +87,8 @@ terminal.
 | `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
 | `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |
 | `::LON` | `::LONGITUDE`, `::LNG` | chart | a map point's longitude (degrees, WGS84), with ::LAT |
+| `::ORIGIN` | `::FROM_PLACE` | chart | a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE |
+| `::DEST` | `::DESTINATION`, `::TO_PLACE` | chart | a flow map's end (see ::ORIGIN) |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts' |
 | `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
@@ -1154,6 +1156,76 @@ flags skipped rows with `map/size-not-positive`.
   highest first, without the WKT.
 - **Size**: above 100,000 drawn marks the render warns (aggregate in SQL, e.g.
   with the h3 extension); `map/too-many-marks` flags more than 20,000 points.
+
+#### Flow maps (`::ORIGIN`, `::DEST`)
+
+```sql
+SELECT {'lon': k.lon, 'lat': k.lat, 'name': k.name || ' DC'}::ORIGIN,
+       d.state::DEST, sum(v.deliveries) AS "Deliveries"::SIZE,
+       k.name || ' DC'::CATEGORY,
+       'Deliveries from each DC into each state, last 12 weeks; width by volume.'::INFO
+FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags)
+GROUP BY ALL ORDER BY 3 DESC;
+```
+
+An `::ORIGIN`/`::DEST` pair draws a bent arc between two places. Each end
+takes one of three forms:
+
+- a **region code** (`'DE-BY'::ORIGIN`), looked up in the boundary pack the
+  same way `::REGION` is;
+- a **WKT `POINT`** (`'POINT(9.18 48.78)'::ORIGIN`);
+- a **struct-as-JSON** (`{'lon': 9.18, 'lat': 48.78, 'name': 'Stuttgart'}::ORIGIN`)
+  — `lon`/`lng`/`x` and `lat`/`y` (any case), plus an optional `name`; without
+  one, the coordinates are shown ("48.78° N, 9.18° E").
+
+**Arc shape (D6):** a quadratic curve whose control point sits 0.2 × the
+chord's length to the **right of the direction of travel** — so A→B and B→A
+draw as two separate, visible arcs rather than overlapping. The arrowhead
+sits at 85 % along the arc, sized from the stroke width.
+
+**Width:** a non-constant numeric `::SIZE` scales `width = 0.75 +
+7.25·√(v / vmax)` px (`v ≤ 0`/NA isn't drawn); a constant `::SIZE` fixes
+every arc's width (clamped 0.5–12 px, no legend); with no `::SIZE` every
+flow is 1.5 px. A **width legend** (three nice values, the same derivation
+as the symbol size legend) stacks under the colour legend when widths vary.
+
+**Colour** follows a measure through the usual ramp/classes, else
+`::CATEGORY`, else the brand tint; stroke opacity is 0.85, or `::ALPHA`.
+`'flow'::LINESTYLE` marks the arc `class="dp-flow"` and dashes it (the CSS
+animates the dashes, so goods/orders read as moving); `'dashed'::LINESTYLE`
+dashes without the animation class.
+
+**Backdrop (D4):** when both ends are region codes and there is no explicit
+`::BASEMAP`, the whole matched layer (Antarctica excluded) is drawn as an
+unfitted backdrop automatically — the map still fits to the flows' own
+extent (padded 8 %, wider than a choropleth's 4 %, so the arcs' bulge
+fits), not to the whole layer.
+
+**End labels:** `::LABEL_TOP`/`::DATALABELS` label the distinct **ends**, not
+the arcs — an end's importance is the sum of the sizes of every flow
+touching it.
+
+**Attributes:** each arc carries `data-row`, `data-series` (`::CATEGORY`,
+else the origin's name), `data-label` (`::LABEL`, else `"{origin} →
+{dest}"`), `data-x` (the end-pair key), `data-orig`/`data-dest` (the
+resolved names), `data-value`, `data-size`/`data-fsize` and `data-fvalue`
+(once — never duplicated with a colour measure's own `data-fvalue`). Each
+arrowhead carries `data-head`, `data-series` and `data-x`, but **no**
+`data-row` — it is not a keyboard stop or an as-table row, though it dims
+with its arc's series on hover. A small dot marks every distinct end.
+
+**Caps:** above 10,000 flows, only the 10,000 widest are drawn, with the
+render warning "map: `n` flows, the 10,000 widest drawn — aggregate in
+SQL". `dashboard --check` warns above 2,000 flows
+(`map/too-many-flows`), flags an `::ORIGIN` with no `::DEST` or the reverse
+(`map/flow-needs-both`), an end that matches no region
+(`map/flow-missing-end`), and notes flows whose two ends are the same place
+(`map/flow-self`) — none of those three are drawn.
+
+The summary reads "`n` flows between `o` origins and `d` destinations
+(`projection`). Largest: `A` → `B` `value`; smallest: `C` → `D` `value`",
+plus "; `k` not drawn (no location)" and "; `s` start and end at the same
+place" when either is non-zero.
 
 #### Built-in boundaries (`::REGION`, `::BOUNDARIES`)
 
