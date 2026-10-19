@@ -25,6 +25,7 @@ assert.deepEqual(appBrandMerge(), {
   name: "anofox-visualization",
   tagline: "Dashboards from SQL",
   logo: "",
+  logo_dark: "",
   link: "",
   favicon: "",
   name_visible: true,
@@ -38,6 +39,7 @@ assert.deepEqual(appBrandMerge(file, server), {
   name: "Acme Insights",
   tagline: "", // empty hides it
   logo: "brand/logo.svg",
+  logo_dark: "",
   link: "https://intranet.acme.example/",
   favicon: "",
   name_visible: true,
@@ -91,6 +93,23 @@ assert.equal(appBrandMerge(file, { logo: "data:text/html,<script>" }).logo, "bra
 assert.equal(appBrandMerge({ favicon: "data:image/png;base64,AA==" }).favicon, "data:image/png;base64,AA==");
 assert.equal(appBrandMerge({ favicon: "file:///etc/passwd" }).favicon, "");
 assert.equal(warnings.length, 3, warnings.join("\n"));
+
+// logo_dark (#198): the dark-theme variant, the logo's image rules, only with a logo
+{
+  const w0 = warnings.length;
+  assert.equal(appBrandMerge(file, { logo_dark: "brand/logo-dark.svg" }).logo_dark, "brand/logo-dark.svg");
+  assert.equal(appBrandMerge(file, { logo_dark: "javascript:alert(1)" }).logo_dark, "");
+  assert.equal(appBrandMerge(file, { logo_dark: 'x.png" onerror="alert(1)' }).logo_dark, "");
+  assert.equal(appBrandMerge({ logo_dark: "brand/logo-dark.svg" }).logo_dark, ""); // no logo
+  assert.equal(appBrandMerge(file, { logo_dark: "d.svg" }, { logo: "" }).logo_dark, ""); // logo cleared later
+  assert.equal(appBrandMerge(file, { logo_dark: "d.svg" }, { logo_dark: "" }).logo_dark, "");
+  assert.equal(warnings.length - w0, 4, warnings.slice(w0).join("\n"));
+  warnings.length = w0;
+  const ap = grab("appBrandApply");
+  assert.ok(/app-logo-/.test(ap) && /cfg\.logo_dark/.test(ap), "a dark-theme logo next to the light one");
+  const page = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
+  assert.ok(page.includes("body.dark header h1 .app-logo-light{display:none}") || page.includes("body.dark header h1 .app-logo-light"), "the light logo hides in dark mode");
+}
 
 // link: absolute http(s) only
 assert.ok(appLinkOk("https://acme.example/"));

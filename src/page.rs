@@ -207,11 +207,17 @@ pub fn landing(l: &Landing) -> String {
         .filter(|t| !t.is_empty())
         .map(|t| format!("{} · {count}", esc(t)))
         .unwrap_or_else(|| esc(&count).to_string());
-    let logo = app
-        .and_then(|a| a.logo.as_deref())
-        .filter(|u| crate::host::app_brand::image_url_ok(u))
-        .map(|u| format!("<img class=\"lp-logo\" src=\"{}\" alt=\"\">", esc(u)))
-        .unwrap_or_default();
+    let ok = |u: &&str| crate::host::app_brand::image_url_ok(u);
+    let light_logo = app.and_then(|a| a.logo.as_deref()).filter(ok);
+    let dark_logo = app.and_then(|a| a.logo_dark.as_deref()).filter(ok);
+    let logo = match (light_logo, dark_logo, l.theme.mode) {
+        (None, _, _) => String::new(),
+        (Some(u), Some(d), theme::Mode::Auto) => format!(
+            "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"{}\"><img class=\"lp-logo\" src=\"{}\" alt=\"\"></picture>",
+            esc(d), esc(u)),
+        (Some(_), Some(d), theme::Mode::Dark) => format!("<img class=\"lp-logo\" src=\"{}\" alt=\"\">", esc(d)),
+        (Some(u), _, _) => format!("<img class=\"lp-logo\" src=\"{}\" alt=\"\">", esc(u)),
+    };
     let show_name = app.and_then(|a| a.name_visible) != Some(false) || logo.is_empty();
     let h1 = if show_name {
         format!("<h1 class=\"lp-title\">{}</h1>", esc(name))
@@ -483,6 +489,21 @@ mod tests {
         assert!(html.contains("Sales &amp; stock · 1 dashboard"));
         assert!(html.contains("<img class=\"lp-logo\" src=\"https://example.com/l.png\""));
         assert!(html.contains("<title>Bakery &lt;BI&gt;</title>"));
+        // logo_dark (#198): auto mode uses <picture>, dark mode uses the dark logo
+        app.set("logo_dark", "https://example.com/d.png", false)
+            .unwrap();
+        let html = page(&metas[..1], Some(&app));
+        assert!(html.contains("srcset=\"https://example.com/d.png\""));
+        assert!(html.contains("<img class=\"lp-logo\" src=\"https://example.com/l.png\""));
+        let dark_set = theme::resolve("dark").unwrap();
+        assert!(matches!(dark_set.mode, theme::Mode::Dark));
+        let html = landing(&Landing {
+            theme: &dark_set,
+            app: Some(&app),
+            items: vec![],
+        });
+        assert!(html.contains("src=\"https://example.com/d.png\""));
+        assert!(!html.contains("<picture>"));
         assert!(page(&[], None).contains("No dashboards to show."));
     }
 }

@@ -276,7 +276,7 @@ struct Authoring {
 
 /// `anofox_serve(port[, options])`: start the authoring server on
 /// 127.0.0.1:`port`; `options` sets the builder's app bar (name, tagline,
-/// logo, link, favicon — see `AppBrand`).
+/// logo, logo_dark, link, favicon — see `AppBrand`).
 pub fn start_authoring(
     ctx: Arc<DbCtx>,
     port: u16,
