@@ -68,8 +68,8 @@ CREATE TABLE fc AS SELECT * FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '
 # The dated conformal API (main) calibrates per group into a table.
 SETUP_DATED = "CREATE TABLE cal AS SELECT * FROM ts_conformal_calibrate('btc', id, actual, forecast, params := {'alpha': 0.1});"
 
-PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS = (
-    "prediction", "summary", "terms", "obs", "curve", "test", "events")
+PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS, DECOMP = (
+    "prediction", "summary", "terms", "obs", "curve", "test", "events", "decomposition")
 SPECIFIC = {
     PRED: "anofox_plot_prediction(t)",
     SUMMARY: "anofox_plot_summary(t)",
@@ -78,6 +78,7 @@ SPECIFIC = {
     CURVE: "anofox_plot_curve(t)",
     TEST: "anofox_plot_tests(t)",
     EVENTS: "anofox_plot_events(t)",
+    DECOMP: "anofox_plot_decomposition(t)",
 }
 
 FC = "MAP{'seasonal_period': '7'}"
@@ -166,20 +167,13 @@ def producers(dated: bool) -> dict[str, dict]:
         "(SELECT d.id, unnest(generate_series(1, len(d.trend))) AS period, unnest(h.ys) AS y, unnest(d.trend) AS yhat, "
         "d.method AS model_name FROM ts_detrend_by('s', id, ds, y, 'auto') d "
         "JOIN (SELECT id, list(y ORDER BY ds) AS ys FROM s GROUP BY id) h USING (id))")
-    # decompositions: one panel per component (no decomposition plot yet)
-    add("ts_mstl_decomposition_by", PRED,
-        "(UNPIVOT (SELECT m.id, unnest(h.dss) AS ds, unnest(m.trend) AS trend, unnest(m.seasonal[1]) AS seasonal, "
-        "unnest(m.remainder) AS remainder FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m "
-        "JOIN (SELECT id, list(ds ORDER BY ds) AS dss FROM s GROUP BY id) h USING (id) WHERE m.id = 'B') "
-        "ON trend, seasonal, remainder INTO NAME component VALUE yhat)",
-        specific="anofox_plot_prediction(t, facet := 'component')")
-    add("ts_forecast_explain_by", PRED,
-        "(UNPIVOT (SELECT id, unnest(generate_series(1, (decomposition).horizon)) AS period, "
-        "unnest((decomposition).level) AS level_, unnest((decomposition).trend) AS trend, "
-        "unnest((decomposition).seasonal) AS seasonal "
-        "FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A') "
-        "ON level_ AS level, trend, seasonal INTO NAME component VALUE yhat)",
-        specific="anofox_plot_prediction(t, facet := 'component')")
+    # decompositions (#188): the list outputs plot as they come.
+    add("ts_mstl_decomposition_by", DECOMP,
+        "(SELECT * FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) WHERE id = 'B')",
+        "direct")
+    add("ts_forecast_explain_by", DECOMP,
+        "(SELECT * FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A')",
+        "direct")
 
     # ── in-sample fit → obs (the plot.lm 2×2) ───────────────────────────────
     add("ts_forecast_inspect_by", OBS,
@@ -349,6 +343,15 @@ EXTRA = {
                            "(adf).statistic AS statistic, (adf).p_value AS p_value FROM ts_adf_by('s', id, ds, y) "
                            "UNION ALL SELECT id, 'KPSS', (kpss).statistic, (kpss).p_value "
                            "FROM ts_kpss_by('s', id, ds, y)) t",
+    # the long form, with the real dates back (#188): the same UNPIVOT
+    # adapter as before, but into the decomposition schema's `value`.
+    "mstl_long_with_dates": "SELECT anofox_plot_decomposition(t) FROM (UNPIVOT (SELECT m.id, unnest(h.dss) AS ds, "
+                            "unnest(m.trend) AS trend, unnest(m.seasonal[1]) AS seasonal, unnest(m.remainder) AS remainder "
+                            "FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m "
+                            "JOIN (SELECT id, list(ds ORDER BY ds) AS dss FROM s GROUP BY id) h USING (id) WHERE m.id = 'B') "
+                            "ON trend, seasonal, remainder INTO NAME component VALUE value) t",
+    "mstl_per_series": "SELECT id, anofox_plot_decomposition(m) FROM "
+                       "ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m GROUP BY id ORDER BY id",
 }
 
 # Build warnings the harness accepts (none today).

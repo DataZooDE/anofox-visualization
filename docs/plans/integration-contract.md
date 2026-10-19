@@ -35,6 +35,11 @@ Principles
 | `test` | **method, statistic, p_value**, test_id, group1, group2, p_adj, df1, df2, estimate, conf_low, conf_high, effect_size, effect_name, alternative, alpha | all `*_test_agg`, post-hoc pairwise, Diebold–Mariano | p-value brackets, effect-size forest, critical-region plot |
 | `events` | **ds \| period, kind**, label, severity (`warning`/`alarm`), value, threshold, model_id, series | twin alarms (inventory-rs `Alarm`: tier → severity, category/name → kind/label, stream → series), parameter changes, calibration proposals | event timeline (`anofox_plot_events`), event lines over a forecast (`anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))`) |
 | `graph` (nodes + edges) | nodes: **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq, upstream; edges (a LIST passed as `edges :=`): **source, target**, value, label, style, status — Grafana node-graph names; also read: `stage`, `label`, `from_stage`, `to_stage`, `count`, … | pipeline run manifests (inventory-rs#28 `run_manifest` + `run_edges`), lineage, process mining | node/edge diagram (`anofox_plot_diagram(n, edges := (SELECT list(e) FROM run_edges e))`), the `::DIAGRAM` panel |
+| `decomposition` (provisional) | **id, ds \| period, component, value** (`observed`, `level`, `trend`, `seasonal`, `seasonal_<period>`, `remainder`), model_id; also read wide (one column per component) and as LISTs | anofox-forecast `ts_mstl_decomposition_by`, `ts_forecast_explain_by` (as they come, no ds); anofox-orchestration `decomposition` (wide, `t`) | stacked panels, shared x, own y (`anofox_plot_decomposition`) |
+
+Provisional: the long-form names are to be agreed with anofox-orchestration
+(DataZooDE/anofox-orchestration#539) and anofox-forecast
+(DataZooDE/anofox-forecast#282).
 
 `period` is an integer period index (a twin advancing by period); producers
 write `ds` instead when a calendar is configured. `level` is the interval's
@@ -52,9 +57,10 @@ names*), so outside tables plot without a reshaping step — this does not
 change contract version `1`. Nor do the readers for an interval held in one
 `[low, high]` column (`conf_int`, pingouin's `CI95%`), statsforecast's wide
 `<model>-lo-<L>` / `-hi-<L>` forecast, `level` 95 vs 0.95, the `period`
-x key and the `events` schema: all are additions (new optional columns, a
-new schema, more accepted spellings) and no column changed name, type or
-meaning, so the version stays `1`. A version bump is reserved for a renamed,
+x key, the `events` schema and the `decomposition` schema: all are
+additions (new optional columns, a new schema, more accepted spellings) and
+no column changed name, type or meaning, so the version stays `1`. A
+version bump is reserved for a renamed,
 re-typed or re-interpreted column.
 
 ## Model objects between extensions
