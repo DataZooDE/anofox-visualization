@@ -232,7 +232,8 @@ scale-location and residuals vs leverage (or Cook's distance).",
 unnested *_test_agg STRUCT): one row per test (test_id, else 'group1 vs group2', else the group / method), the \
 estimate with conf_low..conf_high when the test has one, else the statistic, else -log10(p), coloured by \
 significance at alpha, the (adjusted) p-value and stars beside each row. Several groups (id, model_id or the \
-GROUP BY column of an unnested aggregate) get one panel each. value := 'estimate' | 'statistic' | 'p' overrides \
+GROUP BY column of an unnested aggregate) get one panel each. Several methods (ADF and KPSS) get one panel per \
+method (own x, groups on a shared y) unless the axis is -log10(p). value := 'estimate' | 'statistic' | 'p' overrides \
 the measure. A column holding the aggregate's STRUCT or LIST is expanded: \
 SELECT anofox_plot_tests(s) FROM (SELECT tukey_hsd_agg(y, g) AS r FROM t) s.",
         example: "SELECT anofox_plot_tests(t) FROM (VALUES ('b-a', 'a', 'b', 1.2, 0.4, 2.0, 0.003), \

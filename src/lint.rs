@@ -930,6 +930,9 @@ where
                 .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
             {
                 diags.extend(summed_rate_diag(&p.roles, &rows, spec, stmt, &short));
+                diags.extend(totals_unknown_column_diag(
+                    &p.roles, &rows, spec, stmt, &short,
+                ));
             }
         }
 
@@ -1908,7 +1911,7 @@ fn summed_rate_diag(
     stmt: usize,
     short: &str,
 ) -> Option<Diagnostic> {
-    use crate::table::{human_header, parse_totals, profile_column, Cell, ColumnSpec};
+    use crate::table::{names_column, parse_totals, profile_column, Cell, ColumnSpec};
     let t = parse_totals(spec);
     if t.all.as_deref() != Some("sum") {
         return None;
@@ -1925,13 +1928,7 @@ fn summed_rate_diag(
             .find(|(j, r)| *j == i && crate::roles::is_table_format(*r))
             .map(|(_, r)| r.token())
     };
-    let named = |name: &str| {
-        let (a, b) = (name.to_lowercase(), human_header(name).to_lowercase());
-        t.col.iter().any(|(n, _)| {
-            let n = n.to_lowercase();
-            n == a || n == b
-        })
-    };
+    let named = |name: &str| t.col.iter().any(|(n, _)| names_column(name, n));
     let l = crate::format::Locale::default();
     let mut hits: Vec<String> = Vec::new();
     let mut k = 0usize; // visible position: the first column is the row key
@@ -1971,6 +1968,65 @@ fn summed_rate_diag(
             "::TOTALS '{spec}' sums every column, `{}` too — a rate or percentage does not \
              add up; give it its own total: '{first_hit}: none' (or mean)",
             hits.join("`, `")
+        ),
+        sql: short.to_string(),
+    })
+}
+
+/// `totals/unknown-column` (#228): a `::TOTALS 'name: agg'` entry that
+/// names no column of the next table (raw name or header, case-insensitive
+/// — the browser's `colNamed`): the browser and `--svg` skip it silently.
+/// With `,` separators a header holding a comma splits ('Customers per
+/// 10,000 people'): the note then says to use `;`.
+fn totals_unknown_column_diag(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+    spec: &str,
+    stmt: usize,
+    short: &str,
+) -> Option<Diagnostic> {
+    use crate::table::{names_column, parse_totals};
+    let t = parse_totals(spec);
+    let first = rows.first()?;
+    let skip = |i: usize| {
+        roles
+            .iter()
+            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Info))
+    };
+    let cols: Vec<&String> = first
+        .keys()
+        .enumerate()
+        .filter(|(i, _)| !skip(*i))
+        .map(|(_, k)| k)
+        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    for (n, _) in &t.col {
+        if !cols.iter().any(|c| names_column(c, n)) && !missing.contains(&n.as_str()) {
+            missing.push(n);
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    let mut list: Vec<String> = cols.iter().take(8).map(|c| format!("`{c}`")).collect();
+    if cols.len() > 8 {
+        list.push("…".into());
+    }
+    let comma = !spec.contains(';') && spec.contains(',') && cols.iter().any(|c| c.contains(','));
+    Some(Diagnostic {
+        severity: Severity::Note,
+        stmt,
+        code: "totals/unknown-column",
+        message: format!(
+            "::TOTALS '{spec}' names `{}` — no column of this table, so that entry is ignored; \
+             name a column by its raw name or its header (case-insensitive): {}{}",
+            missing.join("`, `"),
+            list.join(", "),
+            if comma {
+                " — a header here holds a comma: separate the entries with `;`"
+            } else {
+                ""
+            }
         ),
         sql: short.to_string(),
     })
@@ -3125,6 +3181,64 @@ mod design_tests {
                 "SELECT district::TABLE, \"Per 10k\" FROM t;",
                 plain
             )),
+            0
+        );
+    }
+
+    #[test]
+    fn totals_naming_no_column_are_noted() {
+        let n = |d: &[Diagnostic]| {
+            d.iter()
+                .filter(|x| x.code == "totals/unknown-column")
+                .count()
+        };
+        let d = lint_totals("peoples: sum; Per 10k: none", 1);
+        assert_eq!(n(&d), 1, "{d:?}");
+        let m = d
+            .iter()
+            .find(|x| x.code == "totals/unknown-column")
+            .unwrap();
+        assert!(
+            m.severity == Severity::Note
+                && m.message.contains("`peoples`")
+                && !m.message.contains("`;`"),
+            "{m:?}"
+        );
+        // raw names or headers, any case; bare values name nothing
+        for spec in [
+            "PEOPLE: sum; per 10K: none; On time: mean; district: count",
+            "sum",
+            "none",
+            "Per 10k: none; sum",
+        ] {
+            assert_eq!(n(&lint_totals(spec, 1)), 0, "{spec}");
+        }
+        // the value is for the next table only
+        assert_eq!(n(&lint_totals("peoples: sum", 2)), 1);
+        // a header holding a comma, split by ',': the note says to use ';'
+        let wide = rows(3, |i| {
+            json!({ "district": format!("D{i}"), "Customers per 10,000 people": 0.1 * i as f64,
+                    "people": 1000 + i })
+        });
+        let t = "SELECT district::TABLE, \"Customers per 10,000 people\", people FROM t;";
+        let lint = |spec: &str| {
+            let (wide, spec) = (wide.clone(), spec.to_string());
+            check(&format!("SELECT '{spec}'::TOTALS;\n{t}\n"), move |q| {
+                Ok(if q.contains("FROM t") {
+                    wide.clone()
+                } else {
+                    rows(1, |_| json!({ "c0": spec }))
+                })
+            })
+        };
+        let d = lint("Customers per 10,000 people: none, people: sum");
+        let m = d
+            .iter()
+            .find(|x| x.code == "totals/unknown-column")
+            .expect("note");
+        assert!(m.message.contains("`;`"), "{m:?}");
+        assert_eq!(
+            n(&lint("Customers per 10,000 people: none; people: sum")),
             0
         );
     }
