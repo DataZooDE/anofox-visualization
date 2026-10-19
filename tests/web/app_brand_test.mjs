@@ -113,7 +113,7 @@ assert.ok(/img\.alt = cfg\.name_visible \? "" : cfg\.name/.test(apply), "a wordm
 assert.ok(/createElement\("img"\)/.test(apply) && !/createElementNS|<svg/.test(apply), "the logo is an <img>");
 // the mandatory credits are not driven by the settings
 const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
-assert.ok(html.includes(">© DataZoo GmbH</a>"), "sidebar footer credit");
+assert.ok(!html.includes("© DataZoo GmbH"), "no company line in the sidebar footer");
 assert.ok(!/app(Brand|-brand)[\s\S]{0,40}side-foot/.test(apply), "footer untouched");
 
 process.stdout.write("app_brand_test: ok\n");
