@@ -1042,7 +1042,15 @@ fn route_serve(
             respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
             200
         }
-        Err(e) => reply(req, 400, &e),
+        Err(PageError::Viewer(e)) => reply(req, 400, &e),
+        Err(PageError::Server(e)) => {
+            eprintln!(
+                "[anofox-serve] dashboard '{}' failed: {}",
+                dash.id,
+                access::diag(&e)
+            );
+            reply(req, 400, PAGE_ERROR)
+        }
     }
 }
 
@@ -1171,6 +1179,35 @@ const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nod
 /// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
 /// external access disabled and the configuration locked after the
 /// server-declared `-- @load`s.
+type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
+
+/// Why the script-free page could not be drawn (#279). `Viewer` text is safe
+/// to show (no data, SQL or paths: a timeout, the row cap); `Server` text — a
+/// DuckDB error, which can quote file paths, SQL and values — goes to the
+/// server log only, and the viewer gets [`PAGE_ERROR`] (as the locked
+/// server does, duckext `POLICY_PANEL_ERROR`).
+enum PageError {
+    Viewer(String),
+    Server(String),
+}
+
+const PAGE_ERROR: &str = "this dashboard could not be shown (the server log has the details)";
+
+/// A `run_duckdb` error as a [`PageError`]: only its own timeout is shown.
+fn page_error(e: String) -> PageError {
+    if e.starts_with("query timed out after ") {
+        PageError::Viewer(e)
+    } else {
+        PageError::Server(e)
+    }
+}
+
+/// One read-only panel query → rows.
+fn page_rows(st: &ServeState, q: &str) -> Result<Rows, PageError> {
+    let json = run_duckdb(&st.db, &["-readonly", "-json"], q, st.timeout).map_err(page_error)?;
+    sql::parse_rows_json(json.trim()).map_err(PageError::Server)
+}
+
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1178,7 +1215,7 @@ fn render_dashboard_page(
     claims: Option<&Claims>,
     scope: Option<&Scope>,
     embed_link: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, PageError> {
     let value_of = |name: &str| -> String {
         resolved
             .iter()
@@ -1238,7 +1275,6 @@ fn render_dashboard_page(
 
     // Phase 1: query every panel (read-only) and collect the chrome
     // directives, so a ::THEME anywhere styles the whole page.
-    type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
     let mut chrome = DashboardChrome::default();
     let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
@@ -1287,8 +1323,7 @@ fn render_dashboard_page(
                 panel.sql.trim().trim_end_matches(';'),
                 st.max_rows
             );
-            let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
-            let rows: Rows = sql::parse_rows_json(json.trim())?;
+            let rows: Rows = page_rows(st, &q)?;
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
@@ -1325,13 +1360,12 @@ fn render_dashboard_page(
             panel.sql.trim().trim_end_matches(';'),
             st.max_rows + 1
         );
-        let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
-        let rows: Rows = sql::parse_rows_json(json.trim())?;
+        let rows: Rows = page_rows(st, &q)?;
         if rows.len() > st.max_rows {
-            return Err(format!(
+            return Err(PageError::Viewer(format!(
                 "a panel of '{}' returned more than {} rows",
                 dash.id, st.max_rows
-            ));
+            )));
         }
         if let Some(r) = chrome_role {
             let cell = |v: &serde_json::Value| match v {
@@ -1349,7 +1383,7 @@ fn render_dashboard_page(
         }
         queried.push((panel, rows, false));
     }
-    let set = chrome.resolve(theme_default())?;
+    let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
     let opts = RenderOptions {
         locale: t
@@ -1495,6 +1529,20 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_errors_show_only_safe_text() {
+        assert!(matches!(
+            page_error("query timed out after 30s".into()),
+            PageError::Viewer(_)
+        ));
+        assert!(matches!(
+            page_error(
+                "Catalog Error: Table with name secret does not exist!\nLINE 1: SELECT …".into()
+            ),
+            PageError::Server(_)
+        ));
+    }
 
     #[test]
     fn app_flag_errors_name_the_flag() {
