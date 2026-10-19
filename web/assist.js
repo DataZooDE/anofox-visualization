@@ -984,6 +984,7 @@ export function wasmTools({
   requireLocked = true,
   snapshot = new Map(),
   extensions = [],
+  __testing,
 }) {
   if (requireLocked && prepare) throw new Error("assistant tools: prepare is not allowed on the locked engine (#204)"); // M-1
   const PREPARE = requireLocked ? undefined : prepare;
@@ -1082,7 +1083,15 @@ export function wasmTools({
       const p = m[1].replace(/""/g, '"');
       return /^[a-z][a-z0-9+.-]*:\/\//i.test(p) ? "remote files are not available to the assistant" : `not in the assistant's snapshot: ${show(p)}`;
     }
-    m = /^IO Error: Cannot open file '((?:[^']|'')*)' with VSI prefix/.exec(line) || /^IO Error: Could not open GDAL dataset at: (.*)$/.exec(line);
+    // sec-review-256 Info: GDAL/spatial's two file-open failure shapes.
+    // The VSI-prefixed form (ST_Read('/vsicurl/http://…')) is a Permission
+    // Error (single-quoted path), verified against DuckDB 1.5.6 + spatial
+    // — the plan's draft assumed "IO Error", which never matched and left
+    // this branch dead code (harmless: the message just fell through to
+    // quietError's generic "withheld", never leaked anything). The
+    // non-prefixed form (ST_Read('http://…')) really is an IO Error and
+    // already matched.
+    m = /^Permission Error: Cannot open file '((?:[^']|'')*)' with VSI prefix/.exec(line) || /^IO Error: Could not open GDAL dataset at: (.*)$/.exec(line);
     if (m) return `not available to the assistant: ${show(m[1].replace(/''/g, "'"))}`;
     // DuckDB's own catalog lookup names the providing extension directly
     // for a function it knows about (a bundled/official extension, e.g.
@@ -1253,7 +1262,14 @@ export function wasmTools({
       return async (sql) => {
         await locked();
         const names = await catalogNames();
-        return scratchRunner(db, { timeoutMs: checkQueryMs, guard: guardFor(allowed, names) })(sql);
+        // plan-204 §5.3 step 8 / sec-review-256 L-3: a test-only gate
+        // bypass, admitting everything — proves H-1 *structurally* (the
+        // engine still has no network or file access: the lock is the
+        // control), independent of whatever the classifier/parse-tree
+        // guard would also have caught. Never referenced by app.js or any
+        // other assist*.js module (a static grep test).
+        const guard = __testing?.admitAll ? async () => {} : guardFor(allowed, names);
+        return scratchRunner(db, { timeoutMs: checkQueryMs, guard })(sql);
       };
     },
   };

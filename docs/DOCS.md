@@ -2864,7 +2864,12 @@ user applies it:
   fixed set loaded before the lock. This holds independent of any
   function-name list — it is enforced by DuckDB's own
   `enable_external_access=false` + `lock_configuration=true`, re-checked
-  before every call.
+  before every call. `allowed_paths`' exact-name allow-list grants a
+  **write**, not just a read, to that one name — `COPY … TO` an allowed
+  path overwrites the engine's own in-memory copy of that file, never the
+  page's; the write gate (classifying `COPY` as a statement that needs the
+  user's confirmation) is what actually keeps the model from doing this on
+  its own, the lock is the backstop.
 - **The tab's Content-Security-Policy.** Static hosting sends no headers,
   so the app inserts a `<meta>` CSP: at boot, whenever a browser-stored API
   key is present (it then holds across reloads), and whenever the
