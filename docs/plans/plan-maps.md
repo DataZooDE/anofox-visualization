@@ -472,11 +472,9 @@ Lint rules (namespace `map/*`):
 | **M1a: own map writer** | `src/map/` (model, projections, fit, pixel simplification, evenodd paths, themed colours, classes, stepped/gradient legends, no-data hatch, #147 attributes + `data-x`/`data-class`/`data-proj`, row order); `PROJECTION`, `CLASSES`, `MIDPOINT`, `RANGE` on maps; `map_bounds` in projected units; map a11y summary + as-tables; lint `map/*` (first five) | **L**: ~1,400 Rust lines incl. tests, ~120 JS, ≈ 1.5 wk | Render regression for every projection × class method × light/dark; projection points vs PROJ constants; Jenks against a published dataset; #147's map tests unchanged and green; the existing examples render identically in structure; wasm Δ ≤ 150 KB |
 | **M1b: boundaries, codes, labels** | `scripts/build-boundaries.sh`, `web/data/boundaries/*` + `SOURCES.md`; `register_boundaries` + lazy fetch; native embed; `REGION`, `LAT`/`LON`, `BOUNDARIES`, pack `::BASEMAP`; polylabel + collision labels with halo; scale bar; attribution; gallery Map tab off jsdelivr | **M–L**: ~900 Rust, ~100 JS, ≈ 1–1.5 wk | Pack integrity test (each layer parses, codes unique, the 16/400 counts, attribution present); code-detection unit tests; e2e: offline (network blocked except same origin), axe, phone width |
 | **M1c: showcase + example upgrades** | "Where do our deliveries and customers cluster, and which regions are underserved?" (§10); `optimize-delivery` gets the themed look (`'none'` projection auto-detected) | **S–M** | `dashboard --check --strict` green; showcase e2e |
-| **M2: types** | graduated symbols + size legend; flows (+ supply-chain flow tab: retailer → DC → factory → supplier); hexbin; bivariate | **M–L**: ~900 Rust, ~80 JS, ≈ 1.5 wk | Render regression per type and theme; flow direction separation test; hex area equality under Equal Earth; e2e on the supply-chain tab |
-| **M3: motion and more** | `FRAME` player (Rust frames + `anim.js`), `FACET` grids, tooltip sparklines, opt-in tiles (+ #146 setting, validation, lint), zoom tools (double-click to feature, fit to selection, reset button, "locate" region search) | **L**: ~600 Rust, ~450 JS, ≈ 2 wk | e2e: play/pause/slider keyed tween, reduced motion; tiles absent from export; setting validation tests; a11y of the player controls |
+| **M2 and M3** | See §15's M2a–M2f table (graduated symbols, flows, density, bivariate, time maps) and its M3 outline (facets, tooltip sparklines, opt-in tiles, zoom tools). | — | — |
 
-**Total:** about 5.5–6.5 weeks. M1a and M1b can go in parallel once the
-`src/map/` model types are merged.
+**Total:** M1 was about 4–4.5 weeks; see §15 for M2's and M3's.
 
 ## 10. Showcase
 
@@ -561,3 +559,41 @@ The owner approved the plan. Every decision in §12 takes its recommendation, an
 7. **Mark cap:** a render warning above 100k marks, with the aggregation hint. The panel is not refused.
 8. **Labels:** built-in boundaries use the dashboard locale (`NAME_DE`/`NAME_EN`) when available, and `::LABEL` from the data always wins.
 9. **Tiles:** stay opt-in, per installation, raster and browser only.
+
+## 15. M2 decisions (2026-10-19)
+
+Settled against `docs/plans/plan-maps-m2.md` §1. The owner went with every recommendation.
+
+| # | Decision | Taken |
+|---|---|---|
+| D1 | Time maps (`::FRAME`), owner-scoped into M2 vs. plan §9/issue's M3. | Moved into M2, as the last two PRs: M2e (Rust) and M2f (browser player). M3 keeps facets, tooltip sparklines, tiles and zoom tools. |
+| D2 | Category of `::ORIGIN`/`::DEST`. | "chart" — like `::REGION`/`::LAT`/`::LON`, either one makes the statement a map. |
+| D3 | `::SIZE` next to a measure on a `::REGION` map. | Draws symbols at each region's pole of inaccessibility, coloured by the measure; the regions become the backdrop. One statement is one layer — no choropleth plus symbols. |
+| D4 | Backdrop for symbol maps (and flow maps, M2b) built from region codes. | Automatic: the whole matched layer (Antarctica excluded) when there is no `::BASEMAP`. Not used for fitting — the map fits to the drawn rows. An explicit `::BASEMAP` keeps today's behaviour (fitted too). |
+| D5 | Draw order of symbols and flows. | Largest first (the one place a map breaks row order for these two types; `data-row` still holds the row). |
+| D6 | Flow arc shape (M2b). | A quadratic curve bending right of the direction of travel, control point 0.2× length from the chord; arrowhead at 85 % of the path; 1.5 px wide with no `::SIZE`. |
+| D7 | Hexbin `'auto'` size (M2c). | `nice_floor(longer side of the unzoomed projected data box / 40)` — a nice 1/2/2.5/5 × 10ⁿ metres value; depends on the data only, so zoom and export widths never re-bin. |
+| D8 | Hexbin aggregate (M2c). | Sum of the measure, else a count of rows. No mean in M2. |
+| D9 | h3 in the showcase (M2c). | Docs only — loading the community h3 extension in the browser fetches from an outside host, breaking offline use and the locked server. |
+| D10 | Bivariate palette (M2d). | Derived from the theme: multiply-blend tints of `palette[0]` × `palette[1]`, lifted over the card colour in dark; a test asserts the 9 cells stay distinguishable in every theme. |
+| D11 | Frame order (M2e). | Numeric/date keys sort ascending; text keys keep SQL order of first appearance. |
+| D12 | Headless output / HTML export under `::FRAME` (M2e). | The last frame; the export keeps the player. |
+| D13 | Duplicate (feature, frame) rows (M2e). | First row wins, plus lint `map/frame-duplicate`. |
+| D14 | Frame player under `prefers-reduced-motion` (M2f). | Play stays available; changes are instant (no tween), stepping every 1.5 s; never autoplays. |
+| D15 | Frame caps (M2e). | Lint above 200 frames; the renderer keeps the last frames that fit within 100,000 feature × frame cells and warns. |
+| D16 | Frame index in the URL. | Not in M2 — it persists per statement across re-runs, like `::STORY`. An M3 candidate. |
+| D17 | Supply-chain flow tab (M2b). | Fictional sites (Supplier Chemnitz, Factory Stuttgart, DC Kassel, Retailer Hamburg); goods downstream and orders upstream (`'flow'::LINESTYLE`), width = peak weekly quantity, so the bullwhip shows as order arcs widening upstream. |
+| D18 | Merge order. | Sequential: M2a → b → c → d → e → f. All touch `src/map/mod.rs`, `roles.rs`, the DOCS role table and SKILL.md — rebase after each merge. |
+
+This replaces the §9 "M2: types" and "M3" rows:
+
+| PR | Scope | Size | Tests / exit |
+|---|---|---|---|
+| **M2a: graduated symbols** | `::SIZE` on maps: area-scaled symbols (largest first), a stacked size legend, the automatic region backdrop (D4), and the `map_diags` early-return fix (`::PROJECTION`/`::CLASSES`/too-many-marks now checked on `::REGION`/`::LAT`/`::LON` too) | **S–M**: ~700 Rust, ~15 JS, ≈ 1.5 days | Render regression (area ratio, draw order, pole anchoring, size legend, light/dark/colourblind, `data-fvalue` written once); new lint tests; release perf budget |
+| **M2b: flow maps** | `::ORIGIN`/`::DEST`, bending arcs with arrowheads, a width legend, `'flow'::LINESTYLE`, the supply-chain flow tab (D17) | **L**: ~900 Rust, ~40 JS, ≈ 2 days | Arc-separation, end parsing (codes/points/structs), width legend, lint; e2e on both example tabs |
+| **M2c: density** | `::HEXBIN` equal-area binning, sum/count, classes, the showcase `::VIEW` switcher | **M**: ~500 Rust, ≈ 1.5 days | Equal-area check under Equal Earth, zoom stability, lint; e2e view switch |
+| **M2d: bivariate choropleth** | `::BIVARIATE` tertile palette (theme-derived, D10), 3×3 legend | **S–M**: ~400 Rust, ≈ 1 day | 9-colour distinguishability (CIE76 ΔE) per theme, legend counts |
+| **M2e: time maps (renderer)** | `::FRAME` grouping into features × frames, shared scales, last-frame static output, `data-fv` tuples, caps (D15) | **L**: ~700 Rust, ≈ 2 days | Frame order/duplicates/caps, per-type tuple shapes |
+| **M2f: time maps (player)** | `web/anim.js` frame bar (play/pause/step/slider), reduced-motion behaviour (D14), export keeps the last frame | **M**: ~450 JS, ≈ 1.5–2 days | Keyed tween, reduced motion, export snapshot |
+
+**Total:** about 9.5–10 working days across six PRs, sequential (D18). M3 (facets, tooltip sparklines, opt-in tiles with a security review, zoom tools) gets its own issues once M2f merges.
