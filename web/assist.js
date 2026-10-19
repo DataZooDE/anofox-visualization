@@ -968,24 +968,35 @@ async function checkProposal(input, tools, signal) {
 // so the model knows what it's seeing is partial. `extensions` is the
 // engine's actually-loaded set (buildEngine's `extensions`), used only to
 // phrase a clean "not in the assistant's engine: <ext>" error.
-export function wasmTools({
-  db,
-  prepare,
-  lintStep,
-  plan,
-  pageSql,
-  known = new Set(),
-  commonValues = () => true,
-  sampleRows = () => false,
-  timeoutMs = LIMITS.timeoutMs,
-  checkQueryMs = LIMITS.checkQueryMs,
-  checkMs = LIMITS.checkMs,
-  profiles = new Map(),
-  requireLocked = true,
-  snapshot = new Map(),
-  extensions = [],
-  __testing,
-}) {
+export function wasmTools(opts) {
+  // sec-review-256 R-1: destructuring an options object reads *inherited*
+  // properties too (`{requireLocked = true} = opts` falls back to the
+  // default only when `opts.requireLocked` is `undefined` — a property
+  // *lookup*, which walks the prototype chain). A `Object.prototype`
+  // pollution bug anywhere on the page (nothing known today; M1-3 will add
+  // more JSON handling) could set `Object.prototype.requireLocked = false`
+  // and switch the lock check off for every call, with no caller ever
+  // passing that option. Copying into a null-prototype object first means
+  // every read below is an *own*-property read: a key `opts` doesn't carry
+  // itself is `undefined`, full stop, never inherited.
+  const o = Object.assign(Object.create(null), opts);
+  const {
+    db,
+    prepare,
+    lintStep,
+    plan,
+    pageSql,
+    known = new Set(),
+    commonValues = () => true,
+    sampleRows = () => false,
+    timeoutMs = LIMITS.timeoutMs,
+    checkQueryMs = LIMITS.checkQueryMs,
+    checkMs = LIMITS.checkMs,
+    profiles = new Map(),
+    requireLocked = true,
+    snapshot = new Map(),
+    extensions = [],
+  } = o;
   if (requireLocked && prepare) throw new Error("assistant tools: prepare is not allowed on the locked engine (#204)"); // M-1
   const PREPARE = requireLocked ? undefined : prepare;
   // The per-call re-check (§2.4): one cheap query before every tool call and
@@ -1262,14 +1273,7 @@ export function wasmTools({
       return async (sql) => {
         await locked();
         const names = await catalogNames();
-        // plan-204 §5.3 step 8 / sec-review-256 L-3: a test-only gate
-        // bypass, admitting everything — proves H-1 *structurally* (the
-        // engine still has no network or file access: the lock is the
-        // control), independent of whatever the classifier/parse-tree
-        // guard would also have caught. Never referenced by app.js or any
-        // other assist*.js module (a static grep test).
-        const guard = __testing?.admitAll ? async () => {} : guardFor(allowed, names);
-        return scratchRunner(db, { timeoutMs: checkQueryMs, guard })(sql);
+        return scratchRunner(db, { timeoutMs: checkQueryMs, guard: guardFor(allowed, names) })(sql);
       };
     },
   };

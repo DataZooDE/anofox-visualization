@@ -495,7 +495,16 @@ export async function engineLocked(db) {
 // H-1 preview fixture need an unlocked engine to show the CSP alone is not
 // enough; app.js and assist*.js never import `__testing` and never pass
 // `lock:` — a static grep test).
-export async function buildEngine({ makeDb, page, extensions = [], files = [], limits = SNAPSHOT_LIMITS, doc = globalThis.document, signal, onProgress, lock = true }) {
+export async function buildEngine(opts) {
+  // sec-review-256 R-1: the same null-prototype copy as wasmTools, for the
+  // same reason — `{lock = true} = opts` would fall back to an inherited
+  // `Object.prototype.lock` instead of the default if that property were
+  // ever polluted, silently skipping the lock for every caller that didn't
+  // pass `lock` itself (which in shipped code is every caller but
+  // `__testing.unlocked` below, which always sets its own `lock: false`
+  // as an own property regardless).
+  const o = Object.assign(Object.create(null), opts);
+  const { makeDb, page, extensions = [], files = [], limits = SNAPSHOT_LIMITS, doc = globalThis.document, signal, onProgress, lock = true } = o;
   if (doc) await assistCspProven(doc); // L-4: rejects unless enforcement was proven
   const db = await makeDb();
   try {
