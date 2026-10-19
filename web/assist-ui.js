@@ -835,6 +835,15 @@ export function mountAssistant(hostArg) {
   }
 
   // ---- the engine (per-request, fingerprinted) ----
+  // A build in flight for the engine's current generation (keyed by `fp`):
+  // a second call that lands while one is still running (e.g. the lock
+  // re-check/profile step of one send overlapping the next, or two rapid
+  // Sends) awaits the same promise instead of racing a second
+  // close()+rebuild against the first — closing an engine that the other
+  // call is still mid-build with would leak its Worker and could leave
+  // `S.engine` pointing at a terminated instance.
+  let engineBuildFp = null,
+    engineBuildP = null;
   async function ensureEngine(signal) {
     if (host.preview.active()) await host.preview.exit({ rerun: true });
     await host.deps.prepareFiles();
@@ -842,17 +851,27 @@ export function mountAssistant(hostArg) {
     const files = host.deps.files();
     const fp = await pageFingerprint(host.deps.page, { extensions: ext, files });
     if (fp === S.engineFp && S.engine) return S.engine;
-    S.engine?.close();
-    S.profiles = new Map();
+    if (engineBuildP && engineBuildFp === fp) return engineBuildP;
+    engineBuildFp = fp;
+    engineBuildP = (async () => {
+      S.engine?.close();
+      S.profiles = new Map();
+      try {
+        S.engine = await buildEngine({ makeDb: host.deps.makeDb, page: host.deps.page, extensions: ext, files, signal, onProgress: ({ fq }) => setStatus({ phase: "engine", fq }) });
+      } catch (e) {
+        S.engine = null;
+        S.engineFp = null;
+        throw new Error(`The assistant could not prepare its copy of your data: ${e?.message || e}`);
+      }
+      S.engineFp = fp;
+      return S.engine;
+    })();
     try {
-      S.engine = await buildEngine({ makeDb: host.deps.makeDb, page: host.deps.page, extensions: ext, files, signal, onProgress: ({ fq }) => setStatus({ phase: "engine", fq }) });
-    } catch (e) {
-      S.engine = null;
-      S.engineFp = null;
-      throw new Error(`The assistant could not prepare its copy of your data: ${e?.message || e}`);
+      return await engineBuildP;
+    } finally {
+      engineBuildP = null;
+      engineBuildFp = null;
     }
-    S.engineFp = fp;
-    return S.engine;
   }
   function makeTools(engine, editorSql) {
     return wasmTools({
@@ -1233,6 +1252,15 @@ export function mountAssistant(hostArg) {
   host.onPreviewExit(() => {
     if (el.previewBtn) el.previewBtn.hidden = !S.proposal;
   });
+
+  // The preview bar's own three buttons (§5.1, static markup in
+  // index.html — present and wired at mount, never shown before this).
+  const previewBarDiff = doc.getElementById("preview-diff");
+  const previewBarDiscard = doc.getElementById("preview-discard");
+  const previewBarApply = doc.getElementById("preview-apply");
+  if (previewBarDiff) previewBarDiff.onclick = () => diffDialog();
+  if (previewBarDiscard) previewBarDiscard.onclick = () => discard();
+  if (previewBarApply) previewBarApply.onclick = () => apply();
 
   if (typeof matchMedia === "function") {
     matchMedia(SIDE_DRAWER).addEventListener?.("change", () => {
