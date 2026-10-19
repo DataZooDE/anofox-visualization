@@ -2,6 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- #204: a static baseline, present on every page regardless of the
+     assistant — no script-src (serve injects inline <script>s: duckext/src/serve.rs,
+     src/host/app_brand.rs, src/bin/serve.rs — this must never block them)
+     and this template declares no base-setting element, so injecting one
+     can't move where localext or any other relative fetch resolves before
+     the assistant's own ratchet (web/assist-csp.js) ever runs. -->
+<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>anofox-visualization — Dashboards from SQL</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">

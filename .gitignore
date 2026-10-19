@@ -12,6 +12,7 @@
 /dist
 /.cache
 /web/app-config.json
+/web/__e2e__
 __pycache__/
 
 # EU NUTS layers a user fetches for themselves (scripts/fetch-nuts.sh): never committed

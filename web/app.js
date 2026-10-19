@@ -27,6 +27,12 @@ import init, {
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
 import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from "./lint.js";
+// #204: the tab-wide CSP (whenever an assistant key is stored) and the
+// groundwork for the assistant's own locked DuckDB-Wasm instance
+// (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
+import { applyAssistCsp } from "./assist-csp.js";
+import { engineExtensions, pageAdapter } from "./assist-engine.js";
+import { keyStore, rememberAllowed } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1317,6 +1323,14 @@ async function servedRequest(sql, page, kind, at) {
   }
 }
 let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
+// #204: the imported DuckDB-Wasm module and the bundle boot() selected, kept
+// so assistDeps()'s makeDb can build a *second* AsyncDuckDB (the assistant
+// engine) without a second `import()` — I-4: nothing may import DuckDB-Wasm
+// again after the CSP ratchet; `+esm` imports apache-arrow outside the
+// script-src path, which is only safe at boot.
+let duckdbMod = null,
+  duckdbBundle = null;
+let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(), for assistDeps()'s imgOrigins
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1365,7 +1379,10 @@ async function ensureExtension(name) {
       } catch (_) {
         /* usually bundled */
       }
-      const repo = new URL("localext", document.baseURI).href.replace(/\/$/, "");
+      // L-3 (#204): import.meta.url, never document.baseURI — a <base>
+      // injection (or a sibling repo on the shared github.io origin) must
+      // not move where unsigned anofox extensions come from.
+      const repo = new URL("localext", import.meta.url).href.replace(/\/$/, "");
       await conn.query(`SET custom_extension_repository='${repo}';`);
       try {
         await conn.query(`INSTALL ${name};`);
@@ -1518,19 +1535,55 @@ async function runSqlInner(sql, page, kind, setup, at) {
   return rowsJson(await conn.query(sql));
 }
 
+// The anofox/spatial extensions a statement's text needs (#204 M-1: used
+// both by prepareSql, over whatever SQL is about to run on the page, and by
+// assistDeps() below, over the *editor*'s own text only — never the
+// model's — to fix the assistant engine's extension set before it is
+// built and locked).
+function neededExtensions(sql) {
+  const code = sqlCode(sql);
+  const out = [];
+  if (/\bST_Read\b|\bspatial\b/i.test(code)) out.push("spatial");
+  if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) out.push("anofox_forecast");
+  if (STATS_RE.test(code)) out.push("anofox_statistics");
+  return out;
+}
+
 // What a statement needs in DuckDB-Wasm before it runs: the map files, an
 // anofox extension, the forecast parquet, the stored data files (each a no-op
 // on a live backend).
 async function prepareSql(sql) {
-  const code = sqlCode(sql); // (the data/… file check below reads the strings)
-  if (/\bST_Read\b|\bspatial\b/i.test(code)) await ensureGeo();
-  if (/\bts_\w+\b|\banofox_forecast\b/i.test(code) || /m5_monthly/i.test(sql)) await ensureForecast(sql);
-  if (STATS_RE.test(code)) await ensureExtension("anofox_statistics");
+  const need = neededExtensions(sql);
+  if (need.includes("spatial")) await ensureGeo();
+  if (need.includes("anofox_forecast")) await ensureForecast(sql);
+  if (need.includes("anofox_statistics")) await ensureExtension("anofox_statistics");
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
 }
 
+// #204: what M1-3 (#244) needs to build the assistant engine — not wired to
+// anything yet, and not on `window` (a static grep test,
+// tests/web/assist_engine_test.mjs item 12): the module that opens the
+// panel imports this directly. `null` on a live backend, on a served page,
+// or before DuckDB-Wasm itself has booted.
+function assistDeps() {
+  if (backend === "live" || servedMode || !duckdbMod) return null;
+  return {
+    makeDb: async () => {
+      const url = URL.createObjectURL(new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" }));
+      const d = new duckdbMod.AsyncDuckDB(new duckdbMod.VoidLogger(), new Worker(url)); // created after the ratchet → inherits it
+      await d.instantiate(duckdbBundle.mainModule, duckdbBundle.pthreadWorker);
+      URL.revokeObjectURL(url);
+      return d;
+    },
+    page: pageAdapter(db, { handles: xpHandles }),
+    extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions($("sql").value) }),
+    prepareFiles: () => ensureDataFiles($("sql").value), // editor text only — never the model's
+    imgOrigins: async () => brandImgOrigins(await appBrandReady),
+  };
+}
+
 async function boot() {
-  appBrandLoad(); // the app bar (in parallel; the bar shows when it's known)
+  appBrandReady = appBrandLoad(); // the app bar (in parallel; the bar shows when it's known) — #204: kept, for the CSP's imgOrigins
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
   const sideVer = document.getElementById("side-ver");
   if (sideVer) sideVer.textContent = wasmVersion(); // "v2026.10.18" or "v2026.10.18+37 · 739aba4" (#216)
@@ -1546,13 +1599,13 @@ async function boot() {
     } catch (_) {}
 
   if (backend !== "live") {
-    const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm");
-    const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+    duckdbMod = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm");
+    duckdbBundle = await duckdbMod.selectBundle(duckdbMod.getJsDelivrBundles());
     const workerUrl = URL.createObjectURL(
-      new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+      new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" })
     );
-    db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), new Worker(workerUrl));
-    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    db = new duckdbMod.AsyncDuckDB(new duckdbMod.ConsoleLogger(), new Worker(workerUrl));
+    await db.instantiate(duckdbBundle.mainModule, duckdbBundle.pthreadWorker);
     // Allow unsigned extensions: the anofox wasm extensions are served from
     // web/localext/ (fixed copies of the get.erpl.io builds — see
     // scripts/fetch-wasm-extensions.sh).
@@ -1570,6 +1623,29 @@ async function boot() {
         await conn.query(pragma);
       } catch (_) {
         /* option not available on this build */
+      }
+    }
+  }
+
+  // #204 (M-2, D1): the tab-wide CSP, applied at boot whenever a key is
+  // already stored — it then holds across reloads, closing the window
+  // (R4/M-2) where a reloaded tab would otherwise hold the key with no CSP.
+  // Nothing attacker-influenced has run yet: wasm init, the /query probe,
+  // the DuckDB import and Worker above are the app's own code only, so the
+  // page's DuckDB Worker (which keeps its network, R1) predates the ratchet
+  // and every later Worker (the assistant engine's, once M1-3/#244 builds
+  // one) inherits it. `rememberAllowed()` with no config yet available here
+  // defaults to "not allowed" (L-R2-1: opt-in, read from app-config.json's
+  // `assistant.remember` once M1-3 wires that block in) — safe either way,
+  // since it only controls whether a stray localStorage key gets demoted to
+  // sessionStorage, never whether the ratchet itself runs.
+  {
+    const ks = keyStore(sessionStorage, localStorage, { remember: rememberAllowed(location.hostname) });
+    if (ks.get()) {
+      try {
+        await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+      } catch (_) {
+        ks.clear(); // not enforceable here: fail closed — drop the key, the assistant won't open either
       }
     }
   }
@@ -3653,6 +3729,10 @@ const xpState = {
   ctok: 0, // the comparison in progress
   checks: new Map(), // "fq|column|hint" -> the anofox_tabular check result
 };
+// #204: explore/<name> -> the File handle registerFileHandle() used, kept
+// so the assistant engine's file snapshot (web/assist-engine.js pageAdapter)
+// can register the same file with its own instance with no copy.
+const xpHandles = new Map();
 const lsGet = (k, d) => {
   try {
     const v = localStorage.getItem(k);
@@ -3858,6 +3938,7 @@ async function xpAddFiles(files) {
       catMsg(`Reading ${f.name}…`);
       try {
         await db.registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
+        xpHandles.set(path, f); // #204: the assistant engine registers this handle directly
       } catch (_) {
         await db.registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
       }
@@ -10809,7 +10890,24 @@ async function appBrandLoad() {
       clearTimeout(timer);
     }
   }
-  appBrandApply(appBrandMerge(file, window.__anofoxApp));
+  const cfg = appBrandMerge(file, window.__anofoxApp);
+  appBrandApply(cfg);
+  return cfg; // #204: boot() keeps this as appBrandReady, for the CSP's imgOrigins
+}
+// #204: the https: origins (I-R2-3(a): the exact logo/favicon URL, narrower
+// than the whole origin) the installation's brand config needs img-src for
+// — never from the URL or the SQL, only from the merged app-config.json /
+// window.__anofoxApp brand config appBrandLoad() already validated.
+function brandImgOrigins(cfg) {
+  const out = [];
+  for (const u of [cfg?.logo, cfg?.favicon]) {
+    if (typeof u !== "string" || !/^https:\/\//i.test(u)) continue;
+    try {
+      const x = new URL(u);
+      out.push(x.origin + x.pathname);
+    } catch (_) {}
+  }
+  return out;
 }
 // An image URL ::LOGO / ::FAVICON accept — the rules of safe_url in
 // src/theme.rs (lint chrome/bad-url): relative, http(s): or data:image/, no
