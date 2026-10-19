@@ -32,7 +32,7 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
 import { engineExtensions, pageAdapter } from "./assist-engine.js";
-import { keyStore, rememberAllowed } from "./assist.js";
+import { KEY_SLOT, keyStore, rememberAllowed } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1331,6 +1331,14 @@ let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 let duckdbMod = null,
   duckdbBundle = null;
 let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(), for assistDeps()'s imgOrigins
+// sec-review-256 L-2: the installation's own opt-in (app-config.json's/
+// window.__anofoxApp's `assistant.remember: true`), read alongside the
+// brand config in appBrandLoad() (not part of appBrandMerge's brand-only
+// keys) and passed into rememberAllowed() at boot — without this, the
+// ratchet (M-2's keyStore construction) demoted every remembered key on
+// every boot, even on an installation that opted in on its own,
+// non-shared domain.
+let assistantRememberOptIn = false;
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1634,18 +1642,29 @@ async function boot() {
   // the DuckDB import and Worker above are the app's own code only, so the
   // page's DuckDB Worker (which keeps its network, R1) predates the ratchet
   // and every later Worker (the assistant engine's, once M1-3/#244 builds
-  // one) inherits it. `rememberAllowed()` with no config yet available here
-  // defaults to "not allowed" (L-R2-1: opt-in, read from app-config.json's
-  // `assistant.remember` once M1-3 wires that block in) — safe either way,
-  // since it only controls whether a stray localStorage key gets demoted to
-  // sessionStorage, never whether the ratchet itself runs.
+  // one) inherits it.
   {
-    const ks = keyStore(sessionStorage, localStorage, { remember: rememberAllowed(location.hostname) });
-    if (ks.get()) {
-      try {
-        await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
-      } catch (_) {
-        ks.clear(); // not enforceable here: fail closed — drop the key, the assistant won't open either
+    // A cheap presence check first (no boot ever waits on appBrandReady
+    // just to find there was no key) — real reads go through keyStore.
+    let hasKey = false;
+    try {
+      hasKey = !!(sessionStorage.getItem(KEY_SLOT) || localStorage.getItem(KEY_SLOT));
+    } catch (_) {}
+    if (hasKey) {
+      // sec-review-256 L-2: await appBrandReady here — assistantRememberOptIn
+      // is set as a side effect of appBrandLoad() reading app-config.json/
+      // window.__anofoxApp, so rememberAllowed() must see it, not the
+      // construction-time default (L-R2-1: opt-in, off unless the
+      // installation's own config says so; always off on a shared host
+      // regardless of the opt-in). Only paid when a key actually exists.
+      const brandCfg = await appBrandReady;
+      const ks = keyStore(sessionStorage, localStorage, { remember: rememberAllowed(location.hostname, assistantRememberOptIn) });
+      if (ks.get()) {
+        try {
+          await applyAssistCsp(document, { imgOrigins: brandImgOrigins(brandCfg) });
+        } catch (_) {
+          ks.clear(); // not enforceable here: fail closed — drop the key, the assistant won't open either
+        }
       }
     }
   }
@@ -10892,6 +10911,12 @@ async function appBrandLoad() {
   }
   const cfg = appBrandMerge(file, window.__anofoxApp);
   appBrandApply(cfg);
+  // sec-review-256 L-2: window.__anofoxApp (the serving process) wins over
+  // app-config.json (static hosting), the same "later wins" order
+  // appBrandMerge uses — but only when it actually says something: an
+  // installation that configures the opt-in only in app-config.json must
+  // not be overridden by an absent `assistant` key from the server layer.
+  assistantRememberOptIn = (window.__anofoxApp?.assistant?.remember ?? file?.assistant?.remember) === true;
   return cfg; // #204: boot() keeps this as appBrandReady, for the CSP's imgOrigins
 }
 // #204: the https: origins (I-R2-3(a): the exact logo/favicon URL, narrower
