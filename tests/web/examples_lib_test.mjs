@@ -276,4 +276,22 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   assert.deepEqual(JSON.parse(wasm.map_layers(JSON.stringify([{ c0: 52.5, c1: 13.4, c2: "world" }]), bm)), ["world"]);
 }
 
+// M2a: a LAT/LON + ::SIZE panel draws graduated symbols with data-size /
+// data-fsize (no Role::Value column, so render_panel writes data-fvalue too).
+{
+  const rows = JSON.stringify([
+    { c0: 50.0, c1: 10.0, c2: 100 },
+    { c0: 51.0, c1: 10.0, c2: 10 },
+  ]);
+  const roles = JSON.stringify([
+    [0, "LAT"],
+    [1, "LON"],
+    [2, "SIZE"],
+  ]);
+  const svg = wasm.render_panel(rows, roles, 460, 300, "", "");
+  assert.match(svg, /<circle [^>]*data-size="100"/);
+  assert.match(svg, /<circle [^>]*data-fsize="[^"]*"/);
+  assert.match(svg, /<circle [^>]*data-fvalue="[^"]*"/);
+}
+
 console.log(`examples_lib_test: ok (${EXAMPLES.length} examples in ${exampleAreas(EXAMPLES).length} areas)`);

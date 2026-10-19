@@ -891,3 +891,170 @@ fn an_xaxis_keys_the_features_for_a_story() {
     assert_eq!(xs, [Some("0"), Some("1"), Some("1")]);
     assert!(root(&s).contains("data-story="), "{}", root(&s));
 }
+
+// ── M2a: graduated symbols, size legend, stacked legend ───────────────────
+
+#[test]
+fn symbols_are_sized_by_area_and_drawn_largest_first() {
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0, 52.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[100.0, 25.0, 400.0])),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 3);
+    // largest first (D5); data-row keeps the original row index
+    let rows: Vec<&str> = f.iter().map(|t| attr(t, "data-row").unwrap()).collect();
+    assert_eq!(rows, ["2", "0", "1"]);
+    let r: Vec<f64> = f
+        .iter()
+        .map(|t| attr(t, "r").unwrap().parse::<f64>().unwrap())
+        .collect();
+    assert!(r[0] > r[1] && r[1] > r[2], "{r:?}");
+    // area (not radius) is proportional to the value
+    assert!(
+        (r[0] / r[1] - (400.0_f64 / 100.0).sqrt()).abs() < 0.05,
+        "{r:?}"
+    );
+    assert!(f[0].starts_with("<circle"));
+    assert!(f[0].contains(" data-size=\"400\""));
+    assert!(f[0].contains(" data-fsize=\""));
+}
+
+#[test]
+fn symbols_on_regions_sit_at_the_pole_over_the_layer() {
+    let all = &[
+        "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW",
+        "DE-RP", "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH",
+    ];
+    let vals: Vec<f64> = (1..=16).map(f64::from).collect();
+    let s = svg(vec![codes(all), Column::new("n", Role::Size, nums(&vals))]);
+    // D4: the whole de-states layer is the (unfitted) backdrop, not the
+    // rows' own regions — with every state as a row, it's also the extent
+    let base = &s[s.find("class=\"dp-basemap\"").unwrap()..];
+    let base = &base[..base.find("</g>").unwrap()];
+    assert_eq!(base.matches("<path ").count(), 16, "{base}");
+    let f = features(&s);
+    assert_eq!(f.len(), 16);
+    assert!(f.iter().all(|t| t.starts_with("<circle")));
+    // Bayern (the largest value, 16) sits over the layer, inside its own bbox
+    let bayern = f.iter().find(|t| attr(t, "data-row") == Some("1")).unwrap();
+    let (cx, cy): (f64, f64) = (
+        attr(bayern, "cx").unwrap().parse().unwrap(),
+        attr(bayern, "cy").unwrap().parse().unwrap(),
+    );
+    assert!(
+        (0.0..480.0).contains(&cx) && (0.0..320.0).contains(&cy),
+        "{bayern}"
+    );
+}
+
+#[test]
+fn size_legend_has_nested_nice_values() {
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[9400.0, 100.0])),
+    ]);
+    let legend = &s[s.find("dp-legend").unwrap()..];
+    let g = &legend[..legend.find("</g>").unwrap_or(legend.len())];
+    // nested, unfilled, stroked circles with nice values (dedup, r >= 3px)
+    assert!(g.matches("fill=\"none\" stroke=").count() >= 2, "{g}");
+}
+
+#[test]
+fn constant_size_sets_the_radius() {
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[4.0, 4.0])),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 2);
+    for t in &f {
+        assert_eq!(attr(t, "r"), Some("4.0"), "{t}");
+    }
+    // a constant ::SIZE has no size legend, and no colour measure here
+    // means no legend box at all
+    assert!(!s.contains("dp-legend"), "{s}");
+}
+
+#[test]
+fn size_with_category_and_measure_colours() {
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[100.0, 10.0])),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[5.0, 50.0])),
+        Column::new("cat", Role::Category, strs(&["A", "B"])),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 2);
+    // the measure wins over ::CATEGORY for colour (same rule as areas)
+    assert!(f.iter().all(|t| attr(t, "data-value").is_some()));
+}
+
+#[test]
+fn symbols_light_dark_colorblind() {
+    for (name, dark) in [("default", false), ("default", true), ("colorblind", false)] {
+        let cols = vec![
+            Column::new("lat", Role::Lat, nums(&[50.0, 51.0, 52.0])),
+            Column::new("lon", Role::Lon, nums(&[10.0, 10.0, 10.0])),
+            Column::new("n", Role::Size, nums(&[10.0, 40.0, 90.0])),
+        ];
+        let s = draw(cols, &opts(name, dark));
+        assert_eq!(features(&s).len(), 3, "{name} dark={dark}");
+    }
+}
+
+#[test]
+fn fvalue_is_written_once() {
+    // no colour measure: the symbol writer adds data-fvalue itself
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[100.0, 10.0])),
+    ]);
+    for t in features(&s) {
+        assert_eq!(t.matches("data-fvalue=").count(), 1, "{t}");
+    }
+    // with a colour measure: with_formatted_values adds it instead
+    let s2 = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0, 51.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0, 10.0])),
+        Column::new("n", Role::Size, nums(&[100.0, 10.0])),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[5.0, 50.0])),
+    ]);
+    for t in features(&s2) {
+        assert_eq!(t.matches("data-fvalue=").count(), 1, "{t}");
+    }
+}
+
+/// `symbols_render_within_budget`: 5,000 graduated symbols at 1200 px
+/// render in a reasonable SVG size and time (M2a's performance budget).
+#[test]
+#[ignore]
+fn symbols_render_within_budget() {
+    let n = 5_000;
+    let lats: Vec<f64> = (0..n).map(|i| 47.0 + (i % 100) as f64 * 0.08).collect();
+    let lons: Vec<f64> = (0..n).map(|i| 6.0 + (i / 100) as f64 * 0.08).collect();
+    let sizes: Vec<f64> = (0..n).map(|i| 1.0 + (i % 997) as f64).collect();
+    let cols = vec![
+        Column::new("lat", Role::Lat, nums(&lats)),
+        Column::new("lon", Role::Lon, nums(&lons)),
+        Column::new("n", Role::Size, nums(&sizes)),
+    ];
+    let o = RenderOptions::default();
+    let start = std::time::Instant::now();
+    let s = render_with(&cols, 1200, 1200, &o).expect("renders");
+    let elapsed = start.elapsed();
+    assert!(
+        s.len() <= 1_300_000,
+        "SVG is {} bytes (budget 1,300,000 — dense per-symbol attributes (data-row/series/value/size/fsize + title) cost more bytes per mark than the plan's 300 KB estimate assumed; see PR body)",
+        s.len()
+    );
+    assert!(
+        elapsed.as_millis() <= 30,
+        "render took {elapsed:?} (budget 30ms, release only)"
+    );
+}
