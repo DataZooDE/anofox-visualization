@@ -47,7 +47,7 @@ pub struct Diagnostic {
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
     /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
-    /// `transition/unknown` (warnings) | `diagram/null-id` |
+    /// `transition/unknown` | `hover-focus/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `box/missing` (error: a box from statistics without
@@ -1953,7 +1953,7 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
 /// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
-/// `::CATEGORY`), an unknown `::TRANSITION`.
+/// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1985,6 +1985,12 @@ fn motion_diags(
             out.push((
                 "transition/unknown",
                 format!("::TRANSITION `{v}` is not 'tween' or 'none' — the chart is swapped"),
+            ));
+        }
+        if *r == Role::HoverFocus && !crate::HOVER_FOCUS_MODES.contains(&v.as_str()) {
+            out.push((
+                "hover-focus/unknown",
+                format!("::HOVER_FOCUS `{v}` is not 'series' or 'none' — hovering a mark focuses its series"),
             ));
         }
         if *r == Role::StoryBy {
@@ -4205,9 +4211,15 @@ mod design_tests {
                 .into_iter()
                 .map(|d| d.code)
                 .filter(|c| {
-                    ["animate/", "linestyle/", "story/", "transition/"]
-                        .iter()
-                        .any(|p| c.starts_with(p))
+                    [
+                        "animate/",
+                        "linestyle/",
+                        "story/",
+                        "transition/",
+                        "hover-focus/",
+                    ]
+                    .iter()
+                    .any(|p| c.starts_with(p))
                 })
                 .collect()
         };
@@ -4251,6 +4263,20 @@ mod design_tests {
             ),
             vec!["transition/unknown"]
         );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "dim" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'dim'::HOVER_FOCUS FROM t;",
+                row
+            ),
+            vec!["hover-focus/unknown"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "none" });
+        assert!(codes(
+            "SELECT x::XAXIS, y::BARCHART, 'none'::HOVER_FOCUS FROM t;",
+            row
+        )
+        .is_empty());
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
     }
