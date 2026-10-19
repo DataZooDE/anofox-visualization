@@ -40,8 +40,22 @@ const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:\d+)?$/i;
 // logo/favicon can be listed by its exact address.
 const FULL_URL_RE = /^https:\/\/[a-z0-9.-]+(:\d+)?\/[^\s"'<>]*$/i;
 
-export function assistCsp({ base = appBase(), imgOrigins = [] } = {}) {
-  const img = [base, "data:", "blob:", ...imgOrigins.filter((o) => ORIGIN_RE.test(o) || FULL_URL_RE.test(o))];
+// sec-review-256 R-1 check: destructuring `opts` directly reads *inherited*
+// properties too — `Object.prototype.base = "https://evil.example/"` would
+// put an attacker origin into script-src/connect-src for every caller that
+// never itself passes `base` (which in shipped code is every caller:
+// app.js's boot() only ever passes `imgOrigins`). Copying into a
+// null-prototype object first means a missing option is always
+// `undefined`, never inherited, so the secure default (`appBase()`) always
+// applies unless a caller's *own* property overrides it. Validating that
+// override against a cross-origin value is `applyAssistCsp`'s job (below):
+// it is the one function with a `doc` to validate "same origin" against,
+// and it is the only one that ever turns this text into a real policy.
+export function assistCsp(opts) {
+  const o = Object.assign(Object.create(null), opts);
+  const base = o.base ?? appBase();
+  const imgOrigins = Array.isArray(o.imgOrigins) ? o.imgOrigins : [];
+  const img = [base, "data:", "blob:", ...imgOrigins.filter((x) => ORIGIN_RE.test(x) || FULL_URL_RE.test(x))];
   return [
     "default-src 'none'",
     `script-src ${base} 'wasm-unsafe-eval' ${DUCKDB_WASM} ${KATEX}`,
@@ -64,6 +78,14 @@ export function assistCsp({ base = appBase(), imgOrigins = [] } = {}) {
 // gets the same promise: C-2).
 const proofs = new WeakMap();
 
+const sameOrigin = (a, b) => {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch (_) {
+    return false;
+  }
+};
+
 // Insert the meta once, then prove it: a probe <img> to a host that can
 // never resolve must raise an img-src `securitypolicyviolation` within 1 s.
 // Anything else (no <head>, the meta ignored, appended outside <head>, a
@@ -73,9 +95,27 @@ export function applyAssistCsp(doc, opts = {}) {
   if (proofs.has(doc)) return proofs.get(doc);
   const p = (async () => {
     if (!doc.head) throw new Error("no <head>");
+    // sec-review-256 R-1 check: this is the one function that turns the
+    // policy text into a real, applied CSP, so it is where a `base` gets
+    // validated against where the page actually is — never from a
+    // caller-supplied cross-origin value, polluted prototype or not.
+    // Trusted sources only: this module's own `import.meta.url`
+    // (`appBase()`) and `doc.location` (what the browser navigated to) —
+    // never `doc.baseURI`, which a `<base>` injection can move (L-3).
+    const safeOpts = { ...opts };
+    if (Object.hasOwn(opts, "base")) {
+      const trusted = appBase();
+      let docOrigin = null;
+      try {
+        docOrigin = new URL(doc.location?.href ?? doc.URL ?? trusted).origin;
+      } catch (_) {}
+      const wellFormed = typeof opts.base === "string" && /^https?:\/\/[^/]+\/.*\/$/.test(opts.base);
+      const ok = wellFormed && (sameOrigin(opts.base, trusted) || (docOrigin && sameOrigin(opts.base, docOrigin)));
+      if (!ok) delete safeOpts.base; // assistCsp() then falls back to appBase()
+    }
     const m = doc.createElement("meta");
     m.httpEquiv = "Content-Security-Policy";
-    m.content = assistCsp(opts);
+    m.content = assistCsp(safeOpts);
     m.dataset.anofoxAssist = "1";
     doc.head.appendChild(m);
     await new Promise((ok, fail) => {

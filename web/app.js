@@ -10911,12 +10911,23 @@ async function appBrandLoad() {
   }
   const cfg = appBrandMerge(file, window.__anofoxApp);
   appBrandApply(cfg);
-  // sec-review-256 L-2: window.__anofoxApp (the serving process) wins over
-  // app-config.json (static hosting), the same "later wins" order
-  // appBrandMerge uses — but only when it actually says something: an
-  // installation that configures the opt-in only in app-config.json must
-  // not be overridden by an absent `assistant` key from the server layer.
-  assistantRememberOptIn = (window.__anofoxApp?.assistant?.remember ?? file?.assistant?.remember) === true;
+  // sec-review-256 L-2 / R-1 check: window.__anofoxApp (the serving
+  // process) wins over app-config.json (static hosting), the same "later
+  // wins" order appBrandMerge uses — but only when it actually says
+  // something: an installation that configures the opt-in only in
+  // app-config.json must not be overridden by an absent `assistant` key
+  // from the server layer. `ownRemember` reads `.assistant` and
+  // `.assistant.remember` as *own* properties at each level
+  // (Object.hasOwn) — a plain `?.` chain would read a polluted
+  // Object.prototype.assistant = {remember: true} and opt every
+  // installation in with nothing of its own saying so.
+  const ownRemember = (src) => {
+    if (!src || typeof src !== "object" || !Object.hasOwn(src, "assistant")) return undefined;
+    const a = src.assistant;
+    if (!a || typeof a !== "object" || !Object.hasOwn(a, "remember")) return undefined;
+    return a.remember;
+  };
+  assistantRememberOptIn = (ownRemember(window.__anofoxApp) ?? ownRemember(file)) === true;
   return cfg; // #204: boot() keeps this as appBrandReady, for the CSP's imgOrigins
 }
 // #204: the https: origins (I-R2-3(a): the exact logo/favicon URL, narrower

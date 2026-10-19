@@ -57,11 +57,20 @@ export const LIMITS = {
 // the assistant — the meta CSP it depends on (assist-csp.js) can't carry
 // `frame-ancestors`, so clickjacking the panel into a confirming click is
 // otherwise possible.
-export function assistConfig(block, { served = false, embed = false, live = false, framed = false, host } = {}) {
+// sec-review-256 R-1 check: both arguments are destructured directly
+// elsewhere's version of this function used to read *inherited*
+// properties too — Object.prototype.enabled = true / .remember = true
+// would turn the assistant and *Remember* on from `assistConfig(undefined)`
+// alone, with no installation ever configuring either. Copying `block`
+// and the options into null-prototype objects first means a missing key
+// is always `undefined`, never inherited.
+export function assistConfig(block, opts) {
+  const o = Object.assign(Object.create(null), opts);
+  const { served = false, embed = false, live = false, framed = false, host } = o;
   const off = (reason) => ({ enabled: false, reason });
   if (served || embed) return off("locked");
   if (framed) return off("framed");
-  const a = block && typeof block === "object" ? block : {};
+  const a = block && typeof block === "object" ? Object.assign(Object.create(null), block) : Object.create(null);
   if (live) return off("serve-not-yet");
   if (a.enabled !== true) return off("disabled");
   const transport = a.transport || "browser-key";
