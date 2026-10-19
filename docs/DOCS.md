@@ -1601,7 +1601,12 @@ Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`)
   (no server) plus the open tab and the viewer state (`?v.*`, see *Viewer
   state in the URL*) — open it to reproduce exactly that view.
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
-  file (interactive hover + tabs, no server).
+  file (interactive hover + tabs, no server). A `::VIEW` switcher works in the
+  export too (click or arrow keys, offline) and the file carries **every
+  alternative that isn't `-- @requires`-hidden** — not the default view only,
+  the same as it already carries every tab's rows. That is the viewer's own
+  data (they could already click through to each alternative on the live
+  page); only a hidden alternative is left out of the export entirely.
 
 ### Dashboard header comments
 
