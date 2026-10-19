@@ -115,7 +115,7 @@ await page.click("#mode-view");
 check(!(await page.$(".dash .dp-title-btn")), "View mode: the name is plain text");
 check((await page.$eval(".dash .dp-title", (h) => h.textContent)) === title0, "…and reads the name");
 check(!(await page.$$eval(".dash .dp-hedit", (es) => es.some((e) => e.getClientRects().length))), "View mode: no logo control");
-check((await page.$eval("body", (b) => b.innerText)).includes("Powered by DataZoo GmbH"), "the DataZoo credit is there");
+check(!(await page.$eval("body", (b) => b.innerText)).includes("Powered by DataZoo GmbH"), "the DataZoo credit is gone");
 // (the name was removed and added again, so it may sit elsewhere in the Look section)
 const lines = (t) => t.split("\n").filter((l) => l.trim() && !/::LOGO;$/.test(l)).sort().join("\n");
 check(lines(await sql()) === lines(sql0), "the SQL is back to the example (but its logo)");

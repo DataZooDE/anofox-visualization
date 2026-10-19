@@ -7790,17 +7790,6 @@ async function runOnce(fresh = true) {
     bar.appendChild(b);
     dash.prepend(bar);
   }
-  // A "Powered by DataZoo GmbH" credit at the foot of every dashboard.
-  dash.querySelector(".dp-credit")?.remove();
-  const credit = document.createElement("div");
-  credit.className = "dp-credit";
-  const creditLink = document.createElement("a");
-  creditLink.href = "https://data-zoo.de";
-  creditLink.target = "_blank";
-  creditLink.rel = "noopener noreferrer";
-  creditLink.textContent = "DataZoo GmbH";
-  credit.append("Powered by ", creditLink);
-  dash.append(credit);
   fitCharts(true);
   const tWire = performance.now();
   wireCharts();
@@ -10727,7 +10716,6 @@ function safeUrl(u, { image = false } = {}) {
 // Layers, later wins: these defaults → app-config.json next to index.html
 // (static hosting) → window.__anofoxApp from the serving process (serve
 // --app-*, anofox_serve(port, options); checked by src/host/app_brand.rs).
-// The "Powered by DataZoo GmbH" credit stays as it is.
 const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "", name_visible: true };
 let appBrand = { ...APP_BRAND_DEFAULT };
 let pageBrand = {}; // the open dashboard's brand (applyTheme)

@@ -5,8 +5,8 @@
 -- browser demo reads the tables this script produces from
 -- web/data/tabular-dedup/ (regenerate: scripts/gen-tabular-cases.sh dedup).
 -- Run from the repo root:
---   duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'"   # once
---   duckdb -unsigned -c ".read examples/tabular-dedup/compute.sql"
+--   duckdb -c "INSTALL anofox_tabular FROM community"   # once (signed; replaces a get.erpl.io install with FORCE INSTALL)
+--   duckdb -c ".read examples/tabular-dedup/compute.sql"
 LOAD anofox_tabular;
 .read examples/tabular-dedup/data.sql
 
