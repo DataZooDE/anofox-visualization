@@ -672,7 +672,10 @@ export function validate(schema, v, at = "input") {
 // The cached prefix: the tools, the instructions, then the role reference
 // and the guide (with the explicit cache breakpoint). Nothing in it varies
 // per request (no date, no id): `version` is the wasm build's.
-export function buildPrefix({ instructions, guide, rolesJson, version = "" }) {
+// sec-review-256 last check: ownOpts first (a signature-destructured
+// parameter reads inherited properties too, same as everywhere else).
+export function buildPrefix(opts = {}) {
+  const { instructions, guide, rolesJson, version = "" } = ownOpts(opts);
   return {
     tools: TOOLS,
     system: [
@@ -715,7 +718,9 @@ export function personal(name, values = []) {
 // A column card (web/explore.js) as the model gets it: counts, ranges and
 // hints; the common values only for a text column with at most 50 distinct,
 // when `commonValues` is on and nothing looks personal.
-export function modelCard(c, { commonValues = true } = {}) {
+// sec-review-256 last check: ownOpts first (same reason as buildPrefix).
+export function modelCard(c, opts = {}) {
+  const { commonValues = true } = ownOpts(opts);
   const r = (x, d = 4) => (x == null || !Number.isFinite(Number(x)) ? undefined : Number(Number(x).toPrecision(d)));
   const out = { name: c.name, type: c.type, kind: c.kind, empty_pct: r(c.nullPct, 3), distinct: c.distinct ?? undefined };
   if (c.kind === "num") Object.assign(out, { min: r(c.min, 6), max: r(c.max, 6), median: r(c.median), p05: r(c.p05), p95: r(c.p95), mean: r(c.mean) });
@@ -734,7 +739,9 @@ export function modelCard(c, { commonValues = true } = {}) {
 // The context of a request: the tables in scope (≤ 15 with profiles, the rest
 // by name), the current SQL with its statements numbered, theme and locale.
 // `tables` = [{name, rows, cards?}]; `spans` = lint_step's statement spans.
-export function buildContext({ mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true }) {
+// sec-review-256 last check: ownOpts first (same reason as buildPrefix).
+export function buildContext(opts = {}) {
+  const { mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true } = ownOpts(opts);
   const ctx = { mode };
   ctx.tables = tables.slice(0, LIMITS.tables).map((t) => ({
     name: t.name,
@@ -797,7 +804,9 @@ export function proposalReaders(sql) {
 // size, the dynamic part in full, and a rough token count.
 // The tool results (toolLog, as the loop sends them) are listed too: profiles,
 // query summaries and check results leave as well.
-export function payloadPreview({ prefix, ctx, request, destination = API_HOST, toolLog = [] }) {
+// sec-review-256 last check: ownOpts first (same reason as buildPrefix).
+export function payloadPreview(opts = {}) {
+  const { prefix, ctx, request, destination = API_HOST, toolLog = [] } = ownOpts(opts);
   const msg = firstMessage(ctx, request);
   const dynamic = msg.content.map((c) => c.text).join("\n\n");
   const statics = [
@@ -1220,8 +1229,11 @@ export function wasmTools(opts) {
       }
       if (!quiet()) return resultProfile(res.types, res.rows, { values: true });
       // A column name the query does not write and no table has may come
-      // from the data (PIVOT … ON a column): withheld.
-      return resultProfile(res.types, res.rows, { names: await namesIn(s) });
+      // from the data (PIVOT … ON a column): withheld. `values: false` is
+      // passed explicitly (sec-review-256 last check) rather than left to
+      // resultProfile's default, so a polluted Object.prototype.values
+      // can't turn withholding off here either.
+      return resultProfile(res.types, res.rows, { values: false, names: await namesIn(s) });
     },
     // The strict check of a whole script: {ok, text, issues}; `signal` (the
     // request's) stops it before its next query ({cancelled: true}).
@@ -1392,7 +1404,16 @@ const INPUT_ROLES = new Set(["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT"
 // `values` (sample rows off) no text value is in it: the range of numbers
 // and of DATE / TIMESTAMP columns only, and a column whose name `names(n)`
 // rejects (one the data may have made) is listed by its type alone.
-export function resultProfile(types, rows, { values = false, names = () => true } = {}) {
+// sec-review-256 last check: the third parameter used to be destructured
+// directly in the signature (`{ values = false, names = () => true } = {}`),
+// which reads *inherited* properties too — `Object.prototype.values = true`
+// turned the withholding off for every caller that omits `values` (run_sql's
+// quiet branch included), sending text values and un-withholding column
+// names to the model with sample rows off. ownOpts first, as everywhere
+// else; run_sql below now also passes `values: false` explicitly in the
+// quiet branch rather than relying on the default.
+export function resultProfile(types, rows, opts = {}) {
+  const { values = false, names = () => true } = ownOpts(opts);
   const capped = rows.length > LIMITS.runRows;
   const data = capped ? rows.slice(0, LIMITS.runRows) : rows;
   let withheld = 0;

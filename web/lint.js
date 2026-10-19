@@ -41,11 +41,16 @@ export function ownOpts(o) {
 // before the next query. Resolves to {diagnostics, ok, summary, spans, steps,
 // queries, answers} (answers: query -> {rows} | {error}), or null when
 // cancelled.
-export async function lintScript(script, { step, run, strict = false, design = true, onStep, cancelled }) {
-  const opts = JSON.stringify({ strict, design });
+// sec-review-256 last check: the second parameter used to be destructured
+// directly in the signature (`{ step, run, … }`), which reads *inherited*
+// properties too — a polluted `Object.prototype.strict`/`.design` would
+// apply to every caller. `ownOpts` first, as everywhere else.
+export async function lintScript(script, opts = {}) {
+  const { step, run, strict = false, design = true, onStep, cancelled } = ownOpts(opts);
+  const stepOpts = JSON.stringify({ strict, design });
   const known = new Map(); // query -> {rows} | {error}
   for (let n = 1; n <= MAX_STEPS; n++) {
-    const res = JSON.parse(step(script, knownJson(known), opts));
+    const res = JSON.parse(step(script, knownJson(known), stepOpts));
     if (res.error) throw new Error(res.error);
     if (res.done) return { ...res, steps: n, queries: known.size, answers: known };
     onStep?.(n, known.size + res.need.length);

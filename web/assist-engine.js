@@ -61,7 +61,11 @@ export const SNAPSHOT_LIMITS = {
 // when the page already has it loaded or the current *editor* SQL needs it —
 // never the model's SQL, which the engine never prepares against (M-1).
 export const ENGINE_EXTENSIONS = ["json", "parquet", "icu", "anofox_forecast", "anofox_statistics", "spatial"];
-export function engineExtensions({ pageLoaded = [], editorNeeds = [] } = {}) {
+// sec-review-256 last check: a signature-destructured parameter (`{ pageLoaded,
+// editorNeeds } = {}`) reads *inherited* properties too — ownOpts first, as
+// everywhere else that takes an options object.
+export function engineExtensions(opts = {}) {
+  const { pageLoaded = [], editorNeeds = [] } = ownOpts(opts);
   const base = ["json", "parquet", "icu", "anofox_forecast", "anofox_statistics"];
   const extra = [...pageLoaded, ...editorNeeds].includes("spatial") ? ["spatial"] : [];
   return [...base, ...extra];
@@ -278,7 +282,11 @@ function fnv1a(str) {
 // set of fixed statements, `fq` always rebuilt from catalog rows with `qid`
 // (never a name the caller hands in directly). Opens its own connection (so
 // a snapshot timeout's `cancelSent` never cancels the page's own panels).
-export function pageAdapter(db, { handles = new Map() } = {}) {
+// sec-review-256 last check: ownOpts first (the same reason as every other
+// options object here) — a signature-destructured parameter is no
+// exception just because its only field is a Map.
+export function pageAdapter(db, opts = {}) {
+  const { handles = new Map() } = ownOpts(opts);
   let connP = null;
   const conn = () => (connP ||= Promise.resolve(db.connect()));
   // Grabbed once, from a trivial query on this connection (always fast —
@@ -361,7 +369,12 @@ function dbStatus(row) {
 // Remote-attached and non-`duckdb` databases — and any view whose body names
 // one as an identifier — are excluded rather than pulled: an
 // over-approximation (a false exclusion is safe; a false inclusion is not).
-export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, { signal, onProgress } = {}) {
+// sec-review-256 last check: the trailing `{ signal, onProgress } = {}`
+// read inherited properties too — ownOpts first, same as everywhere else.
+// (`limits` itself is buildEngine's job to merge/cap over SNAPSHOT_LIMITS
+// before it ever reaches here; see buildEngine.)
+export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, opts = {}) {
+  const { signal, onProgress } = ownOpts(opts);
   const dbRows = await page.databases(limits.catalogMs);
   const excludedDbs = new Map();
   const includedDbs = new Set();
@@ -450,7 +463,9 @@ export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, { signal
 // new registered file, a new attached db or a changed extension set; stable
 // on a rebuild with nothing changed. M1-3 recomputes this before each
 // request and rebuilds the engine when it differs.
-export async function pageFingerprint(page, { extensions = [], files = [], limits = SNAPSHOT_LIMITS } = {}) {
+// sec-review-256 last check: ownOpts first, same reason.
+export async function pageFingerprint(page, opts = {}) {
+  const { extensions = [], files = [], limits = SNAPSHOT_LIMITS } = ownOpts(opts);
   const dbs = await page.databases(limits.catalogMs);
   const cat = await page.catalog(limits.catalogMs);
   // DuckDB-Wasm's blocking (Node) connection returns BigInt for count-like
@@ -505,7 +520,39 @@ export async function buildEngine(opts) {
   // `__testing.unlocked` below, which always sets its own `lock: false`
   // as an own property regardless).
   const o = ownOpts(opts);
-  const { makeDb, page, extensions = [], files = [], limits = SNAPSHOT_LIMITS, doc = globalThis.document, signal, onProgress, lock = true } = o;
+  const { makeDb, page, extensions = [], files = [], limits, doc = globalThis.document, signal, onProgress, lock = true } = o;
+  // sec-review-256 last check: `limits` used to be read key by key
+  // (`limits.totalRows`, `.totalBytes`, `.queryMs`, `.catalogMs`, `.memory`;
+  // `extMs` had a `?? SNAPSHOT_LIMITS` fallback) with no ownOpts and no
+  // merge over the defaults. A *partial* `limits` object — one field only,
+  // or a polluted prototype supplying a value for a key the object itself
+  // doesn't have — left every unmentioned cap `undefined`: `totalRows <= 0`
+  // is then `false` (the row cap is gone) and `Math.min(undefined, …)` is
+  // `NaN` (so is the byte cap). Merging over SNAPSHOT_LIMITS through
+  // ownOpts fixes the missing-key case; capping every numeric field at its
+  // own default fixes the polluted/oversized case the same way — a caller
+  // can only ever make a cap tighter, never drop it or raise it past the
+  // reviewed maximum.
+  const merged = { ...SNAPSHOT_LIMITS, ...ownOpts(limits) };
+  const capNum = (v, def) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(v, def) : def);
+  const MEM_RE = /^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$/i;
+  const MEM_MULT = { B: 1, KB: 1 << 10, MB: 1 << 20, GB: 1 << 30, TB: 1 << 40 };
+  const memBytes = (s) => {
+    const m = typeof s === "string" ? MEM_RE.exec(s.trim()) : null;
+    return m ? Number(m[1]) * MEM_MULT[m[2].toUpperCase()] : null;
+  };
+  const defMemBytes = memBytes(SNAPSHOT_LIMITS.memory);
+  const inMemBytes = memBytes(merged.memory);
+  const L = {
+    tableRows: capNum(merged.tableRows, SNAPSHOT_LIMITS.tableRows),
+    totalRows: capNum(merged.totalRows, SNAPSHOT_LIMITS.totalRows),
+    totalBytes: capNum(merged.totalBytes, SNAPSHOT_LIMITS.totalBytes),
+    fileBytes: capNum(merged.fileBytes, SNAPSHOT_LIMITS.fileBytes),
+    queryMs: capNum(merged.queryMs, SNAPSHOT_LIMITS.queryMs),
+    catalogMs: capNum(merged.catalogMs, SNAPSHOT_LIMITS.catalogMs),
+    extMs: capNum(merged.extMs, SNAPSHOT_LIMITS.extMs),
+    memory: inMemBytes != null && inMemBytes <= defMemBytes ? merged.memory : SNAPSHOT_LIMITS.memory,
+  };
   if (doc) await assistCspProven(doc); // L-4: rejects unless enforcement was proven
   const db = await makeDb();
   try {
@@ -515,7 +562,7 @@ export async function buildEngine(opts) {
       await db.open({ path: ":memory:" });
     }
     const c = await db.connect();
-    await tryQ(c, `SET memory_limit='${limits.memory}'`);
+    await tryQ(c, `SET memory_limit='${L.memory}'`);
     await tryQ(c, "SET preserve_insertion_order=false");
     const loaded = [];
     for (const e of extensions) {
@@ -532,7 +579,7 @@ export async function buildEngine(opts) {
       // `c` unusable. So a timed out load fails the whole build (fail
       // closed) rather than continuing with a partly loaded, racy
       // extension set.
-      if (await loadExt(c, db, e, limits.extMs ?? SNAPSHOT_LIMITS.extMs)) loaded.push(e);
+      if (await loadExt(c, db, e, L.extMs)) loaded.push(e);
     }
     const allowed = [];
     for (const name of files) {
@@ -540,7 +587,7 @@ export async function buildEngine(opts) {
       try {
         const h = page.handle?.(name);
         if (h) await db.registerFileHandle(name, h, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
-        else await db.registerFileBuffer(name, await page.copyFile(name, limits.fileBytes));
+        else await db.registerFileBuffer(name, await page.copyFile(name, L.fileBytes));
         allowed.push(name);
       } catch (_) {
         /* a file that can't be read is simply not allow-listed */
@@ -554,14 +601,14 @@ export async function buildEngine(opts) {
       await c.query(LOGGING_SHADOW);
       if (!(await engineLocked(db))) throw new Error("assistant engine: not locked");
     }
-    const tables = await snapshotTables(c, page, limits, { signal, onProgress });
+    const tables = await snapshotTables(c, page, L, { signal, onProgress });
     await c.close();
     return {
       db,
       extensions: loaded,
       files: allowed,
       tables,
-      fingerprint: await pageFingerprint(page, { extensions: loaded, files: allowed, limits }),
+      fingerprint: await pageFingerprint(page, { extensions: loaded, files: allowed, limits: L }),
       close: () => db.terminate?.(),
     };
   } catch (e) {
