@@ -353,11 +353,18 @@ fn serve_get(tag: &str, id: &str, script: &str) -> String {
 /// #274: `-- @requires` on the script-free page — the session opens no
 /// file, so every input is missing: a gated tab and ::VIEW alternative are
 /// left out (the next alternative is drawn), a gated panel is a
-/// "Not available" card naming no path, and the page still answers 200.
+/// "Not available" card naming no path, a gated `::INPUT` and a gated chrome
+/// directive (#274 L2, security review #278) are simply left out — never
+/// run, so neither can fail the whole page with its path in the body — and
+/// the page still answers 200.
 const REQ_SCRIPT: &str = "\
 SELECT x::XAXIS, y::BARCHART, 'Always'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
 -- @requires nowhere/panel.parquet
 SELECT x::XAXIS, y::BARCHART, 'GatedPanel'::TITLE FROM read_parquet('nowhere/panel.parquet');
+-- @requires nowhere/input.parquet
+SELECT r AS r ::DROPDOWN FROM read_parquet('nowhere/input.parquet');
+-- @requires nowhere/chrome.parquet
+SELECT 'ChromeGated' AS title ::DASHBOARD_TITLE FROM read_parquet('nowhere/chrome.parquet');
 -- @requires nowhere/view.parquet
 SELECT 'Lines' AS g ::VIEW;
 SELECT x::XAXIS, y::LINECHART, 'HiddenView'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
@@ -381,7 +388,13 @@ fn serve_static_page_gates_requires() {
     assert_eq!(f.len(), 2, "{html}");
     assert!(f[0].contains(">Always</text></svg><svg"), "{}", f[0]);
     assert!(f[1].contains(">ShownView</text></svg><svg"), "{}", f[1]);
-    for gone in ["HiddenView", "HiddenTab", "GatedPanel", "nowhere/"] {
+    for gone in [
+        "HiddenView",
+        "HiddenTab",
+        "GatedPanel",
+        "ChromeGated",
+        "nowhere/",
+    ] {
         assert!(!html.contains(gone), "{gone} on the page: {html}");
     }
     assert_eq!(
@@ -390,6 +403,12 @@ fn serve_static_page_gates_requires() {
         "{html}"
     );
     assert!(html.contains("<strong>Not available</strong>"), "{html}");
+    // the gated chrome directive never ran: the title stays the fallback
+    assert!(
+        html.contains("<h1 class=\"dp-title\">requires</h1>"),
+        "{html}"
+    );
+    assert!(html.contains("<title>requires</title>"), "{html}");
     // the card sits between the two charts
     let (a, n, s) = (
         html.find(">Always<").unwrap(),

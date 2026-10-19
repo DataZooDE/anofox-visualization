@@ -1087,10 +1087,6 @@ fn cache_key(
     )
 }
 
-/// Render one dashboard to a view-only HTML page: binds the (whitelisted)
-/// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
-/// external access disabled and the configuration locked after the
-/// server-declared `-- @load`s.
 /// The first row of `duckdb -json` output as `(column, text)` pairs (NULL → None).
 fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> {
     let rows = sql::parse_rows_json(json)?;
@@ -1112,6 +1108,12 @@ fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> 
         .unwrap_or_default())
 }
 
+/// `requires_unmet`'s answers, memoized for one render (#274 L1): keyed by
+/// `(prefix, "{reqs:?}")`, since the same gate is often asked more than once
+/// — a `::TAB`/`::SUBTAB`/`::VIEW` marker's own check (`Sections::step`) and
+/// then, for a panel directly inside it, its own identical `-- @requires`.
+type RequiresCache = HashMap<(String, String), Option<String>>;
+
 /// `-- @requires` on the script-free page (#274), gated as the browser and
 /// the locked server gate it: the shared check (`sql::requires::check`, as
 /// `dashboard --check` and the static renderers use it), each query in the
@@ -1119,26 +1121,45 @@ fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> 
 /// request's variables (`prefix`). That session can open no file
 /// (`enable_external_access = false`), so a `glob` that fails counts as
 /// missing here — fail closed, unlike `check` on an author's own session.
-/// `Some(requirement)` (as written) when one is not met.
+/// The glob probe itself never spawns `duckdb` (#274 L1): in this locked
+/// session the only path a `glob` can ever see is the served database's own
+/// file or its `.wal` (#274 I2), so any other path is decided as missing
+/// from the query text alone, the same `sql::requires::glob_sql` the shared
+/// `check` would have sent. `check`'s own semantics are unchanged; only this
+/// closure short-circuits. `Some(requirement)` (as written) when one is not
+/// met.
 fn requires_unmet(
     st: &ServeState,
     prefix: &str,
     reqs: &[sql::requires::Requirement],
+    cache: &mut RequiresCache,
 ) -> Option<String> {
-    sql::requires::check(reqs, |q, session| {
-        let row = run_duckdb(
+    let key = (prefix.to_string(), format!("{reqs:?}"));
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let missing = sql::requires::check(reqs, |q, session| {
+        if !session {
+            let n = if q == sql::requires::glob_sql(&st.db)
+                || q == sql::requires::glob_sql(&format!("{}.wal", st.db))
+            {
+                "1"
+            } else {
+                "0"
+            };
+            return Ok(vec![("n".to_string(), Some(n.to_string()))]);
+        }
+        run_duckdb(
             &st.db,
             &["-readonly", "-json"],
             &format!("{prefix}{q}"),
             st.timeout,
         )
-        .and_then(|json| first_row_cells(json.trim()));
-        match row {
-            Err(_) if !session => Ok(vec![("n".to_string(), Some("0".to_string()))]),
-            r => r,
-        }
+        .and_then(|json| first_row_cells(json.trim()))
     })
-    .missing
+    .missing;
+    cache.insert(key, missing.clone());
+    missing
 }
 
 /// A panel whose own `-- @requires` input is missing (#274): the browser's
@@ -1146,6 +1167,10 @@ fn requires_unmet(
 /// name — this page carries none of the dashboard's SQL.
 const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nodata\" role=\"status\"><strong>Not available</strong><span>An optional input of this panel is missing.</span></div></figure>";
 
+/// Render one dashboard to a view-only HTML page: binds the (whitelisted)
+/// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
+/// external access disabled and the configuration locked after the
+/// server-declared `-- @load`s.
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1225,8 +1250,13 @@ fn render_dashboard_page(
     // here; the next shown alternative is the one drawn) — as the static
     // renderers do (src/dashboard.rs `execute`).
     let mut sections = sql::requires::Sections::default();
+    // #274 L1: memoized per render — the same gate is often asked more than
+    // once (a tab/view marker's own check, then a panel inside it).
+    let mut req_cache = RequiresCache::new();
     for panel in sql::plan(&dash.script) {
-        let hidden = sections.step(&panel, |reqs| requires_unmet(st, &prefix, reqs));
+        let hidden = sections.step(&panel, |reqs| {
+            requires_unmet(st, &prefix, reqs, &mut req_cache)
+        });
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
         }
@@ -1238,10 +1268,20 @@ fn render_dashboard_page(
             .iter()
             .map(|(_, r)| *r)
             .find(|r| anofox_visualization::roles::is_chrome_directive(*r));
+        // #274 L2: the panel's own `-- @requires` gates it whatever it is —
+        // an ordinary chart, an `::INPUT` or a chrome directive — so a
+        // missing input never reaches that panel's query and turns into a
+        // 400 naming the file; it is simply left out (below).
+        let gated = !panel.requires.is_empty()
+            && requires_unmet(st, &prefix, &panel.requires, &mut req_cache).is_some();
         // An input binds its default (as the browser does on first load) so
         // the getvariable() panels read it — unless a whitelisted `-- @param`
-        // already sets that variable.
+        // already sets that variable. Gated: left out, so the variable keeps
+        // its built-in default, as the static renderer leaves it too.
         if let Some(kind) = anofox_visualization::inputs::input_kind(&panel.roles) {
+            if gated {
+                continue;
+            }
             let q = format!(
                 "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
                 panel.sql.trim().trim_end_matches(';'),
@@ -1267,14 +1307,14 @@ fn render_dashboard_page(
         {
             continue;
         }
+        // Gated: a chrome directive is left out — its query never runs.
+        if chrome_role.is_some() && gated {
+            continue;
+        }
         // #274: the panel's own `-- @requires` (never a chrome directive's or a
         // ::SECTION's): not met → a "Not available" card; a ::TRACK strip is
         // left out of its chart instead.
-        if chrome_role.is_none()
-            && !section
-            && !panel.requires.is_empty()
-            && requires_unmet(st, &prefix, &panel.requires).is_some()
-        {
+        if chrome_role.is_none() && !section && gated {
             if !track::is_track(&panel.roles) {
                 queried.push((panel, Rows::new(), true));
             }
