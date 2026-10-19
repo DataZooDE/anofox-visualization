@@ -89,6 +89,15 @@ fn usage(msg: &str) -> ! {
     std::process::exit(2)
 }
 
+/// An `AppBrand::set` error, named by the flag that caused it (#267): the
+/// brand's keys use `_` (`logo_dark`), the flags `-` (`--app-logo-dark`).
+fn app_flag_error(e: &str) -> String {
+    let n = e
+        .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+        .unwrap_or(e.len());
+    format!("--app-{}{}", e[..n].replace('_', "-"), &e[n..])
+}
+
 fn parse_args() -> Opts {
     let mut o = Opts {
         port: 8080,
@@ -186,7 +195,7 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|| usage(&format!("{a} needs a value")));
                 o.app
                     .set(&a["--app-".len()..].replace('-', "_"), &v, true)
-                    .unwrap_or_else(|e| usage(&format!("--app-{e}")));
+                    .unwrap_or_else(|e| usage(&app_flag_error(&e)));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
             "--home" => {
@@ -1078,6 +1087,86 @@ fn cache_key(
     )
 }
 
+/// The first row of `duckdb -json` output as `(column, text)` pairs (NULL → None).
+fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let rows = sql::parse_rows_json(json)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|row| {
+            row.into_iter()
+                .map(|(k, v)| {
+                    let t = match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        v => Some(v.to_string()),
+                    };
+                    (k, t)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `requires_unmet`'s answers, memoized for one render (#274 L1): keyed by
+/// `(prefix, "{reqs:?}")`, since the same gate is often asked more than once
+/// — a `::TAB`/`::SUBTAB`/`::VIEW` marker's own check (`Sections::step`) and
+/// then, for a panel directly inside it, its own identical `-- @requires`.
+type RequiresCache = HashMap<(String, String), Option<String>>;
+
+/// `-- @requires` on the script-free page (#274), gated as the browser and
+/// the locked server gate it: the shared check (`sql::requires::check`, as
+/// `dashboard --check` and the static renderers use it), each query in the
+/// same locked `duckdb -readonly` session the panels run in, with this
+/// request's variables (`prefix`). That session can open no file
+/// (`enable_external_access = false`), so a `glob` that fails counts as
+/// missing here — fail closed, unlike `check` on an author's own session.
+/// The glob probe itself never spawns `duckdb` (#274 L1): in this locked
+/// session the only path a `glob` can ever see is the served database's own
+/// file or its `.wal` (#274 I2), so any other path is decided as missing
+/// from the query text alone, the same `sql::requires::glob_sql` the shared
+/// `check` would have sent. `check`'s own semantics are unchanged; only this
+/// closure short-circuits. `Some(requirement)` (as written) when one is not
+/// met.
+fn requires_unmet(
+    st: &ServeState,
+    prefix: &str,
+    reqs: &[sql::requires::Requirement],
+    cache: &mut RequiresCache,
+) -> Option<String> {
+    let key = (prefix.to_string(), format!("{reqs:?}"));
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let missing = sql::requires::check(reqs, |q, session| {
+        if !session {
+            let n = if q == sql::requires::glob_sql(&st.db)
+                || q == sql::requires::glob_sql(&format!("{}.wal", st.db))
+            {
+                "1"
+            } else {
+                "0"
+            };
+            return Ok(vec![("n".to_string(), Some(n.to_string()))]);
+        }
+        run_duckdb(
+            &st.db,
+            &["-readonly", "-json"],
+            &format!("{prefix}{q}"),
+            st.timeout,
+        )
+        .and_then(|json| first_row_cells(json.trim()))
+    })
+    .missing;
+    cache.insert(key, missing.clone());
+    missing
+}
+
+/// A panel whose own `-- @requires` input is missing (#274): the browser's
+/// "Not available" card (web/app.js `mkNotAvailable`), without the file's
+/// name — this page carries none of the dashboard's SQL.
+const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nodata\" role=\"status\"><strong>Not available</strong><span>An optional input of this panel is missing.</span></div></figure>";
+
 /// Render one dashboard to a view-only HTML page: binds the (whitelisted)
 /// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
 /// external access disabled and the configuration locked after the
@@ -1151,16 +1240,27 @@ fn render_dashboard_page(
     // directives, so a ::THEME anywhere styles the whole page.
     type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
     let mut chrome = DashboardChrome::default();
-    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
     let mut view_pick = sql::views::StaticPick::default();
+    // #274: a ::TAB / ::SUBTAB / ::VIEW alternative whose `-- @requires`
+    // input is missing is left out with its panels (the tabs are flattened
+    // here; the next shown alternative is the one drawn) — as the static
+    // renderers do (src/dashboard.rs `execute`).
+    let mut sections = sql::requires::Sections::default();
+    // #274 L1: memoized per render — the same gate is often asked more than
+    // once (a tab/view marker's own check, then a panel inside it).
+    let mut req_cache = RequiresCache::new();
     for panel in sql::plan(&dash.script) {
+        let hidden = sections.step(&panel, |reqs| {
+            requires_unmet(st, &prefix, reqs, &mut req_cache)
+        });
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
         }
-        if view_pick.drop_panel(&panel) {
+        if hidden.is_some() || view_pick.drop_panel(&panel) {
             continue;
         }
         let chrome_role = panel
@@ -1168,10 +1268,20 @@ fn render_dashboard_page(
             .iter()
             .map(|(_, r)| *r)
             .find(|r| anofox_visualization::roles::is_chrome_directive(*r));
+        // #274 L2: the panel's own `-- @requires` gates it whatever it is —
+        // an ordinary chart, an `::INPUT` or a chrome directive — so a
+        // missing input never reaches that panel's query and turns into a
+        // 400 naming the file; it is simply left out (below).
+        let gated = !panel.requires.is_empty()
+            && requires_unmet(st, &prefix, &panel.requires, &mut req_cache).is_some();
         // An input binds its default (as the browser does on first load) so
         // the getvariable() panels read it — unless a whitelisted `-- @param`
-        // already sets that variable.
+        // already sets that variable. Gated: left out, so the variable keeps
+        // its built-in default, as the static renderer leaves it too.
         if let Some(kind) = anofox_visualization::inputs::input_kind(&panel.roles) {
+            if gated {
+                continue;
+            }
             let q = format!(
                 "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
                 panel.sql.trim().trim_end_matches(';'),
@@ -1195,6 +1305,19 @@ fn render_dashboard_page(
             && !section
             && anofox_visualization::roles::is_directive_panel(&panel.roles)
         {
+            continue;
+        }
+        // Gated: a chrome directive is left out — its query never runs.
+        if chrome_role.is_some() && gated {
+            continue;
+        }
+        // #274: the panel's own `-- @requires` (never a chrome directive's or a
+        // ::SECTION's): not met → a "Not available" card; a ::TRACK strip is
+        // left out of its chart instead.
+        if chrome_role.is_none() && !section && gated {
+            if !track::is_track(&panel.roles) {
+                queried.push((panel, Rows::new(), true));
+            }
             continue;
         }
         let q = format!(
@@ -1224,7 +1347,7 @@ fn render_dashboard_page(
             chrome.apply_row(r, cells);
             continue;
         }
-        queried.push((panel, rows));
+        queried.push((panel, rows, false));
     }
     let set = chrome.resolve(theme_default())?;
     let t = set.default_variant().clone();
@@ -1241,7 +1364,16 @@ fn render_dashboard_page(
     // Phase 2: render.
     let mut panels = String::new();
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows)) = queried.next() {
+    while let Some((panel, rows, na)) = queried.next() {
+        if na {
+            panels.push_str(NOT_AVAILABLE_HTML);
+            // its strips go with it
+            while queried
+                .next_if(|(q, _, _)| track::is_track(&q.roles))
+                .is_some()
+            {}
+            continue;
+        }
         if let Some(cp) = &panel.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
                 let svg =
@@ -1267,7 +1399,7 @@ fn render_dashboard_page(
         );
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).
@@ -1363,6 +1495,37 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_flag_errors_name_the_flag() {
+        let mut b = AppBrand::default();
+        let e = b.set("logo_dark", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark must be an http(s) URL"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b
+            .set("logo_dark", "/nonexistent/anofox-267.png", true)
+            .unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark: '/nonexistent/anofox-267.png'"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("logo", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("tagline", &"x".repeat(1000), true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-tagline must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+    }
 
     #[test]
     fn render_cache_expires_and_is_capped() {
