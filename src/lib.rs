@@ -33,6 +33,7 @@ pub mod freshness;
 pub mod host;
 pub mod inputs;
 pub mod kpi;
+mod legend_wrap;
 pub mod lint;
 pub mod macros;
 pub(crate) mod map;
@@ -1298,6 +1299,9 @@ pub(crate) enum Panel {
         height: u32,
         /// Extra root attributes (e.g. `data-xticks`) written on the `<svg>`.
         attrs: Vec<(&'static str, String)>,
+        /// The plot margin its theme set, for a pass that grows it (a top
+        /// legend wrapping onto more rows); `None` when not known.
+        margin: Option<ggplot_rs::theme::Margin>,
     },
     Own {
         width: u32,
@@ -1322,6 +1326,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
+                margin,
             } if !o.locale.is_default() => {
                 let yearish = cols.iter().filter(|c| c.role == Role::X).any(|c| {
                     let mut any = false;
@@ -1344,6 +1349,7 @@ impl Panel {
                     width,
                     height,
                     attrs,
+                    margin,
                 }
             }
             p => p,
@@ -1367,6 +1373,53 @@ impl Panel {
             width,
             height,
             attrs: Vec::new(),
+            margin: None,
+        }
+    }
+
+    /// Record the plot margin the panel's theme set (see
+    /// [`legend_rows`](Self::legend_rows)).
+    pub(crate) fn with_margin(mut self, m: ggplot_rs::theme::Margin) -> Panel {
+        if let Panel::Plot { margin, .. } = &mut self {
+            *margin = Some(m);
+        }
+        self
+    }
+
+    /// Reserve `rows.rows` legend rows: the plot margin above (or below) the
+    /// panel grows by the rows past the first, which ggplot-rs reserves
+    /// itself. A panel whose margin is not known is left as it is.
+    pub(crate) fn legend_rows(self, rows: Option<legend_wrap::Rows>) -> Panel {
+        match (self, rows) {
+            (
+                Panel::Plot {
+                    plot,
+                    width,
+                    height,
+                    attrs,
+                    margin: Some(mut m),
+                },
+                Some(r),
+            ) if r.rows > 1 => {
+                let extra = (r.rows - 1) as f64 * legend_wrap::ROW;
+                if r.top {
+                    m.top += extra;
+                } else {
+                    m.bottom += extra;
+                }
+                let plot = plot.theme_update(ggplot_rs::theme::ThemeUpdate {
+                    plot_margin: Some(m.clone()),
+                    ..Default::default()
+                });
+                Panel::Plot {
+                    plot: Box::new(plot),
+                    width,
+                    height,
+                    attrs,
+                    margin: Some(m),
+                }
+            }
+            (p, _) => p,
         }
     }
 
@@ -1379,6 +1432,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
+                ..
             } => {
                 let svg = match place {
                     Place::Doc => plot.render_svg_native_with_warnings(width, height),
@@ -1538,25 +1592,40 @@ fn render_placed(
         }
         let cols = downsample::prepare(cols, o);
         let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
-        let draw = |fit: Option<track::Fit>| {
+        let draw = |fit: Option<track::Fit>, rows: Option<legend_wrap::Rows>| {
             render_inner(&cols, w, h, o)
                 .map(|p| p.localized(o, &cols))
                 .map(|p| match fit {
                     Some(f) => p.fitted(f),
                     None => p,
                 })
+                .map(|p| p.legend_rows(rows))
                 .and_then(|p| p.finish(place))
         };
         // Aligned with other panels: draw, measure, draw again fitted.
-        let (svg, warnings) = match &o.align {
+        let run = |rows: Option<legend_wrap::Rows>| match &o.align {
             Some(a) => {
                 let first = track::Fit::first(o, a);
-                let (svg, _) = draw(Some(first.clone())).map_err(RenderError::Render)?;
-                draw(Some(first.correct(a, &svg, h as f64)))
+                let (svg, _) = draw(Some(first.clone()), rows)?;
+                draw(Some(first.correct(a, &svg, h as f64)), rows)
             }
-            None => draw(None),
+            None => draw(None, rows),
+        };
+        let (mut svg, mut warnings) = run(None).map_err(RenderError::Render)?;
+        // A top/bottom legend too long for one line: draw again with its rows
+        // reserved (once more if the panel's new axis labels moved it), then
+        // wrap it.
+        let mut reserved = 1;
+        for _ in 0..2 {
+            match legend_wrap::plan(&svg).filter(|r| r.rows > reserved) {
+                Some(r) => {
+                    (svg, warnings) = run(Some(r)).map_err(RenderError::Render)?;
+                    reserved = r.rows;
+                }
+                None => break,
+            }
         }
-        .map_err(RenderError::Render)?;
+        let svg = legend_wrap::wrap(svg, reserved, &mut warnings);
         // A map paints with the variant's own tokens: no neutral remap.
         let svg = if map::is_map(&cols) {
             o.theme.with_font(svg)
@@ -3444,7 +3513,7 @@ fn cartesian(
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    let mut panel = Panel::plot(plot, width, height);
+    let mut panel = Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin);
     // A dodged discrete x is drawn on numeric slots: tell hosts which level
     // each slot is, so a tooltip header reads "W1" rather than "1.225".
     if let (Some(d), Panel::Plot { attrs, .. }) = (&dodged, &mut panel) {
@@ -3520,7 +3589,7 @@ fn render_density(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    Ok(Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin))
 }
 
 /// Build an axis tick formatter from a short spec — a keyword or a currency
@@ -4378,7 +4447,7 @@ fn render_radar(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    Ok(Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin))
 }
 
 fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
@@ -5116,7 +5185,7 @@ fn render_pie(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    Ok(Panel::plot(plot, width, height).with_margin(void_theme(o).plot_margin))
 }
 
 /// A minimal SVG heading (for a `::LABEL`-only result).

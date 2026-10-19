@@ -2038,3 +2038,187 @@ fn stacked_area_data_labels_sit_in_the_middle_of_their_band() {
         assert!((a - m).abs() < 0.6, "{area:?} vs {mids:?}");
     }
 }
+
+// ── #175: a top legend wraps onto rows inside the chart ───────────────────
+/// `n` cartons stacked into three containers (the anofox-optimize packing
+/// view), rendered at `w`×`h`.
+fn cartons(kind: Kind, n: usize, w: u32, h: u32) -> anofox_visualization::Rendered {
+    use anofox_visualization::{render_with_warnings, RenderOptions};
+    let (mut x, mut c, mut y) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 1..=n {
+        x.push(Value::Str(format!("container {}", i % 3 + 1)));
+        c.push(Value::Str(format!("carton {i:02}")));
+        y.push(Value::Float((1 + i % 4) as f64));
+    }
+    let mut cols = vec![
+        Column::new("item", Role::Category, c),
+        Column::new("size", Role::Value(kind), y),
+    ];
+    if kind != Kind::Pie {
+        cols.insert(0, Column::new("bin", Role::X, x));
+    }
+    render_with_warnings(&cols, w, h, &RenderOptions::default()).expect("renders")
+}
+/// A number attribute of a start tag.
+fn num_attr(tag: &str, a: &str) -> Option<f64> {
+    let k = tag.find(&format!(" {a}=\""))? + a.len() + 3;
+    tag[k..k + tag[k..].find('"')?].parse().ok()
+}
+/// The panel rect `[x, y, w, h]` (`data-plot`).
+fn panel(svg: &str) -> [f64; 4] {
+    let k = svg.find("data-plot=\"").unwrap() + 11;
+    let v: Vec<f64> = svg[k..k + svg[k..].find('"').unwrap()]
+        .split(' ')
+        .map(|s| s.parse().unwrap())
+        .collect();
+    [v[0], v[1], v[2], v[3]]
+}
+/// The legend labels above the panel as `(x0, x1, y, text)`: from the key's
+/// left edge (16 px before the label) to the label's estimated end.
+fn top_legend(svg: &str) -> Vec<(f64, f64, f64, String)> {
+    let top = panel(svg)[1];
+    svg.split("<text ")
+        .skip(1)
+        .filter_map(|t| {
+            let end = t.find('>')?;
+            let tag = format!(" {}", &t[..end]);
+            let text = t[end + 1..t.find("</text>")?].to_string();
+            let (x, y, size) = (
+                num_attr(&tag, "x")?,
+                num_attr(&tag, "y")?,
+                num_attr(&tag, "font-size")?,
+            );
+            let legend = text.starts_with("carton ") || text.starts_with('+');
+            (legend && y < top).then(|| {
+                let w = anofox_visualization::ticks::text_width(&text, size);
+                (x - 16.0, x + w, y, text)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn top_legend_wraps_inside_the_chart() {
+    for n in [1, 3, 12, 30] {
+        let r = cartons(Kind::BarStacked, n, 640, 400);
+        let l = top_legend(&r.svg);
+        assert_eq!(l.len(), n, "{n} cartons: every entry shown");
+        assert!(r.warnings.is_empty(), "{n} cartons: {:?}", r.warnings);
+        for (x0, x1, _, t) in &l {
+            assert!(*x0 >= 0.0 && *x1 <= 640.0, "{n} cartons: {t} at {x0}..{x1}");
+        }
+        for (i, a) in l.iter().enumerate() {
+            for b in &l[i + 1..] {
+                let apart = (a.2 - b.2).abs() >= 18.0 || a.1 <= b.0 || b.1 <= a.0;
+                assert!(apart, "{n} cartons: {} overlaps {}", a.3, b.3);
+            }
+        }
+        let rows = {
+            let mut ys: Vec<i64> = l.iter().map(|e| e.2.round() as i64).collect();
+            ys.dedup();
+            ys.len()
+        };
+        let [_, top, _, _] = panel(&r.svg);
+        let bottom = l.iter().map(|e| e.2).fold(0.0, f64::max) + 6.0;
+        assert!(
+            bottom < top,
+            "{n} cartons: legend ends at {bottom}, panel starts at {top}"
+        );
+        match n {
+            1 | 3 => {
+                assert_eq!(rows, 1, "{n} cartons fit on one line");
+                assert_eq!(
+                    top, 47.5,
+                    "{n} cartons: a one-line legend's band is unchanged"
+                );
+            }
+            12 => assert_eq!(rows, 2, "12 cartons: two rows"),
+            _ => assert!(rows >= 4, "30 cartons: {rows} rows"),
+        }
+    }
+}
+
+#[test]
+fn legend_wraps_on_line_and_pie_charts() {
+    for kind in [Kind::Line, Kind::Pie] {
+        let r = cartons(kind, 12, 640, 400);
+        let l = top_legend(&r.svg);
+        assert_eq!(l.len(), 12, "{kind:?}");
+        assert!(
+            l.iter().all(|e| e.0 >= 0.0 && e.1 <= 640.0),
+            "{kind:?}: {l:?}"
+        );
+        let bottom = l.iter().map(|e| e.2).fold(0.0, f64::max) + 6.0;
+        assert!(bottom < panel(&r.svg)[1], "{kind:?}: legend over the panel");
+    }
+}
+
+#[test]
+fn a_legend_too_long_for_the_chart_ends_in_n_more_and_warns() {
+    let r = cartons(Kind::BarStacked, 30, 320, 300);
+    let l = top_legend(&r.svg);
+    let more = l.last().expect("a legend");
+    assert!(
+        more.3.starts_with('+') && more.3.ends_with(" more"),
+        "{more:?}"
+    );
+    let hidden: usize = more.3[1..more.3.len() - 5].parse().unwrap();
+    assert_eq!(l.len() - 1 + hidden, 30, "shown + hidden = all cartons");
+    assert!(l.iter().all(|e| e.0 >= 0.0 && e.1 <= 320.0), "{l:?}");
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("legend:")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(
+        r.svg.contains("data-warnings="),
+        "the warning reaches the SVG root"
+    );
+    let bottom = l.iter().map(|e| e.2).fold(0.0, f64::max) + 6.0;
+    assert!(bottom < panel(&r.svg)[1], "legend over the panel");
+}
+
+#[test]
+fn stacked_data_labels_stay_centred_under_a_wrapped_legend() {
+    // #218/#219's centred stacked labels and #175's legend wrap touch the
+    // same chart from different passes (the label layer is built with the
+    // chart; the legend is wrapped on the finished SVG, which redraws the
+    // chart with a taller legend band reserved). Check the two combine: with
+    // 12 cartons (two legend rows) every stacked label still sits in the
+    // middle of its own segment.
+    use anofox_visualization::{render_with_warnings, RenderOptions};
+    let n = 12;
+    let (mut x, mut c, mut y) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 1..=n {
+        x.push(Value::Str(format!("container {}", i % 3 + 1)));
+        c.push(Value::Str(format!("carton {i:02}")));
+        y.push(Value::Float((1 + i % 4) as f64));
+    }
+    let cols = with_labels(vec![
+        Column::new("bin", Role::X, x),
+        Column::new("item", Role::Category, c),
+        Column::new("size", Role::Value(Kind::BarStacked), y),
+    ]);
+    let r = render_with_warnings(&cols, 640, 400, &RenderOptions::default()).expect("renders");
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+
+    let l = top_legend(&r.svg);
+    assert_eq!(l.len(), n, "every carton shown in the legend");
+    let [_, top, _, _] = panel(&r.svg);
+    assert!(
+        top > 47.5,
+        "12 cartons need a second legend row: panel top is {top}"
+    );
+
+    let (segs, labels) = (segments(&r.svg), data_labels(&r.svg));
+    assert_eq!(labels.len(), n, "{labels:?}");
+    for seg in &segs {
+        let (cx, cy) = (seg[0] + seg[2] / 2.0, seg[1] + seg[3] / 2.0);
+        assert!(
+            labels
+                .iter()
+                .any(|lbl| (lbl.0 - cx).abs() < 0.6 && (lbl.1 - cy).abs() < 0.6),
+            "no label centred on segment {seg:?}: {labels:?}"
+        );
+    }
+}

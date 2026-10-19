@@ -2263,7 +2263,7 @@ dashboard --check mydash.sql            # (add --json for machine output)
 #   silent-setup  a query with ::ROLE casts outside its main SELECT list
 #   sql-error     the query failed         render-error  missing required aesthetic
 #   empty-panel   query returned 0 rows (blank card)
-#   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer)
+#   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer, legend entries that don't fit)
 # With an access policy (locked server): what it refuses, which panels use hidden columns.
 dashboard --check mydash.sql --db data.duckdb --policy policy.json
 #   policy/refused  policy/denied-column  policy/masked-column
@@ -2804,7 +2804,8 @@ guarantee is that the core never panics on user input (fuzz-tested).
   `set_brand`/`set_panel_zoom` remain as compatibility wrappers).
 - `render_with_warnings(…) -> Result<Rendered { svg, warnings }, RenderError>`
   — also returns ggplot-rs's build warnings (rows dropped for non-finite
-  positions, a layer whose stat produced no data, …): the chart renders, but
+  positions, a layer whose stat produced no data, a top legend too long for
+  the chart that ends in "+N more", …): the chart renders, but
   data went missing. Every SVG document (`render_with`, `render_spec*`, the
   wasm `render_panel`) also records them on its root as
   `data-warnings="[…]"` (escaped JSON; absent when there are none; the

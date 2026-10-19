@@ -74,4 +74,12 @@ const link = {
 assert.equal(chartLink(link, el({ "data-row": "1", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 3");
 assert.equal(chartLink(link, el({ "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
 assert.equal(chartLink(link, el({ "data-row": "9", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
+// The legend toggle finds the legend above the panel rect, however many
+// rows it wrapped onto (#175).
+const { legendBand } = new Function(`${grab("legendBand")}\nreturn { legendBand };`)();
+assert.equal(legendBand("62.05 65.50 572.45 294.45", 400), 65.5);
+assert.equal(legendBand("62.05 119.50 572.45 240.45", 400), 119.5, "a five-row legend");
+assert.equal(legendBand(null, 400), 64);
+assert.equal(legendBand("0.00 0.00 640.00 400.00", 400), 64, "a panel at the top: no band");
+
 console.log("interaction_test: ok");
