@@ -2,12 +2,14 @@
 //!
 //! **Authoring** (default): `serve [db]` launches the embedded browser builder
 //! wired to a DuckDB file via a `/query` endpoint that runs client-supplied SQL
-//! (through the `duckdb` CLI). Because it runs arbitrary SQL it is locked to
-//! the author: loopback bind only, the `Host` header must be loopback (DNS
-//! rebinding), cross-origin requests are refused (CSRF), and every request needs
-//! the random per-run token from the printed URL (`?token=` → `HttpOnly;
-//! SameSite=Strict` cookie, or the `X-Anofox-Token` header). Bodies containing
-//! CLI dot-commands (`.shell`, `.read`, …) are refused before reaching the CLI.
+//! (through one long-lived `duckdb` CLI session, so ATTACH, TEMP objects and
+//! variables persist between statements, #275). Because it runs arbitrary SQL
+//! it is locked to the author: loopback bind only, the `Host` header must be
+//! loopback (DNS rebinding), cross-origin requests are refused (CSRF), and
+//! every request needs the random per-run token from the printed URL
+//! (`?token=` → `HttpOnly; SameSite=Strict` cookie, or the `X-Anofox-Token`
+//! header). Bodies containing CLI dot-commands (`.shell`, `.read`, …) are
+//! refused before reaching the CLI.
 //!
 //! **Serve** (`--dashboards <dir>`): the secure, consumer-facing mode. Dashboards
 //! (annotated `.sql` files) live on the server; the client only selects a
@@ -27,7 +29,7 @@ use anofox_visualization::theme::DashboardChrome;
 use anofox_visualization::{page, render_with_title, sql, track, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -545,10 +547,13 @@ fn authoring_mode(o: &Opts) {
     if o.open_browser {
         let _ = open::that(&url);
     }
-    run_workers(server, 1, move |req| handle_authoring(&guard, &db, req));
+    let session = Mutex::new(AuthoringSession::new(db.clone()));
+    run_workers(server, 1, move |req| {
+        handle_authoring(&guard, &session, req)
+    });
 }
 
-fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
+fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, mut req: Request) {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/").to_string();
     let m = meta(&req);
@@ -586,7 +591,7 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         if sv::has_dot_command(&sql) {
             return text(req, 400, "CLI dot-commands are not allowed");
         }
-        return match run_duckdb(db, &["-json"], &sql, Duration::ZERO) {
+        return match session.lock().unwrap_or_else(|p| p.into_inner()).run(&sql) {
             Ok(body) => {
                 let body = if body.trim().is_empty() {
                     "[]".into()
@@ -632,6 +637,233 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
     }
+}
+
+// ---------- the authoring session (#275) ----------
+
+/// One long-lived `duckdb` CLI process for the builder's `/query`s, so what a
+/// statement leaves in the session — ATTACH, TEMP tables / views / macros,
+/// SET VARIABLE, LOAD, SET, USE — is there for the next one (as in DuckDB-Wasm
+/// and `anofox_serve()`). Each body is written to a file in a private
+/// directory and run with `.read`; a `.print` marker and a `.read` of a
+/// missing `end-<nonce>` file mark the end of its stdout and stderr (dot
+/// commands: they still run in an aborted transaction). The nonce is fresh
+/// per request, so a query can't fake the end. If the CLI exits, the next
+/// query starts a new session.
+struct AuthoringSession {
+    db: String,
+    dir: PathBuf,
+    live: Option<Live>,
+}
+
+struct Live {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    out: BufReader<std::process::ChildStdout>,
+    err: std::sync::mpsc::Receiver<String>,
+}
+
+enum RoundErr {
+    /// The statement failed; the session is fine.
+    Sql(String),
+    /// The CLI is gone (stderr's tail).
+    Ended(String),
+}
+
+impl AuthoringSession {
+    fn new(db: String) -> Self {
+        let dir = private_dir("anofox-session");
+        let p = dir.to_string_lossy();
+        if p.contains(['\'', '\n', '\r']) {
+            eprintln!(
+                "error: the temp directory path ({p}) contains a quote or a line break; set TMPDIR to another directory"
+            );
+            std::process::exit(1);
+        }
+        AuthoringSession {
+            db,
+            dir,
+            live: None,
+        }
+    }
+
+    fn run(&mut self, sql: &str) -> Result<String, String> {
+        if self.live.is_none() {
+            self.live = Some(Live::spawn(&self.db, &self.dir)?);
+        }
+        let r = self
+            .live
+            .as_mut()
+            .expect("a live session")
+            .round(&self.dir, sql);
+        let _ = std::fs::remove_file(self.dir.join("q.sql"));
+        match r {
+            Ok(out) => Ok(out),
+            Err(RoundErr::Sql(e)) => Err(e),
+            Err(RoundErr::Ended(tail)) => {
+                if let Some(mut l) = self.live.take() {
+                    let _ = l.child.kill();
+                    let _ = l.child.wait();
+                }
+                Err(format!(
+                    "the DuckDB session ended; the next query starts a new one (ATTACH, TEMP objects and variables are gone){}",
+                    if tail.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", tail.trim())
+                    }
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for AuthoringSession {
+    fn drop(&mut self) {
+        if let Some(mut l) = self.live.take() {
+            let _ = l.child.kill();
+            let _ = l.child.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Live {
+    fn spawn(db: &str, dir: &Path) -> Result<Live, String> {
+        let mut child = Command::new("duckdb")
+            .arg(db)
+            .arg("-json")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("duckdb: {e}"))?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let out = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let err_pipe = child.stderr.take().expect("piped stderr");
+        let (tx, err) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(err_pipe).lines() {
+                let Ok(l) = line else { break };
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut live = Live {
+            child,
+            stdin,
+            out,
+            err,
+        };
+        // Reset what a `~/.duckdbrc` could otherwise break or hang every
+        // request with (#275 L2): `.bail on` would exit the CLI at the
+        // stderr end marker's deliberate "missing file" error, and a
+        // leftover `.output …` would swallow the `.print` marker. These are
+        // server-written dot commands, sent before the warm-up round's own
+        // markers; the client-side dot-command refusal is unaffected.
+        match live.round_with(dir, ".bail off\n.output\n.mode json\n", "") {
+            Ok(_) | Err(RoundErr::Sql(_)) => Ok(live),
+            Err(RoundErr::Ended(t)) => {
+                // #275 L4: don't leak a zombie when the session never came up.
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                Err(format!("duckdb did not start: {}", t.trim()))
+            }
+        }
+    }
+
+    fn round(&mut self, dir: &Path, sql: &str) -> Result<String, RoundErr> {
+        self.round_with(dir, "", sql)
+    }
+
+    fn round_with(&mut self, dir: &Path, preamble: &str, sql: &str) -> Result<String, RoundErr> {
+        let q = dir.join("q.sql");
+        // Drop any previous (now read-only, #275 L3) staged query first.
+        let _ = std::fs::remove_file(&q);
+        write_private(&q, sql)
+            .map_err(|e| RoundErr::Sql(format!("could not stage the query: {e}")))?;
+        // Read-only once staged (#275 L3): the query can't rewrite its own
+        // file out from under the CLI's still-open `.read` of it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o400));
+        }
+        let nonce = sv::random_token();
+        let done = format!("__anofox_done_{nonce}");
+        let script = format!(
+            "{preamble}.read '{}'\n.print {done}\n.read '{}'\n",
+            q.display(),
+            dir.join(format!("end-{nonce}")).display()
+        );
+        if self
+            .stdin
+            .write_all(script.as_bytes())
+            .and_then(|_| self.stdin.flush())
+            .is_err()
+        {
+            return Err(RoundErr::Ended(self.drain_err()));
+        }
+        let mut out = String::new();
+        loop {
+            let mut line = String::new();
+            match self.out.read_line(&mut line) {
+                Ok(0) | Err(_) => return Err(RoundErr::Ended(self.drain_err())),
+                Ok(_) => {
+                    // #275 L1: the marker is matched as a line's suffix, not
+                    // only as a whole line, so a statement's output that
+                    // doesn't end in `\n` (no trailing newline, or a `\r`
+                    // line terminator) can't merge with the marker and hang
+                    // this loop forever.
+                    let l = line.trim_end_matches(['\r', '\n']);
+                    if let Some(head) = l.strip_suffix(done.as_str()) {
+                        out.push_str(head);
+                        break;
+                    }
+                    out.push_str(&line);
+                }
+            }
+        }
+        let mut err = String::new();
+        loop {
+            match self.err.recv() {
+                Ok(l) if l.contains(&nonce) => break,
+                Ok(l) => {
+                    err.push_str(&l);
+                    err.push('\n');
+                }
+                Err(_) => return Err(RoundErr::Ended(err)),
+            }
+        }
+        if err.trim().is_empty() {
+            Ok(out)
+        } else {
+            Err(RoundErr::Sql(err.trim_end().to_string()))
+        }
+    }
+
+    /// stderr's remaining lines, once the CLI is gone.
+    fn drain_err(&mut self) -> String {
+        let mut s = String::new();
+        while let Ok(l) = self.err.recv_timeout(Duration::from_millis(200)) {
+            s.push_str(&l);
+            s.push('\n');
+        }
+        s
+    }
+}
+
+/// Create/overwrite `p` (0600 on Unix) with `text`.
+fn write_private(p: &Path, text: &str) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(p)?.write_all(text.as_bytes())
 }
 
 // ---------- serve mode (server owns the SQL; consumers pick id + params) ----------
@@ -1542,6 +1774,23 @@ mod tests {
             ),
             PageError::Server(_)
         ));
+    }
+
+    #[test]
+    fn authoring_session_keeps_state_and_restarts() {
+        if Command::new("duckdb").arg("-version").output().is_err() {
+            eprintln!("skipped authoring_session_keeps_state_and_restarts: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = AuthoringSession::new(":memory:".into());
+        s.run("SET VARIABLE x = 42").unwrap();
+        let out = s.run("SELECT getvariable('x') AS v").unwrap();
+        assert!(out.contains("\"v\":42"), "{out}");
+        s.live.as_mut().unwrap().child.kill().unwrap();
+        let e = s.run("SELECT 1 AS a").unwrap_err();
+        assert!(e.contains("session ended"), "{e}");
+        let out = s.run("SELECT getvariable('x') AS v").unwrap();
+        assert!(out.contains("\"v\":null"), "{out}");
     }
 
     #[test]

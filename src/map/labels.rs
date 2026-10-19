@@ -185,6 +185,10 @@ pub(crate) struct Candidate {
     /// A region's width on screen (a label wider than it is dropped);
     /// `None` for a point (labelled to its right).
     pub room: Option<f64>,
+    /// How far right of the anchor a point-style label starts (a plain
+    /// point: 5 px; a graduated symbol, M2a: its radius + 3 px). Unused
+    /// when `room` is `Some` (an area's label is centred on its anchor).
+    pub dx: f64,
 }
 
 /// A placed label: its anchor, text and whether it starts at the anchor
@@ -221,7 +225,7 @@ pub(crate) fn place(
         }
         let start = c.room.is_none();
         let x0 = if start {
-            c.at.0 + 5.0
+            c.at.0 + c.dx
         } else {
             c.at.0 - tw / 2.0
         };
@@ -289,6 +293,7 @@ mod tests {
             text: t.into(),
             priority: p,
             room: Some(80.0),
+            dx: 0.0,
         };
         let placed = place(
             vec![
@@ -310,6 +315,7 @@ mod tests {
             text: "A very long region name".into(),
             priority: 1.0,
             room: Some(20.0),
+            dx: 0.0,
         };
         assert!(place(vec![wide], None, &[], (400.0, 100.0), 9.0).is_empty());
         let many = (0..5)

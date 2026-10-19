@@ -35,7 +35,7 @@ terminal.
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
-| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size |
+| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); on a map a symbol's area (graduated symbols) or a flow's width; a constant (4::SIZE) sets the point size |
 | `::Q1` | `::QUARTILE1`, `::LOWER_QUARTILE` | encoding | a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT) |
 | `::MEDIAN` | `::Q2` | encoding | the median line of a box from statistics (see ::Q1) |
 | `::Q3` | `::QUARTILE3`, `::UPPER_QUARTILE` | encoding | the upper quartile of a box from statistics (see ::Q1) |
@@ -1087,6 +1087,50 @@ and `<circle>`s for points. Features are drawn in row order.
   Antarctica —, `'de-states'`, `'de-districts'`, `'world-50m'`) or a second
   WKT column, drawn first in a pale land colour with hairline borders;
   `::ALPHA` sets the data layer's opacity.
+
+#### Graduated symbols (`::SIZE`)
+
+```sql
+SELECT ags::REGION, customers::SIZE, dc_name::CATEGORY, district::LABEL,
+       'Customers per district, by distribution centre'::TITLE
+FROM coverage;
+```
+
+A numeric `::SIZE` column with at least two distinct finite values draws a
+circle at each feature's anchor instead of filling it — the point itself
+(`::LAT`/`::LON`, a WKT `POINT`), or a region's/polygon's pole of
+inaccessibility — scaled so its **area** is proportional to the value:
+`r = rmax · √(v / vmax)`, `rmax` a 4 % share of the panel's shorter side
+(clamped 6–28 px). Lines ignore `::SIZE` and draw as today. A constant
+`::SIZE` (e.g. `4::SIZE`) sets every symbol to that fixed radius in px, with
+no size legend. Symbols are drawn **largest first** (so small ones stay
+visible), which is the one place a map breaks row order — `data-row` still
+holds the row.
+
+Colour follows the same rule as a choropleth: the measure through the
+sequential/diverging ramp (classes, `::RANGE` and `::MIDPOINT` all work),
+else `::CATEGORY`, else the brand tint; `::ALPHA` sets the fill opacity
+(default 0.75).
+
+On a `::REGION` map with no explicit `::BASEMAP`, the whole matched layer
+(Antarctica excluded) is drawn automatically as an unfitted backdrop — the
+map still fits to the drawn symbols, not to the whole layer — and the rows'
+own regions are not filled individually (D4); an explicit `::BASEMAP` keeps
+today's behaviour (fitted too).
+
+A **size legend** stacks under the colour legend: nested circles at three
+"nice" values (the largest, a quarter and a sixteenth of it, deduplicated,
+dropping any under 3 px), bottom-aligned, each with a leader line to its
+formatted value.
+
+Each symbol carries `data-size` (the raw value) and `data-fsize` (formatted,
+always present); `data-value` is the colour measure, or the size value when
+there is no colour measure. The summary reads "`n` symbols
+(`projection`). Largest: `name` `value`; smallest: `name` `value`. Area ∝
+`measure`", then the colour classes/no-data as a choropleth, then "`k` not
+drawn (zero or negative size)" when any are skipped. `dashboard --check`
+flags skipped rows with `map/size-not-positive`.
+
 - **Labels** (`::LABEL_TOP n`: the n most important; `::DATALABELS`: all
   that fit): a region's name sits at its pole of inaccessibility (inside even
   a C-shaped region), a point's to its right, in the ink with a halo in the
@@ -1098,10 +1142,11 @@ and `<circle>`s for points. Features are drawn in row order.
 - **Hover / click / zoom**: each feature carries `data-row`, `data-series`
   (its `::CATEGORY`, else its `::LABEL`), `data-value`, `data-label`,
   `data-x` (its key — the row — when it has no label; else the label is the
-  key) and `data-class`; the root carries `data-map`,
-  `data-proj` and `data-classes`. Scroll zooms and drag pans in the browser
-  (double-click resets); the zoom window is in the projected units, and each
-  zoom re-renders, so simplification acts as level of detail.
+  key) and `data-class`; a graduated symbol adds `data-size`/`data-fsize`
+  (above); the root carries `data-map`, `data-proj` and `data-classes`.
+  Scroll zooms and drag pans in the browser (double-click resets); the zoom
+  window is in the projected units, and each zoom re-renders, so
+  simplification acts as level of detail.
 - **Accessibility**: the SVG's `<desc>` (and the chart's aria label) is one
   sentence — "400 regions (equal-area conic). Highest: München 980; lowest:
   Zweibrücken 12. 5 quantile classes: 80 / 80 / 80 / 80 / 80; 3 without
@@ -1558,10 +1603,13 @@ SELECT max(loaded_at)::ASOF, 'stale=24h' FROM etl_log;   -- s, m, h, d or w
 
 The value is a `TIMESTAMP`, `TIMESTAMPTZ` or `DATE`; a timestamp without a time
 zone is read as **UTC** (prefer `TIMESTAMPTZ`, e.g. `now()` or a `loaded_at`
-written with one). The chip shows the time in the viewer's zone and the
-dashboard locale (the date is added when it isn't today) and keeps its relative
-age current while the page is open. It is in every output: the browser, a
-locked server, the static HTML of `dashboard file.sql out.html` /
+written with one). A `DATE` (or `'YYYY-MM-DD'` text) is a calendar day: the
+chip shows the date alone, with no time and no time-zone shift ("Data as of
+01.01.2026 (291 d ago)", "today" on the day). The chip shows the time in the
+viewer's zone and the dashboard locale (the date is added when it isn't today)
+and keeps its relative age current while the page is open. It is in every
+output: the browser, a locked server, the static HTML of
+`dashboard file.sql out.html` /
 `serve --dashboards` (rendered at build time, then refreshed by the page's
 script against the viewer's clock) and headless SVG (`dashboard --svg`,
 `render_dashboard_svg`: rendered at render time, in UTC). `--check` warns when
