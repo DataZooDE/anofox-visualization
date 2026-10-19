@@ -16,13 +16,17 @@
 // real security effect: sec-review-256 "Last check"). This version also
 // flags that pattern outright, and extends the file list with explore.js,
 // which "final check"'s FILES never covered.
+//
+// #244: web/assist-ui.js joins the scan too — the panel builds its own
+// options objects (applyModel, diffScripts, buildCtx-shaped calls, …) and
+// must follow the same rule as every other assistant module.
 import { readFileSync } from "fs";
 import path from "path";
 import assert from "assert/strict";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
-const FILES = ["web/assist.js", "web/assist-engine.js", "web/assist-csp.js", "web/lint.js", "web/explore.js"];
+const FILES = ["web/assist.js", "web/assist-engine.js", "web/assist-csp.js", "web/lint.js", "web/explore.js", "web/assist-ui.js"];
 const OPTS_NAMES = new Set(["opts", "options", "config", "cfg", "o"]);
 
 // Splits a parameter list (or any comma-separated text) on top-level

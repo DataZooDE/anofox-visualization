@@ -13,7 +13,7 @@
 //   * the tools over DuckDB-Wasm, each in a scratch session (web/lint.js).
 // A pure ES module (no DOM): the panel (M1-3) drives it, and
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
-import { lintScript, ownOpts, rowsJson, scratchRunner, splitStatements } from "./lint.js";
+import { lintScript, ownOpts, rowsJson, scratchRunner, scratchSession, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
 // #204: the assistant's own locked DuckDB-Wasm instance. wasmTools runs
@@ -1330,6 +1330,22 @@ export function wasmTools(opts) {
         const names = await catalogNames();
         return scratchRunner(db, { timeoutMs: checkQueryMs, guard: guardFor(allowed, names) })(sql);
       };
+    },
+    // C-1 (#244): the preview's whole render loop (inputs, drills, pages,
+    // tabs) in ONE guarded engine session — the same `allowed` set and guard
+    // as previewRunner above, the lock re-checked before every call (`before:
+    // locked`), so a dashboard's SET VARIABLEs and TEMP objects carry from one
+    // render call to the next exactly as they do on the page's own connection.
+    // No `prepare`: scratchSession takes none (#244 §6.1).
+    previewSession(proposalSql) {
+      const planned = JSON.parse(plan(proposalSql));
+      const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
+      let names = null;
+      return scratchSession(db, {
+        timeoutMs: checkQueryMs,
+        before: locked,
+        guard: async (piece, ctx) => guardFor(allowed, (names ||= await catalogNames()))(piece, ctx),
+      });
     },
   };
   return tools;

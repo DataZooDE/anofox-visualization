@@ -1,0 +1,5 @@
+<img src=x onerror=alert(1)>
+
+![r](http://127.0.0.1:${REC}/r.png)
+
+[click](javascript:alert(1)) https://evil.example/
