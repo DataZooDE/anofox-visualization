@@ -199,4 +199,17 @@ fn authoring_session_persists_state() {
     let (st, body) = q(port, &tok, ".shell echo hi");
     assert_eq!(st, 400, "{body}");
     assert!(body.contains("dot-commands"), "{body}");
+
+    // 9. #275 L1: output with no trailing newline (a `\r` line terminator)
+    // doesn't merge with the `.print` end marker and hang the server — the
+    // request still answers, and the next one isn't desynced.
+    let (st, body) = q(
+        port,
+        &tok,
+        "COPY (SELECT 1) TO '/dev/stdout' (FORMAT csv, NEW_LINE '\\r')",
+    );
+    assert_eq!(st, 200, "{body}");
+    let (st, body) = q(port, &tok, "SELECT 4 AS four");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"four\":4"), "{body}");
 }

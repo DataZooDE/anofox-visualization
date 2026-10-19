@@ -756,21 +756,44 @@ impl Live {
             out,
             err,
         };
-        // Whatever the CLI prints at start (a ~/.duckdbrc) is no query's answer.
-        match live.round(dir, "") {
+        // Reset what a `~/.duckdbrc` could otherwise break or hang every
+        // request with (#275 L2): `.bail on` would exit the CLI at the
+        // stderr end marker's deliberate "missing file" error, and a
+        // leftover `.output …` would swallow the `.print` marker. These are
+        // server-written dot commands, sent before the warm-up round's own
+        // markers; the client-side dot-command refusal is unaffected.
+        match live.round_with(dir, ".bail off\n.output\n.mode json\n", "") {
             Ok(_) | Err(RoundErr::Sql(_)) => Ok(live),
-            Err(RoundErr::Ended(t)) => Err(format!("duckdb did not start: {}", t.trim())),
+            Err(RoundErr::Ended(t)) => {
+                // #275 L4: don't leak a zombie when the session never came up.
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                Err(format!("duckdb did not start: {}", t.trim()))
+            }
         }
     }
 
     fn round(&mut self, dir: &Path, sql: &str) -> Result<String, RoundErr> {
+        self.round_with(dir, "", sql)
+    }
+
+    fn round_with(&mut self, dir: &Path, preamble: &str, sql: &str) -> Result<String, RoundErr> {
         let q = dir.join("q.sql");
+        // Drop any previous (now read-only, #275 L3) staged query first.
+        let _ = std::fs::remove_file(&q);
         write_private(&q, sql)
             .map_err(|e| RoundErr::Sql(format!("could not stage the query: {e}")))?;
+        // Read-only once staged (#275 L3): the query can't rewrite its own
+        // file out from under the CLI's still-open `.read` of it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o400));
+        }
         let nonce = sv::random_token();
         let done = format!("__anofox_done_{nonce}");
         let script = format!(
-            ".read '{}'\n.print {done}\n.read '{}'\n",
+            "{preamble}.read '{}'\n.print {done}\n.read '{}'\n",
             q.display(),
             dir.join(format!("end-{nonce}")).display()
         );
@@ -787,8 +810,19 @@ impl Live {
             let mut line = String::new();
             match self.out.read_line(&mut line) {
                 Ok(0) | Err(_) => return Err(RoundErr::Ended(self.drain_err())),
-                Ok(_) if line.trim_end_matches(['\r', '\n']) == done => break,
-                Ok(_) => out.push_str(&line),
+                Ok(_) => {
+                    // #275 L1: the marker is matched as a line's suffix, not
+                    // only as a whole line, so a statement's output that
+                    // doesn't end in `\n` (no trailing newline, or a `\r`
+                    // line terminator) can't merge with the marker and hang
+                    // this loop forever.
+                    let l = line.trim_end_matches(['\r', '\n']);
+                    if let Some(head) = l.strip_suffix(done.as_str()) {
+                        out.push_str(head);
+                        break;
+                    }
+                    out.push_str(&line);
+                }
             }
         }
         let mut err = String::new();
