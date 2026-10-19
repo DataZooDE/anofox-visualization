@@ -1823,6 +1823,13 @@ Every panel carries its own state — there is no full-page spinner:
   see *A live data folder* in [secure serving](secure-serving.md).
   Elsewhere (the builder, `serve`) the statement's own missing-input error
   decides.
+  The script-free page of `serve --dashboards` checks them as well, with the
+  request's variables, but its session can open no file
+  (`enable_external_access = false`): there every `-- @requires` input is
+  missing — a gated panel reads *Not available* (without naming the file), a
+  gated strip is left out of its chart, and a gated tab or `::VIEW`
+  alternative is left out with its panels (the next shown alternative is
+  drawn).
 
   A statement skipped for a missing input is skipped for whoever picked that
   run: never put `@requires` on a setup statement whose effect narrows what a
@@ -1867,7 +1874,8 @@ Every panel carries its own state — there is no full-page spinner:
   answers the tab's statement *Not available*), and so is every panel in it,
   whoever asks: a hidden tab's panels never run. As for panels, a locked
   server checks the paths only with a data folder. The static renderers
-  (`dashboard file.sql`, `dashboard --svg`) leave the tab's panels out.
+  (`dashboard file.sql`, `dashboard --svg`) and the script-free page of
+  `serve --dashboards` leave the tab's panels out.
 
   `dashboard --check` reports a missing input as a **note** (`optional/missing`),
   not an error — `--strict` still passes. It warns about a `${name}` with no

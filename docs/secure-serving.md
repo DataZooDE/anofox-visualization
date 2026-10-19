@@ -433,6 +433,11 @@ Consumers pick a dashboard id and whitelisted params
   doubles as the freshness knob).
 - `--init setup.sql` runs once, read-write, before serving (attach sources,
   create views/tables). CLI dot-commands are refused there too.
+- `-- @requires` (DOCS, *Not available*): checked per request with the
+  request's variables, like `dashboard --check`; the session can open no
+  file, so every such input counts as missing here — a gated panel shows
+  *Not available* (naming no file), a gated `::TRACK`, `::TAB` / `::SUBTAB`
+  or `::VIEW` alternative is left out (#274).
 - A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
   value, trimmed and escaped, at most 200 characters; none on a KPI tile), as
   on a dashboard card.

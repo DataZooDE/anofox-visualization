@@ -1091,6 +1091,61 @@ fn cache_key(
 /// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
 /// external access disabled and the configuration locked after the
 /// server-declared `-- @load`s.
+/// The first row of `duckdb -json` output as `(column, text)` pairs (NULL → None).
+fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let rows = sql::parse_rows_json(json)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|row| {
+            row.into_iter()
+                .map(|(k, v)| {
+                    let t = match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        v => Some(v.to_string()),
+                    };
+                    (k, t)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `-- @requires` on the script-free page (#274), gated as the browser and
+/// the locked server gate it: the shared check (`sql::requires::check`, as
+/// `dashboard --check` and the static renderers use it), each query in the
+/// same locked `duckdb -readonly` session the panels run in, with this
+/// request's variables (`prefix`). That session can open no file
+/// (`enable_external_access = false`), so a `glob` that fails counts as
+/// missing here — fail closed, unlike `check` on an author's own session.
+/// `Some(requirement)` (as written) when one is not met.
+fn requires_unmet(
+    st: &ServeState,
+    prefix: &str,
+    reqs: &[sql::requires::Requirement],
+) -> Option<String> {
+    sql::requires::check(reqs, |q, session| {
+        let row = run_duckdb(
+            &st.db,
+            &["-readonly", "-json"],
+            &format!("{prefix}{q}"),
+            st.timeout,
+        )
+        .and_then(|json| first_row_cells(json.trim()));
+        match row {
+            Err(_) if !session => Ok(vec![("n".to_string(), Some("0".to_string()))]),
+            r => r,
+        }
+    })
+    .missing
+}
+
+/// A panel whose own `-- @requires` input is missing (#274): the browser's
+/// "Not available" card (web/app.js `mkNotAvailable`), without the file's
+/// name — this page carries none of the dashboard's SQL.
+const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nodata\" role=\"status\"><strong>Not available</strong><span>An optional input of this panel is missing.</span></div></figure>";
+
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1160,16 +1215,22 @@ fn render_dashboard_page(
     // directives, so a ::THEME anywhere styles the whole page.
     type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
     let mut chrome = DashboardChrome::default();
-    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
     let mut view_pick = sql::views::StaticPick::default();
+    // #274: a ::TAB / ::SUBTAB / ::VIEW alternative whose `-- @requires`
+    // input is missing is left out with its panels (the tabs are flattened
+    // here; the next shown alternative is the one drawn) — as the static
+    // renderers do (src/dashboard.rs `execute`).
+    let mut sections = sql::requires::Sections::default();
     for panel in sql::plan(&dash.script) {
+        let hidden = sections.step(&panel, |reqs| requires_unmet(st, &prefix, reqs));
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
         }
-        if view_pick.drop_panel(&panel) {
+        if hidden.is_some() || view_pick.drop_panel(&panel) {
             continue;
         }
         let chrome_role = panel
@@ -1206,6 +1267,19 @@ fn render_dashboard_page(
         {
             continue;
         }
+        // #274: the panel's own `-- @requires` (never a chrome directive's or a
+        // ::SECTION's): not met → a "Not available" card; a ::TRACK strip is
+        // left out of its chart instead.
+        if chrome_role.is_none()
+            && !section
+            && !panel.requires.is_empty()
+            && requires_unmet(st, &prefix, &panel.requires).is_some()
+        {
+            if !track::is_track(&panel.roles) {
+                queried.push((panel, Rows::new(), true));
+            }
+            continue;
+        }
         let q = format!(
             "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
             panel.sql.trim().trim_end_matches(';'),
@@ -1233,7 +1307,7 @@ fn render_dashboard_page(
             chrome.apply_row(r, cells);
             continue;
         }
-        queried.push((panel, rows));
+        queried.push((panel, rows, false));
     }
     let set = chrome.resolve(theme_default())?;
     let t = set.default_variant().clone();
@@ -1250,7 +1324,16 @@ fn render_dashboard_page(
     // Phase 2: render.
     let mut panels = String::new();
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows)) = queried.next() {
+    while let Some((panel, rows, na)) = queried.next() {
+        if na {
+            panels.push_str(NOT_AVAILABLE_HTML);
+            // its strips go with it
+            while queried
+                .next_if(|(q, _, _)| track::is_track(&q.roles))
+                .is_some()
+            {}
+            continue;
+        }
         if let Some(cp) = &panel.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
                 let svg =
@@ -1276,7 +1359,7 @@ fn render_dashboard_page(
         );
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).

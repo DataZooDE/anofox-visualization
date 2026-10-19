@@ -289,3 +289,112 @@ fn serve_static_page_draws_only_the_default_view() {
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     check_view_page(&http_body(&resp));
 }
+
+/// `GET /d/<id>` on a `serve --dashboards` instance started over `script`,
+/// as a raw HTTP/1.1 response (status line and headers plus body).
+#[cfg(feature = "serve")]
+fn serve_get(tag: &str, id: &str, script: &str) -> String {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let s = Scratch::new(tag);
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(dash.join(format!("{id}.sql")), script).unwrap();
+    let init = s.0.join("init.sql");
+    std::fs::write(&init, "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS one;\n").unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut conn = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        conn,
+        "GET /d/{id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut resp = String::new();
+    conn.read_to_string(&mut resp).unwrap();
+    resp
+}
+
+/// #274: `-- @requires` on the script-free page — the session opens no
+/// file, so every input is missing: a gated tab and ::VIEW alternative are
+/// left out (the next alternative is drawn), a gated panel is a
+/// "Not available" card naming no path, and the page still answers 200.
+const REQ_SCRIPT: &str = "\
+SELECT x::XAXIS, y::BARCHART, 'Always'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+-- @requires nowhere/panel.parquet
+SELECT x::XAXIS, y::BARCHART, 'GatedPanel'::TITLE FROM read_parquet('nowhere/panel.parquet');
+-- @requires nowhere/view.parquet
+SELECT 'Lines' AS g ::VIEW;
+SELECT x::XAXIS, y::LINECHART, 'HiddenView'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+SELECT 'Bars' AS g2 ::VIEW;
+SELECT x::XAXIS, y::BARCHART, 'ShownView'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+-- @requires nowhere/tab.parquet
+SELECT 'Forecasts'::TAB;
+SELECT x::XAXIS, y::BARCHART, 'HiddenTab'::TITLE FROM (VALUES ('a', 1), ('b', 2)) v(x, y) ORDER BY x;
+";
+
+#[cfg(feature = "serve")]
+#[test]
+fn serve_static_page_gates_requires() {
+    if !have_duckdb("serve_static_page_gates_requires") {
+        return;
+    }
+    let resp = serve_get("serve-req", "requires", REQ_SCRIPT);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let html = http_body(&resp);
+    let f = figures(&html);
+    assert_eq!(f.len(), 2, "{html}");
+    assert!(f[0].contains(">Always</text></svg><svg"), "{}", f[0]);
+    assert!(f[1].contains(">ShownView</text></svg><svg"), "{}", f[1]);
+    for gone in ["HiddenView", "HiddenTab", "GatedPanel", "nowhere/"] {
+        assert!(!html.contains(gone), "{gone} on the page: {html}");
+    }
+    assert_eq!(
+        html.matches("<figure class=\"panel dp-na\">").count(),
+        1,
+        "{html}"
+    );
+    assert!(html.contains("<strong>Not available</strong>"), "{html}");
+    // the card sits between the two charts
+    let (a, n, s) = (
+        html.find(">Always<").unwrap(),
+        html.find("<figure class=\"panel dp-na\">").unwrap(),
+        html.find(">ShownView<").unwrap(),
+    );
+    assert!(a < n && n < s, "{html}");
+}
