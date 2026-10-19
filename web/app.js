@@ -32,7 +32,7 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
 import { engineExtensions, pageAdapter } from "./assist-engine.js";
-import { KEY_SLOT, keyStore, rememberAllowed } from "./assist.js";
+import { KEY_SLOT, assistConfig, keyStore, rememberAllowed } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1181,6 +1181,23 @@ function syncHL() {
   hl.scrollTop = $("sql").scrollTop;
   hl.scrollLeft = $("sql").scrollLeft;
 }
+// #244: Apply replaces the editor's text with the assistant's SQL, through
+// the browser's own undo stack (execCommand("insertText")) rather than a
+// plain `.value =`, so Ctrl+Z undoes it like any other edit (M7). Falls
+// back to a plain assignment (native undo lost) where insertText is
+// unavailable. The `input` event this fires is also what exits a preview
+// (app.js's `#sql` input listener) — Apply itself exits the preview first.
+function editorReplace(text) {
+  const ta = $("sql");
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand && document.execCommand("insertText", false, text);
+  if (!ok || ta.value !== text) {
+    ta.value = text;
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  syncHL();
+}
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
@@ -1339,6 +1356,34 @@ let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(),
 // every boot, even on an installation that opted in on its own,
 // non-shared domain.
 let assistantRememberOptIn = false;
+// #244: the assistant's own state. `assistCfg` is assistConfig()'s result
+// (boot() sets it once, after appBrandReady resolves — assistFlags());
+// `appAssistBlock` is read only inside appBrandLoad() (G2); `assistUi` is
+// the mounted panel (mountAssistant(), lazily imported on first open);
+// `lastOpener` is where focus returns to on close (the toolbar button, the
+// start card's button, or Ctrl/⌘+I's document.activeElement).
+let assistCfg = { enabled: false, reason: "boot" },
+  appAssistBlock = null,
+  assistUi = null,
+  lastOpener = null;
+
+// #244 C-1: while a proposal is previewed, the dashboard renders `preview.sql`
+// and every query goes to `preview.run` — a guarded session in the
+// assistant's locked engine (assist-ui.js → tools.previewSession). Nothing
+// may reach the page's own DuckDB until Apply: pageConn()/pageDb() (every
+// other use of `conn`/`db` in this file goes through them) and the guarded
+// `pageAdapter` (assistDeps(), §3.5) all throw while a preview is active.
+let preview = null; // Object.freeze({ sql, run(sql) -> Promise<rowsJson text> }) | null
+let previewSaved = null; // the page dashboard's UI state, restored on exit (dashStateSave)
+const PREVIEW_PAGE_DB = "the page's DuckDB is not used during a preview (#244)";
+function pageConn() {
+  if (preview) throw new Error(PREVIEW_PAGE_DB);
+  return conn;
+}
+function pageDb() {
+  if (preview) throw new Error(PREVIEW_PAGE_DB);
+  return db;
+}
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1350,10 +1395,10 @@ async function ensureGeo() {
   if (!db) throw new Error("in-browser DuckDB not ready");
   if (!geoReady) {
     geoReady = (async () => {
-      await conn.query("INSTALL spatial; LOAD spatial;");
+      await pageConn().query("INSTALL spatial; LOAD spatial;");
       const reg = async (name, url) => {
         const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
-        await db.registerFileBuffer(name, bytes);
+        await pageDb().registerFileBuffer(name, bytes);
       };
       await reg(
         "quakes.geojson",
@@ -1383,7 +1428,7 @@ async function ensureExtension(name) {
     extReady[name] = (async () => {
       // json (from the default repo) is needed by some anofox macros.
       try {
-        await conn.query("INSTALL json; LOAD json;");
+        await pageConn().query("INSTALL json; LOAD json;");
       } catch (_) {
         /* usually bundled */
       }
@@ -1391,14 +1436,14 @@ async function ensureExtension(name) {
       // injection (or a sibling repo on the shared github.io origin) must
       // not move where unsigned anofox extensions come from.
       const repo = new URL("localext", import.meta.url).href.replace(/\/$/, "");
-      await conn.query(`SET custom_extension_repository='${repo}';`);
+      await pageConn().query(`SET custom_extension_repository='${repo}';`);
       try {
-        await conn.query(`INSTALL ${name};`);
-        await conn.query(`LOAD ${name};`);
+        await pageConn().query(`INSTALL ${name};`);
+        await pageConn().query(`LOAD ${name};`);
       } finally {
         // Restore the default repo so other autoloaded extensions (parquet,
         // spatial, …) still resolve — ours only hosts the anofox extensions.
-        await conn.query("RESET custom_extension_repository;");
+        await pageConn().query("RESET custom_extension_repository;");
       }
     })().catch((e) => {
       throw new Error(
@@ -1435,7 +1480,7 @@ async function ensureForecast(sql) {
   if (/m5_monthly/i.test(sql) && !fcParquet) {
     fcParquet = (async () => {
       const bytes = new Uint8Array(await (await fetch("m5_monthly.parquet")).arrayBuffer());
-      await db.registerFileBuffer("m5_monthly.parquet", bytes);
+      await pageDb().registerFileBuffer("m5_monthly.parquet", bytes);
     })().catch((e) => {
       fcParquet = null;
       throw e;
@@ -1492,7 +1537,7 @@ async function ensureDataFiles(sql) {
         dataFiles[n] = (async () => {
           const r = await fetch(n);
           if (!r.ok) throw new Error(`couldn't fetch ${n} (HTTP ${r.status})`);
-          await db.registerFileBuffer(n, new Uint8Array(await r.arrayBuffer()));
+          await pageDb().registerFileBuffer(n, new Uint8Array(await r.arrayBuffer()));
         })().catch((e) => {
           delete dataFiles[n];
           throw e;
@@ -1521,6 +1566,10 @@ async function runSql(sql, page, kind, setup, at) {
 async function runSqlInner(sql, page, kind, setup, at) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+  // #244 C-1: before prepareSql and before any page handle — while a
+  // proposal is previewed, every render-loop query goes to the assistant's
+  // guarded engine session, never to the page's own DuckDB.
+  if (preview) return preview.run(sql);
   await prepareSql(sql);
   if (servedMode) {
     // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
@@ -1540,7 +1589,7 @@ async function runSqlInner(sql, page, kind, setup, at) {
     return (await r.text()) || "[]";
   }
   // (DATE / TIMESTAMP / DECIMAL back to what the CLI's JSON reads: web/lint.js)
-  return rowsJson(await conn.query(sql));
+  return rowsJson(await pageConn().query(sql));
 }
 
 // The anofox/spatial extensions a statement's text needs (#204 M-1: used
@@ -1568,6 +1617,34 @@ async function prepareSql(sql) {
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
 }
 
+// #244 §3.5: the assistant's view of the page's own DuckDB (pageAdapter)
+// must also refuse while a preview is active — the engine build
+// (assist-ui's ensureEngine) always exits a preview before it reads the
+// page, but this is the backstop (C-1), same spirit as pageConn()/pageDb():
+// every method of `adapter` throws PREVIEW_PAGE_DB instead of running.
+function guardPage(adapter) {
+  const out = {};
+  for (const k of Object.keys(adapter)) {
+    const v = adapter[k];
+    out[k] =
+      typeof v === "function"
+        ? (...a) => {
+            if (preview) throw new Error(PREVIEW_PAGE_DB);
+            return v.apply(adapter, a);
+          }
+        : v;
+  }
+  return out;
+}
+// The 'data/<x>/<y>.(csv|parquet)' literals an editor script names, plus
+// m5_monthly.parquet when it is named (ensureForecast's own file) — editor
+// text only, never the model's SQL (M-1): assistDeps().files() fixes the
+// assistant engine's allow-listed file set *before* it is built and locked.
+function editorFileNames(sql) {
+  const out = new Set([...String(sql).matchAll(/'(data\/[\w-]+\/[\w.-]+\.(?:csv|parquet))'/g)].map((m) => m[1]));
+  if (/m5_monthly/i.test(sql)) out.add("m5_monthly.parquet");
+  return [...out];
+}
 // #204: what M1-3 (#244) needs to build the assistant engine — not wired to
 // anything yet, and not on `window` (a static grep test,
 // tests/web/assist_engine_test.mjs item 12): the module that opens the
@@ -1583,11 +1660,144 @@ function assistDeps() {
       URL.revokeObjectURL(url);
       return d;
     },
-    page: pageAdapter(db, { handles: xpHandles }),
+    page: guardPage(pageAdapter(db, { handles: xpHandles })),
     extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions($("sql").value) }),
-    prepareFiles: () => ensureDataFiles($("sql").value), // editor text only — never the model's
+    files: () => [...new Set([...editorFileNames($("sql").value), ...xpHandles.keys()])],
+    // #244: also the forecast parquet (ensureForecast's own memoised
+    // registration) — editor text only, never the model's SQL (M-1).
+    prepareFiles: async () => {
+      const s = $("sql").value;
+      await ensureDataFiles(s);
+      if (/m5_monthly/i.test(s)) await ensureForecast("m5_monthly");
+    },
     imgOrigins: async () => brandImgOrigins(await appBrandReady),
   };
+}
+
+// ---- the assistant panel: config, entry, host (#244 M1-3) ----
+
+// R1: a URL param can only ever turn the assistant *off* (embed=1 already
+// does, through assistConfig's own `embed` check) — never on, and never
+// supply any other field. assistConfig() itself is called in exactly one
+// place, below, with `appAssistBlock` (read only in appBrandLoad(), G1/G2).
+function assistFlags() {
+  return { served: !!window.__served || servedMode, embed: document.body.classList.contains("embed"), live: backend === "live", framed: isFramed(), host: location.hostname };
+}
+function isFramed() {
+  try {
+    return window.top !== window.self;
+  } catch (_) {
+    return true; // cross-origin frame: can't read window.top — treat as framed (fail closed, T11)
+  }
+}
+// Visibility (§5.4): the toolbar button, the editor tabs, and the start
+// card (hidden once the editor has text, or while the panel is already
+// open — reopening shows the conversation, not the start card again).
+function assistUiSync() {
+  const on = assistCfg.enabled && !servedMode && !document.body.classList.contains("embed") && bodyMode() === "edit";
+  const btn = $("assist-btn");
+  if (btn) btn.hidden = !on;
+  const tabs = document.querySelector(".ed-tabs");
+  if (tabs) tabs.hidden = !on;
+  const start = $("assist-start");
+  if (start) start.hidden = !on || $("sql").value.trim() !== "" || !!assistUi?.isOpen();
+}
+// The editor-column tabs (SQL / ✦ Assistant): a standard ARIA tablist
+// (←/→, Home/End move and activate; selecting the Assistant tab opens the
+// panel; selecting SQL closes it).
+function wireEdTabs() {
+  const tabSql = $("tab-sql"),
+    tabAssist = $("tab-assist");
+  if (!tabSql || !tabAssist) return;
+  const tabs = [tabSql, tabAssist];
+  const select = (tab, focus) => {
+    for (const t of tabs) {
+      const sel = t === tab;
+      t.setAttribute("aria-selected", String(sel));
+      t.tabIndex = sel ? 0 : -1;
+    }
+    if (focus) tab.focus();
+    if (tab === tabAssist) openAssistant({ opener: tab });
+    else assistUi?.close();
+  };
+  tabSql.onclick = () => select(tabSql, false);
+  tabAssist.onclick = () => select(tabAssist, false);
+  tabSql.closest('[role="tablist"]')?.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(document.activeElement);
+    if (i < 0) return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      select(tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length], true);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      select(tabs[0], true);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      select(tabs[tabs.length - 1], true);
+    }
+  });
+}
+// The host object mountAssistant(host) gets — built fresh on every open,
+// never put on `window` (G12): assist-ui.js sees exactly this surface, and
+// nothing else of app.js's state.
+function assistHost() {
+  return {
+    config: assistCfg,
+    deps: assistDeps(),
+    wasm: { plan, lintStep: lint_step, pageSql: page_sql, rolesJson: roles_json, dashboardMeta: dashboard_meta, version: wasmVersion },
+    editor: { get: () => $("sql").value, replace: editorReplace, focus: () => $("sql").focus() },
+    preview: { enter: previewEnter, exit: previewExit, active: () => !!preview },
+    onPreviewExit: (cb) => previewExitListeners.add(cb),
+    run: () => run(),
+    dashName: { get: () => $("dash-name").value, set: (v) => ($("dash-name").value = v) },
+    keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }),
+    ui: { toast: sideToast, status, isPhone: () => matchMedia(SIDE_DRAWER).matches, opener: () => lastOpener },
+    debug: new URLSearchParams(location.search).get("assist_debug") === "1", // display only
+  };
+}
+// Click ✦, the Assistant tab, the start card's submit, or Ctrl/⌘+I: proves
+// the tab-wide CSP (R7, the same memoised promise boot()'s key-presence
+// check shares — C-2), then lazily imports assist-ui.js (R6: never before
+// this point) and mounts it once. A failed CSP probe fails closed: the key
+// is cleared and the assistant turns itself off rather than opening
+// unenforced.
+async function openAssistant(opts = {}) {
+  if (!assistCfg.enabled) return;
+  lastOpener = opts.opener || null;
+  try {
+    await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+  } catch (_) {
+    keyStore(sessionStorage, localStorage, { remember: false }).clear();
+    assistCfg = { enabled: false, reason: "csp" };
+    assistUiSync();
+    status("The assistant is not available in this browser: its security policy could not be enforced.");
+    return;
+  }
+  assistUi ||= (await import("./assist-ui.js")).mountAssistant(assistHost());
+  assistUi.open(opts);
+}
+// Toolbar button, the start card, Ctrl/⌘+I.
+function wireAssist() {
+  const btn = $("assist-btn");
+  if (btn) btn.onclick = () => openAssistant({ opener: btn });
+  wireEdTabs();
+  const startForm = $("assist-start");
+  if (startForm) {
+    startForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const request = $("assist-start-q")?.value.trim();
+      if (!request) return;
+      openAssistant({ request, send: true, opener: startForm.querySelector("button[type=submit]") });
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "i")) return;
+    const editable = !servedMode && !document.body.classList.contains("embed") && !preview;
+    if (!(assistCfg.enabled && editable && bodyMode() === "edit" && !document.querySelector(".dp-dialog"))) return;
+    e.preventDefault();
+    if (assistUi?.isOpen()) assistUi.close();
+    else openAssistant({ opener: document.activeElement });
+  });
 }
 
 async function boot() {
@@ -1675,7 +1885,19 @@ async function boot() {
   INLINE_SAMPLES.forEach((sql, i) => addExample(sql, `Example ${i + 1}`));
   if (!window.__served) await loadFileSamples();
   renderSidebar();
-  $("side-new").onclick = () => loadDash("", "");
+  // #244 §5.4: with the assistant on, ＋ New dashboard opens straight into
+  // the "Describe the dashboard you want…" start card instead of a blank
+  // editor — `assistUiSync()` (loadDash → assistUiSync) shows it once the
+  // editor is actually empty.
+  $("side-new").onclick = () => {
+    const m = bodyMode();
+    const toAssist = assistCfg.enabled && !servedMode && !document.body.classList.contains("embed") && (m === "edit" || m === "view");
+    loadDash("", "");
+    if (toAssist) {
+      setMode("edit");
+      $("assist-start-q")?.focus();
+    }
+  };
   $("save").onclick = saveDash;
   // One name: renaming in the toolbar renames the page title (::DASHBOARD_TITLE,
   // when the SQL has one); saving keeps the two together too.
@@ -1816,7 +2038,14 @@ async function boot() {
   wireLint();
 
   // SQL editor: highlight overlay + scroll sync
-  $("sql").addEventListener("input", syncHL);
+  $("sql").addEventListener("input", () => {
+    syncHL();
+    // #244: editing the SQL directly (the editorReplace() of an Apply fires
+    // this too, but Apply itself already exited the preview first) leaves
+    // the preview — no rerun prompt: the grid shows "Not run yet."
+    if (preview) previewExit({ rerun: false });
+    assistUiSync();
+  });
   $("sql").addEventListener("scroll", () => {
     $("hl").scrollTop = $("sql").scrollTop;
     $("hl").scrollLeft = $("sql").scrollLeft;
@@ -1846,6 +2075,16 @@ async function boot() {
 
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
+  finishAssistBoot(); // #244: after run() has started — never delays the first render
+}
+// R1: assistConfig(appAssistBlock, assistFlags()) — called exactly once,
+// here, once appAssistBlock is known (appBrandLoad(), awaited via
+// appBrandReady) and the #256 ratchet block above has run.
+async function finishAssistBoot() {
+  await appBrandReady;
+  assistCfg = assistConfig(appAssistBlock, assistFlags());
+  wireAssist();
+  assistUiSync();
 }
 
 // ---- Check (#145): the lint of `dashboard --check`, in the browser ----
@@ -1873,7 +2112,7 @@ async function runLint() {
   btn.setAttribute("aria-busy", "true");
   say("Checking…");
   try {
-    const run = scratchRunner(db, { prepare: prepareSql });
+    const run = scratchRunner(pageDb(), { prepare: prepareSql });
     const res = await lintScript(script, {
       step: lint_step,
       run,
@@ -3219,11 +3458,11 @@ function delDash(id) {
     () => document.querySelector("#side-nav .side-item") || $("side-new")
   );
 }
-function loadDash(name, sql, key) {
-  closeSideMenu();
-  curDash = key || null;
-  if (key) rememberDash(key);
-  // A different dashboard starts clean — don't carry tab/filter/page state over.
+// A different dashboard (or a preview's exit, #244) starts clean — don't
+// carry tab/filter/page state over. dashStateSave()/dashStateRestore() are
+// the same reset, but save-then-restore instead of clearing, so entering and
+// leaving a preview round-trips the page dashboard's own UI state exactly.
+function dashStateReset() {
   dpTab = null;
   dpTableUI = {};
   dpSubTab = {};
@@ -3240,13 +3479,151 @@ function loadDash(name, sql, key) {
   dpSort = {};
   dpPaged = {};
   dpFilterText = {};
-  $("sql").value = sql;
-  $("dash-name").value = name || "";
-  syncHL();
-  if (bodyMode() === "explore") setMode("edit");
-  markActive();
-  run();
+  dpVars = {};
 }
+function dashStateSave() {
+  return {
+    dpTab,
+    dpTableUI: { ...dpTableUI },
+    dpSubTab: { ...dpSubTab },
+    dpFilter,
+    dpSelected,
+    dpZoomGroups: { ...dpZoomGroups },
+    dpXf: { ...dpXf },
+    dpUrlSeed: { ...dpUrlSeed },
+    dpVarDefault: { ...dpVarDefault },
+    dpPeriodUrl: { ...dpPeriodUrl },
+    dpRange: { ...dpRange },
+    dpDrill: { ...dpDrill },
+    dpPage: { ...dpPage },
+    dpSort: { ...dpSort },
+    dpPaged: { ...dpPaged },
+    dpFilterText: { ...dpFilterText },
+    dpVars: { ...dpVars },
+  };
+}
+function dashStateRestore(saved) {
+  if (!saved) return;
+  ({ dpTab, dpFilter, dpSelected } = saved);
+  dpTableUI = saved.dpTableUI;
+  dpSubTab = saved.dpSubTab;
+  dpZoomGroups = saved.dpZoomGroups;
+  dpXf = saved.dpXf;
+  dpUrlSeed = saved.dpUrlSeed;
+  dpVarDefault = saved.dpVarDefault;
+  dpPeriodUrl = saved.dpPeriodUrl;
+  dpRange = saved.dpRange;
+  dpDrill = saved.dpDrill;
+  dpPage = saved.dpPage;
+  dpSort = saved.dpSort;
+  dpPaged = saved.dpPaged;
+  dpFilterText = saved.dpFilterText;
+  dpVars = saved.dpVars;
+}
+function loadDash(name, sql, key) {
+  // #244: leaving a dashboard exits an active preview first (no rerun
+  // prompt) — the preview's "before" state belongs to the dashboard we're
+  // about to replace, not to the new one.
+  void (async () => {
+    if (preview) await previewExit({ rerun: false });
+    closeSideMenu();
+    curDash = key || null;
+    if (key) rememberDash(key);
+    dashStateReset();
+    $("sql").value = sql;
+    $("dash-name").value = name || "";
+    syncHL();
+    if (bodyMode() === "explore") setMode("edit");
+    markActive();
+    assistUiSync();
+    run();
+  })();
+}
+
+// ---- the assistant's preview (#244 C-1) ----
+// assist-ui.js is told through host.onPreviewExit(cb) so its card can switch
+// to "Preview again" once the preview actually ends (Discard, Apply, a new
+// Send, or the viewer navigating away via loadDash/setMode/#sql input).
+const previewExitListeners = new Set();
+// The toolbar buttons a preview disables (nothing may Run/Save/Share/export/
+// Check/start a new dashboard while the grid shows someone else's SQL that
+// isn't in the editor). Each button's own `disabled`/`title` is restored on
+// exit. The dark toggle and the refresh select stay enabled: a re-run of the
+// preview stays in the engine (runSqlInner dispatches to it regardless).
+const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "md", "lint-run", "side-new"];
+let previewToolbarPrev = null;
+function previewToolbar(on) {
+  if (on) {
+    previewToolbarPrev = {};
+    for (const id of PREVIEW_TOOLBAR_IDS) {
+      const el = $(id);
+      if (!el) continue;
+      previewToolbarPrev[id] = { disabled: el.disabled, title: el.title };
+      el.disabled = true;
+      el.title = "Apply or discard the preview first";
+    }
+  } else {
+    for (const id of PREVIEW_TOOLBAR_IDS) {
+      const el = $(id);
+      if (!el || !previewToolbarPrev?.[id]) continue;
+      el.disabled = previewToolbarPrev[id].disabled;
+      el.title = previewToolbarPrev[id].title;
+    }
+    previewToolbarPrev = null;
+  }
+}
+// The grid while a preview was applied without running ("Apply, don't run").
+function notRunCard() {
+  const d = document.createElement("div");
+  d.className = "dp-notrun";
+  d.textContent = "Not run yet. Press Run ▸ to run it.";
+  return d;
+}
+// Enter the preview: the dashboard renders `sql` and every query goes to
+// `runner(sql)` (assist-ui.js's guarded engine session) until previewExit().
+// The page's own UI state (tab, filters, drill, …) is saved and restored
+// around it, exactly as switching to a different dashboard and back would
+// (dashStateSave/Reset/Restore) — but never written to the URL (§3.4).
+async function previewEnter({ sql, run: runner }) {
+  if (preview) await previewExit({ rerun: false });
+  try {
+    await runActive;
+  } catch (_) {}
+  dpLazy.gen++;
+  await dpLazy.tail; // no page render job still in flight (#244's C-1 window)
+  previewSaved = dashStateSave();
+  dashStateReset();
+  preview = Object.freeze({ sql, run: runner });
+  document.body.classList.add("previewing");
+  if ($("preview-bar")) $("preview-bar").hidden = false;
+  previewToolbar(true);
+  await run(true);
+}
+// Leave the preview (Discard, Apply, a new Send, or a navigation away).
+// `rerun`: true re-renders the page's own (restored) dashboard; false shows
+// "Not run yet." (Apply, don't run) without running anything.
+async function previewExit({ rerun = true } = {}) {
+  if (!preview) return;
+  try {
+    await runActive;
+  } catch (_) {}
+  dpLazy.gen++;
+  await dpLazy.tail;
+  preview = null;
+  dashStateRestore(previewSaved);
+  previewSaved = null;
+  document.body.classList.remove("previewing");
+  if ($("preview-bar")) $("preview-bar").hidden = true;
+  previewToolbar(false);
+  for (const cb of previewExitListeners) {
+    try {
+      cb();
+    } catch (_) {}
+  }
+  if (rerun) await run(true);
+  else $("grid").replaceChildren(notRunCard());
+}
+
 // Save the editor as a saved dashboard under the toolbar name. The open
 // saved dashboard is updated (renamed, when the name changed); a name that
 // belongs to another dashboard asks "Replace …?" first. The page title
@@ -3717,6 +4094,7 @@ function bodyMode() {
 }
 function setMode(m) {
   if (m === "explore" && servedMode) m = "view"; // a locked server never exposes Explore (no SQL endpoint)
+  if (m === "explore" && preview) previewExit({ rerun: false }); // #244: leaving edit exits the preview
   document.body.classList.remove("mode-view", "mode-explore");
   if (m === "view") document.body.classList.add("mode-view");
   else if (m === "explore") document.body.classList.add("mode-explore");
@@ -3725,6 +4103,7 @@ function setMode(m) {
   $("side-explore").classList.toggle("active", m === "explore");
   document.querySelectorAll(".dash .dp-title[data-title]").forEach(paintHeadTitle);
   if (m === "explore") loadCatalog();
+  assistUiSync();
 }
 
 // ---- Explore data (#97): catalog, column cards, charts, starter dashboards ----
@@ -3956,10 +4335,10 @@ async function xpAddFiles(files) {
     try {
       catMsg(`Reading ${f.name}…`);
       try {
-        await db.registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
+        await pageDb().registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
         xpHandles.set(path, f); // #204: the assistant engine registers this handle directly
       } catch (_) {
-        await db.registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
+        await pageDb().registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
       }
       await runSql(xp.fileViewSql(view, reader, path));
       lastFq = fqn("memory", "main", view);
@@ -5081,8 +5460,8 @@ function xqTools(sql, rows) {
       dl("⤓ Parquet", "Download the result as Parquet", async () => {
         const name = "explore-result.parquet";
         await runSql(`COPY (${xp.stripSemi(sql)}) TO '${name}' (FORMAT parquet)`);
-        const buf = await db.copyFileToBuffer(name);
-        await db.dropFile(name).catch(() => {});
+        const buf = await pageDb().copyFileToBuffer(name);
+        await pageDb().dropFile(name).catch(() => {});
         download(new Blob([buf], { type: "application/vnd.apache.parquet" }), "query.parquet");
       })
     );
@@ -5411,8 +5790,10 @@ function dashHeader() {
   const b = (v && v.brand) || {};
   const chip = mkAsof();
   // The builder's Edit mode edits the name and logo in place (#60); a served or
-  // embedded dashboard (and View mode) shows them as they are.
-  const editable = !servedMode && !document.body.classList.contains("embed");
+  // embedded dashboard (and View mode) shows them as they are. #244: a
+  // preview is never editable either — it's the assistant's proposal, not
+  // yet in the editor.
+  const editable = !servedMode && !document.body.classList.contains("embed") && !preview;
   if (!b.title && !b.name && !b.logo && !editable) {
     if (!chip) return null;
     const h = document.createElement("div");
@@ -5465,6 +5846,7 @@ const LOGO_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image
 // Write `value` as the dashboard's ::<roleName> statement, then re-run; `focusKey`
 // names the header control to focus again once the new header is on screen.
 function editChrome(roleName, value, focusKey) {
+  if (preview) return; // #244: dashHeader() never renders the edit UI during a preview; belt and braces
   const ta = $("sql");
   const next = setChromeSql(ta.value, roleName, value);
   if (next !== ta.value) {
@@ -5667,6 +6049,7 @@ function getTabParam() {
   }
 }
 function setTabParam(name) {
+  if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
     u.searchParams.set("tab", name);
@@ -5875,6 +6258,7 @@ function urlStateParams() {
   return out;
 }
 function syncUrlState() {
+  if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
     for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.")) u.searchParams.delete(k);
@@ -6868,7 +7252,9 @@ async function runOnce(fresh = true) {
   newGrid.className = "grid";
   let stmts;
   try {
-    stmts = JSON.parse(plan($("sql").value));
+    // #244: the only render read of the editor — while a proposal is
+    // previewed, the plan is built from its SQL instead, never the editor's.
+    stmts = JSON.parse(plan(preview ? preview.sql : $("sql").value));
     stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
   } catch (e) {
     grid.replaceChildren();
@@ -10903,6 +11289,7 @@ function appBrandApply(cfg) {
   applyPageBrand();
   document.body.classList.add("brand-ready");
 }
+const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 async function appBrandLoad() {
   let file = null;
   // A locked server has no app-config.json (and no app bar).
@@ -10910,7 +11297,11 @@ async function appBrandLoad() {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 1500);
     try {
-      const r = await fetch("app-config.json", { cache: "no-cache", signal: ctl.signal });
+      // #244 R1/L-3: import.meta.url, never a bare relative path — the same
+      // consistency rule as assist-csp.js's appBase()/LOCALEXT: what the
+      // assistant's config is read from must be the app's own directory,
+      // never movable by a <base> injection.
+      const r = await fetch(new URL("app-config.json", import.meta.url), { cache: "no-cache", signal: ctl.signal });
       if (r.ok) file = await r.json();
     } catch (e) {
       if (e instanceof SyntaxError) console.warn("app-config.json is not valid JSON — ignored");
@@ -10920,6 +11311,13 @@ async function appBrandLoad() {
   }
   const cfg = appBrandMerge(file, window.__anofoxApp);
   appBrandApply(cfg);
+  // #244 R1: the assistant's config comes only from here — app-config.json
+  // (static hosting) or window.__anofoxApp (the serving process), exactly
+  // the same two sources and the same "later wins" the brand itself uses.
+  // Never the URL, never a dashboard's own SQL/comment: assistConfig() is
+  // called in exactly one place (boot(), after this resolves) with this
+  // block as its first argument (G1/G2 static greps).
+  appAssistBlock = isObj(window.__anofoxApp?.assistant) ? window.__anofoxApp.assistant : isObj(file?.assistant) ? file.assistant : null;
   // sec-review-256 L-2 / R-1 check: window.__anofoxApp (the serving
   // process) wins over app-config.json (static hosting), the same "later
   // wins" order appBrandMerge uses — but only when it actually says
@@ -13340,6 +13738,28 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
 document.querySelector(".dash").addEventListener("click", () => {
   if (clearSelections()) run(false);
 });
+// #244: the preview bar sits inside .dash (§5.1) — a click on one of its
+// buttons must not also bubble into the clear-on-click handler above.
+$("preview-bar")?.addEventListener("click", (e) => e.stopPropagation());
+// #244: links are off during a preview (a ::MARKDOWN panel in the
+// assistant's proposal) — a cross-origin link is never model-reachable
+// before Apply, so it is blocked on click rather than rendered differently.
+function previewLinkGuard(e) {
+  if (!preview) return;
+  const a = e.target.closest?.("a[href]");
+  if (!a) return;
+  let origin = null;
+  try {
+    origin = new URL(a.href, location.href).origin;
+  } catch (_) {}
+  if (origin !== location.origin) {
+    e.preventDefault();
+    e.stopPropagation();
+    sideToast("Links are off in the preview.", "OK", () => {});
+  }
+}
+$("grid").addEventListener("click", previewLinkGuard, true);
+$("grid").addEventListener("auxclick", previewLinkGuard, true);
 // Esc does the same (unless a dialog, menu or text field has the key).
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || e.defaultPrevented) return;
