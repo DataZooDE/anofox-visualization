@@ -402,10 +402,12 @@ SELECT ('### Recommendation' || chr(10) || chr(10) ||
 FROM dr_best() b, dr_best_today() t
 JOIN dr_parts() s ON s.plan = 'shortest route' AND s.vans = t.vans;
 
+-- Cost per day by component, one panel per plan (today's plan first), the
+-- bars by van count.
 SELECT 12::COL;
 SELECT 360::HEIGHT;
-SELECT CASE WHEN plan = dr_today() THEN 'Today' WHEN plan = 'shortest route' THEN 'Shortest' ELSE 'Deadline-aware' END || ', ' || vans || ' vans' ::XAXIS,
-       part ::CATEGORY, eur ::BARCHART_STACKED, '€'::YFORMAT,
+SELECT vans || ' vans' ::XAXIS, part ::CATEGORY, eur ::BARCHART_STACKED, '€'::YFORMAT,
+       dr_title(plan) ::FACET, 3 ::FACET_NCOL,
        'Cost per day by component (€), for each plan and number of vans — every extra van adds its day rate, while kilometres and driver time hardly shrink'::TITLE
 FROM (SELECT plan, ord, vans, '1 · street km' AS part, eur_km AS eur FROM dr_parts()
       UNION ALL SELECT plan, ord, vans, '2 · driver time', eur_h FROM dr_parts()

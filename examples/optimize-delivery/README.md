@@ -16,9 +16,9 @@ street km, and the routes are drawn along the streets (east-west, then
 north-south). Today each driver has a fixed district and drives the order
 list.
 
-**The story (4 vans):** today's districts drive 516 km, 13 stops are late and
-one van carries 33 cages for 32 places. The shortest routes drive 268 km but
-6 stops are late; the deadline-aware plan drives 305 km and serves every stop
+**The story (4 vans):** today's districts drive 502 km, 13 stops are late and
+one van carries 33 cages for 32 places. The shortest routes drive 260 km but
+4 stops are late; the deadline-aware plan drives 292 km and serves every stop
 on time, back at the depot by 10:45 — 4 vans are enough, a fifth only adds cost.
 
 ## How it is computed
@@ -92,5 +92,6 @@ the maps, the cost components) is derived in SQL from the stored tables.
 4. **Decision** — the cost assumptions; the cheapest stored plan that serves
    every stop on time against today's plan with as many vans, and what one
    more van would cost; cost per day by component (street km, driver time,
-   van day rates, late penalties) for every plan × van count; late stops by
-   van count; the recommendation as a share of today's plan; every plan priced.
+   van day rates, late penalties), one panel per plan, a stacked bar per van
+   count; late stops by van count; the recommendation as a share of today's
+   plan; every plan priced.
