@@ -298,7 +298,7 @@ impl dashboard::DataProvider for CliProvider {
 }
 
 /// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]`:
-/// the whole dashboard (KPIs, tables, charts, header, credit) as one SVG.
+/// the whole dashboard (KPIs, tables, charts, header) as one SVG.
 fn cmd_svg(args: &[String]) {
     let mut pos: Vec<String> = Vec::new();
     let mut o = dashboard::DashboardOptions::default();

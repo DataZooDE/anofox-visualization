@@ -8,7 +8,7 @@
 #
 # usage: scripts/gen-showcase-data.sh <tabular|optimize|decide>...
 #   DUCKDB=/path/to/duckdb (v1.5.6; default: duckdb on PATH), started -unsigned.
-#   The extensions come from get.erpl.io:  INSTALL anofox_<ext> FROM 'https://get.erpl.io'
+#   The extensions come from get.erpl.io:  INSTALL anofox_<ext> FROM 'https://get.erpl.io'  (tabular: INSTALL anofox_tabular FROM community — signed)
 #   decide additionally needs:  CALL decide_download('laya-multilingual')
 set -euo pipefail
 export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited

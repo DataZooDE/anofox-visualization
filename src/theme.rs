@@ -28,27 +28,18 @@
 //!  "dark":{"colors":{"bg":"#0f1729","card":"#162033","ink":"#e5e7eb"}}}
 //! ```
 //!
-//! The "Powered by DataZoo GmbH" credit is **not** a theme token: it is shown
-//! on every dashboard under every theme (see [`CREDIT_TEXT`]).
-
 use serde_json::{json, Map, Value as J};
 use std::sync::{Arc, OnceLock};
 
 /// An sRGB colour.
 pub type Rgb = (u8, u8, u8);
 
-/// The mandatory credit line every dashboard output carries (browser, export,
-/// headless SVG, `serve`, locked pages) — under every theme.
-pub const CREDIT_TEXT: &str = "Powered by DataZoo GmbH";
 /// Text colours of the extension's own small SVG panels (headings, notes,
 /// errors) in the light look; the dark variant maps them via
 /// [`ResolvedTheme::finish_svg`].
 pub const SVG_HEADING: &str = "#1f2430";
 pub const SVG_NOTE: &str = "#8a93a6";
 pub const SVG_ERROR: &str = "#b42318";
-
-/// Where the credit links to.
-pub const CREDIT_URL: &str = "https://data-zoo.de";
 
 /// Which variant a viewer sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +146,6 @@ pub struct Fonts {
 }
 
 /// Author branding (`::DASHBOARD_TITLE`, `::BRAND`, `::LOGO`, `::FAVICON`).
-/// Shown *in addition to* the mandatory DataZoo credit.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Brand {
     pub title: Option<String>,
@@ -1813,13 +1803,6 @@ pub fn asof_html(t: &ResolvedTheme) -> String {
             .map(|s| format!(" data-stale=\"{s}\""))
             .unwrap_or_default(),
         crate::format::escape_xml(&text)
-    )
-}
-
-/// The mandatory credit footer (HTML).
-pub fn credit_html() -> String {
-    format!(
-        "<div class=\"dp-credit\">Powered by <a href=\"{CREDIT_URL}\" target=\"_blank\" rel=\"noopener noreferrer\">DataZoo GmbH</a></div>"
     )
 }
 

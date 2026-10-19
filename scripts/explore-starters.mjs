@@ -108,7 +108,7 @@ const tables = rows(CATALOG_SQL).filter((r) => r.schema_name === "main");
 const pageSql = (base, page) => wasm.page_sql(base, page);
 const failures = [];
 // anofox_tabular (#111): every hint's check runs natively when the extension
-// is installed (duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'").
+// is installed (duckdb -c "INSTALL anofox_tabular FROM community").
 let tabular = true;
 try {
   execFileSync(DUCKDB, ["-unsigned", ":memory:", "-c", "LOAD anofox_tabular"], { stdio: "ignore" });
