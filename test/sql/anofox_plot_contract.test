@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -282,6 +282,23 @@ true
 # A near-perfect AUC keeps three decimals.
 query I
 SELECT anofox_plot_curve(c) LIKE '%AUC 0.995%' FROM (VALUES ('roc', 0.0, 0.0, 0.9952), ('roc', 0.01, 0.99, 0.9952), ('roc', 1.0, 1.0, 0.9952)) c(curve_type, x, y, auc);
+----
+true
+
+# ── cv fold timeline (provisional, #189) ──────────────────────────────────────
+# One lane per fold_id: train/test windows as bars along an integer period.
+query II
+SELECT anofox_plot_cv(f) LIKE '<svg%>fold 1</text>%', anofox_plot(f) LIKE '<svg%' FROM (
+  SELECT 1 AS fold_id, 'train' AS split, i AS period FROM range(10) r(i)
+  UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f;
+----
+true	true
+
+# The span form (fold_id, train_start/train_end, test_start/test_end).
+query I
+SELECT anofox_plot_cv(f) LIKE '<svg%1 fold%' FROM (VALUES
+  (1, '2024-01-01'::TIMESTAMP, '2024-02-20'::TIMESTAMP, '2024-02-21'::TIMESTAMP, '2024-02-27'::TIMESTAMP)
+) f(fold_id, train_start, train_end, test_start, test_end);
 ----
 true
 

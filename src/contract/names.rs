@@ -70,6 +70,11 @@ pub(super) const COLUMNS: &[&str] = &[
     "kind",
     "label",
     "severity",
+    "fold_id",
+    "train_start",
+    "train_end",
+    "test_start",
+    "test_end",
 ];
 
 /// Other common spellings of a contract column, as [`norm`] writes them

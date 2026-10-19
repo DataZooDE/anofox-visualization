@@ -270,6 +270,21 @@ term's coefficient).",
         tags: &[("anofox.consumes", "partial_residuals"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_cv",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
+        body: contract_body!("cv", "'x', x, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Cross-validation layout of a fold table (provisional schema): one lane per fold_id, the \
+train and test windows as bars along ds (or an integer period), so the number of folds, where each training \
+window ends and whether the test windows overlap or leave gaps (said under the plot) show at a glance. Reads \
+ts_cv_folds_by / ts_cv_split_by (id, ds, fold_id, split) and ts_cv_split_folds_by (fold_id, train_start, \
+train_end, test_start, test_end) as they come. Series with identical folds are drawn once; different folds get \
+a panel per id (up to 6).",
+        example: "SELECT anofox_plot_cv(f) FROM (SELECT 1 AS fold_id, 'train' AS split, i AS period FROM range(10) r(i) \
+UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f",
+        tags: &[("anofox.consumes", "cv"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_events",
         params: &["tbl"],
         named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
@@ -305,11 +320,12 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
-metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests, \
-kind|severity + ds|period -> events. Use the specific anofox_plot_* macro for options.",
+metric+value -> summary, partial_residual -> partial (component + residual), fold_id + (split | test_start | \
+train_end) -> cv (provisional), p_value/test_id -> tests, kind|severity + ds|period -> events. Use the specific \
+anofox_plot_* macro for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
-            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,events"),
+            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,cv,events"),
             CONTRACT_TAG,
         ],
     },
