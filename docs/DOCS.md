@@ -2399,8 +2399,7 @@ The bar at the top of the builder shows **anofox-visualization** and
 *Dashboards from SQL* by default. An installation can put its own name,
 tagline and logo there. This is the deployment's bar, not a dashboard's
 header: a dashboard still brands itself with `::BRAND`, `::DASHBOARD_TITLE`,
-`::LOGO` and `::FAVICON`. The *Powered by DataZoo GmbH* credit and the
-*© DataZoo GmbH* sidebar footer always stay.
+`::LOGO` and `::FAVICON`. The *Powered by DataZoo GmbH* credit always stays.
 
 | Setting   | What it does |
 |-----------|--------------|

@@ -10710,7 +10710,7 @@ function safeUrl(u, { image = false } = {}) {
 // Layers, later wins: these defaults → app-config.json next to index.html
 // (static hosting) → window.__anofoxApp from the serving process (serve
 // --app-*, anofox_serve(port, options); checked by src/host/app_brand.rs).
-// The "Powered by DataZoo GmbH" credit and the sidebar footer stay as they are.
+// The "Powered by DataZoo GmbH" credit stays as it is.
 const APP_BRAND_DEFAULT = { name: "anofox-visualization", tagline: "Dashboards from SQL", logo: "", link: "", favicon: "", name_visible: true };
 let appBrand = { ...APP_BRAND_DEFAULT };
 let pageBrand = {}; // the open dashboard's brand (applyTheme)
