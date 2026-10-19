@@ -2467,6 +2467,23 @@ The bar stays hidden until the settings are known (at most 1.5 s), so the
 default name doesn't flash first. In embed mode (`?embed=1`) and on a locked
 server there is no app bar.
 
+`app-config.json` also has an `assistant` block (§4.5): `"remember": true`
+opts in to the AI assistant remembering its API key in `localStorage`
+across reloads. It is off by default, and always off on a shared static
+host (`*.github.io`, `*.gitlab.io`) regardless.
+
+**Self-hosting the static files behind your own web server** (not GitHub
+Pages): the app inserts its own `<meta>` Content-Security-Policy when the
+assistant is in use (§4.5) — there is nothing to configure for that. If
+your server *also* sends a `Content-Security-Policy` response header
+(stricter than a meta tag, since it can't be overridden by page content),
+make sure it allows at least the same destinations: the app's own
+directory, `https://cdn.jsdelivr.net` (DuckDB-Wasm, KaTeX),
+`https://extensions.duckdb.org`, `https://api.anthropic.com` (the
+assistant's model calls) and `https://earthquake.usgs.gov` (one example's
+live feed) — see `web/assist-csp.js`'s `assistCsp()` for the exact,
+versioned list.
+
 ### b2) Serve the UI on a live DuckDB — explore existing data
 
 `anofox-visualization serve` starts a tiny local HTTP server that serves the same builder UI
@@ -2848,6 +2865,51 @@ guarantee is that the core never panics on user input (fuzz-tested).
   `roles::is_directive_panel(&roles)` (does a planned statement draw nothing?),
   `roles::roles_json()`.
 - `format::escape_xml` (attribute-safe) and `format::format_number`.
+
+## 4.5 The assistant's sandbox (#204)
+
+The builder's AI assistant (`web/assist.js`, `web/assist-engine.js`,
+`web/assist-csp.js` — the panel itself is a separate, later change) never
+lets model-written SQL reach the page's own DuckDB-Wasm instance before the
+user applies it:
+
+- **What it reads.** A one-time **snapshot**: the page's own tables and
+  views, copied in by Arrow, capped by rows and total bytes, with a short
+  per-query timeout. Remote-attached databases (MotherDuck included) and
+  anything not a plain local DuckDB database are **not included** — the
+  assistant is told they exist, never sent their data.
+- **What it cannot reach.** The assistant's queries run in a *second*,
+  locked DuckDB-Wasm instance: no network, no filesystem beyond the exact
+  files the current dashboard already reads, no new extensions beyond a
+  fixed set loaded before the lock. This holds independent of any
+  function-name list — it is enforced by DuckDB's own
+  `enable_external_access=false` + `lock_configuration=true`, re-checked
+  before every call. `allowed_paths`' exact-name allow-list grants a
+  **write**, not just a read, to that one name — `COPY … TO` an allowed
+  path overwrites the engine's own in-memory copy of that file, never the
+  page's; the write gate (classifying `COPY` as a statement that needs the
+  user's confirmation) is what actually keeps the model from doing this on
+  its own, the lock is the backstop.
+- **The tab's Content-Security-Policy.** Static hosting sends no headers,
+  so the app inserts a `<meta>` CSP: at boot, whenever a browser-stored API
+  key is present (it then holds across reloads), and whenever the
+  assistant panel opens. While it is in effect, the tab's images, styles
+  and document-level network are restricted to the app's own files and a
+  short, fixed list of destinations (the model API, the DuckDB-Wasm CDN,
+  DuckDB's extension CDN, web fonts). The page's own dashboard rendering —
+  including a remote dashboard's data fetches — is unaffected: only
+  Workers created *after* the policy is applied are bound by it, and the
+  page's DuckDB Worker predates it.
+- ***Remember* (localStorage) for the API key.** Off by default; an
+  installation opts in with `app-config.json`'s `assistant.remember: true`.
+  It is **always off** on a shared static host (`*.github.io`,
+  `*.gitlab.io`), because every project on the same account shares that
+  storage origin.
+- **Verified in Chromium** (the lock, the Worker-inheritance of the CSP,
+  the enforcement probe, the Arrow snapshot's types). On other browsers
+  the DuckDB-Wasm lock is the layer that holds regardless; the CSP's
+  Worker-inheritance is Chromium-specific unless `scripts/assist-sandbox-e2e.mjs`
+  has been re-run there too.
 
 ## 5. Architecture
 
