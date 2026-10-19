@@ -11,6 +11,7 @@
 // No network calls, no registerFileURL, no OPFS, no document.baseURI and no
 // dynamic module loading here (a static grep test; see
 // tests/web/assist_csp_test.mjs).
+import { ownOpts } from "./lint.js";
 
 export const DUCKDB_WASM = "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/";
 export const KATEX = "https://cdn.jsdelivr.net/npm/katex@0.19.0/";
@@ -52,7 +53,7 @@ const FULL_URL_RE = /^https:\/\/[a-z0-9.-]+(:\d+)?\/[^\s"'<>]*$/i;
 // it is the one function with a `doc` to validate "same origin" against,
 // and it is the only one that ever turns this text into a real policy.
 export function assistCsp(opts) {
-  const o = Object.assign(Object.create(null), opts);
+  const o = ownOpts(opts);
   const base = o.base ?? appBase();
   const imgOrigins = Array.isArray(o.imgOrigins) ? o.imgOrigins : [];
   const img = [base, "data:", "blob:", ...imgOrigins.filter((x) => ORIGIN_RE.test(x) || FULL_URL_RE.test(x))];
@@ -102,15 +103,16 @@ export function applyAssistCsp(doc, opts = {}) {
     // Trusted sources only: this module's own `import.meta.url`
     // (`appBase()`) and `doc.location` (what the browser navigated to) —
     // never `doc.baseURI`, which a `<base>` injection can move (L-3).
-    const safeOpts = { ...opts };
-    if (Object.hasOwn(opts, "base")) {
+    const o = ownOpts(opts);
+    const safeOpts = { ...o };
+    if (Object.hasOwn(o, "base")) {
       const trusted = appBase();
       let docOrigin = null;
       try {
         docOrigin = new URL(doc.location?.href ?? doc.URL ?? trusted).origin;
       } catch (_) {}
-      const wellFormed = typeof opts.base === "string" && /^https?:\/\/[^/]+\/.*\/$/.test(opts.base);
-      const ok = wellFormed && (sameOrigin(opts.base, trusted) || (docOrigin && sameOrigin(opts.base, docOrigin)));
+      const wellFormed = typeof o.base === "string" && /^https?:\/\/[^/]+\/.*\/$/.test(o.base);
+      const ok = wellFormed && (sameOrigin(o.base, trusted) || (docOrigin && sameOrigin(o.base, docOrigin)));
       if (!ok) delete safeOpts.base; // assistCsp() then falls back to appBase()
     }
     const m = doc.createElement("meta");

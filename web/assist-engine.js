@@ -33,6 +33,7 @@
 // tests/web/assist_engine_test.mjs item 12).
 import { CATALOG_SQL, qid, sqlStr } from "./explore.js";
 import { assistCspProven } from "./assist-csp.js";
+import { ownOpts } from "./lint.js";
 
 // L-3: never `document.baseURI` — a `<base>` injection (an XSS before the
 // ratchet, or a sibling repo on the shared github.io origin) must not move
@@ -503,7 +504,7 @@ export async function buildEngine(opts) {
   // pass `lock` itself (which in shipped code is every caller but
   // `__testing.unlocked` below, which always sets its own `lock: false`
   // as an own property regardless).
-  const o = Object.assign(Object.create(null), opts);
+  const o = ownOpts(opts);
   const { makeDb, page, extensions = [], files = [], limits = SNAPSHOT_LIMITS, doc = globalThis.document, signal, onProgress, lock = true } = o;
   if (doc) await assistCspProven(doc); // L-4: rejects unless enforcement was proven
   const db = await makeDb();
