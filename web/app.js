@@ -928,7 +928,7 @@ ${SALES}
 
 SELECT 'Layout — groups, tabs & height'::LABEL;
 SELECT 12::COL;
-SELECT 'The **layout primitives**: **::GROUP** boxes cluster KPIs/panels together, **::COL** sets a panel''s grid width (1–12), **::HEIGHT** sets its pixel height, and **::TAB** / **::SUBTAB** organise panels into (nested) tabs. Mix them to compose any dashboard shape from plain SQL.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'The **layout primitives**: **::GROUP** boxes cluster KPIs/panels together, **::COL** sets a panel''s grid width (1–12), **::HEIGHT** sets its pixel height, and **::TAB** / **::SUBTAB** organise panels into (nested) tabs. **::VIEW** switches between alternative views of the *same* panel in place (see Revenue → By week: Bars / Lines / Table). Mix them to compose any dashboard shape from plain SQL.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- KPIs in a ::GROUP box (compact strip). They react to plot clicks: clicking a
 -- channel segment/bar below sets getvariable('selected'), and each KPI filters
@@ -945,8 +945,18 @@ SELECT 1::COLUMNS;
 -- top-level ::TAB, each with nested ::SUBTAB; ::HEIGHT sets a taller box
 SELECT 'Revenue'::TAB;
 SELECT 'By week'::SUBTAB;
+-- ::VIEW / ::ENDVIEW: alternative views of the SAME query, switched in place
+-- (a segmented control, top-right) instead of a tab/subtab of their own.
+SELECT 'Bars' AS rev_week ::VIEW;
 SELECT 420::HEIGHT;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Lines'::VIEW;
+SELECT 420::HEIGHT;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::LINECHART, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Table'::VIEW;
+SELECT week, channel, sum(revenue)::MONEY AS revenue ::TABLE
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'By channel'::SUBTAB;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
