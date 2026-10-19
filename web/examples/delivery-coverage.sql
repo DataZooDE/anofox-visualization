@@ -145,7 +145,7 @@ FROM dc_customers c JOIN dc_dcs k USING (dc) GROUP BY ALL ORDER BY 3 DESC;
 SELECT 'Flows'::TAB;
 SELECT 8::COL; SELECT 560::HEIGHT;
 SELECT {'lon': k.lon, 'lat': k.lat, 'name': k.name || ' DC'} ::ORIGIN, d.state ::DEST,
-       sum(v.deliveries) AS "Deliveries" ::SIZE, k.name || ' DC' ::CATEGORY,
+       sum(v.deliveries)::DOUBLE AS "Deliveries" ::SIZE, k.name || ' DC' ::CATEGORY,
        'The Dortmund DC delivers most within its own state, North Rhine-Westphalia'::TITLE,
        'Deliveries from each DC into each state, last 12 weeks; width by volume.'::INFO
 FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags)

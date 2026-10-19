@@ -217,7 +217,8 @@ FROM sc_now() n;
 -- weekly quantity. In the default run (Promotion / Own forecasts / no
 -- smoothing), order peaks grow at every step upstream — checked against
 -- the data in the SQL comments below.
-CREATE OR REPLACE TABLE sc_site AS SELECT * FROM (VALUES
+CREATE OR REPLACE TABLE sc_site AS
+  SELECT stage_no, stage, lon::DOUBLE AS lon, lat::DOUBLE AS lat, city FROM (VALUES
   (1, 'Retailer', 10.00, 53.55, 'Hamburg'), (2, 'Distribution centre', 9.48, 51.31, 'Kassel'),
   (3, 'Factory', 9.18, 48.78, 'Stuttgart'), (4, 'Supplier', 12.92, 50.83, 'Chemnitz')) t(stage_no, stage, lon, lat, city);
 SELECT 'Where it flows'::TAB;
