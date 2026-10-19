@@ -562,7 +562,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
 /// The required columns of each schema [`detect`] tells apart, and those among
 /// them that identify it. A schema is only suggested when one identifying
 /// column is present or misspelled: a shared generic name (`kind`, `value`,
-/// `x`, `y`) alone is no near miss (#180).
+/// `x`, `y`) alone is no near miss (#180). A short identifying column's near
+/// miss counts only as itself plus a suffix (#255).
 const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
     ("terms", &["term", "estimate"], &["term", "estimate"]),
     ("prediction", &["yhat"], &["yhat"]),
@@ -586,6 +587,14 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
 /// `period` for `ds` and `severity` for `kind`.
 const STAND_INS: &[(&str, &str)] = &[("ds", "period"), ("kind", "severity")];
 
+/// Does the near miss `k` of the identifying column `c` point at its schema
+/// on its own? A long name's does (`estimat`, `curve_typ`); a short one
+/// (`term`, `yhat`) is one letter from everyday words (`team`, `that`), so
+/// only `c` with a suffix counts (`terms`, `yhat_1`) (#255).
+fn identifies(c: &str, k: &str) -> bool {
+    c.len() >= 6 || names::norm(k).starts_with(c)
+}
+
 /// For an undetected table: the schema whose required columns are nearest —
 /// present or misspelled — with what is missing (`""` when none is close, or
 /// when only generic names match).
@@ -603,7 +612,12 @@ fn closest(keys: &[&str]) -> String {
                 .collect();
             let hit = |c: &str| present(c) || found.iter().any(|(f, n)| *f == c && n.is_some());
             let score = found.iter().filter(|(c, _)| hit(c)).count();
-            let identified = ident.iter().any(|c| hit(c));
+            let identified = ident.iter().any(|c| {
+                present(c)
+                    || found
+                        .iter()
+                        .any(|&(f, n)| f == *c && n.is_some_and(|k| identifies(c, k)))
+            });
             (score, identified, name, found)
         })
         .filter(|(score, identified, ..)| *score > 0 && *identified)
@@ -1467,6 +1481,28 @@ mod tests {
             e.contains("closest: curve, missing curve_type (did you mean `curve_typ`?)"),
             "{e}"
         );
+        // #255: a short identifying name one letter off is no near miss…
+        for t in [
+            r#"[{"model_id":"fixture-a","id":3,"grp":"g","refund":true,"team":"x","mood":"ok","question_id":"refund","kind":"binary","probability":0.7}]"#,
+            r#"[{"team":"x"}]"#,
+            r#"[{"that":1}]"#,
+        ] {
+            let e = go("auto", t, "{}").unwrap_err().to_string();
+            assert!(
+                e.contains("match no plottable schema") && !e.contains("closest"),
+                "{t}: {e}"
+            );
+        }
+        // …but a suffixed one, a long one, or one next to the schema's other column is.
+        let hint = |t: &str| go("auto", t, "{}").unwrap_err().to_string();
+        assert!(hint(r#"[{"terms":"a"}]"#)
+            .contains("; closest: terms, missing term (did you mean `terms`?), estimate"));
+        assert!(hint(r#"[{"estimat":1}]"#)
+            .contains("; closest: terms, missing term, estimate (did you mean `estimat`?)"));
+        assert!(hint(r#"[{"yhat_1":1}]"#)
+            .contains("; closest: prediction, missing yhat (did you mean `yhat_1`?)"));
+        assert!(hint(r#"[{"team":"x","estimate":1}]"#)
+            .contains("; closest: terms, missing term (did you mean `team`?)"));
         // A list where a number belongs.
         let e = go("terms", r#"[{"term":"a","estimate":[1,2]}]"#, "{}")
             .unwrap_err()
