@@ -3,8 +3,8 @@
 -- Runs natively only: anofox_tabular has no DuckDB-Wasm build yet, so the
 -- browser demo reads the tables this script produces from web/data/tabular/
 -- (regenerate: scripts/gen-showcase-data.sh tabular). Run from the repo root:
---   duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'"   # once
---   duckdb -unsigned -c ".read examples/tabular-showcase/compute.sql"
+--   duckdb -c "INSTALL anofox_tabular FROM community"   # once (signed; replaces a get.erpl.io install with FORCE INSTALL)
+--   duckdb -c ".read examples/tabular-showcase/compute.sql"
 LOAD anofox_tabular;
 .read examples/tabular-showcase/data.sql
 

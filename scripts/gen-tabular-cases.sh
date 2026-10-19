@@ -7,8 +7,8 @@
 # extension version.
 #
 # usage: scripts/gen-tabular-cases.sh <feed|dedup>...
-#   DUCKDB=/path/to/duckdb (v1.5.6; default: duckdb on PATH), started -unsigned.
-#   The extension comes from get.erpl.io:  INSTALL anofox_tabular FROM 'https://get.erpl.io'
+#   DUCKDB=/path/to/duckdb (v1.5.6; default: duckdb on PATH).
+#   The extension is the signed community build:  INSTALL anofox_tabular FROM community
 set -euo pipefail
 export DATAZOO_DISABLE_TELEMETRY=1  # no usage telemetry from anofox extensions, whatever was inherited
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,6 +28,6 @@ for case in "$@"; do
     copy+="COPY (FROM $t ORDER BY ALL) TO '$out/$t.csv' (HEADER);"
   done
   echo "== tabular-$case → $out"
-  "$DUCKDB" -unsigned -c ".read examples/tabular-$case/compute.sql" -c "$copy" 2>&1 | grep -v '^\[anofox\]' || true
+  "$DUCKDB" -c ".read examples/tabular-$case/compute.sql" -c "$copy" 2>&1 | grep -v '^\[anofox\]' || true
   ls -l "$out"
 done
