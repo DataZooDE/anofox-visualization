@@ -1191,18 +1191,36 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
 /// `anofox_render` and the static pages.
 const TITLE_BAR_H: u32 = 26;
 
-/// The `::TITLE` of a single panel: its first non-NULL, non-blank value.
-/// A KPI tile has none (its caption is `::LABEL`), as in a dashboard.
-fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
-    let title = cols
-        .iter()
-        .find(|c| c.role == Role::Title)?
-        .values
+/// The longest `::TITLE` a static page draws, in characters: a 460 px bar
+/// shows about 50, and escaping can make a title up to 6× longer
+/// (sec-review-250 L1, #251). `anofox_render` keeps the whole title.
+const PAGE_TITLE_MAX_CHARS: usize = 200;
+
+/// `title` cut to [`PAGE_TITLE_MAX_CHARS`] characters (on a `char` boundary,
+/// trailing whitespace dropped) plus `…`; a shorter title is unchanged.
+fn cap_page_title(title: String) -> String {
+    match title.char_indices().nth(PAGE_TITLE_MAX_CHARS) {
+        Some((i, _)) => format!("{}…", title[..i].trim_end()),
+        None => title,
+    }
+}
+
+/// The first non-NULL value of a `::TITLE` column, trimmed; `None` when that
+/// value is blank. Every single-panel output reads a title this way:
+/// `anofox_render`, the static pages, the `dashboard --svg` card (#246).
+pub(crate) fn title_value(values: &[Value]) -> Option<String> {
+    values
         .iter()
         .find(|v| !matches!(v, Value::Na))
         .map(value_str)
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
+        .filter(|s| !s.is_empty())
+}
+
+/// The `::TITLE` of a single panel ([`title_value`]). A KPI tile has none
+/// (its caption is `::LABEL`), as in a dashboard.
+fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
+    let title = title_value(&cols.iter().find(|c| c.role == Role::Title)?.values)?;
     kpi::Kpi::from_columns(cols, &o.locale)
         .is_none()
         .then_some(title)
@@ -1248,7 +1266,8 @@ fn title_bar_text(title: &str, o: &RenderOptions) -> String {
 /// `width`×26 `<svg>` before the chart, which gets the requested height less
 /// 26 px, so every `<svg>` stays top-level in the page (the page CSS sizes
 /// each one). The title is XML-escaped. Without a title this is exactly
-/// `render_with` / the concatenated `render_stack`.
+/// `render_with` / the concatenated `render_stack`. A title longer than 200
+/// characters is cut to 200 and an ellipsis (#251).
 pub fn render_with_title(
     cols: &[Column],
     tracks: &[(Vec<Column>, u32)],
@@ -1256,7 +1275,7 @@ pub fn render_with_title(
     height: u32,
     o: &RenderOptions,
 ) -> Result<String, RenderError> {
-    let title = panel_title(cols, o);
+    let title = panel_title(cols, o).map(cap_page_title);
     let h = if title.is_some() {
         clamp_dim(height as u64)
             .saturating_sub(TITLE_BAR_H)

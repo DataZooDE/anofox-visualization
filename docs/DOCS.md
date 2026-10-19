@@ -201,9 +201,11 @@ format that column; `::TITLE` becomes the table's title bar.
 
 **`::TITLE`** is a panel's title bar in every output: the browser, the locked
 server, `dashboard --svg`, the static HTML of `dashboard file.sql out.html` /
-`serve --dashboards` and `anofox_render`. The static pages and `anofox_render`
-draw its first non-NULL value in a 26 px bar above the chart (the chart gets
-26 px less); a KPI tile has none (its caption is `::LABEL`).
+`serve --dashboards` and `anofox_render`. `anofox_render`, `dashboard --svg`
+and the static pages draw its first non-NULL value, trimmed (a blank one
+draws none), in a 26 px bar above the chart (the chart gets 26 px less); a
+KPI tile has none (its caption is `::LABEL`). The static pages cut a title
+longer than 200 characters to 200 and an ellipsis.
 
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and
@@ -772,8 +774,9 @@ to 1.00 (0.9952 reads "AUC 0.995").
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`): a shared generic name such as \`kind\`, \`value\`,
-  \`x\` or \`y\` alone gives no hint;
+  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
+  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
+  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
@@ -2415,11 +2418,12 @@ header: a dashboard still brands itself with `::BRAND`, `::DASHBOARD_TITLE`,
 | `name`    | The name in the bar and the browser tab (1–80 characters). |
 | `tagline` | The line next to it (up to 160 characters); `""` hides it. Not shown on phones. |
 | `logo`    | An image left of the name, 28 px high (24 px on phones). |
+| `logo_dark` | The logo while the dark theme is on (🌙, `?theme=dark`, the OS setting); the same image rules and size as `logo`. Needs a `logo`; without one it is ignored. |
 | `link`    | Where the name and logo go when clicked (opens in a new tab). |
 | `favicon` | The tab icon while the open dashboard sets no `::FAVICON`. |
 | `name_visible` | `false` shows the logo alone, for a logo that already spells the name (a wordmark); the name becomes the logo's alt text and stays the tab title. Needs a `logo`, so the bar is never empty. |
 
-`logo` and `favicon` take an `https://` (or `http://`) address or a
+`logo`, `logo_dark` and `favicon` take an `https://` (or `http://`) address or a
 `data:image/png|jpeg|gif|webp|svg+xml` URI. In `app-config.json` they can also
 be a path next to `index.html` (`brand/logo.svg`). `link` must be an
 `http(s)://` address. A value that breaks these rules is skipped (the console
@@ -2489,11 +2493,12 @@ Your name and logo in the app bar (see *Your name and logo in the app bar*):
 ```sh
 ./target/debug/serve mydata.duckdb --app-name "Acme Insights" \
     --app-tagline "Sales and stock, every morning" --app-logo brand/logo.svg \
+    --app-logo-dark brand/logo-dark.svg \
     --app-link https://intranet.acme.example/   # also --app-favicon FILE|URL
 # a logo that spells the name: --app-logo wordmark.svg --app-hide-name
 ```
 
-`--app-logo` and `--app-favicon` take an image file (read once and put in the
+`--app-logo`, `--app-logo-dark` and `--app-favicon` take an image file (read once and put in the
 page, so nothing else is served) or an `https://` / `data:image/` address.
 A file that isn't a PNG, JPEG, GIF, WebP or SVG, or is larger than 512 KB, is
 refused with an error. `--app-tagline ""` hides the tagline. The flags style
@@ -2526,9 +2531,11 @@ otherwise it falls back to DuckDB-Wasm (mode ii). Same editor, same rendering.
 - **Chart this** on a card previews a histogram, box plot, top-value bars, a
   line over time or a scatter; **Add to dashboard** appends its annotated SQL
   to the dashboard editor. **New dashboard from this table** writes a starter
-  dashboard: KPI tiles, the data's latest date (`::ASOF`), a `::PERIOD` and a
-  `::BUTTONS` / `::DROPDOWN` filter, a line over time, top-N bars, the main
-  measure's distribution and the paged rows.
+  dashboard: KPI tiles (an average for a rate, score, price, age, margin,
+  coordinate …: whole words of the column name, as the table totals read
+  them — `attempts` and `page_views` are summed), the data's latest date
+  (`::ASOF`), a `::PERIOD` and a `::BUTTONS` / `::DROPDOWN` filter, a line
+  over time, top-N bars, the main measure's distribution and the paged rows.
 - **Queries**: the SQL box highlights, completes `::` roles, runs on
   Ctrl/⌘+Enter, keeps your recent queries and shows errors at their line and
   column. A result shows its rows and time, downloads as CSV / Excel /
@@ -2565,8 +2572,8 @@ SELECT anofox_serve_stop(8080);               -- stop it again
 ```
 
 `anofox_serve(port, options)` sets the app bar (see *Your name and logo in
-the app bar*): a JSON object with `name`, `tagline`, `logo`, `link`,
-`favicon` and `name_visible` (`true` / `false`). The extension doesn't open files itself; read a logo with DuckDB,
+the app bar*): a JSON object with `name`, `tagline`, `logo`, `logo_dark`,
+`link`, `favicon` and `name_visible` (`true` / `false`). The extension doesn't open files itself; read a logo with DuckDB,
 so its file access settings apply:
 
 ```sql
@@ -2708,8 +2715,8 @@ opens the grouped list with a search field (Enter opens it, Esc closes it).
 a landing page in the server's theme (light and dark follow the viewer's
 system setting when the theme does; phone widths get one column). Its header
 is the installation's name, tagline and logo — `options.app` of
-`anofox_serve_dashboards`, `--app-name` / `--app-tagline` / `--app-logo` of
-`serve --dashboards` — or *Dashboards* and a count. The dashboards are cards,
+`anofox_serve_dashboards`, `--app-name` / `--app-tagline` / `--app-logo` /
+`--app-logo-dark` of `serve --dashboards` — or *Dashboards* and a count. The dashboards are cards,
 grouped the same way as the nav (`Sales / EMEA`: an *EMEA* sub-heading under
 *Sales*, each group with its count); a card shows the title, the
 `@description`, the owner, **✓ certified**, the day its file last changed and

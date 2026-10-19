@@ -82,7 +82,7 @@ fn theme_default() -> Option<&'static str> {
 /// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
 static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -179,12 +179,13 @@ fn parse_args() -> Opts {
                         .unwrap_or_else(|e| usage(&format!("--{e}"))),
                 );
             }
-            "--app-name" | "--app-tagline" | "--app-logo" | "--app-link" | "--app-favicon" => {
+            "--app-name" | "--app-tagline" | "--app-logo" | "--app-logo-dark" | "--app-link"
+            | "--app-favicon" => {
                 let v = args
                     .next()
                     .unwrap_or_else(|| usage(&format!("{a} needs a value")));
                 o.app
-                    .set(&a["--app-".len()..], &v, true)
+                    .set(&a["--app-".len()..].replace('-', "_"), &v, true)
                     .unwrap_or_else(|e| usage(&format!("--app-{e}")));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
@@ -230,8 +231,12 @@ fn parse_args() -> Opts {
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
     }
-    if o.app.check().is_err() {
-        usage("--app-hide-name needs --app-logo (the bar would be empty)");
+    if let Err(e) = o.app.check() {
+        usage(if e.starts_with("logo_dark") {
+            "--app-logo-dark needs --app-logo"
+        } else {
+            "--app-hide-name needs --app-logo (the bar would be empty)"
+        });
     }
     if o.dashboards_dir.is_none() && o.home.is_some() {
         usage("--home applies to --dashboards serving");

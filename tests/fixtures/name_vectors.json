@@ -1,0 +1,24 @@
+{
+  "_doc": "Column-name words shared by src/table.rs (name_tokens, rate_like; unit test shared_name_vectors) and web/explore.js (nameTokens, rateLike; tests/web/explore_test.mjs) (#227, #248).",
+  "tokens": [
+    {"name": "churnRate", "tokens": ["churn", "rate"]}, {"name": "per10k", "tokens": ["per", "10", "k"]},
+    {"name": "Per 10k", "tokens": ["per", "10", "k"]}, {"name": "on-time_rate (%)", "tokens": ["on", "time", "rate"]},
+    {"name": "generated", "tokens": ["generated"]}, {"name": "", "tokens": []}, {"name": "—", "tokens": []},
+    {"name": "HTTPStatus", "tokens": ["httpstatus"]}, {"name": "avgPrice2024", "tokens": ["avg", "price", "2024"]},
+    {"name": "Größe_m2", "tokens": ["größe", "m", "2"]}, {"name": "ÄrgerQuote", "tokens": ["ärger", "quote"]},
+    {"name": "x__y", "tokens": ["x", "y"]}, {"name": "v1.2", "tokens": ["v", "1", "2"]},
+    {"name": "page_views", "tokens": ["page", "views"]}, {"name": "AOV", "tokens": ["aov"]}, {"name": "zScore", "tokens": ["z", "score"]}
+  ],
+  "rate_like": [
+    {"name": "conversion_rate", "rate_like": true}, {"name": "churnRate", "rate_like": true}, {"name": "load_pct", "rate_like": true},
+    {"name": "Per 10k", "rate_like": true}, {"name": "km_per_h", "rate_like": true}, {"name": "discount %", "rate_like": true},
+    {"name": "Abschlussquote", "rate_like": true}, {"name": "Marktanteil", "rate_like": true}, {"name": "Umsatz pro Kopf", "rate_like": true},
+    {"name": "avg_basket", "rate_like": true}, {"name": "median_days", "rate_like": true}, {"name": "zscore", "rate_like": true},
+    {"name": "zScore", "rate_like": true}, {"name": "price_index", "rate_like": true}, {"name": "percentile_rank", "rate_like": true},
+    {"name": "Shares", "rate_like": true},
+    {"name": "generated", "rate_like": false}, {"name": "accurate", "rate_like": false}, {"name": "operations", "rate_like": false},
+    {"name": "shareholders", "rate_like": false}, {"name": "winrate", "rate_like": false}, {"name": "meaning", "rate_like": false},
+    {"name": "scoreboard", "rate_like": false}, {"name": "revenue", "rate_like": false}, {"name": "page_views", "rate_like": false},
+    {"name": "attempts", "rate_like": false}, {"name": "", "rate_like": false}
+  ]
+}

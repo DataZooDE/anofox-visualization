@@ -85,6 +85,7 @@ header h1 a{color:inherit;text-decoration:none;display:inherit;align-items:inher
 header h1 a:hover .app-name{text-decoration:underline}
 header h1{white-space:nowrap}
 header h1 .app-logo{display:block;flex:none;height:28px;width:auto;max-width:180px;object-fit:contain;object-position:left center}
+body:not(.dark) header h1 .app-logo-dark,body.dark header h1 .app-logo-light{display:none}
 header .actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
 header .status{font-size:.78rem;color:var(--ui-muted);min-width:58px;text-align:right;font-weight:600}
 /* embed mode (?embed=1): dashboard only — no header, sidebar, or toolbar */

@@ -365,7 +365,8 @@ fn name_tokens(name: &str) -> Vec<String> {
     out
 }
 
-/// Words that make a column a rate or percentage.
+/// Words that make a column a rate or percentage (web/explore.js ports these:
+/// keep in sync).
 const RATE_WORDS: &[&str] = &[
     "pct",
     "percent",
@@ -395,7 +396,8 @@ fn rate_word(name: &str) -> bool {
         })
 }
 
-/// Words that make a column an average: its default total is the mean.
+/// Words that make a column an average: its default total is the mean
+/// (web/explore.js ports these: keep in sync).
 const MEAN_WORDS: &[&str] = &[
     "avg",
     "average",
@@ -954,6 +956,27 @@ mod tests {
         assert_eq!(name_tokens("on-time_rate (%)"), ["on", "time", "rate"]);
         assert_eq!(name_tokens("generated"), ["generated"]);
         assert!(name_tokens("").is_empty() && name_tokens("—").is_empty());
+    }
+
+    /// The name words shared with Explore data (web/explore.js, #248).
+    #[test]
+    fn shared_name_vectors() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/name_vectors.json")).unwrap();
+        for c in v["tokens"].as_array().unwrap() {
+            let name = c["name"].as_str().unwrap();
+            let want: Vec<&str> = c["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap())
+                .collect();
+            assert_eq!(name_tokens(name), want, "{name}");
+        }
+        for c in v["rate_like"].as_array().unwrap() {
+            let name = c["name"].as_str().unwrap();
+            assert_eq!(rate_like(name), c["rate_like"].as_bool().unwrap(), "{name}");
+        }
     }
 
     #[test]
