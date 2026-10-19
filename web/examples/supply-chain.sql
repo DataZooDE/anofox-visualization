@@ -211,6 +211,29 @@ SELECT ('**How the bullwhip is measured.** For each stage $i$, with $O_{i,t}$ th
        'note'::CALLOUT, n.bullwhip_top AS supplier_ratio
 FROM sc_now() n;
 
+-- ── 1b · Where it flows ───────────────────────────────────────────────────────
+-- A flow map (::ORIGIN/::DEST, D17): goods shipped downstream (solid) and
+-- orders placed upstream ('flow'::LINESTYLE, animated), width by peak
+-- weekly quantity. In the default run (Promotion / Own forecasts / no
+-- smoothing), order peaks grow at every step upstream — checked against
+-- the data in the SQL comments below.
+CREATE OR REPLACE TABLE sc_site AS SELECT * FROM (VALUES
+  (1, 'Retailer', 10.00, 53.55, 'Hamburg'), (2, 'Distribution centre', 9.48, 51.31, 'Kassel'),
+  (3, 'Factory', 9.18, 48.78, 'Stuttgart'), (4, 'Supplier', 12.92, 50.83, 'Chemnitz')) t(stage_no, stage, lon, lat, city);
+SELECT 'Where it flows'::TAB;
+SELECT 12::COL; SELECT 560::HEIGHT;
+SELECT {'lon': a.lon, 'lat': a.lat, 'name': a.stage || ' (' || a.city || ')'} ::ORIGIN,
+       {'lon': b.lon, 'lat': b.lat, 'name': b.stage || ' (' || b.city || ')'} ::DEST,
+       f.peak AS "Peak units per week" ::SIZE, f.kind ::CATEGORY, f.style ::LINESTYLE,
+       'de-states'::BASEMAP,
+       'Order peaks grow at every step upstream'::TITLE,
+       'Goods shipped downstream (solid) and orders placed upstream (dashed, animated), width by the peak weekly quantity; the four stages are fictional sites.'::INFO
+FROM (SELECT stage_no AS src, stage_no - 1 AS dst, 'Goods shipped' AS kind, 'solid' AS style, max(shipped) AS peak
+      FROM sc_run() WHERE stage_no > 1 GROUP BY ALL
+      UNION ALL
+      SELECT stage_no, stage_no + 1, 'Orders placed', 'flow', max(order_out) FROM sc_run() WHERE stage_no < 4 GROUP BY ALL) f
+JOIN sc_site a ON a.stage_no = f.src JOIN sc_site b ON b.stage_no = f.dst ORDER BY peak DESC;
+
 -- ── 2 · Stock and service ────────────────────────────────────────────────────
 SELECT 'Stock and service'::TAB;
 
