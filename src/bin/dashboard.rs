@@ -12,7 +12,7 @@ use anofox_visualization::inputs;
 use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::theme::{self, DashboardChrome, Variant};
 use anofox_visualization::{
-    dashboard, error_pre, page, render_with, roles, sql, track, RenderOptions, Role,
+    dashboard, error_pre, page, render_with_title, roles, sql, track, RenderOptions, Role,
 };
 use std::process::Command;
 use std::sync::Arc;
@@ -236,12 +236,9 @@ fn cmd_render(args: &[String]) {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
         }
-        let svg = if tracks.is_empty() {
-            render_with(&cols, 460, 300, &opts)
-        } else {
-            track::render_stack(&cols, &tracks, 460, 300, &opts).map(|svgs| svgs.concat())
-        }
-        .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+        // Its ::TITLE bar, as on a dashboard card (#232).
+        let svg = render_with_title(&cols, &tracks, 460, 300, &opts)
+            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }
