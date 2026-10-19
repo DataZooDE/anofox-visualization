@@ -313,6 +313,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
+    e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -643,6 +644,7 @@ mod tests {
             "ALPHA",
             "BASEMAP",
             "HINT",
+            "OPTION_LABEL",
             "XFORMAT",
             "BUBBLE",
         ] {
@@ -738,6 +740,7 @@ mod tests {
             Role::Badge,
             Role::Plain,
             Role::Hint,
+            Role::OptionLabel,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -857,6 +860,7 @@ mod tests {
                 | Role::Badge
                 | Role::Plain
                 | Role::Hint
+                | Role::OptionLabel
                 | Role::Text(_)
                 | Role::Placeholder
                 | Role::HeaderImage

@@ -653,9 +653,12 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         .filter(|(_, tok)| !is_sql_type_token(tok))
         .filter_map(|(_, tok)| parse_role(tok))
         .collect();
-    let inputs_ok = unambiguous
-        .iter()
-        .all(|r| matches!(r, Role::Input(_) | Role::Hint | Role::Label | Role::Title));
+    let inputs_ok = unambiguous.iter().all(|r| {
+        matches!(
+            r,
+            Role::Input(_) | Role::Hint | Role::OptionLabel | Role::Label | Role::Title
+        )
+    });
 
     // ::TABLE, ::DATERANGE and ::DOWNLOAD_* keep every column and its name — the
     // whole result is the payload; strip only the casts.
@@ -982,6 +985,35 @@ mod xline_date_tests {
         assert_eq!(
             coerce_for_role(Role::VLine, vals),
             vec![Value::Float(12.0), Value::Float(3.5), Value::Float(1.25)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod option_label_tests {
+    use super::*;
+    use crate::{InputKind, Role};
+    #[test]
+    fn option_label_is_a_positional_column_of_an_input() {
+        let p = plan("SELECT run AS run ::DROPDOWN, strftime(w, '%d %b') || ' — ' || run AS run_label ::OPTION_LABEL, 'Run'::LABEL FROM runs;");
+        let p = &p[0];
+        assert!(
+            p.roles.contains(&(0, Role::Input(InputKind::Dropdown))),
+            "{:?}",
+            p.roles
+        );
+        assert!(p.roles.contains(&(1, Role::OptionLabel)), "{:?}", p.roles);
+        assert!(
+            p.sql.contains("run AS run") && p.sql.contains("AS c1"),
+            "{}",
+            p.sql
+        );
+        // an input statement still: ::DATE stays the input role next to it
+        let p = plan("SELECT DATE '2026-01-01' AS d ::DATE, 'x' ::OPTION_LABEL;");
+        assert!(
+            p[0].roles.contains(&(0, Role::Input(InputKind::Date))),
+            "{:?}",
+            p[0].roles
         );
     }
 }
