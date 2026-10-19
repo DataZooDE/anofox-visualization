@@ -13,7 +13,7 @@
 //   * the tools over DuckDB-Wasm, each in a scratch session (web/lint.js).
 // A pure ES module (no DOM): the panel (M1-3) drives it, and
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
-import { lintScript, rowsJson, scratchRunner, splitStatements } from "./lint.js";
+import { lintScript, ownOpts, rowsJson, scratchRunner, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
 // #204: the assistant's own locked DuckDB-Wasm instance. wasmTools runs
@@ -65,18 +65,19 @@ export const LIMITS = {
 // and the options into null-prototype objects first means a missing key
 // is always `undefined`, never inherited.
 export function assistConfig(block, opts) {
-  const o = Object.assign(Object.create(null), opts);
+  const o = ownOpts(opts);
   const { served = false, embed = false, live = false, framed = false, host } = o;
   const off = (reason) => ({ enabled: false, reason });
   if (served || embed) return off("locked");
   if (framed) return off("framed");
-  const a = block && typeof block === "object" ? Object.assign(Object.create(null), block) : Object.create(null);
+  const a = ownOpts(block);
   if (live) return off("serve-not-yet");
   if (a.enabled !== true) return off("disabled");
   const transport = a.transport || "browser-key";
   if (transport !== "browser-key") return off(`${transport}-not-yet`);
   const models = { ...MODELS };
-  for (const k of ["default", "harder"]) if (typeof a.models?.[k] === "string" && /^claude-[a-z0-9-]+$/.test(a.models[k])) models[k] = a.models[k];
+  const aModels = ownOpts(a.models); // sec-review-256 final check: a.models[k] read own-only too
+  for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && /^claude-[a-z0-9-]+$/.test(aModels[k])) models[k] = aModels[k];
   const rounds = Number.isInteger(a.max_rounds) ? Math.min(LIMITS.rounds, Math.max(1, a.max_rounds)) : LIMITS.rounds;
   return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: rememberAllowed(host, a.remember === true) };
 }
@@ -104,7 +105,13 @@ export const KEY_SLOT = "dp_assist_key";
 // the installation's config changed, or before the host was recognised as
 // shared, does not linger in storage every other script on the origin can
 // read.
-export function keyStore(session, local, { remember = true } = {}) {
+export function keyStore(session, local, opts = {}) {
+  // sec-review-256 final check: `remember` now defaults to `false` (L-R2-1's
+  // opt-in applies to the default itself, not only to its documentation —
+  // the old default of `true` meant a caller that omitted the option, or a
+  // polluted Object.prototype.remember, both remembered the key). Real
+  // callers (boot(), M1-3) always pass the real, computed value explicitly.
+  const { remember = false } = ownOpts(opts);
   const read = (s) => {
     try {
       return s?.getItem(KEY_SLOT) || "";
@@ -151,6 +158,11 @@ export async function loadSdk(url = SDK_URL) {
   return (await import(url)).default;
 }
 
+// A non-default baseURL is for tests only: a local fake server, never a
+// real destination. http:// (never https — nothing legitimate needs TLS
+// to loopback) and 127.0.0.1/localhost only.
+const LOCAL_TEST_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/i;
+
 // (a) The user's own key, straight from the browser. `baseURL` is for tests
 // only: the panel never passes one (a URL from a link or a dashboard would
 // send the key elsewhere). `dangerouslyAllowBrowser`
@@ -158,13 +170,21 @@ export async function loadSdk(url = SDK_URL) {
 // `anthropic-dangerous-direct-browser-access: true` header the API needs to
 // answer a browser (CORS). Only the SDK's own headers go along (its version
 // and runtime): no user identity, no `metadata.user_id`.
-export function browserKeyTransport({ Anthropic, apiKey, baseURL }) {
+export function browserKeyTransport(opts) {
+  const { Anthropic, apiKey, baseURL } = ownOpts(opts);
   if (!apiKey) throw new Error("no API key");
-  // I-7: pass the base URL explicitly rather than leaving it undefined — the
-  // SDK's own default then reads an environment variable
-  // (`ANTHROPIC_BASE_URL`, via `globalThis.process`/`Deno.env`), which a
-  // page should never let anything but this call decide.
-  const base = baseURL ?? API_HOST;
+  // I-7 / sec-review-256 final check: pass the base URL explicitly rather
+  // than leaving it undefined — the SDK's own default then reads an
+  // environment variable (`ANTHROPIC_BASE_URL`, via
+  // `globalThis.process`/`Deno.env`), which a page should never let
+  // anything but this call decide. A `baseURL` that isn't a loopback test
+  // origin — a polluted `Object.prototype.baseURL` included — is rejected
+  // outright: the key and every request can only ever go to the real API
+  // or a local test server, never an attacker origin (the tab's CSP
+  // `connect-src` is the only other thing standing between a polluted
+  // `baseURL` and the key, and this transport never checks that the CSP
+  // was proven).
+  const base = typeof baseURL === "string" && LOCAL_TEST_ORIGIN.test(baseURL) ? baseURL : API_HOST;
   const client = new Anthropic({ apiKey, baseURL: base, dangerouslyAllowBrowser: true, maxRetries: 2 });
   return {
     name: "browser-key",
@@ -283,7 +303,14 @@ export const SETTABLE = new Set(["timezone", "calendar", "default_order", "defau
 
 // Classify one statement: {cls: 1 | 2 | 3, kind, reason}. `known` = the
 // paths and URLs already used (the current SQL, the catalog's files).
-export function classifyStatement(sql, { known = new Set() } = {}) {
+export function classifyStatement(sql, opts) {
+  // sec-review-256 final check: found by the systematic ownOpts test — the
+  // same destructuring-reads-inherited-properties issue as everywhere
+  // else, and a real classifier weakening: a polluted Object.prototype.known
+  // (e.g. a fake Set-like object whose .has() always returns true) would
+  // make every reader look like one the dashboard already uses, downgrading
+  // what should be a class-3 "needs confirmation" read.
+  const { known = new Set() } = ownOpts(opts);
   const c = code(sql).trim().replace(/^\(+\s*/, "");
   const words = c.toUpperCase().split(/[^A-Z0-9_]+/).filter(Boolean);
   const [w0 = "", w1 = "", w2 = ""] = words;
@@ -351,7 +378,8 @@ export function classifyStatement(sql, { known = new Set() } = {}) {
 
 // Every statement of a script with its class; `danger` = the class 3 ones.
 export function classifyScript(sql, opts) {
-  const all = splitStatements(sql).map((s) => ({ sql: s, ...classifyStatement(s, opts) }));
+  const o = ownOpts(opts);
+  const all = splitStatements(sql).map((s) => ({ sql: s, ...classifyStatement(s, o) }));
   return { all, danger: all.filter((s) => s.cls === 3) };
 }
 
@@ -808,23 +836,29 @@ const clip = (s, n = LIMITS.resultChars) => (s.length > n ? s.slice(0, n - 20) +
 //   {kind: "proposal" | "reply" | "refusal" | "stopped" | "cancelled" | "error",
 //    text, proposal?: {sql, summary, panels, issues, passed}, reason?,
 //    turns, rounds, usage, messages, toolLog}.
-export async function runAssistant({
-  transport,
-  prefix,
-  model = MODELS.default,
-  effort,
-  ctx,
-  request,
-  history = [],
-  tools,
-  limits = {},
-  signal,
-  onStatus = () => {},
-  onText,
-  onProposalInput,
-  onToolResult,
-}) {
-  const L = { ...LIMITS, ...limits };
+export async function runAssistant(opts) {
+  // sec-review-256 final check: a polluted Object.prototype.limits (lifting
+  // the turn/round/token/call caps) or .model would otherwise take effect
+  // for every call that omits them — which in shipped code is every call
+  // (nothing passes `limits`/`model` today). ownOpts for the top level and
+  // again for `limits` specifically, since it's itself read key-by-key.
+  const {
+    transport,
+    prefix,
+    model = MODELS.default,
+    effort,
+    ctx,
+    request,
+    history = [],
+    tools,
+    limits = {},
+    signal,
+    onStatus = () => {},
+    onText,
+    onProposalInput,
+    onToolResult,
+  } = ownOpts(opts);
+  const L = { ...LIMITS, ...ownOpts(limits) };
   const messages = [...history, firstMessage(ctx, request)];
   const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, spent: 0 };
   let rounds = 0;
@@ -988,7 +1022,7 @@ export function wasmTools(opts) {
   // passing that option. Copying into a null-prototype object first means
   // every read below is an *own*-property read: a key `opts` doesn't carry
   // itself is `undefined`, full stop, never inherited.
-  const o = Object.assign(Object.create(null), opts);
+  const o = ownOpts(opts);
   const {
     db,
     prepare,
