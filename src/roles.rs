@@ -340,6 +340,10 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
+    e("VIEW", &["ALT_VIEW"], R::View, "layout", false,
+      "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
+    e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
+      "close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it)"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
     e("TRACK", &["STRIP_BELOW", "STRIP_UNDER"], R::Track, "layout", true,
       "a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar"),
@@ -502,7 +506,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
-                | Role::SelectAs | Role::Drill | Role::Empty
+                | Role::SelectAs | Role::Drill | Role::Empty | Role::View | Role::ViewEnd
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -620,6 +624,8 @@ mod tests {
             "PLACEHOLDER",
             "SELECT_AS",
             "DRILL",
+            "VIEW",
+            "ENDVIEW",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -762,6 +768,8 @@ mod tests {
             Role::Boundaries,
             Role::Tab,
             Role::SubTab,
+            Role::View,
+            Role::ViewEnd,
             Role::Size,
             Role::YFormat,
             Role::XFormat,
@@ -884,6 +892,8 @@ mod tests {
                 | Role::Boundaries
                 | Role::Tab
                 | Role::SubTab
+                | Role::View
+                | Role::ViewEnd
                 | Role::Size
                 | Role::YFormat
                 | Role::XFormat
