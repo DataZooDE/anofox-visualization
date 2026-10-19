@@ -361,6 +361,70 @@ try {
     const again = await slowPage.describe('"memory"."main"."heavy"', 0);
     assert.deepEqual(again, []);
   }
+
+  // sec-review-256 "last check": `limits` is merged over SNAPSHOT_LIMITS
+  // through ownOpts, and every numeric field is capped at its own
+  // default — a caller (a polluted Object.prototype or not) can only ever
+  // make a cap tighter, never drop it (a partial object) or raise it past
+  // the reviewed maximum. Proven directly: SNAPSHOT_LIMITS.totalRows is
+  // shrunk to a tiny, test-only value, so capping to "the real default" is
+  // fast and exact to check, rather than needing millions of rows.
+  {
+    const capsPage = await rawDb();
+    capsPage.open({});
+    const ccp = capsPage.connect();
+    ccp.query("CREATE TABLE d1 AS SELECT i FROM range(5) t(i)");
+    ccp.query("CREATE TABLE d2 AS SELECT i FROM range(5) t(i)");
+    // Pre-instantiate the three engine dbs this block needs *before*
+    // polluting Object.prototype: DuckDB-Wasm's own dynamic linker
+    // (relocateExports/updateGOT, a plain `for…in` over its GOT object)
+    // instantiates fresh on every `rawDb()`/buildEngine call, and a `for…in`
+    // picks up inherited enumerable properties too — a large numeric value
+    // on Object.prototype crashes *that* unrelated code
+    // ("Cannot create property 'value' on number …"), not anything this PR
+    // touches. Building the dbs first and handing buildEngine a `makeDb`
+    // that just returns one keeps the pollution window around ownOpts'
+    // merge/cap logic only, which is what this test is actually about.
+    const preDbs = [await rawDb(), await rawDb(), await rawDb()];
+    const nextDb = () => preDbs.shift();
+    const realTotalRows = E.SNAPSHOT_LIMITS.totalRows;
+    E.SNAPSHOT_LIMITS.totalRows = 3; // tiny, test-only ceiling
+    const dirty = { totalRows: 1e12 };
+    for (const k of Object.keys(dirty)) Object.prototype[k] = dirty[k];
+    try {
+      // No `limits` at all: a polluted Object.prototype.totalRows must
+      // never be read — the merge is `{ ...SNAPSHOT_LIMITS, ...ownOpts(limits) }`,
+      // and ownOpts(undefined) is an empty, null-prototype object
+      // regardless of what Object.prototype carries.
+      const eNone = await E.buildEngine({ makeDb: nextDb, page: E.pageAdapter(capsPage, {}), extensions: ["json"], doc: undefined });
+      const byNone = Object.fromEntries(eNone.tables.map((t) => [t.fq, t]));
+      assert.equal(byNone['"memory"."main"."d1"'].rows, 3, "the tiny real default applies with no limits object at all, pollution notwithstanding");
+      assert.equal(byNone['"memory"."main"."d2"'].excluded, "too large");
+      eNone.close();
+
+      // An explicit, oversized limits.totalRows (1e12, the same value
+      // sitting on the polluted prototype): still capped at the real
+      // default, not accepted as given.
+      const eHuge = await E.buildEngine({ makeDb: nextDb, page: E.pageAdapter(capsPage, {}), extensions: ["json"], limits: { totalRows: 1e12 }, doc: undefined });
+      const byHuge = Object.fromEntries(eHuge.tables.map((t) => [t.fq, t]));
+      assert.equal(byHuge['"memory"."main"."d1"'].rows, 3, "an oversized limits.totalRows is capped at the real default, not accepted as given");
+      assert.equal(byHuge['"memory"."main"."d2"'].excluded, "too large");
+      eHuge.close();
+
+      // A partial limits object (another field only): totalRows, which it
+      // doesn't mention, still falls back to the real default rather than
+      // being dropped (the old key-by-key read made it `undefined`, and
+      // `undefined <= 0` is `false` — the row cap silently vanished).
+      const ePartial = await E.buildEngine({ makeDb: nextDb, page: E.pageAdapter(capsPage, {}), extensions: ["json"], limits: { queryMs: 5000 }, doc: undefined });
+      const byPartial = Object.fromEntries(ePartial.tables.map((t) => [t.fq, t]));
+      assert.equal(byPartial['"memory"."main"."d1"'].rows, 3, "totalRows still falls back to the real default when a partial limits object omits it");
+      ePartial.close();
+    } finally {
+      for (const k of Object.keys(dirty)) delete Object.prototype[k];
+      E.SNAPSHOT_LIMITS.totalRows = realTotalRows;
+    }
+    capsPage.terminate?.();
+  }
 }
 
 // ---- 5. the page is read only through pageAdapter (fixed statement shapes) ----

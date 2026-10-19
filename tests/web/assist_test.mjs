@@ -1342,6 +1342,7 @@ const tools = A.wasmTools({
       baseURL: "https://evil.example/",
       limits: { turns: 1e9, tokens: 1e12, rounds: 1e9, calls: 1e9, callsPerTurn: 1e9 },
       model: "claude-evil",
+      values: true,
     };
     for (const k of Object.keys(dirty)) Object.prototype[k] = dirty[k];
     try {
@@ -1368,6 +1369,27 @@ const tools = A.wasmTools({
       // assistConfig's nested models object: an empty {} must not pick up
       // Object.prototype.default as the model id.
       assert.equal(A.assistConfig({ enabled: true, models: {} }).models.default, A.MODELS.default, "a polluted models.default is not picked up");
+      // resultProfile: sec-review-256 "last check" — the options parameter
+      // used to be destructured directly in the signature, so a polluted
+      // Object.prototype.values = true switched sample-rows-off withholding
+      // back on for any caller that omits `values` (run_sql's quiet branch
+      // is exactly that caller). With sample rows off (no `values` passed)
+      // neither a text value nor a withheld column name may reach the
+      // model, pollution notwithstanding.
+      {
+        const quietText = A.resultProfile([["secret", "Utf8"]], [{ secret: "codename-falcon" }, { secret: "codename-heron" }], { names: () => false });
+        // The raw JSON text, not a parsed object: a parsed plain object's
+        // own `.values` read would itself fall through to the very same
+        // Object.prototype.values pollution being tested against, which
+        // would mask a real bug as a pass. JSON.stringify only ever
+        // serialises resultProfile's *own* properties, pollution or not,
+        // so the text itself is the real proof.
+        assert.equal(quietText.includes('"values"'), false, "no values key is in the profile under Object.prototype.values pollution");
+        assert.equal(quietText.includes("codename"), false, "the raw text values are nowhere in the profile");
+        const quiet = JSON.parse(quietText);
+        assert.equal(quiet.columns[0].name_withheld, true, "the column name stays withheld under Object.prototype.values pollution");
+        assert.equal(quiet.columns[0].name, "column 1", "no real column name leaks either");
+      }
       // keyStore: remember defaults to false, bare options object or not —
       // set(_, true) must stay in sessionStorage under pollution too.
       {
