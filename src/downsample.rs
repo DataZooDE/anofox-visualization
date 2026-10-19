@@ -8,10 +8,14 @@
 //!    verbatim: every writer escapes them (`format::escape_xml`, and ggplot-rs
 //!    ≥ 0.16 escapes `"`/`'` in attributes).
 //! 3. **Category cap**: a discrete x axis (bars, box/violin/jitter) or a
-//!    `::CATEGORY` with more than [`RenderOptions::max_categories`] levels keeps
-//!    the largest `max − 1` (by total |measure|, or row count for raw-row
-//!    charts) and folds the rest into an `Other` level; aggregating charts
-//!    (bars, lines, areas, pie/donut) sum the folded rows.
+//!    `::CATEGORY` with more than [`RenderOptions::max_categories`] levels
+//!    keeps the largest `max − 1` (by total |measure|, or row count for
+//!    raw-row charts) — or, when the rows come ranked by the measure (an
+//!    `ORDER BY` on it), the first `max − 1` in row order — and folds the
+//!    rest into an `Other` level; aggregating charts sum the folded rows. A
+//!    rate or an average (#281: `'percent'::YFORMAT`, or a measure named
+//!    like one, the table totals' rule) is never summed: it keeps `max`
+//!    levels and the rest are left out.
 //! 4. **LTTB**: a line/area/step series with more than
 //!    [`RenderOptions::max_line_points`] points is downsampled with
 //!    Largest-Triangle-Three-Buckets (visual shape preserved, O(n)).
@@ -150,17 +154,15 @@ fn cap_categories(mut cols: Vec<Column>, kind: Kind, max: usize) -> Vec<Column> 
             | Kind::Violin
             | Kind::Jitter
     );
-    let measure: Vec<f64> = cols
+    let n = cols.iter().map(|c| c.values.len()).max().unwrap_or(0);
+    let signed: Vec<f64> = cols
         .iter()
         .find(|c| matches!(c.role, Role::Value(_)))
-        .map(|c| {
-            c.values
-                .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0).abs())
-                .collect()
-        })
+        .map(|c| c.values.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
         .unwrap_or_default();
-
+    // #281: a rate or an average can't be summed into "Other": left out instead.
+    let rate = aggregating && rate_measure(&cols);
+    let mut dropped = vec![false; n];
     let mut changed = false;
     for target in [Role::Category, Role::X] {
         if target == Role::X && !x_capped {
@@ -169,41 +171,112 @@ fn cap_categories(mut cols: Vec<Column>, kind: Kind, max: usize) -> Vec<Column> 
         let Some(ci) = cols.iter().position(|c| c.role == target) else {
             continue;
         };
-        // Only discrete (string) columns are capped.
         if !cols[ci].values.iter().any(|v| matches!(v, Value::Str(_))) {
             continue;
         }
-        let mut weight: HashMap<String, f64> = HashMap::new();
+        // Levels in first-seen order: (key, |total| or row count, signed total).
+        let mut at: HashMap<String, usize> = HashMap::new();
+        let mut levels: Vec<(String, f64, f64)> = Vec::new();
         for (i, v) in cols[ci].values.iter().enumerate() {
-            let w = if raw_rows {
-                1.0
+            let k = key(v);
+            let j = *at.entry(k.clone()).or_insert_with(|| {
+                levels.push((k, 0.0, 0.0));
+                levels.len() - 1
+            });
+            if raw_rows {
+                levels[j].1 += 1.0;
             } else {
-                measure.get(i).copied().unwrap_or(0.0)
-            };
-            *weight.entry(key(v)).or_insert(0.0) += w;
+                let s = signed.get(i).copied().unwrap_or(0.0);
+                levels[j].1 += s.abs();
+                levels[j].2 += s;
+            }
         }
-        if weight.len() <= max {
+        if levels.len() <= max {
             continue;
         }
-        let mut ranked: Vec<(String, f64)> = weight.into_iter().collect();
-        ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        let keep: std::collections::HashSet<String> =
-            ranked.into_iter().take(max - 1).map(|(k, _)| k).collect();
-        for v in cols[ci].values.iter_mut() {
+        let take = if rate { max } else { max - 1 };
+        let keep: std::collections::HashSet<String> = if !raw_rows && ranked(&levels) {
+            levels.iter().take(take).map(|l| l.0.clone()).collect()
+        } else {
+            let mut by_size: Vec<&(String, f64, f64)> = levels.iter().collect();
+            by_size.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            by_size
+                .into_iter()
+                .take(take)
+                .map(|l| l.0.clone())
+                .collect()
+        };
+        for (i, v) in cols[ci].values.iter_mut().enumerate() {
             if !keep.contains(&key(v)) {
-                *v = Value::Str(OTHER.into());
+                if rate {
+                    dropped[i] = true;
+                } else {
+                    *v = Value::Str(OTHER.into());
+                }
             }
         }
         changed = true;
     }
-    if changed && aggregating {
+    if !changed {
+        return cols;
+    }
+    if rate {
+        return drop_rows(cols, &dropped);
+    }
+    if aggregating {
         cols = aggregate(cols);
     }
     cols
+}
+
+/// The query ranked its levels (#281): their totals, in the order the rows
+/// list them, never rise or never fall — an `ORDER BY` on the measure. Then
+/// the first levels are the ones the author put first (a worst-first ranking
+/// keeps its worst), not the largest.
+fn ranked(levels: &[(String, f64, f64)]) -> bool {
+    let w: Vec<f64> = levels.iter().map(|l| l.2).collect();
+    w.windows(2).all(|p| p[0] >= p[1]) || w.windows(2).all(|p| p[0] <= p[1])
+}
+
+/// A rate or an average (#281): `'%'` / `'percent'` / `'pct'` as `::YFORMAT`,
+/// or a measure named like one (the table totals' rule, #207 / #227:
+/// `on_time_pct`, `On-time %`, `churnRate`, `avg_price`).
+fn rate_measure(cols: &[Column]) -> bool {
+    let pct = cols
+        .iter()
+        .filter(|c| c.role == Role::YFormat)
+        .flat_map(|c| c.values.iter())
+        .find_map(|v| match v {
+            Value::Str(s) if !s.trim().is_empty() => Some(s.as_str()),
+            _ => None,
+        })
+        .is_some_and(|s| crate::format::ValueFmt::parse(s) == crate::format::ValueFmt::Percent);
+    pct || cols
+        .iter()
+        .any(|c| matches!(c.role, Role::Value(_)) && crate::table::rate_like(&c.name))
+}
+
+/// Leave the rows marked in `dropped` out of every row-aligned column.
+fn drop_rows(cols: Vec<Column>, dropped: &[bool]) -> Vec<Column> {
+    cols.into_iter()
+        .map(|c| {
+            if !row_aligned(c.role) {
+                return c;
+            }
+            let values = c
+                .values
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !dropped.get(*i).copied().unwrap_or(false))
+                .map(|(_, v)| v)
+                .collect();
+            Column::new(c.name, c.role, values)
+        })
+        .collect()
 }
 
 /// Group row-aligned columns by (x, category), summing measures; other
@@ -403,5 +476,160 @@ mod tests {
             (0..n).sum::<usize>() as f64,
             "folded rows are summed"
         );
+    }
+
+    #[test]
+    fn unordered_bars_keep_the_largest() {
+        let n = 200;
+        let cols = vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..n).map(|i| Value::Str(format!("c{i}"))).collect(),
+            ),
+            Column::new(
+                "v",
+                Role::Value(Kind::Bar),
+                (0..n)
+                    .map(|i| Value::Float(((i * 37) % 200) as f64))
+                    .collect(),
+            ),
+        ];
+        let o = RenderOptions {
+            max_categories: 10,
+            ..Default::default()
+        };
+        let out = prepare(&cols, &o);
+        let x = &out[0].values;
+        assert!(x.contains(&Value::Str(OTHER.into())));
+        let kept: std::collections::HashSet<usize> = (0..n)
+            .filter(|&i| x.contains(&Value::Str(format!("c{i}"))))
+            .collect();
+        let expected: std::collections::HashSet<usize> =
+            (0..n).filter(|&i| ((i * 37) % 200) >= 191).collect();
+        assert_eq!(kept, expected);
+    }
+
+    #[test]
+    fn ranked_bars_keep_their_first_rows() {
+        let n = 200;
+        let cols = vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..n).map(|i| Value::Str(format!("c{i}"))).collect(),
+            ),
+            Column::new(
+                "v",
+                Role::Value(Kind::Bar),
+                (0..n).map(|i| Value::Float(i as f64)).collect(),
+            ),
+        ];
+        let o = RenderOptions {
+            max_categories: 10,
+            ..Default::default()
+        };
+        let out = prepare(&cols, &o);
+        let x: Vec<String> = out[0]
+            .values
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!("expected a string"),
+            })
+            .collect();
+        let expected: Vec<String> = (0..9)
+            .map(|i| format!("c{i}"))
+            .chain(std::iter::once(OTHER.to_string()))
+            .collect();
+        assert_eq!(x, expected);
+    }
+
+    #[test]
+    fn rates_are_not_summed() {
+        let n = 200;
+        let cols = vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..n).map(|i| Value::Str(format!("c{i}"))).collect(),
+            ),
+            Column::new(
+                "On-time %",
+                Role::Value(Kind::Bar),
+                (0..n).map(|i| Value::Float((i % 100) as f64)).collect(),
+            ),
+        ];
+        let o = RenderOptions {
+            max_categories: 10,
+            ..Default::default()
+        };
+        let out = prepare(&cols, &o);
+        let x = &out[0].values;
+        assert_eq!(x.len(), 10);
+        assert!(!x.contains(&Value::Str(OTHER.into())));
+        for v in &out[1].values {
+            let f = v.as_f64().unwrap();
+            assert!(f <= 99.0, "{f}");
+        }
+    }
+
+    #[test]
+    fn percent_yformat_is_a_rate() {
+        let n = 200;
+        let cols = vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..n).map(|i| Value::Str(format!("c{i}"))).collect(),
+            ),
+            Column::new(
+                "v",
+                Role::Value(Kind::Bar),
+                (0..n).map(|i| Value::Float((i % 100) as f64)).collect(),
+            ),
+            Column::new("f", Role::YFormat, vec![Value::Str("percent".into()); n]),
+        ];
+        let o = RenderOptions {
+            max_categories: 10,
+            ..Default::default()
+        };
+        let out = prepare(&cols, &o);
+        let x = &out[0].values;
+        assert!(!x.contains(&Value::Str(OTHER.into())));
+        assert_eq!(x.len(), 10);
+    }
+
+    #[test]
+    fn ranked_rates_keep_the_worst() {
+        let n = 200;
+        let cols = vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..n).map(|i| Value::Str(format!("c{i}"))).collect(),
+            ),
+            Column::new(
+                "on_time_pct",
+                Role::Value(Kind::Bar),
+                (0..n).map(|i| Value::Float(i as f64 / 2.0)).collect(),
+            ),
+        ];
+        let o = RenderOptions {
+            max_categories: 10,
+            ..Default::default()
+        };
+        let out = prepare(&cols, &o);
+        let x: Vec<String> = out[0]
+            .values
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!("expected a string"),
+            })
+            .collect();
+        let expected: Vec<String> = (0..10).map(|i| format!("c{i}")).collect();
+        assert_eq!(x, expected);
+        assert!(!x.contains(&OTHER.to_string()));
     }
 }
