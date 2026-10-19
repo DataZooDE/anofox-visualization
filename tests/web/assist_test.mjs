@@ -1305,6 +1305,32 @@ const tools = A.wasmTools({
     const previewRows = await preview("SELECT region, sum(amount) AS s FROM sales GROUP BY ALL ORDER BY 2 DESC");
     assert.ok(JSON.parse(previewRows).length > 0);
     assert.deepEqual(seen, [], "nothing of the loop or the preview reached the page's own connection");
+
+    // ---- sec-review-256 R-1: Object.prototype pollution must not switch
+    // off the lock check or the gate. wasmTools used to read its options
+    // by destructuring, which reads *inherited* properties too — a
+    // polluted Object.prototype.requireLocked = false (or the old
+    // __testing.admitAll gate bypass, now removed outright) would have
+    // silently disabled the per-call lock check / the guard for every
+    // caller, with nothing ever passing those options itself.
+    const dirty = { requireLocked: false, __testing: { admitAll: true }, admitAll: true, prepare: async () => {} };
+    for (const k of Object.keys(dirty)) Object.prototype[k] = dirty[k];
+    try {
+      // requireLocked must still default to true: the raw, unlocked page
+      // db must still be refused, pollution or not.
+      const pollutedUnlocked = A.wasmTools({ db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql });
+      await assert.rejects(pollutedUnlocked.list_tables({ filter: "" }), /locked assistant engine|changed state/, "requireLocked still defaults to true under Object.prototype pollution");
+      // The gate must still refuse a dangerous statement in a preview
+      // built while the prototype is polluted, over the real locked
+      // engine — there is no __testing/admitAll option left to read at
+      // all, polluted or not.
+      const pollutedEngineTools = A.wasmTools({ db: engine.db, lintStep: wasm.lint_step, plan: wasm.plan, pageSql: wasm.page_sql, snapshot: new Map(engine.tables.map((t) => [t.fq, t])) });
+      const pollutedPreview = pollutedEngineTools.previewRunner("INSTALL spatial;");
+      await assert.rejects(pollutedPreview("INSTALL spatial"), /not run/, "the gate still refuses INSTALL under Object.prototype pollution");
+    } finally {
+      for (const k of Object.keys(dirty)) delete Object.prototype[k];
+    }
+    assert.deepEqual(Object.keys(Object.prototype).filter((k) => k in dirty), [], "the prototype was cleaned up");
   } finally {
     engine.close();
   }
