@@ -23,8 +23,11 @@ python3 "$HERE/scripts/append_extension_metadata.py" -l /tmp/ggext.wasm -n anofo
 python3 -c "import gzip;d=open('$REPO/anofox_visualization.duckdb_extension.wasm','rb').read();open('$REPO/anofox_visualization.duckdb_extension.wasm.gz','wb').write(gzip.compress(d))"
 
 echo "== serve + load in DuckDB-Wasm (headless Chromium) =="
-pkill -f "http.server -d $GG/web 8130" 2>/dev/null || true
-( python3 -m http.server -d "$GG/web" 8130 >/dev/null 2>&1 & ) ; sleep 2
+if (exec 3<>/dev/tcp/127.0.0.1/8130) 2>/dev/null; then echo "port 8130 is already in use" >&2; exit 2; fi
+python3 -m http.server -d "$GG/web" 8130 >/dev/null 2>&1 &
+HTTP_PID=$!
+trap 'kill "$HTTP_PID" 2>/dev/null || true' EXIT
+sleep 2
 cd "$GG/web/e2e"
 cat > _wasmtest.mjs <<'EOF'
 import { chromium } from "playwright";
@@ -49,5 +52,5 @@ console.log("RESULT:", JSON.stringify(r));
 await b.close();
 EOF
 node _wasmtest.mjs; rm -f _wasmtest.mjs
-pkill -f "http.server -d $GG/web 8130" 2>/dev/null || true
+kill "$HTTP_PID" 2>/dev/null || true
 rm -rf "$GG/web/extrepo"
