@@ -1152,9 +1152,16 @@ fn render_dashboard_page(
     type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
     let mut chrome = DashboardChrome::default();
     let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    // The script-free page shows only a ::VIEW group's first alternative
+    // (#214); the others are never queried, and a `?view.*` request param
+    // is not a thing — `resolve_params` above only reads declared `@param`s.
+    let mut view_pick = sql::views::StaticPick::default();
     for panel in sql::plan(&dash.script) {
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
+        }
+        if view_pick.drop_panel(&panel) {
+            continue;
         }
         let chrome_role = panel
             .roles

@@ -101,9 +101,14 @@ fn cmd_render(args: &[String]) {
     // statement.
     let mut vars = String::new();
     let mut sections = sql::requires::Sections::default();
+    // A static HTML render shows only a ::VIEW group's first shown
+    // alternative (#214) — the other alternatives' non-setup statements
+    // never even run.
+    let mut view_pick = sql::views::StaticPick::default();
     for p in sql::plan(&script) {
-        // A ::TAB whose `-- @requires` input is missing is hidden: none of
-        // its panels are drawn (the tabs themselves are flattened here).
+        // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
+        // is hidden: none of its panels are drawn (the tabs themselves are
+        // flattened here).
         let hidden = sections.step(&p, |reqs| {
             sql::requires::check(reqs, |q, session| {
                 let pre = if session { vars.as_str() } else { "" };
@@ -118,7 +123,7 @@ fn cmd_render(args: &[String]) {
             })
             .missing
         });
-        if hidden.is_some() {
+        if hidden.is_some() || view_pick.drop_panel(&p) {
             continue;
         }
         if p.setup {

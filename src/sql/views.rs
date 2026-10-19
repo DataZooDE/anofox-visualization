@@ -272,10 +272,10 @@ pub fn assign_views(panels: &mut [Panel]) {
                     .and_then(|idx| marker_literal(&panels[mi], idx))
             })
             .collect();
-        for j in g.start..g.end {
+        for (j, p) in panels.iter_mut().enumerate().take(g.end).skip(g.start) {
             let alt = g.markers.iter().rposition(|&m| m <= j).unwrap_or(0);
             let marker = g.markers.contains(&j);
-            panels[j].view = Some(ViewAt {
+            p.view = Some(ViewAt {
                 group: g.start,
                 alt,
                 marker,
@@ -323,7 +323,9 @@ mod tests {
     use crate::sql::plan;
 
     fn view_of(p: &[Panel], i: usize) -> &ViewAt {
-        p[i].view.as_ref().unwrap_or_else(|| panic!("stmt {i} has no view"))
+        p[i].view
+            .as_ref()
+            .unwrap_or_else(|| panic!("stmt {i} has no view"))
     }
 
     #[test]
@@ -382,9 +384,13 @@ mod tests {
 
     #[test]
     fn closer_endview() {
-        let p = plan("SELECT 'Lines'::VIEW; SELECT 1::ENDVIEW; SELECT a::XAXIS, b::BARCHART FROM t;");
+        let p =
+            plan("SELECT 'Lines'::VIEW; SELECT 1::ENDVIEW; SELECT a::XAXIS, b::BARCHART FROM t;");
         assert!(view_of(&p, 0).marker);
-        assert!(p[1].view.is_none(), "the ::ENDVIEW itself closes, not a member");
+        assert!(
+            p[1].view.is_none(),
+            "the ::ENDVIEW itself closes, not a member"
+        );
         assert!(p[2].view.is_none(), "after the closer: no group");
     }
 
@@ -414,7 +420,10 @@ mod tests {
         // The ::GROUP opened before the ::VIEW; its ::ENDGROUP closes both.
         let p = plan("SELECT 1::GROUP; SELECT 'Lines'::VIEW; SELECT 1::ENDGROUP; SELECT a::XAXIS, b::BARCHART FROM t;");
         assert!(view_of(&p, 1).marker);
-        assert!(p[2].view.is_none(), "the outer ::ENDGROUP itself is not a member");
+        assert!(
+            p[2].view.is_none(),
+            "the outer ::ENDGROUP itself is not a member"
+        );
         assert!(p[3].view.is_none(), "after the closer: no group");
         let g = groups(&p);
         assert_eq!(g.len(), 1);
@@ -479,14 +488,16 @@ mod tests {
         assert_eq!(view_of(&p, 0).label.as_deref(), Some("Lines"));
         assert_eq!(view_of(&p, 1).label.as_deref(), Some(""));
         assert_eq!(view_of(&p, 2).label.as_deref(), Some(""));
-        assert_eq!(view_of(&p, 3).label, None, "a computed expression is not a literal");
+        assert_eq!(
+            view_of(&p, 3).label,
+            None,
+            "a computed expression is not a literal"
+        );
     }
 
     #[test]
     fn a_lone_view_right_after_a_closed_group_opens_a_new_one() {
-        let p = plan(
-            "SELECT 'Lines'::VIEW; SELECT 1::ENDVIEW; SELECT 'Bars'::VIEW;",
-        );
+        let p = plan("SELECT 'Lines'::VIEW; SELECT 1::ENDVIEW; SELECT 'Bars'::VIEW;");
         let g = groups(&p);
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].markers, vec![0]);

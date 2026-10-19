@@ -747,9 +747,7 @@ mod tests {
         let mut sec = Sections::default();
         let h: Vec<Option<String>> = p
             .iter()
-            .map(|p| {
-                sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone()))
-            })
+            .map(|p| sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone())))
             .collect();
         let g = Some("gone".to_string());
         assert_eq!(h, [g.clone(), g, None, None], "alt 0 hidden, alt 1 shown");
@@ -768,9 +766,7 @@ mod tests {
         let mut sec = Sections::default();
         let h: Vec<Option<String>> = p
             .iter()
-            .map(|p| {
-                sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone()))
-            })
+            .map(|p| sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone())))
             .collect();
         let g = Some("gone".to_string());
         assert_eq!(h, [g.clone(), g.clone(), g.clone(), g]);
