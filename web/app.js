@@ -10945,7 +10945,7 @@ async function appBrandLoad() {
 // window.__anofoxApp brand config appBrandLoad() already validated.
 function brandImgOrigins(cfg) {
   const out = [];
-  for (const u of [cfg?.logo, cfg?.favicon]) {
+  for (const u of [cfg?.logo, cfg?.logo_dark, cfg?.favicon]) {
     if (typeof u !== "string" || !/^https:\/\//i.test(u)) continue;
     try {
       const x = new URL(u);
