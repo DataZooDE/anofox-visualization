@@ -25,7 +25,7 @@ use crate::sql::contract_call;
 use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant, CREDIT_TEXT, CREDIT_URL};
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
-    Role,
+    Role, TableOpt,
 };
 use ggplot_rs::prelude::Value;
 use std::sync::Arc;
@@ -194,8 +194,18 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             continue;
         }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
-        let layout =
-            has(&|r| matches!(r, Role::Columns | Role::Span | Role::Height | Role::Section));
+        // ::TOTALS is kept for the next table (#226), like the other layout
+        // directives below, so its value reaches render_inner as a Step.
+        let layout = has(&|r| {
+            matches!(
+                r,
+                Role::Columns
+                    | Role::Span
+                    | Role::Height
+                    | Role::Section
+                    | Role::TableOpt(TableOpt::Totals)
+            )
+        });
         if roles::is_directive_panel(&panel.roles) && !layout {
             continue; // inputs, downloads, tabs, groups, reload, …
         }
@@ -242,6 +252,9 @@ fn render_inner(
     let mut row_units = 0u32;
     let mut next_span = 0u32;
     let mut next_height = 0u32;
+    // A ::TOTALS value for the next panel — a table reads it (#226); like the
+    // browser's nextTableOpts, any next panel consumes it.
+    let mut next_totals: Option<String> = None;
 
     // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO).
     if let Some((svg, h)) = header_svg(t, pad, row_y, content_w) {
@@ -309,6 +322,23 @@ fn render_inner(
             next_height = num().unwrap_or(0.0) as u32;
             continue;
         }
+        if has(&|r| matches!(r, Role::TableOpt(TableOpt::Totals))) {
+            // the first cell, one surrounding '"' stripped (as the browser)
+            next_totals = step
+                .rows
+                .as_ref()
+                .ok()
+                .and_then(|r| first_text(r))
+                .map(|s| {
+                    let s = s.as_str();
+                    let s = s.strip_prefix('"').unwrap_or(s);
+                    s.strip_suffix('"').unwrap_or(s).to_string()
+                })
+                .filter(|s| !s.is_empty());
+            continue;
+        }
+        // every later panel (also a failed one) consumes the value
+        let totals_spec = next_totals.take();
         let rows = match &step.rows {
             Ok(r) => r,
             Err(_) => continue,
@@ -492,6 +522,7 @@ fn render_inner(
             &ropts,
             strip.is_some(),
             &tracks,
+            totals_spec.as_deref(),
         );
         placed.push((x, row_y, cw, ch, inner));
 
@@ -628,6 +659,8 @@ fn json_rows(result: &[(String, Vec<Value>)]) -> Vec<serde_json::Map<String, ser
 /// One panel body → an inner `<svg>` sized (w, h). Charts go through the normal
 /// renderer (with the `::TRACK`s under a chart); KPIs / text / tables get a
 /// lightweight SVG.
+///
+/// `totals`: the `::TOTALS` value before this panel (a table's totals row).
 #[allow(clippy::too_many_arguments)]
 fn render_panel_svg(
     rows: &[(String, Vec<Value>)],
@@ -639,6 +672,7 @@ fn render_panel_svg(
     ropts: &RenderOptions,
     kpi_top: bool,
     tracks: &[(Vec<Column>, u32)],
+    totals: Option<&str>,
 ) -> String {
     let cols = columns_named(rows, roles, names);
     // Title bar (::TITLE) eats a strip off the top.
@@ -671,7 +705,7 @@ fn render_panel_svg(
         .iter()
         .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
     {
-        return table_svg(rows, roles, place, w, h, title.as_deref(), ropts);
+        return table_svg(rows, roles, place, w, h, title.as_deref(), totals, ropts);
     }
 
     // A KPI / text card — the shared tile (crate::kpi), also used by the
@@ -786,8 +820,12 @@ fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> S
 /// [`crate::table`] module — humanised headers, one unit per money / compact
 /// column moved into the header, aligned decimals, a true minus sign, ids and
 /// years ungrouped), numbers right-aligned, natural column widths, and the
-/// default totals row under a double rule (≥ 3 rows with an amount column).
+/// totals row under a double rule — the browser's rule: a `::TOTALS` value
+/// (`totals_spec`; a column it names, else its bare aggregation, else the
+/// column's default) and ≥ 2 rows, or without one the defaults with ≥ 3 rows
+/// and an amount column; `'none'` hides it. Badge counts are browser-only.
 /// As many rows as fit, then "… n more rows". Skips a ::TITLE column.
+#[allow(clippy::too_many_arguments)]
 fn table_svg(
     rows: &[(String, Vec<Value>)],
     roles: &[(usize, Role)],
@@ -795,10 +833,12 @@ fn table_svg(
     w: f64,
     h: f64,
     title: Option<&str>,
+    totals_spec: Option<&str>,
     ropts: &RenderOptions,
 ) -> String {
     use crate::table::{
-        default_total, display_text, profile_column, short_number, Cell, ColumnSpec, Negatives,
+        aggregate, count_text, default_total, display_text, names_column, number_text,
+        parse_totals, profile_column, short_number, Cell, ColumnSpec, Negatives,
     };
     let th = &ropts.theme;
     let l = &ropts.locale;
@@ -862,25 +902,45 @@ fn table_svg(
             .map(|v| display_text(v, &c.p, c.fmt, l, neg))
             .unwrap_or_default()
     };
-    // totals: the browser's default (≥ 3 rows and an amount column; none for rates)
+    // ::TOTALS (#226), read as the browser does (web/app.js renderTable):
+    // per column the named aggregation (raw name or header, case-insensitive;
+    // a later entry wins), else the bare one, else the column's default
+    let tspec = totals_spec.map(parse_totals).unwrap_or_default();
+    let mut named: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (n, a) in &tspec.col {
+        if let Some(k) = vis.iter().position(|(_, (name, _))| names_column(name, n)) {
+            named.insert(k, a.as_str());
+        }
+    }
+    let totals_off = tspec.all.as_deref() == Some("none") && named.values().all(|a| *a == "none");
+    // totals: a numeric, non-label column after the first (badges: no
+    // headless count); 'none' leaves the cell empty
     let totals: Vec<Option<String>> = cols
         .iter()
         .enumerate()
         .map(|(k, c)| {
-            let agg = default_total(&c.p, c.fmt).filter(|_| k > 0)?;
-            let nums: Vec<f64> = c.cells.iter().filter_map(Cell::num).collect();
-            if nums.is_empty() {
+            if k == 0 || !c.p.numeric || c.p.label || c.fmt == Some("BADGE") {
                 return None;
             }
-            let sum: f64 = nums.iter().sum();
-            let v = if agg == "sum" {
-                sum
-            } else {
-                sum / nums.len() as f64
+            let agg = match named.get(&k).copied().or(tspec.all.as_deref()) {
+                Some(a) => a,
+                None => default_total(&c.p, c.fmt)?,
             };
-            // a mean of whole numbers keeps one decimal
+            if agg == "none" {
+                return None;
+            }
+            let nums: Vec<f64> = c.cells.iter().filter_map(Cell::num).collect();
+            if agg == "count" {
+                return Some(count_text(nums.len(), l));
+            }
+            let v = aggregate(&nums, agg)?;
+            // a mean / median of whole numbers keeps one decimal
             let mut p = c.p.clone();
-            if agg == "mean" && p.unit.is_none() && p.dec == 0 && v.fract() != 0.0 {
+            if matches!(agg, "mean" | "median")
+                && p.unit.is_none()
+                && p.dec == 0
+                && v.fract() != 0.0
+            {
                 p.dec = 1;
             }
             // trends and colour scales: ≤ 2 decimals, like the browser's totals
@@ -889,13 +949,18 @@ fn table_svg(
             {
                 return Some(short_number(v, l, neg));
             }
-            Some(crate::table::number_text(v, &p, c.fmt, l, neg))
+            Some(number_text(v, &p, c.fmt, l, neg))
         })
         .collect();
-    let show_totals = nrow >= 3
-        && cols
-            .iter()
-            .any(|c| matches!(c.fmt, Some("MONEY" | "COMPACT")));
+    let show_totals = !totals_off
+        && if totals_spec.is_some() {
+            nrow >= 2
+        } else {
+            nrow >= 3
+                && cols
+                    .iter()
+                    .any(|c| matches!(c.fmt, Some("MONEY" | "COMPACT")))
+        };
 
     // natural widths (in characters): the header (wrapping onto ≤ 2 lines) and
     // the formatted cells, shared out over the card

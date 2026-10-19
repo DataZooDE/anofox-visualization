@@ -2111,7 +2111,8 @@ header shows the column's min / max / mean, empty and distinct counts.
 
 Formatting (one set of rules, `src/table.rs`, for the browser table and the
 headless `dashboard --svg` / static HTML table — which also right-aligns
-numbers, moves units into the header and adds the default totals row): raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
+numbers, moves units into the header and adds the totals row, `::TOTALS`
+included (badge counts in the totals are browser-only)): raw column names read as headers (`load_pct` → "Load %", `avg_mae` →
 "Avg MAE"; an `AS "Header"` alias is kept as written) and wrap onto two lines;
 numbers are formatted per column — aligned decimals, grouping (ids and years stay
 ungrouped), a true minus sign, muted zeros, and one unit per `::MONEY` /
@@ -2128,7 +2129,7 @@ by their raw name or their header, case-insensitive):
 
 | Directive | Value | Effect |
 |---|---|---|
-| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum; Per 10k: none; km to DC: mean'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); entries are separated by `;` (or `,` when there is no `;` — use `;` when a header contains a comma). `'none'` hides the row and its button; `'Column: none'` leaves that cell empty. Without it: sums of amounts and counts (`::MONEY`, `::COMPACT`, whole numbers), no total for rates and percentages (`::PERCENT`, or a name with pct / % / rate / ratio / share / per …), means of the rest. Distances are not recognised by name: a distance per row ("km to DC") is summed unless you name it ('km to DC: mean'). The viewer's pick in a cell wins. |
+| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum; Per 10k: none; km to DC: mean'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); entries are separated by `;` (or `,` when there is no `;` — use `;` when a header contains a comma). `'none'` hides the row and its button; `'Column: none'` leaves that cell empty. Without it: sums of amounts and counts (`::MONEY`, `::COMPACT`, whole numbers), no total for rates and percentages (`::PERCENT`, a `%` in the name, or a name with the word pct / percent / rate / ratio / share / per / pro — whole words: `conversion_rate`, `churnRate`, `Per 10k` are rates, `generated` and `accurate` are not; write `win_rate`, not `winrate`; German compounds ending in -quote / -anteil count too), means of the rest (and of averages: a name with the word avg / average / mean / median / score / index / percentile). Distances are not recognised by name: a distance per row ("km to DC") is summed unless you name it ('km to DC: mean'). `dashboard --svg` draws the same totals. The viewer's pick in a cell wins. |
 | `::COLGROUP` (`::COL_GROUP`, `::HEADER_GROUP`) | `'Backtest: mae, rmse \| Holdout: mae_h, rmse_h'` | a header row with a label over adjacent columns (a thin rule under each label) |
 | `::FLAG` (`::THRESHOLD`) | `'mape > 0.2, bias < -5, status = breach'` | cells meeting a condition (`>` `>=` `<` `<=` `=` `!=`) get a ⚠ and the warning tint — never colour alone |
 | `::HIGHLIGHT` (`::TOPN`) | `'Revenue: top 3, Margin: bottom 2'` (`'top 3'` alone: the first numeric column) | the top / bottom n values in bold with their rank (#1, #2 / ↓1, ↓2); a `::PAGED` table ranks within the page |
@@ -2147,6 +2148,9 @@ FROM regions;
 `dashboard --check` notes `totals/summed-rate` when a `'sum'::TOTALS` (or a bare
 `sum` in the list) would also sum a rate or percentage column the value does
 not name. Give that column its own total: `'Per 10k: none; sum'`.
+It notes `totals/unknown-column` when an entry names no column of the table (by
+raw name or header, case-insensitive). That entry would be ignored. With `,`
+separators a header holding a comma splits in two: use `;`.
 
 Colour scales: `::COLORSCALE` shades low values green and high values red (errors,
 latency); `::COLORSCALE_HIGH_GOOD` the other way round (accuracy, scores);
