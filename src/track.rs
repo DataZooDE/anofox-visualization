@@ -101,7 +101,9 @@ impl Panel {
                 width,
                 height,
                 attrs,
+                ..
             } => {
+                let margin = Some(fit.margin.clone());
                 let mut plot = plot.theme_update(ThemeUpdate {
                     plot_margin: Some(fit.margin),
                     ..Default::default()
@@ -117,6 +119,7 @@ impl Panel {
                     width,
                     height,
                     attrs,
+                    margin,
                 }
             }
             p => p,

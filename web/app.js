@@ -12818,6 +12818,14 @@ function savePanelPng(panel) {
   img.src = url;
 }
 
+// The top legend's band (viewBox units): everything above the panel rect
+// (`data-plot`, "x y w h"), which grows when the legend wraps onto more rows
+// (#175); the top 16% of a chart without a panel rect.
+function legendBand(dataPlot, vbH) {
+  const p = String(dataPlot || "").trim().split(/\s+/).map(Number);
+  return p.length === 4 && p[1] > 0 ? p[1] : vbH * 0.16;
+}
+
 // ECharts-style legend toggle: click a series name in the top legend to hide /
 // show that series (its marks + line). Hidden state persists per panel across
 // zoom re-renders; the legend entry dims when off.
@@ -12830,11 +12838,11 @@ function attachLegendToggle() {
     if (svg.getAttribute("data-kind") === "heatmap") return;
     const series = new Set([...svg.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series")));
     if (series.size < 2) return; // need a real multi-series legend
-    const vbH = svg.viewBox.baseVal.height;
+    const band = legendBand(svg.getAttribute("data-plot"), svg.viewBox.baseVal.height);
     // Legend labels: text in the top band whose content is a series name (so
     // titles / axis numbers are excluded).
     const legendTexts = [...svg.querySelectorAll("text")].filter(
-      (t) => (+t.getAttribute("y") || 0) < vbH * 0.16 && series.has(t.textContent.trim())
+      (t) => (+t.getAttribute("y") || 0) < band && series.has(t.textContent.trim())
     );
     if (!legendTexts.length) return;
     svg.dataset.legendWired = "1";
@@ -12842,7 +12850,7 @@ function attachLegendToggle() {
     // The swatch is a small coloured rect just left of each label at a similar y.
     const swatches = [...svg.querySelectorAll("rect")].filter((r) => {
       const bb = r.getBBox();
-      return bb.y < vbH * 0.16 && bb.width < 20 && bb.width > 3;
+      return bb.y < band && bb.width < 20 && bb.width > 3;
     });
     const entries = legendTexts.map((t) => {
       const tb = t.getBBox();
