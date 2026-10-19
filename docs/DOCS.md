@@ -201,9 +201,10 @@ format that column; `::TITLE` becomes the table's title bar.
 
 **`::TITLE`** is a panel's title bar in every output: the browser, the locked
 server, `dashboard --svg`, the static HTML of `dashboard file.sql out.html` /
-`serve --dashboards` and `anofox_render`. The static pages and `anofox_render`
-draw its first non-NULL value in a 26 px bar above the chart (the chart gets
-26 px less); a KPI tile has none (its caption is `::LABEL`).
+`serve --dashboards` and `anofox_render`. `anofox_render`, `dashboard --svg`
+and the static pages draw its first non-NULL value, trimmed (a blank one
+draws none), in a 26 px bar above the chart (the chart gets 26 px less); a
+KPI tile has none (its caption is `::LABEL`).
 
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and

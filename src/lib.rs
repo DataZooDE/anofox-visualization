@@ -1191,18 +1191,22 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
 /// `anofox_render` and the static pages.
 const TITLE_BAR_H: u32 = 26;
 
-/// The `::TITLE` of a single panel: its first non-NULL, non-blank value.
-/// A KPI tile has none (its caption is `::LABEL`), as in a dashboard.
-fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
-    let title = cols
-        .iter()
-        .find(|c| c.role == Role::Title)?
-        .values
+/// The first non-NULL value of a `::TITLE` column, trimmed; `None` when that
+/// value is blank. Every single-panel output reads a title this way:
+/// `anofox_render`, the static pages, the `dashboard --svg` card (#246).
+pub(crate) fn title_value(values: &[Value]) -> Option<String> {
+    values
         .iter()
         .find(|v| !matches!(v, Value::Na))
         .map(value_str)
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
+        .filter(|s| !s.is_empty())
+}
+
+/// The `::TITLE` of a single panel ([`title_value`]). A KPI tile has none
+/// (its caption is `::LABEL`), as in a dashboard.
+fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
+    let title = title_value(&cols.iter().find(|c| c.role == Role::Title)?.values)?;
     kpi::Kpi::from_columns(cols, &o.locale)
         .is_none()
         .then_some(title)

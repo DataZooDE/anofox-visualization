@@ -115,6 +115,13 @@ fn columns_named(
         .collect()
 }
 
+/// A panel's `::TITLE`: its first non-NULL value, trimmed; none when blank
+/// ([`crate::title_value`], as `anofox_render` and the static pages, #246).
+fn title_of(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+    let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Title))?;
+    crate::title_value(&column_at(rows, *i)?.1)
+}
+
 /// Render a whole annotated SQL script to one composed SVG dashboard.
 pub fn render_dashboard_svg(
     script: &str,
@@ -359,13 +366,7 @@ fn render_inner(
             next_span = 0;
             next_height = 0;
             let cw = (unit_w * span as f64) - gap;
-            let title = roles
-                .iter()
-                .find(|(_, r)| matches!(r, Role::Title))
-                .and_then(|(i, _)| column_at(rows, *i))
-                .and_then(|(_, v)| v.first())
-                .map(value_str)
-                .unwrap_or_default();
+            let title = title_of(rows, roles).unwrap_or_default();
             let maps = json_rows(rows);
             let title_h = 26.0;
             let body_h = (ch - title_h).max(30.0);
@@ -676,13 +677,7 @@ fn render_panel_svg(
 ) -> String {
     let cols = columns_named(rows, roles, names);
     // Title bar (::TITLE) eats a strip off the top.
-    let title = roles
-        .iter()
-        .find(|(_, r)| matches!(r, Role::Title))
-        .and_then(|(i, _)| column_at(rows, *i))
-        .and_then(|(_, v)| v.first())
-        .map(value_str)
-        .filter(|s| !s.is_empty());
+    let title = title_of(rows, roles);
     // ::INFO: an ⓘ after the title whose SVG <title> is the definition (a
     // hover tooltip wherever the SVG is shown).
     let info = roles
