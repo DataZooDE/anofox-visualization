@@ -1737,6 +1737,10 @@ async function boot() {
   // this only when switching dashboards, so it survives the initial run()).
   const tabParam = getTabParam();
   if (tabParam) dpTab = tabParam;
+  // Deep-link: `?view.<id>=<label>` seeds the active alternative of a ::VIEW
+  // group, like ?tab= — applied once here, then dpView is a persistent
+  // selection (clicks update it directly), never re-seeded on a re-run.
+  Object.assign(dpView, readViewSeed());
   // Persistent cross-dashboard nav (served mode, 2+ dashboards).
   renderServedNav(served);
   // Opt-in chart zoom (off by default; ?zoom=1 enables).
@@ -3237,6 +3241,8 @@ function loadDash(name, sql, key) {
   dpTab = null;
   dpTableUI = {};
   dpSubTab = {};
+  dpView = {};
+  dpViewDefault = {};
   dpFilter = "";
   dpSelected = null;
   dpZoomGroups = {};
@@ -5666,6 +5672,8 @@ document.addEventListener("keydown", (e) => {
 });
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
+let dpView = {}; // ::VIEW group id -> active alternative's label (#214)
+let dpViewDefault = {}; // ::VIEW group id -> its default (first SHOWN) alternative's label
 
 // Deep-linking: reflect the active tab in the URL (?tab=) so a reload or a
 // shared link lands on the same page.
@@ -5682,6 +5690,41 @@ function setTabParam(name) {
     u.searchParams.set("tab", name);
     history.replaceState(null, "", u);
   } catch (e) {}
+}
+
+// ::VIEW deep-linking (#214): `?view.<id>=<label>` picks that group's active
+// alternative — `<id>` is the group's own id (its alias, else its 1-based
+// position), matched EXACTLY against the group's current alternatives (a
+// stale/mistyped label is simply ignored: the group falls back to its
+// default, the first SHOWN alternative). Independent of `?tab=` / `?v.*`: it
+// never resets them, and they never reset it.
+function setViewParam(id, label) {
+  try {
+    const u = new URL(location.href);
+    if (label === dpViewDefault[id]) u.searchParams.delete("view." + id);
+    else u.searchParams.set("view." + id, label);
+    history.replaceState(null, "", u);
+  } catch (e) {}
+}
+// `readViewSeed`'s pure, side-effect-free parse (tests/web/views_test.mjs
+// extracts this function's source the way tests/web/urlstate_test.mjs
+// extracts readUrlSeed's): only `view.<id>` keys whose id matches URL_VAR_RE
+// or `^\d{1,3}$` (the positional fallback id), at most 32 of them, each
+// value capped at 200 chars — "view." never collides with the plain `v.`
+// variable prefix (`"view.x".startsWith("v.")` is false).
+function readViewSeed(search = location.search) {
+  const seed = {};
+  try {
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("view.")) continue;
+      const id = k.slice(5);
+      if (!(URL_VAR_RE.test(id) || /^\d{1,3}$/.test(id))) continue;
+      if (!(id in seed) && Object.keys(seed).length >= 32) continue;
+      if (String(v).length > 200) continue;
+      seed[id] = String(v);
+    }
+  } catch (_) {}
+  return seed;
 }
 
 // Viewer state in the URL: `?v.<name>=<value>` seeds a variable on load — an
@@ -6068,6 +6111,10 @@ function followLink(url) {
       if ([p.prefix, p.prefix + "_grain", p.prefix + "_compare"].some((k) => k in seed)) delete dpVars[col];
     }
     Object.assign(dpUrlSeed, seed);
+    // `#Tab?view.yoy=Bars`: a ::VIEW group's active alternative, same as a
+    // top-level deep link — applied directly (dpView is a live selection,
+    // not a one-shot seed), independent of the tab switch above.
+    Object.assign(dpView, readViewSeed(qs));
     const t = tab || new URLSearchParams(qs).get("tab");
     dpMotion = { link: true };
     if (t) {
@@ -6116,6 +6163,35 @@ function openTabNow(name) {
     if (!dpAnim.still() && pane.animate) pane.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
   }
   focus();
+}
+// Activate a ::VIEW group's alternative (#214): a click or an arrow key on
+// its button. DOM-driven (not a closure over the loop's variables, so it
+// works equally from a live render's button and the standalone-export
+// SNAPSHOT_JS, which rebuilds the same shape in plain JS): shows `btn`'s
+// pane, hides its siblings', records the choice (dpView + the URL) and
+// kicks off its lazy jobs.
+function activateView(btn, focus) {
+  const bar = btn.closest(".dp-viewbar");
+  const sec = btn.closest(".dp-views");
+  if (!bar || !sec) return;
+  const id = bar.dataset.viewId;
+  const label = btn.textContent;
+  bar.querySelectorAll('[role="tab"]').forEach((b) => {
+    b.setAttribute("aria-selected", "false");
+    b.tabIndex = -1;
+  });
+  sec.querySelectorAll(".dp-viewpane").forEach((p) => (p.style.display = "none"));
+  btn.setAttribute("aria-selected", "true");
+  btn.tabIndex = 0;
+  const pane = document.getElementById(btn.getAttribute("aria-controls"));
+  if (pane) {
+    if (!dpAnim.still()) pane.classList.add("dp-switching");
+    pane.style.display = "";
+    lazyShown(pane);
+  }
+  dpView[id] = label;
+  setViewParam(id, label);
+  if (focus) refocus("view:" + id, btn);
 }
 // Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
 // a control): back to the tab it came from, focus on the mark or link followed.
@@ -6362,6 +6438,12 @@ function slotsOf(roots) {
 // same shape differ only in panel content.
 // (Serialised with the slots and the tab state taken out for a moment — no
 // copy of the charts.)
+// Tab/sub-tab/::VIEW elements excluded from the shape/patch comparison below
+// (#214): a ::VIEW tab button's state lives in `aria-selected` + `tabindex`
+// (never a class, so it can't reuse the ".tab-btn" attr), its pane's in
+// `style` same as a tabpane/subtabpane.
+const TAB_SEL = ".tab-btn, .tabpane, .subtabpane, .dp-viewbar [role=tab], .dp-viewpane";
+const tabAttrs = (el) => (el.matches(".tab-btn") ? ["class"] : el.matches("[role=tab]") ? ["aria-selected", "tabindex"] : ["style"]);
 function shapeOf(roots) {
   const slots = slotsOf(roots);
   const holes = slots.map((el) => {
@@ -6369,33 +6451,40 @@ function shapeOf(roots) {
     el.replaceWith(i);
     return i;
   });
-  const tabs = roots.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
-  const attr = (el) => (el.matches(".tab-btn") ? "class" : "style");
-  const was = tabs.map((el) => el.getAttribute(attr(el)));
-  tabs.forEach((el) => (el.matches(".tab-btn") ? el.classList.remove("active") : el.style.removeProperty("display")));
+  const tabs = roots.flatMap((r) => (r ? [...r.querySelectorAll(TAB_SEL)] : []));
+  const was = tabs.map((el) => tabAttrs(el).map((a) => el.getAttribute(a)));
+  tabs.forEach((el) => {
+    if (el.matches(".tab-btn")) el.classList.remove("active");
+    else if (el.matches("[role=tab]")) tabAttrs(el).forEach((a) => el.removeAttribute(a));
+    else el.style.removeProperty("display");
+  });
   // (nor whether a pane still waits for lazily rendered panels)
   const busy = tabs.filter((el) => el.hasAttribute("aria-busy"));
   busy.forEach((el) => el.removeAttribute("aria-busy"));
   const html = roots.map((r) => (r ? r.outerHTML : "")).join("");
   busy.forEach((el) => el.setAttribute("aria-busy", "true"));
-  tabs.forEach((el, k) => (was[k] == null ? el.removeAttribute(attr(el)) : el.setAttribute(attr(el), was[k])));
+  tabs.forEach((el, k) => tabAttrs(el).forEach((a, j) => (was[k][j] == null ? el.removeAttribute(a) : el.setAttribute(a, was[k][j]))));
   holes.forEach((i, k) => i.replaceWith(slots[k]));
   return html;
 }
 // Patch the dashboard on screen (`roots`) to the new one: keep each panel
 // whose output is unchanged, replace the others (pairs in `swaps`), and open
-// the new run's tabs. False (nothing touched) when the slots do not line up.
+// the new run's tabs / ::VIEW selections. False (nothing touched) when the
+// slots do not line up.
 function patchSlots(roots, newRoots, swaps) {
   const a = slotsOf(roots);
   const b = slotsOf(newRoots);
   if (a.length !== b.length) return false;
-  const tabState = (rs) => rs.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
+  const tabState = (rs) => rs.flatMap((r) => (r ? [...r.querySelectorAll(TAB_SEL)] : []));
   const ta = tabState(roots);
   const tb = tabState(newRoots);
   if (ta.length !== tb.length) return false;
   ta.forEach((el, k) => {
     if (el.matches(".tab-btn")) el.classList.toggle("active", tb[k].classList.contains("active"));
-    else el.style.display = tb[k].style.display;
+    else tabAttrs(el).forEach((a) => {
+      const v = tb[k].getAttribute(a);
+      v == null ? el.removeAttribute(a) : el.setAttribute(a, v);
+    });
   });
   a.forEach((o, k) => {
     const n = b[k];
@@ -6753,9 +6842,9 @@ async function lazyRunJob(job, inline = false) {
   }
   if (L.gen !== dpLazy.gen) return;
   const made = [...frag.querySelectorAll(".panel")];
-  const pane = job.ph.closest(".tabpane, .subtabpane");
+  const pane = job.ph.closest(".tabpane, .subtabpane, .dp-viewpane");
   job.ph.replaceWith(frag);
-  if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane") === pane)) pane.removeAttribute("aria-busy");
+  if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane, .dp-viewpane") === pane)) pane.removeAttribute("aria-busy");
   if (inline) return;
   // The output a re-run's patch compares with (patchSlots), as the swap
   // records it for the panels it brings: before wiring.
@@ -6787,7 +6876,9 @@ async function lazyPump() {
       if (!job && dpLazyPrefetch) {
         await idleTask();
         if (runActive || L.gen !== dpLazy.gen) break;
-        job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j));
+        // D3: a hidden ::VIEW alternative's jobs are never idle-prefetched
+        // (unlike a hidden tab's) — they run only once their view is shown.
+        job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j) && !j.view);
       }
       if (!job) break;
       const shown = paneShown(job.ph) ? open().filter((j) => paneShown(j.ph)).slice(0, lazyWidth()) : [job];
@@ -6894,8 +6985,11 @@ async function runOnce(fresh = true) {
   // Lazy tabs: this run's deferred setup statements and panel jobs.
   const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
   dpLazy.building = lazy;
-  const tabAt = []; // statement -> the ::TAB whose section it is in (-1: before the first)
-  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(directive(stmts[i]) === "TAB" ? (t = i) : t);
+  const tabAt = []; // statement -> the ::TAB/::VIEW whose section it is in (-1: before the first)
+  // A ::VIEW marker starts a deferred-setup section too (#214): its
+  // alternatives' panels go through the same lazy-job mechanism as a tab's,
+  // so setup inside one is just as safe to defer until its first panel shows.
+  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(["TAB", "VIEW"].includes(directive(stmts[i])) ? (t = i) : t);
 
   await prepInteractions(stmts);
   await setSelectionVars();
@@ -7042,8 +7136,13 @@ async function runOnce(fresh = true) {
   let tabWrap = null;
   let curPane = null; // the current top-level ::TAB pane (nesting host for ::SUBTAB)
   let curTopName = null;
+  let curSubName = null; // the current ::SUBTAB's name, for a ::VIEW group's aria-label
   let subBar = null;
   let subWrap = null;
+  let openView = null; // the plan index of the currently open ::VIEW group (#214), or null
+  let viewBar = null; // its <div class="dp-viewbar">
+  let viewSec = null; // its <section class="dp-views">
+  let viewHost = null; // {container, curGrid, defaultSpan} to restore when the group closes
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
@@ -7584,20 +7683,43 @@ async function runOnce(fresh = true) {
   };
   if (lazy) lazy.panelBody = panelBody;
   let lastYield = performance.now();
-  let hiding = null; // "TAB" | "SUBTAB": the section of a hidden tab, left out
+  let hiding = null; // "TAB" | "SUBTAB" | "VIEW": the section of a hidden tab/view, left out
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
-    // A ::TAB / ::SUBTAB whose `-- @requires` input is missing is hidden —
-    // no button, no pane — with every statement up to the next ::TAB (a
-    // sub-tab: the next ::SUBTAB or ::TAB). (Chrome directives were applied
-    // in the pre-pass.)
+    // Close an open ::VIEW group the moment this statement is no longer one
+    // of its members (#214) — `views.rs` already decided the grouping and
+    // every closer (an explicit ::ENDVIEW, ::TAB/::SUBTAB/::SECTION, an
+    // ::ENDGROUP closing an outer ::GROUP, or end of script): any of those
+    // statements (or the loop simply ending) carries `view: null`, so this
+    // reacts to the transition instead of re-deriving the closer rules.
+    if (openView !== null && (!s.view || s.view.group !== openView)) {
+      container = viewHost.container;
+      curGrid = viewHost.curGrid;
+      defaultSpan = viewHost.defaultSpan;
+      openView = null;
+      viewBar = null;
+      viewSec = null;
+      viewHost = null;
+    }
+    // A ::TAB / ::SUBTAB / ::VIEW whose `-- @requires` input is missing is
+    // hidden — no button, no pane — with every statement up to the next
+    // ::TAB (a sub-tab: the next ::SUBTAB or ::TAB; a view: the next ::VIEW,
+    // or any closer, which the check above already handled). (Chrome
+    // directives were applied in the pre-pass.)
     if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
+    if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
     if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s))) {
       console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = d;
+      lastChart = null;
+      continue;
+    }
+    if (d === "VIEW" && !(await tabShown(s))) {
+      console.info(`view hidden (optional input missing): ${requiresText(s.requires)}`);
+      hiding = "VIEW";
       lastChart = null;
       continue;
     }
@@ -7694,6 +7816,7 @@ async function runOnce(fresh = true) {
         container = pane;
         curPane = pane; // nesting host for ::SUBTAB
         curTopName = name;
+        curSubName = null;
         subBar = null; // start fresh sub-tabs for this top tab
         subWrap = null;
       } else if (d === "SUBTAB") {
@@ -7735,8 +7858,100 @@ async function runOnce(fresh = true) {
           spane.style.display = "";
           sbtn.classList.add("active");
         }
+        curSubName = name;
         curGrid = spane;
         container = spane;
+      } else if (d === "VIEW") {
+        // ::VIEW / ::ENDVIEW: alternative views of one panel (#214). A group
+        // is a run of ::VIEW markers with no closer between them — the first
+        // one builds the switcher (<section class="dp-views">: a <div
+        // class="dp-viewbar dp-seg" role="tablist"> + one <div class="grid
+        // dp-viewpane" role="tabpanel"> per alternative), later ones in the
+        // same group just add another button + pane to it.
+        const id = s.view.id;
+        const alt = s.view.alt;
+        let label = s.view.label; // the plan's literal label, else computed below
+        if (label == null) label = String((await firstValue(s)) ?? "View");
+        if (openView !== s.view.group) {
+          const sec = document.createElement("section");
+          sec.className = "dp-views";
+          if (container === curGrid) sec.style.gridColumn = `span ${Math.min(12, nextSpan || 12)}`;
+          nextSpan = 0;
+          const bar = document.createElement("div");
+          bar.className = "dp-viewbar dp-seg";
+          bar.setAttribute("role", "tablist");
+          const scope = curSubName || curTopName;
+          bar.setAttribute("aria-label", scope ? `Views: ${scope}` : "Views");
+          bar.dataset.viewId = id;
+          sec.appendChild(bar);
+          container.appendChild(sec);
+          viewHost = { container, curGrid, defaultSpan };
+          viewBar = bar;
+          viewSec = sec;
+          openView = s.view.group;
+          dpViewDefault[id] = label; // the first SHOWN alternative is the group's default
+        }
+        // Full width of the view's own grid by default (like a fresh
+        // tab/section resetting nextSpan), unless a ::COL is already pending.
+        defaultSpan = 12;
+        const pane = document.createElement("div");
+        pane.className = "grid dp-viewpane";
+        pane.id = `dp-vp-${s.view.group}-${alt}`;
+        pane.style.display = "none";
+        pane.setAttribute("role", "tabpanel");
+        pane.setAttribute("aria-labelledby", `dp-vt-${s.view.group}-${alt}`);
+        viewSec.appendChild(pane);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.id = `dp-vt-${s.view.group}-${alt}`;
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-controls", pane.id);
+        btn.textContent = label; // textContent only — ids (above) carry the identity, never the label
+        btn.setAttribute("aria-selected", "false");
+        btn.tabIndex = -1;
+        // Capture THIS group's bar — `viewBar` is a shared loop variable
+        // reassigned for a later group (see the ::SUBTAB comment above).
+        const myBar = viewBar;
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          if (document.activeElement === btn) dpRefocus = "view:" + id;
+          activateView(btn, true);
+        };
+        // Arrow keys move + activate within the bar (wrapping); Home/End jump
+        // to the ends. preventDefault + stopPropagation so the document-level
+        // dpNav arrow-key handler (paging a chart) never also fires.
+        btn.addEventListener("keydown", (e) => {
+          const btns = [...myBar.querySelectorAll('[role="tab"]')];
+          const at = btns.indexOf(btn);
+          let target = null;
+          if (e.key === "Home") target = btns[0];
+          else if (e.key === "End") target = btns[btns.length - 1];
+          else {
+            const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+            if (step) target = btns[(at + step + btns.length) % btns.length];
+          }
+          if (!target) return;
+          e.preventDefault();
+          e.stopPropagation();
+          dpRefocus = "view:" + id;
+          activateView(target, true);
+        });
+        viewBar.appendChild(btn);
+        // Active alternative: the seeded/remembered label if it matches one
+        // of this group's CURRENT alternatives, else the first SHOWN one.
+        const want = dpView[id];
+        if (want === label || (want === undefined && !viewBar.querySelector('[aria-selected="true"]'))) {
+          pane.style.display = "";
+          btn.setAttribute("aria-selected", "true");
+          btn.tabIndex = 0;
+          dpView[id] = label;
+          refocus("view:" + id, btn);
+        }
+        curGrid = pane;
+        container = pane;
+      } else if (d === "ENDVIEW") {
+        // No-op: the close check at the top of the loop already restored
+        // container/curGrid the moment this (view-less) statement was seen.
       } else if (d === "PLACEHOLDER") {
         const span = Math.min(12, nextSpan || defaultSpan);
         const ph = document.createElement("div");
@@ -7775,7 +7990,10 @@ async function runOnce(fresh = true) {
         ph._async = true; // a re-run's patch (patchSlots) never keeps an old placeholder in its place
         container.appendChild(ph);
         curGrid.setAttribute("aria-busy", "true");
-        const job = { i, ph, run: lazy, tracks: [], ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
+        // D3: tag a job inside a ::VIEW alternative so lazyPump's idle
+        // prefetch (unlike a hidden tab's) skips it — it runs once its view
+        // is actually shown.
+        const job = { i, ph, run: lazy, tracks: [], view: curGrid.classList.contains("dp-viewpane"), ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
         lazy.jobs.push(job);
         lastChart = { lazy: job };
         panels++;
@@ -7835,6 +8053,25 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
+  // Same fallback for ::VIEW groups (#214): a seeded/remembered label that
+  // names no CURRENT alternative leaves the whole bar unselected — fix up
+  // dpView[id] and activate the first (default) alternative instead. A
+  // ::VIEW group can sit at the top level too, not just inside a tab, so
+  // both roots are checked (unlike a sub-tab, which only ever nests in one).
+  for (const root of [newGrid, tabWrap]) {
+    if (!root) continue;
+    root.querySelectorAll(".dp-viewbar").forEach((bar) => {
+      if (bar.querySelector('[aria-selected="true"]')) return;
+      const firstBtn = bar.querySelector('[role="tab"]');
+      const firstPane = bar.parentElement.querySelector(".dp-viewpane");
+      if (firstBtn) {
+        firstBtn.setAttribute("aria-selected", "true");
+        firstBtn.tabIndex = 0;
+        dpView[bar.dataset.viewId] = firstBtn.textContent;
+      }
+      if (firstPane) firstPane.style.display = "";
+    });
+  }
   // The shown panes' panels: rendered off-screen here, like the rest — or,
   // on a first load (nothing but skeletons on screen), after the swap, each
   // as it arrives. The hidden panes' jobs wait for lazyPump().
@@ -11621,6 +11858,9 @@ function shareLink(e) {
   const q = new URLSearchParams(editable ? "" : "embed=1");
   const tab = new URLSearchParams(location.search).get("tab");
   if (tab) q.set("tab", tab);
+  // ::VIEW selections (?view.<id>=<label>): setViewParam already wrote the
+  // non-default ones into the address bar, so just carry them along too.
+  for (const [k, v] of new URLSearchParams(location.search)) if (k.startsWith("view.")) q.set(k, v);
   for (const [k, v] of urlStateParams()) q.append(k, v);
   const qs = q.toString();
   const url = base + (qs ? "?" + qs : "") + "#sql=" + encoded;
@@ -11734,6 +11974,35 @@ const SNAPSHOT_JS = `(function(){
       wrap.querySelectorAll('.tabpane').forEach(function(p){p.style.display='none';});
       document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active');});
       wrap.querySelectorAll('.tabpane')[i].style.display=''; btn.classList.add('active');
+    });
+  });
+  // ::VIEW switcher (#214): every group's buttons/panes, scoped to its own
+  // .dp-views container so clicking one group never touches another.
+  function viewActivate(btn){
+    var bar=btn.closest('.dp-viewbar'), sec=btn.closest('.dp-views');
+    if(!bar||!sec)return;
+    [].forEach.call(bar.querySelectorAll('[role="tab"]'),function(b){b.setAttribute('aria-selected','false');b.tabIndex=-1;});
+    [].forEach.call(sec.querySelectorAll('.dp-viewpane'),function(p){p.style.display='none';});
+    btn.setAttribute('aria-selected','true'); btn.tabIndex=0;
+    var pane=document.getElementById(btn.getAttribute('aria-controls'));
+    if(pane)pane.style.display='';
+    btn.focus();
+  }
+  document.querySelectorAll('.dp-viewbar [role="tab"]').forEach(function(btn){
+    btn.addEventListener('click',function(e){e.stopPropagation();viewActivate(btn);});
+    btn.addEventListener('keydown',function(e){
+      var bar=btn.closest('.dp-viewbar');
+      var btns=[].slice.call(bar.querySelectorAll('[role="tab"]'));
+      var at=btns.indexOf(btn), target=null;
+      if(e.key==='Home')target=btns[0];
+      else if(e.key==='End')target=btns[btns.length-1];
+      else{
+        var step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];
+        if(step)target=btns[(at+step+btns.length)%btns.length];
+      }
+      if(!target)return;
+      e.preventDefault(); e.stopPropagation();
+      viewActivate(target);
     });
   });
 })();`;
