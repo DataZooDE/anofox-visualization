@@ -22,10 +22,10 @@ The computation runs natively and the dashboard reads its results:
 | `../../scripts/gen-tabular-cases.sh feed` | Runs `compute.sql` natively and writes the tables to `web/data/tabular-feed/*.csv`, plus `provenance.csv`. |
 | `showcase.sql` | A link to `web/examples/tabular-feed.sql`, the single source of the dashboard. It only reads the CSVs, and says on the page that the results are stored. |
 
-Regenerate (DuckDB v1.5.6, `-unsigned`, from the repository root):
+Regenerate (DuckDB v1.5.6, from the repository root):
 
 ```sh
-duckdb -unsigned -c "INSTALL anofox_tabular FROM 'https://get.erpl.io'"   # once
+duckdb -c "INSTALL anofox_tabular FROM community"   # once (signed; FORCE INSTALL replaces a get.erpl.io install)
 DUCKDB=duckdb scripts/gen-tabular-cases.sh feed
 cd web && ../target/release/dashboard --check --strict ../examples/tabular-feed/showcase.sql
 ```

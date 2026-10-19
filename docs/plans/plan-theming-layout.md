@@ -321,6 +321,7 @@ SELECT 'assets/favicon.svg'::FAVICON;
 
 - All of these are also tokens in the theme `brand` object. The SQL directive wins.
 - **Owner decision (resolved): the credit is mandatory.** "Powered by DataZoo GmbH" (a link to DataZoo GmbH) renders on every dashboard — browser, embed, exported HTML/PDF, headless dashboard SVG, `serve` and locked pages — under every theme. It follows the theme's colours and fonts so it stays readable (e.g. in dark mode), but its text and link never change. There is **no** `::CREDIT` role and no `brand.credit` token. Author branding (`::DASHBOARD_TITLE`, `::BRAND`, `::LOGO`, `::FAVICON`, themes) is shown *in addition to* the credit.
+- **Superseded 2026-10-19: the owner removed the credit from all outputs.**
 - The builder header `<h1>anofox-visualization</h1>` (`index.html:419`) shows `brand.name` only in embed and served mode. The authoring builder keeps the product name (see T12).
 - `document.title` = `{DASHBOARD_TITLE}{title_suffix}`. The favicon is set as a `<link rel=icon>`; today there is none.
 - Logos and favicons are resolved relative to the dashboard file and served same-origin; `data:` URIs are allowed. In locked mode they are read at startup, never from a viewer URL.
@@ -537,5 +538,5 @@ SELECT region, margin::PERCENT, '<0:negative; 0..0.05:warning; >0.05:positive'::
 8. **Custom CSS:** confirm "no CSS from dashboard SQL"; is an operator-level `serve --css` wanted?
 9. **Fonts:** which corporate fonts must work offline in exported HTML (embedding and licensing)?
 10. **Upstream:** OK to file U1/U2 (and U4 later) against ggplot-rs, and pin the next minor version in M1?
-11. ~~**Credit / white-labelling:** may any dashboard hide "Powered by DataZoo GmbH"?~~ **Resolved (owner):** no — the credit is mandatory in every output and under every theme; there is no `::CREDIT` role. Authors add their own branding alongside it. The builder itself stays product-branded (T12).
+11. ~~**Credit / white-labelling:** may any dashboard hide "Powered by DataZoo GmbH"?~~ **Resolved (owner):** no — the credit is mandatory in every output and under every theme; there is no `::CREDIT` role. Authors add their own branding alongside it. The builder itself stays product-branded (T12). **Superseded 2026-10-19: the owner removed the credit from all outputs.**
 12. **Builder chrome:** agree that the editor/sidebar stay neutral (T12) and only the dashboard canvas follows the theme?

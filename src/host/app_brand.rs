@@ -5,8 +5,7 @@
 //! (`anofox_serve(port, '{"name": …}')`), validate it here, and put it in
 //! `index.html` as `window.__anofoxApp`; the builder merges it over its
 //! defaults and an optional `app-config.json` (web/app.js `appBrandMerge`,
-//! which repeats these rules). The "Powered by DataZoo GmbH" credit and the
-//! sidebar footer are not part of it.
+//! which repeats these rules). The sidebar footer is not part of it.
 
 use serde_json::{Map, Value};
 
