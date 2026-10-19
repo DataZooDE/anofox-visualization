@@ -89,6 +89,15 @@ fn usage(msg: &str) -> ! {
     std::process::exit(2)
 }
 
+/// An `AppBrand::set` error, named by the flag that caused it (#267): the
+/// brand's keys use `_` (`logo_dark`), the flags `-` (`--app-logo-dark`).
+fn app_flag_error(e: &str) -> String {
+    let n = e
+        .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+        .unwrap_or(e.len());
+    format!("--app-{}{}", e[..n].replace('_', "-"), &e[n..])
+}
+
 fn parse_args() -> Opts {
     let mut o = Opts {
         port: 8080,
@@ -186,7 +195,7 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|| usage(&format!("{a} needs a value")));
                 o.app
                     .set(&a["--app-".len()..].replace('-', "_"), &v, true)
-                    .unwrap_or_else(|e| usage(&format!("--app-{e}")));
+                    .unwrap_or_else(|e| usage(&app_flag_error(&e)));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
             "--home" => {
@@ -1363,6 +1372,37 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_flag_errors_name_the_flag() {
+        let mut b = AppBrand::default();
+        let e = b.set("logo_dark", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark must be an http(s) URL"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b
+            .set("logo_dark", "/nonexistent/anofox-267.png", true)
+            .unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark: '/nonexistent/anofox-267.png'"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("logo", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("tagline", &"x".repeat(1000), true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-tagline must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+    }
 
     #[test]
     fn render_cache_expires_and_is_capped() {
