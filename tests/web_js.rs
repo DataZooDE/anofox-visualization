@@ -108,6 +108,11 @@ fn web_app_bar_settings_are_merged_and_checked() {
 }
 
 #[test]
+fn web_option_labels() {
+    run_node("option_label_test.mjs");
+}
+
+#[test]
 fn web_sidebar_search_and_zip() {
     run_node("library_test.mjs");
 }

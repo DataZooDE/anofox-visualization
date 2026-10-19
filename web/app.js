@@ -7368,12 +7368,9 @@ async function runOnce(fresh = true) {
         seedInputFromUrl(kind, [varname], rows);
         let lit;
         if (kind === "DROPDOWN" || kind === "BUTTONS") {
-          const options = rows.map((r) => String(r[varname]));
+          const { options, labels, hints } = inputOptions(s.roles, rows, varname);
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-          // Optional ::HINT column → a hint shown next to each option.
-          const hr = s.roles.find((r) => r[1] === "HINT");
-          const hints = hr ? rows.map((r) => String(r["c" + hr[0]] ?? "")) : null;
-          dd[i] = { kind, varname, options, hints, caption };
+          dd[i] = { kind, varname, options, labels, hints, caption };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "TOGGLE") {
           // A BOOLEAN variable; the query's value is the default.
@@ -7381,10 +7378,10 @@ async function runOnce(fresh = true) {
           dd[i] = { kind, varname, caption };
           lit = dpVars[varname] === "true" ? "TRUE" : "FALSE";
         } else if (kind === "MULTISELECT") {
-          const options = rows.map((r) => String(r[varname]));
+          const { options, labels } = inputOptions(s.roles, rows, varname);
           if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
           dpVars[varname] = dpVars[varname].filter((v) => options.includes(v));
-          dd[i] = { kind, varname, options, caption };
+          dd[i] = { kind, varname, options, labels, caption };
           lit = "[" + dpVars[varname].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(",") + "]";
         } else {
           // number / date / text: the query's value is the default
@@ -8668,6 +8665,26 @@ function makePeriodControl(meta, bar) {
   return finalizeControl(cont, bar);
 }
 
+// ::DROPDOWN / ::BUTTONS / ::MULTISELECT options (#170): the values (the
+// variable's), and from optional ::OPTION_LABEL / ::HINT columns what each
+// option shows (a NULL or empty label shows the value).
+function inputOptions(roles, rows, varname) {
+  const col = (tok) => {
+    const r = roles.find((x) => x[1] === tok);
+    return r ? rows.map((row) => row["c" + r[0]]) : null;
+  };
+  const options = rows.map((r) => String(r[varname]));
+  const lab = col("OPTION_LABEL");
+  const hin = col("HINT");
+  const labels = lab ? lab.map((v, k) => (v == null || String(v).trim() === "" ? options[k] : String(v))) : null;
+  const hints = hin ? hin.map((v) => String(v ?? "")) : null;
+  return { options, labels, hints };
+}
+// What option k shows: its ::OPTION_LABEL, else its value.
+function optionLabel(meta, k) {
+  return (meta.labels && meta.labels[k]) || meta.options[k];
+}
+
 function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
@@ -8721,7 +8738,7 @@ function makeControl(meta, bar) {
       const opt = document.createElement("option");
       opt.value = o;
       const hint = meta.hints && meta.hints[k];
-      opt.textContent = hint ? `${o} — ${hint}` : o;
+      opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
       if (o === dpVars[meta.varname]) opt.selected = true;
       input.appendChild(opt);
     });
@@ -8753,7 +8770,7 @@ function makeControl(meta, bar) {
 
     const summarize = () => {
       // name the picks while they fit; otherwise count them
-      const picked = options.filter((o) => sel.has(o));
+      const picked = options.map((o, k) => [o, optionLabel(meta, k)]).filter(([o]) => sel.has(o)).map(([, l]) => l);
       const names = picked.join(", ");
       sum.textContent =
         sel.size === 0
@@ -8785,7 +8802,7 @@ function makeControl(meta, bar) {
       sb.className = "dp-ms-search";
       sb.oninput = () => {
         const q = sb.value.toLowerCase();
-        for (const r of rows) r.row.style.display = r.o.toLowerCase().includes(q) ? "" : "none";
+        for (const r of rows) r.row.style.display = (r.l + "\u0000" + r.o).toLowerCase().includes(q) ? "" : "none";
       };
       sb.onkeydown = (e) => e.stopPropagation(); // don't let space/enter toggle <details>
       pop.appendChild(sb);
@@ -8804,7 +8821,7 @@ function makeControl(meta, bar) {
     const list = document.createElement("div");
     list.className = "dp-ms-list";
     pop.appendChild(list);
-    for (const o of options) {
+    options.forEach((o, k) => {
       const row = document.createElement("label");
       row.className = "dp-ms-opt";
       const cb = document.createElement("input");
@@ -8817,11 +8834,11 @@ function makeControl(meta, bar) {
         summarize();
       };
       const tx = document.createElement("span");
-      tx.textContent = o;
+      tx.textContent = optionLabel(meta, k);
       row.append(cb, tx);
       list.appendChild(row);
-      rows.push({ o, row, cb });
-    }
+      rows.push({ o, l: optionLabel(meta, k), row, cb });
+    });
     allB.onclick = () => {
       for (const r of rows) {
         sel.add(r.o);
@@ -8879,7 +8896,7 @@ function mkButtons(meta) {
   const btns = meta.options.map((o, k) => {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = o;
+    b.textContent = optionLabel(meta, k);
     b.setAttribute("role", "radio");
     const on = o === dpVars[meta.varname];
     b.setAttribute("aria-checked", on ? "true" : "false");
@@ -11343,7 +11360,7 @@ async function appBrandLoad() {
 // window.__anofoxApp brand config appBrandLoad() already validated.
 function brandImgOrigins(cfg) {
   const out = [];
-  for (const u of [cfg?.logo, cfg?.favicon]) {
+  for (const u of [cfg?.logo, cfg?.logo_dark, cfg?.favicon]) {
     if (typeof u !== "string" || !/^https:\/\//i.test(u)) continue;
     try {
       const x = new URL(u);
@@ -13072,7 +13089,7 @@ function dataTableHtml(dp, limit, caption) {
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
-  const SKIP = new Set(["TITLE", "HINT", "LABEL", "TRACK"]);
+  const SKIP = new Set(["TITLE", "HINT", "OPTION_LABEL", "LABEL", "TRACK"]);
   const keys = (rows.length ? Object.keys(rows[0]) : []).filter((k) => {
     const r = roleFor(k);
     return !r || !SKIP.has(r[1]);

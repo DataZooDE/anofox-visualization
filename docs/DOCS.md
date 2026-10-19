@@ -163,6 +163,7 @@ terminal.
 | `::BUTTONS` | `::BUTTON_GROUP`, `::SEGMENTED` | input | segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher) |
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
+| `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
@@ -238,6 +239,15 @@ the variable can stay a short identifier:
 
 ```sql
 SELECT 50 AS refund_at_pct ::NUMBER, 'Refund threshold (%)'::LABEL;
+```
+
+An `::OPTION_LABEL` column gives each option of a `::DROPDOWN`, `::BUTTONS` or `::MULTISELECT` the text it shows (and a long multiselect's search reads it), while the variable, `?v.name=` and a locked server's `path_vars` keep the value; a NULL or empty label shows the value. Put the input column first. Other inputs ignore it.
+
+```sql
+SELECT run AS run ::DROPDOWN,
+       strftime(written, '%d %b %Y %H:%M') || ' — ' || run AS run_label ::OPTION_LABEL,
+       'Run'::LABEL
+FROM runs ORDER BY written DESC;
 ```
 
 An input renders **where it appears in the script**: before the first `::TAB`
@@ -2218,7 +2228,7 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 - **Role tokens that are also SQL types** — `::DATE`, `::TEXT`, `::STRING`,
   `::NUMERIC` (inputs) and `::MAP`, `::GEOMETRY` (maps). In a query statement
   `::MAP`/`::GEOMETRY` are always the map role. The input tokens are roles only
-  in an **input statement** (no other role except `::HINT`/`::LABEL`/`::TITLE`,
+  in an **input statement** (no other role except `::HINT`/`::OPTION_LABEL`/`::LABEL`/`::TITLE`,
   e.g. `SELECT DATE '2024-01-01' AS start ::DATE`); in a chart panel
   (`SELECT day::DATE, n::BARCHART …`) and inside a `::TABLE` they stay real
   casts. To cast *and* tag, chain them: `ts::DATE::XAXIS`.

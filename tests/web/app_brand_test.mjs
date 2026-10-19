@@ -135,4 +135,14 @@ const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf
 assert.ok(!html.includes("© DataZoo GmbH"), "no company line in the sidebar footer");
 assert.ok(!/app(Brand|-brand)[\s\S]{0,40}side-foot/.test(apply), "footer untouched");
 
+// the assistant's CSP allows the app bar's images: logo, logo_dark (#269), favicon
+{
+  const brandImgOrigins = new Function(`${grab("brandImgOrigins")}\nreturn brandImgOrigins;`)();
+  assert.deepEqual(
+    brandImgOrigins({ logo: "https://a.example/l.svg", logo_dark: "https://b.example/d.svg", favicon: "data:image/png;base64,x" }),
+    ["https://a.example/l.svg", "https://b.example/d.svg"],
+  );
+  assert.deepEqual(brandImgOrigins({ logo_dark: "javascript:alert(1)" }), []);
+}
+
 process.stdout.write("app_brand_test: ok\n");

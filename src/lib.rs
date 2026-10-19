@@ -296,6 +296,8 @@ pub enum Role {
     Plain,
     /// A count/metadata hint shown next to a dropdown option (`::HINT`).
     Hint,
+    /// The shown text of a `::DROPDOWN`/`::BUTTONS`/`::MULTISELECT` option (`::OPTION_LABEL`); the variable keeps the value (#170).
+    OptionLabel,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
     /// Layout: reserve an empty grid cell (`::PLACEHOLDER`).
