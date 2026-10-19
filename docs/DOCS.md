@@ -1376,8 +1376,10 @@ Hover tooltips show values the way the panel formats them: its `::YFORMAT`
 (`'$'`, `'€'`, `'percent'` — values 0–100, `'comma'`, `' kg'`, `'CHF '` — the same keywords as
 the axis) in the dashboard `::LOCALE`, with cents kept for currency
 (`$1,234.50`, `1.234,50 €`). Share charts (`::BARCHART_PERCENT`,
-`::BAR_STACKED_PERCENT`, a fractional `::LINECHART_PERCENT`) read as percent.
-The x value follows `::XFORMAT`, and ISO dates take the locale's date order
+`::BAR_STACKED_PERCENT`, a fractional `::LINECHART_PERCENT`) read as percent:
+a stacked-percent segment shows its share of the bar (its `data-value` is that
+share, 0–1). On stacked bars and areas, `::DATALABELS` sit in the middle of
+each segment. The x value follows `::XFORMAT`, and ISO dates take the locale's date order
 (`01.03.2024`) when a `::LOCALE` is set. Data labels (`::DATALABELS`) use the
 same format in short form. The renderer writes these as `data-fvalue` /
 `data-fx` next to the raw `data-value` / `data-x` on each mark, so any host can

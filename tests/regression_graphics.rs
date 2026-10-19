@@ -1929,3 +1929,112 @@ fn event_labels_over_stacked_facets_sit_above_the_panel_totals() {
         "y axis stretched to the pooled stacks: {ticks:?}"
     );
 }
+
+// ── #218 / #219: values and data labels on stacked marks ─────────────────
+/// `(data-value, data-fvalue)` of every data `<rect>`, in drawing order.
+fn hover_values(svg: &str) -> Vec<(f64, String)> {
+    svg.split("<rect ")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap()])
+        .filter(|t| t.contains("data-value=\""))
+        .map(|t| {
+            let attr = |a: &str| {
+                let k = t.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                t[k..k + t[k..].find('"').unwrap()].to_string()
+            };
+            (attr("data-value").parse().unwrap(), attr("data-fvalue"))
+        })
+        .collect()
+}
+/// `(x, y, text)` of every data label (drawn at the ::DATALABELS size, 11).
+fn data_labels(svg: &str) -> Vec<(f64, f64, String)> {
+    svg.split("<text")
+        .skip(1)
+        .filter(|t| t.contains("font-size=\"11.00\""))
+        .map(|t| {
+            let attr = |a: &str| -> f64 {
+                let k = t.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                t[k..k + t[k..].find('"').unwrap()].parse().unwrap()
+            };
+            let text = t[t.find('>').unwrap() + 1..t.find("</text>").unwrap()].to_string();
+            (attr("x"), attr("y"), text)
+        })
+        .collect()
+}
+fn with_labels(mut cols: Vec<Column>) -> Vec<Column> {
+    cols.push(Column::new("l", Role::DataLabels, nums(&[11.0])));
+    cols
+}
+
+#[test]
+fn percent_stacked_hover_shows_each_segments_share() {
+    // Shares per panel and day: P = 3/8, 5/8, 7/9, 2/9; Q = 4/5, 1/5, 2/8, 6/8.
+    let want = [0.375, 0.625, 7.0 / 9.0, 2.0 / 9.0, 0.8, 0.2, 0.25, 0.75];
+    for flip in [false, true] {
+        let got = hover_values(&svg(stacked_facets(Kind::BarStackedPercent, flip)));
+        assert_eq!(got.len(), 8, "flip={flip}");
+        for ((v, fv), w) in got.iter().zip(want) {
+            assert!((v - w).abs() < 1e-9, "flip={flip}: data-value {v} vs {w}");
+            assert!(fv.ends_with('%'), "flip={flip}: {fv}");
+            let pct: f64 = fv.trim_end_matches('%').parse().unwrap();
+            assert!((pct - w * 100.0).abs() < 0.51, "flip={flip}: {fv} vs {w}");
+        }
+    }
+    // Values that are fractions already are still divided by their stack.
+    let s = svg(vec![
+        Column::new("d", Role::X, strs(&["D1", "D1"])),
+        Column::new("c", Role::Category, strs(&["a", "b"])),
+        Column::new("v", Role::Value(Kind::BarStackedPercent), nums(&[0.3, 0.2])),
+    ]);
+    let got: Vec<String> = hover_values(&s).into_iter().map(|(_, f)| f).collect();
+    assert_eq!(got, ["60%", "40%"]);
+}
+
+#[test]
+fn stacked_data_labels_sit_in_the_middle_of_their_segment() {
+    for kind in [Kind::BarStacked, Kind::BarStackedPercent] {
+        for flip in [false, true] {
+            let s = svg(with_labels(stacked_facets(kind, flip)));
+            let (segs, labels) = (segments(&s), data_labels(&s));
+            assert_eq!(labels.len(), 8, "{kind:?} flip={flip}: {labels:?}");
+            for r in &segs {
+                let (cx, cy) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+                assert!(
+                    labels
+                        .iter()
+                        .any(|l| (l.0 - cx).abs() < 0.6 && (l.1 - cy).abs() < 0.6),
+                    "{kind:?} flip={flip}: no label at the middle of {r:?}: {labels:?}"
+                );
+            }
+        }
+    }
+    // Percent stacks: the labels are the shares, and the y axis stays 0–100 %.
+    let s = svg(with_labels(stacked_facets(Kind::BarStackedPercent, false)));
+    let texts: Vec<String> = data_labels(&s).into_iter().map(|l| l.2).collect();
+    assert_eq!(
+        texts,
+        ["37.5%", "62.5%", "77.8%", "22.2%", "80%", "20%", "25%", "75%"]
+    );
+    assert!(!s.contains(">200%</text>"), "y axis trained on raw values");
+}
+
+#[test]
+fn stacked_area_data_labels_sit_in_the_middle_of_their_band() {
+    // The same stacks as bars on the same y scale: an area's labels sit at
+    // the heights of the bar segments' middles.
+    let mut area: Vec<f64> =
+        data_labels(&svg(with_labels(stacked_facets(Kind::AreaStacked, false))))
+            .into_iter()
+            .map(|l| l.1)
+            .collect();
+    let mut mids: Vec<f64> = segments(&svg(with_labels(stacked_facets(Kind::BarStacked, false))))
+        .into_iter()
+        .map(|r| r[1] + r[3] / 2.0)
+        .collect();
+    area.sort_by(f64::total_cmp);
+    mids.sort_by(f64::total_cmp);
+    assert_eq!(area.len(), 8);
+    for (a, m) in area.iter().zip(&mids) {
+        assert!((a - m).abs() < 0.6, "{area:?} vs {mids:?}");
+    }
+}

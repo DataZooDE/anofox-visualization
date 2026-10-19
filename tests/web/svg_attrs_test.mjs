@@ -65,6 +65,10 @@ const de = info(
   "web: 12.5"
 );
 assert.deepEqual([de.value, de.x, de.fx, de.detail], ["12,50 €", "01.03.2024", true, ""]);
+// A ::BARCHART_STACKED_PERCENT segment (#218): the renderer writes its share,
+// so the tooltip reads the share with no extra detail line.
+const share = info({ "data-series": "a", "data-value": "0.375", "data-fvalue": "37.5%", "data-x": "D1" }, "a: 0.375");
+assert.deepEqual([share.value, share.detail], ["37.5%", ""]);
 // A single-series bar (series = x): the tooltip row drops the repeated name.
 const one = info({ "data-series": "2024-03-01", "data-value": "3", "data-x": "2024-03-01", "data-fx": "01.03.2024" }, "2024-03-01: 3");
 assert.equal(one.own, true);

@@ -63,6 +63,30 @@ impl<P: Position> Position for PerFacet<P> {
     }
 }
 
+/// Runs `P`, then moves each row's `y` to the middle of the span `P` gave it
+/// (`ymin`..`y`): where a stacked segment's data label sits (#219).
+pub(crate) struct Centred<P>(pub(crate) P);
+
+impl<P: Position> Position for Centred<P> {
+    fn compute(&self, data: &mut DataFrame, params: &PositionParams) {
+        self.0.compute(data, params);
+        let Some(ymin) = data.column("ymin").map(|c| c.to_vec()) else {
+            return;
+        };
+        if let Some(y) = data.column_mut("y") {
+            for (v, lo) in y.iter_mut().zip(&ymin) {
+                if let (Some(hi), Some(lo)) = (v.as_f64(), lo.as_f64()) {
+                    *v = Value::Float((hi + lo) / 2.0);
+                }
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +141,15 @@ mod tests {
             "{:?}",
             nums(&d, "ymin")
         );
+    }
+
+    #[test]
+    fn centred_puts_y_in_the_middle_of_each_segment() {
+        let mut d = frame(true);
+        Centred(PerFacet(PositionStack)).compute(&mut d, &PositionParams::default());
+        // Segments P = [5, 8], [0, 5]; Q = [1, 5], [0, 1].
+        assert_eq!(nums(&d, "y"), [6.5, 2.5, 3.0, 0.5]);
+        assert_eq!(Centred(PositionStack).name(), "stack");
     }
 
     #[test]
