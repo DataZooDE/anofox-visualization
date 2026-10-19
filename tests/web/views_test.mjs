@@ -12,7 +12,14 @@ const grab = (name) => {
   return m[0];
 };
 const re = src.match(/^const URL_VAR_RE = .*$/m)[0];
-const { readViewSeed } = new Function(`${re}\n${grab("readViewSeed")}\nreturn { readViewSeed };`)();
+const { readViewSeed: readViewSeedRaw } = new Function(`${re}\n${grab("readViewSeed")}\nreturn { readViewSeed };`)();
+// readViewSeed returns a null-prototype object (security review #273 L1, so
+// that an inherited Object.prototype name like "constructor" or "toString"
+// is an ordinary own key, not a free pass past the 32-key cap — see below).
+// assert.deepEqual/deepStrictEqual compare the prototype too, so most of
+// this file compares through this plain-object copy; a couple of cases
+// below assert `Object.getPrototypeOf(...) === null` directly instead.
+const readViewSeed = (s) => ({ ...readViewSeedRaw(s) });
 
 // ---- readViewSeed: shape validation ----
 
@@ -53,6 +60,69 @@ assert.deepEqual(readViewSeed("?view.a=" + "x".repeat(200)), { a: "x".repeat(200
   assert.equal(Object.keys(seed).length, 32);
   assert.equal(seed.v0, "L0b");
   assert.equal(seed.v99, undefined);
+}
+
+// ---- security review #273 L1: inherited Object.prototype names cannot
+// bypass the 32-key cap, and `__proto__` works as an ordinary group id ----
+{
+  // 32 ordinary ids, then 11 ids that name inherited Object.prototype
+  // members. Before the null-prototype/Object.hasOwn fix, `!(id in seed)`
+  // was true for every one of these (nothing owns them yet, but the plain
+  // `{}` seed still *inherits* them), so all 11 were admitted on top of the
+  // 32 already-full cap — 43 keys in total. They must now count against the
+  // same 32-key cap as any other id, so none of them get in.
+  const inherited = [
+    "constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "toLocaleString", "__defineGetter__",
+    "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+  ];
+  const params = [];
+  for (let i = 0; i < 32; i++) params.push(`view.v${i}=L${i}`);
+  for (const id of inherited) params.push(`view.${id}=X`);
+  const seedRaw = readViewSeedRaw("?" + params.join("&"));
+  assert.equal(Object.keys(seedRaw).length, 32, "inherited names must not pad the 32-key cap");
+  for (const id of inherited) assert.equal(Object.hasOwn(seedRaw, id), false, `${id} must not be admitted once the cap is full`);
+}
+{
+  // readViewSeed's own result has no prototype at all, so "constructor" etc.
+  // reading as a function (inherited, not an own key) can never be mistaken
+  // for a seeded value.
+  const seedRaw = readViewSeedRaw("?view.a=1");
+  assert.equal(Object.getPrototypeOf(seedRaw), null);
+}
+{
+  // `__proto__` is a plain, settable OWN key on a null-prototype object (not
+  // the legacy accessor a `{}` literal gives it), so a group whose id is
+  // literally "__proto__" (it matches URL_VAR_RE: letters/digits/underscore
+  // only) is seeded like any other id, and never silently reassigns the
+  // object's prototype.
+  const seedRaw = readViewSeedRaw("?view.__proto__=B");
+  assert.equal(Object.getPrototypeOf(seedRaw), null, "__proto__ as a key must not become the prototype");
+  assert.equal(Object.hasOwn(seedRaw, "__proto__"), true, "__proto__ must be seeded as an ordinary own key");
+  assert.equal(seedRaw.__proto__, "B");
+  // NOTE: deliberately not compared with assert.deepEqual against a
+  // `{ __proto__: "B" }` object LITERAL — that syntax is the special
+  // prototype-setting form (a no-op here, since "B" is not an Object), so
+  // the literal ends up with ZERO own keys and a normal prototype, which is
+  // not what this test wants to express. The hasOwn/value checks above are
+  // the real assertion; readViewSeed's plain-object wrapper (used
+  // everywhere else in this file) is still safe because object SPREAD
+  // (`{...seedRaw}`) uses CreateDataPropertyOrThrow, not the literal's
+  // special-cased [[SetPrototypeOf]], so a spread copy keeps "__proto__" as
+  // an ordinary own key.
+  const copy = { ...seedRaw };
+  assert.equal(Object.hasOwn(copy, "__proto__"), true);
+  assert.equal(copy.__proto__, "B");
+  assert.equal(Object.getPrototypeOf(copy), Object.prototype);
+}
+{
+  // dpView / dpViewDefault (web/app.js module state) are also null-prototype
+  // (same fix, same reasoning) — a quick structural check on the source so a
+  // future edit can't quietly revert to `{}` without failing this test.
+  assert.match(src, /let dpView = Object\.create\(null\)/, "dpView must be a null-prototype object (#273 L1)");
+  assert.match(src, /let dpViewDefault = Object\.create\(null\)/, "dpViewDefault must be a null-prototype object (#273 L1)");
+  assert.match(src, /dpView = Object\.create\(null\)/, "loadDash must reset dpView to a null-prototype object (#273 L1)");
+  assert.match(src, /dpViewDefault = Object\.create\(null\)/, "loadDash must reset dpViewDefault to a null-prototype object (#273 L1)");
 }
 
 // Labels that don't exactly match any of a group's CURRENT alternatives are

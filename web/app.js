@@ -3241,8 +3241,8 @@ function loadDash(name, sql, key) {
   dpTab = null;
   dpTableUI = {};
   dpSubTab = {};
-  dpView = {};
-  dpViewDefault = {};
+  dpView = Object.create(null);
+  dpViewDefault = Object.create(null);
   dpFilter = "";
   dpSelected = null;
   dpZoomGroups = {};
@@ -5672,8 +5672,13 @@ document.addEventListener("keydown", (e) => {
 });
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
-let dpView = {}; // ::VIEW group id -> active alternative's label (#214)
-let dpViewDefault = {}; // ::VIEW group id -> its default (first SHOWN) alternative's label
+// Null-prototype (no `constructor`/`toString`/… inherited names, and
+// `__proto__` is a safe, settable own key, not the exotic accessor a plain
+// object literal has) so an id can be any valid group id, including
+// `__proto__`, and inherited names can never pad the key cap in
+// readViewSeed below (security review #273 L1).
+let dpView = Object.create(null); // ::VIEW group id -> active alternative's label (#214)
+let dpViewDefault = Object.create(null); // ::VIEW group id -> its default (first SHOWN) alternative's label
 
 // Deep-linking: reflect the active tab in the URL (?tab=) so a reload or a
 // shared link lands on the same page.
@@ -5711,15 +5716,21 @@ function setViewParam(id, label) {
 // extracts readUrlSeed's): only `view.<id>` keys whose id matches URL_VAR_RE
 // or `^\d{1,3}$` (the positional fallback id), at most 32 of them, each
 // value capped at 200 chars — "view." never collides with the plain `v.`
-// variable prefix (`"view.x".startsWith("v.")` is false).
+// variable prefix (`"view.x".startsWith("v.")` is false). `seed` is a
+// null-prototype object and the cap check is `Object.hasOwn`, so an id that
+// happens to name an inherited Object.prototype member (`constructor`,
+// `toString`, `hasOwnProperty`, …) is an ordinary own key subject to the
+// same 32-key cap as any other id, not a free pass past it (security review
+// #273 L1) — and `__proto__` works as a plain own key too, not the
+// prototype-reassignment accessor a `{}` literal gives it.
 function readViewSeed(search = location.search) {
-  const seed = {};
+  const seed = Object.create(null);
   try {
     for (const [k, v] of new URLSearchParams(search)) {
       if (!k.startsWith("view.")) continue;
       const id = k.slice(5);
       if (!(URL_VAR_RE.test(id) || /^\d{1,3}$/.test(id))) continue;
-      if (!(id in seed) && Object.keys(seed).length >= 32) continue;
+      if (!Object.hasOwn(seed, id) && Object.keys(seed).length >= 32) continue;
       if (String(v).length > 200) continue;
       seed[id] = String(v);
     }
