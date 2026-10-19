@@ -246,6 +246,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
     e("TRANSITION", &["TWEEN"], R::Transition, "modifier", true,
       "on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart"),
+    e("HOVER_FOCUS", &["HOVERFOCUS"], R::HoverFocus, "modifier", true,
+      "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
@@ -828,6 +830,7 @@ mod tests {
             Role::Story,
             Role::StoryBy,
             Role::Transition,
+            Role::HoverFocus,
             Role::Track,
             Role::Diagram,
             Role::Upstream,
@@ -952,6 +955,7 @@ mod tests {
                 | Role::Story
                 | Role::StoryBy
                 | Role::Transition
+                | Role::HoverFocus
                 | Role::Track
                 | Role::Diagram
                 | Role::Upstream

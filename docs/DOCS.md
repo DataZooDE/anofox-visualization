@@ -127,6 +127,7 @@ terminal.
 | `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
 | `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
 | `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
+| `::HOVER_FOCUS` | `::HOVERFOCUS` | modifier | hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts) |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
@@ -1892,6 +1893,8 @@ series/bar to highlight it across all panels and dim the rest — click empty
 space (or the mark again) to clear. Series colours are **consistent across
 charts**.
 
+> **Hover focus**: hovering a bar, point, line or area of a chart with several series (a `::CATEGORY`, or several measures) emphasises that whole series and fades the others, as hovering its legend entry does; moving off clears it. Focusing a mark from the keyboard does the same. A click still sets the sticky linked highlighting: while it (or a brush, a named selection or a `::STORY` step) is on, hovering changes nothing. It is off where each series is a single mark (a pie, a single-series bar), on maps (hovering a map feature emphasises its series on every map instead), diagrams, heatmaps, calendars and `::TRACK` strips, above 2,000 marks, on a touch tap (a tap is a click), and with `'none'::HOVER_FOCUS`. The change is instant (no animation). Static output (the HTML export, `dashboard file.sql out.html`, the script-free served page) has no hover focus. `--check` warns on a value other than `'series'` / `'none'` (`hover-focus/unknown`).
+
 **Cross-filter**: a click also sets a DuckDB variable `selected` to the clicked
 value and re-runs the dashboard. Panels *opt in* by referencing it — filtered
 panels re-query, the rest just highlight:
@@ -2884,7 +2887,7 @@ for marks without them (SVGs from older renderers). Map features carry
 else their `::LABEL`), `data-value` (the measure) and `data-label` (the
 `::LABEL` text), and a map's root `<svg>` carries `data-map` (see Maps). The root `<svg>` carries the drawn
 domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
-`data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
+`data-flip`), and `data-hover-focus="none"` (`'none'::HOVER_FOCUS`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
 runtime, works on static HTML.
 
 ---

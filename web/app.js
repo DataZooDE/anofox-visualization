@@ -12265,6 +12265,71 @@ function mapHoverEmph(series) {
   }
 }
 
+// #213: hovering a mark (or focusing it from the keyboard) emphasises its
+// whole series and fades the others, as hovering its legend entry does — a
+// layer of its own ("hoverfocus") in the shared emphasis state (web/anim.js),
+// so it never undoes a click's sticky selection. Off where a series is no
+// group of marks (seriesFocusable), on maps (mapHoverEmph), diagrams,
+// heatmaps, calendars, pies, gauges, ::TRACK strips, with 'none'::HOVER_FOCUS
+// and above HOVER_FOCUS_MAX marks; a tap on a touch screen is a click (the
+// sticky selection), not a hover. Instant: no motion to reduce.
+const HOVER_FOCUS_MAX = 2000;
+const HOVER_FOCUS_DIM = 0.15; // as the legend's focus
+let dpTouchAt = 0; // the last touch pointerdown (its compatibility mouseenter is no hover)
+document.addEventListener("pointerdown", (e) => (dpTouchAt = e.pointerType === "touch" ? Date.now() : 0), true);
+
+// Does hovering a mark focus its series? `series`: the series key of every
+// data mark. Two series at least, one of them more than a single mark, and
+// at most `max` marks.
+function seriesFocusable(series, max = HOVER_FOCUS_MAX) {
+  if (!series.length || series.length > max) return false;
+  const n = new Map();
+  for (const s of series) n.set(s, (n.get(s) || 0) + 1);
+  return n.size >= 2 && [...n.values()].some((k) => k >= 2);
+}
+
+// Decided once per chart SVG (a re-render brings a new one).
+function hoverFocusOn(svg) {
+  if (svg._dpHf === undefined) {
+    const roles = svg.closest(".panel")?._dp?.roles || [];
+    svg._dpHf =
+      !svg.hasAttribute("data-map") &&
+      !svg.hasAttribute("data-diagram") &&
+      svg.getAttribute("data-kind") !== "heatmap" &&
+      !svg.closest(".panel-tracks") &&
+      (svg.getAttribute("data-hover-focus") || "").toLowerCase() !== "none" &&
+      !roles.some((r) => /^(CALENDAR|HEATMAP|PIE|DONUT|GAUGE|DIAGRAM)/.test(r[1])) &&
+      seriesFocusable(chartMarks(svg).map((el) => el.getAttribute("data-series") || ""));
+  }
+  return svg._dpHf;
+}
+
+// Emphasise `series` in `svg` (null clears), at most once a frame: leaving
+// one mark for the next of the same series costs nothing.
+function hoverFocus(svg, series) {
+  svg._dpHfWant = series;
+  if (svg._dpHfRaf) return;
+  svg._dpHfRaf = requestAnimationFrame(() => {
+    svg._dpHfRaf = 0;
+    let s = svg._dpHfWant;
+    // a click's selection, a brush / named selection or a story step owns the dimming
+    const st = svg._dpEmph;
+    if (st && (st.has("select") || st.has("filter") || st.has("story"))) s = null;
+    if (s === (svg._dpHfOn ?? null)) return;
+    svg._dpHfOn = s;
+    dpAnim.emph(
+      svg,
+      "hoverfocus",
+      s == null
+        ? null
+        : (el) => {
+            const k = el.getAttribute("data-series");
+            return k != null && k !== s && !el.hasAttribute("data-rule") ? HOVER_FOCUS_DIM : null;
+          }
+    );
+  });
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -12347,6 +12412,14 @@ function attachHover() {
     // a ::TRACK strip's marks show their own.
     const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
     el.addEventListener("mouseenter", () => {
+      // A tap's mousedown also gives the mark native DOM focus, which the a11y
+      // code below answers with its own (untrusted) synthetic mouseenter —
+      // so the 1 s touch window holds regardless of e.isTrusted, or a tap
+      // would still read as a hover through that detour.
+      if (!isMapMark && !rule && !(Date.now() - dpTouchAt < 1000)) {
+        const svg = rootSvg(el);
+        if (hoverFocusOn(svg)) hoverFocus(svg, series);
+      }
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
@@ -12368,6 +12441,7 @@ function attachHover() {
     });
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
+      else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
       if (pointered()) return;
       tip.classList.remove("show");
     });
