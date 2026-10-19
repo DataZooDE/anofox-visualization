@@ -4,5 +4,13 @@
   "logo": "https://intranet.acme.example/brand/logo.svg",
   "logo_dark": "https://intranet.acme.example/brand/logo-dark.svg",
   "link": "https://intranet.acme.example/",
-  "favicon": "https://intranet.acme.example/brand/favicon.png"
+  "favicon": "https://intranet.acme.example/brand/favicon.png",
+  "assistant": {
+    "enabled": false,
+    "transport": "browser-key",
+    "models": { "default": "claude-sonnet-5", "harder": "claude-opus-5-5" },
+    "sample_rows_allowed": true,
+    "max_rounds": 3,
+    "remember": false
+  }
 }
