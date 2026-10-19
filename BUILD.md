@@ -75,6 +75,8 @@ ours (its body calls `anofox_render`/`anofox_xy`), and a read-only database
 simply gets no macros. The C++ build registers them as internal, documented
 catalog entries and has neither issue.
 
+Because the macros live in that database, they are not found after `USE <other database>`: DuckDB looks unqualified functions up on the search path, and `USE` replaces it (`Catalog Error: Scalar Function with name anofox_plot_summary does not exist! Did you mean "memory.anofox_plot_summary"?`). Call them qualified with the database that was the default at `LOAD` (`memory.anofox_plot_summary(s)` in the CLI's in-memory session), or keep that database on the search path after `USE f`: `SET search_path = 'f.main,memory.main'`. `CREATE TEMP MACRO` is no way out: the extension creates the macros on its own connection, and temporary objects are visible only on the connection that created them. The C++ build (`INSTALL anofox_visualization FROM community`) registers them in the system catalog and has neither issue (#179).
+
 ## Release assets (full toolkit)
 
 Publishing a GitHub release pushes its `v<version>` tag, which runs
