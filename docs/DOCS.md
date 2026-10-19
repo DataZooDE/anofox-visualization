@@ -2474,6 +2474,85 @@ assistant's model calls) and `https://earthquake.usgs.gov` (one example's
 live feed) — see `web/assist-csp.js`'s `assistCsp()` for the exact,
 versioned list.
 
+#### The assistant (off by default)
+
+A panel (✦, or Ctrl/⌘+I) that turns a plain-language request into a
+dashboard, and answers follow-up questions about the one you're editing. It
+calls Claude directly from the browser with your own API key — never a
+DataZooDE server, never any server at all. The sandbox it runs in is §4.5;
+this section is the panel itself.
+
+**Enabling it.** Off until `app-config.json` (or `window.__anofoxApp`, for
+`serve`/the extension) has an `assistant` block with `"enabled": true`:
+
+```json
+"assistant": {
+  "enabled": true,
+  "transport": "browser-key",
+  "models": { "default": "claude-sonnet-5", "harder": "claude-opus-5-5" },
+  "sample_rows_allowed": true,
+  "max_rounds": 3,
+  "remember": false
+}
+```
+
+| Key | What it does |
+|-----|--------------|
+| `enabled` | Turns the panel on. Never on a locked server, an embed, a frame, or from a URL parameter or a dashboard's own SQL/comment — only this config. |
+| `transport` | `"browser-key"` is the only one in this release (your own key, direct to `api.anthropic.com`). |
+| `models` | The two model choices the panel's *Model* select offers ("Standard" / "Try harder"); a malformed id is ignored. |
+| `sample_rows_allowed` | Whether the conversation's "Include common values" toggle may be on (it still defaults to the viewer's own choice). |
+| `max_rounds` | How many times the assistant may fix and re-check its own proposal before showing it with open issues (1-3). |
+| `remember` | Opt-in for the key dialog's *Remember on this device* checkbox (§4.5) — off by default, always off on `*.github.io`/`*.gitlab.io` regardless. |
+
+**What is sent.** Before anything leaves the browser, *What will be sent*
+shows: the destination (`api.anthropic.com`), the static reference material's
+size, the full dynamic part (your request and the table/column profiles in
+scope — names, types, counts, ranges; common values only for text columns,
+and never for anything that looks personal), and a token estimate. A
+checkbox skips this dialog for the rest of the conversation. Only up to 15
+tables go with a profile; the rest go by name only. Secrets in your own SQL
+(a `CREATE SECRET`, a `token=`/`password=` in a literal) are replaced by
+`***` before they're ever read into the context.
+
+**The key.** Typed once into the key dialog, kept in `sessionStorage`
+(gone when the tab closes) unless you tick *Remember* — shown only when the
+installation opted in (above). *Forget key* clears it; reload the page to
+lift the tab's Content-Security-Policy (§4.5) the key's presence puts in
+place.
+
+**The sandbox.** Every tool call, and the proposal's live preview, run in
+the locked, second DuckDB-Wasm instance §4.5 describes — never the page's
+own. While a proposal is being previewed, the dashboard renders it in place
+(a bar above the grid says so); your own SQL in the editor is untouched
+until you apply it.
+
+**Preview, apply, undo.** A proposal replaces the dashboard's *view* only:
+the preview bar's *Show changes* is a line-level diff against your current
+SQL; *Discard* throws the proposal away; *Apply* puts the SQL in the editor
+(native undo — Ctrl+Z works, and a toast offers *Undo* for about 8 seconds)
+and runs it. When the proposal reads a file or URL your dashboard doesn't
+already use, or runs a statement the assistant may not run by itself (an
+`INSTALL`, a write, a dynamic query), Apply asks first and lists them —
+*Apply and run*, *Apply, don't run* (the SQL goes in, nothing executes until
+you press Run), or *Cancel*.
+
+**Phone.** The panel opens as a full-height sheet; once a proposal arrives
+it closes and the dashboard (with the fixed preview bar) takes over, with
+focus on the preview's heading.
+
+**Limits.** One request at a time (Cancel stops it); a clarifying question
+and your answer continue the same exchange, but a fresh Send after a
+proposal starts a new one; the sandbox's table snapshot can be sampled or
+truncated for a very large table (noted in the profile); links in a preview
+don't navigate, and the model's own text is always shown as plain text,
+never links, images or HTML.
+
+**The eval.** `tests/assist-eval/` is a fixed 10-prompt seed exercising new
+dashboards, edits and two adversarial safety prompts, run live against your
+own key (`node scripts/assist-eval.mjs --yes`, about $3 total on Sonnet 5);
+see `tests/assist-eval/README.md`. Results aren't committed.
+
 ### b2) Serve the UI on a live DuckDB — explore existing data
 
 `anofox-visualization serve` starts a tiny local HTTP server that serves the same builder UI
