@@ -2315,6 +2315,31 @@ fn percent_shares(x: &[Value], y: &[Value], by_x: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Each value's share of its stack — the sum of the values at its x (and
+/// `::FACET` panel) — for `::BARCHART_STACKED_PERCENT`; missing when the stack
+/// sums to zero. Unlike [`percent_shares`], values that are fractions
+/// already are divided too: the stack is drawn as their shares (#218).
+fn stack_shares(x: &[Value], facet: Option<&[Value]>, y: &[Value]) -> Vec<Value> {
+    let key = |i: usize| {
+        let panel = facet
+            .and_then(|f| f.get(i))
+            .map(value_str)
+            .unwrap_or_default();
+        (panel, value_str(&x[i]))
+    };
+    let mut totals: std::collections::HashMap<(String, String), f64> = Default::default();
+    for (i, v) in y.iter().enumerate() {
+        *totals.entry(key(i)).or_default() += v.as_f64().unwrap_or(0.0);
+    }
+    y.iter()
+        .enumerate()
+        .map(|(i, v)| match (v.as_f64(), totals.get(&key(i))) {
+            (Some(f), Some(t)) if *t != 0.0 => Value::Float(f / t),
+            _ => Value::Na,
+        })
+        .collect()
+}
+
 /// Percent tick labels for `::LINECHART_PERCENT`: fractions (all |v| ≤ 1) are
 /// scaled ×100 (`0.42` → `42%`); larger values are already percentages.
 fn percent_axis(values: &[Value]) -> Box<dyn Fn(f64) -> String + Send + Sync> {
@@ -2479,10 +2504,18 @@ fn cartesian(
         .as_ref()
         .map(|d| d.x.clone())
         .unwrap_or_else(|| x.values.clone());
-    let yvals = if kind == Kind::BarPercent {
-        percent_shares(&x.values, &value.values, category.is_some())
-    } else {
-        value.values.clone()
+    let yvals = match kind {
+        Kind::BarPercent => percent_shares(&x.values, &value.values, category.is_some()),
+        // Each segment's share of its bar, so the hover value and the data
+        // label read e.g. `25%`, not the raw measure as a percent (#218).
+        Kind::BarStackedPercent => stack_shares(
+            &x.values,
+            cols.iter()
+                .find(|c| matches!(c.role, Role::Facet | Role::FacetFree))
+                .map(|f| f.values.as_slice()),
+            &value.values,
+        ),
+        _ => value.values.clone(),
     };
 
     let mut data: Vec<(String, Vec<Value>)> =
@@ -3058,17 +3091,33 @@ fn cartesian(
             })
             .layer_aes(Aes::new().y("y").xmin("jlo").xmax("jhi"));
     }
-    // Data labels (`::DATALABELS`): draw the measure value just above each mark.
+    // Data labels (`::DATALABELS`): draw the measure value just above each mark
+    // — on a stacked mark, in the middle of its segment, stacked the way the
+    // mark is (#219).
     if show_labels {
+        let stacked = matches!(
+            kind,
+            Kind::BarStacked | Kind::BarStackedPercent | Kind::AreaStacked
+        );
         plot = plot
             .geom_text_with(GeomText {
                 size: dlabel_size,
                 color: o.theme.chart_label(),
-                // Lift the label clear of the mark (a small gap above the top).
-                vjust: -0.35,
+                // Lift the label clear of the mark (a small gap above the
+                // top); a stacked segment's label is centred in it.
+                vjust: if stacked { 0.5 } else { -0.35 },
                 ..Default::default()
             })
             .layer_aes(Aes::new().x("x").y("y").label("dlab"));
+        plot = match kind {
+            Kind::BarStacked | Kind::AreaStacked => plot.position(facet_position::Centred(
+                facet_position::PerFacet(PositionStack),
+            )),
+            Kind::BarStackedPercent => plot.position(facet_position::Centred(
+                facet_position::PerFacet(PositionFill),
+            )),
+            _ => plot,
+        };
     }
     // Combo layers: overlay each extra measure with its own geom + y column.
     for (k, ev) in extras.iter().enumerate() {
