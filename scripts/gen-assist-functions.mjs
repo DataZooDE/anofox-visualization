@@ -5,9 +5,8 @@
 // the reviewed denials below; a function this list has not seen (another
 // extension, a newer DuckDB) is refused by the assistant's gate. After a
 // DuckDB-Wasm or extension upgrade: run it, review what it prints, commit.
-// CI's web job runs --check with the extensions scripts/fetch-wasm-extensions.sh
-// fetches (#224), so a new get.erpl.io build fails it until the list is
-// regenerated.
+// CI checks --check against the pinned builds (scripts/wasm-extensions.lock,
+// #235), so a lock bump without regenerating this list fails it.
 //
 //   node scripts/gen-assist-functions.mjs           write web/assist/functions.js
 //   node scripts/gen-assist-functions.mjs --check   exit 1 if it is stale
@@ -15,6 +14,7 @@ process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox e
 process.env.DATAZOO_NO_BANNER = "1";
 import { createRequire } from "module";
 import { spawn } from "child_process";
+import { createHash } from "crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
@@ -22,6 +22,7 @@ import { fileURLToPath } from "url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const OUT = "web/assist/functions.js";
+export const LOCK = "scripts/wasm-extensions.lock";
 // Reviewed denials: they reach outside the session, change its state, or carry
 // a value into an error message.
 const DENIED = {
@@ -91,6 +92,34 @@ const NATIVE_HELPER_ALLOWED = new Set(
   ).split(" ")
 );
 
+// The pinned DuckDB-Wasm builds for `version` (scripts/wasm-extensions.lock,
+// #235): hashes each web/localext/<version>/<platform>/<ext>.duckdb_extension.wasm
+// and throws when it doesn't match the lock (a stale or unfetched file), so a
+// build this script's duckdb_functions() rowset didn't come from can't slip
+// into the generated list unnoticed. Returns a short fingerprint of the
+// pinned shas, recorded in the header so --check also catches a lock bump
+// that wasn't followed by regenerating web/assist/functions.js.
+function pinned(version) {
+  const lines = readFileSync(path.join(root, LOCK), "utf8").split("\n");
+  const rows = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const [ver, p, e, sha] = t.split(/\s+/);
+    if (ver === version) rows.push({ p, e, sha });
+  }
+  if (!rows.length) throw new Error(`${LOCK} pins no builds for DuckDB ${version}`);
+  for (const r of rows) {
+    const file = path.join(root, "web/localext", version, r.p, `${r.e}.duckdb_extension.wasm`);
+    const got = createHash("sha256").update(readFileSync(file)).digest("hex");
+    if (got !== r.sha) throw new Error(`${path.relative(root, file)} is not the pinned build (${got}): run scripts/fetch-wasm-extensions.sh`);
+  }
+  return createHash("sha256")
+    .update(rows.map((r) => `${r.p} ${r.e} ${r.sha}`).join("\n"))
+    .digest("hex")
+    .slice(0, 12);
+}
+
 // The DuckDB-Wasm connection the browser (and the tests) use, with json,
 // anofox_statistics and anofox_forecast loaded from web/localext, served
 // locally (the blocking bundle fetches extensions synchronously).
@@ -113,6 +142,8 @@ async function collect() {
     db.open({ allowUnsignedExtensions: true });
     const c = db.connect();
     const rows = (s) => JSON.parse(JSON.stringify(c.query(s).toArray().map((r) => r.toJSON()), (_, v) => (typeof v === "bigint" ? Number(v) : v)));
+    const version = rows("SELECT version() AS v")[0].v;
+    const pin = pinned(version);
     const port = 19500 + (process.pid % 400);
     const server = spawn("python3", ["-u", "-m", "http.server", String(port), "--bind", "127.0.0.1"], {
       cwd: path.join(root, "web/localext"),
@@ -127,10 +158,9 @@ async function collect() {
         c.query(`LOAD ${e}`);
       }
       c.query("RESET custom_extension_repository");
-      const version = rows("SELECT version() AS v")[0].v;
       const exts = rows("SELECT extension_name AS n, extension_version AS v FROM duckdb_extensions() WHERE loaded ORDER BY 1");
       const fns = rows("SELECT lower(function_name) AS f, function_type AS t, parameters AS p, macro_definition AS m FROM duckdb_functions() WHERE internal");
-      return { version, exts, fns };
+      return { version, exts, fns, pin };
     } finally {
       server.kill();
     }
@@ -284,7 +314,7 @@ const EXPORTS_COMMENT = `// SCALAR_ALLOWED: the scalar, aggregate and window fun
 `;
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { version, exts, fns } = await collect();
+  const { version, exts, fns, pin } = await collect();
   const { scalars, denied, builtin, rel, tables, left, review } = build(fns);
   console.log(`scalars: ${scalars.length}, denied: ${denied.size}, builtin: ${builtin.length}, anofox tables: ${tables.length}, relation keys: ${Object.keys(rel).length}`);
   console.log(`left out: ${JSON.stringify(left)}`);
@@ -297,7 +327,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const wasmVersion = JSON.parse(readFileSync(path.join(root, "tests/web/package.json"), "utf8")).dependencies["@duckdb/duckdb-wasm"];
   const extsText = exts.map((e) => `${e.n} ${e.v}`).join(", ");
-  const header = `// Generated by scripts/gen-assist-functions.mjs from duckdb_functions() of DuckDB ${version} (DuckDB-Wasm ${wasmVersion}) with ${extsText}; do not edit.\n`;
+  const header = `// Generated by scripts/gen-assist-functions.mjs from duckdb_functions() of DuckDB ${version} (DuckDB-Wasm ${wasmVersion}) with ${extsText}, pinned builds ${pin} (${LOCK}); do not edit.\n`;
   const body = [header, EXPORTS_COMMENT, renderNameSet("SCALAR_ALLOWED", scalars), renderDeniedMap(denied), renderNameSet("BUILTIN", builtin), renderNameSet("ANOFOX_TABLES", tables), renderRelationArgs(rel)].join("\n");
   const file = path.join(root, OUT);
   if (process.argv.includes("--check")) {

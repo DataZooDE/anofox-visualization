@@ -130,9 +130,8 @@ jobs:
         run: |
           for i in 1 2 3; do scripts/fetch-wasm-extensions.sh && break; echo "fetch attempt $i failed; retrying"; sleep 10; done
 
-      # The assistant's function lists (web/assist/functions.js) come from this
-      # DuckDB-Wasm with the extensions fetched above: a stale list could miss a
-      # table macro's new relation argument (#224). When this fails, run
+      # The assistant's function lists (web/assist/functions.js) come from the
+      # pinned builds (scripts/wasm-extensions.lock); after a bump, run
       # node scripts/gen-assist-functions.mjs, review what it prints, commit.
       - name: The assistant's function lists are current
         run: node scripts/gen-assist-functions.mjs --check
