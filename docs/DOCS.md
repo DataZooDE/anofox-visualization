@@ -167,7 +167,7 @@ terminal.
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
 | `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
-| `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum, Margin: mean' |
+| `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum; Per 10k: none' |
 | `::COLGROUP` | `::COL_GROUP`, `::HEADER_GROUP` | layout | next table's grouped header: 'Backtest: mae, rmse \| Holdout: mae_h, rmse_h' |
 | `::FLAG` | `::THRESHOLD` | layout | next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5' |
 | `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
@@ -2081,8 +2081,9 @@ A `::TABLE` / `::PAGED` panel comes with a toolbar: the row count ("8 of 24
 rows") with a chip per active filter, a **search** box, **Filters** (a filter
 under each header: a dropdown for a column with few values, `> n` / `< n` and a
 range slider for numbers, "contains" for text), **Σ Totals** (a totals row
-over every matching row, not just the page: sums of amounts and counts, means of
-rates, shares and scores, counts of badge values — each numeric total carries a
+over every matching row, not just the page: sums of amounts and counts, no total
+for rates and percentages (their tag reads "none ▾"), means of the other
+measures, counts of badge values — each numeric total carries a
 small tag, e.g. "sum ▾", to switch it to mean, median, min, max or count; the
 choice is kept per table), **Stats** (a strip under the header: a 10-bin
 histogram with min and max for each number column, the top 3 values with their
@@ -2119,7 +2120,7 @@ by their raw name or their header, case-insensitive):
 
 | Directive | Value | Effect |
 |---|---|---|
-| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum, Margin: mean, Score: median'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); `'none'` hides the row and its button. Without it: sums of amounts and counts, means of rates / shares / scores. The viewer's pick in a cell wins. |
+| `::TOTALS` (`::TOTAL`, `::AGGREGATE`) | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'Revenue: sum; Per 10k: none; km to DC: mean'` | the totals row's aggregation for every numeric column, or per column (a bare value inside the list sets the rest); entries are separated by `;` (or `,` when there is no `;` — use `;` when a header contains a comma). `'none'` hides the row and its button; `'Column: none'` leaves that cell empty. Without it: sums of amounts and counts (`::MONEY`, `::COMPACT`, whole numbers), no total for rates and percentages (`::PERCENT`, or a name with pct / % / rate / ratio / share / per …), means of the rest. Distances are not recognised by name: a distance per row ("km to DC") is summed unless you name it ('km to DC: mean'). The viewer's pick in a cell wins. |
 | `::COLGROUP` (`::COL_GROUP`, `::HEADER_GROUP`) | `'Backtest: mae, rmse \| Holdout: mae_h, rmse_h'` | a header row with a label over adjacent columns (a thin rule under each label) |
 | `::FLAG` (`::THRESHOLD`) | `'mape > 0.2, bias < -5, status = breach'` | cells meeting a condition (`>` `>=` `<` `<=` `=` `!=`) get a ⚠ and the warning tint — never colour alone |
 | `::HIGHLIGHT` (`::TOPN`) | `'Revenue: top 3, Margin: bottom 2'` (`'top 3'` alone: the first numeric column) | the top / bottom n values in bold with their rank (#1, #2 / ↓1, ↓2); a `::PAGED` table ranks within the page |
@@ -2134,6 +2135,10 @@ SELECT region::TABLE, plan::MONEY, revenue::MONEY, margin,
        accuracy::COLORSCALE_HIGH_GOOD, bias::COLORSCALE_DIVERGING
 FROM regions;
 ```
+
+`dashboard --check` notes `totals/summed-rate` when a `'sum'::TOTALS` (or a bare
+`sum` in the list) would also sum a rate or percentage column the value does
+not name. Give that column its own total: `'Per 10k: none; sum'`.
 
 Colour scales: `::COLORSCALE` shades low values green and high values red (errors,
 latency); `::COLORSCALE_HIGH_GOOD` the other way round (accuracy, scores);

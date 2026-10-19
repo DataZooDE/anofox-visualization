@@ -320,7 +320,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ROWSELECT", &["ROW_SELECT", "SELECTABLE"], R::RowSelect, "layout", false,
       "next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>')"),
     e("TOTALS", &["TOTAL", "AGGREGATE"], R::TableOpt(TableOpt::Totals), "layout", false,
-      "next table's totals: 'sum'|'mean'|'median'|'min'|'max'|'count'|'none', or per column 'Revenue: sum, Margin: mean'"),
+      "next table's totals: 'sum'|'mean'|'median'|'min'|'max'|'count'|'none', or per column 'Revenue: sum; Per 10k: none'"),
     e("COLGROUP", &["COL_GROUP", "HEADER_GROUP"], R::TableOpt(TableOpt::ColGroup), "layout", false,
       "next table's grouped header: 'Backtest: mae, rmse | Holdout: mae_h, rmse_h'"),
     e("FLAG", &["THRESHOLD"], R::TableOpt(TableOpt::Flag), "layout", false,

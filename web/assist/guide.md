@@ -66,7 +66,7 @@ Directives for the **next** table (columns named by raw name or header, case-ins
 | Directive | Value | Effect |
 |---|---|---|
 | `::ROWSELECT` | `'none'` (default) \| `'single'` \| `'multi'` | row click → `getvariable('<first column>')` (+ `'selected'` for single); multi = a list |
-| `::TOTALS` | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'revenue: sum, margin: mean'` | totals aggregation (default: sums of amounts / counts, means of rates and scores); `'none'` hides the row |
+| `::TOTALS` | `'sum'` \| `'mean'` \| `'median'` \| `'min'` \| `'max'` \| `'count'` \| `'none'`, or `'revenue: sum; per 10k: none'` (`;` or `,`) | totals aggregation (default: sums of amounts / counts, no total for rates and percentages, means of the rest; name distances: 'km: mean'); `'none'` hides the row |
 | `::COLGROUP` | `'Money: plan, revenue \| Quality: accuracy, bias'` | a grouped header over adjacent columns |
 | `::FLAG` | `'margin < 12, status = breach'` (`>` `>=` `<` `<=` `=` `!=`) | ⚠ + warning tint on matching cells |
 | `::HIGHLIGHT` | `'revenue: top 2, margin: bottom 1'` (`'top 3'` = first numeric column) | bold + rank on the top / bottom n (a `::PAGED` table: within the page) |

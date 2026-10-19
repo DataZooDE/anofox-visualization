@@ -92,8 +92,8 @@ FROM dc_cover ORDER BY ags;
 
 SELECT 5::COL;
 SELECT 560::HEIGHT;
--- rates and distances don't add up: no totals row
-SELECT 'none'::TOTALS;
+-- people add up; the distance as a mean; the rate has no total
+SELECT 'People: sum; km to DC: mean; Per 10k: none'::TOTALS;
 SELECT district AS "District" ::TABLE, round(per_10k, 2) AS "Per 10k",
        round(dc_km)::INTEGER AS "km to DC", population AS "People" ::COMPACT,
        'The 15 least covered districts'::TITLE,
