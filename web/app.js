@@ -13040,19 +13040,27 @@ function mapTableHtml(svg, limit, caption) {
     const raw = el.getAttribute("data-value");
     const k = +el.getAttribute("data-class");
     const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    const size = el.getAttribute("data-size");
     rows.push({
       name,
       series: series && series !== label && series !== name ? series : "",
       raw: raw == null || raw === "" ? null : Number(raw),
       value: el.getAttribute("data-fvalue") || (raw != null ? fmtTipValue(raw) : ""),
       cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
+      sizeRaw: size == null || size === "" ? null : Number(size),
+      size: el.getAttribute("data-fsize") || "",
     });
   }
-  if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
+  // M2a: graduated symbols (::SIZE) — sort by size when no colour measure
+  // differs from it (data-value then equals the size, row by row).
+  const bySize = rows.some((r) => r.size) && rows.every((r) => r.raw === r.sizeRaw);
+  if (bySize) rows.sort((a, b) => (b.sizeRaw ?? -Infinity) - (a.sizeRaw ?? -Infinity));
+  else if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
   const cols = [
     ["name", "name"],
     ["series", "series"],
     ["value", "value"],
+    ["size", "size"],
     ["cls", "class"],
   ].filter(([k]) => k === "name" || rows.some((r) => r[k]));
   const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");

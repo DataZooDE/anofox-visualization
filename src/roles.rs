@@ -73,7 +73,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
-    e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size"),
+    e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area); on a map a symbol's area (graduated symbols) or a flow's width; a constant (4::SIZE) sets the point size"),
     e("Q1", &["QUARTILE1", "LOWER_QUARTILE"], R::Q1, "encoding", true,
       "a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT)"),
     e("MEDIAN", &["Q2"], R::Median, "encoding", true, "the median line of a box from statistics (see ::Q1)"),
