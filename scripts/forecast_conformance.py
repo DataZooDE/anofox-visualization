@@ -30,20 +30,11 @@ Exit status 1 when any case fails or a function is not classified.
 
 from __future__ import annotations
 
-import argparse
-import concurrent.futures as cf
-import html
-import json
 import os
 import re
-import subprocess
 import sys
 
-# The anofox extensions send usage telemetry unless this is set; every duckdb
-# process the harness starts inherits it (forced: an inherited 0 must not
-# re-enable it). Each session also turns the extension's setting off.
-os.environ["DATAZOO_DISABLE_TELEMETRY"] = "1"
-from statistics_conformance import montage, svgs_of  # noqa: E402
+from conformance_lib import check as _check, ext_path, known_bug, parser, run_all, run_duckdb, svg_names, write_montage
 
 # ── demo data ────────────────────────────────────────────────────────────────
 # Three daily series (A, B, C) of 84 days: trend, a weekly season, an
@@ -386,46 +377,19 @@ KNOWN: dict[str, dict[str, str]] = {
 
 
 def run(duckdb: str, ext: str, sql: str, pre: str, mode: str = "-list") -> tuple[bool, str]:
-    script = f"{pre}LOAD anofox_forecast; SET anofox_telemetry_enabled = false; LOAD '{ext}';\n{sql};"
-    p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
-                       capture_output=True, text=True, timeout=600)
-    out = (p.stdout or "") + (p.stderr or "")
-    return p.returncode == 0 and not p.stderr.strip(), out
+    return run_duckdb(duckdb, f"{pre}LOAD anofox_forecast; SET anofox_telemetry_enabled = false; "
+                               f"LOAD '{ext}';\n{sql};", mode, timeout=600)
 
 
 def check(ok: bool, out: str) -> tuple[str, list[str], str]:
-    svgs = svgs_of(out) if ok else []
-    if not svgs:
-        return "FAIL", [], out.strip().replace("\n", " ")[:400]
-    # an empty producer result plots as the "No data" note: a broken recipe
-    if any(">No data<" in s for s in svgs):
-        return "FAIL", svgs, "the producer returned no rows (the plot is the 'No data' note)"
-    warnings = []
-    for s in svgs:
-        w = re.search(r'data-warnings="([^"]*)"', s)
-        if w:
-            warnings += json.loads(html.unescape(w.group(1)))
-    bad = [w for w in warnings if not any(a in w for a in ALLOWED_WARNINGS)]
-    if bad:
-        return "WARN", svgs, "; ".join(bad)[:400]
-    return "OK", svgs, ""
+    return _check(ok, out, ALLOWED_WARNINGS, no_data=True)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--duckdb", default=os.environ.get("DUCKDB", "duckdb"))
-    ap.add_argument("--ext", required=True, help="anofox_visualization extension file to LOAD")
-    ap.add_argument("--extension-directory", help="DuckDB extension directory holding anofox_forecast")
-    ap.add_argument("--out", default="forecast-conformance")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--only", help="regex: run only matching case names")
-    ap.add_argument("--no-montage", action="store_true")
-    a = ap.parse_args()
-    ext = os.path.abspath(a.ext)
-    if not re.fullmatch(r"anofox_visualization(\..+)?\.duckdb_extension", os.path.basename(ext)):
-        print(f"--ext {ext}: LOAD takes the entry point from the file name, so it must be named "
-              "anofox_visualization.duckdb_extension (or anofox_visualization.<x>.duckdb_extension). "
-              f"Rename it, or: ln -s '{ext}' /tmp/anofox_visualization.duckdb_extension", file=sys.stderr)
+    a = parser(__doc__, "forecast-conformance",
+               extension_directory="DuckDB extension directory holding anofox_forecast").parse_args()
+    ext = ext_path(a.ext)
+    if ext is None:
         return 2
     os.makedirs(a.out, exist_ok=True)
     pre = f"SET extension_directory = '{a.extension_directory}'; " if a.extension_directory else ""
@@ -482,22 +446,12 @@ def main() -> int:
                 status, msg = "FAIL", f"{got} panels, expected {want} (a panel per test method, #190)"
         return c, (status, svgs, msg)
 
-    results = []
-    with cf.ThreadPoolExecutor(a.jobs) as pool:
-        for c, (status, svgs, msg) in pool.map(one, runs):
-            key = f"{c['name']}.{c['which']}"
-            for k, s in enumerate(svgs):
-                fn = key if len(svgs) == 1 else f"{key}.{k}"
-                with open(os.path.join(a.out, fn + ".svg"), "w") as f:
-                    f.write(s)
-            if c["name"] in known:
-                status, msg = ("XFAIL", known[c["name"]]) if status != "OK" else ("XPASS", "drop it from KNOWN")
-            results.append((key, status, msg, len(svgs), c))
-    names = []
-    for key, status, msg, n, c in sorted(results, key=lambda r: r[0]):
+    post = lambda c, s, m: known_bug(s, m, known[c["name"]]) if c["name"] in known else (s, m)
+    results = run_all(runs, one, a.jobs, a.out, post=post)
+    names = svg_names(results)
+    for key, status, msg, n, c in results:
         tag = f"{c['schema']}/{c['kind']}" if c["schema"] else "extra"
         print(f"{status:5s} {key:44s} {tag:20s} {msg}")
-        names += [key] if n == 1 else [f"{key}.{k}" for k in range(n)]
     for m in missing:
         why = f"tagged anofox.output = {found[m]}" if found[m] else "neither a producer nor out of scope"
         print(f"MISS {m}: {why} — add a recipe or an OUT_OF_SCOPE reason")
@@ -509,11 +463,9 @@ def main() -> int:
     direct = sum(1 for n in covered if reg[n]["kind"] == "direct")
     print(f"\n{len(covered)} producers covered ({direct} direct, {len(covered) - direct} through an adapter), "
           f"{passed}/{len(results)} plot calls OK" + (f" ({xfail} known producer bugs of {version})" if xfail else ""))
+    keep = lambda n: not n.endswith(".auto")
     if not a.no_montage:
-        names = [n for n in names if os.path.exists(os.path.join(a.out, n + ".svg"))]
-        m = montage(a.out, [n for n in names if not n.endswith(".auto")])
-        if m:
-            print(f"montage: {m}")
+        write_montage(a.out, names, keep)
     return 0 if passed == len(results) and not missing else 1
 
 
