@@ -32,6 +32,7 @@
 pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod flows;
+pub(crate) mod hexbin;
 mod labels;
 mod legend;
 pub(crate) mod project;
@@ -48,6 +49,7 @@ use classes::{Classes, Method};
 use flows::Flows;
 use ggplot_rs::prelude::Value;
 use ggplot_rs::spatial::{parse_wkt, Geometry};
+use hexbin::Hexbin;
 use legend::{legend_of, legend_svg, legend_title, Legend, LegendBox};
 use project::{Extent, Proj, Projection};
 use symbols::Symbols;
@@ -441,6 +443,9 @@ struct Model<'a> {
     symbols: Option<Symbols>,
     /// A flow map (`::ORIGIN`/`::DEST`), when it applies (M2b).
     flows: Option<Flows>,
+    /// Hexagonal density binning (`::HEXBIN`), when it applies (M2c) —
+    /// takes over the point-drawing pass; `::SIZE` is ignored alongside it.
+    hexbin: Option<Hexbin>,
     /// Whether `base` counts toward the fitted extent — true unless a
     /// symbol map's backdrop was built automatically from a region layer
     /// (D4): that backdrop isn't used for fitting, only an explicit
@@ -581,6 +586,7 @@ impl<'a> Model<'a> {
                 fill,
                 symbols: None,
                 flows: Some(flows_model),
+                hexbin: None,
                 base_fitted,
             });
         }
@@ -658,7 +664,14 @@ impl<'a> Model<'a> {
             .iter()
             .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
             .collect();
-        let symbols = symbols::of(cols, &features);
+        // ::HEXBIN (M2c) takes over the point pass entirely — no graduated
+        // symbols alongside it (::SIZE is ignored when both are present).
+        let hexbin = hexbin::of(cols, &proj);
+        let symbols = if hexbin.is_none() {
+            symbols::of(cols, &features)
+        } else {
+            None
+        };
         let measure = measure_of(cols, geometry(cols));
         let category =
             find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
@@ -666,10 +679,14 @@ impl<'a> Model<'a> {
         // makes the sequential ramp start a quarter in, so pale symbols
         // don't vanish into it
         let has_base = has_explicit_basemap || region_backdrop;
-        let fill = match (&measure, category) {
-            (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
-            (None, Some(c)) => category_fill(o, cols, c, rows),
-            (None, None) => Fill::Plain(crate::wash(o, o.brand(), 0.55)),
+        let fill = if let Some(hb) = &hexbin {
+            hexbin::fill_of(o, cols, hb)
+        } else {
+            match (&measure, category) {
+                (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
+                (None, Some(c)) => category_fill(o, cols, c, rows),
+                (None, None) => Fill::Plain(crate::wash(o, o.brand(), 0.55)),
+            }
         };
         Some(Model {
             rows,
@@ -689,6 +706,7 @@ impl<'a> Model<'a> {
             fill,
             symbols,
             flows: None,
+            hexbin,
             base_fitted,
         })
     }
@@ -988,7 +1006,11 @@ pub(crate) struct Drawn {
 /// covers the fewest vertices — or, when every corner would cover some,
 /// beside or above the map (whichever keeps it larger).
 fn layout(m: &Model, lg: &LegendBox, w: f64, h: f64) -> Option<(Frame, (f64, f64))> {
-    let margin = if m.flows.is_some() { 0.08 } else { 0.04 };
+    let margin = if m.flows.is_some() || m.hexbin.is_some() {
+        0.08
+    } else {
+        0.04
+    };
     let b = padded(m.bbox()?, matches!(m.proj, Proj::Identity), margin);
     let full = Frame::fit(b, (2.0, 2.0, w - 4.0, h - 4.0));
     if lg.w <= 0.0 {
@@ -1163,7 +1185,9 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     // an ::XAXIS keys the features for a ::STORY (a route stop by stop)
     let step_x = find_role(cols, Role::X);
     for (i, f) in m.features.iter().enumerate() {
-        if f.is_empty() {
+        // ::HEXBIN (M2c) takes over the point pass entirely — the per-row
+        // features group draws nothing (m.fill is indexed by cell, not row).
+        if f.is_empty() || m.hexbin.is_some() {
             continue;
         }
         let label = m.label_of(i);
@@ -1287,7 +1311,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
                 marks += 1;
             }
         }
-        if m.symbols.is_none() {
+        if m.symbols.is_none() && m.hexbin.is_none() {
             for s in f {
                 if let Shape::Point(p) = s {
                     let (x, y) = frame.at(*p);
@@ -1631,6 +1655,62 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         }
     }
 
+    // ---- density binning (::HEXBIN, M2c): one hexagon per occupied cell,
+    // BTreeMap order, coloured by the sum of a measure or a count of points.
+    if let Some(hb) = &m.hexbin {
+        if let Fill::Measure(scale) = &m.fill {
+            out.push_str(&format!(
+                "<g class=\"dp-hexes\" stroke=\"{}\" stroke-width=\".4\">",
+                hex(card)
+            ));
+            for (i, ((q, r), cell)) in hb.cells.iter().enumerate() {
+                let value = if hb.has_measure {
+                    cell.sum
+                } else {
+                    cell.n as f64
+                };
+                let (color, class) = scale.color(value);
+                let fvalue = scale.fmt.full(value, &o.locale);
+                let label = hexbin::label_of(cell, hb.planar);
+                let n_points = format!("point{}", if cell.n == 1 { "" } else { "s" });
+                let title = if hb.has_measure {
+                    format!("{label}: {fvalue} ({} {n_points})", cell.n)
+                } else {
+                    format!("{label}: {} {n_points}", cell.n)
+                };
+                let verts: Vec<_> = hexbin::ring(*q, *r, hb.size, hb.origin)
+                    .iter()
+                    .map(|p| tenths(frame.at(*p)))
+                    .collect();
+                let mut d = String::new();
+                push_path(&mut d, &verts, true);
+                let mut data =
+                    format!(" data-row=\"{i}\" data-x=\"{q},{r}\" data-value=\"{value}\"");
+                if let Some(k) = class {
+                    data.push_str(&format!(" data-class=\"{}\"", k + 1));
+                }
+                data.push_str(&format!(" data-count=\"{}\"", cell.n));
+                data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
+                if !hb.has_measure {
+                    data.push_str(&format!(" data-fvalue=\"{}\"", attr(&fvalue)));
+                }
+                out.push_str(&format!(
+                    "<path d=\"{d}\" fill=\"{}\"{data}><title>{}</title></path>",
+                    hex(color),
+                    esc(&title)
+                ));
+                marks += 1;
+            }
+            out.push_str("</g>");
+            if hb.cells.len() > hexbin::HEX_WARN {
+                warnings.push(format!(
+                    "map: {} hexagons — use a larger ::HEXBIN",
+                    hb.cells.len()
+                ));
+            }
+        }
+    }
+
     if marks > MARK_WARN {
         warnings.push(format!(
             "map: {marks} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light"
@@ -1678,6 +1758,9 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
                 serde_json::to_string(&labels).unwrap_or_default(),
             ));
         }
+    }
+    if let Some(hb) = &m.hexbin {
+        attrs.push(("data-hexbin", hexbin::fmt_num(hb.width)));
     }
     Some(Drawn {
         body: out,
@@ -2113,12 +2196,33 @@ fn labels_svg(
     g
 }
 
+/// The classes part of a map summary, shared by the choropleth, symbol and
+/// hexbin summaries: `". k method classes: n1 / n2 / …"` when `::CLASSES` is
+/// active, else empty.
+fn classes_suffix(s: &ValueScale) -> String {
+    match &s.classes {
+        Some((method, c, _)) => {
+            let counts: Vec<String> = c.counts.iter().map(|n| n.to_string()).collect();
+            format!(
+                ". {} {} classes: {}",
+                c.len(),
+                method.name(),
+                counts.join(" / ")
+            )
+        }
+        None => String::new(),
+    }
+}
+
 /// One sentence for screen readers: what the map shows, its projection,
 /// the highest and lowest feature, the classes and their counts, and how
 /// many rows have no value.
 fn summary(o: &RenderOptions, m: &Model, extra_self: usize) -> String {
     if let Some(fl) = &m.flows {
         return flows_summary(o, m, fl, extra_self);
+    }
+    if let Some(hb) = &m.hexbin {
+        return hexbin_summary(o, m, hb);
     }
     if let Some(sym) = &m.symbols {
         return symbols_summary(o, m, sym);
@@ -2194,15 +2298,7 @@ fn summary(o: &RenderOptions, m: &Model, extra_self: usize) -> String {
                     ));
                 }
             }
-            if let Some((method, c, _)) = &s.classes {
-                let counts: Vec<String> = c.counts.iter().map(|n| n.to_string()).collect();
-                out.push_str(&format!(
-                    ". {} {} classes: {}",
-                    c.len(),
-                    method.name(),
-                    counts.join(" / ")
-                ));
-            }
+            out.push_str(&classes_suffix(s));
             let missing = drawn.iter().filter(|i| s.values[**i].is_none()).count();
             if missing > 0 {
                 out.push_str(&format!("; {missing} without data"));
@@ -2285,15 +2381,7 @@ fn symbols_summary(o: &RenderOptions, m: &Model, sym: &Symbols) -> String {
     let size_title = sym.title.clone().unwrap_or_else(|| "size".to_string());
     out.push_str(&format!(". Area ∝ {size_title}"));
     if let Fill::Measure(s) = &m.fill {
-        if let Some((method, c, _)) = &s.classes {
-            let counts: Vec<String> = c.counts.iter().map(|n| n.to_string()).collect();
-            out.push_str(&format!(
-                ". {} {} classes: {}",
-                c.len(),
-                method.name(),
-                counts.join(" / ")
-            ));
-        }
+        out.push_str(&classes_suffix(s));
         let missing = drawn.iter().filter(|(i, _)| s.values[*i].is_none()).count();
         if missing > 0 {
             out.push_str(&format!("; {missing} without data"));
@@ -2305,6 +2393,37 @@ fn symbols_summary(o: &RenderOptions, m: &Model, sym: &Symbols) -> String {
     if skipped > 0 {
         out.push_str(&format!("; {skipped} not drawn (zero or negative size)"));
     }
+    out.push('.');
+    out
+}
+
+/// One sentence for a `::HEXBIN` map: the cell and point counts, the grid
+/// width, the densest cell, then the colour classes/no-data fragment a
+/// choropleth summary uses.
+fn hexbin_summary(o: &RenderOptions, m: &Model, hb: &Hexbin) -> String {
+    let Fill::Measure(s) = &m.fill else {
+        return String::new();
+    };
+    let n = hb.cells.len();
+    let mut out = format!(
+        "{n} hexagon{} {} across ({}), {} point{}",
+        if n == 1 { "" } else { "s" },
+        hexbin::fmt_width(hb.width, hb.planar),
+        m.projection.describe(),
+        hb.n_points,
+        if hb.n_points == 1 { "" } else { "s" }
+    );
+    if let Some((i, v)) = hb
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, (_, c))| (i, if hb.has_measure { c.sum } else { c.n as f64 }))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+    {
+        let label = hexbin::label_of(&hb.cells[i].1, hb.planar);
+        out.push_str(&format!(". Densest: {label} {}", s.fmt.full(v, &o.locale)));
+    }
+    out.push_str(&classes_suffix(s));
     out.push('.');
     out
 }

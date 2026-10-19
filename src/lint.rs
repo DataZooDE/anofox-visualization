@@ -2058,6 +2058,7 @@ fn map_diags(
         return out;
     }
     out.extend(flow_diags(roles, rows));
+    out.extend(hexbin_diags(roles, rows));
     let first = |want: Role| {
         roles
             .iter()
@@ -2137,7 +2138,9 @@ fn map_diags(
         _ => 0,
     };
     let points = wkt_points + latlon_points;
-    if points > MAP_POINTS_WARN {
+    // M2c: a ::HEXBIN map aggregates its points into hexagons, so the raw
+    // point count no longer reflects what's drawn.
+    if points > MAP_POINTS_WARN && !has(Role::Hexbin) {
         out.push((
             Severity::Warning,
             "map/too-many-marks",
@@ -2341,6 +2344,83 @@ fn flow_diags(
             format!(
                 "{both} flows on one map (over 2,000) — aggregate to fewer origin/destination pairs (e.g. states) to keep it readable"
             ),
+        ));
+    }
+    out
+}
+
+/// Density-binning lint (`::HEXBIN`, M2c): a bad size spec, no points to
+/// bin (region/WKT-area maps, lines), Mercator's area distortion towards
+/// the poles, and `::CATEGORY` being ignored (hexagons are coloured by
+/// count or sum, never by a category).
+fn hexbin_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some(hi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Hexbin)
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    if let Some(v) = column_texts(rows, hi).into_iter().next() {
+        if crate::map::hexbin::HexSize::parse(&v).is_err() {
+            out.push((
+                Severity::Warning,
+                "map/hexbin-bad-size",
+                format!("::HEXBIN '{v}' is not 'auto', '25 km' or a number — the map uses 'auto'"),
+            ));
+        }
+    }
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    let geom_points = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Geometry)
+        .map(|(i, _)| *i)
+        .is_some_and(|i| {
+            column_texts(rows, i).iter().any(|t| {
+                matches!(
+                    ggplot_rs::spatial::parse_wkt(t),
+                    Some(ggplot_rs::spatial::Geometry::Point(_))
+                        | Some(ggplot_rs::spatial::Geometry::MultiPoint(_))
+                )
+            })
+        });
+    let has_points = (has(Role::Lat) && has(Role::Lon)) || geom_points;
+    if !has_points {
+        out.push((
+            Severity::Warning,
+            "map/hexbin-needs-points",
+            "::HEXBIN aggregates points (::LAT/::LON or WKT POINTs); this map has none — ignored"
+                .to_string(),
+        ));
+        return out;
+    }
+    let projection = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Projection)
+        .and_then(|(i, _)| column_texts(rows, *i).into_iter().next());
+    if projection
+        .as_deref()
+        .and_then(crate::map::project::Projection::parse)
+        == Some(crate::map::project::Projection::Mercator)
+    {
+        out.push((
+            Severity::Note,
+            "map/hexbin-mercator",
+            "hexagons in 'mercator' cover less ground towards the poles — 'auto' keeps them \
+             equal-area"
+                .to_string(),
+        ));
+    }
+    if has(Role::Category) {
+        out.push((
+            Severity::Note,
+            "map/hexbin-category",
+            "::CATEGORY is ignored on a ::HEXBIN map — hexagons are coloured by count or sum"
+                .to_string(),
         ));
     }
     out
@@ -4507,6 +4587,108 @@ mod design_tests {
             codes(vec![json!({ "c0": "DE-BY", "c1": "de-by" })]),
             vec![(Severity::Note, "map/flow-self")]
         );
+    }
+
+    #[test]
+    fn hexbin_bad_size_is_flagged() {
+        let codes = |v: &str| -> Vec<(Severity, &'static str)> {
+            let data = vec![json!({ "c0": 50.0, "c1": 10.0, "c2": v })
+                .as_object()
+                .unwrap()
+                .clone()];
+            check_opts(
+                "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/hexbin-bad-size")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        assert!(codes("auto").is_empty());
+        assert!(codes("25 km").is_empty());
+        assert_eq!(
+            codes("huge"),
+            vec![(Severity::Warning, "map/hexbin-bad-size")]
+        );
+        assert_eq!(
+            codes("-5"),
+            vec![(Severity::Warning, "map/hexbin-bad-size")]
+        );
+    }
+
+    #[test]
+    fn hexbin_needs_points_is_flagged() {
+        let data = vec![json!({ "c0": "DE-BY", "c1": "auto" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT c::REGION, h::HEXBIN FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/hexbin"))
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Warning, "map/hexbin-needs-points")]);
+    }
+
+    #[test]
+    fn hexbin_mercator_is_noted() {
+        let data = vec![
+            json!({ "c0": 50.0, "c1": 10.0, "c2": "auto", "c3": "mercator" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        let d = check_opts(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN, 'mercator'::PROJECTION FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "map/hexbin-mercator")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Note, "map/hexbin-mercator")]);
+    }
+
+    #[test]
+    fn hexbin_category_is_noted() {
+        let data = vec![json!({ "c0": 50.0, "c1": 10.0, "c2": "auto", "c3": "A" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "map/hexbin-category")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Note, "map/hexbin-category")]);
+    }
+
+    #[test]
+    fn too_many_marks_skips_hexbin_maps() {
+        let pts: Vec<Value> = (0..20_001)
+            .map(|i| json!({ "c0": (i % 80) as f64, "c1": 10.0, "c2": "auto" }))
+            .collect();
+        let data: Vec<_> = pts.iter().map(|r| r.as_object().unwrap().clone()).collect();
+        let d = check_opts(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        assert!(!d.iter().any(|d| d.code == "map/too-many-marks"), "{d:?}");
     }
 
     #[test]

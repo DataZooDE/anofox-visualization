@@ -45,6 +45,8 @@ pub(super) enum Extra {
         /// `(width px, label)`, widest first.
         items: Vec<(f64, String)>,
     },
+    /// A single note line (M2c's "Hexagons 2.5 km across").
+    Note(String),
 }
 
 /// The legend box: its content, the no-data count, the title and size.
@@ -205,19 +207,40 @@ fn widths_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
     ))
 }
 
+/// The hexbin note extra (M2c): "Hexagons 2.5 km across" / German "Sechsecke
+/// 2.5 km breit" (planar: no unit), under the colour legend.
+fn hexbin_note_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
+    let hb = m.hexbin.as_ref()?;
+    let german = o.locale.tag.starts_with("de");
+    let w = super::hexbin::fmt_width(hb.width, hb.planar);
+    let text = if german {
+        format!("Sechsecke {w} breit")
+    } else {
+        format!("Hexagons {w} across")
+    };
+    let tw = crate::ticks::text_width(&text, FONT);
+    Some((Extra::Note(text), tw, ROW))
+}
+
 /// The legend of a map, sized for a panel `w`×`h`.
 pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendBox {
     // drawn rows without a value (rows without geometry — a backdrop's —
     // don't count); with graduated symbols a row's regions may have moved
     // into the backdrop (D4), so a row counts when it has a symbol anchor.
-    let nodata = match (&m.fill, &m.symbols) {
-        (Fill::Measure(s), Some(sym)) => (0..m.rows)
-            .filter(|i| s.values[*i].is_none() && !sym.anchors[*i].is_empty())
-            .count(),
-        (Fill::Measure(s), None) => (0..m.rows)
-            .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
-            .count(),
-        _ => 0,
+    // A hexbin map's `ValueScale` is indexed by cell, not by row, and every
+    // occupied cell always has a value (M2c) — no "no data" hatch for it.
+    let nodata = if m.hexbin.is_some() {
+        0
+    } else {
+        match (&m.fill, &m.symbols) {
+            (Fill::Measure(s), Some(sym)) => (0..m.rows)
+                .filter(|i| s.values[*i].is_none() && !sym.anchors[*i].is_empty())
+                .count(),
+            (Fill::Measure(s), None) => (0..m.rows)
+                .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
+                .count(),
+            _ => 0,
+        }
     };
     let tw = |s: &str| crate::ticks::text_width(s, FONT);
     let max_w = (w - 16.0).max(60.0);
@@ -347,6 +370,18 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
             }
         }
     };
+    // M2c: counting (no measure) hexbin map — the measure's own title (if
+    // any) wins above; without one, default to "Points per hexagon".
+    if title.is_none() && m.hexbin.is_some() {
+        title = Some(
+            if o.locale.tag.starts_with("de") {
+                "Punkte je Sechseck"
+            } else {
+                "Points per hexagon"
+            }
+            .to_string(),
+        );
+    }
     if let Some(t) = &title {
         cw = cw.max(tw(t));
         ch += ROW;
@@ -364,6 +399,11 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
         extras.push(extra);
     }
     if let Some((extra, xw, xh)) = widths_extra(o, m) {
+        ew = ew.max(xw);
+        eh += xh + EXTRA_GAP;
+        extras.push(extra);
+    }
+    if let Some((extra, xw, xh)) = hexbin_note_extra(o, m) {
         ew = ew.max(xw);
         eh += xh + EXTRA_GAP;
         extras.push(extra);
@@ -601,6 +641,10 @@ pub(super) fn legend_svg(
                     g.push_str(&text(PAD + LINE + 6.0, cy, "start", &ink, "", label));
                     y += ROW;
                 }
+            }
+            Extra::Note(note) => {
+                g.push_str(&text(PAD, y + ROW / 2.0 - 1.0, "start", &muted, "", note));
+                y += ROW;
             }
         }
     }

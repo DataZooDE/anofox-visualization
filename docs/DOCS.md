@@ -120,6 +120,7 @@ terminal.
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
+| `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons: 'auto' or a width across ('25 km'; planar: '2.5'); sums the measure, else counts rows |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1226,6 +1227,69 @@ The summary reads "`n` flows between `o` origins and `d` destinations
 (`projection`). Largest: `A` → `B` `value`; smallest: `C` → `D` `value`",
 plus "; `k` not drawn (no location)" and "; `s` start and end at the same
 place" when either is non-zero.
+
+#### Density (`::HEXBIN`)
+
+```sql
+SELECT lat ::LAT, lon ::LON, 'auto'::HEXBIN, 'quantile 5'::CLASSES,
+       'de-states'::BASEMAP, 'Customers cluster around three hubs'::TITLE
+FROM customers;
+```
+
+`::HEXBIN` aggregates a map's points — `::LAT`/`::LON`, or WKT
+`POINT`/`MULTIPOINT` — into a grid of hexagons, so thousands of points read
+as a density surface instead of an overplotted smear. Its value is `'auto'`
+(default), a width across (`'25 km'`), or a bare number — metres, or on a
+`'none'` projection planar units (`'km'` is accepted and ignored there, since
+the written number is already the planar width). Applying it to a map with
+no points (a `::REGION`/WKT-area map) does nothing — `dashboard --check`
+flags it (`map/hexbin-needs-points`).
+
+- **Auto size:** `nice_floor(longer side of the projected box / 40)` — a
+  "nice" 1/2/2.5/5 × 10ⁿ width, from the data alone. Zooming or exporting
+  never re-bins: the grid is anchored to the **unzoomed** projected data
+  box, so the same point always falls in the same hexagon.
+- **Value:** the sum of the chart's measure column when there is one, else
+  a count of points per hexagon (D8 — no mean in M2). `::CLASSES`,
+  `::RANGE` and `::MIDPOINT` all work exactly as on a choropleth; a bare
+  `::HEXBIN` with no measure colours by count, and the legend defaults to
+  "Points per hexagon".
+- **Equal area:** under the default projections (`'auto'`, `'equal-earth'`,
+  a planar `'none'`), every hexagon covers the same amount of ground
+  regardless of where it sits on the map. `'mercator'` inflates hexagons
+  towards the poles, same as a Mercator choropleth — `'auto'` keeps them
+  equal-area (`dashboard --check` notes `map/hexbin-mercator`).
+  `::CATEGORY` is ignored on a hexbin map (`map/hexbin-category`) — it is
+  always coloured by count or sum.
+- **Legend:** titled with the measure's name (as a choropleth), or "Points
+  per hexagon" when counting; a note under it reads "Hexagons 2.5 km
+  across" (planar: "Hexagons 2.5 across", no unit).
+- **Attributes:** each hexagon carries `data-row`, `data-x` (its grid
+  coordinate, `"q,r"`), `data-value`, `data-class` (classed), `data-count`
+  (points in it) and `data-label` ("around 48.78° N, 9.18° E", the mean
+  position of its points; planar: "around x 4.2, y 1.8"); no
+  `data-series`. The root carries `data-hexbin` (the resolved width).
+  Above 20,000 hexagons the render warns ("use a larger `::HEXBIN`") —
+  points never count toward that cap, only cells do.
+- **Served data:** a hexbin map only bins the rows the server actually
+  returns — `serve`'s `max_rows` (default 100,000) still applies, so a
+  truly huge table should pre-aggregate (e.g. `GROUP BY` a grid) in SQL.
+
+**Finer binning with h3.** Nothing about h3 exists in this extension's own
+code — `::HEXBIN` is a fixed, regular grid, not h3 cells. For an h3-indexed
+view (DuckDB's community extension), load it yourself and draw the cell
+boundaries as ordinary `::MAP` polygons:
+
+```sql
+INSTALL h3 FROM community; LOAD h3;
+SELECT h3_cell_to_boundary_wkt(h3_latlng_to_cell(lat, lon, 6))::MAP, count(*)::BARCHART, 'quantile 5'::CLASSES
+FROM customers GROUP BY 1;
+```
+
+This needs the community extension, installed either natively (`INSTALL …
+FROM community`) or, in the browser, by fetching it from outside this host
+— which breaks on an offline or locked-down server (D9). `::HEXBIN` needs
+neither: it has no extension dependency and no outside fetch.
 
 #### Built-in boundaries (`::REGION`, `::BOUNDARIES`)
 
