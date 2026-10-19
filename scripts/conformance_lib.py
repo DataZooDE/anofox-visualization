@@ -8,6 +8,11 @@ cells of a `-json` result (`svgs_of`), the verdict on a plot call (`check`,
 every SVG (`run_all`, `svg_names`), the PNG contact sheet (`montage`,
 `write_montage`) and the common arguments (`parser`, `ext_path`).
 
+Every case runs on one DuckDB thread (`THREADS`, #264): parallel aggregation
+changes some producers' output between identical runs, so SVG diffs work as
+regression checks. `ANOFOX_CONFORMANCE_THREADS=0` runs with DuckDB's default
+instead (to look for producer bugs that only show in parallel).
+
 Importing it switches off the anofox extensions' usage telemetry for every
 process a harness starts (DATAZOO_DISABLE_TELEMETRY=1, forced: an inherited 0
 must not re-enable it).
@@ -31,12 +36,16 @@ os.environ["DATAZOO_DISABLE_TELEMETRY"] = "1"
 #: The error anofox_plot gives a table that follows no contract schema.
 NO_SCHEMA = "match no plottable schema"
 
+#: DuckDB threads per case (#264); "0" or "" = DuckDB's default.
+THREADS = os.environ.get("ANOFOX_CONFORMANCE_THREADS", "1")
+
 
 def run_duckdb(duckdb: str, script: str, mode: str = "-list", timeout: int = 600,
                quiet: tuple[str, ...] = ()) -> tuple[bool, str]:
     """`script` in a fresh `duckdb -unsigned -noheader <mode>` process → (ok, stdout + stderr).
     ok = exit 0 and no stderr; stderr lines starting with a `quiet` prefix (extension banners) are dropped."""
-    p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", script],
+    pre = f"SET threads = {int(THREADS)};\n" if THREADS not in ("", "0") else ""
+    p = subprocess.run([duckdb, "-unsigned", "-noheader", mode, "-c", pre + script],
                        capture_output=True, text=True, timeout=timeout)
     err = p.stderr or ""
     if quiet:
