@@ -16,6 +16,10 @@
 import { lintScript, rowsJson, scratchRunner, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
+// #204: the assistant's own locked DuckDB-Wasm instance. wasmTools runs
+// every tool and the proposal preview there (requireLocked, previewRunner
+// below); engineLocked is the per-call re-check (plan-204 §2.4).
+import { engineLocked } from "./assist-engine.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // The SDK as one vendored ES module (web/vendor/, built by
@@ -49,9 +53,14 @@ export const LIMITS = {
 // the block says `"enabled": true`; a locked server and an embed never do. In
 // this release only the browser-key transport exists: an authoring server's
 // proxy (`serve`) and an OpenAI-compatible endpoint come later.
-export function assistConfig(block, { served = false, embed = false, live = false } = {}) {
+// T11: a dashboard embedded in someone else's page (an <iframe>) never gets
+// the assistant — the meta CSP it depends on (assist-csp.js) can't carry
+// `frame-ancestors`, so clickjacking the panel into a confirming click is
+// otherwise possible.
+export function assistConfig(block, { served = false, embed = false, live = false, framed = false, host } = {}) {
   const off = (reason) => ({ enabled: false, reason });
   if (served || embed) return off("locked");
+  if (framed) return off("framed");
   const a = block && typeof block === "object" ? block : {};
   if (live) return off("serve-not-yet");
   if (a.enabled !== true) return off("disabled");
@@ -60,14 +69,33 @@ export function assistConfig(block, { served = false, embed = false, live = fals
   const models = { ...MODELS };
   for (const k of ["default", "harder"]) if (typeof a.models?.[k] === "string" && /^claude-[a-z0-9-]+$/.test(a.models[k])) models[k] = a.models[k];
   const rounds = Number.isInteger(a.max_rounds) ? Math.min(LIMITS.rounds, Math.max(1, a.max_rounds)) : LIMITS.rounds;
-  return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false };
+  return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: rememberAllowed(host, a.remember === true) };
 }
+
+// T13: a shared static host (every project under the same account/org
+// shares the storage origin) never remembers the key, even when the
+// installation opts in (L-R2-1). `rememberAllowed`'s own default is off —
+// "Remember" is opt-in per installation (`app-config.json`'s
+// `assistant.remember: true`), not on by default, because a static host
+// can share its origin in ways besides *.github.io/*.gitlab.io (a storage
+// bucket's path-style bucket, htmlpreview.github.io, …) that this denylist
+// can't see; an installation that knows its own hosting is safe opts in.
+export const SHARED_HOST_SUFFIXES = [".github.io", ".gitlab.io"];
+export const rememberAllowed = (host = globalThis.location?.hostname || "", allow = false) =>
+  !!allow && !SHARED_HOST_SUFFIXES.some((s) => String(host).toLowerCase().endsWith(s));
 
 // The user's API key: sessionStorage (gone when the tab closes) unless they
 // chose "Remember on this device" (localStorage). Never in the SQL, a link,
 // an export or a log.
 export const KEY_SLOT = "dp_assist_key";
-export function keyStore(session, local) {
+// `remember`: whether "Remember on this device" (localStorage) is currently
+// allowed (rememberAllowed(host, config) — off by default, always off on a
+// shared static host). When it is not, construction demotes any key already
+// in `local` to `session` and clears `local` (T13): a key remembered before
+// the installation's config changed, or before the host was recognised as
+// shared, does not linger in storage every other script on the origin can
+// read.
+export function keyStore(session, local, { remember = true } = {}) {
   const read = (s) => {
     try {
       return s?.getItem(KEY_SLOT) || "";
@@ -81,13 +109,21 @@ export function keyStore(session, local) {
       else s?.removeItem(KEY_SLOT);
     } catch (_) {}
   };
+  if (!remember) {
+    const old = read(local);
+    if (old) {
+      write(session, old);
+      write(local, "");
+    }
+  }
   return {
     get: () => read(session) || read(local),
     remembered: () => !!read(local),
-    set(key, remember = false) {
+    set(key, rememberThis = false) {
       const k = String(key || "").trim();
-      write(session, remember ? "" : k);
-      write(local, remember ? k : "");
+      const keep = rememberThis && remember;
+      write(session, keep ? "" : k);
+      write(local, keep ? k : "");
     },
     clear() {
       write(session, "");
@@ -115,10 +151,15 @@ export async function loadSdk(url = SDK_URL) {
 // and runtime): no user identity, no `metadata.user_id`.
 export function browserKeyTransport({ Anthropic, apiKey, baseURL }) {
   if (!apiKey) throw new Error("no API key");
-  const client = new Anthropic({ apiKey, baseURL, dangerouslyAllowBrowser: true, maxRetries: 2 });
+  // I-7: pass the base URL explicitly rather than leaving it undefined — the
+  // SDK's own default then reads an environment variable
+  // (`ANTHROPIC_BASE_URL`, via `globalThis.process`/`Deno.env`), which a
+  // page should never let anything but this call decide.
+  const base = baseURL ?? API_HOST;
+  const client = new Anthropic({ apiKey, baseURL: base, dangerouslyAllowBrowser: true, maxRetries: 2 });
   return {
     name: "browser-key",
-    destination: baseURL || API_HOST,
+    destination: base,
     async send(request, { signal, onText, onToolInput } = {}) {
       const stream = client.messages.stream(request, { signal });
       if (onText) stream.on("text", (delta) => onText(delta));
@@ -914,7 +955,46 @@ async function checkProposal(input, tools, signal) {
 // `sampleRows()` = the per-conversation opt-in (with the installation's
 // sample_rows_allowed): only then does run_sql return text values; `known` = the
 // paths and URLs the current SQL already reads.
-export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Set(), commonValues = () => true, sampleRows = () => false, timeoutMs = LIMITS.timeoutMs, checkQueryMs = LIMITS.checkQueryMs, checkMs = LIMITS.checkMs, profiles = new Map() }) {
+// #204: `requireLocked` (default true) is the contract — every tool, and the
+// proposal preview (`previewRunner`), run only against a `db` that is the
+// locked assistant engine. `prepare` (app.js's `prepareSql`-shaped callback)
+// exists only for `requireLocked: false` callers (tests, and the pre-#204
+// code path this replaces): under the lock, the engine's extensions and
+// files are already fixed before it was built, so there is nothing left for
+// `prepare` to do, and a `prepare` driven by the model's SQL would run on
+// whatever `db` it was given — on the page, that is exactly the hole M-1
+// closed. `snapshot` (fq -> {sampled, truncated, types_changed, excluded})
+// comes from `buildEngine`'s result and annotates list_tables/profile_table
+// so the model knows what it's seeing is partial. `extensions` is the
+// engine's actually-loaded set (buildEngine's `extensions`), used only to
+// phrase a clean "not in the assistant's engine: <ext>" error.
+export function wasmTools({
+  db,
+  prepare,
+  lintStep,
+  plan,
+  pageSql,
+  known = new Set(),
+  commonValues = () => true,
+  sampleRows = () => false,
+  timeoutMs = LIMITS.timeoutMs,
+  checkQueryMs = LIMITS.checkQueryMs,
+  checkMs = LIMITS.checkMs,
+  profiles = new Map(),
+  requireLocked = true,
+  snapshot = new Map(),
+  extensions = [],
+}) {
+  if (requireLocked && prepare) throw new Error("assistant tools: prepare is not allowed on the locked engine (#204)"); // M-1
+  const PREPARE = requireLocked ? undefined : prepare;
+  // The per-call re-check (§2.4): one cheap query before every tool call and
+  // every preview batch. `enable_logging` is the one DuckDB setting that
+  // escapes `lock_configuration` (L-1); anything that flips it (or any other
+  // state change `engineLocked` would catch) makes every further call refuse
+  // until M1-3 rebuilds the engine.
+  const locked = async () => {
+    if (requireLocked && !(await engineLocked(db))) throw new Error("assistant engine changed state; rebuilding (#204)");
+  };
   // The check at the execution point: every statement of every query a tool
   // runs from the model's SQL (the planned statements, the lint's prelude, its
   // input SETs, its @requires globs, run_sql's query) is classified and its
@@ -986,24 +1066,77 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
   // Without sample rows no text value leaves, error messages included
   // (quietError: an error's class, and its text only in a reviewed shape).
   const quiet = () => !(sampleRows() && commonValues());
-  const say = (msg, named) => (quiet() ? quietError(msg, named) : String(msg));
+  // I-2: the engine's own error shapes (Permission Error from the lock,
+  // GDAL's VSI/dataset errors, a catalog lookup for a function an unloaded
+  // extension would supply) are rewritten into something the model can act
+  // on before `quietError`'s generic reviewed-shapes list ever sees them —
+  // they aren't in `SAFE_ERRORS`, so without this they would just be
+  // withheld. The path inside is shown in full when sample rows are
+  // allowed; otherwise only when `named(path)` says the SQL itself wrote it
+  // literally (never a value the data made).
+  const engineErrorText = (raw, named) => {
+    const line = String((raw && raw.message) || raw).split("\n")[0].trim();
+    const show = (p) => (quiet() ? (named(p) ? p : "…") : p);
+    let m = /^Permission Error: Cannot access (?:file|directory) "((?:[^"]|"")*)"/.exec(line);
+    if (m) {
+      const p = m[1].replace(/""/g, '"');
+      return /^[a-z][a-z0-9+.-]*:\/\//i.test(p) ? "remote files are not available to the assistant" : `not in the assistant's snapshot: ${show(p)}`;
+    }
+    m = /^IO Error: Cannot open file '((?:[^']|'')*)' with VSI prefix/.exec(line) || /^IO Error: Could not open GDAL dataset at: (.*)$/.exec(line);
+    if (m) return `not available to the assistant: ${show(m[1].replace(/''/g, "'"))}`;
+    // DuckDB's own catalog lookup names the providing extension directly
+    // for a function it knows about (a bundled/official extension, e.g.
+    // spatial): "… is not in the catalog, but it exists in the X extension."
+    m = /^Catalog Error: (?:Scalar|Table|Aggregate) Function with name "([^"]+)" is not in the catalog, but it exists in the (\w+) extension\.$/.exec(line);
+    if (m && !extensions.includes(m[2])) return `not in the assistant's engine: ${m[2]}`;
+    // A third-party extension (anofox_*) DuckDB's own hint database doesn't
+    // know, so the plain "does not exist!" shape is all there is — guessed
+    // from the name, the same way web/app.js's own prepareSql detects it.
+    m = /^Catalog Error: (?:Scalar Function|Table Function|Aggregate Function) with name ([^\s"']+) does not exist!$/.exec(line);
+    if (m) {
+      const fn = m[1].toLowerCase();
+      const ext = /^st_/i.test(fn) ? "spatial" : /anofox_fcst|^ts_/i.test(fn) ? "anofox_forecast" : ANOFOX_TABLES.has(fn) ? "anofox_statistics" : null;
+      if (ext && !extensions.includes(ext)) return `not in the assistant's engine: ${ext}`;
+    }
+    return null;
+  };
+  const say = (msg, named) => engineErrorText(msg, named) ?? (quiet() ? quietError(msg, named) : String(msg));
   const tools = {
     async list_tables({ filter = "" }) {
+      await locked();
       const all = await tables();
       const f = String(filter).toLowerCase();
       const hit = all.filter((t) => !f || t.name.toLowerCase().includes(f)).slice(0, LIMITS.catalog);
-      return stableJson(hit.map((t) => ({ name: display(t, all), kind: t.kind, rows: t.rows, columns: t.cols })));
+      const flags = (t) => {
+        const s = snapshot.get(`${qid(t.db)}.${qid(t.schema)}.${qid(t.name)}`);
+        return s ? { sampled: s.sampled || undefined, truncated: s.truncated || undefined, types_changed: s.types_changed || undefined } : {};
+      };
+      const rows = hit.map((t) => ({ name: display(t, all), kind: t.kind, rows: t.rows, columns: t.cols, ...flags(t) }));
+      // L-2: what the snapshot left out entirely (a remote database, too
+      // large, timed out, …) — listed with no rows, so the model knows it
+      // exists rather than concluding it doesn't.
+      for (const [fq, v] of snapshot) if (v?.excluded) rows.push({ name: fq, excluded: v.excluded });
+      return stableJson(rows);
     },
     async profile_table({ table }) {
+      await locked();
       const t = await resolve(table);
       if (!profiles.has(t.fq)) profiles.set(t.fq, await profileTable(rowsOf, pageSql, t.fq));
       const p = profiles.get(t.fq);
-      return stableJson({ table: t.display, rows: p.total, sampled: p.sampled || undefined, columns: p.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues: commonValues() })) });
+      return stableJson({
+        table: t.display,
+        rows: p.total,
+        sampled: p.sampled || snapshot.get(t.fq)?.sampled || undefined,
+        truncated: snapshot.get(t.fq)?.truncated || undefined,
+        types_changed: snapshot.get(t.fq)?.types_changed || undefined,
+        columns: p.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues: commonValues() })),
+      });
     },
     // One read-only query, as DuckDB's own parser reads it: exactly one
     // SELECT-class statement (json_serialize_sql), nothing denied in its
     // tree; run as one prepared-checked statement with a cancelling timeout.
     async run_sql({ sql }) {
+      await locked();
       const stmts = splitStatements(sql);
       if (stmts.length !== 1) throw new Error("refused: run_sql takes exactly one statement");
       const s = stmts[0];
@@ -1015,7 +1148,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
       const denied = await inspect(s, own, known, {}, names);
       if (denied.length) throw new Error(`refused: ${denied.join("; ")}`);
       const q = `SELECT * FROM (${s.replace(/;\s*$/, "")}) AS _q LIMIT ${LIMITS.runRows + 1}`;
-      const typed = scratchRunner(db, { prepare, timeoutMs, guard: guardFor(known, names), toRows });
+      const typed = scratchRunner(db, { prepare: PREPARE, timeoutMs, guard: guardFor(known, names), toRows });
       let res;
       try {
         res = await typed(q);
@@ -1030,12 +1163,13 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     // The strict check of a whole script: {ok, text, issues}; `signal` (the
     // request's) stops it before its next query ({cancelled: true}).
     async check(sql, { signal } = {}) {
+      await locked();
       const until = Date.now() + checkMs;
       const planned = JSON.parse(plan(sql));
       // A literal @requires path (the gate refuses URLs and ${…}) is one the
       // dashboard uses: the lint may glob() it.
       const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
-      const run = scratchRunner(db, { prepare, timeoutMs: checkQueryMs, guard: guardFor(allowed, await catalogNames()) });
+      const run = scratchRunner(db, { prepare: PREPARE, timeoutMs: checkQueryMs, guard: guardFor(allowed, await catalogNames()) });
       const res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => !!signal?.aborted || Date.now() > until });
       if (!res && signal?.aborted) return { ok: false, cancelled: true, text: "cancelled", issues: [], diagnostics: [], statements: [] };
       if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
@@ -1044,25 +1178,42 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         for (const [q, a] of res.answers) if (q.endsWith(`${p.sql};`)) return a;
         return null;
       };
+      // D3: the only Permission Error that is not a real problem is one for
+      // a *known* remote path the statement itself reads literally — a
+      // reader the dashboard already uses, over a file the engine never
+      // pre-fetches (D3). That statement is `unchecked`, not failed; its
+      // `sql-error` diagnostic is demoted to `info` and dropped from
+      // `issues`. Any other Permission Error (an unknown path, a computed
+      // one, anything else) stays an error.
+      const unchecked = new Set(); // 1-based statement numbers
       const statements = planned.map((p, i) => {
         const roles = (p.roles || []).map((r) => r[1]);
         const kind = p.setup ? "setup" : roles.some((r) => INPUT_ROLES.has(r)) ? "input" : "panel";
         const a = answer(p);
         const out = { n: i + 1, kind };
         if (roles.length) out.roles = roles;
-        if (a?.error) out.error = say(a.error.split("\n")[0], named).slice(0, 200);
-        else if (a && kind !== "setup") out.rows = JSON.parse(a.rows || "[]").length;
+        if (a?.error) {
+          const line = String(a.error).split("\n")[0].trim();
+          const m = /^Permission Error: Cannot access (?:file|directory) "((?:[^"]|"")*)"/.exec(line);
+          const path = m ? m[1].replace(/""/g, '"') : null;
+          if (path && looksLikeUrl(path) && known.has(path) && pathsOf(p.sql).includes(path)) {
+            out.unchecked = "reads a remote file; it runs on Apply";
+            unchecked.add(i + 1);
+          } else out.error = say(a.error.split("\n")[0], named).slice(0, 200);
+        } else if (a && kind !== "setup") out.rows = JSON.parse(a.rows || "[]").length;
         return out;
       });
       const strictCode = (c) => c.startsWith("design/") || c.startsWith("requires/");
-      const issues = res.diagnostics.filter((d) => d.severity === "error" || strictCode(d.code));
+      const diagnostics = res.diagnostics.map((d) => (d.code === "sql-error" && unchecked.has(d.stmt) ? { ...d, severity: "info" } : d));
+      const issues = diagnostics.filter((d) => d.severity === "error" || strictCode(d.code));
+      const ok = issues.length === 0;
       const text = stableJson({
-        ok: res.ok,
+        ok,
         summary: res.summary,
         statements,
-        diagnostics: res.diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: quietDiagnostic(d, quiet(), named) })),
+        diagnostics: diagnostics.map((d) => ({ stmt: d.stmt, severity: d.severity, code: d.code, message: quietDiagnostic(d, quiet(), named) })),
       });
-      return { ok: res.ok, text, issues, diagnostics: res.diagnostics, statements };
+      return { ok, text, issues, diagnostics, statements };
     },
     // The gate before anything of a script runs: every statement exactly as
     // it will run (the plan), by keyword and by DuckDB's parse tree. A class 3
@@ -1074,6 +1225,7 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
     // (${…}: its value comes from the session, and the lint would glob() it),
     // is refused too.
     async gate(sql) {
+      await locked();
       const refused = [];
       const objs = { tables: new Set(), scalars: new Set(), relations: new Set() };
       const names = await catalogNames();
@@ -1086,6 +1238,23 @@ export function wasmTools({ db, prepare, lintStep, plan, pageSql, known = new Se
         noteMade(p.sql, objs);
       }
       return { allowed: !refused.length, statements: refused };
+    },
+    // H-1: every query of a proposal *before* Apply — the preview's panels,
+    // input option queries, and drill / cross-filter re-queries — runs here,
+    // never on the page. One call = one scratch session in the locked
+    // engine, guarded exactly like `check`'s queries (the plan's own
+    // @requires paths plus `known`); `sql` is the statement with whatever
+    // setup prelude `lint_step` builds for it, the same shape `check`
+    // already runs. The lock is re-checked per batch (`locked()`), same as
+    // every other tool.
+    previewRunner(proposalSql) {
+      const planned = JSON.parse(plan(proposalSql));
+      const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
+      return async (sql) => {
+        await locked();
+        const names = await catalogNames();
+        return scratchRunner(db, { timeoutMs: checkQueryMs, guard: guardFor(allowed, names) })(sql);
+      };
     },
   };
   return tools;
