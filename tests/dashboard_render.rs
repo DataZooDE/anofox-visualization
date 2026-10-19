@@ -431,3 +431,91 @@ fn headless_info_is_a_tooltip_on_the_title() {
     assert!(svg.contains("class=\"dp-info\""), "no ⓘ: {svg}");
     assert!(svg.contains("ⓘ<title>Weekly</title>"), "no definition");
 }
+
+// #226: the headless table honours ::TOTALS like the browser.
+struct TotalsDb {
+    rows: usize,
+    spec: &'static str,
+}
+impl DataProvider for TotalsDb {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        if !sql.contains("FROM t") {
+            return Ok(vec![("c0".into(), s(&[self.spec]))]);
+        }
+        let n = self.rows;
+        Ok(vec![
+            ("region".into(), s(&["North", "South", "East"][..n])),
+            ("revenue".into(), f(&[1200.0, 800.0, 1000.0][..n])),
+            ("units".into(), f(&[1.0, 2.0, 4.0][..n])),
+            ("Per 10k".into(), f(&[0.15, 0.25, 0.45][..n])),
+        ])
+    }
+}
+const TOTALS_TABLE: &str = "SELECT region::TABLE, revenue::MONEY, units, \"Per 10k\" FROM t;";
+/// The totals rows of a rendered dashboard: the text after each TOTAL label,
+/// up to the end of its table's svg.
+fn totals_rows(svg: &str) -> Vec<String> {
+    svg.split(">TOTAL</text>")
+        .skip(1)
+        .map(|t| t.split("</svg>").next().unwrap_or("").to_string())
+        .collect()
+}
+fn render_totals(spec: Option<&'static str>, tables: usize, rows: usize) -> Vec<String> {
+    let mut script = String::new();
+    if let Some(sp) = spec {
+        script.push_str(&format!("SELECT '{sp}'::TOTALS;\n"));
+    }
+    for _ in 0..tables {
+        script.push_str(TOTALS_TABLE);
+        script.push('\n');
+    }
+    let mut db = TotalsDb {
+        rows,
+        spec: spec.unwrap_or(""),
+    };
+    totals_rows(&render_dashboard_svg(&script, &mut db, &DashboardOptions::default()).unwrap())
+}
+
+#[test]
+fn svg_table_honours_totals() {
+    // the defaults: units summed, the rate (Per 10k) without a total
+    let t = render_totals(None, 1, 3);
+    assert_eq!(t.len(), 1);
+    assert!(
+        t[0].contains(">7<") && !t[0].contains(">0.28<") && !t[0].contains(">0.85<"),
+        "{t:?}"
+    );
+    // a named column (raw name or header, any case); the rest keep their default
+    let t = render_totals(Some("Per 10k: mean"), 1, 3);
+    assert!(t[0].contains(">0.28<") && t[0].contains(">7<"), "{t:?}");
+    let t = render_totals(Some("Units: median; PER 10K: max"), 1, 3);
+    assert!(
+        t[0].contains(">2<") && t[0].contains(">0.45<") && !t[0].contains(">7<"),
+        "{t:?}"
+    );
+    let t = render_totals(Some("units: count"), 1, 3);
+    assert!(t[0].contains(">3<") && !t[0].contains(">7<"), "{t:?}");
+    // a bare value: every numeric column (a rate too, as in the browser)
+    let t = render_totals(Some("mean"), 1, 3);
+    assert!(t[0].contains(">2.3<") && t[0].contains(">0.28<"), "{t:?}");
+    let t = render_totals(Some("sum"), 1, 3);
+    assert!(t[0].contains(">7<") && t[0].contains(">0.85<"), "{t:?}");
+    let t = render_totals(Some("Per 10k: none; sum"), 1, 3);
+    assert!(t[0].contains(">7<") && !t[0].contains(">0.85<"), "{t:?}");
+    // 'none' hides the row
+    assert!(render_totals(Some("none"), 1, 3).is_empty());
+}
+
+#[test]
+fn svg_table_totals_are_for_the_next_table_and_show_from_two_rows() {
+    let t = render_totals(Some("Per 10k: mean"), 2, 3);
+    assert_eq!(t.len(), 2, "{t:?}");
+    assert!(t[0].contains(">0.28<") && !t[1].contains(">0.28<"), "{t:?}");
+    // two rows: no default totals row, but a ::TOTALS value shows one
+    assert!(render_totals(None, 1, 2).is_empty());
+    let t = render_totals(Some("units: sum"), 1, 2);
+    assert!(t.len() == 1 && t[0].contains(">3<"), "{t:?}");
+}
