@@ -1474,8 +1474,20 @@ show them; selection and filtering keep using the raw values.
 ### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
-`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. The toolbar also has
-an **auto-refresh** interval.
+`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. Without a
+`::CATEGORY`, several columns of the **same** chart family (e.g.
+`events::LINECHART, failures::LINECHART`, or `events::BARCHART,
+failures::BARCHART`) get a real legend, one entry per column, named by the
+column's own header (an `AS alias` wins; a bare column name otherwise) — not
+a positional `c1`, `c2`, … placeholder. A **mixed** combo (a different-kind
+overlay on a base chart, e.g. `sessions::BARCHART, revenue::LINECHART`) keeps
+the base in the brand colour with no legend; each overlay just takes the next
+palette colour so it never disappears into the base. For a legend that also
+dodges (bars side by side instead of overlaid) or needs a title other than
+the column header, pivot to the long form instead: one shared measure column
+plus a `::CATEGORY` naming the series.
+
+The toolbar also has an **auto-refresh** interval.
 
 ### Themes, dark mode, branding and locale
 
@@ -1986,7 +1998,23 @@ Clicking a channel narrows those panels to that channel; clicking empty space
 clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
 
 **Selecting table rows** is opt-in per table, with a `::ROWSELECT` directive
-before it (tables without one are not clickable):
+before it (tables without one are not clickable). Like `::COL`/`::HEIGHT`,
+`::ROWSELECT` (and `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`,
+`::SUBTOTAL`, `::SELECT_AS`, `::DRILL`, `::EMPTY` — every `[layout]` role
+described as "next table's …" / "next panel's …") is its own **preceding**
+statement, never a column on the table/chart's own `SELECT`:
+
+```sql skip
+-- Wrong: looks like a column, passes `--check` clean, but 'single' and
+-- 'none' render as literal extra table columns and the row click does
+-- nothing (`dashboard --check --strict` now flags this: `layout/next-panel`).
+SELECT id ::TABLE, name, 'single'::ROWSELECT, 'none'::TOTALS FROM t;
+
+-- Right: each directive is its own statement, read for the table that follows.
+SELECT 'single'::ROWSELECT;
+SELECT 'none'::TOTALS;
+SELECT id ::TABLE, name FROM t;
+```
 
 | `SELECT … ::ROWSELECT;` | A click on a row… |
 |---|---|
@@ -2386,7 +2414,11 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 - **Casts are read from the main `SELECT` list** — the first `SELECT` at
   bracket depth 0. A leading `WITH` CTE list is fine
   (`WITH s AS (…) SELECT week::XAXIS, n::LINECHART FROM s`); casts inside a CTE
-  body or subquery are ordinary SQL.
+  body or subquery are ordinary SQL. A top-level `UNION`/`UNION ALL`/
+  `INTERSECT`/`EXCEPT` reads as one SELECT list: the **first** branch's roles
+  decide the panel's shape, and every later branch's own `::ROLE` casts are
+  stripped the same way (repeat them or not — a bare column just takes the
+  same position).
 - **A `::ROLE` may follow an `AS` alias on any column.** The alias is replaced by
   the internal `c{i}` name. For a measure it becomes the legend name of a combo
   chart; for an input it *is* the DuckDB variable name
