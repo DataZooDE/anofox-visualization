@@ -263,6 +263,9 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   ]);
   const roles = JSON.stringify([[0, "REGION"], [1, "BARCHART"]]);
   assert.deepEqual(JSON.parse(wasm.map_layers(rows, roles)), ["de-states"]);
+  // M2b: ::ORIGIN/::DEST codes guess the layer the same way ::REGION does.
+  const flowRoles = JSON.stringify([[0, "ORIGIN"], [1, "DEST"]]);
+  assert.deepEqual(JSON.parse(wasm.map_layers(rows, flowRoles)), ["de-states"]);
   const before = wasm.render_panel(rows, roles, 460, 300, "", "");
   assert.ok(!/data-row/.test(before), "nothing to draw before the layer is registered");
   const csv = readFileSync(new URL("../../web/data/boundaries/de-states.csv", import.meta.url), "utf8");
@@ -292,6 +295,17 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
   assert.match(svg, /<circle [^>]*data-size="100"/);
   assert.match(svg, /<circle [^>]*data-fsize="[^"]*"/);
   assert.match(svg, /<circle [^>]*data-fvalue="[^"]*"/);
+}
+
+// M2b: a flow panel's arrowhead is a ggplot-rs mark-part, data-part="arrow"
+// (#308 — a real geom_curve + arrow() layer, not hand-written SVG).
+{
+  const rows = JSON.stringify([
+    { c0: "{\"lon\": 9.0, \"lat\": 50.0, \"name\": \"A\"}", c1: "{\"lon\": 10.0, \"lat\": 51.0, \"name\": \"B\"}" },
+  ]);
+  const roles = JSON.stringify([[0, "ORIGIN"], [1, "DEST"]]);
+  const svg = wasm.render_panel(rows, roles, 460, 300, "", "");
+  assert.match(svg, /data-part="arrow"/);
 }
 
 console.log(`examples_lib_test: ok (${EXAMPLES.length} examples in ${exampleAreas(EXAMPLES).length} areas)`);

@@ -50,7 +50,7 @@ fn as_pts(ring: &[[f64; 2]]) -> Vec<(f64, f64)> {
 /// The anchor(s) of one row's shapes: a point is itself (a `MultiPoint`
 /// gives one per point); otherwise the largest (by bounding-box area) core
 /// polygon's pole of inaccessibility; a line alone has no anchor.
-fn anchors_of(shapes: &[Shape]) -> Vec<[f64; 2]> {
+pub(super) fn anchors_of(shapes: &[Shape]) -> Vec<[f64; 2]> {
     let points: Vec<[f64; 2]> = shapes
         .iter()
         .filter_map(|s| match s {

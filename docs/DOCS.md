@@ -87,6 +87,8 @@ terminal.
 | `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
 | `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |
 | `::LON` | `::LONGITUDE`, `::LNG` | chart | a map point's longitude (degrees, WGS84), with ::LAT |
+| `::ORIGIN` | `::FROM_PLACE` | chart | a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE |
+| `::DEST` | `::DESTINATION`, `::TO_PLACE` | chart | a flow map's end (see ::ORIGIN) |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts' |
 | `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
@@ -118,6 +120,7 @@ terminal.
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
+| `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons: 'auto' or a width across ('25 km'; planar: '2.5'); sums the measure, else counts rows |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1215,6 +1218,139 @@ flags skipped rows with `map/size-not-positive`.
   highest first, without the WKT.
 - **Size**: above 100,000 drawn marks the render warns (aggregate in SQL, e.g.
   with the h3 extension); `map/too-many-marks` flags more than 20,000 points.
+
+#### Flow maps (`::ORIGIN`, `::DEST`)
+
+```sql
+SELECT {'lon': k.lon, 'lat': k.lat, 'name': k.name || ' DC'}::ORIGIN,
+       d.state::DEST, sum(v.deliveries) AS "Deliveries"::SIZE,
+       k.name || ' DC'::CATEGORY,
+       'Deliveries from each DC into each state, last 12 weeks; width by volume.'::INFO
+FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags)
+GROUP BY ALL ORDER BY 3 DESC;
+```
+
+An `::ORIGIN`/`::DEST` pair draws a bent arc between two places. Each end
+takes one of three forms:
+
+- a **region code** (`'DE-BY'::ORIGIN`), looked up in the boundary pack the
+  same way `::REGION` is;
+- a **WKT `POINT`** (`'POINT(9.18 48.78)'::ORIGIN`);
+- a **struct-as-JSON** (`{'lon': 9.18, 'lat': 48.78, 'name': 'Stuttgart'}::ORIGIN`)
+  — `lon`/`lng`/`x` and `lat`/`y` (any case), plus an optional `name`; without
+  one, the coordinates are shown ("48.78° N, 9.18° E").
+
+**Arc shape (D6):** a quadratic curve whose control point sits 0.2 × the
+chord's length to the **right of the direction of travel** — so A→B and B→A
+draw as two separate, visible arcs rather than overlapping. The arrowhead
+sits at 85 % along the arc, sized from the stroke width.
+
+**Width:** a non-constant numeric `::SIZE` scales `width = 0.75 +
+7.25·√(v / vmax)` px (`v ≤ 0`/NA isn't drawn); a constant `::SIZE` fixes
+every arc's width (clamped 0.5–12 px, no legend); with no `::SIZE` every
+flow is 1.5 px. A **width legend** (three nice values, the same derivation
+as the symbol size legend) stacks under the colour legend when widths vary.
+
+**Colour** follows a measure through the usual ramp/classes, else
+`::CATEGORY`, else the brand tint; stroke opacity is 0.85, or `::ALPHA`.
+`'flow'::LINESTYLE` marks the arc `class="dp-flow"` and dashes it (the CSS
+animates the dashes, so goods/orders read as moving); `'dashed'::LINESTYLE`
+dashes without the animation class.
+
+**Backdrop (D4):** when both ends are region codes and there is no explicit
+`::BASEMAP`, the whole matched layer (Antarctica excluded) is drawn as an
+unfitted backdrop automatically — the map still fits to the flows' own
+extent (padded 8 %, wider than a choropleth's 4 %, so the arcs' bulge
+fits), not to the whole layer.
+
+**End labels:** `::LABEL_TOP`/`::DATALABELS` label the distinct **ends**, not
+the arcs — an end's importance is the sum of the sizes of every flow
+touching it.
+
+**Attributes:** each arc carries `data-row`, `data-series` (`::CATEGORY`,
+else the origin's name), `data-label` (`::LABEL`, else `"{origin} →
+{dest}"`), `data-x` (the end-pair key), `data-orig`/`data-dest` (the
+resolved names), `data-value`, `data-size`/`data-fsize` and `data-fvalue`
+(once — never duplicated with a colour measure's own `data-fvalue`). Each
+arrowhead carries `data-head`, `data-series` and `data-x`, but **no**
+`data-row` — it is not a keyboard stop or an as-table row, though it dims
+with its arc's series on hover. A small dot marks every distinct end.
+
+**Caps:** above 10,000 flows, only the 10,000 widest are drawn, with the
+render warning "map: `n` flows, the 10,000 widest drawn — aggregate in
+SQL". `dashboard --check` warns above 2,000 flows
+(`map/too-many-flows`), flags an `::ORIGIN` with no `::DEST` or the reverse
+(`map/flow-needs-both`), an end that matches no region
+(`map/flow-missing-end`), and notes flows whose two ends are the same place
+(`map/flow-self`) — none of those three are drawn.
+
+The summary reads "`n` flows between `o` origins and `d` destinations
+(`projection`). Largest: `A` → `B` `value`; smallest: `C` → `D` `value`",
+plus "; `k` not drawn (no location)" and "; `s` start and end at the same
+place" when either is non-zero.
+
+#### Density (`::HEXBIN`)
+
+```sql
+SELECT lat ::LAT, lon ::LON, 'auto'::HEXBIN, 'quantile 5'::CLASSES,
+       'de-states'::BASEMAP, 'Customers cluster around three hubs'::TITLE
+FROM customers;
+```
+
+`::HEXBIN` aggregates a map's points — `::LAT`/`::LON`, or WKT
+`POINT`/`MULTIPOINT` — into a grid of hexagons, so thousands of points read
+as a density surface instead of an overplotted smear. Its value is `'auto'`
+(default), a width across (`'25 km'`), or a bare number — metres, or on a
+`'none'` projection planar units (`'km'` is accepted and ignored there, since
+the written number is already the planar width). Applying it to a map with
+no points (a `::REGION`/WKT-area map) does nothing — `dashboard --check`
+flags it (`map/hexbin-needs-points`).
+
+- **Auto size:** `nice_floor(longer side of the projected box / 40)` — a
+  "nice" 1/2/2.5/5 × 10ⁿ width, from the data alone. Zooming or exporting
+  never re-bins: the grid is anchored to the **unzoomed** projected data
+  box, so the same point always falls in the same hexagon.
+- **Value:** the sum of the chart's measure column when there is one, else
+  a count of points per hexagon (D8 — no mean in M2). `::CLASSES`,
+  `::RANGE` and `::MIDPOINT` all work exactly as on a choropleth; a bare
+  `::HEXBIN` with no measure colours by count, and the legend defaults to
+  "Points per hexagon".
+- **Equal area:** under the default projections (`'auto'`, `'equal-earth'`,
+  a planar `'none'`), every hexagon covers the same amount of ground
+  regardless of where it sits on the map. `'mercator'` inflates hexagons
+  towards the poles, same as a Mercator choropleth — `'auto'` keeps them
+  equal-area (`dashboard --check` notes `map/hexbin-mercator`).
+  `::CATEGORY` is ignored on a hexbin map (`map/hexbin-category`) — it is
+  always coloured by count or sum.
+- **Legend:** titled with the measure's name (as a choropleth), or "Points
+  per hexagon" when counting; a note under it reads "Hexagons 2.5 km
+  across" (planar: "Hexagons 2.5 across", no unit).
+- **Attributes:** each hexagon carries `data-row`, `data-x` (its grid
+  coordinate, `"q,r"`), `data-value`, `data-class` (classed), `data-count`
+  (points in it) and `data-label` ("around 48.78° N, 9.18° E", the mean
+  position of its points; planar: "around x 4.2, y 1.8"); no
+  `data-series`. The root carries `data-hexbin` (the resolved width).
+  Above 20,000 hexagons the render warns ("use a larger `::HEXBIN`") —
+  points never count toward that cap, only cells do.
+- **Served data:** a hexbin map only bins the rows the server actually
+  returns — `serve`'s `max_rows` (default 100,000) still applies, so a
+  truly huge table should pre-aggregate (e.g. `GROUP BY` a grid) in SQL.
+
+**Finer binning with h3.** Nothing about h3 exists in this extension's own
+code — `::HEXBIN` is a fixed, regular grid, not h3 cells. For an h3-indexed
+view (DuckDB's community extension), load it yourself and draw the cell
+boundaries as ordinary `::MAP` polygons:
+
+```sql
+INSTALL h3 FROM community; LOAD h3;
+SELECT h3_cell_to_boundary_wkt(h3_latlng_to_cell(lat, lon, 6))::MAP, count(*)::BARCHART, 'quantile 5'::CLASSES
+FROM customers GROUP BY 1;
+```
+
+This needs the community extension, installed either natively (`INSTALL …
+FROM community`) or, in the browser, by fetching it from outside this host
+— which breaks on an offline or locked-down server (D9). `::HEXBIN` needs
+neither: it has no extension dependency and no outside fetch.
 
 #### Built-in boundaries (`::REGION`, `::BOUNDARIES`)
 

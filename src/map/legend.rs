@@ -39,6 +39,14 @@ pub(super) enum Extra {
         /// `(radius px, label)`, largest first.
         items: Vec<(f64, String)>,
     },
+    /// A flow-width key (M2b): horizontal line samples with nice values.
+    Widths {
+        title: Option<String>,
+        /// `(width px, label)`, widest first.
+        items: Vec<(f64, String)>,
+    },
+    /// A single note line (M2c's "Hexagons 2.5 km across").
+    Note(String),
 }
 
 /// The legend box: its content, the no-data count, the title and size.
@@ -158,19 +166,93 @@ fn sizes_extra(o: &RenderOptions, m: &Model, w: f64, h: f64) -> Option<(Extra, f
     ))
 }
 
+/// The width-key extra of a flow map (`None` without a varying `::SIZE`,
+/// mirroring [`sizes_extra`]'s guard).
+fn widths_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
+    let fl = m.flows.as_ref()?;
+    if fl.fixed.is_some() || fl.vmax <= 0.0 {
+        return None;
+    }
+    let v1 = nice_floor(fl.vmax);
+    if v1 <= 0.0 {
+        return None;
+    }
+    let v2 = nice_floor(v1 / 4.0);
+    let v3 = nice_floor(v1 / 16.0);
+    let mut values = vec![v1, v2, v3];
+    values.retain(|v| *v > 0.0);
+    values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let tw = |s: &str| crate::ticks::text_width(s, FONT);
+    // The exact scale the overlay (`overlay.rs`) maps `linewidth` through,
+    // so the legend's key widths are never a second, hand-rolled formula
+    // that could drift from what's actually drawn.
+    use ggplot_rs::scale::Scale as _;
+    let scale = ggplot_rs::scale::linewidth::ScaleLinewidthContinuous::new()
+        .with_range(0.75, 8.0)
+        .with_transform(ggplot_rs::scale::transform::ScaleTransform::Sqrt)
+        .with_limits(0.0, fl.vmax);
+    let width_of = |v: f64| -> f64 {
+        scale
+            .map_to_size(&ggplot_rs::prelude::Value::Float(v))
+            .unwrap_or(0.75)
+    };
+    let items: Vec<(f64, String)> = values
+        .into_iter()
+        .map(|v| (width_of(v), fl.fmt.short(v, &o.locale)))
+        .filter(|(w, _)| *w >= 1.0)
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let widest_label = items.iter().map(|(_, l)| tw(l)).fold(0.0, f64::max);
+    let line_len = 24.0_f64;
+    let width = line_len + 6.0 + widest_label;
+    let title_row = if fl.title.is_some() { ROW } else { 0.0 };
+    let height = title_row + items.len() as f64 * ROW;
+    Some((
+        Extra::Widths {
+            title: fl.title.clone(),
+            items,
+        },
+        width,
+        height,
+    ))
+}
+
+/// The hexbin note extra (M2c): "Hexagons 2.5 km across" / German "Sechsecke
+/// 2.5 km breit" (planar: no unit), under the colour legend.
+fn hexbin_note_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
+    let hb = m.hexbin.as_ref()?;
+    let german = o.locale.tag.starts_with("de");
+    let w = super::hexbin::fmt_width(hb.width, hb.planar);
+    let text = if german {
+        format!("Sechsecke {w} breit")
+    } else {
+        format!("Hexagons {w} across")
+    };
+    let tw = crate::ticks::text_width(&text, FONT);
+    Some((Extra::Note(text), tw, ROW))
+}
+
 /// The legend of a map, sized for a panel `w`×`h`.
 pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendBox {
     // drawn rows without a value (rows without geometry — a backdrop's —
     // don't count); with graduated symbols a row's regions may have moved
     // into the backdrop (D4), so a row counts when it has a symbol anchor.
-    let nodata = match (&m.fill, &m.symbols) {
-        (Fill::Measure(s), Some(sym)) => (0..m.rows)
-            .filter(|i| s.values[*i].is_none() && !sym.anchors[*i].is_empty())
-            .count(),
-        (Fill::Measure(s), None) => (0..m.rows)
-            .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
-            .count(),
-        _ => 0,
+    // A hexbin map's `ValueScale` is indexed by cell, not by row, and every
+    // occupied cell always has a value (M2c) — no "no data" hatch for it.
+    let nodata = if m.hexbin.is_some() {
+        0
+    } else {
+        match (&m.fill, &m.symbols) {
+            (Fill::Measure(s), Some(sym)) => (0..m.rows)
+                .filter(|i| s.values[*i].is_none() && !sym.anchors[*i].is_empty())
+                .count(),
+            (Fill::Measure(s), None) => (0..m.rows)
+                .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
+                .count(),
+            _ => 0,
+        }
     };
     let tw = |s: &str| crate::ticks::text_width(s, FONT);
     let max_w = (w - 16.0).max(60.0);
@@ -300,6 +382,18 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
             }
         }
     };
+    // M2c: counting (no measure) hexbin map — the measure's own title (if
+    // any) wins above; without one, default to "Points per hexagon".
+    if title.is_none() && m.hexbin.is_some() {
+        title = Some(
+            if o.locale.tag.starts_with("de") {
+                "Punkte je Sechseck"
+            } else {
+                "Points per hexagon"
+            }
+            .to_string(),
+        );
+    }
     if let Some(t) = &title {
         cw = cw.max(tw(t));
         ch += ROW;
@@ -312,6 +406,16 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
     let mut ew = 0.0_f64;
     let mut eh = 0.0_f64;
     if let Some((extra, xw, xh)) = sizes_extra(o, m, w, h) {
+        ew = ew.max(xw);
+        eh += xh + EXTRA_GAP;
+        extras.push(extra);
+    }
+    if let Some((extra, xw, xh)) = widths_extra(o, m) {
+        ew = ew.max(xw);
+        eh += xh + EXTRA_GAP;
+        extras.push(extra);
+    }
+    if let Some((extra, xw, xh)) = hexbin_note_extra(o, m) {
         ew = ew.max(xw);
         eh += xh + EXTRA_GAP;
         extras.push(extra);
@@ -526,6 +630,33 @@ pub(super) fn legend_svg(
                     ));
                     g.push_str(&text(lx, base_y - 2.0 * r - 3.0, "start", &ink, "", label));
                 }
+            }
+            Extra::Widths { title, items } => {
+                if let Some(t) = title {
+                    g.push_str(&text(
+                        PAD,
+                        y + ROW / 2.0 - 1.0,
+                        "start",
+                        &muted,
+                        " font-weight=\"600\"",
+                        t,
+                    ));
+                    y += ROW;
+                }
+                const LINE: f64 = 24.0;
+                for (w, label) in items {
+                    let cy = y + ROW / 2.0;
+                    g.push_str(&format!(
+                        "<line x1=\"{PAD}\" y1=\"{cy:.1}\" x2=\"{:.1}\" y2=\"{cy:.1}\" stroke=\"{muted}\" stroke-width=\"{w:.2}\" stroke-linecap=\"round\"/>",
+                        PAD + LINE
+                    ));
+                    g.push_str(&text(PAD + LINE + 6.0, cy, "start", &ink, "", label));
+                    y += ROW;
+                }
+            }
+            Extra::Note(note) => {
+                g.push_str(&text(PAD, y + ROW / 2.0 - 1.0, "start", &muted, "", note));
+                y += ROW;
             }
         }
     }

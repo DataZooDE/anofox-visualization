@@ -339,6 +339,10 @@ pub enum Role {
     Classes,
     /// The centre of a map's diverging colour ramp (`::MIDPOINT`).
     Midpoint,
+    /// A map's hexagonal density-bin width (`::HEXBIN`, M2c): `'auto'` or a
+    /// width across (`'25 km'`; planar: a bare number) — sums `::Value`
+    /// when present, else counts points per hexagon.
+    Hexbin,
     /// A region code a map looks up in the built-in boundary pack
     /// (`::REGION`): ISO 3166-1 (`'DE'`, `'DEU'`), ISO 3166-2 (`'DE-BY'`), a
     /// German AGS (`'09162'`) or NUTS code (`'DE212'`), else a name.
@@ -347,6 +351,11 @@ pub enum Role {
     Lat,
     /// A point's longitude on a map (`::LON`), with `::LAT`.
     Lon,
+    /// A flow map's start (`::ORIGIN`): a region code, WKT POINT, or
+    /// `{'lon':…,'lat':…,'name':…}` struct-as-JSON. With `::DEST`.
+    Origin,
+    /// A flow map's end (`::DEST`), see `Origin`.
+    Dest,
     /// The pack layer a map's `::REGION` codes are looked up in
     /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
     /// `'de-districts'`. Read from the first value.
@@ -2214,7 +2223,7 @@ fn render_inner(
     if cols.iter().any(|c| {
         matches!(
             c.role,
-            Role::Geometry | Role::Region | Role::Lat | Role::Lon
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
         )
     }) {
         return Ok(match map::render(o, cols, width, height) {

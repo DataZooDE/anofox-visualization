@@ -148,12 +148,16 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 @media (max-width:640px){.panel-svg:has(> svg[data-diagram]){overflow-x:auto;background:linear-gradient(90deg,var(--ax-card) 40%,transparent) left/32px 100% no-repeat local,linear-gradient(270deg,var(--ax-card) 40%,transparent) right/32px 100% no-repeat local,linear-gradient(90deg,var(--ax-line),transparent) left/10px 100% no-repeat scroll,linear-gradient(270deg,var(--ax-line),transparent) right/10px 100% no-repeat scroll}}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
-/* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10) */
+/* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10).
+   `.dp-flow` is a ::DIAGRAM edge's own hand-written class (src/diagram.rs);
+   a map's flow arcs (#308) carry no class at all — ggplot-rs's curve layer
+   marks them with `data-linestyle="flow"` instead (scoped to map svgs via
+   the `[data-map]` attribute so this never touches a non-map `[data-linestyle]`). */
 @keyframes dp-flow{to{stroke-dashoffset:-20}}
-.panel svg .dp-flow{animation:dp-flow 1.2s linear infinite}
+.panel svg .dp-flow,.panel svg[data-map] [data-linestyle="flow"]{animation:dp-flow 1.2s linear infinite}
 @keyframes dp-dots{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
-@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg .dp-flow.dp-dots{animation:none}}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg[data-map] [data-linestyle="flow"],.panel svg .dp-flow.dp-dots{animation:none}}
 /* ::STORY: step controls under the chart, the caption + connector over it */
 .dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
 .dp-story-btn{font:inherit;font-size:.78rem;font-weight:600;line-height:1;padding:.38rem .62rem;border-radius:var(--ax-radius-sm);border:1px solid var(--ax-tool-border);background:var(--ax-btn2-bg);color:var(--ax-ink);cursor:pointer}
@@ -445,7 +449,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-tip .tip-row b{font-variant-numeric:tabular-nums;color:var(--ax-tip-head);font-weight:700}
 .dp-cross{position:fixed;width:0;border-left:1px dashed var(--ax-cross);pointer-events:none;z-index:49;display:none}
 .dp-hit{transition:filter .12s}.dp-hit:hover{filter:brightness(1.1) saturate(1.06)}
-svg[data-map] path.dp-hit:not([fill="none"]):hover,svg[data-map] circle.dp-hit:hover{stroke:var(--ax-ink);stroke-width:1.5px}svg[data-map] path.dp-hit[fill="none"]:hover{stroke-width:2.5px}
+svg[data-map] path.dp-hit:not([fill="none"]):hover,svg[data-map] polygon.dp-hit:hover,svg[data-map] circle.dp-hit:hover{stroke:var(--ax-ink);stroke-width:1.5px}svg[data-map] path.dp-hit[fill="none"]:hover{stroke-width:2.5px}
 /* heatmap cell labels: hover and click reach the cell underneath */
 svg[data-kind="heatmap"] text{pointer-events:none}
 

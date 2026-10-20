@@ -1548,7 +1548,7 @@ async function ensureForecast(sql) {
 
 // A ::MAP panel: WKT, a ::REGION code or a ::LAT/::LON point.
 function isMapPanel(roles) {
-  return roles.some((r) => r[1] === "MAP" || r[1] === "REGION" || r[1] === "LAT");
+  return roles.some((r) => r[1] === "MAP" || r[1] === "REGION" || r[1] === "LAT" || r[1] === "ORIGIN");
 }
 
 // The built-in boundary layers (::REGION codes, a named ::BASEMAP) are
@@ -13015,9 +13015,21 @@ let dpSelected = null;
 // stops) on every map that has it, so two maps side by side read together.
 function mapHoverEmph(series) {
   for (const svg of document.querySelectorAll(".panel svg[data-map]")) {
-    const els = [...svg.querySelectorAll(".dp-hit")];
+    // Flow arrowheads are now ggplot-rs mark-parts (`data-part="arrow"`,
+    // #308), not the old hand-written `data-head` triangle.
+    const els = [...svg.querySelectorAll('.dp-hit, [data-part="arrow"]')];
     const has = series != null && els.some((el) => el.getAttribute("data-series") === series);
-    dpAnim.emph(svg, "hover", has ? (el) => (el.classList.contains("dp-hit") && el.getAttribute("data-series") !== series ? 0.2 : null) : null);
+    dpAnim.emph(
+      svg,
+      "hover",
+      has
+        ? (el) =>
+            (el.classList.contains("dp-hit") || el.getAttribute("data-part") === "arrow") &&
+            el.getAttribute("data-series") !== series
+              ? 0.2
+              : null
+        : null
+    );
   }
 }
 
@@ -13264,7 +13276,7 @@ const CHART_KINDS = [
   [/^HEATMAP/, "Heatmap"],
   [/^CALENDAR/, "Calendar heatmap"],
   [/^CANDLESTICK/, "Candlestick chart"],
-  [/^(MAP|REGION|LAT)$/, "Map"],
+  [/^(MAP|REGION|LAT|ORIGIN)$/, "Map"],
   [/^DIAGRAM/, "Diagram"],
 ];
 function chartKind(roles) {
@@ -13785,7 +13797,30 @@ function mapTableHtml(svg, limit, caption) {
       cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
       sizeRaw: size == null || size === "" ? null : Number(size),
       size: el.getAttribute("data-fsize") || "",
+      orig: el.getAttribute("data-orig") || "",
+      dest: el.getAttribute("data-dest") || "",
     });
+  }
+  // M2b: flow maps (::ORIGIN/::DEST) — from/to columns, sorted by size.
+  const isFlow = rows.some((r) => r.orig);
+  if (isFlow) {
+    rows.sort((a, b) => (b.sizeRaw ?? -Infinity) - (a.sizeRaw ?? -Infinity));
+    const cols = [
+      ["orig", "from"],
+      ["dest", "to"],
+      ["value", "value"],
+      ["size", "size"],
+      ["cls", "class"],
+    ].filter(([k]) => k === "orig" || k === "dest" || rows.some((r) => r[k]));
+    const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");
+    const body = rows
+      .slice(0, limit)
+      .map((r) => `<tr>${cols.map(([k]) => `<td>${esc(r[k])}</td>`).join("")}</tr>`)
+      .join("");
+    return (
+      `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}"` : ""}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+      (rows.length > limit ? `<div class="dp-modal-note">Showing ${limit} of ${rows.length} rows</div>` : "")
+    );
   }
   // M2a: graduated symbols (::SIZE) — sort by size when no colour measure
   // differs from it (data-value then equals the size, row by row).
