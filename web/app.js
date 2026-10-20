@@ -12255,7 +12255,10 @@ function mapMarkInfo(attr, tip) {
   const series = attr("data-series") || "";
   const label = attr("data-label") || "";
   const dv = attr("data-value");
-  const fv = attr("data-fvalue");
+  // `data-fvalue` (symbol/region marks, written directly — not ggplot-rs
+  // output) or `data-vtext` (a count-only hexbin cell: `data-fvalue` is
+  // ggplot-rs-reserved, see `map/overlay.rs`).
+  const fv = attr("data-fvalue") || attr("data-vtext");
   const value = fv ? fv : dv !== null && dv !== "" ? fmtTipValue(dv) : "";
   const own = series !== "" && series === label;
   return { series: series || tip, value, x: label, fx: true, own, detail: "" };

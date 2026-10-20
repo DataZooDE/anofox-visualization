@@ -34,8 +34,15 @@ crate-type = ["cdylib", "rlib"]
 # binning in data units (`StatBinHex`/`GeomHex` on a fixed lattice), identity
 # colour/fill scales, interactive aesthetics (`Aes::tooltip`, `Aes::data_attr`),
 # and `coord_sf` xlim/ylim/expand + `svg_root_data(false)` for overlay
-# rendering). For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.20", default-features = false, features = ["sf"] }
+# rendering); 0.21: the SVG mark contract — `class="gg-mark …"` +
+# `data-geom`, a NaN-safe `draw_line` split, `fill-opacity`/`stroke-opacity`
+# omitted at 1, `svg_attr`/`svg_warnings_attr` root attributes on GGPlot and
+# PlotGrid, `svg_formatted_values` + `Scale::format_value`
+# (`with_value_formatter`), tooltip templates, geom text inheriting
+# `theme.text.family`, and `element_geom` ink/paper/accent (point, line,
+# path, text, label, boxplot, smooth — sipemu/ggplot-rs#142 tracks the rest).
+# For local ggplot-rs work, `[patch.crates-io]` it to a path.
+ggplot-rs = { version = "0.21", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

@@ -264,7 +264,10 @@ fn tracks_share_the_charts_plot_area_and_x_window() {
 fn lane_tooltips_name_the_lane_and_the_text() {
     let svgs =
         track::render_stack(&chart(), &tracks(), 800, 300, &RenderOptions::default()).unwrap();
-    assert!(svgs[1].contains("data-series=\"Promotions\" data-fvalue=\"Summer sale\"><title>Promotions: Summer sale</title>"));
+    assert!(svgs[1].contains(
+        "data-series=\"Promotions\" class=\"gg-mark gg-bar\" data-geom=\"tile\" \
+         data-fvalue=\"Summer sale\"><title>Promotions: Summer sale</title>"
+    ));
     // a category fill is a colour, not the tooltip's value
     assert!(svgs[2].contains("<title>Lead time: #d64545</title>"));
     assert!(!svgs[2].contains("data-value=\"#"));
@@ -441,3 +444,4 @@ fn the_headless_dashboard_leaves_out_hidden_tabs_and_missing_strips() {
     assert_eq!(cards(&svg), cards(&three));
     assert!(cards(&three) > cards(&render_dashboard_svg(one, &mut Files, &opts).unwrap()));
 }
+
