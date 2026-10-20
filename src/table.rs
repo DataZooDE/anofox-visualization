@@ -418,7 +418,7 @@ fn mean_word(name: &str) -> bool {
 }
 
 /// Rate- or average-like names (never summed by default).
-fn rate_like(name: &str) -> bool {
+pub(crate) fn rate_like(name: &str) -> bool {
     rate_word(name) || mean_word(name)
 }
 

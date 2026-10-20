@@ -121,7 +121,13 @@ jobs:
           node-version: "22"
 
       - name: Build the wasm package (web/pkg)
-        run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+        run: wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
+
+      # web/wasm-size.txt + 30 KB (#312). Only meaningful because the build
+      # above uses [profile.wasm] (fat LTO, one codegen unit) — see that
+      # script's header comment.
+      - name: wasm bundle size is within budget
+        run: node scripts/check-wasm-size.mjs --check
 
       - name: Install DuckDB-Wasm (tests/web)
         run: npm install --prefix tests/web --no-audit --no-fund
@@ -130,9 +136,8 @@ jobs:
         run: |
           for i in 1 2 3; do scripts/fetch-wasm-extensions.sh && break; echo "fetch attempt $i failed; retrying"; sleep 10; done
 
-      # The assistant's function lists (web/assist/functions.js) come from this
-      # DuckDB-Wasm with the extensions fetched above: a stale list could miss a
-      # table macro's new relation argument (#224). When this fails, run
+      # The assistant's function lists (web/assist/functions.js) come from the
+      # pinned builds (scripts/wasm-extensions.lock); after a bump, run
       # node scripts/gen-assist-functions.mjs, review what it prints, commit.
       - name: The assistant's function lists are current
         run: node scripts/gen-assist-functions.mjs --check

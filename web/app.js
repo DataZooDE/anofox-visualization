@@ -5362,7 +5362,7 @@ function axToken(name, fallback = "") {
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
 // ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
-let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+let dpAsof = null; // {at: epoch ms | null, day: 'YYYY-MM-DD' | null, stale: seconds | 0}
 // A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
 // ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
 function asofParse(v) {
@@ -5391,13 +5391,26 @@ function asofRelative(sec) {
   if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
   return `${Math.floor(sec / 86400)} d ago`;
 }
-// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
-// dashboard locale (a date is added when it isn't today); amber once stale.
-function paintAsof(el, a) {
+// A date-only ::ASOF value ('2026-01-01', a DATE) → that day, else null: it
+// reads as a calendar day — no time, no time-zone shift (#282).
+function asofDay(v) {
+  const m = typeof v === "string" && v.trim().match(/^"?(\d{4}-\d{2}-\d{2})"?$/);
+  return m ? m[1] : null;
+}
+// The chip at `now` (epoch ms) in locale `loc`: {text, title, stale}.
+function asofText(a, now, loc) {
+  if (a.day) {
+    const [y, mo, dd] = a.day.split("-").map(Number);
+    const day = new Date(y, mo - 1, dd);
+    const n = new Date(now);
+    const days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()) - day) / 86400000);
+    let t;
+    try { t = day.toLocaleDateString(loc); } catch (_) { t = a.day; }
+    const age = (now - day.getTime()) / 1000;
+    return { text: `Data as of ${t} (${days <= 0 ? "today" : `${days} d ago`})`, title: a.day, stale: a.stale > 0 && age > a.stale };
+  }
   const d = new Date(a.at);
-  const now = Date.now();
   const age = (now - a.at) / 1000;
-  const loc = dashLocale() || undefined;
   let t;
   try {
     t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
@@ -5405,9 +5418,15 @@ function paintAsof(el, a) {
   } catch (_) {
     t = d.toISOString().slice(0, 16).replace("T", " ");
   }
-  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
-  el.title = d.toString();
-  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+  return { text: `Data as of ${t} (${asofRelative(age)})`, title: d.toString(), stale: a.stale > 0 && age > a.stale };
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const r = asofText(a, Date.now(), dashLocale() || undefined);
+  el.textContent = r.text;
+  el.title = r.title;
+  el.classList.toggle("stale", r.stale);
 }
 let asofTimer = null;
 function mkAsof() {
@@ -7032,7 +7051,8 @@ async function runOnce(fresh = true) {
         else if (cr === "ASOF") {
           // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
           const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
-          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+          const raw = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+          dpAsof = { at: asofParse(raw), day: asofDay(raw), stale: asofStale(opt) };
         } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }
@@ -8821,7 +8841,12 @@ function contractCaption(title, contract, row) {
 // Default render height of a contract plot (::HEIGHT overrides): the 2×2
 // diagnostics need room, single panels match the chart default.
 function contractHeight(macro) {
-  const H = { anofox_plot_diagnostics: 560, anofox_plot_summary: 360, anofox_plot_terms: 340 };
+  const H = {
+    anofox_plot_diagnostics: 560,
+    anofox_plot_summary: 360,
+    anofox_plot_terms: 340,
+    anofox_plot_decomposition: 520,
+  };
   return H[macro] || 320;
 }
 
@@ -12265,6 +12290,71 @@ function mapHoverEmph(series) {
   }
 }
 
+// #213: hovering a mark (or focusing it from the keyboard) emphasises its
+// whole series and fades the others, as hovering its legend entry does — a
+// layer of its own ("hoverfocus") in the shared emphasis state (web/anim.js),
+// so it never undoes a click's sticky selection. Off where a series is no
+// group of marks (seriesFocusable), on maps (mapHoverEmph), diagrams,
+// heatmaps, calendars, pies, gauges, ::TRACK strips, with 'none'::HOVER_FOCUS
+// and above HOVER_FOCUS_MAX marks; a tap on a touch screen is a click (the
+// sticky selection), not a hover. Instant: no motion to reduce.
+const HOVER_FOCUS_MAX = 2000;
+const HOVER_FOCUS_DIM = 0.15; // as the legend's focus
+let dpTouchAt = 0; // the last touch pointerdown (its compatibility mouseenter is no hover)
+document.addEventListener("pointerdown", (e) => (dpTouchAt = e.pointerType === "touch" ? Date.now() : 0), true);
+
+// Does hovering a mark focus its series? `series`: the series key of every
+// data mark. Two series at least, one of them more than a single mark, and
+// at most `max` marks.
+function seriesFocusable(series, max = HOVER_FOCUS_MAX) {
+  if (!series.length || series.length > max) return false;
+  const n = new Map();
+  for (const s of series) n.set(s, (n.get(s) || 0) + 1);
+  return n.size >= 2 && [...n.values()].some((k) => k >= 2);
+}
+
+// Decided once per chart SVG (a re-render brings a new one).
+function hoverFocusOn(svg) {
+  if (svg._dpHf === undefined) {
+    const roles = svg.closest(".panel")?._dp?.roles || [];
+    svg._dpHf =
+      !svg.hasAttribute("data-map") &&
+      !svg.hasAttribute("data-diagram") &&
+      svg.getAttribute("data-kind") !== "heatmap" &&
+      !svg.closest(".panel-tracks") &&
+      (svg.getAttribute("data-hover-focus") || "").toLowerCase() !== "none" &&
+      !roles.some((r) => /^(CALENDAR|HEATMAP|PIE|DONUT|GAUGE|DIAGRAM)/.test(r[1])) &&
+      seriesFocusable(chartMarks(svg).map((el) => el.getAttribute("data-series") || ""));
+  }
+  return svg._dpHf;
+}
+
+// Emphasise `series` in `svg` (null clears), at most once a frame: leaving
+// one mark for the next of the same series costs nothing.
+function hoverFocus(svg, series) {
+  svg._dpHfWant = series;
+  if (svg._dpHfRaf) return;
+  svg._dpHfRaf = requestAnimationFrame(() => {
+    svg._dpHfRaf = 0;
+    let s = svg._dpHfWant;
+    // a click's selection, a brush / named selection or a story step owns the dimming
+    const st = svg._dpEmph;
+    if (st && (st.has("select") || st.has("filter") || st.has("story"))) s = null;
+    if (s === (svg._dpHfOn ?? null)) return;
+    svg._dpHfOn = s;
+    dpAnim.emph(
+      svg,
+      "hoverfocus",
+      s == null
+        ? null
+        : (el) => {
+            const k = el.getAttribute("data-series");
+            return k != null && k !== s && !el.hasAttribute("data-rule") ? HOVER_FOCUS_DIM : null;
+          }
+    );
+  });
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -12347,6 +12437,14 @@ function attachHover() {
     // a ::TRACK strip's marks show their own.
     const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
     el.addEventListener("mouseenter", () => {
+      // A tap's mousedown also gives the mark native DOM focus, which the a11y
+      // code below answers with its own (untrusted) synthetic mouseenter —
+      // so the 1 s touch window holds regardless of e.isTrusted, or a tap
+      // would still read as a hover through that detour.
+      if (!isMapMark && !rule && !(Date.now() - dpTouchAt < 1000)) {
+        const svg = rootSvg(el);
+        if (hoverFocusOn(svg)) hoverFocus(svg, series);
+      }
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
@@ -12368,6 +12466,7 @@ function attachHover() {
     });
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
+      else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
       if (pointered()) return;
       tip.classList.remove("show");
     });
@@ -12946,19 +13045,27 @@ function mapTableHtml(svg, limit, caption) {
     const raw = el.getAttribute("data-value");
     const k = +el.getAttribute("data-class");
     const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    const size = el.getAttribute("data-size");
     rows.push({
       name,
       series: series && series !== label && series !== name ? series : "",
       raw: raw == null || raw === "" ? null : Number(raw),
       value: el.getAttribute("data-fvalue") || (raw != null ? fmtTipValue(raw) : ""),
       cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
+      sizeRaw: size == null || size === "" ? null : Number(size),
+      size: el.getAttribute("data-fsize") || "",
     });
   }
-  if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
+  // M2a: graduated symbols (::SIZE) — sort by size when no colour measure
+  // differs from it (data-value then equals the size, row by row).
+  const bySize = rows.some((r) => r.size) && rows.every((r) => r.raw === r.sizeRaw);
+  if (bySize) rows.sort((a, b) => (b.sizeRaw ?? -Infinity) - (a.sizeRaw ?? -Infinity));
+  else if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
   const cols = [
     ["name", "name"],
     ["series", "series"],
     ["value", "value"],
+    ["size", "size"],
     ["cls", "class"],
   ].filter(([k]) => k === "name" || rows.some((r) => r[k]));
   const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");

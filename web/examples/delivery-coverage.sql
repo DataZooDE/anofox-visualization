@@ -16,7 +16,7 @@
 -- regions are underserved? Asked by the head of sales logistics, who plans
 -- where the next depot goes.
 --
--- Tabs: Coverage · Customers · On time · Underserved.
+-- Tabs: Coverage · Customers · Clusters · On time · Underserved.
 -- Natively, run from web/:  dashboard --check examples/delivery-coverage.sql
 
 SELECT 'Where do our deliveries and customers cluster, and which regions are underserved?'::DASHBOARD_TITLE;
@@ -119,7 +119,25 @@ SELECT km AS "Road km to the DC" ::HISTOGRAM,
        'Customers by road distance to the DC that serves them.'::INFO
 FROM dc_customers;
 
--- ── 3 · On time ──────────────────────────────────────────────────────────────
+-- ── 3 · Clusters ─────────────────────────────────────────────────────────────
+-- Graduated symbols (::SIZE, M2a): one circle per district / DC, area by
+-- customer count. Dortmund (the district) and the Dortmund DC both carry the
+-- most customers — checked against the data in the SQL comments below.
+SELECT 'Clusters'::TAB;
+SELECT 7::COL; SELECT 560::HEIGHT;
+SELECT ags ::REGION, customers AS "Customers" ::SIZE, dc_name || ' DC' ::CATEGORY,
+       district ::LABEL, 8::LABEL_TOP,
+       'Dortmund has the most active customers of any district'::TITLE,
+       'One circle per district, its area by the number of active customers, coloured by the DC that serves it.'::INFO
+FROM dc_cover WHERE customers > 0 ORDER BY ags;
+SELECT 5::COL; SELECT 560::HEIGHT;
+SELECT k.lat ::LAT, k.lon ::LON, count(*) AS "Customers" ::SIZE, k.name || ' DC' ::LABEL, ''::DATALABELS,
+       'de-states'::BASEMAP,
+       'The Dortmund DC serves the most customers'::TITLE,
+       'Customers served by each distribution centre, last 12 weeks.'::INFO
+FROM dc_customers c JOIN dc_dcs k USING (dc) GROUP BY ALL ORDER BY 3 DESC;
+
+-- ── 4 · On time ──────────────────────────────────────────────────────────────
 SELECT 'On time'::TAB;
 SELECT 6::COL;
 SELECT 520::HEIGHT;
@@ -138,7 +156,7 @@ SELECT week AS "Week" ::XAXIS, k.name || ' DC' ::CATEGORY,
        'Weekly share of on-time deliveries per DC. Nürnberg''s area reaches furthest into the east.'::INFO
 FROM dc_deliveries d JOIN dc_dcs k USING (dc) GROUP BY week, k.name ORDER BY k.name, week;
 
--- ── 4 · Underserved ──────────────────────────────────────────────────────────
+-- ── 5 · Underserved ──────────────────────────────────────────────────────────
 SELECT 'Underserved'::TAB;
 SELECT 6::COL;
 SELECT 520::HEIGHT;

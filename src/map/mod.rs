@@ -32,7 +32,9 @@
 pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod labels;
+mod legend;
 pub(crate) mod project;
+mod symbols;
 mod write;
 
 use crate::format::{escape_xml as esc, ValueFmt};
@@ -44,7 +46,9 @@ use crate::{
 use classes::{Classes, Method};
 use ggplot_rs::prelude::Value;
 use ggplot_rs::spatial::{parse_wkt, Geometry};
+use legend::{legend_of, legend_svg, legend_title, Legend, LegendBox};
 use project::{Extent, Proj, Projection};
+use symbols::Symbols;
 use write::{push_path, simplify, tenths};
 
 type Rgb = (u8, u8, u8);
@@ -392,6 +396,13 @@ struct Model<'a> {
     projection: Projection,
     proj: Proj,
     fill: Fill,
+    /// Graduated symbols (`::SIZE`), when it applies (M2a).
+    symbols: Option<Symbols>,
+    /// Whether `base` counts toward the fitted extent — true unless a
+    /// symbol map's backdrop was built automatically from a region layer
+    /// (D4): that backdrop isn't used for fitting, only an explicit
+    /// `::BASEMAP` is.
+    base_fitted: bool,
 }
 
 /// The `::RANGE 'lo,hi'` of a map (a colour-domain cap).
@@ -446,8 +457,39 @@ impl<'a> Model<'a> {
         let german = o.locale.tag.starts_with("de");
         let inp = input(cols, german)?;
         let rows = inp.features.len();
-        let (base, base_layer) = backdrop(cols, rows);
-        let layers: Vec<String> = inp.layer.iter().chain(&base_layer).cloned().collect();
+        let (mut base, mut base_layer) = backdrop(cols, rows);
+        let has_explicit_basemap = find_role(cols, Role::Basemap).is_some();
+        let want_symbols = find_role(cols, Role::Size)
+            .is_some_and(|c| c.values.iter().any(|v| cell_num(v).is_some()));
+        // D4: a symbol map built from region codes, with no explicit
+        // ::BASEMAP, draws the whole matched layer as an unfitted backdrop
+        // instead of colouring the rows' own regions.
+        let region_backdrop = want_symbols
+            && !has_explicit_basemap
+            && inp.layer.as_deref().is_some_and(|l| {
+                if let Some(layer) = boundaries::layer(l) {
+                    base = layer
+                        .regions
+                        .iter()
+                        .filter(|r| !(layer.name.starts_with("world") && r.key == "ATA"))
+                        .map(|r| r.shapes.clone())
+                        .collect();
+                    base_layer = Some(layer.name.clone());
+                    true
+                } else {
+                    false
+                }
+            });
+        let base_fitted = !region_backdrop;
+        let mut layers: Vec<String> = Vec::new();
+        if let Some(l) = &inp.layer {
+            layers.push(l.clone());
+        }
+        if let Some(l) = &base_layer {
+            if !layers.contains(l) {
+                layers.push(l.clone());
+            }
+        }
         let features = inp.features;
         // an unknown name draws as 'auto' (lint: map/unknown-projection)
         let projection = role_str(cols, Role::Projection)
@@ -462,11 +504,12 @@ impl<'a> Model<'a> {
             .then_some(core)
         });
         let mut extent = Extent::new();
+        let fit_base: &[Vec<Shape>] = if base_fitted { &base } else { &[] };
         for s in core
             .as_ref()
             .unwrap_or(&features)
             .iter()
-            .chain(&base)
+            .chain(fit_base)
             .flatten()
         {
             for_coords(s, &mut |c| extent.add(c));
@@ -478,7 +521,7 @@ impl<'a> Model<'a> {
                 .collect()
         });
         let lonlat = extent;
-        let features = features
+        let features: Vec<Vec<Shape>> = features
             .iter()
             .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
             .collect();
@@ -486,10 +529,14 @@ impl<'a> Model<'a> {
             .iter()
             .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
             .collect();
+        let symbols = symbols::of(cols, &features);
         let measure = measure_of(cols, geometry(cols));
         let category =
             find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
-        let has_base = find_role(cols, Role::Basemap).is_some();
+        // a backdrop (explicit, or the automatic one under a symbol map)
+        // makes the sequential ramp start a quarter in, so pale symbols
+        // don't vanish into it
+        let has_base = has_explicit_basemap || region_backdrop;
         let fill = match (&measure, category) {
             (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
             (None, Some(c)) => category_fill(o, cols, c, rows),
@@ -511,14 +558,18 @@ impl<'a> Model<'a> {
             projection,
             proj,
             fill,
+            symbols,
+            base_fitted,
         })
     }
 
-    /// The projected box of everything drawn (data and backdrop).
+    /// The projected box of everything drawn (data and backdrop; the
+    /// backdrop only when it's fitted — [`Model::base_fitted`]).
     fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
         let mut e = Extent::new();
         let features = self.core.as_ref().unwrap_or(&self.features);
-        for s in features.iter().chain(&self.base).flatten() {
+        let base: &[Vec<Shape>] = if self.base_fitted { &self.base } else { &[] };
+        for s in features.iter().chain(base).flatten() {
             for_coords(s, &mut |c| e.add(c));
         }
         (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
@@ -754,260 +805,6 @@ fn padded((x0, y0, x1, y1): (f64, f64, f64, f64), planar: bool) -> (f64, f64, f6
     (x0 - mx, y0 - my, x1 + mx, y1 + my)
 }
 
-/// What the legend shows.
-enum Legend {
-    None,
-    Category(Vec<(String, Rgb)>),
-    Gradient {
-        stops: Vec<Rgb>,
-        /// `(position 0..1, label)`.
-        ticks: Vec<(f64, String)>,
-    },
-    Steps {
-        colors: Vec<Rgb>,
-        ticks: Vec<String>,
-        counts: Vec<usize>,
-    },
-}
-
-/// The legend box: its content, the no-data count, the title and size.
-struct LegendBox {
-    legend: Legend,
-    nodata: usize,
-    title: Option<String>,
-    w: f64,
-    h: f64,
-    /// Gradient bar width / class swatch width.
-    bar: f64,
-}
-
-/// Line height of a legend row.
-const ROW: f64 = 13.0;
-/// Inner padding of the legend box.
-const PAD: f64 = 5.0;
-
-/// The legend title of a measure: its name (not a generated `c3`) and its
-/// unit from the value format — "Revenue (€)", "Share (%)".
-fn legend_title(name: &str, fmt: &ValueFmt) -> Option<String> {
-    let generated = name.is_empty()
-        || (name.starts_with('c')
-            && name.len() > 1
-            && name[1..].bytes().all(|b| b.is_ascii_digit()));
-    if generated {
-        return None;
-    }
-    let unit = match fmt {
-        ValueFmt::Currency(u) => Some(u.trim().to_string()),
-        ValueFmt::Percent | ValueFmt::Share => Some("%".to_string()),
-        ValueFmt::Prefix(u) | ValueFmt::Suffix(u) => Some(u.trim().to_string()),
-        _ => None,
-    }
-    .filter(|u| !u.is_empty() && !name.contains(u.as_str()));
-    Some(match unit {
-        Some(u) => format!("{name} ({u})"),
-        None => name.to_string(),
-    })
-}
-
-/// "Nice" ticks (1, 2, 2.5, 5 × 10ⁿ) inside `[lo, hi]`, at most `n`.
-fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    let span = hi - lo;
-    if span <= 0.0 || !span.is_finite() {
-        return Vec::new();
-    }
-    let raw = span / n.max(1) as f64;
-    let mag = 10f64.powf(raw.log10().floor());
-    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
-        .iter()
-        .map(|m| m * mag)
-        .find(|st| span / st <= n as f64)
-        .unwrap_or(10.0 * mag);
-    let mut out = Vec::new();
-    let mut v = (lo / step).ceil() * step;
-    while v <= hi + step * 1e-9 {
-        out.push(if v.abs() < step * 1e-9 { 0.0 } else { v });
-        v += step;
-    }
-    out
-}
-
-/// The legend of a map, sized for a panel `w` wide.
-fn legend_of(o: &RenderOptions, m: &Model, w: f64) -> LegendBox {
-    // drawn rows without a value (rows without geometry — a backdrop's —
-    // don't count)
-    let nodata = match &m.fill {
-        Fill::Measure(s) => (0..m.rows)
-            .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
-            .count(),
-        _ => 0,
-    };
-    let tw = |s: &str| crate::ticks::text_width(s, FONT);
-    let max_w = (w - 16.0).max(60.0);
-    let mut title = None;
-    let mut bar = 0.0;
-    let (legend, mut cw, mut ch) = match &m.fill {
-        Fill::Plain(_) => (Legend::None, 0.0, 0.0),
-        Fill::Category { levels, .. } => {
-            let rows = category_rows(levels, max_w);
-            let cw = rows
-                .iter()
-                .map(|r| {
-                    r.last()
-                        .map(|(x, i)| x + 13.0 + tw(&levels[*i].0))
-                        .unwrap_or(0.0)
-                })
-                .fold(0.0, f64::max);
-            (
-                Legend::Category(levels.clone()),
-                cw,
-                rows.len() as f64 * ROW,
-            )
-        }
-        Fill::Measure(s) => {
-            title = s.title.clone();
-            let short = |v: f64| s.fmt.short(v, &o.locale);
-            match &s.classes {
-                Some((_, c, colors)) => {
-                    let mut ticks: Vec<String> = (0..=c.len())
-                        .map(|i| {
-                            let v = if i == 0 {
-                                c.lo
-                            } else if i == c.len() {
-                                c.hi
-                            } else {
-                                c.edges[i - 1]
-                            };
-                            short(v)
-                        })
-                        .collect();
-                    if c.open_lo {
-                        ticks[0] = format!("≤{}", ticks[0]);
-                    }
-                    if c.open_hi {
-                        let l = ticks.len() - 1;
-                        ticks[l] = format!("≥{}", ticks[l]);
-                    }
-                    let k = colors.len() as f64;
-                    let widest = ticks.iter().map(|t| tw(t)).fold(0.0, f64::max);
-                    bar = (widest + 8.0).clamp(26.0, 48.0).min(max_w / k);
-                    let lw = k * bar + tw(&ticks[ticks.len() - 1]) / 2.0;
-                    (
-                        Legend::Steps {
-                            colors: colors.clone(),
-                            ticks,
-                            counts: c.counts.clone(),
-                        },
-                        lw,
-                        12.0 + 3.0 + ROW,
-                    )
-                }
-                None => {
-                    bar = (w * 0.3).clamp(90.0, 160.0).min(max_w);
-                    let stops = (0..=16)
-                        .map(|i| s.color_at(s.lo + (s.hi - s.lo) * i as f64 / 16.0))
-                        .collect();
-                    let span = s.hi - s.lo;
-                    let pos = |v: f64| if span > 0.0 { (v - s.lo) / span } else { 0.5 };
-                    let cand: Vec<(f64, String)> = nice_ticks(s.lo, s.hi, 5)
-                        .into_iter()
-                        .map(|v| (pos(v), short(v)))
-                        .collect();
-                    // a label's extent along the bar (the ends are anchored
-                    // inside it)
-                    let ext = |p: f64, l: &str| {
-                        let (x, w) = (p * bar, tw(l));
-                        if p <= 0.0 {
-                            (x, x + w)
-                        } else if p >= 1.0 {
-                            (x - w, x)
-                        } else {
-                            (x - w / 2.0, x + w / 2.0)
-                        }
-                    };
-                    let clear = |a: (f64, f64), b: (f64, f64)| a.1 + 4.0 <= b.0 || b.1 + 4.0 <= a.0;
-                    // the nice ticks that fit side by side
-                    let mut ticks: Vec<(f64, String)> = Vec::new();
-                    for (p, l) in cand {
-                        if ticks
-                            .last()
-                            .is_none_or(|(q, m)| clear(ext(*q, m), ext(p, &l)))
-                        {
-                            ticks.push((p, l));
-                        }
-                    }
-                    // the ends: always when capped (≤lo / ≥hi), else when they fit
-                    let ends = [
-                        (0.0, s.capped_lo, format!("≤{}", short(s.lo)), short(s.lo)),
-                        (1.0, s.capped_hi, format!("≥{}", short(s.hi)), short(s.hi)),
-                    ];
-                    for (p, capped, lc, l) in ends {
-                        let l = if capped { lc } else { l };
-                        let e = ext(p, &l);
-                        if capped {
-                            ticks.retain(|(q, m)| clear(ext(*q, m), e));
-                        } else if ticks
-                            .iter()
-                            .any(|(q, m)| (q - p).abs() < 1e-9 || !clear(ext(*q, m), e))
-                        {
-                            continue;
-                        }
-                        if p <= 0.0 {
-                            ticks.insert(0, (p, l));
-                        } else {
-                            ticks.push((p, l));
-                        }
-                    }
-                    if span <= 0.0 {
-                        ticks = vec![(0.5, short(s.lo))];
-                    }
-                    let over = ticks
-                        .iter()
-                        .map(|(p, l)| p * bar + tw(l) / 2.0)
-                        .fold(bar, f64::max);
-                    (Legend::Gradient { stops, ticks }, over, 8.0 + 3.0 + ROW)
-                }
-            }
-        }
-    };
-    if let Some(t) = &title {
-        cw = cw.max(tw(t));
-        ch += ROW;
-    }
-    if nodata > 0 {
-        cw = cw.max(16.0 + tw(&format!("No data ({nodata})")));
-        ch += ROW + 2.0;
-    }
-    let (w, h) = if ch > 0.0 {
-        ((cw + 2.0 * PAD).min(w - 4.0), ch + 2.0 * PAD - 2.0)
-    } else {
-        (0.0, 0.0)
-    };
-    LegendBox {
-        legend,
-        nodata,
-        title,
-        w,
-        h,
-        bar,
-    }
-}
-
-/// Category legend entries packed into rows that fit `w`: `(x, entry)`.
-fn category_rows(items: &[(String, Rgb)], w: f64) -> Vec<Vec<(f64, usize)>> {
-    let mut rows: Vec<Vec<(f64, usize)>> = vec![Vec::new()];
-    let mut x = 0.0;
-    for (i, (name, _)) in items.iter().enumerate() {
-        let iw = 13.0 + crate::ticks::text_width(name, FONT) + 10.0;
-        if x + iw - 10.0 > w && !rows.last().unwrap().is_empty() {
-            rows.push(Vec::new());
-            x = 0.0;
-        }
-        rows.last_mut().unwrap().push((x, i));
-        x += iw;
-    }
-    rows
-}
-
 /// A stable id prefix for this map's `<defs>` (pages hold many SVGs).
 fn id_of(cols: &[Column], w: u32, h: u32) -> String {
     let mut x: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1130,7 +927,7 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
         return Some([x0, x1, y0, y1]);
     }
     let (w, h) = (w as f64, h as f64);
-    let lg = legend_of(o, &m, w);
+    let lg = legend_of(o, &m, w, h);
     let ft = foot_of(o, &m, w);
     layout(&m, &lg, w, h - ft.h).map(|(f, _)| f.window(w, h))
 }
@@ -1139,7 +936,7 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
 pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
     let m = Model::new(o, cols)?;
     let (w, h) = (width as f64, height as f64);
-    let lg = legend_of(o, &m, w);
+    let lg = legend_of(o, &m, w, h);
     let nodata = lg.nodata;
     let ft = foot_of(o, &m, w);
     let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h)?;
@@ -1316,7 +1113,9 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         };
         let areas: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Area(_))).collect();
         let lines: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Line(_))).collect();
-        if !areas.is_empty() {
+        // graduated symbols (M2a) take over areas and points — a symbol is
+        // drawn for the row below instead, in its own pass (largest first)
+        if !areas.is_empty() && m.symbols.is_none() {
             let d = path_d_of(&areas, &frame, viewport, true);
             if !d.is_empty() {
                 out.push_str(&format!(
@@ -1342,24 +1141,162 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
                 marks += 1;
             }
         }
-        for s in f {
-            if let Shape::Point(p) = s {
-                let (x, y) = frame.at(*p);
-                if x < viewport.0 || y < viewport.1 || x > viewport.2 || y > viewport.3 {
-                    continue;
+        if m.symbols.is_none() {
+            for s in f {
+                if let Shape::Point(p) = s {
+                    let (x, y) = frame.at(*p);
+                    if x < viewport.0 || y < viewport.1 || x > viewport.2 || y > viewport.3 {
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{POINT_R}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".5\"{data}{inner}{}",
+                        x,
+                        y,
+                        hex(card),
+                        close("circle")
+                    ));
+                    marks += 1;
                 }
-                out.push_str(&format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{POINT_R}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".5\"{data}{inner}{}",
-                    x,
-                    y,
-                    hex(card),
-                    close("circle")
-                ));
-                marks += 1;
             }
         }
     }
     out.push_str("</g>");
+
+    // ---- graduated symbols (::SIZE, M2a): one circle per anchor, largest
+    // first (D5) — a feature's area, pole of inaccessibility, or point.
+    if let Some(sym) = &m.symbols {
+        struct Circ {
+            r: f64,
+            row: usize,
+            pt: [f64; 2],
+            v: f64,
+        }
+        let rmax_px = symbols::rmax(w, h);
+        let mut circles: Vec<Circ> = Vec::new();
+        for i in 0..m.rows {
+            if sym.anchors[i].is_empty() {
+                continue;
+            }
+            let Some(v) = sym.size[i] else { continue };
+            let r = sym
+                .fixed
+                .unwrap_or_else(|| symbols::radius(rmax_px, v, sym.vmax));
+            for pt in &sym.anchors[i] {
+                circles.push(Circ {
+                    r,
+                    row: i,
+                    pt: *pt,
+                    v,
+                });
+            }
+        }
+        circles.sort_by(|a, b| b.r.total_cmp(&a.r));
+        out.push_str("<g class=\"dp-symbols\">");
+        for c in &circles {
+            let i = c.row;
+            let label = m.label_of(i);
+            let cat = m.text(m.category, i);
+            let series = if cat.is_empty() {
+                label.clone()
+            } else {
+                cat.clone()
+            };
+            let (color, value, class, nd) = match &m.fill {
+                Fill::Measure(s) => match s.values[i] {
+                    Some(v) => {
+                        let (col, k) = s.color(v);
+                        (col, Some(v), k, false)
+                    }
+                    None => (hatch_bg, None, None, true),
+                },
+                Fill::Category { of_row, levels } => (
+                    of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
+                    None,
+                    None,
+                    false,
+                ),
+                Fill::Plain(col) => (*col, None, None, false),
+            };
+            let shown = match (&m.fill, value) {
+                (Fill::Measure(s), Some(v)) => fmt_full(s, v),
+                (Fill::Measure(_), None) => "no data".to_string(),
+                (Fill::Category { .. }, _) => cat.clone(),
+                _ => String::new(),
+            };
+            let fsize = sym.fmt.full(c.v, &o.locale);
+            let size_title = sym.title.clone().unwrap_or_else(|| "Size".to_string());
+            let mut title = if matches!(m.fill, Fill::Measure(_)) {
+                let head = match (label.is_empty(), shown.is_empty()) {
+                    (false, false) => format!("{label}: {shown}"),
+                    (false, true) => label.clone(),
+                    (true, _) => shown.clone(),
+                };
+                format!("{head}; {size_title}: {fsize}")
+            } else if !label.is_empty() {
+                format!("{label}: {fsize}")
+            } else {
+                fsize.clone()
+            };
+            if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
+                if let Some((_, cl, _)) = &s.classes {
+                    title.push_str(&format!(
+                        " (class {} of {}: {})",
+                        k + 1,
+                        cl.len(),
+                        cl.label(k, &|v| s.fmt.short(v, &o.locale))
+                    ));
+                }
+            }
+            let mut data = String::new();
+            if label.is_empty() {
+                data.push_str(&format!(" data-x=\"{i}\""));
+            }
+            if let Some(k) = class {
+                data.push_str(&format!(" data-class=\"{}\"", k + 1));
+            }
+            data.push_str(&format!(" data-row=\"{i}\""));
+            if !series.is_empty() {
+                data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
+            }
+            let data_value = value.unwrap_or(c.v);
+            data.push_str(&format!(" data-value=\"{data_value}\""));
+            if !label.is_empty() {
+                data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
+            }
+            data.push_str(&format!(" data-size=\"{}\"", c.v));
+            data.push_str(&format!(" data-fsize=\"{}\"", attr(&fsize)));
+            if !matches!(m.fill, Fill::Measure(_)) {
+                // no colour measure: with_formatted_values (src/lib.rs) only
+                // adds data-fvalue when a ::Value column exists, so write it
+                // ourselves here (never both — fvalue_is_written_once).
+                data.push_str(&format!(" data-fvalue=\"{}\"", attr(&fsize)));
+            }
+            let (x, y) = frame.at(c.pt);
+            let fill_attr = if nd {
+                format!("url(#{id}-nd)")
+            } else {
+                hex(color)
+            };
+            let fo = if alpha.is_empty() {
+                String::new()
+            } else {
+                format!(" fill-opacity=\"{alpha}\"")
+            };
+            let inner = if title.is_empty() {
+                "/>".to_string()
+            } else {
+                format!("><title>{}</title></circle>", esc(&title))
+            };
+            out.push_str(&format!(
+                "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"{:.1}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".75\"{data}{inner}",
+                c.r,
+                hex(card)
+            ));
+            marks += 1;
+        }
+        out.push_str("</g>");
+    }
+
     if marks > MARK_WARN {
         warnings.push(format!(
             "map: {marks} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light"
@@ -1469,150 +1406,6 @@ fn push_ring(d: &mut String, pts: &[[f64; 2]], f: &Frame, vp: (f64, f64, f64, f6
         return;
     }
     push_path(d, &s, close);
-}
-
-/// The legend box at `(x, y)`: the title, then category swatches, a
-/// gradient bar with ticks, or stepped classes with their counts; then the
-/// no-data hatch with its count.
-fn legend_svg(
-    o: &RenderOptions,
-    lg: &LegendBox,
-    id: &str,
-    (x, y): (f64, f64),
-    font: &str,
-) -> String {
-    if lg.w <= 0.0 {
-        return String::new();
-    }
-    let t = &o.theme;
-    let ink = hex(t.chart_label());
-    let muted = hex(t.chart_text());
-    let text = |x: f64, y: f64, anchor: &str, fill: &str, weight: &str, s: &str| {
-        format!(
-            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"{FONT}\"{weight} fill=\"{fill}\">{}</text>",
-            esc(s)
-        )
-    };
-    let mut g = format!(
-        "<g class=\"dp-legend\" transform=\"translate({x:.1},{y:.1})\"><rect width=\"{:.1}\" height=\"{:.1}\" rx=\"3\" fill=\"{}\" fill-opacity=\".85\"/>",
-        lg.w,
-        lg.h,
-        hex(t.colors.card)
-    );
-    let mut y = PAD;
-    if let Some(title) = &lg.title {
-        g.push_str(&text(
-            PAD,
-            y + ROW / 2.0 - 1.0,
-            "start",
-            &muted,
-            " font-weight=\"600\"",
-            title,
-        ));
-        y += ROW;
-    }
-    let bar = lg.bar;
-    match &lg.legend {
-        Legend::None => {}
-        Legend::Category(items) => {
-            let rows = category_rows(items, lg.w - 2.0 * PAD);
-            for row in &rows {
-                let cy = y + ROW / 2.0;
-                for (cx, i) in row {
-                    let (name, c) = &items[*i];
-                    let cx = PAD + cx;
-                    g.push_str(&format!(
-                        "<rect x=\"{cx:.1}\" y=\"{:.1}\" width=\"9\" height=\"9\" rx=\"1.5\" fill=\"{}\"/>",
-                        cy - 4.5,
-                        hex(*c)
-                    ));
-                    g.push_str(&text(cx + 13.0, cy, "start", &ink, "", name));
-                }
-                y += ROW;
-            }
-        }
-        Legend::Gradient { ticks, .. } => {
-            g.push_str(&format!(
-                "<rect x=\"{PAD}\" y=\"{y:.1}\" width=\"{bar:.1}\" height=\"8\" rx=\"1.5\" fill=\"url(#{id}-g)\"/>"
-            ));
-            for (p, s) in ticks {
-                let tx = PAD + p * bar;
-                let anchor = if *p <= 0.0 {
-                    "start"
-                } else if *p >= 1.0 {
-                    "end"
-                } else {
-                    "middle"
-                };
-                g.push_str(&format!(
-                    "<path d=\"M{tx:.1} {:.1}v3\" stroke=\"{muted}\" stroke-width=\".6\"/>",
-                    y + 8.0
-                ));
-                g.push_str(&text(tx, y + 11.0 + ROW / 2.0, anchor, &ink, "", s));
-            }
-            y += 11.0 + ROW;
-        }
-        Legend::Steps {
-            colors,
-            ticks,
-            counts,
-        } => {
-            let tw = |s: &str| crate::ticks::text_width(s, FONT);
-            for (i, c) in colors.iter().enumerate() {
-                let sx = PAD + i as f64 * bar;
-                g.push_str(&format!(
-                    "<rect x=\"{sx:.1}\" y=\"{y:.1}\" width=\"{bar:.1}\" height=\"12\" fill=\"{}\"/>",
-                    hex(*c)
-                ));
-                g.push_str(&format!(
-                    "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"7.5\" fill=\"{}\">{}</text>",
-                    sx + bar / 2.0,
-                    y + 6.5,
-                    hex(t.text_on(*c)),
-                    counts[i]
-                ));
-            }
-            // boundary labels, skipping one that would run into the last
-            let mut right = f64::NEG_INFINITY;
-            let n = ticks.len();
-            for (i, s) in ticks.iter().enumerate() {
-                let tx = PAD + i as f64 * bar;
-                let (anchor, l, r) = if i == 0 {
-                    ("start", tx, tx + tw(s))
-                } else {
-                    ("middle", tx - tw(s) / 2.0, tx + tw(s) / 2.0)
-                };
-                if l < right + 3.0 && i != n - 1 {
-                    continue;
-                }
-                right = r;
-                g.push_str(&format!(
-                    "<path d=\"M{tx:.1} {:.1}v3\" stroke=\"{muted}\" stroke-width=\".6\"/>",
-                    y + 12.0
-                ));
-                g.push_str(&text(tx, y + 15.0 + ROW / 2.0, anchor, &ink, "", s));
-            }
-            y += 15.0 + ROW;
-        }
-    }
-    if lg.nodata > 0 {
-        let cy = y + 2.0 + ROW / 2.0;
-        g.push_str(&format!(
-            "<rect x=\"{PAD}\" y=\"{:.1}\" width=\"11\" height=\"11\" fill=\"url(#{id}-nd)\" stroke=\"{}\" stroke-width=\".5\"/>",
-            cy - 5.5,
-            hex(t.chart_grid())
-        ));
-        g.push_str(&text(
-            PAD + 16.0,
-            cy,
-            "start",
-            &ink,
-            "",
-            &format!("No data ({})", lg.nodata),
-        ));
-    }
-    g.push_str("</g>");
-    g
 }
 
 /// The attribution (and scale bar) strip at the bottom of a map.
@@ -1821,6 +1614,7 @@ fn labels_svg(
         return String::new();
     }
     let rank = find_role(cols, Role::Rank);
+    let rmax_px = m.symbols.as_ref().map(|_| symbols::rmax(size.0, size.1));
     let mut cands = Vec::new();
     for (i, f) in m.features.iter().enumerate() {
         let text = m
@@ -1830,13 +1624,41 @@ fn labels_svg(
             .unwrap_or("")
             .trim()
             .to_string();
-        if text.is_empty() || f.is_empty() {
+        if text.is_empty() {
             continue;
         }
         let value = match &m.fill {
             Fill::Measure(s) => s.values[i],
             _ => None,
         };
+        // a graduated symbol (M2a): anchor at the symbol, label to its
+        // right offset by its radius + 3 px, skipping the area/point logic
+        // below entirely (its anchor already is the symbol's)
+        if let Some(sym) = &m.symbols {
+            let Some(&pt) = sym.anchors[i].first() else {
+                continue;
+            };
+            let Some(v) = sym.size[i] else { continue };
+            let r = sym
+                .fixed
+                .unwrap_or_else(|| symbols::radius(rmax_px.unwrap_or(0.0), v, sym.vmax));
+            let priority = rank
+                .and_then(|r| r.values.get(i))
+                .and_then(cell_num)
+                .or(value.map(f64::abs))
+                .unwrap_or(v);
+            cands.push(labels::Candidate {
+                at: frame.at(pt),
+                text,
+                priority,
+                room: None,
+                dx: r + 3.0,
+            });
+            continue;
+        }
+        if f.is_empty() {
+            continue;
+        }
         // the largest polygon on screen, else the first point
         let mut best: Option<(f64, Vec<Vec<labels::Pt>>)> = None;
         for s in f {
@@ -1882,6 +1704,7 @@ fn labels_svg(
             text,
             priority,
             room,
+            dx: 5.0,
         });
     }
     let placed = labels::place(cands, top, blocked, size, FONT);
@@ -1911,6 +1734,9 @@ fn labels_svg(
 /// the highest and lowest feature, the classes and their counts, and how
 /// many rows have no value.
 fn summary(o: &RenderOptions, m: &Model) -> String {
+    if let Some(sym) = &m.symbols {
+        return symbols_summary(o, m, sym);
+    }
     let drawn: Vec<usize> = (0..m.rows).filter(|i| !m.features[*i].is_empty()).collect();
     let (mut areas, mut lines, mut points) = (0, 0, 0);
     for i in &drawn {
@@ -2022,6 +1848,76 @@ fn summary(o: &RenderOptions, m: &Model) -> String {
             ));
         }
         Fill::Plain(_) => {}
+    }
+    out.push('.');
+    out
+}
+
+/// One sentence for a graduated-symbol map: the count, the largest and
+/// smallest, the size measure, then the colour measure's classes / no-data
+/// (as [`summary`]) and how many rows weren't drawn for size.
+fn symbols_summary(o: &RenderOptions, m: &Model, sym: &Symbols) -> String {
+    let name = |i: usize| {
+        let l = m.label_of(i);
+        if !l.is_empty() {
+            l.lines().next().unwrap_or("").to_string()
+        } else {
+            let c = m.text(m.category, i);
+            if c.is_empty() {
+                format!("row {}", i + 1)
+            } else {
+                c
+            }
+        }
+    };
+    let drawn: Vec<(usize, f64)> = (0..m.rows)
+        .filter_map(|i| sym.size[i].map(|v| (i, v)))
+        .collect();
+    let n = drawn.len();
+    let mut out = format!(
+        "{n} symbol{} ({})",
+        if n == 1 { "" } else { "s" },
+        m.projection.describe()
+    );
+    if let (Some(hi), Some(lo)) = (
+        drawn.iter().max_by(|a, b| a.1.total_cmp(&b.1)),
+        drawn.iter().min_by(|a, b| a.1.total_cmp(&b.1)),
+    ) {
+        let f = |v: f64| sym.fmt.full(v, &o.locale);
+        if hi.0 == lo.0 {
+            out.push_str(&format!(". {} {}", name(hi.0), f(hi.1)));
+        } else {
+            out.push_str(&format!(
+                ". Largest: {} {}; smallest: {} {}",
+                name(hi.0),
+                f(hi.1),
+                name(lo.0),
+                f(lo.1)
+            ));
+        }
+    }
+    let size_title = sym.title.clone().unwrap_or_else(|| "size".to_string());
+    out.push_str(&format!(". Area ∝ {size_title}"));
+    if let Fill::Measure(s) = &m.fill {
+        if let Some((method, c, _)) = &s.classes {
+            let counts: Vec<String> = c.counts.iter().map(|n| n.to_string()).collect();
+            out.push_str(&format!(
+                ". {} {} classes: {}",
+                c.len(),
+                method.name(),
+                counts.join(" / ")
+            ));
+        }
+        let missing = drawn.iter().filter(|(i, _)| s.values[*i].is_none()).count();
+        if missing > 0 {
+            out.push_str(&format!("; {missing} without data"));
+        }
+    }
+    let skipped = (0..m.rows)
+        .filter(|i| !sym.anchors[*i].is_empty() && sym.size[*i].is_none())
+        .count();
+    if skipped > 0 {
+        out.push_str(&format!("; {skipped} not drawn (zero or negative size)"));
     }
     out.push('.');
     out

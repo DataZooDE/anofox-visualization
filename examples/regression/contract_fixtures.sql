@@ -113,5 +113,16 @@ UNION ALL SELECT 3, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP F
 UNION ALL SELECT 3, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(34, 41) r(i);
 SELECT 'cv' AS name, anofox_plot_cv(f) AS svg FROM folds f;
 
+-- decomposition (provisional, #188): trend + weekly seasonality + remainder -
+CREATE TABLE decomp AS
+SELECT (DATE '2024-01-01' + i::INTEGER) AS ds, c.component,
+       CASE c.component
+         WHEN 'trend' THEN 20.0 + 0.3 * i
+         WHEN 'seasonal' THEN 4.0 * sin(2 * pi() * i / 7)
+         ELSE 0.6 * sin(i * 1.7)
+       END AS value
+FROM range(56) r(i), (VALUES ('trend'), ('seasonal'), ('remainder')) c(component);
+SELECT 'decomposition' AS name, anofox_plot_decomposition(d) AS svg FROM decomp d;
+
 -- anofox_plot: dispatch on the column signature ------------------------------
 SELECT 'auto_terms' AS name, anofox_plot(c) AS svg FROM coefs c;

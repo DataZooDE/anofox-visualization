@@ -49,9 +49,25 @@ so the protection is about making sure *only you* can send it:
   `403` — including pages on *other* localhost ports (cookies are shared across
   ports, origins are not). A `text/plain` form/fetch POST from a web page
   therefore never reaches the SQL endpoint.
-- **No CLI meta commands** (`serve` bin). It executes SQL through the `duckdb`
-  CLI; a body (or `--init` script) containing a line that starts with `.` is
-  refused, so `.shell`, `.read`, `.output`, … never reach the CLI.
+- **No CLI meta commands in the text you send** (`serve` bin). It runs SQL
+  through the `duckdb` CLI. A body (or `--init` script) with a line that
+  starts with `.` is refused, so `.shell`, `.read`, `.output`, … from the
+  client's own text never reach the CLI. The server feeds each body to its
+  session as a file in a private directory (`.read`), followed by two end
+  markers that carry a new random nonce per request; that staged file is
+  made read-only once written. This is not a sandbox: authoring SQL already
+  runs read-write with external access as the author, so it can still write
+  `.shell …` into a config file such as `~/.duckdbrc` it controls — the
+  refusal only stops a dot command in the request's own text.
+- **One session** (`serve <db>`, #275). Like `anofox_serve(port)`, the
+  builder talks to one DuckDB session for the whole run, shared by every
+  tab. What a statement leaves (ATTACH, TEMP tables, views and macros, `SET
+  VARIABLE`, `LOAD`, `SET`, `USE`) is there for the next one — including a
+  transaction: a `BEGIN` or a failed statement in one tab leaves every
+  tab's queries failing until that session's `ROLLBACK`. Restart `serve`
+  for a clean session. The database file stays open, and locked, while
+  `serve` runs. If the CLI exits, the next query starts a new session and
+  the error says so.
 - Body limit 4 MiB; authoring results are capped at 1,000,000 rows.
 
 `SELECT anofox_serve_stop(port)` stops an extension server.
@@ -433,9 +449,20 @@ Consumers pick a dashboard id and whitelisted params
   doubles as the freshness knob).
 - `--init setup.sql` runs once, read-write, before serving (attach sources,
   create views/tables). CLI dot-commands are refused there too.
+- `-- @requires` (DOCS, *Not available*): checked per request with the
+  request's variables, like `dashboard --check`; the session can open no
+  file, so every such input counts as missing here — a gated panel shows
+  *Not available* (naming no file), a gated `::TRACK`, `::TAB` / `::SUBTAB`
+  or `::VIEW` alternative is left out (#274).
 - A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
   value, trimmed and escaped, at most 200 characters; none on a KPI tile), as
   on a dashboard card.
+- A panel whose query fails answers `400` with a generic message ("this
+  dashboard could not be shown (the server log has the details)"). The
+  DuckDB error, which can quote file paths, SQL and values, goes to the
+  server's stderr only (`[anofox-serve] dashboard '<id>' failed: …`,
+  escaped, at most 512 characters). A timeout and the `--max-rows` cap still
+  say what happened.
 - `--auth '<json>'` (or `--auth @auth.json`) — login via an auth proxy, the
   same object as `options.auth` below; `--log <path|stderr>` and
   `--log-vars none|names|values` — the request log. With `--auth` the render

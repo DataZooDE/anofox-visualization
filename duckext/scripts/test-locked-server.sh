@@ -23,6 +23,7 @@
 #     always read fresh, an in-place rewrite at the same size and mtime second
 #     is not (#209).
 #   * the result cache keys on the variables a panel can depend on (#210).
+#   * a database with foreign keys (#283).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -562,3 +563,49 @@ grep -q "epoch 2" "$T/out" || fail "parquet cache refresh: $(cat "$T/out")"
 grep -q "parquet_metadata_cache:" "$T/out" && fail "parquet_metadata_cache warning: $(cat "$T/out")"
 stop
 echo "OK: parquet footers cached across requests; a file renamed into place reads fresh, also after a refresh"
+
+# 8. A database with foreign keys (#283): a bare COPY FROM DATABASE fails on it
+# (duckdb/duckdb#16785), so the snapshot copies schema first, then table by
+# table, parents first; a generated column and a sequence default copy as
+# values; a self-referencing table is copied without its constraints. From a
+# -readonly session, and the source is checked unchanged afterwards.
+"$DUCKDB" "$T/fk.duckdb" -c "
+CREATE SEQUENCE sq;
+CREATE TABLE suppliers(supplier_id VARCHAR PRIMARY KEY, name VARCHAR);
+CREATE TABLE materials(material_id VARCHAR PRIMARY KEY, supplier_id VARCHAR REFERENCES suppliers(supplier_id),
+  price DOUBLE, price2 DOUBLE GENERATED ALWAYS AS (price * 2));
+CREATE TABLE actuals(material_id VARCHAR REFERENCES materials(material_id), qty INTEGER, n BIGINT DEFAULT nextval('sq'));
+CREATE TABLE tree(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES tree(id));
+INSERT INTO suppliers SELECT 'SUP-' || lpad(i::VARCHAR, 3, '0'), 's' || i FROM range(50) r(i);
+INSERT INTO materials (material_id, supplier_id, price) SELECT 'M-' || i, 'SUP-' || lpad((i % 50)::VARCHAR, 3, '0'), i FROM range(500) r(i);
+INSERT INTO actuals (material_id, qty) SELECT 'M-' || (i % 500), i FROM range(20000) r(i);
+INSERT INTO tree VALUES (1, NULL); INSERT INTO tree VALUES (2, 1); INSERT INTO tree VALUES (3, 2);
+CREATE VIEW per_supplier AS SELECT supplier_id, sum(qty) AS q FROM actuals JOIN materials USING (material_id) GROUP BY ALL;" >/dev/null
+if "$DUCKDB" -c "ATTACH $(q "$T/fk.duckdb") AS s (READ_ONLY); ATTACH ':memory:' AS d; COPY FROM DATABASE s TO d;" >/dev/null 2>&1; then
+  echo "NOTE: a bare COPY FROM DATABASE copies the FK fixture now (duckdb/duckdb#16785 fixed?)"
+fi
+fkstate() { "$DUCKDB" -readonly -noheader -list "$T/fk.duckdb" -c "SELECT count(*) FROM duckdb_constraints() WHERE database_name = current_database(); SELECT count(*), sum(n) FROM actuals; SELECT count(*) FROM tree;"; }
+before="$(fkstate)"
+mkdir -p "$T/fkdash"
+cat > "$T/fkdash/fk.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM actuals;
+SELECT sum(price2)::BIGINT AS s ::METRIC FROM materials;
+SELECT count(*)::BIGINT AS n ::METRIC FROM tree WHERE parent IS NOT NULL;
+SELECT count(*)::BIGINT AS n ::METRIC FROM per_supplier;
+SELECT max(n)::BIGINT AS n ::METRIC FROM actuals;
+SQL
+start "$T/fk.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/fkdash"), $PORT, '{}');" || fail "a database with foreign keys could not be served"
+[ "$(panel 0 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK actuals: $(cat "$T/body")"
+[ "$(panel 1 '{}' fk)" = 200 ] && grep -qE '"c0":249500(\.0)?[,}]' "$T/body" || fail "FK generated column: $(cat "$T/body")"
+[ "$(panel 2 '{}' fk)" = 200 ] && grep -qE '"c0":2(\.0)?[,}]' "$T/body" || fail "FK self-referencing table: $(cat "$T/body")"
+[ "$(panel 3 '{}' fk)" = 200 ] && grep -qE '"c0":50(\.0)?[,}]' "$T/body" || fail "FK view: $(cat "$T/body")"
+[ "$(panel 4 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK sequence default: $(cat "$T/body")"
+grep -q "table main.tree of 'fk' copied without its constraints" "$T/out" || fail "FK: no warning for tree: $(cat "$T/out")"
+grep -qE "main\.(materials|actuals|suppliers) of 'fk' copied without" "$T/out" && fail "FK: a table lost its constraints: $(cat "$T/out")"
+echo "SELECT anofox_serve_refresh($PORT);" >&3
+for _ in $(seq 50); do grep -q "epoch 2" "$T/out" && break; sleep 0.2; done
+grep -q "epoch 2" "$T/out" || fail "FK refresh: $(cat "$T/out")"
+[ "$(panel 0 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK after refresh: $(cat "$T/body")"
+stop
+[ "$before" = "$(fkstate)" ] || fail "FK: the source database changed"
+echo "OK: a database with foreign keys is snapshotted table by table, parents first; a self-referencing table without its constraints; the source is untouched"

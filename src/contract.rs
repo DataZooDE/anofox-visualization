@@ -3,8 +3,10 @@
 //! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
 //! `test` (`tests`: a comparison forest; `compare`: groups with significance
 //! brackets), partial-residual plots (`partial`), a cross-validation fold
-//! timeline (`cv`, provisional), point-in-time `events` (alarms, parameter
-//! changes) and an `auto` dispatch on the column signature.
+//! timeline (`cv`, provisional), time-series `decomposition` (stacked
+//! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
+//! `events` (alarms, parameter changes) and an `auto` dispatch on the column
+//! signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -20,6 +22,7 @@ use serde_json::{Map, Value as J};
 
 mod curves;
 mod cv;
+mod decomposition;
 mod events;
 mod graph;
 mod look;
@@ -45,6 +48,7 @@ pub const PLOTS: &[&str] = &[
     "compare",
     "partial",
     "cv",
+    "decomposition",
     "events",
     "diagram",
     "auto",
@@ -120,8 +124,8 @@ fn render_plot(
     // aggregate: one row per test.
     let flat;
     let rows = match plot {
-        "tests" | "auto" => match flatten(rows) {
-            Some(f) if plot == "tests" || detect(rows).is_err() => {
+        "tests" | "auto" | "decomposition" => match flatten(rows) {
+            Some(f) if plot != "auto" || detect(rows).is_err() => {
                 flat = rename(&f).unwrap_or(f);
                 &flat[..]
             }
@@ -195,6 +199,9 @@ fn render_plot(
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
         "cv" => return direct(&|| cv::cv(&t, options, w, h, o, place)),
+        "decomposition" => {
+            return direct(&|| decomposition::decomposition(&t, options, w, h, o, place))
+        }
         "diagram" => {
             let cols = graph::columns(rows, options).map_err(fail)?;
             return crate::render_placed(&cols, place, w, h, o);
@@ -543,6 +550,10 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "partial"
     } else if has("fold_id") && (has("split") || has("test_start") || has("train_end")) {
         "cv"
+    } else if has("component") && has("value")
+        || has("trend") && (has("remainder") || has("residual") || has("seasonal"))
+    {
+        "decomposition"
     } else if (has("kind") || has("severity")) && (has("ds") || has("period")) {
         "events"
     } else if has("p_value") || has("test_id") || has("statistic") && has("method") {
@@ -557,7 +568,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
-             partial_residual), cv folds (fold_id, split, ds) or events (ds | period, kind){}",
+             partial_residual), cv folds (fold_id, split, ds), decomposition (ds | period, \
+             component, value) or events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -585,6 +597,11 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["partial_residual"],
     ),
     ("cv", &["fold_id", "split", "ds"], &["fold_id"]),
+    (
+        "decomposition",
+        &["ds", "component", "value"],
+        &["trend", "remainder"],
+    ),
     ("tests", &["p_value"], &["p_value"]),
     ("events", &["ds", "kind"], &["ds"]),
 ];
@@ -1714,6 +1731,81 @@ mod tests {
             ))
             .unwrap(),
             "prediction"
+        );
+    }
+
+    const DECOMP_LONG: &str = r#"[
+        {"ds":"2024-01-01","component":"trend","value":1.0},
+        {"ds":"2024-01-02","component":"trend","value":1.2},
+        {"ds":"2024-01-01","component":"seasonal","value":0.1},
+        {"ds":"2024-01-02","component":"seasonal","value":-0.1},
+        {"ds":"2024-01-01","component":"remainder","value":0.02},
+        {"ds":"2024-01-02","component":"remainder","value":-0.01}]"#;
+
+    #[test]
+    fn decomposition_plots() {
+        let svg = go("decomposition", DECOMP_LONG, "{}").unwrap();
+        dump("decomposition_long", &svg);
+        assert!(
+            svg.contains(">trend</text>") && svg.contains(">remainder</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+        assert_eq!(
+            go("auto", DECOMP_LONG, "{}").unwrap(),
+            go("decomposition", DECOMP_LONG, "{}").unwrap()
+        );
+        // anofox-orchestration's wide table (unique_id, t, method): `t` reads
+        // as `statistic`, which next to `method` would otherwise look like a
+        // `tests` table (#255's gotcha) — decomposition is detected first.
+        let wide: String = format!(
+            "[{}]",
+            (0..10)
+                .map(|i| format!(
+                    r#"{{"unique_id":"a","t":{i},"observed":{o},"trend":1.0,"seasonal":0.1,
+                        "remainder":0.0,"method":"stl"}}"#,
+                    o = i as f64
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(detect(&rows(&wide)).unwrap(), "decomposition");
+        let svg = go("auto", &wide, "{}").unwrap();
+        dump("decomposition_wide_orchestration", &svg);
+        assert!(
+            svg.contains(">observed</text>") && svg.contains(">trend</text>"),
+            "{svg}"
+        );
+        // ts_mstl_decomposition_by's list output: seasonal[][] + periods[] ->
+        // one labelled panel per period.
+        let mstl = r#"[{"id":"B","trend":[1.0,2.0,3.0],"seasonal":[[0.1,-0.1,0.0]],
+            "remainder":[0.0,0.1,-0.1],"periods":[7]}]"#;
+        let svg = go("auto", mstl, "{}").unwrap();
+        dump("decomposition_mstl", &svg);
+        assert!(svg.contains("seasonal (7)"), "{svg}");
+        // ts_forecast_explain_by's STRUCT column is flattened first.
+        let explain = r#"[{"id":"A","decomposition":{"horizon":5,"level":[1.0,1.1,1.2,1.3,1.4],
+            "trend":[1.0,1.0,1.0,1.0,1.0],"seasonal":[0.1,-0.1,0.0,0.1,-0.1],"residual":null}}]"#;
+        let svg = go("auto", explain, "{}").unwrap();
+        dump("decomposition_explain", &svg);
+        assert!(
+            svg.contains(">level</text>")
+                && svg.contains(">trend</text>")
+                && svg.contains(">seasonal</text>"),
+            "{svg}"
+        );
+        let svg2 = go("decomposition", explain, "{}").unwrap();
+        assert_eq!(svg, svg2);
+        // Two series: GROUP BY id.
+        let two = r#"[{"id":"A","ds":"2024-01-01","component":"trend","value":1.0},
+            {"id":"B","ds":"2024-01-01","component":"trend","value":2.0}]"#;
+        let e = go("decomposition", two, "{}").unwrap_err().to_string();
+        assert!(e.contains("GROUP BY id"), "{e}");
+        // components := picks and orders the panels.
+        let svg = go("decomposition", DECOMP_LONG, r#"{"components":["trend"]}"#).unwrap();
+        assert!(
+            svg.contains(">trend</text>") && !svg.contains(">remainder</text>"),
+            "{svg}"
         );
     }
 

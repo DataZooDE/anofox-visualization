@@ -47,7 +47,7 @@ pub struct Diagnostic {
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
     /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
-    /// `transition/unknown` (warnings) | `diagram/null-id` |
+    /// `transition/unknown` | `hover-focus/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `box/missing` (error: a box from statistics without
@@ -1953,7 +1953,7 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
 /// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
-/// `::CATEGORY`), an unknown `::TRANSITION`.
+/// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1985,6 +1985,12 @@ fn motion_diags(
             out.push((
                 "transition/unknown",
                 format!("::TRANSITION `{v}` is not 'tween' or 'none' — the chart is swapped"),
+            ));
+        }
+        if *r == Role::HoverFocus && !crate::HOVER_FOCUS_MODES.contains(&v.as_str()) {
+            out.push((
+                "hover-focus/unknown",
+                format!("::HOVER_FOCUS `{v}` is not 'series' or 'none' — hovering a mark focuses its series"),
             ));
         }
         if *r == Role::StoryBy {
@@ -2030,7 +2036,8 @@ fn map_diags(
     rows: &[Map<String, Value>],
 ) -> Vec<(Severity, &'static str, String)> {
     let mut out = region_diags(roles, rows);
-    let Some(geom) = roles
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    let geom = roles
         .iter()
         .find(|(i, r)| {
             *r == Role::Geometry
@@ -2038,10 +2045,14 @@ fn map_diags(
                     .iter()
                     .any(|t| t.trim().parse::<f64>().is_err())
         })
-        .map(|(i, _)| *i)
-    else {
+        .map(|(i, _)| *i);
+    // M2a fix: the projection/classes/too-many-marks checks used to run only
+    // on WKT (::MAP) panels, so a ::REGION or ::LAT/::LON map's
+    // ::PROJECTION, ::CLASSES and point count went unchecked.
+    let is_map = geom.is_some() || has(Role::Region) || (has(Role::Lat) && has(Role::Lon));
+    if !is_map {
         return out;
-    };
+    }
     let first = |want: Role| {
         roles
             .iter()
@@ -2070,14 +2081,15 @@ fn map_diags(
             ));
         }
     }
-    let wkt = column_texts(rows, geom);
+    let wkt = geom.map(|g| column_texts(rows, g)).unwrap_or_default();
     let filled = roles.iter().any(|(i, r)| {
         matches!(r, Role::Value(_))
-            || (*r == Role::Geometry && *i != geom && !column_texts(rows, *i).is_empty())
+            || (*r == Role::Geometry && Some(*i) != geom && !column_texts(rows, *i).is_empty())
     });
-    let areas = wkt
-        .iter()
-        .any(|t| t.trim_start().to_ascii_uppercase().contains("POLYGON"));
+    let areas = has(Role::Region)
+        || wkt
+            .iter()
+            .any(|t| t.trim_start().to_ascii_uppercase().contains("POLYGON"));
     if filled
         && areas
         && projection
@@ -2093,7 +2105,7 @@ fn map_diags(
                 .to_string(),
         ));
     }
-    let points: usize = wkt
+    let wkt_points: usize = wkt
         .iter()
         .map(|t| match ggplot_rs::spatial::parse_wkt(t) {
             Some(ggplot_rs::spatial::Geometry::Point(_)) => 1,
@@ -2101,6 +2113,25 @@ fn map_diags(
             _ => 0,
         })
         .sum();
+    // ::LAT/::LON rows with both numbers
+    let latlon_points = match (
+        roles.iter().find(|(_, r)| *r == Role::Lat).map(|(i, _)| *i),
+        roles.iter().find(|(_, r)| *r == Role::Lon).map(|(i, _)| *i),
+    ) {
+        (Some(li), Some(lo)) => {
+            let lats = cells(rows, li);
+            let lons = cells(rows, lo);
+            lats.iter()
+                .zip(lons.iter())
+                .filter(|(a, b)| {
+                    a.as_deref().and_then(|s| s.parse::<f64>().ok()).is_some()
+                        && b.as_deref().and_then(|s| s.parse::<f64>().ok()).is_some()
+                })
+                .count()
+        }
+        _ => 0,
+    };
+    let points = wkt_points + latlon_points;
     if points > MAP_POINTS_WARN {
         out.push((
             Severity::Warning,
@@ -2110,6 +2141,32 @@ fn map_diags(
                  cells (the h3 extension) or to regions, to keep the map light"
             ),
         ));
+    }
+    // M2a: ::SIZE rows that a graduated-symbol map won't draw (zero,
+    // negative or missing — size is the symbol's area, not a position).
+    if let Some(si) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Size)
+        .map(|(i, _)| *i)
+    {
+        let k = cells(rows, si)
+            .iter()
+            .filter(|v| match v.as_deref().and_then(|s| s.parse::<f64>().ok()) {
+                Some(n) => !(n.is_finite() && n > 0.0),
+                None => true,
+            })
+            .count();
+        // only when at least one row *does* have a usable size (otherwise
+        // ::SIZE isn't driving symbols at all — no map/* lint for that)
+        if k > 0 && k < rows.len() {
+            out.push((
+                Severity::Warning,
+                "map/size-not-positive",
+                format!(
+                    "{k} rows have a zero, negative or missing ::SIZE and are not drawn — size is the symbol's area"
+                ),
+            ));
+        }
     }
     out
 }
@@ -4146,6 +4203,72 @@ mod design_tests {
         );
     }
 
+    /// M2a fix: `map_diags` used to return early (no WKT) before checking
+    /// `::PROJECTION`/`::CLASSES`/too-many-marks on `::REGION` or
+    /// `::LAT`/`::LON` maps.
+    #[test]
+    fn map_modifiers_are_checked_on_region_and_point_maps() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .filter(|d| d.code.starts_with("map/"))
+                .map(|d| (d.severity, d.code))
+                .collect()
+        };
+        let sql = "SELECT c::REGION, v::BARCHART, 'robinson'::PROJECTION FROM t;";
+        assert_eq!(
+            codes(
+                sql,
+                vec![json!({ "c0": "DE-BY", "c1": 1.0, "c2": "robinson" })]
+            ),
+            vec![(Severity::Warning, "map/unknown-projection")]
+        );
+        let pts: Vec<Value> = (0..20_001)
+            .map(|i| json!({ "c0": (i % 80) as f64, "c1": 10.0 }))
+            .collect();
+        assert_eq!(
+            codes("SELECT lat::LAT, lon::LON FROM t;", pts),
+            vec![(Severity::Warning, "map/too-many-marks")]
+        );
+    }
+
+    #[test]
+    fn size_not_positive_is_flagged() {
+        let codes = |rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                "SELECT lat::LAT, lon::LON, n::SIZE FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/size-not-positive")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let row = |lat: f64, lon: f64, n: Value| json!({ "c0": lat, "c1": lon, "c2": n });
+        assert!(codes(vec![
+            row(50.0, 10.0, json!(1.0)),
+            row(51.0, 10.0, json!(2.0))
+        ])
+        .is_empty());
+        assert_eq!(
+            codes(vec![
+                row(50.0, 10.0, json!(1.0)),
+                row(51.0, 10.0, json!(0.0)),
+                row(52.0, 10.0, Value::Null),
+            ]),
+            vec![(Severity::Warning, "map/size-not-positive")]
+        );
+    }
+
     #[test]
     fn map_regions_and_points_are_checked() {
         let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str, String)> {
@@ -4205,9 +4328,15 @@ mod design_tests {
                 .into_iter()
                 .map(|d| d.code)
                 .filter(|c| {
-                    ["animate/", "linestyle/", "story/", "transition/"]
-                        .iter()
-                        .any(|p| c.starts_with(p))
+                    [
+                        "animate/",
+                        "linestyle/",
+                        "story/",
+                        "transition/",
+                        "hover-focus/",
+                    ]
+                    .iter()
+                    .any(|p| c.starts_with(p))
                 })
                 .collect()
         };
@@ -4251,6 +4380,20 @@ mod design_tests {
             ),
             vec!["transition/unknown"]
         );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "dim" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'dim'::HOVER_FOCUS FROM t;",
+                row
+            ),
+            vec!["hover-focus/unknown"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "none" });
+        assert!(codes(
+            "SELECT x::XAXIS, y::BARCHART, 'none'::HOVER_FOCUS FROM t;",
+            row
+        )
+        .is_empty());
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
     }
