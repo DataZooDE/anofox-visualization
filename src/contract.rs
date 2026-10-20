@@ -2,10 +2,11 @@
 //! (`docs/plans/integration-contract.md`): `terms`, `prediction`, `curve`,
 //! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
 //! `test` (`tests`: a comparison forest; `compare`: groups with significance
-//! brackets), partial-residual plots (`partial`), time-series
-//! `decomposition` (stacked observed/level/trend/seasonal/remainder panels,
-//! provisional), point-in-time `events` (alarms, parameter changes) and an
-//! `auto` dispatch on the column signature.
+//! brackets), partial-residual plots (`partial`), a cross-validation fold
+//! timeline (`cv`, provisional), time-series `decomposition` (stacked
+//! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
+//! `events` (alarms, parameter changes) and an `auto` dispatch on the column
+//! signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -20,6 +21,7 @@ use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
 mod curves;
+mod cv;
 mod decomposition;
 mod events;
 mod graph;
@@ -45,6 +47,7 @@ pub const PLOTS: &[&str] = &[
     "tests",
     "compare",
     "partial",
+    "cv",
     "decomposition",
     "events",
     "diagram",
@@ -195,6 +198,7 @@ fn render_plot(
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
+        "cv" => return direct(&|| cv::cv(&t, options, w, h, o, place)),
         "decomposition" => {
             return direct(&|| decomposition::decomposition(&t, options, w, h, o, place))
         }
@@ -544,6 +548,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "summary"
     } else if has("partial_residual") || has("x_residual") && has("y_residual") {
         "partial"
+    } else if has("fold_id") && (has("split") || has("test_start") || has("train_end")) {
+        "cv"
     } else if has("component") && has("value")
         || has("trend") && (has("remainder") || has("residual") || has("seasonal"))
     {
@@ -562,8 +568,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
-             partial_residual), decomposition (ds | period, component, value) or events \
-             (ds | period, kind){}",
+             partial_residual), cv folds (fold_id, split, ds), decomposition (ds | period, \
+             component, value) or events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -590,6 +596,7 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["term", "x", "partial_residual"],
         &["partial_residual"],
     ),
+    ("cv", &["fold_id", "split", "ds"], &["fold_id"]),
     (
         "decomposition",
         &["ds", "component", "value"],
@@ -1695,6 +1702,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("needs an event time"), "{e}");
+    }
+
+    const FOLDS: &str = r#"[
+        {"fold_id":1,"split":"train","period":0},{"fold_id":1,"split":"train","period":1},
+        {"fold_id":1,"split":"test","period":2},
+        {"fold_id":2,"split":"train","period":0},{"fold_id":2,"split":"train","period":1},
+        {"fold_id":2,"split":"train","period":2},{"fold_id":2,"split":"test","period":3},
+        {"fold_id":3,"split":"train","period":0},{"fold_id":3,"split":"train","period":1},
+        {"fold_id":3,"split":"train","period":2},{"fold_id":3,"split":"train","period":3},
+        {"fold_id":3,"split":"test","period":4}]"#;
+
+    #[test]
+    fn cv_fold_timeline() {
+        assert_eq!(detect(&rows(FOLDS)).unwrap(), "cv");
+        let svg = go("auto", FOLDS, "{}").unwrap();
+        dump("cv", &svg);
+        assert!(
+            svg.contains(">fold 1</text>") && svg.contains(">fold 3</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+        // A table with fold_id, split, yhat and model_name is still a
+        // prediction (ts_cv_forecast_by's backtest output), not cv.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"fold_id":1,"id":"a","ds":"2024-01-01","y":1,"split":"test","yhat":1.1,"model_name":"AutoETS"}]"#
+            ))
+            .unwrap(),
+            "prediction"
+        );
     }
 
     const DECOMP_LONG: &str = r#"[

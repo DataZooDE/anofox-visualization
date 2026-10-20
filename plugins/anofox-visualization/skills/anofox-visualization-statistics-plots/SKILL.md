@@ -13,6 +13,7 @@ description: >
   lambda.1se), anofox_plot_tests (post-hoc comparison forest),
   anofox_plot_compare (box / violin / points with significance brackets),
   anofox_plot_partial (component + residual, added-variable),
+  anofox_plot_cv (cross-validation fold timeline, provisional),
   anofox_plot_events (alarm / parameter-change timeline; events := over a
   forecast), anofox_plot_decomposition (time-series decomposition panels:
   observed, level, trend, seasonal, remainder; provisional), anofox_plot_diagram
@@ -71,8 +72,9 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_tests(t, …)` | **p_value \| p_adj \| statistic**, test_id, group1, group2, estimate, conf_low, conf_high, method | `alpha := 0.05` (significance colour), `value := 'estimate'` \| `'statistic'` \| `'p'` (measure; default estimate, else statistic, else −log10 p), `label := 'p'` (default: p and stars) \| `'stars'`. Several methods (ADF, KPSS) get a panel each — own x, the groups on a shared y — unless the axis is −log10 p (`value := 'p'`: one panel, rows "A · ADF"). A STRUCT / LIST column (`tukey_hsd_agg(y, g) AS r`) is expanded |
 | `anofox_plot_compare(r, …)` | the raw rows | **`value := '<numeric col>'`, `factor := '<group col>'`**, `tests :=` a LIST of test STRUCTs (`(SELECT list(t) FROM tukey_hsd_by(…) t WHERE …)`, `tukey_hsd_agg(y, g)`, a two-sample STRUCT such as `t_test_agg(y, g)`), `kind := 'box'` \| `'violin'` \| `'points'`, `hide_ns :=` (drop p > 0.05; default true above 3 groups), `label := 'stars'` (default) \| `'p'` \| a template (`'{p.signif}'`, `'p = {p.adj}'`) |
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
+| `anofox_plot_cv(f, …)` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period \| x**, id; or **fold_id**, train_start, train_end, test_start, test_end | `x := '<col>'`; one lane per fold, train/test windows as bars, a caption with the fold count and whether test windows overlap or leave gaps. Identical folds across ids drawn once; up to 6 different ones get a panel per id (default 640 × 260) |
 | `anofox_plot_diagram(n, …)` | **id** (or `stage`), title \| label, mainstat, status, group, lane, story, x, y, sparkline, seq | `edges :=` a LIST of **source, target** (or `from_stage` / `to_stage`), value \| count, label, style, status; `mainstat := '<col>'`, `format := 'compact'`, `direction := 'LR'` \| `'TB'`, `style :=` (default edge style). The `::DIAGRAM` panel from two tables (dashboards skill → *Diagrams*); 800 × 400 |
-| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, component+value \| trend → decomposition, p_value / test_id → tests, kind \| severity + ds \| period → events. Only the common options |
+| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id → tests, kind \| severity + ds \| period → events. Only the common options |
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
 
@@ -192,6 +194,8 @@ Converters: `from_statsmodels` (OLS, GLM, Logit, linearmodels; Tukey HSD), `from
 | `<model>_partial_residuals_by` | (not a contract schema) | `anofox_plot_partial(p, kind := …)` |
 | `ts_forecast_by` (anofox-forecast) | prediction (no `y`) | `anofox_plot_prediction(f)`; union the history to show actuals |
 | statsforecast `sf.forecast(…, level=[80, 95])` | prediction (wide, melted on read) | `anofox_plot_prediction(f)` — a line per model, nested fan |
+| `ts_cv_folds_by`, `ts_cv_split_by` (anofox-forecast) | cv (provisional, long: `id, ds, fold_id, split`) | `anofox_plot_cv(f)` — as they come |
+| `ts_cv_split_folds_by` (anofox-forecast) | cv (provisional, span: `fold_id, train_start, train_end, test_start, test_end`) | `anofox_plot_cv(f)` — as it comes |
 | twin alarms / parameter changes (inventory-rs) | events | `anofox_plot_events(e)`, or `anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))` |
 | `ts_mstl_decomposition_by`, `ts_forecast_explain_by` (anofox-forecast) | decomposition (provisional, as they come) | `anofox_plot_decomposition(m)` |
 
@@ -303,6 +307,20 @@ LOAD anofox_forecast;
 SELECT anofox_plot_decomposition(m)
 FROM ts_mstl_decomposition_by('sales', id, ds, y, MAP{'seasonal_periods': '[7]'}) m
 WHERE id = 'north';
+```
+
+## Cross-validation folds (anofox_forecast, provisional)
+
+`ts_cv_folds_by(table, id, ds, y, n_folds, horizon, params)` returns one row per `(id, ds)` tagged with its `fold_id` and `split` (`train`/`test`); training windows expand. `anofox_plot_cv(f)` draws one lane per fold, the train and test windows as bars, with a caption on fold count, overlap and gaps. This schema is provisional (DataZooDE/anofox-orchestration#539 is not settled yet).
+
+```sql
+LOAD anofox_forecast;
+CREATE TABLE sales AS
+SELECT store AS id, (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP AS ds,
+       base + 0.4 * i + 6 * sin(i * 2 * pi() / 7) AS y
+FROM (VALUES ('north', 50.0)) s(store, base), range(70) r(i);
+
+SELECT anofox_plot_cv(f) FROM ts_cv_folds_by('sales', id, ds, y, 3, 7, MAP{}) f WHERE id = 'north';
 ```
 
 ## In dashboards and the browser builder

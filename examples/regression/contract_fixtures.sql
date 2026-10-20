@@ -103,6 +103,16 @@ FROM range(60) r(i);
 SELECT 'partial' AS name, anofox_plot_partial(p) AS svg FROM partial p;
 SELECT 'added_variable' AS name, anofox_plot_partial(p, kind := 'added_variable') AS svg FROM partial p;
 
+-- cv: three expanding folds (provisional schema) -----------------------------
+CREATE TABLE folds AS
+SELECT 1 AS fold_id, 'train' AS split, (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP AS ds FROM range(0, 20) r(i)
+UNION ALL SELECT 1, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(20, 27) r(i)
+UNION ALL SELECT 2, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(0, 27) r(i)
+UNION ALL SELECT 2, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(27, 34) r(i)
+UNION ALL SELECT 3, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(0, 34) r(i)
+UNION ALL SELECT 3, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(34, 41) r(i);
+SELECT 'cv' AS name, anofox_plot_cv(f) AS svg FROM folds f;
+
 -- decomposition (provisional, #188): trend + weekly seasonality + remainder -
 CREATE TABLE decomp AS
 SELECT (DATE '2024-01-01' + i::INTEGER) AS ds, c.component,
