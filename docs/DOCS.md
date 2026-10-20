@@ -673,8 +673,9 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
 | `anofox_plot_checks(tbl, x := NULL, kind := NULL)` | **check_name, status, value**, lower_threshold, upper_threshold, identifier, message, run_ts \| ds, check_type, table_name, column_name | a data-quality check band (default): one panel per check (own x scale, sorted), the value as a dot coloured by status (fail red, warn amber, pass green, else muted) against the lower_threshold..upper_threshold acceptance band (light green), one lane per `identifier`; over several `run_ts` / `ds` values (or `kind := 'strip'`) a status strip instead, one lane per check, a dot per run. The status, check label, identifier and message are on hover; `x :=` names the time column (default `run_ts`, else `ds`) |
 | `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
+| `anofox_plot_matrix(tbl, row := NULL, col := NULL, value := NULL, domain := NULL, mirror := NULL, labels := NULL)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also read from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n`; optional `model_id` | a heatmap, one tile per cell: a diverging fill scale around 0, `−1..1` for a correlation measure (`domain :=` overrides); a pair list (anofox-tabular's `profile_correlations` as it comes) is mirrored to the full matrix with a diagonal of 1 (`mirror := false` keeps it as given); cell values are written when there are at most 144 cells (`labels :=` overrides); `value := 'spearman'` picks another measure. Width 520, height 440 |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, row+col \| column_a+column_b → matrix, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -791,7 +792,8 @@ to 1.00 (0.9952 reads "AUC 0.995").
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`check_name\` / \`lower_threshold\` /
   \`upper_threshold\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`fold_id\`, \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one
+  \`fold_id\`, \`trend\` / \`remainder\`, \`p_value\`, \`column_a\` / \`column_b\`,
+  \`ds\` / \`period\`) — a short one
   (\`term\`, \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
   \`team\` is no \`term\`. A shared generic name such as \`kind\`, \`value\`, \`x\`
   or \`y\` alone gives no hint;
@@ -1020,8 +1022,18 @@ SELECT anofox_plot_checks(t) FROM (
 The time-aware checks (`metric_anomaly_iqr`, `rel_count_change`,
 `rolling_values_in_set`) read as `events` (`reference_date` → `ds`, `fail` /
 `warn` → `alarm` / `warning`, `message` → `label`) for a timeline, or as
-`check` (`reference_date` → `ds`) for a status strip over several runs. See
-`docs/plans/integration-contract.md` ("anofox-tabular producers") for the
+`check` (`reference_date` → `ds`) for a status strip over several runs.
+
+`anofox_tab_profile_correlations` (`column_a, column_b, pearson, spearman,
+n`) already follows the `matrix` schema as it comes — a pair list, mirrored
+to the full matrix with a diagonal of 1:
+
+```sql
+SELECT anofox_plot_matrix(t) FROM anofox_tab_profile_correlations('d') t;
+SELECT anofox_plot_matrix(t, value := 'spearman') FROM anofox_tab_profile_correlations('d') t;
+```
+
+See `docs/plans/integration-contract.md` ("anofox-tabular producers") for the
 full adapter table, and `scripts/tabular_conformance.py` for every producer
 rendered end to end.
 

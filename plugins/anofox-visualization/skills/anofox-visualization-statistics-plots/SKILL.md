@@ -17,19 +17,26 @@ description: >
   forecast), anofox_plot_checks (anofox-tabular data-quality checks: a band
   of pass/warn/fail dots against their acceptance range, or a status strip
   over time), anofox_plot_decomposition (time-series decomposition panels:
-  observed, level, trend, seasonal, remainder; provisional), anofox_plot_diagram
+  observed, level, trend, seasonal, remainder; provisional), anofox_plot_matrix
+  (correlation-style heatmap: row/col/value, a diverging scale around 0,
+  anofox-tabular profile_correlations as it comes, mirrored to the full
+  matrix), anofox_plot_diagram
   (a process / pipeline graph from node and edge tables) and anofox_plot
   (auto), with every option (title, x_label,
   y_label, highlight, lambda_min, lambda_1se, facet, reference, band, kind,
   events, base_rate, metrics,
   baseline, label_top, alpha, value, label, factor, tests, hide_ns, components,
+  domain, mirror, labels,
   width, height), anofox_contract_version(), the alias-the-row calling convention,
   GROUP BY for one plot per group, the producer to macro table, and using
   them in ::ROLE dashboards and the browser builder. Use when the user wants
   to plot a regression, coefficients, residual diagnostics, a forecast, a
-  ROC curve, survival curves, test results or a data-quality check result
-  (anofox-tabular run_checks / agg_check / null_rate / …), asks "how do I
-  plot ols_tidy_by / ts_forecast_by / statsforecast / run_checks output", or
+  ROC curve, survival curves, test results, a correlation / confusion matrix
+  or a data-quality check result
+  (anofox-tabular run_checks / agg_check / null_rate / profile_correlations /
+  …), asks "how do I
+  plot ols_tidy_by / ts_forecast_by / statsforecast / run_checks /
+  profile_correlations output", or
   a contract plot call errors. Also for results computed in Python or R: the anofox_viz
   Python package (from_statsmodels, from_sklearn, from_estimator,
   from_scipy, from_pingouin, from_lifelines, from_statsforecast,
@@ -76,8 +83,9 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_compare(r, …)` | the raw rows | **`value := '<numeric col>'`, `factor := '<group col>'`**, `tests :=` a LIST of test STRUCTs (`(SELECT list(t) FROM tukey_hsd_by(…) t WHERE …)`, `tukey_hsd_agg(y, g)`, a two-sample STRUCT such as `t_test_agg(y, g)`), `kind := 'box'` \| `'violin'` \| `'points'`, `hide_ns :=` (drop p > 0.05; default true above 3 groups), `label := 'stars'` (default) \| `'p'` \| a template (`'{p.signif}'`, `'p = {p.adj}'`) |
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
 | `anofox_plot_cv(f, …)` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period \| x**, id; or **fold_id**, train_start, train_end, test_start, test_end | `x := '<col>'`; one lane per fold, train/test windows as bars, a caption with the fold count and whether test windows overlap or leave gaps. Identical folds across ids drawn once; up to 6 different ones get a panel per id (default 640 × 260) |
+| `anofox_plot_matrix(m, …)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n` | `domain := [lo, hi]` (fill scale; default −1..1 for a correlation measure, else the data range), `mirror := false` (keep a pair list as given; default: mirror to the full matrix with a diagonal of 1), `labels := false` \| `true` (cell values; default: on up to 144 cells), `value := 'spearman'` (another measure). One tile per cell, a diverging scale around 0 (default 520 × 440) |
 | `anofox_plot_diagram(n, …)` | **id** (or `stage`), title \| label, mainstat, status, group, lane, story, x, y, sparkline, seq | `edges :=` a LIST of **source, target** (or `from_stage` / `to_stage`), value \| count, label, style, status; `mainstat := '<col>'`, `format := 'compact'`, `direction := 'LR'` \| `'TB'`, `style :=` (default edge style). The `::DIAGRAM` panel from two tables (dashboards skill → *Diagrams*); 800 × 400 |
-| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold + status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id → tests, kind \| severity + ds \| period → events. Only the common options |
+| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold + status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id → tests, row+col \| column_a+column_b → matrix, kind \| severity + ds \| period → events. Only the common options |
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
 
@@ -115,6 +123,16 @@ named `value` and their bounds `lower_threshold` / `upper_threshold`:
 SELECT anofox_plot_checks(c) FROM (VALUES ('rows', 'pass', 120.0, 100.0, NULL),
        ('customer present', 'fail', 0.083, NULL, 0.05))
      c(check_name, status, value, lower_threshold, upper_threshold);
+```
+
+**A correlation matrix** (`matrix` schema): `profile_correlations` plots as it
+comes, a pair list mirrored to the full matrix with a diagonal of 1:
+
+```sql
+SELECT anofox_plot_matrix(m) FROM (VALUES ('amount', 'qty', 0.08, 0.09, 120),
+       ('id', 'amount', -0.01, -0.01, 120))
+     m(column_a, column_b, pearson, spearman, n);
+-- SELECT anofox_plot_matrix(t) FROM anofox_tab_profile_correlations('d') t;  -- as it comes
 ```
 
 **Events and integer periods** (a digital twin's projection and alarms): `period` is the x when there is no `ds`, one row per level draws a nested fan, and `events :=` puts the alarms on it:
@@ -213,6 +231,7 @@ Converters: `from_statsmodels` (OLS, GLM, Logit, linearmodels; Tukey HSD), `from
 | `anofox_tab_run_checks`, `anofox_tab_agg_check` (anofox-tabular) | check (as it comes) | `anofox_plot_checks(t)` / `anofox_plot(t)` |
 | the other anofox-tabular checks (`null_rate`, `compliance`, `distinct_count`, …) | check (measure → `value`, bounds → `lower_threshold` / `upper_threshold`) | `anofox_plot_checks(t)` over the renamed columns |
 | `ts_mstl_decomposition_by`, `ts_forecast_explain_by` (anofox-forecast) | decomposition (provisional, as they come) | `anofox_plot_decomposition(m)` |
+| `anofox_tab_profile_correlations` (anofox-tabular) | matrix (as it comes) | `anofox_plot_matrix(t)` / `anofox_plot(t)` |
 
 Discover the producers of the loaded extensions:
 
