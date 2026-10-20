@@ -1997,7 +1997,23 @@ Clicking a channel narrows those panels to that channel; clicking empty space
 clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
 
 **Selecting table rows** is opt-in per table, with a `::ROWSELECT` directive
-before it (tables without one are not clickable):
+before it (tables without one are not clickable). Like `::COL`/`::HEIGHT`,
+`::ROWSELECT` (and `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`,
+`::SUBTOTAL`, `::SELECT_AS`, `::DRILL`, `::EMPTY` — every `[layout]` role
+described as "next table's …" / "next panel's …") is its own **preceding**
+statement, never a column on the table/chart's own `SELECT`:
+
+```sql skip
+-- Wrong: looks like a column, passes `--check` clean, but 'single' and
+-- 'none' render as literal extra table columns and the row click does
+-- nothing (`dashboard --check --strict` now flags this: `layout/next-panel`).
+SELECT id ::TABLE, name, 'single'::ROWSELECT, 'none'::TOTALS FROM t;
+
+-- Right: each directive is its own statement, read for the table that follows.
+SELECT 'single'::ROWSELECT;
+SELECT 'none'::TOTALS;
+SELECT id ::TABLE, name FROM t;
+```
 
 | `SELECT … ::ROWSELECT;` | A click on a row… |
 |---|---|
