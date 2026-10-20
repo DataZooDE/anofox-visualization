@@ -115,11 +115,12 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 // Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for this
 // process — before registering anything — so every anofox extension this
 // DuckDB loads afterwards (including a LOAD that follows ours in the same
-// session) stays silent by default; an explicit value is left alone (see
-// anofox_viz_ffi.h / anofox_visualization::host::telemetry for the parsing
-// and the thread-safety reasoning). Then, best effort, for an anofox
-// extension loaded BEFORE us in this database: its own load event already
-// went out, but `anofox_telemetry_enabled` -- a setting shared by name
+// session) stays silent by default; an explicit non-empty value is left
+// alone, an unset or empty/whitespace-only one is not (see anofox_viz_ffi.h
+// / anofox_visualization::host::telemetry for the parsing and the
+// thread-safety reasoning). Then, best effort, for an anofox extension
+// loaded BEFORE us in this database: its load event may already have been
+// reported, but `anofox_telemetry_enabled` -- a setting shared by name
 // across every anofox extension -- can still be turned off for the rest of
 // this session, if it exists (duckdb_settings() is checked first so this is
 // a silent no-op otherwise). It only reaches whichever anofox extension

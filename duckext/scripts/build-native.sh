@@ -72,6 +72,14 @@ if "$DUCKDB" -unsigned -c "LOAD '$EXT'; SELECT anofox_render('not json');" >/dev
   echo "FAIL: a bad spec must raise a SQL error"; exit 1
 fi
 echo "OK: bad spec raises a SQL error"
+# #333: DATAZOO_DISABLE_TELEMETRY defaults to "1" on LOAD, whatever this
+# script's own environment has (CI sets it; strip it here so the check is
+# of the extension's default, not an inherited value). getenv() is a
+# DuckDB-CLI-only function, so this only runs through the duckdb binary.
+TELEMETRY="$(env -u DATAZOO_DISABLE_TELEMETRY "$DUCKDB" -unsigned -noheader -list -c "
+LOAD '$EXT'; SELECT getenv('DATAZOO_DISABLE_TELEMETRY');" | tr -d '\r')"
+[ "$TELEMETRY" = "1" ] || { echo "FAIL: DATAZOO_DISABLE_TELEMETRY should default to 1 on LOAD, saw '$TELEMETRY'" >&2; exit 1; }
+echo "OK: DATAZOO_DISABLE_TELEMETRY defaults to 1 on LOAD"
 # #179: after USE <other db> the macros are reached qualified or via search_path (BUILD.md, "macro caveat").
 USE_OK="$("$DUCKDB" -unsigned -noheader -list -c "
 LOAD '$EXT';

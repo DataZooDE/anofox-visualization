@@ -7,8 +7,12 @@
 //! every anofox extension loaded through anofox-visualization — the
 //! `dashboard`/`serve` binaries and the extension itself — defaults that
 //! switch to **off**, by setting the variable to `"1"` if the user never set
-//! it at all. An explicit value, whatever it is, is the user's own choice and
-//! is left untouched.
+//! it to a non-empty value at all. An explicit non-empty value, whatever it
+//! is, is the user's own choice and is left untouched; an empty or
+//! whitespace-only value is treated the same as unset (templates such as a
+//! compose `VAR=${VAR}` or a bare systemd `Environment=VAR=` leave the
+//! variable set-but-empty for an operator who never touched it — that must
+//! not read as an opt-in).
 //!
 //! Every caller funnels through [`default_value`] (the pure decision, unit
 //! tested directly) and [`ensure_default_once`] (the one place that actually
@@ -24,13 +28,19 @@ pub const VAR: &str = "DATAZOO_DISABLE_TELEMETRY";
 /// what should this process set it to? `Some(v)` means "set it to `v`";
 /// `None` means "leave it alone".
 ///
-/// `current` being `Some(_)` — any string, including `"0"`/`"false"`/`"no"`
-/// or `""` — means the user (or a parent process, e.g. this repo's own CI and
-/// conformance scripts) already made a choice; we never override it. Only an
-/// actually-unset variable gets our default.
+/// `current` being `Some(s)` with a non-empty, non-whitespace `s` — any
+/// string, including `"0"`/`"false"`/`"no"` — means the user (or a parent
+/// process, e.g. this repo's own CI and conformance scripts) already made a
+/// choice; we never override it. An unset variable, or one set to `""` or
+/// only whitespace, gets our default: a deployment template that renders the
+/// variable empty when nobody set it (a compose `VAR=${VAR}`, a bare systemd
+/// `Environment=VAR=`, an unset Helm value) must not be read as an explicit
+/// opt-in — `posthog-telemetry` treats `""` as "telemetry on" (it only
+/// matches `"1"`/`"true"`/`"yes"`), so leaving it alone here would too.
 pub fn default_value(current: Option<&str>) -> Option<&'static str> {
     match current {
         None => Some("1"),
+        Some(s) if s.trim().is_empty() => Some("1"),
         Some(_) => None,
     }
 }
@@ -38,9 +48,9 @@ pub fn default_value(current: Option<&str>) -> Option<&'static str> {
 /// Is telemetry disabled under the exact parsing the anofox extensions use
 /// (see the module docs)? Used to decide whether the best-effort
 /// `SET anofox_telemetry_enabled = false` (for an anofox extension loaded
-/// before ours, whose load event already went out) is this process's
-/// intent, rather than forcing it off even when the user explicitly opted
-/// back in.
+/// before ours, whose load event may already have been reported) is this
+/// process's intent, rather than forcing it off even when the user
+/// explicitly opted back in.
 pub fn is_disabled(current: Option<&str>) -> bool {
     matches!(current, Some("1") | Some("true") | Some("yes"))
 }
@@ -60,23 +70,35 @@ static ENV_ONCE: Once = Once::new();
 /// edition; see the call sites' SAFETY comments). We cannot make the write
 /// itself atomic with respect to other libraries' reads, so we minimise the
 /// window instead: [`Once`] guarantees the process performs this write at
-/// most once, as early in the embedding's lifecycle as it can — before any
-/// thread is spawned in the `dashboard`/`serve` binaries, and as the first
-/// action of the extension's load callback (which DuckDB runs on the
-/// thread that issued `LOAD`/`INSTALL`, before that query's own worker
-/// threads fan out) for the extension. A DuckDB build already running other
-/// queries on a pre-existing thread pool when ours loads is the remaining
-/// theoretical race; we accept it as the safest practical option left once
-/// loading has to happen inside someone else's process, and recommend
-/// loading anofox-visualization first (or setting the variable before any
-/// extension loads) when that matters.
+/// most once, as early as each embedding can manage — before any thread of
+/// its own is spawned in the `dashboard`/`serve` binaries' `main()`, and as
+/// the first action of the extension's load callback.
 ///
-/// A no-op on `wasm32` (DuckDB-Wasm, including `duckext`'s experimental
-/// side-module build): there is no real process environment there —
-/// `std::env::set_var` is unconditionally unsupported and panics (`-C
-/// panic=abort` for that build turns it into a hard abort, not a catchable
-/// error) — and it is moot anyway, since the browser's anofox DuckDB-Wasm
-/// builds have telemetry compiled out (see `docs/DOCS.md`).
+/// In the binaries that is the whole story: nothing has run yet. In the
+/// extension, DuckDB's own worker threads (the `TaskScheduler`'s pool)
+/// already exist by the time `LOAD` runs — they start with the database, not
+/// with this call — but they are idle at this point and never call `getenv`
+/// on their own, so they are not a realistic reader. The one concurrent
+/// reader worth worrying about is a *different* anofox extension, loaded
+/// earlier in the same process, whose own telemetry library may have a
+/// background worker thread calling `getenv(DATAZOO_DISABLE_TELEMETRY)` at
+/// send time (`posthog-telemetry`'s `PostHogProcessBatch`) at the same
+/// moment we call `set_var`. The variable's value is never attacker-
+/// controlled either way, and the write happens at most once per process;
+/// we accept this as the safest practical option left once loading has to
+/// happen inside someone else's process, and recommend loading
+/// anofox-visualization first (or setting the variable before any extension
+/// loads) when avoiding even that residual race matters.
+///
+/// A no-op on `wasm32-unknown-unknown` (`std::env::set_var` is
+/// unconditionally unsupported there and panics — `duckext`'s experimental
+/// side-module build uses `-C panic=abort`, which would turn that into a
+/// hard abort, not a catchable error). `wasm32-unknown-emscripten` (the
+/// target duckext's wasm build actually ships) does support real env vars,
+/// but the no-op is gated on `target_arch` rather than threading the OS in
+/// too, for a single simple rule covering both wasm32 targets; it is moot
+/// either way, since the browser's anofox DuckDB-Wasm builds have telemetry
+/// compiled out (see `docs/DOCS.md`).
 pub fn ensure_default_once() {
     #[cfg(not(target_arch = "wasm32"))]
     ENV_ONCE.call_once(|| {
@@ -103,8 +125,22 @@ mod tests {
     }
 
     #[test]
-    fn any_explicit_value_is_kept() {
-        for v in ["0", "false", "no", "1", "true", "yes", "", "banana"] {
+    fn empty_or_whitespace_is_treated_as_unset() {
+        // A deployment template that renders the variable empty when nobody
+        // set it (compose `VAR=${VAR}`, systemd `Environment=VAR=`, an unset
+        // Helm value) must get our default, not read as an opt-in (#333 L1).
+        for v in ["", " ", "\t", "\n", "  \t\n "] {
+            assert_eq!(
+                default_value(Some(v)),
+                Some("1"),
+                "value {v:?} must be treated as unset"
+            );
+        }
+    }
+
+    #[test]
+    fn any_non_empty_explicit_value_is_kept() {
+        for v in ["0", "false", "no", "1", "true", "yes", "banana", " 1 "] {
             assert_eq!(
                 default_value(Some(v)),
                 None,

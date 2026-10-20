@@ -401,10 +401,11 @@ The anofox extensions it plots (statistics, forecast, tabular, optimize,
 decide) send pseudonymous usage telemetry by default, but **not** wherever
 anofox-visualization runs: the `dashboard`/`serve` binaries and the
 `anofox_visualization` extension itself default `DATAZOO_DISABLE_TELEMETRY`
-to `1` for the process, before any anofox extension they load can send
-anything — `SET anofox_telemetry_enabled = false` alone misses the load event
-and, with several loaded, all but the first. To opt back in, set
-`DATAZOO_DISABLE_TELEMETRY=0` (or `false`/`no`) yourself before anofox-
+to `1` for the process whenever it is unset *or empty* (a templated
+`VAR=${VAR}` left blank is not a choice), before any anofox extension they
+load can send anything — `SET anofox_telemetry_enabled = false` alone misses
+the load event and, with several loaded, all but the first. To opt back in,
+set `DATAZOO_DISABLE_TELEMETRY=0` (or `false`/`no`) yourself before anofox-
 visualization loads. The browser demo's DuckDB-Wasm builds send nothing. See
 [Telemetry of the anofox extensions](docs/DOCS.md#telemetry-of-the-anofox-extensions).
 

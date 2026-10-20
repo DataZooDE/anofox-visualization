@@ -472,8 +472,8 @@ unsafe fn register_scalar(
 /// no-op, never a SQL error, when no such extension is loaded. It only
 /// reaches whichever anofox extension registered the setting first (every
 /// anofox extension shares the one name), so a sibling loaded even earlier,
-/// in a different database connection that already sent its load event, is
-/// unaffected by this call either way — load anofox_visualization first, or
+/// in a different database connection that may already have reported its
+/// load, is unaffected by this call either way — load anofox_visualization first, or
 /// set `DATAZOO_DISABLE_TELEMETRY` in the environment before anything loads,
 /// when that matters (see docs/DOCS.md).
 pub(crate) fn best_effort_disable_existing_setting(conn: &db::Conn) {
@@ -500,11 +500,14 @@ unsafe fn init(
     // Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for
     // this process, as the very first thing this load callback does — see
     // `anofox_visualization::host::telemetry` for the default, the explicit
-    // opt-in it leaves alone, and the thread-safety reasoning (DuckDB runs
-    // this on the thread that issued LOAD, before that statement's own
-    // worker threads exist; `ensure_default_once` still guards the actual
-    // `set_var` with a `Once` as the safest practical choice against a
-    // DuckDB build with other threads already running).
+    // opt-in it leaves alone, and the thread-safety reasoning. DuckDB's own
+    // worker threads already exist by this point (they start with the
+    // database, not with LOAD), but they are idle and never call getenv on
+    // their own; `ensure_default_once` still guards the actual `set_var`
+    // with a `Once` as the safest practical choice against the realistic
+    // concurrent reader — a different anofox extension, loaded earlier in
+    // this same process, whose own telemetry worker thread may call getenv
+    // at send time.
     anofox_visualization::host::telemetry::ensure_default_once();
     let get_api = access.get_api.ok_or("no get_api")?;
     let api_ptr = get_api(info, c"v1.2.0".as_ptr()) as *const duckdb_ext_api_v1;
@@ -524,8 +527,9 @@ unsafe fn init(
     let conn = db::Conn::owned(raw);
 
     // Best effort for an anofox extension loaded BEFORE us: its load event
-    // already went out (that happens at its own LOAD, not at a later SET),
-    // but disabling `anofox_telemetry_enabled` here still silences anything
+    // may already have been reported (that happens at its own LOAD, not at
+    // a later SET), but disabling `anofox_telemetry_enabled` here still
+    // silences anything
     // it or a sibling would send for the rest of this session — the setting
     // is shared by name across every anofox extension loaded into this
     // database (#333). Only when our own effective default is "disabled":

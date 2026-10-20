@@ -27,10 +27,11 @@ const char *anofox_viz_macro_item(size_t i, int list, size_t j, const char **sec
 /* The anofox integration-contract version (anofox_contract_version()). Static. */
 const char *anofox_viz_contract_version(void);
 /* Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for this
- * process if unset (an explicit value is left alone), so every anofox
- * extension loaded afterwards stays silent by default. Call first thing in
- * LoadInternal, before registering anything; see
- * anofox_visualization::host::telemetry for the thread-safety reasoning. */
+ * process if unset or empty/whitespace-only (an explicit non-empty value is
+ * left alone), so every anofox extension loaded afterwards stays silent by
+ * default. Call first thing in LoadInternal, before registering anything;
+ * see anofox_visualization::host::telemetry for the thread-safety
+ * reasoning. */
 void anofox_viz_ensure_telemetry_default(void);
 /* Is telemetry currently disabled, under the exact parsing the anofox
  * extensions use ("1"/"true"/"yes")? Call after

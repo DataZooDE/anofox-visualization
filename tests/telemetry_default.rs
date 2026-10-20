@@ -95,3 +95,16 @@ fn an_explicit_opt_in_reaches_the_duckdb_child_unchanged() {
         "dashboard must leave an explicit DATAZOO_DISABLE_TELEMETRY alone (opt back into telemetry)"
     );
 }
+
+#[test]
+fn an_empty_value_reaches_the_duckdb_child_as_disabled() {
+    // #333 L1: a deployment template that renders the variable empty when
+    // nobody actually set it (compose `VAR=${VAR}`, systemd
+    // `Environment=VAR=`, an unset Helm value) is not an explicit opt-in.
+    let s = Scratch::new("empty");
+    let seen = run_describe(&s.0, Some(("DATAZOO_DISABLE_TELEMETRY", "")));
+    assert_eq!(
+        seen, "1",
+        "dashboard must treat an empty DATAZOO_DISABLE_TELEMETRY as unset, not as an opt-in"
+    );
+}

@@ -3139,24 +3139,31 @@ export DATAZOO_DISABLE_TELEMETRY=1      # 1, true or yes
 itself, set `DATAZOO_DISABLE_TELEMETRY=1` for the process the moment they
 start — before any thread or DuckDB instance exists for the binaries, and as
 the first thing the extension's own load callback does — *unless the
-variable is already set*, to anything at all. That covers the DuckDB CLI
-loading `anofox_visualization` first, `dashboard`, `dashboard serve`
+variable is already set to a non-empty value*. An unset variable, or one set
+to `""` or only whitespace, gets the default: a deployment template that
+renders the variable empty when nobody actually set it (a compose
+`VAR=${VAR}`, a bare systemd `Environment=VAR=`, an unset Helm value) is not
+an explicit choice and must not read as opting in. That covers the DuckDB
+CLI loading `anofox_visualization` first, `dashboard`, `dashboard serve`
 (`serve --dashboards`), and the session that calls
 `anofox_serve_dashboards`, including every anofox extension it loads
 afterwards in that process (they all check the same variable).
 
-To opt back in, set the variable yourself to anything other than
+To opt back in, set the variable yourself to a non-empty value other than
 `1`/`true`/`yes` — most simply `DATAZOO_DISABLE_TELEMETRY=0` — in the
 environment *before* anofox-visualization loads; once it has set the
-default, it never overwrites an explicit value either way. Loading
+default, it never overwrites an explicit non-empty value either way. Loading
 anofox-visualization into a session that already has telemetry enabled for
 some other reason, and that you want to keep that way, needs no action: an
 explicit value is always left alone.
 
 **Load order still matters for an anofox extension loaded *before*
-anofox-visualization in the same session**: its load event already went out
-by the time anofox-visualization's default takes effect. anofox-visualization
-still runs a best-effort `SET anofox_telemetry_enabled = false` right after —
+anofox-visualization in the same session**: its load event may already have
+been reported by the time anofox-visualization's default takes effect (the
+env var is read at send time, on a background worker, so it may still be in
+time if that send hasn't happened yet — but this isn't guaranteed).
+anofox-visualization still runs a best-effort
+`SET anofox_telemetry_enabled = false` right after —
 only when its own effective default is "disabled" — which silences that
 extension (and the locked server's own re-`LOAD` of it into its snapshot) for
 the rest of the process, if the setting exists at all (checked via

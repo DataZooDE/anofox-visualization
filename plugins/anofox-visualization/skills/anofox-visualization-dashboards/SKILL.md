@@ -537,3 +537,5 @@ These silently break a panel (it renders wrong or vanishes):
 | To consumers, locked | `SELECT anofox_serve_dashboards('<dir>', 8095);` — each `.sql` file of the folder is a page `/d/<name>` with a shared nav bar; `::TAB` pages deep-link via `?tab=<name>`; `?v.<variable>=<value>` pre-sets an input or a selection (validated against the input's options) |
 
 Modes, options, limits and deployment: the serving skill; login, row / column policies and embedding: the access-control skill.
+
+**Telemetry:** any `-- @load` of an anofox extension (anofox_statistics, anofox_forecast, anofox_tabular, anofox_optimize, anofox_decide) stays silent — `dashboard`/`serve` and the `anofox_visualization` extension itself default `DATAZOO_DISABLE_TELEMETRY` to `1` before anything else can load. To opt in, set `DATAZOO_DISABLE_TELEMETRY=0` yourself before anofox_visualization loads.
