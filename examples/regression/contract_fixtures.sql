@@ -133,5 +133,11 @@ SELECT (DATE '2024-01-01' + i::INTEGER) AS ds, c.component,
 FROM range(56) r(i), (VALUES ('trend'), ('seasonal'), ('remainder')) c(component);
 SELECT 'decomposition' AS name, anofox_plot_decomposition(d) AS svg FROM decomp d;
 
+-- matrix: a correlation pair list mirrored to the full matrix (#183) --------
+CREATE TABLE corr AS SELECT * FROM (VALUES
+  ('amount', 'qty', 0.42), ('amount', 'id', -0.05), ('id', 'qty', 0.08)
+) t(column_a, column_b, pearson);
+SELECT 'matrix' AS name, anofox_plot_matrix(m) AS svg FROM corr m;
+
 -- anofox_plot: dispatch on the column signature ------------------------------
 SELECT 'auto_terms' AS name, anofox_plot(c) AS svg FROM coefs c;

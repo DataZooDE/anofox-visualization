@@ -7,7 +7,9 @@
 //! by status, or a status strip over time), a cross-validation fold
 //! timeline (`cv`, provisional), time-series `decomposition` (stacked
 //! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
-//! `events` (alarms, parameter changes) and an `auto` dispatch on the column
+//! `events` (alarms, parameter changes), a correlation-style heatmap
+//! (`matrix`: row, col, value; anofox-tabular's `profile_correlations` as it
+//! comes, mirrored to the full matrix) and an `auto` dispatch on the column
 //! signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
@@ -29,6 +31,7 @@ mod decomposition;
 mod events;
 mod graph;
 mod look;
+mod matrix;
 mod names;
 mod stats;
 mod terms;
@@ -54,6 +57,7 @@ pub const PLOTS: &[&str] = &[
     "decomposition",
     "events",
     "checks",
+    "matrix",
     "diagram",
     "auto",
 ];
@@ -212,6 +216,7 @@ fn render_plot(
         }
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
+        "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -568,6 +573,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "events"
     } else if has("p_value") || has("test_id") || has("statistic") && has("method") {
         "tests"
+    } else if (has("row") && has("col")) || (has("column_a") && has("column_b")) {
+        "matrix"
     } else {
         let keys: Vec<&str> = rows
             .first()
@@ -579,8 +586,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
-             ds), decomposition (ds | period, component, value) or events (ds | period, \
-             kind){}",
+             ds), decomposition (ds | period, component, value), matrix (row, col, value) or \
+             events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -620,11 +627,22 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
     ),
     ("tests", &["p_value"], &["p_value"]),
     ("events", &["ds", "kind"], &["ds"]),
+    (
+        "matrix",
+        &["row", "col", "value"],
+        &["column_a", "column_b"],
+    ),
 ];
 
 /// Columns [`detect`] also reads in place of a required one: `events` takes
-/// `period` for `ds` and `severity` for `kind`.
-const STAND_INS: &[(&str, &str)] = &[("ds", "period"), ("kind", "severity")];
+/// `period` for `ds` and `severity` for `kind`; `matrix` takes a pair list's
+/// `column_a` / `column_b` for `row` / `col`.
+const STAND_INS: &[(&str, &str)] = &[
+    ("ds", "period"),
+    ("kind", "severity"),
+    ("row", "column_a"),
+    ("col", "column_b"),
+];
 
 /// Does the near miss `k` of the identifying column `c` point at its schema
 /// on its own? A long name's does (`estimat`, `curve_typ`); a short one
@@ -1904,6 +1922,45 @@ mod tests {
             svg.contains(">trend</text>") && !svg.contains(">remainder</text>"),
             "{svg}"
         );
+    }
+
+    #[test]
+    fn matrix_dispatch() {
+        // profile_correlations-shaped rows (as it comes): a mirrored heatmap.
+        const PAIRS: &str = r#"[
+            {"column_a":"amount","column_b":"qty","pearson":0.08,"spearman":0.09,"n":120},
+            {"column_a":"id","column_b":"amount","pearson":-0.01,"spearman":-0.01,"n":120}]"#;
+        assert_eq!(detect(&rows(PAIRS)).unwrap(), "matrix");
+        let svg = go("auto", PAIRS, "{}").unwrap();
+        dump("matrix_profile_correlations", &svg);
+        assert!(svg.contains(r#"data-kind="heatmap""#), "{svg}");
+        assert!(svg.contains(">amount</text>"), "{svg}");
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // The fixed −1..1 correlation domain is honoured by the fill scale
+        // itself, not just the colourbar: no cell here is anywhere near −1
+        // (the smallest is −0.01), so the diverging ramp's low endpoint must
+        // not appear — ggplot-rs's continuous fill scale otherwise
+        // auto-trains its domain from the plotted values, which would
+        // narrow −1..1 down to the data's own range and paint the barely
+        // negative −0.01 cell as if it were the worst possible value.
+        let [lo, ..] = RenderOptions::default().theme.diverging_ramp();
+        assert!(
+            !svg.contains(&format!("#{:02X}{:02X}{:02X}", lo.0, lo.1, lo.2)),
+            "{svg}"
+        );
+
+        // A pairwise-test table (p_value next to column_a/column_b) still
+        // reads as `tests`, not `matrix` (tests is checked first).
+        assert_eq!(
+            detect(&rows(r#"[{"column_a":"x","column_b":"y","p_value":0.1}]"#)).unwrap(),
+            "tests"
+        );
+
+        let e = go("auto", r#"[{"column_a":"x"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("closest: matrix, missing col"), "{e}");
     }
 
     #[test]

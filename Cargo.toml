@@ -29,9 +29,13 @@ crate-type = ["cdylib", "rlib"]
 # From crates.io (0.17: escaped host attributes, data-domain/series/value,
 # fragments, candlestick/radar/gauge/calendar, plus the statistical geoms —
 # discrete dodge, flip-safe intervals, mapped reference lines, QQ bands, Cook's
-# contours, step ribbons, label repel, PlotGrid). For local ggplot-rs work,
-# `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.19", default-features = false, features = ["sf"] }
+# contours, step ribbons, label repel, PlotGrid; 0.20: arrows via
+# `geom_curve`/`geom_segment` `.arrow()`, the `linewidth` aesthetic, hex
+# binning in data units (`StatBinHex`/`GeomHex` on a fixed lattice), identity
+# colour/fill scales, interactive aesthetics (`Aes::tooltip`, `Aes::data_attr`),
+# and `coord_sf` xlim/ylim/expand + `svg_root_data(false)` for overlay
+# rendering). For local ggplot-rs work, `[patch.crates-io]` it to a path.
+ggplot-rs = { version = "0.20", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

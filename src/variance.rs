@@ -200,6 +200,7 @@ pub(crate) fn render_waterfall(
                 color: neutral(0.62),
                 width: 0.8,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(conn_data)
             .layer_aes(Aes::new().x("x").xend("xend").y("y").yend("y"));

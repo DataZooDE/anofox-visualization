@@ -9482,6 +9482,7 @@ function contractHeight(macro) {
     anofox_plot_terms: 340,
     anofox_plot_checks: 360,
     anofox_plot_decomposition: 520,
+    anofox_plot_matrix: 440,
   };
   return H[macro] || 320;
 }
