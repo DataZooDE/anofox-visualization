@@ -12234,7 +12234,9 @@ function markInfo(attr, tip) {
   const tValue = i >= 0 ? tip.slice(i + 2) : "";
   const ds = attr("data-series");
   const dv = attr("data-value");
-  const fv = attr("data-fvalue");
+  // `data-fvalue` (most marks, via svg_formatted_values) or `data-vtext` (a
+  // ::TRACK lane: `data-fvalue` is ggplot-rs-reserved, see `track.rs`).
+  const fv = attr("data-fvalue") || attr("data-vtext");
   const series = ds !== null && ds !== "" ? ds : tSeries;
   const raw = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
   const value = fv !== null && fv !== "" ? fv : raw;
@@ -12255,7 +12257,10 @@ function mapMarkInfo(attr, tip) {
   const series = attr("data-series") || "";
   const label = attr("data-label") || "";
   const dv = attr("data-value");
-  const fv = attr("data-fvalue");
+  // `data-fvalue` (symbol/region marks, written directly — not ggplot-rs
+  // output) or `data-vtext` (a count-only hexbin cell: `data-fvalue` is
+  // ggplot-rs-reserved, see `map/overlay.rs`).
+  const fv = attr("data-fvalue") || attr("data-vtext");
   const value = fv ? fv : dv !== null && dv !== "" ? fmtTipValue(dv) : "";
   const own = series !== "" && series === label;
   return { series: series || tip, value, x: label, fx: true, own, detail: "" };
@@ -12363,10 +12368,20 @@ function hoverFocus(svg, series) {
         ? null
         : (el) => {
             const k = el.getAttribute("data-series");
-            return k != null && k !== s && !el.hasAttribute("data-rule") ? HOVER_FOCUS_DIM : null;
+            return k != null && k !== s && !isRuleMark(el) ? HOVER_FOCUS_DIM : null;
           }
     );
   });
+}
+
+// A reference rule (::XLINE, ::REFLINE/::YLINE, thresholds): a geom_vline/
+// geom_hline mark (0.21 writes `data-geom` natively). It carries a tooltip
+// like the data marks, but hosts must not read it as data (a chart's
+// summary, its keyboard walk, cross-filtering) — replaces the old hand-written
+// `data-rule="x"`/`"y"` string surgery (`with_rule_marks`, #318 C2).
+function isRuleMark(el) {
+  const g = el.getAttribute("data-geom");
+  return g === "vline" || g === "hline";
 }
 
 function attachHover() {
@@ -12419,7 +12434,7 @@ function attachHover() {
     // A reference rule (::XLINE, ::REFLINE, thresholds) keeps its tooltip but
     // is no value to click: it neither selects, drills nor cross-filters.
     // A ::DIAGRAM edge is hover-only too (it names no value to select).
-    const rule = el.hasAttribute("data-rule") || el.hasAttribute("data-edge");
+    const rule = isRuleMark(el) || el.hasAttribute("data-edge");
     el.style.cursor = rule ? "default" : "pointer";
     // A thin dashed rule is hard to hover (the pointer falls into its dash
     // gaps or onto the axis below): a transparent, wider twin on top hands the
@@ -12583,11 +12598,11 @@ function chartSummary(kind, title, items, fmt = (v) => Number(v).toLocaleString(
   return out + (parts.length ? "; " + parts.join("; ") : "") + ".";
 }
 
-// A chart's data marks — not its reference rules (`data-rule`: ::XLINE,
-// ::REFLINE, thresholds), which keep their tooltip but are no data point.
+// A chart's data marks — not its reference rules (geom_vline/geom_hline:
+// ::XLINE, ::REFLINE, thresholds), which keep their tooltip but are no data point.
 function chartMarks(svg) {
   return [...svg.querySelectorAll(".dp-hit")].filter(
-    (el) => el.getAttribute("data-tip") && !el.hasAttribute("data-rule") && !el.hasAttribute("data-edge")
+    (el) => el.getAttribute("data-tip") && !isRuleMark(el) && !el.hasAttribute("data-edge")
   );
 }
 
@@ -13576,14 +13591,14 @@ function attachAxisPointer() {
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
       });
-      // Reference rules (data-rule) are no column value, but the crosshair names
+      // Reference rules (geom_vline/geom_hline) are no column value, but the crosshair names
       // them: a vertical one (an ::XLINE, "Today") at the column nearest to it,
       // a horizontal one (::REFLINE, a threshold) while the pointer is near it.
       const uy = vb.y + (e.clientY - r.top) / scale;
       const nearest = (x) => pts.reduce((a, p) => (Math.abs(p.cx - x) < Math.abs(a - x) ? p.cx : a), Infinity);
-      const rules = [...svg.querySelectorAll("[data-rule]")].filter((el) => {
+      const rules = [...svg.querySelectorAll('[data-geom="vline"],[data-geom="hline"]')].filter((el) => {
         const [x, y] = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
-        return el.getAttribute("data-rule") === "x" ? Math.round(nearest(x)) === best : Math.abs(y - uy) * scale <= 8;
+        return el.getAttribute("data-geom") === "vline" ? Math.round(nearest(x)) === best : Math.abs(y - uy) * scale <= 8;
       });
       const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
       tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("") + rules.map(ruleRow).join("");

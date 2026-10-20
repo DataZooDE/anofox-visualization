@@ -426,7 +426,14 @@ pub(super) fn render_hexbin(
         .data_attr("class", "class")
         .data_attr("count", "count")
         .data_attr("label", "label")
-        .data_attr("fvalue", "fvalue")
+        // `data-fvalue` is a ggplot-rs-reserved `data_attr` name (0.21):
+        // only `svg_formatted_values` may write it, and a count-based hex's
+        // own "N points" text isn't that mechanism's per-scale
+        // `format_value`. `data-vtext` carries it instead; `web/app.js`'s
+        // `mapMarkInfo` reads either. Omitted when `hb.has_measure` (the
+        // `fvalues` column is then all-`Na`): a summed measure gets its
+        // `data-fvalue` from the whole-map `with_formatted_values` pass.
+        .data_attr("vtext", "fvalue")
         .data_attr("x", "key");
 
     let [x0, x1, y0, y1] = frame.window(w, h);

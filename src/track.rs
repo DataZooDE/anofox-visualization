@@ -373,7 +373,13 @@ fn lanes(
         .y("y")
         .xmin("x0")
         .xmax("x1")
-        .label("label");
+        .label("label")
+        // `data-fvalue` is ggplot-rs-reserved (0.21, only
+        // `svg_formatted_values` may write it): `data-vtext` carries the
+        // lane's text instead (same non-reserved name as the hexbin
+        // overlay's own fix, `map/overlay.rs`); `web/app.js`'s markInfo()
+        // reads it ahead of a raw `data-value`.
+        .data_attr("vtext", "label");
     let filled = match (cat, value) {
         (Some(c), _) => {
             data.push(("fill".to_string(), pick(&|i| c.values[i].clone())));
@@ -411,14 +417,21 @@ fn lanes(
         .layer_data(frame)
         .layer_aes(Aes::new().x("x").y("y"));
     if !rows.is_empty() {
-        plot = plot.geom_tile_with(GeomTile {
-            fill: o.brand(),
-            color: o.theme.colors.card,
-            alpha: 1.0,
-            width: 1.0,
-            height: 0.72,
-            line_width: if value.is_some() { 1.0 } else { 0.0 },
-        });
+        plot = plot
+            .geom_tile_with(GeomTile {
+                fill: o.brand(),
+                color: o.theme.colors.card,
+                alpha: 1.0,
+                width: 1.0,
+                height: 0.72,
+                line_width: if value.is_some() { 1.0 } else { 0.0 },
+            })
+            // "lane: text" (the ::LABEL, category or value), not the
+            // default tile tooltip's "x, lane: text" — the x is the chart's
+            // own tooltip header already, and a category fill is a colour,
+            // not a value (B2-5's tooltip template, replacing the old
+            // `lane_tips` string surgery, #318 C2).
+            .tooltip("{y}: {label}");
     }
     let mut limits = levels.clone();
     limits.reverse();
@@ -475,59 +488,6 @@ fn measure(
         }
         p => Ok(p),
     }
-}
-
-/// A lane track's tooltips read "lane: text" (the `::LABEL`, category or
-/// value) instead of the tile's "x, lane: fill": the x is the tooltip's header
-/// already, and a category fill is a colour, not a value. Hosts get the text
-/// as the mark's `data-fvalue`.
-pub(crate) fn lane_tips(svg: String) -> String {
-    if !root_tag(&svg).contains(" data-ylevels=\"") {
-        return svg;
-    }
-    let attr = |tag: &str, name: &str| -> Option<String> {
-        let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-        Some(tag[k..k + tag[k..].find('"')?].to_string())
-    };
-    let drop = |tag: &str, name: &str| -> String {
-        match tag.find(&format!(" {name}=\"")) {
-            Some(k) => {
-                let v = k + name.len() + 3;
-                let end = tag[v..].find('"').map_or(tag.len(), |e| v + e + 1);
-                format!("{}{}", &tag[..k], &tag[end..])
-            }
-            None => tag.to_string(),
-        }
-    };
-    let mut out = String::with_capacity(svg.len());
-    let mut rest = svg.as_str();
-    while let Some(t) = rest.find("><title>") {
-        let start = rest[..t].rfind('<').unwrap_or(0);
-        let body = t + "><title>".len();
-        let Some(close) = rest[body..].find("</title>").map(|c| body + c) else {
-            break;
-        };
-        let (tag, text) = (&rest[start..t], &rest[body..close]);
-        let lane = attr(tag, "data-series").unwrap_or_default();
-        let x = attr(tag, "data-x").unwrap_or_default();
-        let short = text
-            .strip_prefix(&format!("{x}, "))
-            .filter(|s| s.starts_with(&lane));
-        out.push_str(&rest[..start]);
-        match short {
-            Some(short) => {
-                let mut tag = drop(&drop(tag, "data-value"), "data-fvalue");
-                if let Some(v) = short.strip_prefix(&format!("{lane}: ")) {
-                    tag.push_str(&format!(" data-fvalue=\"{v}\""));
-                }
-                out.push_str(&format!("{tag}><title>{short}"));
-            }
-            None => out.push_str(&rest[start..close]),
-        }
-        rest = &rest[close..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// A track panel, marked for hosts (`data-track`).

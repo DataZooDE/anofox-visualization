@@ -1273,11 +1273,17 @@ fn heatmap_labels_contrast_and_order() {
     assert!(s.contains(">$1.5<") && s.contains(">$1,235<"), "{s}");
     // Dark text on the pale low cell, light (card) text on the deep high cell.
     assert!(
-        s.contains(&format!("fill=\"{}\">$1.5<", hexu(t.colors.ink))),
+        s.contains(&format!(
+            "fill=\"{}\" class=\"gg-mark gg-text\" data-geom=\"text\">$1.5<",
+            hexu(t.colors.ink)
+        )),
         "{s}"
     );
     assert!(
-        s.contains(&format!("fill=\"{}\">$1,235<", hexu(t.colors.card))),
+        s.contains(&format!(
+            "fill=\"{}\" class=\"gg-mark gg-text\" data-geom=\"text\">$1,235<",
+            hexu(t.colors.card)
+        )),
         "{s}"
     );
     // Rows keep the SQL order, first on top: "web" is drawn above "api".
@@ -1382,7 +1388,12 @@ fn heatmap_thresholds_step_by_band() {
         assert!(hi < mid && mid < lo, "bands listed high to low");
         for (v, fill) in [("10%", good), ("30%", warn), ("60%", bad)] {
             let ink = hexu(t.text_on(fill));
-            assert!(s.contains(&format!("fill=\"{ink}\">{v}<")), "{v} ink {ink}");
+            assert!(
+                s.contains(&format!(
+                    "fill=\"{ink}\" class=\"gg-mark gg-text\" data-geom=\"text\">{v}<"
+                )),
+                "{v} ink {ink}"
+            );
         }
         assert!(s.contains("data-fvalue=\"30%\""), "tooltips keep the value");
     }
