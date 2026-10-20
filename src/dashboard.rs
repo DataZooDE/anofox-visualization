@@ -1254,11 +1254,25 @@ fn url_encode_component(s: &str) -> String {
 /// whole. `None` when there is nothing safe or useful to link to (another
 /// scheme, or a bare `#Tab` with no variable to set).
 fn headless_link_href(url: &str) -> Option<String> {
+    // A backslash, control character or whitespace anywhere in the part we
+    // actually emit lets a browser reinterpret the URL (e.g. `/\evil.example`
+    // is read as `//evil.example`, an off-site, protocol-relative link) even
+    // though the checks below see a safe-looking prefix.
+    let has_unsafe_char = |s: &str| {
+        s.chars()
+            .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    };
     let url = url.trim();
     if let Some(rest) = url.strip_prefix('#') {
+        // The tab name before `?` is discarded headless (see the doc
+        // comment) and may legitimately contain spaces (`#Stock & pipeline`),
+        // so only the emitted query string needs the unsafe-char check.
         let q = rest.find('?')?;
         let qs = &rest[q..];
-        return (qs.len() > 1).then(|| qs.to_string());
+        return (qs.len() > 1 && !has_unsafe_char(qs)).then(|| qs.to_string());
+    }
+    if has_unsafe_char(url) {
+        return None;
     }
     if url.starts_with('?') || (url.starts_with('/') && !url.starts_with("//")) {
         return Some(url.to_string());
@@ -1597,6 +1611,15 @@ mod link_tests {
         );
         assert_eq!(headless_link_href("javascript:alert(1)"), None);
         assert_eq!(headless_link_href("//evil.example"), None);
+        // A backslash lets a browser read `/\evil.example` as the
+        // protocol-relative (off-site) `//evil.example` — refuse it even
+        // though it starts with a single `/`.
+        assert_eq!(headless_link_href("/\\evil.example"), None);
+        assert_eq!(headless_link_href("?v.x=1\\2"), None);
+        // Control characters and whitespace are refused the same way.
+        assert_eq!(headless_link_href("?v.x=1\u{0}2"), None);
+        assert_eq!(headless_link_href("?v.x=1 2"), None);
+        assert_eq!(headless_link_href("?v.x=1\n2"), None);
     }
 
     #[test]

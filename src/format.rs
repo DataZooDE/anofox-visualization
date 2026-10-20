@@ -207,8 +207,27 @@ impl Default for Locale {
     }
 }
 
-/// Escape text for HTML/XML **text and attribute** contexts: `& < > " '`.
-/// Use this for every user-controlled string written into SVG/HTML.
+/// Whether `c` is a valid XML 1.0 character. XML forbids every C0 control
+/// character except tab/`\n`/`\r`, and (within the BMP) the two permanently
+/// non-characters `U+FFFE`/`U+FFFF`; a lone surrogate can't be represented
+/// in a Rust `char` at all, since `str`/`char` are always valid Unicode
+/// scalar values. A raw invalid char written into SVG/XML text makes the
+/// whole document fail to parse, so every escaper drops/replaces it.
+fn is_xml_valid_char(c: char) -> bool {
+    matches!(c,
+        '\t' | '\n' | '\r'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
+/// Escape text for HTML/XML **text and attribute** contexts: `& < > " '`,
+/// and replace any character XML 1.0 disallows (stray control characters
+/// below `0x20`, `U+FFFE`, `U+FFFF`) with `U+FFFD` so the result is always
+/// well-formed XML. Use this for every user-controlled string written into
+/// SVG/HTML — it is the one shared escaper every writer in the crate calls
+/// (directly, or via [`crate::host::serving::html_escape`]).
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -218,6 +237,7 @@ pub fn escape_xml(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
+            c if !is_xml_valid_char(c) => out.push('\u{FFFD}'),
             c => out.push(c),
         }
     }
@@ -546,6 +566,22 @@ mod tests {
             escape_xml(r#"<a href="x" onclick='y'>&</a>"#),
             "&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;&lt;/a&gt;"
         );
+    }
+
+    #[test]
+    fn escape_xml_replaces_xml_invalid_control_characters() {
+        // \t \n \r stay as-is: they're valid XML 1.0 characters.
+        assert_eq!(escape_xml("a\tb\nc\rd"), "a\tb\nc\rd");
+        // Every other C0 control character is XML-invalid and would make
+        // the document fail to parse — replace it with U+FFFD.
+        assert_eq!(
+            escape_xml("a\u{0}b\u{1}c\u{1F}d\u{7F}"),
+            "a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{7F}"
+        );
+        // U+FFFE / U+FFFF are permanent BMP non-characters, also invalid.
+        assert_eq!(escape_xml("x\u{FFFE}y\u{FFFF}z"), "x\u{FFFD}y\u{FFFD}z");
+        // Ordinary text (including astral chars) is untouched.
+        assert_eq!(escape_xml("caf\u{e9} \u{1F600}"), "caf\u{e9} \u{1F600}");
     }
 
     #[test]
