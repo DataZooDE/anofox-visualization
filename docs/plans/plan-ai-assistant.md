@@ -851,6 +851,43 @@ outright if none do. An adversarial list of every path that can clear
 `applyHold` — and confirmation that each is an explicit user action
 occurring only once any active preview has already exited — was posted
 to the PR.
+
+**sec-review-272-rereview (fix round 6, PR #272): M-3 and L-6, the fifth
+pass's own findings against the hold.** **M-3 (Medium):** the hold was
+moment-bound, not content-bound — after "Apply, don't run", panel Undo
+(which correctly runs the old SQL and clears `applyHold`) followed by a
+native Ctrl+Z in the editor (or Run of other text followed by
+Ctrl+Shift+Z) brought the unconfirmed proposal straight back with no
+hold, so a dark toggle or Esc then ran its class-3 statements
+(`ATTACH`/`SET`) on the page database. **L-6 (Low):** `previewExit`'s
+`else if (pend !== null)` ran a deferred Ctrl+Enter from a *later*,
+unrelated preview's non-hold exit even when an *earlier* hold (a
+different, still-unconfirmed proposal) was already in place, clearing
+that earlier hold and running the editor — which still held the earlier
+proposal. Fixed together: a new `heldSql` remembers the exact text of
+the unconfirmed proposal (`host.hold.arm(p.sql)`, called from `apply()`
+right after it writes the proposal into the editor); a new `armHold()`
+is the one place that visually arms the hold; the `#sql` `input`
+handler (which fires on native undo/redo exactly as on typing) re-arms
+whenever the editor's text comes back to exactly `heldSql`, regardless
+of how `applyHold` was last cleared; `run()` itself refuses any
+non-explicit run whose text equals `heldSql` as a belt-and-braces
+check; `heldSql` itself is cleared only by an explicit run of *exactly*
+that text (`#run`/Ctrl+Enter outside a preview, confirmed via
+`confirmHeldIfMatch()`) or by `loadDash()` of another dashboard — never
+merely by typing something else. `previewExit`'s `pend` branch gained
+`&& !applyHold` (L-6): an existing hold always beats a deferred run,
+re-arming (idempotently) rather than leaving a stale preview frame in
+the grid. Test: `scripts/assist-e2e.mjs` **M9i** (Undo+Ctrl+Z and
+Run+Ctrl+Shift+Z, each then a dark toggle and Esc) and a dedicated
+**L-6** case (an earlier hold vs. a later preview's deferred Ctrl+Enter,
+landing deterministically in the same synchronous script as Discard,
+not a timing race) — both adapted from the reviewer's own `probe11.mjs`
+(`undo`/`send2`); confirmed 8 assertions FAIL against the pre-fix head
+(`ec1bcde`), reproducing the reviewer's evidence exactly (`HOLDMARK`,
+`hold_attach`, `memory_limit='3GB'` all reaching the page worker), all
+pass after. The audit comment's hold-clearing list was updated to match
+(`heldSql`'s own setter/clearers, and the corrected item 5).
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

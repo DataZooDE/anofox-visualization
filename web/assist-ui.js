@@ -1263,6 +1263,12 @@ export function mountAssistant(hostArg) {
       } catch (_) {}
     }
     if (choice === "run") host.run();
+    // M-3 (sec-review-272-rereview fifth pass): remember the exact text
+    // that is held — see host.hold.arm() (app.js) — so the editor's own
+    // undo/redo (Ctrl+Z / Ctrl+Shift+Z) can never bring this unconfirmed
+    // proposal back with no hold, however the hold was last cleared
+    // (Undo, Run of other text, …).
+    else host.hold.arm(p.sql);
     S.proposal = { ...p, applied: true };
     renderCard();
     host.ui.toast("Applied the assistant's dashboard.", "Undo", undo, () => document.getElementById("sql"));

@@ -91,6 +91,11 @@ const VIEWP = `SELECT region ::XAXIS, ROUND(SUM(units*price),0) ::BARCHART, 'Rev
 const LAZY_SLOW = (k) => `SELECT count(*) AS n${k} ::METRIC FROM range(400000000) t(x) WHERE x % 7 = ${k};`;
 const LAZY_PROP = `SELECT 'Main'::TAB;\nSELECT 'RACEMARK' AS m ::METRIC;\nSELECT 'Hidden'::TAB;\nCREATE OR REPLACE TABLE lazymark_tbl AS SELECT 1 AS x;\n${[1, 2, 3, 4, 5, 6].map(LAZY_SLOW).join("\n")}\nSELECT 'LAZYMARK' AS q ::METRIC;\n`;
 const LAZY_RE = /RACEMARK|LAZYMARK|lazymark_tbl/;
+// M-3/L-6 (sec-review-272-rereview fifth pass): a proposal with class-3
+// statements (ATTACH, SET), adapted verbatim from the reviewer's own
+// probe11.mjs (`HP`/`PROP`).
+const HOLD_PROP = `SELECT 'HOLDMARK' AS m ::METRIC;\nATTACH ':memory:' AS hold_attach;\nSET memory_limit='3GB';\n`;
+const HOLD_RE = /HOLDMARK|hold_attach|memory_limit='3GB'/;
 
 const results = [];
 const record = (name, ok, note = "") => {
@@ -986,6 +991,173 @@ if (run("main")) {
       await context.close();
     }
     record("M9h: at least one trial actually landed in the exit window", landed > 0, "no trial had previewing=true && !editorIsProposal at Ctrl+Enter — the case cannot pass vacuously");
+  }
+
+  // M9i (sec-review-272-rereview fifth pass, M-3): the hold is bound to
+  // the unconfirmed proposal's TEXT, not to a moment in time. After an
+  // explicit run clears `applyHold` (panel Undo, or Run of other text),
+  // the editor's own undo/redo (native Ctrl+Z / Ctrl+Shift+Z) can bring
+  // that same, never-confirmed proposal straight back — the hold must
+  // re-arm the instant it does, before any implicit trigger (dark toggle,
+  // Esc) can run it on the page database. Adapted from the reviewer's own
+  // probe11.mjs (`undo`).
+  {
+    async function m9iHeldPage(tag) {
+      const { context, page } = await mainCtx(() =>
+        sse({ content: [toolUse(`toolu_m9i_${tag}`, "propose_dashboard", { sql: HOLD_PROP, summary: "Hold.", panels: [{ stmt: 0, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+      );
+      await gotoEdit(page, SETUP_AND_METRIC);
+      await page.click("#assist-btn");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await addKey(page);
+      await page.fill("#ai-q", "x");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await page.click('.dp-dialog button:has-text("Send")');
+      await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+      await page.waitForTimeout(1200);
+      await page.click("#ai-apply");
+      await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+      await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+      await page.waitForTimeout(800);
+      return { context, page };
+    }
+    const holdState = (page) =>
+      page.evaluate(() => ({
+        editorIsProposal: /HOLDMARK/.test(document.getElementById("sql")?.value || ""),
+        refreshDisabled: document.getElementById("refresh")?.disabled,
+        lintDisabled: document.getElementById("lint-run")?.disabled,
+        notRun: /Not run yet/.test(document.getElementById("grid")?.textContent || ""),
+      }));
+    const implicitTriggersAreSafe = async (page, label) => {
+      const n1 = await mark(page);
+      await page.evaluate(() => document.getElementById("dark")?.click());
+      await page.waitForTimeout(1500);
+      let hits = await w0with(page, n1, HOLD_RE);
+      record(`${label}: zero page-DB messages after a dark-toggle click`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      const n2 = await mark(page);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(1500);
+      hits = await w0with(page, n2, HOLD_RE);
+      record(`${label}: zero page-DB messages after Esc`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      const stillHeld = await holdState(page);
+      record(`${label}: hold still re-armed after dark toggle + Esc`, stillHeld.refreshDisabled === true && stillHeld.lintDisabled === true, JSON.stringify(stillHeld));
+    };
+
+    // Variant 1: panel Undo (runs the old SQL, clears the hold), then a
+    // single Ctrl+Z in the editor undoes Undo's own edit — bringing the
+    // proposal straight back.
+    {
+      const { context, page } = await m9iHeldPage("undo");
+      await page
+        .click("#ai-undo")
+        .catch(async () => page.click("#side-toast .side-toast-btn"));
+      await page.waitForTimeout(1200);
+      const afterUndo = await holdState(page);
+      record("M9i undo: panel Undo clears the hold and restores the old SQL", !afterUndo.editorIsProposal && afterUndo.refreshDisabled === false, JSON.stringify(afterUndo));
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z");
+      await page.waitForTimeout(400);
+      const afterCtrlZ = await holdState(page);
+      record("M9i undo+Ctrl+Z: the proposal is back in the editor", afterCtrlZ.editorIsProposal, JSON.stringify(afterCtrlZ));
+      record(
+        "M9i undo+Ctrl+Z: the hold is re-armed (#refresh/#lint-run disabled, \"Not run yet\")",
+        afterCtrlZ.refreshDisabled === true && afterCtrlZ.lintDisabled === true && afterCtrlZ.notRun,
+        JSON.stringify(afterCtrlZ)
+      );
+      await implicitTriggersAreSafe(page, "M9i undo+Ctrl+Z");
+      await context.close();
+    }
+
+    // Variant 2: Ctrl+Z first (undo apply()'s own edit, back to the
+    // pre-apply SQL), an explicit Run of that OTHER text (clears the hold
+    // but not `heldSql`), then Ctrl+Shift+Z (redo) brings the proposal
+    // back.
+    {
+      const { context, page } = await m9iHeldPage("rerun");
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z");
+      await page.waitForTimeout(400);
+      const afterUndo = await holdState(page);
+      record("M9i run+redo: Ctrl+Z alone (no explicit run yet) leaves the hold intact", afterUndo.refreshDisabled === true, JSON.stringify(afterUndo));
+      await page.keyboard.press("Control+Enter"); // explicit run of the (now old, non-held) editor text
+      await page.waitForTimeout(800);
+      const afterRun = await holdState(page);
+      record("M9i run+redo: the explicit run of other text clears the hold", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
+      await page.keyboard.press("Control+Shift+z"); // redo -> the proposal comes back
+      await page.waitForTimeout(400);
+      const afterRedo = await holdState(page);
+      record("M9i run+redo: the proposal is back in the editor", afterRedo.editorIsProposal, JSON.stringify(afterRedo));
+      record(
+        "M9i run+redo: the hold is re-armed",
+        afterRedo.refreshDisabled === true && afterRedo.lintDisabled === true && afterRedo.notRun,
+        JSON.stringify(afterRedo)
+      );
+      await implicitTriggersAreSafe(page, "M9i run+redo");
+      await context.close();
+    }
+  }
+
+  // L-6 (sec-review-272-rereview fifth pass): an existing hold (proposal
+  // A, "Apply, don't run") must also beat a deferred Ctrl+Enter from a
+  // LATER, unrelated preview's (proposal B's) non-hold exit — the editor
+  // still holds A, and running it would be exactly as unconfirmed as
+  // before. Adapted from the reviewer's own probe11.mjs (`send2`, ce=true).
+  {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_l6_a", "propose_dashboard", { sql: HOLD_PROP, summary: "A.", panels: [{ stmt: 0, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.waitForTimeout(1200);
+    await page.click("#ai-apply");
+    await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+    await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+    await page.waitForTimeout(800);
+    const n0 = await mark(page);
+    // Send again: a second preview (B) opens over the held A. B's own
+    // content doesn't matter — entering a preview never touches the
+    // editor (that's Apply's job), so the editor keeps showing A's held
+    // text throughout; the mock's handler (always the same proposal) is
+    // reused as-is.
+    await page.fill("#ai-q", "again");
+    await page.keyboard.press("Enter");
+    await page
+      .waitForSelector('.dp-dialog button:has-text("Send")', { timeout: 10000 })
+      .then((b) => b.click())
+      .catch(() => {});
+    await page.waitForTimeout(2500);
+    const previewingB = await page.evaluate(() => document.body.classList.contains("previewing"));
+    record("L-6: proposal B is previewing over the held A", previewingB === true, String(previewingB));
+    // Discard B (rerun:true, no hold), then Ctrl+Enter in the SAME
+    // synchronous script — discard()'s own await (inside previewExit())
+    // suspends before Ctrl+Enter ever dispatches, so this deterministically
+    // lands while `previewExiting` is still true (same reasoning as a
+    // "ltype" trial in M9g/probe8), rather than racing a fixed delay
+    // against however long B's own exit happens to take.
+    await page.evaluate(() => {
+      document.getElementById("preview-discard")?.click();
+      document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(2500);
+    const after = await page.evaluate(() => ({
+      editorIsProposal: /HOLDMARK/.test(document.getElementById("sql")?.value || ""),
+      refreshDisabled: document.getElementById("refresh")?.disabled,
+      lintDisabled: document.getElementById("lint-run")?.disabled,
+      notRun: /Not run yet/.test(document.getElementById("grid")?.textContent || ""),
+    }));
+    record("L-6: A's text is still in the editor (B's Discard restores it)", after.editorIsProposal, JSON.stringify(after));
+    record("L-6: A's hold survives B's Discard + a deferred Ctrl+Enter", after.refreshDisabled === true && after.lintDisabled === true && after.notRun, JSON.stringify(after));
+    const hits = await w0with(page, n0, HOLD_RE);
+    record("L-6: zero page-DB messages with A's text", hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+    await context.close();
   }
 
   // M10: the key leak sweep (sk-ant- never appears anywhere).

@@ -1401,6 +1401,20 @@ function pageDb() {
 // preview.run), so the guard in run() only matters once `preview` is null
 // again — which is exactly when a held, unconfirmed Apply is waiting.
 let applyHold = false;
+// M-3 (sec-review-272-rereview fifth pass): the exact text of the
+// unconfirmed "Apply, don't run" proposal — set once by host.hold.arm(),
+// called right after apply() (assist-ui.js) writes it into the editor.
+// Cleared ONLY by an explicit run of EXACTLY this text (#run/Ctrl+Enter
+// outside a preview, or Apply's own "run" choice) or by loadDash() of
+// another dashboard — never merely by typing something else, and never by
+// an explicit run of OTHER text (that only clears `applyHold`, see
+// clearApplyHold()). The hold itself is content-bound, not moment-bound:
+// the #sql `input` handler below re-arms it (armHold()) whenever the
+// editor's current text comes back to exactly this, by any means —
+// native undo/redo (Ctrl+Z / Ctrl+Shift+Z) included, which is exactly how
+// an Undo- or Run-cleared hold could otherwise let the still-unconfirmed
+// proposal straight back into the editor with no hold at all.
+let heldSql = null;
 let previewRefreshSaved = null; // sec-review-272 H-1/L-2: the viewer's own #refresh value, while a RELOAD role in the preview's own SQL overwrites it
 function clearApplyHold() {
   if (!applyHold) return;
@@ -1413,6 +1427,29 @@ function clearApplyHold() {
     $("lint-run").disabled = false;
     $("lint-run").title = "";
   }
+}
+// M-3 (sec-review-272-rereview fifth pass): the one place that visually
+// arms the hold — #refresh/#lint-run disabled, "Not run yet" shown.
+// Called by previewExit()'s own `hold` branch (a fresh "Apply, don't
+// run") and by every place below that notices the editor's text is back
+// to exactly `heldSql`.
+function armHold() {
+  applyHold = true;
+  if ($("refresh")) $("refresh").disabled = true;
+  // M-2 (sec-review-272-rereview): Check runs on the page database
+  // (scratchRunner(pageDb(), …)) — it must be just as held as Run.
+  if ($("lint-run")) {
+    $("lint-run").disabled = true;
+    $("lint-run").title = "Run or discard the applied SQL first";
+  }
+  $("grid").replaceChildren(notRunCard());
+}
+// M-3: an explicit run of EXACTLY the held text confirms it — it is no
+// longer "the unconfirmed proposal" even if retyped or undone/redone back
+// later. A run of OTHER text leaves `heldSql` alone (clearApplyHold()
+// still runs, clearing only the visual `applyHold`).
+function confirmHeldIfMatch() {
+  if (heldSql !== null && $("sql").value === heldSql) heldSql = null;
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see
@@ -1824,10 +1861,21 @@ function assistHost() {
     editor: { get: () => $("sql").value, replace: editorReplace, focus: () => $("sql").focus() },
     preview: { enter: previewEnter, exit: previewExit, active: () => !!preview },
     onPreviewExit: (cb) => previewExitListeners.add(cb),
+    // M-3 (sec-review-272-rereview fifth pass): called by apply()
+    // (assist-ui.js) right after it writes the "Apply, don't run" choice's
+    // proposal into the editor — remembers the exact text that is held,
+    // so the #sql `input` handler can re-arm the hold if that text ever
+    // comes back (native undo/redo included), however `applyHold` itself
+    // got cleared in between.
+    hold: { arm: (sql) => (heldSql = sql) },
     // sec-review-272 H-1: assist-ui only calls this from Apply's "run"
     // choice and Undo — both a direct, confirmed user action — so it clears
     // the hold and runs explicitly, same as the #run button.
     run: () => {
+      // M-3: an explicit run of EXACTLY the held text confirms it for
+      // good (Undo normally runs OTHER text — the pre-apply SQL — which
+      // leaves `heldSql` alone, exactly as intended).
+      confirmHeldIfMatch();
       clearApplyHold();
       return run(true, { explicit: true });
     },
@@ -2135,7 +2183,12 @@ async function boot() {
     // Info-5 (sec-review-272-rereview): #run is disabled during an active
     // preview (PREVIEW_TOOLBAR_IDS), so this guard is belt-and-suspenders
     // — see the Ctrl+Enter handler below, where it matters for real.
-    if (!preview) clearApplyHold();
+    if (!preview) {
+      // M-3 (sec-review-272-rereview fifth pass): an explicit run of
+      // EXACTLY the held text confirms it for good — see heldSql above.
+      confirmHeldIfMatch();
+      clearApplyHold();
+    }
     run(true, { explicit: true });
   };
   wireLint();
@@ -2147,6 +2200,13 @@ async function boot() {
     // this too, but Apply itself already exited the preview first) leaves
     // the preview — no rerun prompt: the grid shows "Not run yet."
     if (preview) previewExit({ rerun: false });
+    // M-3 (sec-review-272-rereview fifth pass): the hold is bound to the
+    // unconfirmed proposal's TEXT, not to a moment in time. This same
+    // "input" event fires on native undo/redo (Ctrl+Z / Ctrl+Shift+Z) as
+    // much as on typing or editorReplace() — re-arm whenever the editor's
+    // current text is exactly `heldSql` again, however it got there,
+    // regardless of how `applyHold` was cleared in between (Undo, Run…).
+    if (heldSql !== null && $("sql").value === heldSql && !applyHold) armHold();
     assistUiSync();
   });
   // sec-review-272 H-1: the editor's own explicit "run this" shortcut —
@@ -2164,7 +2224,12 @@ async function boot() {
     // re-run THAT preview) -> Discard. Discard's own previewExit({rerun:
     // true}) then ran the EDITOR's still-held SQL on the page database,
     // unblocked, with no Run ever pressed on THAT SQL.
-    if (!preview) clearApplyHold();
+    if (!preview) {
+      // M-3 (sec-review-272-rereview fifth pass): same confirmation rule
+      // as the #run button above.
+      confirmHeldIfMatch();
+      clearApplyHold();
+    }
     run(true, { explicit: true });
   });
   $("sql").addEventListener("scroll", () => {
@@ -3669,6 +3734,7 @@ function loadDash(name, sql, key) {
   void (async () => {
     if (preview) await previewExit({ rerun: false });
     clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
+    heldSql = null; // M-3 (sec-review-272-rereview fifth pass): and releases its text — a different dashboard's own undo/redo stack has nothing to do with it
     closeSideMenu();
     curDash = key || null;
     if (key) rememberDash(key);
@@ -3851,21 +3917,34 @@ async function previewExit({ rerun = true, hold = false } = {}) {
   // into — same as it always was before H-1R2 ever existed. `pend` still
   // wins over an ordinary (non-hold) exit, same as H-1R2 intended.
   if (hold) {
-    applyHold = true;
-    if ($("refresh")) $("refresh").disabled = true;
-    // M-2 (sec-review-272-rereview): Check runs on the page database
-    // (scratchRunner(pageDb(), …)) — it must be just as held as Run.
-    if ($("lint-run")) {
-      $("lint-run").disabled = true;
-      $("lint-run").title = "Run or discard the applied SQL first";
-    }
-    $("grid").replaceChildren(notRunCard());
-  } else if (pend !== null) {
+    // M-3: arms `applyHold` + the UI; `heldSql` itself is set separately,
+    // by host.hold.arm() — called from apply() (assist-ui.js) right after
+    // it writes the proposal into the editor, which hasn't happened yet
+    // at this point in THIS function.
+    armHold();
+  } else if (pend !== null && !applyHold) {
     // H-1R2: honoured now, exactly as if it had just been pressed —
     // `preview` is null here, so Info-5's own rule applies
-    // (clearApplyHold() only when !preview).
+    // (clearApplyHold() only when !preview). M-3: this IS an explicit run
+    // of the current editor text, so it confirms `heldSql` too, if it
+    // happens to match.
+    confirmHeldIfMatch();
     clearApplyHold();
     await run(pend, { explicit: true });
+  } else if (pend !== null) {
+    // L-6 (sec-review-272-rereview fifth pass): an EXISTING hold (an
+    // earlier, still-unconfirmed "Apply, don't run" — `applyHold` is
+    // already true, left by a DIFFERENT exit) also wins over a deferred
+    // run from THIS exit: drop `pend` outright. Without this, a
+    // Ctrl+Enter pressed during a later, unrelated preview's non-hold
+    // exit (Discard, typing) would clear the earlier hold and run the
+    // editor — which still holds the earlier, never-confirmed proposal.
+    // The viewer presses Run once more, outside any preview, to confirm
+    // either text. Re-arm (idempotent: applyHold/the UI are already set)
+    // because THIS exit's own preview may have just overwritten the grid
+    // with its own last render — "Not run yet" must come back, not a
+    // stale frame of the preview that was just discarded.
+    armHold();
   } else if (rerun) await run(true);
   else $("grid").replaceChildren(notRunCard());
 }
@@ -7617,9 +7696,18 @@ let runQueued = null; // null, or the `fresh` flag of the queued follow-up run
 // the hold only ever matters once `preview` is null again.
 function run(fresh = true, opts = {}) {
   const explicit = !!(opts && opts.explicit);
-  if (applyHold && !preview && !explicit) {
-    $("grid").replaceChildren(notRunCard());
-    return;
+  if (!preview && !explicit) {
+    // M-3 (sec-review-272-rereview fifth pass) belt-and-braces: the #sql
+    // `input` handler is the primary place a content-matching hold gets
+    // re-armed; catch it here too, right before any non-explicit run
+    // would otherwise reach the page database, in case some other path
+    // ever changes the editor's text to exactly `heldSql` without going
+    // through that handler.
+    if (heldSql !== null && $("sql").value === heldSql) armHold();
+    if (applyHold) {
+      $("grid").replaceChildren(notRunCard());
+      return;
+    }
   }
   // sec-review-272-rereview H-1R: a non-explicit call is dropped
   // synchronously, before even queueing — previewExit() sets this (and
