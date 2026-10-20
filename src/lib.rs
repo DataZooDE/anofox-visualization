@@ -1722,7 +1722,7 @@ fn render_placed(
         } else {
             o.theme.finish_svg(svg)
         };
-        let svg = with_rule_marks(with_xline_dates(svg, &cols));
+        let svg = with_xline_dates(svg, &cols);
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         if boxstats::is_stats(&cols) {
             svg = boxstats::with_tips(svg, &cols, o);
@@ -1767,51 +1767,6 @@ fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
             );
     }
     svg
-}
-
-/// Mark the reference rules (`::XLINE`, `::REFLINE`/`::YLINE`, threshold
-/// lines) `data-rule="x"` / `"y"`: they carry a tooltip like the data marks,
-/// but hosts must not read them as data (a chart's summary, its keyboard
-/// walk). A rule is a dashed, titled 2-point polyline along one axis.
-fn with_rule_marks(svg: String) -> String {
-    if !svg.contains(" stroke-dasharray=\"") {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len() + 64);
-    let mut rest = svg.as_str();
-    while let Some(i) = rest.find("<polyline ") {
-        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
-            break;
-        };
-        let tag = &rest[i..end];
-        let pts: Vec<(&str, &str)> = tag
-            .find(" points=\"")
-            .map(|k| &tag[k + 9..])
-            .and_then(|p| p.split('"').next())
-            .map(|p| {
-                p.split_whitespace()
-                    .filter_map(|xy| xy.split_once(','))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let axis = match pts[..] {
-            [(x1, _), (x2, _)] if x1 == x2 => Some("x"),
-            [(_, y1), (_, y2)] if y1 == y2 => Some("y"),
-            _ => None,
-        };
-        let rule = axis.filter(|_| {
-            tag.contains(" stroke-dasharray=\"")
-                && !tag.ends_with('/')
-                && rest[end + 1..].starts_with("<title>")
-        });
-        out.push_str(&rest[..end]);
-        if let Some(a) = rule {
-            out.push_str(&format!(" data-rule=\"{a}\""));
-        }
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Epoch seconds as `2026-10-12` (or `2026-10-12 08:30:00` off midnight).

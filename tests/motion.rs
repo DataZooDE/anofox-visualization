@@ -102,18 +102,25 @@ fn numeric_xline_still_draws() {
 
 #[test]
 fn reference_rules_are_marked_as_no_data() {
-    // The browser's chart summary and keyboard walk skip `data-rule` marks:
-    // a date XLINE ("Today") once read as a series "2026-10-12" valued -12.
-    let rules = |svg: &str| svg.matches(" data-rule=\"").count();
+    // The browser's chart summary and keyboard walk skip reference-rule marks
+    // (geom_vline/geom_hline, carrying ggplot-rs's own `data-geom="vline"`/
+    // `"hline"` — replacing the old hand-written `data-rule="x"`/`"y"`): a
+    // date XLINE ("Today") once read as a series "2026-10-12" valued -12.
+    let rules = |svg: &str| {
+        svg.matches(r#"data-geom="vline""#).count() + svg.matches(r#"data-geom="hline""#).count()
+    };
     let svg = line(vec![
         Column::new("t", Role::VLine, vec![Value::DateTime(1_791_763_200); 4]),
         Column::new("r", Role::RefLine, nums(&[11.0; 4])),
     ]);
     assert!(
-        svg.contains(r#"data-x="2026-10-12" data-rule="x""#),
+        svg.contains(r#"data-x="2026-10-12""#) && svg.contains(r#"data-geom="vline""#),
         "{svg}"
     );
-    assert!(svg.contains(r#"data-value="11" data-rule="y""#), "{svg}");
+    assert!(
+        svg.contains(r#"data-value="11""#) && svg.contains(r#"data-geom="hline""#),
+        "{svg}"
+    );
     assert_eq!(rules(&svg), 2);
     let cols = vec![
         Column::new("x", Role::X, nums(&[1.0, 2.0, 3.0])),
@@ -121,7 +128,10 @@ fn reference_rules_are_marked_as_no_data() {
         Column::new("t", Role::VLine, nums(&[2.0; 3])),
     ];
     let svg = render(&cols, 400, 300).unwrap();
-    assert!(svg.contains(r#"data-value="2" data-rule="x""#), "{svg}");
+    assert!(
+        svg.contains(r#"data-value="2""#) && svg.contains(r#"data-geom="vline""#),
+        "{svg}"
+    );
     assert_eq!(rules(&svg), 1);
     // a dashed data line is no rule
     let dashed = line(vec![Column::new(
