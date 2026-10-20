@@ -3832,19 +3832,25 @@ async function previewExit({ rerun = true, hold = false } = {}) {
     } catch (_) {}
   }
   previewExiting = false;
-  // H-1R2 (sec-review-272-rereview final check): an explicit run (#run,
-  // Ctrl/⌘+Enter) that arrived while this exit was in progress is honoured
-  // NOW, exactly as if it had just been pressed — `preview` is null here,
-  // so Info-5's own rule applies (clearApplyHold() only when !preview) —
-  // instead of whatever this exit would otherwise have shown. It
-  // supersedes the hold entirely: the viewer explicitly asked to run,
-  // during the exit, so there is nothing left to hold.
   const pend = pendingExplicit;
   pendingExplicit = null;
-  if (pend !== null) {
-    clearApplyHold();
-    await run(pend, { explicit: true });
-  } else if (hold) {
+  // H-1R3 (sec-review-272-rereview fourth pass): `hold` ALWAYS wins over a
+  // deferred explicit run, full stop — checked first, before `pend` is
+  // even consulted. H-1R2's fix ran `pend` here unconditionally, ahead of
+  // the `hold` branch: for "Apply, don't run" specifically, apply() only
+  // writes the proposal into the editor AFTER this exit resolves (see
+  // host.editor.replace(p.sql) in assist-ui.js's apply(), called after
+  // its own `await host.preview.exit(...)`), so a `pend` run firing here
+  // rendered the OLD editor text — while the PROPOSAL (now applied into
+  // the editor moments later, back in apply()) sat there unheld: `hold`
+  // never got applied, #refresh/#lint-run were never disabled, and the
+  // very next implicit trigger (dark toggle, Esc, the refresh timer) ran
+  // the unheld proposal on the page database. Dropping `pend` outright
+  // when `hold` is set closes that: the viewer's Ctrl+Enter during an
+  // "Apply, don't run" exit is simply superseded by the hold it's exiting
+  // into — same as it always was before H-1R2 ever existed. `pend` still
+  // wins over an ordinary (non-hold) exit, same as H-1R2 intended.
+  if (hold) {
     applyHold = true;
     if ($("refresh")) $("refresh").disabled = true;
     // M-2 (sec-review-272-rereview): Check runs on the page database
@@ -3854,6 +3860,12 @@ async function previewExit({ rerun = true, hold = false } = {}) {
       $("lint-run").title = "Run or discard the applied SQL first";
     }
     $("grid").replaceChildren(notRunCard());
+  } else if (pend !== null) {
+    // H-1R2: honoured now, exactly as if it had just been pressed —
+    // `preview` is null here, so Info-5's own rule applies
+    // (clearApplyHold() only when !preview).
+    clearApplyHold();
+    await run(pend, { explicit: true });
   } else if (rerun) await run(true);
   else $("grid").replaceChildren(notRunCard());
 }

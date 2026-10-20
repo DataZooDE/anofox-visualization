@@ -820,6 +820,37 @@ the pre-fix head, 4/4 pass after. An adversarial audit of every
 `runSql`/`pageConn`/`pageDb` path reachable after a preview ends (lazy
 jobs, the render loop, the `::RELOAD` timer, Explore/add-file/MotherDuck/
 Check, `::VIEW` switches) was posted to the PR.
+
+**sec-review-272-rereview (fix round 5, PR #272): H-1R3, a High regression
+from round 4's own `pendingExplicit`.** `previewExit`'s tail ran a deferred
+explicit run (`pend`) *ahead of* its `hold` branch: `if (pend !== null)
+{…} else if (hold) {…}`. For "Apply, don't run" specifically, `apply()`
+(`assist-ui.js`) writes the proposal into the editor only *after*
+`host.preview.exit()` resolves, so a Ctrl/⌘+Enter pressed ~80 ms into that
+exit ran the OLD editor text (harmless by itself) but then let the
+proposal land in the editor completely unheld: `applyHold` was never set,
+`#refresh`/`#lint-run` stayed enabled, no "Not run yet" card — and the
+very next implicit trigger (a dark-mode toggle, in the reviewer's probe)
+ran the unconfirmed proposal straight onto the page database. Fixed by
+flipping the check order: `if (hold) {…} else if (pend !== null) {…}` —
+`hold` now always wins and the deferred run is dropped outright when it
+does, exactly as the design intended before `pendingExplicit` existed.
+Test: `scripts/assist-e2e.mjs` **M9h** (adapted from the reviewer's
+`probe9.mjs`/`probe10.mjs`) — "Apply, don't run", Ctrl+Enter ~80 ms into
+the exit, then a dark-toggle click and an Esc press — asserts the editor
+holds the proposal, `#refresh`/`#lint-run` stay disabled, "Not run yet" is
+shown, and 0 proposal statements reach the page worker through either
+implicit trigger; confirmed 5/8 assertions FAIL against the pre-fix head
+(`7215ff6`), reproducing the reviewer's own evidence (`RACEMARK` and
+`CREATE OR REPLACE TABLE lazymark_tbl` on the page worker after one
+dark-toggle click) exactly, all pass after. M9g's `lnorun` mode was
+hardened against passing vacuously: it now requires at least one of its
+trials to actually land in the exit window (`previewing=true &&
+!editorIsProposal`), retrying with shorter delays and failing the mode
+outright if none do. An adversarial list of every path that can clear
+`applyHold` — and confirmation that each is an explicit user action
+occurring only once any active preview has already exited — was posted
+to the PR.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

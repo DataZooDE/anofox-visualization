@@ -836,10 +836,94 @@ if (run("main")) {
   // after the exit … a legitimate explicit run … not counted"). `ltype`
   // has no such ambiguity (typing never puts the proposal in the editor),
   // so it always asserts strictly.
+  // Shared helper: one ltype/lnorun trial at a given delay before Ctrl+Enter.
+  // Returns whether this trial actually landed in the exit window
+  // (`previewing===true` and the editor does NOT yet hold the proposal —
+  // `editorIsProposal` only matters for lnorun, since apply() writes the
+  // proposal into the editor only after the exit resolves).
+  async function m9gTrial(mode, tag, delayMs) {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse(`toolu_lazy_${mode}${tag}`, "propose_dashboard", { sql: LAZY_PROP, summary: "Lazy.", panels: [{ stmt: 1, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.waitForTimeout(2500); // let the idle prefetch start the hidden tab's slow jobs
+    const n0 = await mark(page);
+    if (mode === "ltype") {
+      page.evaluate(() => {
+        const t = document.getElementById("sql");
+        t.value += " ";
+        t.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    } else {
+      await page.click("#ai-apply");
+      await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+      page.evaluate(() => [...document.querySelectorAll(".dp-dialog button")].find((b) => /Apply, don/.test(b.textContent))?.click());
+    }
+    await page.waitForTimeout(delayMs); // the exit window H-1R2's race needs
+    const st = await page.evaluate(() => {
+      const previewing = document.body.classList.contains("previewing");
+      document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+      return { previewing, editorIsProposal: /LAZYMARK/.test(document.getElementById("sql")?.value || "") };
+    });
+    await page.waitForTimeout(15000); // the hidden tab's slow panels get a chance to run
+    const hits = await w0with(page, n0, LAZY_RE);
+    await context.close();
+    return { hits, st, inWindow: st.previewing && !st.editorIsProposal };
+  }
   for (const mode of ["ltype", "lnorun"]) {
+    let landed = 0;
     for (let trial = 0; trial < 3; trial++) {
+      const { hits, st, inWindow } = await m9gTrial(mode, trial, 80);
+      if (inWindow) landed++;
+      if (mode === "lnorun" && !inWindow) {
+        console.log(`M9g ${mode} trial ${trial}: not counted — the editor already held the applied proposal at Ctrl+Enter (a legitimate confirmed run), state=${JSON.stringify(st)}`);
+      } else {
+        record(`M9g ${mode} trial ${trial}: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, `${JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90)))} state=${JSON.stringify(st)}`);
+      }
+    }
+    // sec-review-272-rereview fourth pass, "Weakness 1": if slow CI made
+    // every lnorun trial land AFTER the exit, the mode above records
+    // nothing and would otherwise pass vacuously. Retry with much shorter
+    // delays — more likely to still be inside the (variable-length,
+    // dpLazy.tail-bound) exit window — before failing the mode outright.
+    if (mode === "lnorun" && landed === 0) {
+      for (const retryDelay of [20, 5]) {
+        const { hits, st, inWindow } = await m9gTrial(mode, `retry${retryDelay}`, retryDelay);
+        if (inWindow) {
+          landed++;
+          record(`M9g ${mode} retry@${retryDelay}ms: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, `${JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90)))} state=${JSON.stringify(st)}`);
+          break;
+        }
+        console.log(`M9g ${mode} retry@${retryDelay}ms: not counted — state=${JSON.stringify(st)}`);
+      }
+      record(`M9g ${mode}: at least one trial actually landed in the exit window`, landed > 0, `0 of 5 trials had previewing=true && !editorIsProposal — the mode cannot pass vacuously`);
+    }
+  }
+
+  // M9h (sec-review-272-rereview fourth pass, H-1R3): a Ctrl/⌘+Enter pressed
+  // during an "Apply, don't run" exit must NOT drop the hold. previewExit's
+  // tail used to run the deferred (`pendingExplicit`) request INSTEAD of
+  // the hold branch when both applied — and that request rendered the OLD
+  // editor text (apply() writes the proposal into the editor only AFTER
+  // host.preview.exit() resolves, assist-ui.js's apply()), leaving the
+  // proposal sitting in the editor with NO hold: #refresh/#lint-run stayed
+  // enabled, there was no "Not run yet" card, and the very next implicit
+  // trigger ran the unconfirmed proposal on the page database. Adapted
+  // from the reviewer's own probe9.mjs/probe10.mjs (`lnorun` + a
+  // dark-toggle click, here also an Esc press, afterwards).
+  {
+    let landed = 0;
+    for (let trial = 0; trial < 3 && landed === 0; trial++) {
       const { context, page } = await mainCtx(() =>
-        sse({ content: [toolUse(`toolu_lazy_${mode}${trial}`, "propose_dashboard", { sql: LAZY_PROP, summary: "Lazy.", panels: [{ stmt: 1, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+        sse({ content: [toolUse(`toolu_h1r3_${trial}`, "propose_dashboard", { sql: LAZY_PROP, summary: "Lazy.", panels: [{ stmt: 1, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
       );
       await gotoEdit(page, SETUP_AND_METRIC);
       await page.click("#assist-btn");
@@ -850,34 +934,58 @@ if (run("main")) {
       await page.waitForSelector(".dp-dialog", { timeout: 15000 });
       await page.click('.dp-dialog button:has-text("Send")');
       await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
-      await page.waitForTimeout(2500); // let the idle prefetch start the hidden tab's slow jobs
-      const n0 = await mark(page);
-      if (mode === "ltype") {
-        page.evaluate(() => {
-          const t = document.getElementById("sql");
-          t.value += " ";
-          t.dispatchEvent(new Event("input", { bubbles: true }));
-        });
-      } else {
-        await page.click("#ai-apply");
-        await page.waitForSelector(".dp-dialog", { timeout: 10000 });
-        page.evaluate(() => [...document.querySelectorAll(".dp-dialog button")].find((b) => /Apply, don/.test(b.textContent))?.click());
-      }
-      await page.waitForTimeout(80); // the exit window H-1R2's race needs
+      await page.waitForTimeout(2500);
+      await page.click("#ai-apply");
+      await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+      page.evaluate(() => [...document.querySelectorAll(".dp-dialog button")].find((b) => /Apply, don/.test(b.textContent))?.click());
+      await page.waitForTimeout(80);
       const st = await page.evaluate(() => {
         const previewing = document.body.classList.contains("previewing");
         document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
         return { previewing, editorIsProposal: /LAZYMARK/.test(document.getElementById("sql")?.value || "") };
       });
-      await page.waitForTimeout(15000); // the hidden tab's slow panels get a chance to run
-      const hits = await w0with(page, n0, LAZY_RE);
-      if (mode === "lnorun" && st.editorIsProposal) {
-        console.log(`M9g ${mode} trial ${trial}: not counted — the editor already held the applied proposal at Ctrl+Enter (a legitimate confirmed run), state=${JSON.stringify(st)}`);
-      } else {
-        record(`M9g ${mode} trial ${trial}: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, `${JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90)))} state=${JSON.stringify(st)}`);
+      if (!st.previewing || st.editorIsProposal) {
+        console.log(`M9h trial ${trial}: not counted — Ctrl+Enter landed after the exit, state=${JSON.stringify(st)}`);
+        await context.close();
+        continue;
       }
+      landed++;
+      // LAZY_PROP's own slow prefetch jobs mean previewExit() can still be
+      // blocked on its own `await dpLazy.tail` well past 80ms — matching
+      // the reviewer's own probe9/probe10 (15 s before checking held state).
+      await page.waitForTimeout(15000);
+      const held = await page.evaluate(() => ({
+        refreshDisabled: document.getElementById("refresh")?.disabled,
+        lintDisabled: document.getElementById("lint-run")?.disabled,
+        editorIsProposal: /LAZYMARK/.test(document.getElementById("sql")?.value || ""),
+        grid: (document.getElementById("grid")?.textContent || "").replace(/\s+/g, " ").slice(0, 140),
+      }));
+      record(`M9h trial ${trial}: the proposal is in the editor after the exit`, held.editorIsProposal, JSON.stringify(held));
+      record(`M9h trial ${trial}: #refresh is disabled (held)`, held.refreshDisabled === true, JSON.stringify(held));
+      record(`M9h trial ${trial}: #lint-run is disabled (held)`, held.lintDisabled === true, JSON.stringify(held));
+      record(`M9h trial ${trial}: "Not run yet" is shown`, /not run yet/i.test(held.grid), held.grid);
+      const n1 = await mark(page);
+      await page.evaluate(() => document.getElementById("dark")?.click());
+      await page.waitForTimeout(4000);
+      let hits = await w0with(page, n1, LAZY_RE);
+      record(`M9h trial ${trial}: zero page-DB messages after one dark-toggle click`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      const n2 = await mark(page);
+      await page.evaluate(() => document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      await page.waitForTimeout(1500);
+      hits = await w0with(page, n2, LAZY_RE);
+      record(`M9h trial ${trial}: zero page-DB messages after Esc`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      const stillHeld = await page.evaluate(() => ({
+        refreshDisabled: document.getElementById("refresh")?.disabled,
+        lintDisabled: document.getElementById("lint-run")?.disabled,
+      }));
+      record(
+        `M9h trial ${trial}: #refresh/#lint-run still disabled after dark toggle + Esc`,
+        stillHeld.refreshDisabled === true && stillHeld.lintDisabled === true,
+        JSON.stringify(stillHeld)
+      );
       await context.close();
     }
+    record("M9h: at least one trial actually landed in the exit window", landed > 0, "no trial had previewing=true && !editorIsProposal at Ctrl+Enter — the case cannot pass vacuously");
   }
 
   // M10: the key leak sweep (sk-ant- never appears anywhere).
