@@ -888,6 +888,49 @@ not a timing race) — both adapted from the reviewer's own `probe11.mjs`
 `hold_attach`, `memory_limit='3GB'` all reaching the page worker), all
 pass after. The audit comment's hold-clearing list was updated to match
 (`heldSql`'s own setter/clearers, and the corrected item 5).
+
+**sec-review-272-rereview (fix round 7, PR #272): M-3R and L-7, the sixth
+pass's own findings against the hold.** **M-3R (Medium):** a model-chosen
+CRLF proposal defeated the text-bound hold outright — `apply()` armed
+with the *raw* `p.sql`, but the `<textarea>` silently normalises CRLF/CR
+to LF, so the armed text never equalled `$("sql").value` again; the same
+mismatch made panel Undo refuse CRLF proposals (`S.hist`'s own `after:
+p.sql` never matched either). **L-7 (Low):** the single `heldSql` only
+covered the *one exact text* a hold started with — a trivial edit made
+*while held* (a trailing space, a blank line, a trailing comment) was,
+correctly, not a confirmation, but Ctrl-Z/redo back to *that edited*
+version (after running something else) was not recognised as held
+either. Fixed together: `apply()` (`assist-ui.js`) now normalises
+`p.sql` once, at the very top (`.replace(/\r\n?/g, "\n")`, the same
+normalisation the textarea itself applies), and uses that text for the
+stale check, `gate`/`readers`, `S.hist`, `editor.replace` *and*
+`host.hold.arm()` — plus `host.hold.arm()` is called with
+`host.editor.get()` (the editor's own, now-normalised value) rather than
+the SQL variable again, belt-and-braces. The single `heldSql` became a
+small, bounded (≤50) `heldTexts` `Set` (`web/app.js`): the `#sql` `input`
+handler now records the current text into it on every edit made *while*
+`applyHold` is true (not just re-arming on an exact match), and re-arms
+whenever the current text is a *member*; `run()`'s own belt-and-braces
+check uses membership too. Critically, confirming (`confirmHeldIfMatch()`)
+now *removes only that one entry* (`heldTexts.delete(...)`), never
+`heldTexts.clear()` — the first implementation tried `.clear()` and
+broke immediately: `applyHold` stays numerically true for the whole
+stretch between an edit and whatever runs it, so an unrelated
+throwaway text (typed over the proposal, then explicitly run instead of
+it) got recorded as "shown while held" by the same generic rule, and
+confirming *that* text wiped every genuinely-still-unconfirmed entry
+(the original proposal) out of the set along with it — caught by the
+project's own M9i/L-7 e2e cases before this round shipped, not by a
+later review pass. `loadDash()` clears the whole set, same as before.
+Test: `scripts/assist-e2e.mjs` **M9i** gained a CRLF `run+redo` variant,
+a dedicated CRLF Undo case, and three L-7 cases (append a space / a
+blank line / a trailing comment while held, then run other text, Ctrl-Z,
+dark toggle, Esc) — all adapted from the reviewer's own `probe12.mjs`
+(`crlf`, `ws`); confirmed 12 assertions FAIL against the pre-fix head
+(`e950583`), reproducing the reviewer's evidence exactly, all pass
+after. Full suites green: `tests/web/*.mjs` (38 files), `scripts/
+assist-e2e.mjs` 217 ok / 0 FAIL (all tags, including every earlier
+round's cases), `cargo fmt --all --check` clean.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

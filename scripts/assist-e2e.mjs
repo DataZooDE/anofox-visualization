@@ -96,6 +96,10 @@ const LAZY_RE = /RACEMARK|LAZYMARK|lazymark_tbl/;
 // probe11.mjs (`HP`/`PROP`).
 const HOLD_PROP = `SELECT 'HOLDMARK' AS m ::METRIC;\nATTACH ':memory:' AS hold_attach;\nSET memory_limit='3GB';\n`;
 const HOLD_RE = /HOLDMARK|hold_attach|memory_limit='3GB'/;
+// M-3R (sec-review-272-rereview sixth pass): entirely the model's own
+// choice in propose_dashboard's `sql` — a <textarea> silently normalises
+// CRLF to LF, so this must still bind the hold once normalised.
+const HOLD_PROP_CRLF = HOLD_PROP.replace(/\n/g, "\r\n");
 
 const results = [];
 const record = (name, ok, note = "") => {
@@ -1002,9 +1006,9 @@ if (run("main")) {
   // Esc) can run it on the page database. Adapted from the reviewer's own
   // probe11.mjs (`undo`).
   {
-    async function m9iHeldPage(tag) {
+    async function m9iHeldPage(tag, sql = HOLD_PROP) {
       const { context, page } = await mainCtx(() =>
-        sse({ content: [toolUse(`toolu_m9i_${tag}`, "propose_dashboard", { sql: HOLD_PROP, summary: "Hold.", panels: [{ stmt: 0, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+        sse({ content: [toolUse(`toolu_m9i_${tag}`, "propose_dashboard", { sql, summary: "Hold.", panels: [{ stmt: 0, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
       );
       await gotoEdit(page, SETUP_AND_METRIC);
       await page.click("#assist-btn");
@@ -1094,6 +1098,90 @@ if (run("main")) {
         JSON.stringify(afterRedo)
       );
       await implicitTriggersAreSafe(page, "M9i run+redo");
+      await context.close();
+    }
+
+    // Variant 3 (M-3R, sec-review-272-rereview sixth pass): the SAME
+    // run+redo sequence, but the proposal itself uses CRLF line endings
+    // (entirely the model's own choice) — the textarea normalises them to
+    // LF, so `apply()` must normalise too, or `host.editor.get()` (used
+    // to arm the hold) never equals `$("sql").value` and the whole
+    // text-bound hold silently never re-arms for this proposal.
+    {
+      const { context, page } = await m9iHeldPage("crlf-redo", HOLD_PROP_CRLF);
+      const held0 = await holdState(page);
+      record("M9i crlf: held right after \"Apply, don't run\" (CRLF normalised in the editor)", held0.editorIsProposal && held0.refreshDisabled === true, JSON.stringify(held0));
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z");
+      await page.waitForTimeout(400);
+      await page.keyboard.press("Control+Enter"); // explicit run of the (now old, non-held) editor text
+      await page.waitForTimeout(800);
+      const afterRun = await holdState(page);
+      record("M9i crlf: the explicit run of other text clears the hold", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
+      await page.keyboard.press("Control+Shift+z"); // redo -> the (CRLF, normalised) proposal comes back
+      await page.waitForTimeout(400);
+      const afterRedo = await holdState(page);
+      record("M9i crlf: the proposal is back in the editor", afterRedo.editorIsProposal, JSON.stringify(afterRedo));
+      record("M9i crlf: the hold is re-armed", afterRedo.refreshDisabled === true && afterRedo.lintDisabled === true && afterRedo.notRun, JSON.stringify(afterRedo));
+      await implicitTriggersAreSafe(page, "M9i crlf");
+      await context.close();
+    }
+
+    // The Undo test (M-3R): a CRLF proposal must not defeat panel Undo
+    // either — `S.hist`'s own `after` is now the normalised text, so
+    // `host.editor.get() !== e.after` (undo()'s own staleness guard) must
+    // NOT fire, and Undo must actually run the old SQL, not show "The
+    // editor changed since. Use Ctrl+Z in the editor."
+    {
+      const { context, page } = await m9iHeldPage("crlf-undo", HOLD_PROP_CRLF);
+      await page
+        .click("#ai-undo")
+        .catch(async () => page.click("#side-toast .side-toast-btn"));
+      await page.waitForTimeout(1200);
+      const after = await holdState(page);
+      const toastText = await page.evaluate(() => document.getElementById("side-toast")?.textContent || "");
+      record(
+        "M9i crlf-undo: panel Undo is not refused for a CRLF proposal (hold cleared, old SQL restored)",
+        !after.editorIsProposal && after.refreshDisabled === false && !/editor changed/i.test(toastText),
+        `${JSON.stringify(after)} toast=${JSON.stringify(toastText)}`
+      );
+      await context.close();
+    }
+
+    // L-7 (sec-review-272-rereview sixth pass): every version the editor
+    // shows WHILE held counts as held too — typing (append a space, a
+    // blank line, or a trailing comment) is not a confirmation. Run other
+    // text, then Ctrl+Z back to the EDITED (not the original) held text,
+    // then a dark toggle and Esc.
+    for (const extra of [" ", "\n", "\n\n-- ok\n"]) {
+      const tag = `ws${extra.length}`;
+      const { context, page } = await m9iHeldPage(tag);
+      await page.evaluate((t) => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+        document.execCommand("insertText", false, t);
+      }, extra);
+      await page.waitForTimeout(300);
+      const afterEdit = await holdState(page);
+      record(`M9i L-7 ${tag}: typing an edit while held leaves the hold up (typing is not a confirmation)`, afterEdit.refreshDisabled === true && afterEdit.lintDisabled === true, JSON.stringify(afterEdit));
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SELECT 11 AS other ::METRIC;\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      const afterRun = await holdState(page);
+      record(`M9i L-7 ${tag}: the explicit run of other text clears the hold`, afterRun.refreshDisabled === false, JSON.stringify(afterRun));
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z"); // back to the EDITED (proposal + extra) version, not the original
+      await page.waitForTimeout(400);
+      const afterUndo = await holdState(page);
+      record(`M9i L-7 ${tag}: the edited version is back in the editor`, afterUndo.editorIsProposal, JSON.stringify(afterUndo));
+      record(`M9i L-7 ${tag}: the hold is re-armed for the edited version too`, afterUndo.refreshDisabled === true && afterUndo.lintDisabled === true && afterUndo.notRun, JSON.stringify(afterUndo));
+      await implicitTriggersAreSafe(page, `M9i L-7 ${tag}`);
       await context.close();
     }
   }

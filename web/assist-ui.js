@@ -1239,9 +1239,20 @@ export function mountAssistant(hostArg) {
     const p = S.proposal;
     if (!p) return;
     const now = host.editor.get();
+    // M-3R (sec-review-272-rereview sixth pass): normalise once, here, at
+    // the very top — `propose_dashboard`'s `sql` is entirely the model's
+    // choice and may use CRLF/CR line endings, but a <textarea>'s own
+    // `.value` getter silently normalises them to LF. Every later use of
+    // this text (the stale check inputs below, the undo history, the
+    // editor, the hold) must agree with what the textarea will actually
+    // report back — otherwise a CRLF proposal defeats the text-bound hold
+    // (M-3) outright (Run of other text, Ctrl+Z, any implicit trigger),
+    // and panel Undo is refused for it too (`host.editor.get() !==
+    // e.after` never matches a CRLF `e.after`).
+    const sql = p.sql.replace(/\r\n?/g, "\n");
     const stale = now !== S.requestEditor;
-    const readers = proposalReaders(p.sql);
-    const g = await S.tools.gate(p.sql);
+    const readers = proposalReaders(sql);
+    const g = await S.tools.gate(sql);
     const m = applyModel({ readers, refused: g.statements, stale });
     let choice = "run";
     if (m.needsDialog) {
@@ -1254,21 +1265,22 @@ export function mountAssistant(hostArg) {
     await host.preview.exit({ rerun: false, hold: choice === "norun" });
     discardPreview();
     const title = p.summary || "Applied dashboard";
-    S.hist.push({ before: now, after: p.sql, title });
-    host.editor.replace(p.sql);
+    S.hist.push({ before: now, after: sql, title });
+    host.editor.replace(sql);
     if (!host.dashName.get().trim() || host.dashName.get().trim() === "Untitled dashboard") {
       try {
-        const meta = JSON.parse(host.wasm.dashboardMeta(p.sql));
+        const meta = JSON.parse(host.wasm.dashboardMeta(sql));
         if (meta.title) host.dashName.set(meta.title);
       } catch (_) {}
     }
     if (choice === "run") host.run();
-    // M-3 (sec-review-272-rereview fifth pass): remember the exact text
-    // that is held — see host.hold.arm() (app.js) — so the editor's own
-    // undo/redo (Ctrl+Z / Ctrl+Shift+Z) can never bring this unconfirmed
-    // proposal back with no hold, however the hold was last cleared
-    // (Undo, Run of other text, …).
-    else host.hold.arm(p.sql);
+    // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): belt-and-braces
+    // alongside the #sql `input` handler's own generic "record every text
+    // shown while held" logic (app.js) — arm with what the editor
+    // ACTUALLY holds now (`host.editor.get()`, not `sql`/`p.sql` again),
+    // in case some future change ever let editorReplace() skip firing its
+    // own `input` event.
+    else host.hold.arm(host.editor.get());
     S.proposal = { ...p, applied: true };
     renderCard();
     host.ui.toast("Applied the assistant's dashboard.", "Undo", undo, () => document.getElementById("sql"));
