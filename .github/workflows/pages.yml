@@ -55,8 +55,21 @@ jobs:
 
       # The anofox DuckDB-Wasm extensions, served same-origin from
       # web/localext/ (get.erpl.io has no CORS + needs a signature fix, #192).
+      # Pinned (scripts/wasm-extensions.lock, #235), so this is now the same
+      # build the assistant's function lists (web/assist/functions.js) were
+      # generated against.
       - name: Fetch wasm extensions (→ web/localext)
         run: scripts/fetch-wasm-extensions.sh "$(cat .duckdb-version)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install DuckDB-Wasm (tests/web)
+        run: npm install --prefix tests/web --no-audit --no-fund
+
+      - name: The assistant's function lists match the pinned builds
+        run: node scripts/gen-assist-functions.mjs --check
 
       # The latest release's native extensions → web/extensions/<duckdb>/<platform>/
       # anofox_visualization.duckdb_extension.gz (a warning, not a failure, when
