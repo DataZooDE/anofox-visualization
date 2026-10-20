@@ -42,7 +42,7 @@ crate-type = ["cdylib", "rlib"]
 # `theme.text.family`, and `element_geom` ink/paper/accent (point, line,
 # path, text, label, boxplot, smooth — sipemu/ggplot-rs#142 tracks the rest).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.21", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.22", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

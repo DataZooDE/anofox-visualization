@@ -1,7 +1,10 @@
 //! Narrow charts keep every x tick label inside the SVG, and labels don't
-//! overlap (#108).
-use anofox_visualization::ticks::{x_tick_labels, TickLabel};
+//! overlap (#108). The fit/overlap logic itself now lives in ggplot-rs
+//! (`Theme::axis_text_x_fit`, `axis_text_x_check_overlap`, turned on in the
+//! house theme); this just checks the rendered result.
+mod common;
 use anofox_visualization::{render, Column, Kind, Role};
+use common::tick_labels::{x_tick_labels, TickLabel};
 use ggplot_rs::prelude::Value;
 
 /// 2026-01-05, a Monday.

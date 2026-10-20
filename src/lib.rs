@@ -27,13 +27,11 @@ pub mod contract;
 pub mod dashboard;
 pub mod diagram;
 mod downsample;
-mod facet_position;
 pub mod format;
 pub mod freshness;
 pub mod host;
 pub mod inputs;
 pub mod kpi;
-mod legend_wrap;
 pub mod lint;
 pub mod macros;
 pub(crate) mod map;
@@ -46,7 +44,6 @@ pub mod sql;
 pub mod table;
 pub mod theme;
 pub mod thresholds;
-pub mod ticks;
 pub mod track;
 mod variance;
 #[cfg(feature = "wasm")]
@@ -625,6 +622,17 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
         width: 0.6,
         ..Default::default()
     });
+    // ggplot-rs#318 step 2: keep outer x labels on-canvas (ggplot-rs 0.22's
+    // `AxisLabelFit`) and thin crowded ones (ggplot2's `check.overlap`).
+    // `::TRACK`-aligned panels must keep their exact plot area so sibling
+    // tracks stay lined up, so they Shift labels inward instead of
+    // Reserve-ing extra margin for them (which would narrow the panel).
+    th.axis_text_x_fit = if o.align.is_some() {
+        AxisLabelFit::Shift
+    } else {
+        AxisLabelFit::Reserve
+    };
+    th.axis_text_x_check_overlap = true;
     th
 }
 
@@ -1387,11 +1395,8 @@ pub(crate) enum Panel {
         plot: Box<GGPlot>,
         width: u32,
         height: u32,
-        /// Extra root attributes (e.g. `data-xticks`) written on the `<svg>`.
+        /// Extra root attributes (e.g. `data-track`) written on the `<svg>`.
         attrs: Vec<(&'static str, String)>,
-        /// The plot margin its theme set, for a pass that grows it (a top
-        /// legend wrapping onto more rows); `None` when not known.
-        margin: Option<ggplot_rs::theme::Margin>,
     },
     Own {
         width: u32,
@@ -1416,7 +1421,6 @@ impl Panel {
                 width,
                 height,
                 attrs,
-                margin,
             } if !o.locale.is_default() => {
                 let yearish = cols.iter().filter(|c| c.role == Role::X).any(|c| {
                     let mut any = false;
@@ -1439,7 +1443,6 @@ impl Panel {
                     width,
                     height,
                     attrs,
-                    margin,
                 }
             }
             p => p,
@@ -1463,53 +1466,6 @@ impl Panel {
             width,
             height,
             attrs: Vec::new(),
-            margin: None,
-        }
-    }
-
-    /// Record the plot margin the panel's theme set (see
-    /// [`legend_rows`](Self::legend_rows)).
-    pub(crate) fn with_margin(mut self, m: ggplot_rs::theme::Margin) -> Panel {
-        if let Panel::Plot { margin, .. } = &mut self {
-            *margin = Some(m);
-        }
-        self
-    }
-
-    /// Reserve `rows.rows` legend rows: the plot margin above (or below) the
-    /// panel grows by the rows past the first, which ggplot-rs reserves
-    /// itself. A panel whose margin is not known is left as it is.
-    pub(crate) fn legend_rows(self, rows: Option<legend_wrap::Rows>) -> Panel {
-        match (self, rows) {
-            (
-                Panel::Plot {
-                    plot,
-                    width,
-                    height,
-                    attrs,
-                    margin: Some(mut m),
-                },
-                Some(r),
-            ) if r.rows > 1 => {
-                let extra = (r.rows - 1) as f64 * legend_wrap::ROW;
-                if r.top {
-                    m.top += extra;
-                } else {
-                    m.bottom += extra;
-                }
-                let plot = plot.theme_update(ggplot_rs::theme::ThemeUpdate {
-                    plot_margin: Some(m.clone()),
-                    ..Default::default()
-                });
-                Panel::Plot {
-                    plot: Box::new(plot),
-                    width,
-                    height,
-                    attrs,
-                    margin: Some(m),
-                }
-            }
-            (p, _) => p,
         }
     }
 
@@ -1530,8 +1486,7 @@ impl Panel {
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map(|(s, w)| {
-                    let mut s = ticks::fit_x_labels(s);
+                svg.map(|(mut s, w)| {
                     for (k, v) in &attrs {
                         s = with_root_attr(s, k, v);
                     }
@@ -1682,40 +1637,29 @@ fn render_placed(
         }
         let cols = downsample::prepare(cols, o);
         let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
-        let draw = |fit: Option<track::Fit>, rows: Option<legend_wrap::Rows>| {
+        let draw = |fit: Option<track::Fit>| {
             render_inner(&cols, w, h, o)
                 .map(|p| p.localized(o, &cols))
                 .map(|p| match fit {
                     Some(f) => p.fitted(f),
                     None => p,
                 })
-                .map(|p| p.legend_rows(rows))
                 .and_then(|p| p.finish(place))
         };
         // Aligned with other panels: draw, measure, draw again fitted.
-        let run = |rows: Option<legend_wrap::Rows>| match &o.align {
+        let run = || match &o.align {
             Some(a) => {
                 let first = track::Fit::first(o, a);
-                let (svg, _) = draw(Some(first.clone()), rows)?;
-                draw(Some(first.correct(a, &svg, h as f64)), rows)
+                let (svg, _) = draw(Some(first.clone()))?;
+                draw(Some(first.correct(a, &svg, h as f64)))
             }
-            None => draw(None, rows),
+            None => draw(None),
         };
-        let (mut svg, mut warnings) = run(None).map_err(RenderError::Render)?;
-        // A top/bottom legend too long for one line: draw again with its rows
-        // reserved (once more if the panel's new axis labels moved it), then
-        // wrap it.
-        let mut reserved = 1;
-        for _ in 0..2 {
-            match legend_wrap::plan(&svg).filter(|r| r.rows > reserved) {
-                Some(r) => {
-                    (svg, warnings) = run(Some(r)).map_err(RenderError::Render)?;
-                    reserved = r.rows;
-                }
-                None => break,
-            }
-        }
-        let svg = legend_wrap::wrap(svg, reserved, &mut warnings);
+        let (svg, warnings) = run().map_err(RenderError::Render)?;
+        // A horizontal legend too long for one line auto-wraps (ggplot-rs's
+        // own layout_built: it plans the wrap once and draws exactly that
+        // plan, then pushes an overflow warning into `warnings` above when
+        // even that isn't enough room — see ggplot-rs#318 step 2).
         // A map paints with the variant's own tokens: no neutral remap.
         let svg = if map::is_map(&cols) {
             o.theme.with_font(svg)
@@ -1723,10 +1667,7 @@ fn render_placed(
             o.theme.finish_svg(svg)
         };
         let svg = with_xline_dates(svg, &cols);
-        let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
-        if boxstats::is_stats(&cols) {
-            svg = boxstats::with_tips(svg, &cols, o);
-        }
+        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         Ok((svg, warnings))
     })
 }
@@ -1973,7 +1914,6 @@ pub(crate) fn finish_grid(
             .render_svg_native_at(x, y, w, h)
             .map(|s| (s, Vec::new())),
     }
-    .map(|(s, warnings)| (ticks::fit_x_labels(s), warnings))
     .map_err(|e| format!("render failed: {e:?}"))
 }
 
@@ -2144,69 +2084,13 @@ fn discrete_dodge(kind: Kind, cols: &[Column]) -> bool {
             || (matches!(kind, Kind::Point | Kind::Bubble) && interval))
 }
 
-/// A discrete x axis turned into numeric slots `1, 2, …` with each group
-/// offset inside its slot — only for grouped marks with ::DATALABELS, which
-/// cannot follow ggplot-rs's discrete `position_dodge` (geom_text ignores the
-/// stored dodge offset).
-///
-/// TODO(ggplot-rs): drop once geom_text honours `position_dodge` on a
-/// discrete x.
-struct Dodged {
-    x: Vec<Value>,
-    breaks: Vec<f64>,
-    labels: Vec<String>,
-    /// Width of one group's sub-slot.
-    step: f64,
-}
-
-fn dodge_discrete(x: &[Value], group: &[Value], width: f64) -> Dodged {
-    let mut labels: Vec<String> = Vec::new();
-    let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for v in x.iter().filter(|v| !matches!(v, Value::Na)) {
-        let s = value_str(v);
-        if !slot.contains_key(&s) {
-            slot.insert(s.clone(), labels.len());
-            labels.push(s);
-        }
-    }
-    // Groups in the sorted order of the colour scale, so the left-to-right
-    // order inside a slot matches the legend.
-    let groups: Vec<String> = distinct_labels(&Column::new("", Role::Category, group.to_vec()));
-    let n = groups.len().max(1) as f64;
-    let step = width / n;
-    let xs = x
-        .iter()
-        .zip(group)
-        .map(|(v, g)| {
-            if matches!(v, Value::Na) {
-                return Value::Na;
-            }
-            let base = slot[&value_str(v)] as f64 + 1.0;
-            let gi = groups.iter().position(|l| *l == value_str(g)).unwrap_or(0) as f64;
-            Value::Float(base + (gi - (n - 1.0) / 2.0) * step)
-        })
-        .collect();
-    Dodged {
-        x: xs,
-        breaks: (1..=labels.len()).map(|i| i as f64).collect(),
-        labels,
-        step,
-    }
-}
-
 /// Half-width of error-bar caps in normalized panel units: 18 % of one bar
 /// (`slot` x units wide) on a discrete x, else 20 % of the smallest gap
-/// between x values.
-fn cap_half_width(
-    x: &[Value],
-    levels: Option<&[String]>,
-    dodged: &Option<Dodged>,
-    slot: f64,
-) -> f64 {
-    if let Some(d) = dodged {
-        // Slots 1..=n on limits [0.4, n + 0.6].
-        return 0.18 * d.step / (d.labels.len() as f64 + 0.2);
-    }
+/// between x values. `slot` is the whole dodge-group's width even when
+/// dodged (not pre-divided by the group count): ggplot-rs's GeomErrorbar
+/// shrinks `cap_width` by the dodge count itself once `position_dodge` is
+/// on the layer (ggplot-rs#318 B3-7).
+fn cap_half_width(x: &[Value], levels: Option<&[String]>, slot: f64) -> f64 {
     if x.iter().any(|v| matches!(v, Value::Str(_))) {
         let n = levels.map_or_else(
             || distinct_labels(&Column::new("", Role::X, x.to_vec())).len(),
@@ -2363,7 +2247,7 @@ fn render_cartesian(
     let (Some(x), Some(cat)) = (find_role(cols, Role::X), find_role(cols, Role::Category)) else {
         return cartesian(o, kind, value, cols, title, width, height, None);
     };
-    if !discrete_dodge(kind, cols) || find_role(cols, Role::DataLabels).is_some() {
+    if !discrete_dodge(kind, cols) {
         return cartesian(o, kind, value, cols, title, width, height, None);
     }
     let n = x.values.len();
@@ -2436,19 +2320,12 @@ fn cartesian(
     if x_discrete && x_interval.is_some() {
         return Err("::XMIN/::XMAX need a numeric ::XAXIS".into());
     }
-    // Grouped marks on a discrete x sit side by side: `position_dodge` (rows
-    // already ordered by `render_cartesian`), or — with ::DATALABELS, which
-    // cannot follow it — numeric slots.
+    // Grouped marks on a discrete x sit side by side under `position_dodge`
+    // (rows already ordered by `render_cartesian`); `GeomText`/`GeomLabel`
+    // honour it too (ggplot-rs#318 B3-4), so ::DATALABELS dodges the same way.
     let dodge_width = if bar { 0.9 } else { 0.6 };
     let dodge = x_levels.is_some();
-    let dodged = (discrete_dodge(kind, cols) && !dodge)
-        .then_some(category)
-        .flatten()
-        .map(|cat| dodge_discrete(&x.values, &cat.values, dodge_width));
-    let xvals = dodged
-        .as_ref()
-        .map(|d| d.x.clone())
-        .unwrap_or_else(|| x.values.clone());
+    let xvals = x.values.clone();
     let yvals = match kind {
         Kind::BarPercent => percent_shares(&x.values, &value.values, category.is_some()),
         // Each segment's share of its bar, so the hover value and the data
@@ -2523,7 +2400,7 @@ fn cartesian(
     // A box from statistics: its quartiles, whiskers and outliers.
     let box_stats = kind == Kind::Boxplot && boxstats::is_stats(cols);
     if box_stats {
-        data.extend(boxstats::data_columns(cols));
+        data.extend(boxstats::data_columns(cols, o));
     }
     // Censoring marks on a step curve (`::CENSOR`).
     let censor = kind == Kind::Step
@@ -2881,14 +2758,9 @@ fn cartesian(
         Kind::Bar | Kind::BarPercent if dodge => plot
             .geom_col_with(card_col(o))
             .position(position_dodge(dodge_width)),
-        // (A slotted x is already dodged, see `dodge_discrete`.)
         Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
-        Kind::BarStacked => plot
-            .geom_col_with(card_col(o))
-            .position(facet_position::PerFacet(PositionStack)),
-        Kind::BarStackedPercent => plot
-            .geom_col_with(card_col(o))
-            .position(facet_position::PerFacet(PositionFill)),
+        Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
+        Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
         Kind::Line | Kind::LinePercent => {
@@ -2989,7 +2861,7 @@ fn cartesian(
                 alpha: 0.85,
                 ..Default::default()
             })
-            .position(facet_position::PerFacet(PositionStack)),
+            .position(PositionStack),
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
         Kind::Point | Kind::Bubble => match fixed_size {
@@ -3004,27 +2876,26 @@ fn cartesian(
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
         Kind::Boxplot if box_stats => {
-            let mut p = plot
+            // identity: ggplot-rs 0.22 reads lower/middle/upper/ymin/ymax/
+            // outliers straight off the data (ggplot-rs#318 B3-5) — and
+            // widens the y scale to the outlier extent itself, so no more
+            // geom_blank extent layer for outliers is needed. `tooltip` in
+            // `boxstats::layer_aes()` is the box's own hover text (`btip`,
+            // built as data in `boxstats::data_columns`, not a post-render
+            // `<title>` rewrite).
+            let p = plot
                 .geom_boxplot_with(GeomBoxplot {
                     fill: body_fill,
                     color: o.theme.chart_label(),
                     width: 0.6,
                     alpha: 1.0,
                 })
-                .stat(boxstats::StatBoxStats)
+                .stat(StatIdentity)
                 .layer_aes(boxstats::layer_aes());
-            // The outliers and means lie beyond the whiskers the y scale sees.
-            let (ex, ey) = boxstats::extent_rows(cols);
-            if !ex.is_empty() {
-                p = p
-                    .geom_blank()
-                    .layer_data(vec![("x".to_string(), ex), ("y".to_string(), ey)])
-                    .layer_aes(Aes::new().x("x").y("y"));
-            }
-            if let Some(mean) = find_role(cols, Role::Mean) {
-                let n = mean.values.len();
-                p = p
-                    .geom_point_with(GeomPoint {
+            match find_role(cols, Role::Mean) {
+                Some(mean) => {
+                    let n = mean.values.len();
+                    p.geom_point_with(GeomPoint {
                         size: 2.6,
                         color: o.theme.chart_label(),
                         alpha: 1.0,
@@ -3032,14 +2903,29 @@ fn cartesian(
                     .layer_data(vec![
                         ("x".to_string(), x.values.clone()),
                         ("y".to_string(), mean.values.clone()),
-                        (
-                            "label".to_string(),
-                            vec![Value::Str(boxstats::MEAN_LABEL.into()); n],
-                        ),
+                        ("btip".to_string(), col_of(&data, "btip")),
+                        // The mean dot is drawn by its own (real) GeomPoint
+                        // layer, so it carries a title/data-* like any other
+                        // point (ggplot-rs has no "decorative, no mark
+                        // metadata" layer kind yet — sipemu/ggplot-rs
+                        // follow-up filed from #331/#318). `data-decorative`
+                        // is a normal mapped `data_attr`, read by
+                        // web/app.js to keep it out of the hover list,
+                        // crosshair grouping and click/select/drill, the
+                        // same way a reference-rule mark already is, while
+                        // it still shows its own (the box's) tooltip.
+                        ("dec".to_string(), vec![Value::Str("mean".into()); n]),
                     ])
-                    .layer_aes(Aes::new().x("x").y("y").label("label"));
+                    .layer_aes(
+                        Aes::new()
+                            .x("x")
+                            .y("y")
+                            .tooltip("btip")
+                            .data_attr("decorative", "dec"),
+                    )
+                }
+                None => p,
             }
-            p
         }
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
             fill: body_fill,
@@ -3086,10 +2972,7 @@ fn cartesian(
             plot.geom_errorbar_with(GeomErrorbar {
                 color: (60, 60, 60),
                 width: 1.0,
-                cap_width: cap_half_width(&col_of(&data, "x"), x_levels.as_deref(), &dodged, {
-                    let groups = category.map_or(1, |c| distinct_labels(c).len());
-                    dodge_width / if dodge { groups.max(1) as f64 } else { 1.0 }
-                }),
+                cap_width: cap_half_width(&col_of(&data, "x"), x_levels.as_deref(), dodge_width),
                 alpha: 1.0,
             })
             .layer_aes(span)
@@ -3127,12 +3010,14 @@ fn cartesian(
             })
             .layer_aes(Aes::new().x("x").y("y").label("dlab"));
         plot = match kind {
-            Kind::BarStacked | Kind::AreaStacked => plot.position(facet_position::Centred(
-                facet_position::PerFacet(PositionStack),
-            )),
-            Kind::BarStackedPercent => plot.position(facet_position::Centred(
-                facet_position::PerFacet(PositionFill),
-            )),
+            Kind::BarStacked | Kind::AreaStacked => plot.position(position_stack().with_vjust(0.5)),
+            Kind::BarStackedPercent => plot.position(position_fill().with_vjust(0.5)),
+            // Grouped (dodged) bars/points: each layer's position adjustment
+            // is independent, so the label layer needs its own
+            // position_dodge too — GeomText honouring it (ggplot-rs#318
+            // B3-4) only means it *can* dodge, not that it inherits the
+            // bars' own position() call.
+            _ if dodge => plot.position(position_dodge(dodge_width)),
             _ => plot,
         };
     }
@@ -3414,14 +3299,6 @@ fn cartesian(
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
         );
-    } else if let Some(d) = &dodged {
-        plot = plot.scale_x_continuous(
-            ScaleContinuous::new()
-                .with_limits(0.4, d.labels.len() as f64 + 0.6)
-                .with_expand(0.0, 0.0)
-                .with_breaks(d.breaks.clone())
-                .with_labels(d.labels.clone()),
-        );
     } else if !x_discrete {
         let x_fmt = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
         let x_tr = role_str(cols, Role::XScale)
@@ -3475,18 +3352,7 @@ fn cartesian(
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    let mut panel = Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin);
-    // A dodged discrete x is drawn on numeric slots: tell hosts which level
-    // each slot is, so a tooltip header reads "W1" rather than "1.225".
-    if let (Some(d), Panel::Plot { attrs, .. }) = (&dodged, &mut panel) {
-        let ticks: serde_json::Map<String, serde_json::Value> = d
-            .breaks
-            .iter()
-            .zip(&d.labels)
-            .map(|(b, l)| (format!("{b}"), serde_json::Value::String(l.clone())))
-            .collect();
-        attrs.push(("data-xticks", serde_json::Value::Object(ticks).to_string()));
-    }
+    let panel = Panel::plot(plot, width, height);
     Ok(panel)
 }
 
@@ -3551,7 +3417,7 @@ fn render_density(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// Build an axis tick formatter from a short spec — a keyword or a currency
@@ -4423,7 +4289,7 @@ fn render_radar(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height).with_margin(chart_theme(o, 11.0).plot_margin))
+    Ok(Panel::plot(plot, width, height))
 }
 
 fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
@@ -5164,7 +5030,7 @@ fn render_pie(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height).with_margin(void_theme(o).plot_margin))
+    Ok(Panel::plot(plot, width, height))
 }
 
 /// A minimal SVG heading (for a `::LABEL`-only result).

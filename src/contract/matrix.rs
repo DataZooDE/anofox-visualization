@@ -259,7 +259,6 @@ pub(super) fn matrix(
             width,
             height,
             attrs,
-            margin,
         } => {
             let plot = plot
                 .scale_x_discrete(
@@ -275,7 +274,6 @@ pub(super) fn matrix(
                 width,
                 height,
                 attrs,
-                margin,
             }
         }
         other => other,

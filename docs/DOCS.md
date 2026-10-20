@@ -441,10 +441,8 @@ total without a `::CATEGORY`); values already given as fractions (all within
 ±1) are drawn as they are. `::LINECHART_PERCENT` formats fractions ×100 and
 treats larger values as percentages already.
 
-Dodged marks keep their discrete x level in `data-x`. The one exception is a
-grouped chart with `::DATALABELS` (labels cannot follow a discrete dodge), drawn
-on numeric x slots: its SVG root carries `data-xticks` (`{"1":"W1",…}`) so hosts
-can map a mark's numeric `data-x` back to its level.
+Dodged marks keep their discrete x level in `data-x`, including a grouped
+chart with `::DATALABELS`.
 
 For whole model outputs there are ready-made plot macros — see
 [Plotting model output](#plotting-model-output-contract-macros).

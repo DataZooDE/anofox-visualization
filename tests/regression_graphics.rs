@@ -37,6 +37,24 @@ fn bars(svg: &str, s: &str) -> Vec<(f64, f64)> {
     }
     out
 }
+/// `(x, text)` of every `::DATALABELS` text mark (`data-geom="text"`).
+fn data_label_centers(svg: &str) -> Vec<(f64, String)> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<text ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        let body_end = rest[end..].find("</text>").unwrap() + end;
+        if tag.contains("data-geom=\"text\"") {
+            let k = tag.find(" x=\"").unwrap() + 4;
+            let x: f64 = tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap();
+            out.push((x, rest[end + 1..body_end].to_string()));
+        }
+        rest = &rest[body_end + "</text>".len()..];
+    }
+    out
+}
+
 /// Point lists of non-grid `<polyline>`s (the grid is drawn in the theme's
 /// grid colour).
 fn polylines(svg: &str) -> Vec<String> {
@@ -67,8 +85,10 @@ fn bar_with_category_is_dodged() {
     }
     // A real discrete x (position_dodge): every bar names its x level.
     assert!(s.contains("data-x=\"W1\"") && !s.contains("data-xticks="));
-    // Data labels cannot follow a discrete dodge: that chart keeps numeric
-    // slots, and hosts map a slot back to its x level.
+    // ggplot-rs 0.22's GeomText/GeomLabel honour `position_dodge` on a
+    // discrete x too (ggplot-rs#318 B3-4), so ::DATALABELS dodges the same
+    // real discrete x the bars do — no more numeric-slot fallback, and so
+    // no `data-xticks` root attribute mapping a slot back to its level.
     let s = svg(vec![
         Column::new("w", Role::X, strs(&["W1", "W1", "W2", "W2"])),
         Column::new("c", Role::Category, strs(&["app", "web", "app", "web"])),
@@ -77,7 +97,40 @@ fn bar_with_category_is_dodged() {
     ]);
     let (app, web) = (bars(&s, "app"), bars(&s, "web"));
     assert!(app[0].0 + app[0].1 <= web[0].0 + 0.01, "{app:?} {web:?}");
-    assert!(s.contains("data-xticks="), "x level map on the root");
+    assert!(s.contains("data-x=\"W1\""), "a real discrete x level");
+    assert!(!s.contains("data-xticks="), "no numeric-slot tick map");
+    // Each label sits over its own bar's centre, not its group's (a sibling
+    // layer needs its own position_dodge() — GeomText honouring dodge
+    // doesn't mean it inherits the bars' own position() call).
+    let labels = data_label_centers(&s);
+    assert_eq!(labels.len(), 4, "{s}");
+    let center = |b: (f64, f64)| b.0 + b.1 / 2.0;
+    let bar_for = |t: &str| match t {
+        "30" => app[0],
+        "22" => web[0],
+        "41" => app[1],
+        "28" => web[1],
+        other => panic!("unexpected label {other}"),
+    };
+    for (x, text) in &labels {
+        let want = center(bar_for(text));
+        assert!(
+            (x - want).abs() < 0.5,
+            "label {text} at x={x} not over its bar (centre {want}): {labels:?} {app:?} {web:?}"
+        );
+    }
+    // No two labels share (nearly) the same x: that's the overlap bug this
+    // guards against (both of a group's labels stacking at one x).
+    for i in 0..labels.len() {
+        for j in (i + 1)..labels.len() {
+            assert!(
+                (labels[i].0 - labels[j].0).abs() > 1.0,
+                "{:?} and {:?} overlap",
+                labels[i],
+                labels[j]
+            );
+        }
+    }
 }
 
 // Dodged groups follow the legend (sorted) order, whatever the row order, and
@@ -316,6 +369,55 @@ fn mark_colours(svg: &str) -> std::collections::BTreeSet<String> {
         }
     }
     out
+}
+
+// ggplot-rs 0.22's GeomBoxplot widens the y scale to the outlier extent
+// itself (`setup_data`'s internal ymin_final/ymax_final), so the old
+// `boxstats::extent_rows` geom_blank layer is gone; the mean dot's own y
+// training was always just its ordinary GeomPoint layer, same as any other
+// mapped y. Both a mean and an outlier far outside the whiskers must still
+// widen the y axis (no silently clipped extent).
+#[test]
+fn box_from_statistics_y_scale_covers_a_far_mean_and_outlier() {
+    let stats = vec![
+        Column::new("x", Role::X, strs(&["a"])),
+        Column::new("q1", Role::Q1, nums(&[2.0])),
+        Column::new("m", Role::Median, nums(&[4.0])),
+        Column::new("q3", Role::Q3, nums(&[6.0])),
+        Column::new("lo", Role::WhiskerLow, nums(&[0.0])),
+        Column::new("hi", Role::WhiskerHigh, nums(&[8.0])),
+        Column::new("mean", Role::Mean, nums(&[55.0])),
+        Column::new("out", Role::Outliers, strs(&["[-40]"])),
+    ];
+    let s = svg(stats);
+    // The mean dot (y=55) and the outlier (y=-40) must both land strictly
+    // inside the panel — proof the y domain widened to cover them, not
+    // clipped at the whiskers [0, 8].
+    let plot: Vec<f64> = {
+        let k = s.find("data-plot=\"").unwrap() + 11;
+        s[k..k + s[k..].find('"').unwrap()]
+            .split(' ')
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let mean_dot = s
+        .split("<circle ")
+        .skip(1)
+        .find(|t| t.contains("r=\"2.60\""))
+        .expect("the mean dot (r=2.6)");
+    let outlier = s
+        .split("<circle ")
+        .skip(1)
+        .find(|t| t.contains("r=\"2.00\""))
+        .expect("the outlier circle (r=2)");
+    for c in [mean_dot, outlier] {
+        let k = c.find("cy=\"").unwrap() + 4;
+        let cy: f64 = c[k..k + c[k..].find('"').unwrap()].parse().unwrap();
+        assert!(
+            cy >= plot[1] - 0.5 && cy <= plot[1] + plot[3] + 0.5,
+            "cy {cy} outside the panel {plot:?}: the y scale clipped it"
+        );
+    }
 }
 
 #[test]
@@ -2101,7 +2203,7 @@ fn top_legend(svg: &str) -> Vec<(f64, f64, f64, String)> {
             );
             let legend = text.starts_with("carton ") || text.starts_with('+');
             (legend && y < top).then(|| {
-                let w = anofox_visualization::ticks::text_width(&text, size);
+                let w = ggplot_rs::render::text::text_width(&text, size);
                 (x - 16.0, x + w, y, text)
             })
         })

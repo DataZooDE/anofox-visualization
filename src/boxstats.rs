@@ -8,22 +8,18 @@
 //! FROM backtest GROUP BY ALL;
 //! ```
 //!
-//! ggplot-rs's `geom_boxplot` draws the box from its stat's columns (`lower`,
-//! `middle`, `upper`, `ymin`, `ymax`, `outliers`), but it has no aesthetics
-//! for `lower` / `middle` / `upper`, so there is no `stat = "identity"` input.
-//! [`StatBoxStats`] fills that gap: the quartiles travel in the y-scaled
-//! `open` / `close` aesthetics (`y` = the median, `ymin` / `ymax` = the
-//! whiskers, `label` = the outliers) and the stat hands them to the geom under
-//! its names. The box therefore looks exactly like a raw-rows `::BOXPLOT`
-//! (same geom, theme, colours, outlier circles); the tooltip is rewritten to
-//! name all the numbers ([`with_tips`]).
+//! ggplot-rs 0.22 gained `lower`/`middle`/`upper`/`outliers` aesthetics and a
+//! `stat = "identity"` boxplot input (ggplot-rs#318 B3-5), so a box from
+//! statistics is now `geom_boxplot_with(..).stat(StatIdentity)` mapped
+//! straight onto the five-number columns [`data_columns`] computes — no more
+//! local `Stat` impl standing in for one. 0.22 also consumes a mapped
+//! `tooltip` (and widens the y scale to the outlier extent itself), so the
+//! box's hover text is a plain data column ([`data_columns`]'s `btip`,
+//! [`layer_aes`]) rather than a post-render `<title>` rewrite.
 
-use crate::{format, Column, Kind, RenderOptions, Role};
-use ggplot_rs::aes::Aesthetic;
-use ggplot_rs::data::{DataFrame, Value};
+use crate::{Column, Kind, RenderOptions, Role};
+use ggplot_rs::data::Value;
 use ggplot_rs::prelude::Aes;
-use ggplot_rs::scale::ScaleSet;
-use ggplot_rs::stat::Stat;
 
 /// The roles of a box from statistics.
 const ROLES: [Role; 7] = [
@@ -108,9 +104,11 @@ pub(crate) fn outlier_values(v: &Value) -> Vec<f64> {
 }
 
 /// The plot-data columns of the boxes (pushed beside `x` / `y` = the median):
-/// `bq1`, `bq3`, `bwlo`, `bwhi` (a missing whisker stops at the box) and
-/// `bout` (the outliers as `"1.5,9"`).
-pub(crate) fn data_columns(cols: &[Column]) -> Vec<(String, Vec<Value>)> {
+/// `bq1`, `bq3`, `bwlo`, `bwhi` (a missing whisker stops at the box), `bout`
+/// (the outliers as `"1.5,9"`) and `btip` (the box's full tooltip text,
+/// formatted in the panel's locale — the old `with_tips` string, now built
+/// as data instead of a post-render `<title>` rewrite).
+pub(crate) fn data_columns(cols: &[Column], o: &RenderOptions) -> Vec<(String, Vec<Value>)> {
     let n = find(cols, Role::Value(Kind::Boxplot)).map_or(0, |c| c.values.len());
     let vals = |r: Role| -> Vec<Value> {
         find(cols, r).map_or_else(|| vec![Value::Na; n], |c| c.values.clone())
@@ -143,96 +141,66 @@ pub(crate) fn data_columns(cols: &[Column]) -> Vec<(String, Vec<Value>)> {
                 .collect()
         },
     );
+    let btip = tip_text(cols, o);
     vec![
         ("bq1".into(), q1),
         ("bq3".into(), q3),
         ("bwlo".into(), wlo),
         ("bwhi".into(), whi),
         ("bout".into(), out),
+        ("btip".into(), btip),
     ]
 }
 
-/// The box layer's mapping on top of the plot's `x` / `y` (see the module
-/// docs).
+/// The box layer's mapping under `stat = "identity"` (ggplot-rs 0.22's
+/// `lower`/`middle`/`upper`/`ymin`/`ymax`/`outliers`/tooltip): `middle` is
+/// the plot's own `y` column (the median, already plotted there), the rest
+/// are [`data_columns`]'s.
 pub(crate) fn layer_aes() -> Aes {
     Aes::new()
-        .open("bq1")
-        .close("bq3")
+        .x("x")
+        .lower("bq1")
+        .middle("y")
+        .upper("bq3")
         .ymin("bwlo")
         .ymax("bwhi")
-        .label("bout")
+        .outliers("bout")
+        .tooltip("btip")
 }
 
-/// The y extent of what the boxes draw beyond their whiskers (the outliers and
-/// the means), as `(x, y)` rows for a blank layer: the y scale trains on
-/// `y` / `ymin` / `ymax` only.
-pub(crate) fn extent_rows(cols: &[Column]) -> (Vec<Value>, Vec<Value>) {
-    let (mut xs, mut ys) = (Vec::new(), Vec::new());
-    let Some(x) = find(cols, Role::X) else {
-        return (xs, ys);
-    };
-    if let Some(o) = find(cols, Role::Outliers) {
-        for (xv, ov) in x.values.iter().zip(&o.values) {
-            for f in outlier_values(ov) {
-                xs.push(xv.clone());
-                ys.push(Value::Float(f));
+/// Every box's full tooltip text — `A: median 4.1 · Q1 3 · Q3 5.2 ·
+/// whiskers 1 – 8 · mean 4.4 · 2 outliers`, in the panel's value format —
+/// as a plain data column, [`Value::Na`] where the box has no median/Q1/Q3
+/// (ggplot-rs drops the mapped tooltip for an `Na` cell, same as any other
+/// mapped aesthetic).
+fn tip_text(cols: &[Column], o: &RenderOptions) -> Vec<Value> {
+    let median = find(cols, Role::Value(Kind::Boxplot));
+    let fmt = crate::value_fmt(cols, Kind::Boxplot, median.map_or(&[][..], |c| &c.values));
+    let f = |v: f64| fmt.full(v, &o.locale);
+    rows(cols)
+        .iter()
+        .map(|b| {
+            let (Some(m), Some(q1), Some(q3)) = (b.median, b.q1, b.q3) else {
+                return Value::Na;
+            };
+            let mut tip = format!("median {} · Q1 {} · Q3 {}", f(m), f(q1), f(q3));
+            if let (Some(lo), Some(hi)) = (b.lo, b.hi) {
+                tip.push_str(&format!(" · whiskers {} – {}", f(lo), f(hi)));
             }
-        }
-    }
-    if let Some(m) = find(cols, Role::Mean) {
-        for (xv, mv) in x.values.iter().zip(&m.values) {
-            if let Some(f) = mv.as_f64().filter(|f| f.is_finite()) {
-                xs.push(xv.clone());
-                ys.push(Value::Float(f));
+            if let Some(mean) = b.mean {
+                tip.push_str(&format!(" · mean {}", f(mean)));
             }
-        }
-    }
-    (xs, ys)
-}
-
-/// The label of a mean dot (its tooltip is removed by [`with_tips`]: the box's
-/// tooltip names the mean).
-pub(crate) const MEAN_LABEL: &str = "\u{2063}mean";
-
-/// Hands one row per box to `geom_boxplot` under the columns it draws from.
-pub(crate) struct StatBoxStats;
-
-impl Stat for StatBoxStats {
-    fn compute_group(&self, data: &DataFrame, _scales: &ScaleSet) -> DataFrame {
-        let n = data.nrows();
-        let col = |name: &str| -> Vec<Value> {
-            data.column(name)
-                .map_or_else(|| vec![Value::Na; n], |c| c.to_vec())
-        };
-        let mut out = DataFrame::new();
-        for (from, to) in [
-            ("x", "x"),
-            ("ymin", "ymin"),
-            ("open", "lower"),
-            ("y", "middle"),
-            ("close", "upper"),
-            ("ymax", "ymax"),
-        ] {
-            out.add_column(to.to_string(), col(from));
-        }
-        if let Some(l) = data.column("label") {
-            out.add_column("outliers".to_string(), l.to_vec());
-        }
-        for keep in ["fill", "color", "group"] {
-            if let Some(c) = data.column(keep) {
-                out.add_column(keep.to_string(), c.to_vec());
+            match b.outliers {
+                0 => {}
+                1 => tip.push_str(" · 1 outlier"),
+                k => tip.push_str(&format!(" · {k} outliers")),
             }
-        }
-        out
-    }
-
-    fn required_aes(&self) -> Vec<Aesthetic> {
-        vec![Aesthetic::X, Aesthetic::Y]
-    }
-
-    fn name(&self) -> &str {
-        "boxstats"
-    }
+            if !b.x.is_empty() {
+                tip = format!("{}: {tip}", b.x);
+            }
+            Value::Str(tip)
+        })
+        .collect()
 }
 
 /// One box's numbers, for its tooltip and the lint.
@@ -350,134 +318,6 @@ fn more(n: usize) -> String {
     }
 }
 
-/// Give each box the tooltip that names its numbers — `A: median 4.1 · Q1 3
-/// · Q3 5.2 · whiskers 1 – 8 · mean 4.4 · 2 outliers`, in the panel's value
-/// format — in place of the engine's `A: median 4.1 (3–5.2)`; and drop the
-/// mean dots' own tooltips (the box names the mean).
-pub(crate) fn with_tips(mut svg: String, cols: &[Column], o: &RenderOptions) -> String {
-    let all = rows(cols);
-    let median = find(cols, Role::Value(Kind::Boxplot));
-    let fmt = crate::value_fmt(cols, Kind::Boxplot, median.map_or(&[][..], |c| &c.values));
-    let f = |v: f64| fmt.full(v, &o.locale);
-    let r = |v: f64| (v * 100.0).round() / 100.0;
-    // Engine tooltip → ours, both as they appear in the SVG (escaped); then
-    // one pass over the `<title>`s (a replace per box would be quadratic).
-    let mut tips: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for b in &all {
-        let (Some(m), Some(q1), Some(q3)) = (b.median, b.q1, b.q3) else {
-            continue;
-        };
-        let engine = format!("median {} ({}–{})", r(m), r(q1), r(q3));
-        let engine = if b.x.is_empty() {
-            engine
-        } else {
-            format!("{}: {engine}", b.x)
-        };
-        let mut tip = format!("median {} · Q1 {} · Q3 {}", f(m), f(q1), f(q3));
-        if let (Some(lo), Some(hi)) = (b.lo, b.hi) {
-            tip.push_str(&format!(" · whiskers {} – {}", f(lo), f(hi)));
-        }
-        if let Some(mean) = b.mean {
-            tip.push_str(&format!(" · mean {}", f(mean)));
-        }
-        match b.outliers {
-            0 => {}
-            1 => tip.push_str(" · 1 outlier"),
-            k => tip.push_str(&format!(" · {k} outliers")),
-        }
-        if !b.x.is_empty() {
-            tip = format!("{}: {tip}", b.x);
-        }
-        // (The first box of an engine text wins, as a replace would.)
-        tips.entry(format::escape_xml(&engine))
-            .or_insert_with(|| format::escape_xml(&tip));
-    }
-    svg = replace_titles(&svg, &tips);
-    strip_mean_tips(svg)
-}
-
-/// Every `<title>t</title>` whose `t` is a key of `tips` gets its value, in
-/// one pass over `svg`.
-fn replace_titles(svg: &str, tips: &std::collections::HashMap<String, String>) -> String {
-    if tips.is_empty() {
-        return svg.to_string();
-    }
-    let mut out = String::with_capacity(svg.len() + svg.len() / 4);
-    let mut rest = svg;
-    while let Some(i) = rest.find("<title>") {
-        let start = i + "<title>".len();
-        let Some(len) = rest[start..].find("</title>") else {
-            break;
-        };
-        let text = &rest[start..start + len];
-        out.push_str(&rest[..start]);
-        out.push_str(tips.get(text).map_or(text, String::as_str));
-        rest = &rest[start + len..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// A mean dot is drawn as `<circle … data-…><title>⁣mean: 4.4</title></circle>`:
-/// keep the circle, drop its tooltip and mark data (it is no data point of
-/// its own).
-fn strip_mean_tips(svg: String) -> String {
-    let marker = format!("<title>{}: ", format::escape_xml(MEAN_LABEL));
-    if !svg.contains(&marker) {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len());
-    let mut rest = svg.as_str();
-    while let Some(t) = rest.find(&marker) {
-        let Some(open) = rest[..t].rfind('<') else {
-            break;
-        };
-        let Some(end) = rest[t..].find("</title>").map(|e| t + e + "</title>".len()) else {
-            break;
-        };
-        let tag = &rest[open..t]; // `<circle … data-x="…">`
-        let name: String = tag[1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphabetic())
-            .collect();
-        let close = format!("</{name}>");
-        if !rest[end..].starts_with(&close) {
-            out.push_str(&rest[..end]);
-            rest = &rest[end..];
-            continue;
-        }
-        out.push_str(&rest[..open]);
-        let attrs = tag.trim_end_matches('>');
-        let kept: String = strip_data_attrs(attrs);
-        out.push_str(&kept);
-        out.push_str("/>");
-        rest = &rest[end + close.len()..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// `<circle cx="1" data-x="A" data-value="2"` without its `data-*` attributes.
-fn strip_data_attrs(tag: &str) -> String {
-    let mut out = String::with_capacity(tag.len());
-    let mut rest = tag;
-    while let Some(i) = rest.find(" data-") {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        let Some(q1) = after.find('"') else {
-            rest = "";
-            break;
-        };
-        let Some(q2) = after[q1 + 1..].find('"') else {
-            rest = "";
-            break;
-        };
-        rest = &after[q1 + 1 + q2 + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,49 +397,47 @@ mod tests {
     }
 
     #[test]
-    fn many_boxes_take_linear_time() {
-        // 5,000 boxes, each titled on its 6 parts: one pass, not one per box.
-        let n = 5000;
-        let names: Vec<String> = (0..n).map(|i| format!("b{i}")).collect();
-        let xs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let v = |k: f64| (0..n).map(|i| i as f64 + k).collect::<Vec<_>>();
+    fn btip_names_every_number_as_data_not_a_rendered_title() {
+        // `btip` is now built once as a plain data column (ggplot-rs 0.22
+        // consumes it as a mapped tooltip), not a post-render <title> scan
+        // over the SVG — so this just checks the column, not rendered text.
         let cols = vec![
-            x(&xs),
-            col(Role::Q1, &v(1.0)),
-            col(Role::Value(Kind::Boxplot), &v(2.0)),
-            col(Role::Q3, &v(3.0)),
+            x(&["a", "b"]),
+            col(Role::Q1, &[1.0, 3.0]),
+            col(Role::Value(Kind::Boxplot), &[2.0, 3.5]),
+            col(Role::Q3, &[3.0, 4.0]),
+            col(Role::WhiskerLow, &[0.0, 2.0]),
+            col(Role::WhiskerHigh, &[5.0, 6.0]),
+            col(Role::Mean, &[2.2, 3.6]),
+            Column::new(
+                "",
+                Role::Outliers,
+                vec![Value::Str("7, 9".into()), Value::Na],
+            ),
         ];
-        let mut svg = String::from("<svg>");
-        for i in 0..n {
-            for _ in 0..6 {
-                svg.push_str(&format!(
-                    "<rect x=\"1\"><title>b{i}: median {} ({}–{})</title></rect>",
-                    i + 2,
-                    i + 1,
-                    i + 3
-                ));
-            }
-        }
-        svg.push_str("</svg>");
-        let t0 = std::time::Instant::now();
-        let out = with_tips(svg, &cols, &RenderOptions::default());
-        let took = t0.elapsed();
-        assert!(
-            out.contains("<title>b4999: median 5,001 · Q1 5,000 · Q3 5,002</title>"),
-            "{}",
-            &out[out.len() - 300..]
+        let btip = tip_text(&cols, &RenderOptions::default());
+        assert_eq!(btip.len(), 2);
+        let Value::Str(t0) = &btip[0] else {
+            panic!("{:?}", btip[0])
+        };
+        assert_eq!(
+            t0,
+            "a: median 2 · Q1 1 · Q3 3 · whiskers 0 – 5 · mean 2.2 · 2 outliers"
         );
-        assert!(!out.contains("(1–3)"), "every engine title replaced");
-        // (Quadratic took ~4 s for 2,000 boxes; a debug build does this in ms.)
-        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        let Value::Str(t1) = &btip[1] else {
+            panic!("{:?}", btip[1])
+        };
+        assert_eq!(
+            t1,
+            "b: median 3.5 · Q1 3 · Q3 4 · whiskers 2 – 6 · mean 3.6"
+        );
     }
 
     #[test]
-    fn mean_tips_are_removed() {
-        let svg = format!(
-            "<svg><circle cx=\"1\" data-x=\"a\" data-value=\"2\"><title>{}: 2</title></circle><rect/></svg>",
-            MEAN_LABEL
-        );
-        assert_eq!(strip_mean_tips(svg), "<svg><circle cx=\"1\"/><rect/></svg>");
+    fn a_box_with_no_quartile_gets_no_tooltip() {
+        // `median` (post-`prepare`, the ::MEDIAN column renamed to a chart
+        // measure) is present, but ::Q1/::Q3 are not.
+        let cols = vec![x(&["a"]), col(Role::Value(Kind::Boxplot), &[2.0])];
+        assert_eq!(tip_text(&cols, &RenderOptions::default()), vec![Value::Na]);
     }
 }

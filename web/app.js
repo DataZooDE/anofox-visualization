@@ -13128,20 +13128,6 @@ function mapMarkInfo(attr, tip) {
   return { series: series || tip, value, x: label, fx: true, own, detail: "" };
 }
 
-// A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
-// `data-xticks` map {slot: level} on its root <svg>: show "W1", not "1.225".
-function xTickLabel(el, x) {
-  const root = el.closest && el.closest("svg[data-xticks]");
-  if (!root || x === "") return x;
-  try {
-    const ticks = JSON.parse(root.getAttribute("data-xticks"));
-    const slot = String(Math.round(Number(x)));
-    return ticks[x] ?? ticks[slot] ?? x;
-  } catch (_) {
-    return x;
-  }
-}
-
 // Styled hover tooltips + click-to-highlight LINKING across all panels.
 // Every mark carrying a `<title>` becomes hoverable; its series key (ggplot's
 // `data-series`, else the title part before ": ") is the selection key.
@@ -13241,9 +13227,18 @@ function hoverFocus(svg, series) {
 // like the data marks, but hosts must not read it as data (a chart's
 // summary, its keyboard walk, cross-filtering) — replaces the old hand-written
 // `data-rule="x"`/`"y"` string surgery (`with_rule_marks`, #318 C2).
+// A mark that keeps its own hover tooltip but is no value to select, drill,
+// link or cross-filter, and is excluded from "every series under the
+// cursor" groupings (the hover list, the axis crosshair): a reference rule
+// (geom_vline/geom_hline: ::XLINE, ::REFLINE, thresholds), or a `data-
+// decorative` mark — a mapped `data_attr("decorative", …)` a layer that
+// annotates another mark uses because ggplot-rs has no "decorative, no
+// mark metadata" layer kind of its own yet (a boxplot's mean dot is drawn
+// by a real GeomPoint layer, so it carries a title/data-* like any other
+// point; sipemu/ggplot-rs follow-up filed from #331/#318).
 function isRuleMark(el) {
   const g = el.getAttribute("data-geom");
-  return g === "vline" || g === "hline";
+  return g === "vline" || g === "hline" || el.hasAttribute("data-decorative");
 }
 
 function attachHover() {
@@ -13287,7 +13282,6 @@ function attachHover() {
     const attr = (k) => el.getAttribute(k);
     const isMapMark = el.hasAttribute("data-row") && !!el.closest("svg[data-map]");
     const info = isMapMark ? mapMarkInfo(attr, txt) : markInfo(attr, txt);
-    if (!info.fx) info.x = xTickLabel(el, info.x);
     const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);
@@ -13368,7 +13362,7 @@ function attachHover() {
       const ia = el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
-      const key = dx ? String(xTickLabel(el, dx)) : series;
+      const key = dx ? String(dx) : series;
       if (ia && ia.drill && drillInto(ia.drill, key)) return;
       if (ia && ia.link) {
         const k = markKey(el.closest(".panel"), el);
@@ -13482,7 +13476,7 @@ function attachChartA11y() {
     const lanes = !!svg._track && svg.hasAttribute("data-ylevels");
     const items = marks.map((el) => {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
-      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
+      return { series: info.series, x: info.x, value: lanes ? null : markValue(el) };
     });
     // A ::DIAGRAM or a ::MAP brings its own summary from the renderer (steps,
     // stages, loops; regions, extremes, classes).
@@ -14410,7 +14404,11 @@ function attachAxisPointer() {
     if (scatterOnly) return;
     const svg0 = panel.querySelector("svg");
     if (!svg0 || !svg0.viewBox || !svg0.viewBox.baseVal || !svg0.viewBox.baseVal.width) return;
-    if (svg0.querySelectorAll("circle.dp-hit").length < 3) return; // needs a line/scatter chart
+    // Decorative marks (e.g. a boxplot's mean dot: its own real GeomPoint
+    // layer, not a column value of the series under the cursor) are no
+    // crosshair data point — same exclusion as a reference rule.
+    const dataCircles = (root) => [...root.querySelectorAll("circle.dp-hit")].filter((el) => !isRuleMark(el));
+    if (dataCircles(svg0).length < 3) return; // needs a line/scatter chart
     panel.dataset.axisWired = "1";
     panel.classList.add("has-axis-pointer");
     const area = panel.querySelector(".panel-svg") || svg0;
@@ -14418,7 +14416,7 @@ function attachAxisPointer() {
     const move = (e) => {
       const svg = area.querySelector ? area.querySelector("svg") : svg0;
       if (!svg || !svg.viewBox.baseVal.width) return;
-      const circles = [...svg.querySelectorAll("circle.dp-hit")];
+      const circles = dataCircles(svg);
       if (circles.length < 3) return leave();
       const pts = circles.map((el) => ({
         el,
