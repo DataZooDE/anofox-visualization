@@ -578,6 +578,12 @@ fn value_str(v: &Value) -> String {
         Value::Na => String::new(),
         _ => v
             .as_f64()
+            // A non-finite number (`f64::INFINITY`/`NAN`, e.g. from a 0-divide
+            // upstream) must never reach `format!("{}", ..)`, which prints the
+            // literal `inf`/`NaN` — that string then ends up verbatim in a
+            // `data-label`/category key (map markers' `label_of`, #319).
+            // Treat it like missing data, the same as `Value::Na` above.
+            .filter(|f| f.is_finite())
             .map(|f| format!("{}", (f * 1000.0).round() / 1000.0))
             .unwrap_or_default(),
     }
@@ -1767,12 +1773,16 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     svg
 }
 
-/// A cell as text: a string as is, a number without a trailing `.0`.
+/// A cell as text: a string as is, a number without a trailing `.0`. A
+/// non-finite number (`Infinity`/`NaN`) is treated like `Na` rather than
+/// passed to `f64::to_string` — which prints the literal `inf`/`NaN` — since
+/// callers write this straight into ids, `::DIAGRAM` node/lane names and
+/// their `data-*` attributes (#319).
 pub(crate) fn key_text(v: &Value) -> Option<String> {
     match v {
         Value::Str(s) => Some(s.clone()),
         Value::Na => None,
-        v => v.as_f64().map(|f| f.to_string()),
+        v => v.as_f64().filter(|f| f.is_finite()).map(|f| f.to_string()),
     }
 }
 

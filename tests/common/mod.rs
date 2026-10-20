@@ -56,6 +56,11 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     | "data-badge"
                     | "data-of"
                     | "data-story"
+                    // a map marker's / ::DIAGRAM node's category label and
+                    // swimlane name are also free text (#319: a ::LABEL or
+                    // ::LANE column may literally hold the string "inf")
+                    | "data-label"
+                    | "data-lane"
                     | "class"
                     | "id"
             ) {
