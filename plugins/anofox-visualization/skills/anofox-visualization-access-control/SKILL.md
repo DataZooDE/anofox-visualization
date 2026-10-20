@@ -18,7 +18,7 @@ description: >
   app", "API key for a script", "audit who looked at what", or gets a 401 /
   a refused start from auth or policy. Serving modes, options and deployment
   are in the serving skill.
-version: 2026.10.19
+version: 2026.10.20
 user-invocable: false
 ---
 
