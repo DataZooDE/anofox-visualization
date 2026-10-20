@@ -44,6 +44,7 @@ use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
     RequestMeta,
 };
+use anofox_visualization::host::telemetry;
 use anofox_visualization::sql::deps::{self, Deps};
 use anofox_visualization::sql::requires::{self as rq, Requirement};
 use include_dir::{include_dir, Dir};
@@ -1730,6 +1731,16 @@ fn build_snapshot(
                 "SET allowed_directories = [{}]",
                 sql_string_literal(&d)
             ))?;
+        }
+        // #333: best effort, same as init() — one of the extensions just
+        // LOADed above may have registered `anofox_telemetry_enabled` for
+        // the first time in this fresh snapshot db (it didn't exist in the
+        // host DB, or it did and this repeats the init-time attempt there
+        // too). Must run before `lock_configuration = true` below, which
+        // would otherwise refuse the SET for the rest of this snapshot's
+        // life. Skipped on an explicit opt-in, same gate as init().
+        if telemetry::is_disabled(std::env::var(telemetry::VAR).ok().as_deref()) {
+            crate::best_effort_disable_existing_setting(&c);
         }
         // Keep parquet footers across requests: every request re-runs the
         // setup statements on a fresh connection, and their views would

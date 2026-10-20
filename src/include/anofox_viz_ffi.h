@@ -2,6 +2,9 @@
 #ifndef ANOFOX_VIZ_FFI_H
 #define ANOFOX_VIZ_FFI_H
 #include <stddef.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,6 +26,19 @@ const char *anofox_viz_macro_field(size_t i, int field);
 const char *anofox_viz_macro_item(size_t i, int list, size_t j, const char **second);
 /* The anofox integration-contract version (anofox_contract_version()). Static. */
 const char *anofox_viz_contract_version(void);
+/* Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for this
+ * process if unset or empty/whitespace-only (an explicit non-empty value is
+ * left alone), so every anofox extension loaded afterwards stays silent by
+ * default. Call first thing in LoadInternal, before registering anything;
+ * see anofox_visualization::host::telemetry for the thread-safety
+ * reasoning. */
+void anofox_viz_ensure_telemetry_default(void);
+/* Is telemetry currently disabled, under the exact parsing the anofox
+ * extensions use ("1"/"true"/"yes")? Call after
+ * anofox_viz_ensure_telemetry_default to decide whether the best-effort
+ * `SET anofox_telemetry_enabled = false` (for an anofox extension loaded
+ * before this one) matches this process's intent. */
+bool anofox_viz_telemetry_is_disabled(void);
 #ifdef __cplusplus
 }
 #endif

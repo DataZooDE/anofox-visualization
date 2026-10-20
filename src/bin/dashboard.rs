@@ -36,6 +36,11 @@ const USAGE: &str = "usage:\n  \
      Queries run through the `duckdb` CLI on PATH.";
 
 fn main() {
+    // Owner decision (#333): the anofox extensions this binary's `duckdb`
+    // child processes may LOAD default to no telemetry. Must run before any
+    // thread or `duckdb` child exists — first line of `main`, see
+    // `host::telemetry` for the default and its thread-safety reasoning.
+    anofox_visualization::host::telemetry::ensure_default_once();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
@@ -721,4 +726,28 @@ fn run(db: &str, sql: &str, json: bool) -> String {
         return String::new();
     }
     String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[cfg(test)]
+mod telemetry_default_tests {
+    // #333: `main()` (above) calls `telemetry::ensure_default_once()` before
+    // any `duckdb` child process can be spawned, so every anofox extension
+    // such a child LOADs inherits this process's environment. That call's
+    // pure decision — the part worth unit testing — is
+    // `anofox_visualization::host::telemetry::default_value`: see its own
+    // tests in `src/host/telemetry.rs`. This test just pins down the two
+    // cases this binary cares about, against the same function `main` uses.
+    use anofox_visualization::host::telemetry::default_value;
+
+    #[test]
+    fn unset_is_set_to_disabled() {
+        assert_eq!(default_value(None), Some("1"));
+    }
+
+    #[test]
+    fn an_explicit_value_including_an_opt_in_is_kept() {
+        assert_eq!(default_value(Some("1")), None);
+        assert_eq!(default_value(Some("0")), None); // opt back into telemetry
+        assert_eq!(default_value(Some("false")), None);
+    }
 }

@@ -112,7 +112,36 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 	return info;
 }
 
+// Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for this
+// process — before registering anything — so every anofox extension this
+// DuckDB loads afterwards (including a LOAD that follows ours in the same
+// session) stays silent by default; an explicit non-empty value is left
+// alone, an unset or empty/whitespace-only one is not (see anofox_viz_ffi.h
+// / anofox_visualization::host::telemetry for the parsing and the
+// thread-safety reasoning). Then, best effort, for an anofox extension
+// loaded BEFORE us in this database: its load event may already have been
+// reported, but `anofox_telemetry_enabled` -- a setting shared by name
+// across every anofox extension -- can still be turned off for the rest of
+// this session, if it exists (duckdb_settings() is checked first so this is
+// a silent no-op otherwise). It only reaches whichever anofox extension
+// registered the setting first, so load order still matters: load
+// anofox_visualization first, or set the environment variable before
+// anything loads, when that matters (docs/DOCS.md).
+static void EnsureTelemetryDefault(ExtensionLoader &loader) {
+	anofox_viz_ensure_telemetry_default();
+	if (!anofox_viz_telemetry_is_disabled()) {
+		return; // an explicit opt-in must not be overridden by a forced SET
+	}
+	Connection conn(loader.GetDatabaseInstance());
+	auto has_setting =
+	    conn.Query("SELECT 1 FROM duckdb_settings() WHERE name = 'anofox_telemetry_enabled'");
+	if (has_setting && !has_setting->HasError() && has_setting->RowCount() > 0) {
+		conn.Query("SET anofox_telemetry_enabled = false");
+	}
+}
+
 void LoadInternal(ExtensionLoader &loader) {
+	EnsureTelemetryDefault(loader);
 	// Guarded: anofox_render is the single user-facing entry point. Every
 	// anofox_bar/_line/_scatter/_area/_xy/_xyc macro below expands to a call to
 	// it, so one guard puts the issue link on a failure from any of them.
