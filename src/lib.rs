@@ -2274,7 +2274,9 @@ fn render_inner(
         Kind::Histogram => return render_histogram(o, value, title.as_deref(), width, height),
         Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
         Kind::QQ => return render_qq(o, value, title.as_deref(), width, height),
-        Kind::Heatmap => return render_heatmap(o, value, cols, title.as_deref(), width, height),
+        Kind::Heatmap => {
+            return render_heatmap(o, value, cols, title.as_deref(), width, height, None)
+        }
         Kind::Calendar => return render_calendar(o, value, cols, title.as_deref(), width, height),
         Kind::Candlestick => {
             return render_candlestick(o, value, cols, title.as_deref(), width, height)
@@ -3866,6 +3868,7 @@ fn render_heatmap(
     title: Option<&str>,
     width: u32,
     height: u32,
+    domain: Option<(f64, f64)>,
 ) -> Result<Panel, String> {
     let x = cols
         .iter()
@@ -3887,6 +3890,7 @@ fn render_heatmap(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
             (a.min(v), b.max(v))
         });
+    let (min, max) = domain.unwrap_or((min, max));
     let fill = TileFill::of(o, cols, o.theme.seq_low(), min, max)?;
     let tips: Vec<Value> = value
         .values
@@ -4273,14 +4277,29 @@ pub(crate) struct FmtGradient {
 
 impl FmtGradient {
     pub(crate) fn new(ramp: &Ramp, fmt: format::ValueFmt, locale: format::Locale) -> FmtGradient {
-        FmtGradient {
-            inner: ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
-                Aesthetic::Fill,
-                ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
-            ),
-            fmt,
-            locale,
+        let mut inner = ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
+            Aesthetic::Fill,
+            ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
+        );
+        // `ScaleColorGradientN` has no `with_limits`/fixed-domain
+        // constructor (ggplot-rs 0.19): it always auto-trains its min/max
+        // from the layer's own fill values, which ignores `Ramp::min` /
+        // `Ramp::max` — the domain a `matrix` heatmap's `domain :=` option
+        // asks for (e.g. a correlation's fixed −1..1, even when the data
+        // itself happens to span a narrower range after mirroring). `train`
+        // only ever widens the recorded range (`Scale::train`, never
+        // shrinks it), and the real data trains again once this scale joins
+        // the plot, so seeding it with the ramp's own domain here fixes the
+        // domain without the data ever being allowed to narrow it. A no-op
+        // for every other heatmap, whose ramp is already built from that
+        // same data (`Ramp::new`/`Ramp::status`).
+        if ramp.min.is_finite() && ramp.max.is_finite() && ramp.min <= ramp.max {
+            ggplot_rs::scale::Scale::train(
+                &mut inner,
+                &[Value::Float(ramp.min), Value::Float(ramp.max)],
+            );
         }
+        FmtGradient { inner, fmt, locale }
     }
 }
 

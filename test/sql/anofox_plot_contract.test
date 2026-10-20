@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_decomposition/_events/_checks, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_decomposition/_events/_checks/_matrix, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -412,6 +412,37 @@ SELECT anofox_plot_decomposition(d) FROM (VALUES
   ('A', DATE '2024-01-01', 'trend', 1.0), ('B', DATE '2024-01-01', 'trend', 2.0)) d(id, ds, component, value);
 ----
 GROUP BY id
+
+# ── matrix (#183) ────────────────────────────────────────────────────────────
+# A pairwise-correlation pair list (anofox_tab_profile_correlations as it
+# comes) is mirrored to the full 3x3 matrix with a diagonal of 1.
+query II
+SELECT anofox_plot_matrix(m) LIKE '<svg%data-kind="heatmap"%', anofox_plot(m) LIKE '<svg%' FROM (VALUES
+  ('amount', 'qty', 0.08, 0.09, 120), ('id', 'amount', -0.01, -0.01, 120)
+) m(column_a, column_b, pearson, spearman, n);
+----
+true	true
+
+# value := picks another measure.
+query I
+SELECT anofox_plot_matrix(m, value := 'spearman') LIKE '<svg%' FROM (VALUES
+  ('amount', 'qty', 0.08, 0.09, 120), ('id', 'amount', -0.01, -0.01, 120)
+) m(column_a, column_b, pearson, spearman, n);
+----
+true
+
+# A confusion matrix: row/col already the full grid, no mirroring.
+query I
+SELECT anofox_plot_matrix(m) LIKE '<svg%' FROM (VALUES
+  ('cat', 'cat', 8), ('cat', 'dog', 2), ('dog', 'cat', 1), ('dog', 'dog', 9)
+) m(row, col, value);
+----
+true
+
+statement error
+SELECT anofox_plot_matrix(m) FROM (VALUES ('a', 'b', 1), ('a', 'b', 2)) m(row, col, value);
+----
+one row per cell
 
 # ── contract version ─────────────────────────────────────────────────────────
 query I

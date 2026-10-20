@@ -86,6 +86,8 @@ pub(super) const COLUMNS: &[&str] = &[
     "trend",
     "seasonal",
     "remainder",
+    "row",
+    "col",
 ];
 
 /// Other common spellings of a contract column, as [`norm`] writes them

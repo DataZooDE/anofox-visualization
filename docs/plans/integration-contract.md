@@ -38,6 +38,7 @@ Principles
 | `cv` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period**, id, y; or **fold_id**, train_start, train_end, test_start, test_end | anofox-forecast `ts_cv_folds_by`, `ts_cv_split_by`, `ts_cv_split_folds_by` (as they come) | fold timeline (`anofox_plot_cv`) |
 | `graph` (nodes + edges) | nodes: **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq, upstream; edges (a LIST passed as `edges :=`): **source, target**, value, label, style, status — Grafana node-graph names; also read: `stage`, `label`, `from_stage`, `to_stage`, `count`, … | pipeline run manifests (inventory-rs#28 `run_manifest` + `run_edges`), lineage, process mining | node/edge diagram (`anofox_plot_diagram(n, edges := (SELECT list(e) FROM run_edges e))`), the `::DIAGRAM` panel |
 | `decomposition` (provisional) | **id, ds \| period, component, value** (`observed`, `level`, `trend`, `seasonal`, `seasonal_<period>`, `remainder`), model_id; also read wide (one column per component) and as LISTs | anofox-forecast `ts_mstl_decomposition_by`, `ts_forecast_explain_by` (as they come, no ds); anofox-orchestration `decomposition` (wide, `t`) | stacked panels, shared x, own y (`anofox_plot_decomposition`) |
+| `matrix` | **row, col, value**, model_id — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`), and `pearson` / `spearman` / `kendall` / `correlation` / `corr` / `count` / `n` as the value | anofox-tabular `profile_correlations` (as it comes; a pair list is mirrored), correlation / confusion / setup matrices | heatmap, diverging around 0, −1…1 for correlations (`anofox_plot_matrix`) |
 
 Provisional: the long-form names are to be agreed with anofox-orchestration
 (DataZooDE/anofox-orchestration#539) and anofox-forecast
@@ -59,11 +60,11 @@ names*), so outside tables plot without a reshaping step — this does not
 change contract version `1`. Nor do the readers for an interval held in one
 `[low, high]` column (`conf_int`, pingouin's `CI95%`), statsforecast's wide
 `<model>-lo-<L>` / `-hi-<L>` forecast, `level` 95 vs 0.95, the `period`
-x key, the `events` schema, the `check` schema and the `decomposition`
-schema: all are additions (new optional columns, a new schema, more accepted
-spellings) and no column changed name, type or meaning, so the version stays
-`1`. A version bump is reserved for a renamed, re-typed or re-interpreted
-column.
+x key, the `events` schema, the `check` schema, the `decomposition` schema
+and the `matrix` schema: all are additions (new optional columns, a new
+schema, more accepted spellings) and no column changed name, type or
+meaning, so the version stays `1`. A version bump is reserved for a renamed,
+re-typed or re-interpreted column.
 
 ### anofox-tabular producers
 
@@ -79,7 +80,7 @@ renders every one end to end.
 | `metric_anomaly_iqr` | `prediction` (band) | `metric_value` → `y`, `(q1+q3)/2` → `yhat`, `lower_bound` / `upper_bound` → `yhat_lower` / `yhat_upper` | adapter |
 | `profile_table`, `profile_summary`, `isolation_forest[_mv]` / `outlier_tree` / `dbscan[_mv]` summary modes | `summary` | as it comes (unpivoted) | adapter |
 | `outlier_tree` outliers mode | `terms` | as it comes | adapter |
-| `profile_correlations` | `summary` today, `matrix` with #183 | `column_a × column_b` | adapter |
+| `profile_correlations` | `matrix` | as it comes (`column_a × column_b`, mirrored) | works as it comes |
 | diffs (`diff_hashdiff`, `diff_joindiff`), PII (`pii_scan_table`, `pii_audit_table`) | — | — | generic charts, no schema |
 
 Provisional: anofox-orchestration's backtest numbers folds as `fold_idx` (0 =
