@@ -34,6 +34,7 @@ pub(crate) mod classes;
 mod flows;
 mod labels;
 mod legend;
+mod overlay;
 pub(crate) mod project;
 mod symbols;
 mod write;
@@ -924,7 +925,6 @@ impl Frame {
     }
 
     /// The projected window `[x0, x1, y0, y1]` the whole `w`×`h` panel shows.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     fn window(&self, w: f64, h: f64) -> [f64; 4] {
         let x0 = self.x0 - self.ox / self.s;
         let y1 = self.y1 + self.oy / self.s;
@@ -1084,6 +1084,15 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let (w, h) = (width as f64, height as f64);
     let lg = legend_of(o, &m, w, h);
     let nodata = lg.nodata;
+    // `nodata` (above) only counts regular features/symbols without a
+    // value — a flow row without one (`Fill::Measure` + no value) isn't a
+    // "feature", so it needs its own check here to still get the hatch
+    // pattern + the `data-nd` CSS override defined (overlay::render sets
+    // `data-nd="1"` on those rows regardless of this map having any other
+    // no-data features).
+    let flow_nodata = m.flows.as_ref().is_some_and(|fl| {
+        matches!(&m.fill, Fill::Measure(s) if fl.flows.iter().any(|f| s.values[f.row].is_none()))
+    });
     let ft = foot_of(o, &m, w);
     let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h)?;
     let t = &o.theme;
@@ -1097,11 +1106,20 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let hatch_bg = mix(t.colors.muted, card, 0.85);
     let hatch_fg = mix(t.colors.muted, card, 0.35);
     let mut defs = String::new();
-    if nodata > 0 {
+    if nodata > 0 || flow_nodata {
         defs.push_str(&format!(
             "<pattern id=\"{id}-nd\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><rect width=\"4\" height=\"4\" fill=\"{}\"/><path d=\"M0 0v4\" stroke=\"{}\" stroke-width=\"1.2\"/></pattern>",
             hex(hatch_bg),
             hex(hatch_fg)
+        ));
+    }
+    // A flow's no-data rows carry `data-nd="1"` (set by overlay::render, via
+    // the ggplot-rs curve layer's own `data_attr`) instead of a hand-picked
+    // `fill`/`stroke`; this rule paints them with the hatch above, scoped to
+    // this map's own `id` so two maps on one dashboard don't cross-wire.
+    if flow_nodata {
+        defs.push_str(&format!(
+            "<style>#{id} [data-nd]{{stroke:url(#{id}-nd)}}</style>"
         ));
     }
     if let Legend::Gradient { stops, .. } = &lg.legend {
@@ -1443,191 +1461,19 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         out.push_str("</g>");
     }
 
-    // ---- flows (::ORIGIN/::DEST, M2b): one bent arc + arrowhead per flow,
-    // largest-width first (D5), then one dot per distinct end.
+    // ---- flows (::ORIGIN/::DEST, M2b): a ggplot-rs overlay (`geom_curve` +
+    // `arrow()` + the `linewidth`/identity-colour/interactive aesthetics —
+    // see `overlay.rs` and issue #318), spliced in here: after the basemap
+    // and before `labels_svg` below.
     let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
     if let Some(fl) = &m.flows {
-        const FLOW_BEND: f64 = 0.2;
-        let linestyle_col = find_role(cols, Role::LineStyle);
-        let mut arcs_g = String::new();
-        let mut end_pts: std::collections::HashMap<&str, (f64, f64)> =
-            std::collections::HashMap::new();
-        for fl_ in &fl.flows {
-            let i = fl_.row;
-            let label = m.label_of(i);
-            let cat = m.text(m.category, i);
-            let series = if cat.is_empty() {
-                fl_.o_name.clone()
-            } else {
-                cat.clone()
-            };
-            let (color, value, class, nd) = match &m.fill {
-                Fill::Measure(s) => match s.values[i] {
-                    Some(v) => {
-                        let (c, k) = s.color(v);
-                        (c, Some(v), k, false)
-                    }
-                    None => (hatch_bg, None, None, true),
-                },
-                Fill::Category { of_row, levels } => (
-                    of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
-                    None,
-                    None,
-                    false,
-                ),
-                Fill::Plain(c) => (*c, None, None, false),
-            };
-            let p0 = frame.at(fl_.o);
-            let p1 = frame.at(fl_.d);
-            let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
-            let l = dx.hypot(dy);
-            if l < 2.0 {
-                extra_self += 1;
-                continue;
-            }
-            let (nx, ny) = (-dy / l, dx / l);
-            let mid = ((p0.0 + p1.0) / 2.0, (p0.1 + p1.1) / 2.0);
-            let c = (mid.0 + nx * FLOW_BEND * l, mid.1 + ny * FLOW_BEND * l);
-            let bt = |t: f64| -> (f64, f64) {
-                let mt = 1.0 - t;
-                (
-                    mt * mt * p0.0 + 2.0 * mt * t * c.0 + t * t * p1.0,
-                    mt * mt * p0.1 + 2.0 * mt * t * c.1 + t * t * p1.1,
-                )
-            };
-            let tangent = |t: f64| -> (f64, f64) {
-                let mt = 1.0 - t;
-                (
-                    2.0 * mt * (c.0 - p0.0) + 2.0 * t * (p1.0 - c.0),
-                    2.0 * mt * (c.1 - p0.1) + 2.0 * t * (p1.1 - c.1),
-                )
-            };
-            let linestyle = linestyle_col
-                .and_then(|lc| lc.values.get(i))
-                .map(value_str)
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase();
-            let (class_attr, dash_attr) = match linestyle.as_str() {
-                "flow" => (" class=\"dp-flow\"", " stroke-dasharray=\"6 4\""),
-                "dashed" => ("", " stroke-dasharray=\"6 4\""),
-                _ => ("", ""),
-            };
-            let shown = match (&m.fill, value) {
-                (Fill::Measure(s), Some(v)) => fmt_full(s, v),
-                (Fill::Measure(_), None) => "no data".to_string(),
-                (Fill::Category { .. }, _) => cat.clone(),
-                (Fill::Plain(_), _) if fl.has_size => {
-                    fl.fmt.full(fl_.raw.unwrap_or(fl_.w), &o.locale)
-                }
-                _ => String::new(),
-            };
-            let flow_label = if label.is_empty() {
-                format!("{} → {}", fl_.o_name, fl_.d_name)
-            } else {
-                label.clone()
-            };
-            let mut title = format!("{flow_label}: {shown}");
-            if title.ends_with(": ") {
-                title.truncate(title.len() - 2);
-            }
-            if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
-                if let Some((_, cl, _)) = &s.classes {
-                    title.push_str(&format!(
-                        " (class {} of {}: {})",
-                        k + 1,
-                        cl.len(),
-                        cl.label(k, &|v| s.fmt.short(v, &o.locale))
-                    ));
-                }
-            }
-            let key = format!("{}→{}", fl_.ok, fl_.dk);
-            let mut data = String::new();
-            data.push_str(&format!(" data-x=\"{}\"", attr(&key)));
-            if let Some(k) = class {
-                data.push_str(&format!(" data-class=\"{}\"", k + 1));
-            }
-            data.push_str(&format!(" data-row=\"{i}\""));
-            data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
-            let data_value = value.unwrap_or(fl_.raw.unwrap_or(fl_.w));
-            data.push_str(&format!(" data-value=\"{data_value}\""));
-            data.push_str(&format!(" data-label=\"{}\"", attr(&flow_label)));
-            data.push_str(&format!(" data-orig=\"{}\"", attr(&fl_.o_name)));
-            data.push_str(&format!(" data-dest=\"{}\"", attr(&fl_.d_name)));
-            if let Some(raw) = fl_.raw {
-                data.push_str(&format!(" data-size=\"{raw}\""));
-                data.push_str(&format!(
-                    " data-fsize=\"{}\"",
-                    attr(&fl.fmt.full(raw, &o.locale))
-                ));
-                if !matches!(m.fill, Fill::Measure(_)) {
-                    data.push_str(&format!(
-                        " data-fvalue=\"{}\"",
-                        attr(&fl.fmt.full(raw, &o.locale))
-                    ));
-                }
-            }
-            let fill_attr = if nd {
-                format!("url(#{id}-nd)")
-            } else {
-                hex(color)
-            };
-            let so = if m.alpha < 1.0 {
-                format!(" stroke-opacity=\"{:.2}\"", m.alpha)
-            } else {
-                " stroke-opacity=\".85\"".to_string()
-            };
-            let dd = format!(
-                "M{:.1} {:.1} Q{:.1} {:.1} {:.1} {:.1}",
-                p0.0, p0.1, c.0, c.1, p1.0, p1.1
-            );
-            arcs_g.push_str(&format!(
-                "<path d=\"{dd}\" fill=\"none\" stroke=\"{fill_attr}\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"{so}{class_attr}{dash_attr}{data}><title>{}</title></path>",
-                fl_.w,
-                esc(&title)
-            ));
-            marks += 1;
-            // the arrowhead, at t = 0.85 along the arc
-            let tip_t = 0.85;
-            let b = bt(tip_t);
-            let (tx, ty) = tangent(tip_t);
-            let tl = tx.hypot(ty).max(1e-9);
-            let (ux, uy) = (tx / tl, ty / tl);
-            let (px, py) = (-uy, ux);
-            let hl = (2.2 * fl_.w).max(5.0);
-            let hw = (1.1 * fl_.w).max(2.5);
-            let tip = (b.0 + ux * hl / 2.0, b.1 + uy * hl / 2.0);
-            let base = (b.0 - ux * hl / 2.0, b.1 - uy * hl / 2.0);
-            let c1 = (base.0 + px * hw, base.1 + py * hw);
-            let c2 = (base.0 - px * hw, base.1 - py * hw);
-            arcs_g.push_str(&format!(
-                "<path d=\"M{:.1} {:.1}L{:.1} {:.1}L{:.1} {:.1}z\" fill=\"{fill_attr}\"{} data-head=\"\" data-series=\"{}\" data-x=\"{}\" pointer-events=\"none\" aria-hidden=\"true\"/>",
-                tip.0, tip.1, c1.0, c1.1, c2.0, c2.1,
-                if m.alpha < 1.0 { format!(" fill-opacity=\"{:.2}\"", m.alpha) } else { String::new() },
-                attr(&series),
-                attr(&key)
-            ));
-            end_pts.entry(fl_.ok.as_str()).or_insert(p0);
-            end_pts.entry(fl_.dk.as_str()).or_insert(p1);
-        }
-        out.push_str(&format!("<g class=\"dp-flows\">{arcs_g}</g>"));
-        let mut ends_g = String::new();
-        for (x, y) in end_pts.values() {
-            ends_g.push_str(&format!(
-                "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"2.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\".75\"/>",
-                hex(mix(t.colors.ink, card, 0.25)),
-                hex(card)
-            ));
-        }
-        out.push_str(&format!(
-            "<g class=\"dp-flow-ends\" pointer-events=\"none\" aria-hidden=\"true\">{ends_g}</g>"
-        ));
-        if fl.total > flows::FLOW_CAP {
-            warnings.push(format!(
-                "map: {} flows, the {} widest drawn — aggregate in SQL",
-                fl.total,
-                flows::FLOW_CAP
-            ));
+        let (frag, added_marks, self_ct, cap_warn) =
+            overlay::render(o, cols, &m, &frame, fl, t, card, hatch_bg, w, h);
+        out.push_str(&frag);
+        marks += added_marks;
+        extra_self += self_ct;
+        if let Some(cw) = cap_warn {
+            warnings.push(cw);
         }
     }
 
@@ -1668,6 +1514,11 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         ("data-proj", m.projection.name().to_string()),
         ("data-summary", summary),
     ];
+    // Only when the `data-nd` CSS rule above needs an anchor to scope to —
+    // every other map stays exactly as it was (no stray `id`).
+    if flow_nodata {
+        attrs.push(("id", id.clone()));
+    }
     if let Fill::Measure(s) = &m.fill {
         if let Some((_, c, _)) = &s.classes {
             let labels: Vec<String> = (0..c.len())
