@@ -355,6 +355,13 @@ pub enum Role {
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
     SubTab,
+    /// Layout: `::VIEW` opens (or extends) a group of alternative views of
+    /// one panel; consecutive `::VIEW` markers with no closer between them
+    /// are alternatives of the same group (#214).
+    View,
+    /// Layout: `::ENDVIEW` closes the current `::VIEW` group (`::TAB`,
+    /// `::SUBTAB` and `::SECTION` also close it).
+    ViewEnd,
     /// Bubble size for a scatter — maps a measure to point area (`::SIZE`).
     Size,
     /// Format the y-axis tick labels (`::YFORMAT`) — the column's (string) value
@@ -514,6 +521,10 @@ pub enum Role {
     /// How the chart changes on a re-run (`::TRANSITION`): `'tween'` moves
     /// the marks to their new values, `'none'` (default) swaps the chart.
     Transition,
+    /// Hovering a mark (`::HOVER_FOCUS`): `'series'` (default) emphasises the
+    /// mark's whole series and fades the others, as hovering its legend entry
+    /// does; `'none'` keeps the plain hover (dense charts). Browser only.
+    HoverFocus,
     /// A node/edge diagram (`::DIAGRAM`/`::NODE`): the column is the node id,
     /// one row per node (see [`diagram`]).
     Diagram,
@@ -1888,12 +1899,15 @@ fn with_line_styles(svg: String, cols: &[Column]) -> String {
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 
+/// The `::HOVER_FOCUS` values the browser knows.
+pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
+
 /// Pass a panel's motion directives to the browser as attributes on the SVG
 /// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
 /// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
 /// (epoch seconds on a date axis, a level on a discrete one); `data-story` +
 /// `data-story-by` (`::STORY`, `::STORY_BY`); `data-transition`
-/// (`'tween'::TRANSITION`).
+/// (`'tween'::TRANSITION`); `data-hover-focus="none"` (`'none'::HOVER_FOCUS`).
 fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
         if ANIMATE_MODES.contains(&mode.as_str()) {
@@ -1913,6 +1927,9 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
     }
     if role_str(cols, Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween")) {
         svg = with_root_attr(svg, "data-transition", "tween");
+    }
+    if role_str(cols, Role::HoverFocus).is_some_and(|m| m.eq_ignore_ascii_case("none")) {
+        svg = with_root_attr(svg, "data-hover-focus", "none");
     }
     if let Some(steps) = story_steps(cols) {
         let by = match role_str(cols, Role::StoryBy).map(|b| b.to_ascii_lowercase()) {

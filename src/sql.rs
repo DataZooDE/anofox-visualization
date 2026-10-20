@@ -34,9 +34,11 @@ pub mod contract_call;
 pub mod deps;
 pub mod lex;
 pub mod requires;
+pub mod views;
 
 pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
+pub use views::ViewAt;
 
 use crate::roles::is_sql_type_token;
 use crate::{parse_role, Column, InputKind, Kind, Role};
@@ -72,6 +74,10 @@ pub struct Panel {
     /// `-- @requires` or not), outermost first. Their requirements are
     /// decided where they stand: with the variables set above the tab.
     pub tabs: Vec<usize>,
+    /// This statement's place in a `::VIEW` group (#214), if it is in one —
+    /// set on every statement of the group, setup included. See
+    /// [`views::assign_views`].
+    pub view: Option<views::ViewAt>,
 }
 
 impl Panel {
@@ -99,19 +105,25 @@ impl Panel {
 }
 
 /// Fill each statement's [`Panel::tab_requires`]: a `::TAB`'s section runs to
-/// the next `::TAB`, a `::SUBTAB`'s to the next `::SUBTAB` or `::TAB`. Chrome
+/// the next `::TAB`, a `::SUBTAB`'s to the next `::SUBTAB` or `::TAB`, a
+/// `::VIEW` alternative's to the next alternative, closer or end of its
+/// group (a third level inside a `::SUBTAB`'s, gated exactly like a
+/// `::SUBTAB`'s is inside a `::TAB`'s — see [`views::assign_views`], which
+/// has already filled [`Panel::view`] by the time this runs). Chrome
 /// directives (`::THEME`, `::DASHBOARD_TITLE`, …) apply to the whole
 /// dashboard wherever they sit: they inherit nothing.
 fn section_requires(panels: &mut [Panel]) {
     let mut tab: Vec<requires::Requirement> = Vec::new();
     let mut sub: Vec<requires::Requirement> = Vec::new();
-    let (mut tab_at, mut sub_at) = (None, None);
+    let mut view: Vec<requires::Requirement> = Vec::new();
+    let (mut tab_at, mut sub_at, mut view_at) = (None, None, None);
     for (i, p) in panels.iter_mut().enumerate() {
         match p.tab_kind() {
             Some(false) => {
                 tab = p.requires.clone();
                 sub.clear();
-                (tab_at, sub_at) = (Some(i), None);
+                view.clear();
+                (tab_at, sub_at, view_at) = (Some(i), None, None);
                 continue;
             }
             Some(true) => {
@@ -119,6 +131,8 @@ fn section_requires(panels: &mut [Panel]) {
                 p.tabs = tab_at.into_iter().collect();
                 sub = p.requires.clone();
                 sub_at = Some(i);
+                view.clear();
+                view_at = None;
                 continue;
             }
             None => {}
@@ -129,14 +143,30 @@ fn section_requires(panels: &mut [Panel]) {
         {
             continue;
         }
-        p.tab_requires = tab.iter().chain(&sub).cloned().collect();
-        p.tabs = tab_at.into_iter().chain(sub_at).collect();
+        // A `::VIEW` marker: like a `::SUBTAB`, its own requires gate
+        // everything from here to the next marker/closer in its group.
+        if p.view.as_ref().is_some_and(|v| v.marker) {
+            p.tab_requires = tab.iter().chain(&sub).cloned().collect();
+            p.tabs = tab_at.into_iter().chain(sub_at).collect();
+            view = p.requires.clone();
+            view_at = Some(i);
+            continue;
+        }
+        // Left the group (or never in one): nothing of its view level
+        // carries over to this statement.
+        if p.view.is_none() {
+            view.clear();
+            view_at = None;
+        }
+        p.tab_requires = tab.iter().chain(&sub).chain(&view).cloned().collect();
+        p.tabs = tab_at.into_iter().chain(sub_at).chain(view_at).collect();
     }
 }
 
 /// Parse a whole script into ordered [`Panel`]s.
 pub fn plan(script: &str) -> Vec<Panel> {
     let mut panels = plan_statements(script);
+    views::assign_views(&mut panels);
     section_requires(&mut panels);
     panels
 }
@@ -169,6 +199,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires_issues,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
+                    view: None,
                 }
             } else {
                 Panel {
@@ -181,6 +212,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires_issues,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
+                    view: None,
                 }
             })
         })
@@ -756,6 +788,18 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 // Inputs keep the original column name — it becomes the
                 // DuckDB variable name the browser binds the control to.
                 Role::Input(_) => expr.to_string(),
+                // A `::VIEW` marker's explicit `AS alias` names its group
+                // (#214) — kept in `names` (views::assign_views reads it
+                // back), the value's own text kept intact (not even
+                // re-aliased away) so views::assign_views can tell a literal
+                // label from a computed one straight off the rewritten SQL.
+                Role::View => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 // Any other role: an explicit `AS alias` is replaced by c{i}.
                 _ => format!("{} AS c{i}", trailing_alias(expr).0),
             };

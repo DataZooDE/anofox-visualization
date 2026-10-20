@@ -278,6 +278,32 @@ assert.equal(A.relationDefined("CREATE TEMP TABLE temp.main.h AS SELECT 1 AS a")
   assert.equal(buildFunctions([{ f: "sneaky", t: "macro", p: ["x"], m: "(SELECT count(*) FROM t, query_table(x))" }]).denied.get("sneaky"), "its body reads a table function");
 }
 
+// #239 N-1: a family macro's calls outside its family are reviewed; a quoted call counts like a plain one
+{
+  const fam = [
+    { f: "ts_fill_forward_operator", t: "table", p: ["col0"], m: null },
+    { f: "_ts_x_operator", t: "table", p: ["col0"], m: null },
+    { f: "_ts_metrics_native", t: "table", p: ["col0"], m: null },
+    { f: "other_macro", t: "table_macro", p: ["x"], m: "SELECT 1" },
+  ];
+  const one = (m) => buildFunctions([...fam, { f: "ts_odd_by", t: "table_macro", p: ["source"], m }]);
+  for (const m of ["SELECT * FROM _ts_x_operator(source)", 'SELECT * FROM "_ts_x_operator"(source)', "SELECT * FROM read_csv(source)",
+                   "SELECT * FROM glob(source)", 'SELECT * FROM "query_table"(CAST(source AS VARCHAR))', "SELECT * FROM other_macro(source)"])
+    assert.ok(one(m).review.some((r) => r.startsWith("ts_odd_by: ")), m);
+  for (const m of ['SELECT * FROM "ts_fill_forward_operator"(source)', "SELECT * FROM ts_fill_forward_operator(source)"]) {
+    const b = one(m);
+    assert.deepEqual(b.review, [], m);
+    assert.ok(b.left.includes("ts_odd_by") && !b.tables.includes("ts_odd_by"), m);
+  }
+  const ok = one("SELECT * FROM _ts_metrics_native((SELECT * FROM query_table(CAST(source AS VARCHAR))), 'a', 'b', 'c', 'd'), range(3)");
+  assert.deepEqual(ok.review, []);
+  assert.ok(ok.tables.includes("ts_odd_by"));
+  const via = buildFunctions([...fam,
+    { f: "ts_inner_by", t: "table_macro", p: ["s"], m: "SELECT * FROM ts_fill_forward_operator(s)" },
+    { f: "ts_outer_by", t: "table_macro", p: ["s"], m: 'SELECT * FROM "ts_inner_by"(s)' }]);
+  assert.deepEqual(via.left.filter((f) => f.startsWith("ts_")), ["ts_fill_forward_operator", "ts_inner_by", "ts_outer_by"]);
+}
+
 // ---- what is sent: masking, context, prefix ----
 const card = (name, kind, extra = {}) => ({ name, type: kind === "num" ? "DOUBLE" : "VARCHAR", kind, n: 100, nonnull: 100, nullPct: 0, distinct: 4, ...extra });
 const top = (...v) => v.map((x, i) => ({ v: x, n: 10 - i }));

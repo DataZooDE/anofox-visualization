@@ -24,7 +24,7 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$CORE/Cargo.toml" | head -1)"
 if [ "${SKIP_WASM:-0}" != "1" ]; then
   command -v wasm-pack >/dev/null || { echo "wasm-pack is required (or SKIP_WASM=1)"; exit 1; }
   echo "== build web/pkg (wasm) — embedded UI for anofox_serve =="
-  ( cd "$CORE" && wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm )
+  ( cd "$CORE" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm )
   touch "$HERE/src/serve.rs"   # force include_dir! to re-embed the fresh web/pkg
 else
   echo "== SKIP_WASM=1 — anofox_serve UI won't include the renderer =="

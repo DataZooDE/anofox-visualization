@@ -1,0 +1,9 @@
+# The anofox DuckDB-Wasm builds CI, the Pages site and gen-assist-functions.mjs load (#235).
+# scripts/fetch-wasm-extensions.sh downloads each file and checks its sha256. Bump on purpose:
+# scripts/release/pin-wasm-extensions.sh <tag>, then node scripts/gen-assist-functions.mjs,
+# and commit this file with web/assist/functions.js.
+# duckdb platform extension sha256 url
+v1.5.6 wasm_eh anofox_statistics 30542b5a26d955873eceb8d985a8153181d87a0ecf1d0ff4872d90d310eef155 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_eh-anofox_statistics.duckdb_extension.wasm
+v1.5.6 wasm_eh anofox_forecast e71b80e8dedf3ed70242315ce146bfb92cc9ecabdef511ec8ca56f13c0807e62 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_eh-anofox_forecast.duckdb_extension.wasm
+v1.5.6 wasm_mvp anofox_statistics dd4d99428f256fb61f34403d94722591465365fa24fc68e8856f19af89713bf9 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_mvp-anofox_statistics.duckdb_extension.wasm
+v1.5.6 wasm_mvp anofox_forecast 268c6bc4ad2f2f442359660a198eb9b40e06dc8f4c71a089a985d6627876b411 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_mvp-anofox_forecast.duckdb_extension.wasm

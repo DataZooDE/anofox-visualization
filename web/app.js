@@ -928,7 +928,7 @@ ${SALES}
 
 SELECT 'Layout — groups, tabs & height'::LABEL;
 SELECT 12::COL;
-SELECT 'The **layout primitives**: **::GROUP** boxes cluster KPIs/panels together, **::COL** sets a panel''s grid width (1–12), **::HEIGHT** sets its pixel height, and **::TAB** / **::SUBTAB** organise panels into (nested) tabs. Mix them to compose any dashboard shape from plain SQL.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'The **layout primitives**: **::GROUP** boxes cluster KPIs/panels together, **::COL** sets a panel''s grid width (1–12), **::HEIGHT** sets its pixel height, and **::TAB** / **::SUBTAB** organise panels into (nested) tabs. **::VIEW** switches between alternative views of the *same* panel in place (see Revenue → By week: Bars / Lines / Table). Mix them to compose any dashboard shape from plain SQL.'::MARKDOWN, 'What this shows'::TITLE;
 
 -- KPIs in a ::GROUP box (compact strip). They react to plot clicks: clicking a
 -- channel segment/bar below sets getvariable('selected'), and each KPI filters
@@ -945,8 +945,18 @@ SELECT 1::COLUMNS;
 -- top-level ::TAB, each with nested ::SUBTAB; ::HEIGHT sets a taller box
 SELECT 'Revenue'::TAB;
 SELECT 'By week'::SUBTAB;
+-- ::VIEW / ::ENDVIEW: alternative views of the SAME query, switched in place
+-- (a segmented control, top-right) instead of a tab/subtab of their own.
+SELECT 'Bars' AS rev_week ::VIEW;
 SELECT 420::HEIGHT;
 SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Lines'::VIEW;
+SELECT 420::HEIGHT;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::LINECHART, '€'::YFORMAT, 'Revenue by week (tall)'::TITLE
+FROM sales GROUP BY ALL ORDER BY week, channel;
+SELECT 'Table'::VIEW;
+SELECT week::TABLE, channel, sum(revenue) AS revenue ::MONEY
 FROM sales GROUP BY ALL ORDER BY week, channel;
 SELECT 'By channel'::SUBTAB;
 SELECT channel::XAXIS, sum(revenue)::BARCHART, 'Revenue by channel'::TITLE FROM sales GROUP BY ALL ORDER BY channel;
@@ -1979,6 +1989,10 @@ async function boot() {
   // this only when switching dashboards, so it survives the initial run()).
   const tabParam = getTabParam();
   if (tabParam) dpTab = tabParam;
+  // Deep-link: `?view.<id>=<label>` seeds the active alternative of a ::VIEW
+  // group, like ?tab= — applied once here, then dpView is a persistent
+  // selection (clicks update it directly), never re-seeded on a re-run.
+  Object.assign(dpView, readViewSeed());
   // Persistent cross-dashboard nav (served mode, 2+ dashboards).
   renderServedNav(served);
   // Opt-in chart zoom (off by default; ?zoom=1 enables).
@@ -3509,6 +3523,8 @@ function dashStateReset() {
   dpTab = null;
   dpTableUI = {};
   dpSubTab = {};
+  dpView = Object.create(null);
+  dpViewDefault = Object.create(null);
   dpFilter = "";
   dpSelected = null;
   dpZoomGroups = {};
@@ -5646,7 +5662,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -5793,7 +5809,7 @@ function axToken(name, fallback = "") {
 }
 // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO), or null.
 // ---- ::ASOF freshness chip (src/freshness.rs has the same rules) ----
-let dpAsof = null; // {at: epoch ms | null, stale: seconds | 0}
+let dpAsof = null; // {at: epoch ms | null, day: 'YYYY-MM-DD' | null, stale: seconds | 0}
 // A timestamp cell → epoch ms: a number is epoch ms (DuckDB-Wasm), text is
 // ISO-ish ('2026-10-16 14:02:00[+02]'); text without an offset is UTC.
 function asofParse(v) {
@@ -5822,13 +5838,26 @@ function asofRelative(sec) {
   if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
   return `${Math.floor(sec / 86400)} d ago`;
 }
-// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
-// dashboard locale (a date is added when it isn't today); amber once stale.
-function paintAsof(el, a) {
+// A date-only ::ASOF value ('2026-01-01', a DATE) → that day, else null: it
+// reads as a calendar day — no time, no time-zone shift (#282).
+function asofDay(v) {
+  const m = typeof v === "string" && v.trim().match(/^"?(\d{4}-\d{2}-\d{2})"?$/);
+  return m ? m[1] : null;
+}
+// The chip at `now` (epoch ms) in locale `loc`: {text, title, stale}.
+function asofText(a, now, loc) {
+  if (a.day) {
+    const [y, mo, dd] = a.day.split("-").map(Number);
+    const day = new Date(y, mo - 1, dd);
+    const n = new Date(now);
+    const days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()) - day) / 86400000);
+    let t;
+    try { t = day.toLocaleDateString(loc); } catch (_) { t = a.day; }
+    const age = (now - day.getTime()) / 1000;
+    return { text: `Data as of ${t} (${days <= 0 ? "today" : `${days} d ago`})`, title: a.day, stale: a.stale > 0 && age > a.stale };
+  }
   const d = new Date(a.at);
-  const now = Date.now();
   const age = (now - a.at) / 1000;
-  const loc = dashLocale() || undefined;
   let t;
   try {
     t = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit" });
@@ -5836,9 +5865,15 @@ function paintAsof(el, a) {
   } catch (_) {
     t = d.toISOString().slice(0, 16).replace("T", " ");
   }
-  el.textContent = `Data as of ${t} (${asofRelative(age)})`;
-  el.title = d.toString();
-  el.classList.toggle("stale", a.stale > 0 && age > a.stale);
+  return { text: `Data as of ${t} (${asofRelative(age)})`, title: d.toString(), stale: a.stale > 0 && age > a.stale };
+}
+// Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
+// dashboard locale (a date is added when it isn't today); amber once stale.
+function paintAsof(el, a) {
+  const r = asofText(a, Date.now(), dashLocale() || undefined);
+  el.textContent = r.text;
+  el.title = r.title;
+  el.classList.toggle("stale", r.stale);
 }
 let asofTimer = null;
 function mkAsof() {
@@ -6106,6 +6141,13 @@ document.addEventListener("keydown", (e) => {
 });
 let dpTab = null; // the active tab name (preserved across re-runs)
 let dpSubTab = {}; // top-tab name -> active sub-tab name (nested tabs)
+// Null-prototype (no `constructor`/`toString`/… inherited names, and
+// `__proto__` is a safe, settable own key, not the exotic accessor a plain
+// object literal has) so an id can be any valid group id, including
+// `__proto__`, and inherited names can never pad the key cap in
+// readViewSeed below (security review #273 L1).
+let dpView = Object.create(null); // ::VIEW group id -> active alternative's label (#214)
+let dpViewDefault = Object.create(null); // ::VIEW group id -> its default (first SHOWN) alternative's label
 
 // Deep-linking: reflect the active tab in the URL (?tab=) so a reload or a
 // shared link lands on the same page.
@@ -6123,6 +6165,47 @@ function setTabParam(name) {
     u.searchParams.set("tab", name);
     history.replaceState(null, "", u);
   } catch (e) {}
+}
+
+// ::VIEW deep-linking (#214): `?view.<id>=<label>` picks that group's active
+// alternative — `<id>` is the group's own id (its alias, else its 1-based
+// position), matched EXACTLY against the group's current alternatives (a
+// stale/mistyped label is simply ignored: the group falls back to its
+// default, the first SHOWN alternative). Independent of `?tab=` / `?v.*`: it
+// never resets them, and they never reset it.
+function setViewParam(id, label) {
+  try {
+    const u = new URL(location.href);
+    if (label === dpViewDefault[id]) u.searchParams.delete("view." + id);
+    else u.searchParams.set("view." + id, label);
+    history.replaceState(null, "", u);
+  } catch (e) {}
+}
+// `readViewSeed`'s pure, side-effect-free parse (tests/web/views_test.mjs
+// extracts this function's source the way tests/web/urlstate_test.mjs
+// extracts readUrlSeed's): only `view.<id>` keys whose id matches URL_VAR_RE
+// or `^\d{1,3}$` (the positional fallback id), at most 32 of them, each
+// value capped at 200 chars — "view." never collides with the plain `v.`
+// variable prefix (`"view.x".startsWith("v.")` is false). `seed` is a
+// null-prototype object and the cap check is `Object.hasOwn`, so an id that
+// happens to name an inherited Object.prototype member (`constructor`,
+// `toString`, `hasOwnProperty`, …) is an ordinary own key subject to the
+// same 32-key cap as any other id, not a free pass past it (security review
+// #273 L1) — and `__proto__` works as a plain own key too, not the
+// prototype-reassignment accessor a `{}` literal gives it.
+function readViewSeed(search = location.search) {
+  const seed = Object.create(null);
+  try {
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("view.")) continue;
+      const id = k.slice(5);
+      if (!(URL_VAR_RE.test(id) || /^\d{1,3}$/.test(id))) continue;
+      if (!Object.hasOwn(seed, id) && Object.keys(seed).length >= 32) continue;
+      if (String(v).length > 200) continue;
+      seed[id] = String(v);
+    }
+  } catch (_) {}
+  return seed;
 }
 
 // Viewer state in the URL: `?v.<name>=<value>` seeds a variable on load — an
@@ -6519,6 +6602,10 @@ function followLink(url) {
       if ([p.prefix, p.prefix + "_grain", p.prefix + "_compare"].some((k) => k in seed)) delete dpVars[col];
     }
     Object.assign(dpUrlSeed, seed);
+    // `#Tab?view.yoy=Bars`: a ::VIEW group's active alternative, same as a
+    // top-level deep link — applied directly (dpView is a live selection,
+    // not a one-shot seed), independent of the tab switch above.
+    Object.assign(dpView, readViewSeed(qs));
     const t = tab || new URLSearchParams(qs).get("tab");
     dpMotion = { link: true };
     if (t) {
@@ -6567,6 +6654,35 @@ function openTabNow(name) {
     if (!dpAnim.still() && pane.animate) pane.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
   }
   focus();
+}
+// Activate a ::VIEW group's alternative (#214): a click or an arrow key on
+// its button. DOM-driven (not a closure over the loop's variables, so it
+// works equally from a live render's button and the standalone-export
+// SNAPSHOT_JS, which rebuilds the same shape in plain JS): shows `btn`'s
+// pane, hides its siblings', records the choice (dpView + the URL) and
+// kicks off its lazy jobs.
+function activateView(btn, focus) {
+  const bar = btn.closest(".dp-viewbar");
+  const sec = btn.closest(".dp-views");
+  if (!bar || !sec) return;
+  const id = bar.dataset.viewId;
+  const label = btn.textContent;
+  bar.querySelectorAll('[role="tab"]').forEach((b) => {
+    b.setAttribute("aria-selected", "false");
+    b.tabIndex = -1;
+  });
+  sec.querySelectorAll(".dp-viewpane").forEach((p) => (p.style.display = "none"));
+  btn.setAttribute("aria-selected", "true");
+  btn.tabIndex = 0;
+  const pane = document.getElementById(btn.getAttribute("aria-controls"));
+  if (pane) {
+    if (!dpAnim.still()) pane.classList.add("dp-switching");
+    pane.style.display = "";
+    lazyShown(pane);
+  }
+  dpView[id] = label;
+  setViewParam(id, label);
+  if (focus) refocus("view:" + id, btn);
 }
 // Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
 // a control): back to the tab it came from, focus on the mark or link followed.
@@ -6813,6 +6929,12 @@ function slotsOf(roots) {
 // same shape differ only in panel content.
 // (Serialised with the slots and the tab state taken out for a moment — no
 // copy of the charts.)
+// Tab/sub-tab/::VIEW elements excluded from the shape/patch comparison below
+// (#214): a ::VIEW tab button's state lives in `aria-selected` + `tabindex`
+// (never a class, so it can't reuse the ".tab-btn" attr), its pane's in
+// `style` same as a tabpane/subtabpane.
+const TAB_SEL = ".tab-btn, .tabpane, .subtabpane, .dp-viewbar [role=tab], .dp-viewpane";
+const tabAttrs = (el) => (el.matches(".tab-btn") ? ["class"] : el.matches("[role=tab]") ? ["aria-selected", "tabindex"] : ["style"]);
 function shapeOf(roots) {
   const slots = slotsOf(roots);
   const holes = slots.map((el) => {
@@ -6820,33 +6942,40 @@ function shapeOf(roots) {
     el.replaceWith(i);
     return i;
   });
-  const tabs = roots.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
-  const attr = (el) => (el.matches(".tab-btn") ? "class" : "style");
-  const was = tabs.map((el) => el.getAttribute(attr(el)));
-  tabs.forEach((el) => (el.matches(".tab-btn") ? el.classList.remove("active") : el.style.removeProperty("display")));
+  const tabs = roots.flatMap((r) => (r ? [...r.querySelectorAll(TAB_SEL)] : []));
+  const was = tabs.map((el) => tabAttrs(el).map((a) => el.getAttribute(a)));
+  tabs.forEach((el) => {
+    if (el.matches(".tab-btn")) el.classList.remove("active");
+    else if (el.matches("[role=tab]")) tabAttrs(el).forEach((a) => el.removeAttribute(a));
+    else el.style.removeProperty("display");
+  });
   // (nor whether a pane still waits for lazily rendered panels)
   const busy = tabs.filter((el) => el.hasAttribute("aria-busy"));
   busy.forEach((el) => el.removeAttribute("aria-busy"));
   const html = roots.map((r) => (r ? r.outerHTML : "")).join("");
   busy.forEach((el) => el.setAttribute("aria-busy", "true"));
-  tabs.forEach((el, k) => (was[k] == null ? el.removeAttribute(attr(el)) : el.setAttribute(attr(el), was[k])));
+  tabs.forEach((el, k) => tabAttrs(el).forEach((a, j) => (was[k][j] == null ? el.removeAttribute(a) : el.setAttribute(a, was[k][j]))));
   holes.forEach((i, k) => i.replaceWith(slots[k]));
   return html;
 }
 // Patch the dashboard on screen (`roots`) to the new one: keep each panel
 // whose output is unchanged, replace the others (pairs in `swaps`), and open
-// the new run's tabs. False (nothing touched) when the slots do not line up.
+// the new run's tabs / ::VIEW selections. False (nothing touched) when the
+// slots do not line up.
 function patchSlots(roots, newRoots, swaps) {
   const a = slotsOf(roots);
   const b = slotsOf(newRoots);
   if (a.length !== b.length) return false;
-  const tabState = (rs) => rs.flatMap((r) => (r ? [...r.querySelectorAll(".tab-btn, .tabpane, .subtabpane")] : []));
+  const tabState = (rs) => rs.flatMap((r) => (r ? [...r.querySelectorAll(TAB_SEL)] : []));
   const ta = tabState(roots);
   const tb = tabState(newRoots);
   if (ta.length !== tb.length) return false;
   ta.forEach((el, k) => {
     if (el.matches(".tab-btn")) el.classList.toggle("active", tb[k].classList.contains("active"));
-    else el.style.display = tb[k].style.display;
+    else tabAttrs(el).forEach((a) => {
+      const v = tb[k].getAttribute(a);
+      v == null ? el.removeAttribute(a) : el.setAttribute(a, v);
+    });
   });
   a.forEach((o, k) => {
     const n = b[k];
@@ -7204,9 +7333,9 @@ async function lazyRunJob(job, inline = false) {
   }
   if (L.gen !== dpLazy.gen) return;
   const made = [...frag.querySelectorAll(".panel")];
-  const pane = job.ph.closest(".tabpane, .subtabpane");
+  const pane = job.ph.closest(".tabpane, .subtabpane, .dp-viewpane");
   job.ph.replaceWith(frag);
-  if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane") === pane)) pane.removeAttribute("aria-busy");
+  if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane, .dp-viewpane") === pane)) pane.removeAttribute("aria-busy");
   if (inline) return;
   // The output a re-run's patch compares with (patchSlots), as the swap
   // records it for the panels it brings: before wiring.
@@ -7238,7 +7367,9 @@ async function lazyPump() {
       if (!job && dpLazyPrefetch) {
         await idleTask();
         if (runActive || L.gen !== dpLazy.gen) break;
-        job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j));
+        // D3: a hidden ::VIEW alternative's jobs are never idle-prefetched
+        // (unlike a hidden tab's) — they run only once their view is shown.
+        job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j) && !j.view);
       }
       if (!job) break;
       const shown = paneShown(job.ph) ? open().filter((j) => paneShown(j.ph)).slice(0, lazyWidth()) : [job];
@@ -7358,8 +7489,11 @@ async function runOnce(fresh = true) {
   // Lazy tabs: this run's deferred setup statements and panel jobs.
   const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
   dpLazy.building = lazy;
-  const tabAt = []; // statement -> the ::TAB whose section it is in (-1: before the first)
-  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(directive(stmts[i]) === "TAB" ? (t = i) : t);
+  const tabAt = []; // statement -> the ::TAB/::VIEW whose section it is in (-1: before the first)
+  // A ::VIEW marker starts a deferred-setup section too (#214): its
+  // alternatives' panels go through the same lazy-job mechanism as a tab's,
+  // so setup inside one is just as safe to defer until its first panel shows.
+  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(["TAB", "VIEW"].includes(directive(stmts[i])) ? (t = i) : t);
 
   await prepInteractions(stmts);
   await setSelectionVars();
@@ -7391,7 +7525,8 @@ async function runOnce(fresh = true) {
         else if (cr === "ASOF") {
           // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
           const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
-          dpAsof = { at: asofParse(rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null), stale: asofStale(opt) };
+          const raw = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+          dpAsof = { at: asofParse(raw), day: asofDay(raw), stale: asofStale(opt) };
         } else dpTheme.chrome[CHROME_KEY[cr]] = v;
         continue;
       }
@@ -7506,8 +7641,13 @@ async function runOnce(fresh = true) {
   let tabWrap = null;
   let curPane = null; // the current top-level ::TAB pane (nesting host for ::SUBTAB)
   let curTopName = null;
+  let curSubName = null; // the current ::SUBTAB's name, for a ::VIEW group's aria-label
   let subBar = null;
   let subWrap = null;
+  let openView = null; // the plan index of the currently open ::VIEW group (#214), or null
+  let viewBar = null; // its <div class="dp-viewbar">
+  let viewSec = null; // its <section class="dp-views">
+  let viewHost = null; // {container, curGrid, defaultSpan} to restore when the group closes
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
@@ -8048,20 +8188,43 @@ async function runOnce(fresh = true) {
   };
   if (lazy) lazy.panelBody = panelBody;
   let lastYield = performance.now();
-  let hiding = null; // "TAB" | "SUBTAB": the section of a hidden tab, left out
+  let hiding = null; // "TAB" | "SUBTAB" | "VIEW": the section of a hidden tab/view, left out
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
-    // A ::TAB / ::SUBTAB whose `-- @requires` input is missing is hidden —
-    // no button, no pane — with every statement up to the next ::TAB (a
-    // sub-tab: the next ::SUBTAB or ::TAB). (Chrome directives were applied
-    // in the pre-pass.)
+    // Close an open ::VIEW group the moment this statement is no longer one
+    // of its members (#214) — `views.rs` already decided the grouping and
+    // every closer (an explicit ::ENDVIEW, ::TAB/::SUBTAB/::SECTION, an
+    // ::ENDGROUP closing an outer ::GROUP, or end of script): any of those
+    // statements (or the loop simply ending) carries `view: null`, so this
+    // reacts to the transition instead of re-deriving the closer rules.
+    if (openView !== null && (!s.view || s.view.group !== openView)) {
+      container = viewHost.container;
+      curGrid = viewHost.curGrid;
+      defaultSpan = viewHost.defaultSpan;
+      openView = null;
+      viewBar = null;
+      viewSec = null;
+      viewHost = null;
+    }
+    // A ::TAB / ::SUBTAB / ::VIEW whose `-- @requires` input is missing is
+    // hidden — no button, no pane — with every statement up to the next
+    // ::TAB (a sub-tab: the next ::SUBTAB or ::TAB; a view: the next ::VIEW,
+    // or any closer, which the check above already handled). (Chrome
+    // directives were applied in the pre-pass.)
     if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
+    if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
     if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s))) {
       console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = d;
+      lastChart = null;
+      continue;
+    }
+    if (d === "VIEW" && !(await tabShown(s))) {
+      console.info(`view hidden (optional input missing): ${requiresText(s.requires)}`);
+      hiding = "VIEW";
       lastChart = null;
       continue;
     }
@@ -8158,6 +8321,7 @@ async function runOnce(fresh = true) {
         container = pane;
         curPane = pane; // nesting host for ::SUBTAB
         curTopName = name;
+        curSubName = null;
         subBar = null; // start fresh sub-tabs for this top tab
         subWrap = null;
       } else if (d === "SUBTAB") {
@@ -8199,8 +8363,100 @@ async function runOnce(fresh = true) {
           spane.style.display = "";
           sbtn.classList.add("active");
         }
+        curSubName = name;
         curGrid = spane;
         container = spane;
+      } else if (d === "VIEW") {
+        // ::VIEW / ::ENDVIEW: alternative views of one panel (#214). A group
+        // is a run of ::VIEW markers with no closer between them — the first
+        // one builds the switcher (<section class="dp-views">: a <div
+        // class="dp-viewbar dp-seg" role="tablist"> + one <div class="grid
+        // dp-viewpane" role="tabpanel"> per alternative), later ones in the
+        // same group just add another button + pane to it.
+        const id = s.view.id;
+        const alt = s.view.alt;
+        let label = s.view.label; // the plan's literal label, else computed below
+        if (label == null) label = String((await firstValue(s)) ?? "View");
+        if (openView !== s.view.group) {
+          const sec = document.createElement("section");
+          sec.className = "dp-views";
+          if (container === curGrid) sec.style.gridColumn = `span ${Math.min(12, nextSpan || 12)}`;
+          nextSpan = 0;
+          const bar = document.createElement("div");
+          bar.className = "dp-viewbar dp-seg";
+          bar.setAttribute("role", "tablist");
+          const scope = curSubName || curTopName;
+          bar.setAttribute("aria-label", scope ? `Views: ${scope}` : "Views");
+          bar.dataset.viewId = id;
+          sec.appendChild(bar);
+          container.appendChild(sec);
+          viewHost = { container, curGrid, defaultSpan };
+          viewBar = bar;
+          viewSec = sec;
+          openView = s.view.group;
+          dpViewDefault[id] = label; // the first SHOWN alternative is the group's default
+        }
+        // Full width of the view's own grid by default (like a fresh
+        // tab/section resetting nextSpan), unless a ::COL is already pending.
+        defaultSpan = 12;
+        const pane = document.createElement("div");
+        pane.className = "grid dp-viewpane";
+        pane.id = `dp-vp-${s.view.group}-${alt}`;
+        pane.style.display = "none";
+        pane.setAttribute("role", "tabpanel");
+        pane.setAttribute("aria-labelledby", `dp-vt-${s.view.group}-${alt}`);
+        viewSec.appendChild(pane);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.id = `dp-vt-${s.view.group}-${alt}`;
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-controls", pane.id);
+        btn.textContent = label; // textContent only — ids (above) carry the identity, never the label
+        btn.setAttribute("aria-selected", "false");
+        btn.tabIndex = -1;
+        // Capture THIS group's bar — `viewBar` is a shared loop variable
+        // reassigned for a later group (see the ::SUBTAB comment above).
+        const myBar = viewBar;
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          if (document.activeElement === btn) dpRefocus = "view:" + id;
+          activateView(btn, true);
+        };
+        // Arrow keys move + activate within the bar (wrapping); Home/End jump
+        // to the ends. preventDefault + stopPropagation so the document-level
+        // dpNav arrow-key handler (paging a chart) never also fires.
+        btn.addEventListener("keydown", (e) => {
+          const btns = [...myBar.querySelectorAll('[role="tab"]')];
+          const at = btns.indexOf(btn);
+          let target = null;
+          if (e.key === "Home") target = btns[0];
+          else if (e.key === "End") target = btns[btns.length - 1];
+          else {
+            const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+            if (step) target = btns[(at + step + btns.length) % btns.length];
+          }
+          if (!target) return;
+          e.preventDefault();
+          e.stopPropagation();
+          dpRefocus = "view:" + id;
+          activateView(target, true);
+        });
+        viewBar.appendChild(btn);
+        // Active alternative: the seeded/remembered label if it matches one
+        // of this group's CURRENT alternatives, else the first SHOWN one.
+        const want = dpView[id];
+        if (want === label || (want === undefined && !viewBar.querySelector('[aria-selected="true"]'))) {
+          pane.style.display = "";
+          btn.setAttribute("aria-selected", "true");
+          btn.tabIndex = 0;
+          dpView[id] = label;
+          refocus("view:" + id, btn);
+        }
+        curGrid = pane;
+        container = pane;
+      } else if (d === "ENDVIEW") {
+        // No-op: the close check at the top of the loop already restored
+        // container/curGrid the moment this (view-less) statement was seen.
       } else if (d === "PLACEHOLDER") {
         const span = Math.min(12, nextSpan || defaultSpan);
         const ph = document.createElement("div");
@@ -8239,7 +8495,10 @@ async function runOnce(fresh = true) {
         ph._async = true; // a re-run's patch (patchSlots) never keeps an old placeholder in its place
         container.appendChild(ph);
         curGrid.setAttribute("aria-busy", "true");
-        const job = { i, ph, run: lazy, tracks: [], ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
+        // D3: tag a job inside a ::VIEW alternative so lazyPump's idle
+        // prefetch (unlike a hidden tab's) skips it — it runs once its view
+        // is actually shown.
+        const job = { i, ph, run: lazy, tracks: [], view: curGrid.classList.contains("dp-viewpane"), ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
         lazy.jobs.push(job);
         lastChart = { lazy: job };
         panels++;
@@ -8299,6 +8558,25 @@ async function runOnce(fresh = true) {
     if (firstBtn) firstBtn.classList.add("active");
     if (firstPane) firstPane.style.display = "";
   });
+  // Same fallback for ::VIEW groups (#214): a seeded/remembered label that
+  // names no CURRENT alternative leaves the whole bar unselected — fix up
+  // dpView[id] and activate the first (default) alternative instead. A
+  // ::VIEW group can sit at the top level too, not just inside a tab, so
+  // both roots are checked (unlike a sub-tab, which only ever nests in one).
+  for (const root of [newGrid, tabWrap]) {
+    if (!root) continue;
+    root.querySelectorAll(".dp-viewbar").forEach((bar) => {
+      if (bar.querySelector('[aria-selected="true"]')) return;
+      const firstBtn = bar.querySelector('[role="tab"]');
+      const firstPane = bar.parentElement.querySelector(".dp-viewpane");
+      if (firstBtn) {
+        firstBtn.setAttribute("aria-selected", "true");
+        firstBtn.tabIndex = 0;
+        dpView[bar.dataset.viewId] = firstBtn.textContent;
+      }
+      if (firstPane) firstPane.style.display = "";
+    });
+  }
   // The shown panes' panels: rendered off-screen here, like the rest — or,
   // on a first load (nothing but skeletons on screen), after the swap, each
   // as it arrives. The hidden panes' jobs wait for lazyPump().
@@ -9037,7 +9315,12 @@ function contractCaption(title, contract, row) {
 // Default render height of a contract plot (::HEIGHT overrides): the 2×2
 // diagnostics need room, single panels match the chart default.
 function contractHeight(macro) {
-  const H = { anofox_plot_diagnostics: 560, anofox_plot_summary: 360, anofox_plot_terms: 340 };
+  const H = {
+    anofox_plot_diagnostics: 560,
+    anofox_plot_summary: 360,
+    anofox_plot_terms: 340,
+    anofox_plot_decomposition: 520,
+  };
   return H[macro] || 320;
 }
 
@@ -12105,6 +12388,9 @@ function shareLink(e) {
   const q = new URLSearchParams(editable ? "" : "embed=1");
   const tab = new URLSearchParams(location.search).get("tab");
   if (tab) q.set("tab", tab);
+  // ::VIEW selections (?view.<id>=<label>): setViewParam already wrote the
+  // non-default ones into the address bar, so just carry them along too.
+  for (const [k, v] of new URLSearchParams(location.search)) if (k.startsWith("view.")) q.set(k, v);
   for (const [k, v] of urlStateParams()) q.append(k, v);
   const qs = q.toString();
   const url = base + (qs ? "?" + qs : "") + "#sql=" + encoded;
@@ -12218,6 +12504,35 @@ const SNAPSHOT_JS = `(function(){
       wrap.querySelectorAll('.tabpane').forEach(function(p){p.style.display='none';});
       document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active');});
       wrap.querySelectorAll('.tabpane')[i].style.display=''; btn.classList.add('active');
+    });
+  });
+  // ::VIEW switcher (#214): every group's buttons/panes, scoped to its own
+  // .dp-views container so clicking one group never touches another.
+  function viewActivate(btn){
+    var bar=btn.closest('.dp-viewbar'), sec=btn.closest('.dp-views');
+    if(!bar||!sec)return;
+    [].forEach.call(bar.querySelectorAll('[role="tab"]'),function(b){b.setAttribute('aria-selected','false');b.tabIndex=-1;});
+    [].forEach.call(sec.querySelectorAll('.dp-viewpane'),function(p){p.style.display='none';});
+    btn.setAttribute('aria-selected','true'); btn.tabIndex=0;
+    var pane=document.getElementById(btn.getAttribute('aria-controls'));
+    if(pane)pane.style.display='';
+    btn.focus();
+  }
+  document.querySelectorAll('.dp-viewbar [role="tab"]').forEach(function(btn){
+    btn.addEventListener('click',function(e){e.stopPropagation();viewActivate(btn);});
+    btn.addEventListener('keydown',function(e){
+      var bar=btn.closest('.dp-viewbar');
+      var btns=[].slice.call(bar.querySelectorAll('[role="tab"]'));
+      var at=btns.indexOf(btn), target=null;
+      if(e.key==='Home')target=btns[0];
+      else if(e.key==='End')target=btns[btns.length-1];
+      else{
+        var step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];
+        if(step)target=btns[(at+step+btns.length)%btns.length];
+      }
+      if(!target)return;
+      e.preventDefault(); e.stopPropagation();
+      viewActivate(target);
     });
   });
 })();`;
@@ -12469,6 +12784,71 @@ function mapHoverEmph(series) {
   }
 }
 
+// #213: hovering a mark (or focusing it from the keyboard) emphasises its
+// whole series and fades the others, as hovering its legend entry does — a
+// layer of its own ("hoverfocus") in the shared emphasis state (web/anim.js),
+// so it never undoes a click's sticky selection. Off where a series is no
+// group of marks (seriesFocusable), on maps (mapHoverEmph), diagrams,
+// heatmaps, calendars, pies, gauges, ::TRACK strips, with 'none'::HOVER_FOCUS
+// and above HOVER_FOCUS_MAX marks; a tap on a touch screen is a click (the
+// sticky selection), not a hover. Instant: no motion to reduce.
+const HOVER_FOCUS_MAX = 2000;
+const HOVER_FOCUS_DIM = 0.15; // as the legend's focus
+let dpTouchAt = 0; // the last touch pointerdown (its compatibility mouseenter is no hover)
+document.addEventListener("pointerdown", (e) => (dpTouchAt = e.pointerType === "touch" ? Date.now() : 0), true);
+
+// Does hovering a mark focus its series? `series`: the series key of every
+// data mark. Two series at least, one of them more than a single mark, and
+// at most `max` marks.
+function seriesFocusable(series, max = HOVER_FOCUS_MAX) {
+  if (!series.length || series.length > max) return false;
+  const n = new Map();
+  for (const s of series) n.set(s, (n.get(s) || 0) + 1);
+  return n.size >= 2 && [...n.values()].some((k) => k >= 2);
+}
+
+// Decided once per chart SVG (a re-render brings a new one).
+function hoverFocusOn(svg) {
+  if (svg._dpHf === undefined) {
+    const roles = svg.closest(".panel")?._dp?.roles || [];
+    svg._dpHf =
+      !svg.hasAttribute("data-map") &&
+      !svg.hasAttribute("data-diagram") &&
+      svg.getAttribute("data-kind") !== "heatmap" &&
+      !svg.closest(".panel-tracks") &&
+      (svg.getAttribute("data-hover-focus") || "").toLowerCase() !== "none" &&
+      !roles.some((r) => /^(CALENDAR|HEATMAP|PIE|DONUT|GAUGE|DIAGRAM)/.test(r[1])) &&
+      seriesFocusable(chartMarks(svg).map((el) => el.getAttribute("data-series") || ""));
+  }
+  return svg._dpHf;
+}
+
+// Emphasise `series` in `svg` (null clears), at most once a frame: leaving
+// one mark for the next of the same series costs nothing.
+function hoverFocus(svg, series) {
+  svg._dpHfWant = series;
+  if (svg._dpHfRaf) return;
+  svg._dpHfRaf = requestAnimationFrame(() => {
+    svg._dpHfRaf = 0;
+    let s = svg._dpHfWant;
+    // a click's selection, a brush / named selection or a story step owns the dimming
+    const st = svg._dpEmph;
+    if (st && (st.has("select") || st.has("filter") || st.has("story"))) s = null;
+    if (s === (svg._dpHfOn ?? null)) return;
+    svg._dpHfOn = s;
+    dpAnim.emph(
+      svg,
+      "hoverfocus",
+      s == null
+        ? null
+        : (el) => {
+            const k = el.getAttribute("data-series");
+            return k != null && k !== s && !el.hasAttribute("data-rule") ? HOVER_FOCUS_DIM : null;
+          }
+    );
+  });
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -12551,6 +12931,14 @@ function attachHover() {
     // a ::TRACK strip's marks show their own.
     const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
     el.addEventListener("mouseenter", () => {
+      // A tap's mousedown also gives the mark native DOM focus, which the a11y
+      // code below answers with its own (untrusted) synthetic mouseenter —
+      // so the 1 s touch window holds regardless of e.isTrusted, or a tap
+      // would still read as a hover through that detour.
+      if (!isMapMark && !rule && !(Date.now() - dpTouchAt < 1000)) {
+        const svg = rootSvg(el);
+        if (hoverFocusOn(svg)) hoverFocus(svg, series);
+      }
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
@@ -12572,6 +12960,7 @@ function attachHover() {
     });
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
+      else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
       if (pointered()) return;
       tip.classList.remove("show");
     });
@@ -13150,19 +13539,27 @@ function mapTableHtml(svg, limit, caption) {
     const raw = el.getAttribute("data-value");
     const k = +el.getAttribute("data-class");
     const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    const size = el.getAttribute("data-size");
     rows.push({
       name,
       series: series && series !== label && series !== name ? series : "",
       raw: raw == null || raw === "" ? null : Number(raw),
       value: el.getAttribute("data-fvalue") || (raw != null ? fmtTipValue(raw) : ""),
       cls: k ? `${k} of ${classes.length}${classes[k - 1] ? `: ${classes[k - 1]}` : ""}` : "",
+      sizeRaw: size == null || size === "" ? null : Number(size),
+      size: el.getAttribute("data-fsize") || "",
     });
   }
-  if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
+  // M2a: graduated symbols (::SIZE) — sort by size when no colour measure
+  // differs from it (data-value then equals the size, row by row).
+  const bySize = rows.some((r) => r.size) && rows.every((r) => r.raw === r.sizeRaw);
+  if (bySize) rows.sort((a, b) => (b.sizeRaw ?? -Infinity) - (a.sizeRaw ?? -Infinity));
+  else if (rows.some((r) => r.raw != null)) rows.sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity));
   const cols = [
     ["name", "name"],
     ["series", "series"],
     ["value", "value"],
+    ["size", "size"],
     ["cls", "class"],
   ].filter(([k]) => k === "name" || rows.some((r) => r[k]));
   const head = cols.map(([, h]) => `<th scope="col">${esc(h)}</th>`).join("");

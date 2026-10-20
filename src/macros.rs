@@ -283,6 +283,22 @@ to anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e)).",
         tags: &[("anofox.consumes", "events"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_decomposition",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("components", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "560")],
+        body: contract_body!("decomposition", "'x', x, 'components', components, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Stacked panels of a time-series decomposition sharing one x axis, each with its own y scale: \
+observed, level, trend, each seasonal (seasonal_<period>), remainder (as points). Reads the long `decomposition` \
+table (ds | period, component, value), wide columns (observed, trend, seasonal, remainder; anofox-orchestration's \
+decomposition output) and anofox-forecast's list outputs as they come: ts_mstl_decomposition_by (trend[], \
+seasonal[][], periods[]; x = the period index) and ts_forecast_explain_by (its decomposition STRUCT). One series \
+per call (GROUP BY id). components := ['trend', 'seasonal_7'] picks and orders the panels. Provisional: the \
+long-form column names are to be agreed with anofox-orchestration and anofox-forecast.",
+        example: "SELECT anofox_plot_decomposition(d) FROM (SELECT i AS period, 'trend' AS component, 0.5 * i AS value \
+FROM range(20) r(i) UNION ALL SELECT i, 'seasonal', sin(i) FROM range(20) r(i)) d",
+        tags: &[("anofox.consumes", "decomposition"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_diagram",
         params: &["tbl"],
         named: &[("edges", "NULL"), ("id", "NULL"), ("mainstat", "NULL"), ("format", "NULL"), ("source", "NULL"), ("target", "NULL"), ("value", "NULL"), ("direction", "NULL"), ("style", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "800"), ("height", "400")],
@@ -305,11 +321,15 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
-metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests, \
-kind|severity + ds|period -> events. Use the specific anofox_plot_* macro for options.",
+metric+value -> summary, partial_residual -> partial (component + residual), component+value | trend -> \
+decomposition, p_value/test_id -> tests, kind|severity + ds|period -> events. Use the specific anofox_plot_* macro \
+for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
-            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,events"),
+            (
+                "anofox.consumes",
+                "terms,prediction,curve,summary,obs,test,partial_residuals,decomposition,events",
+            ),
             CONTRACT_TAG,
         ],
     },

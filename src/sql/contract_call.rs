@@ -229,6 +229,7 @@ pub(crate) fn plan_contract(stmt: &str) -> Option<(super::Panel, ContractCall)> 
         requires_issues: Vec::new(),
         tab_requires: Vec::new(),
         tabs: Vec::new(),
+        view: None,
     };
     Some((panel, call))
 }

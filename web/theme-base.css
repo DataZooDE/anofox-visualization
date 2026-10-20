@@ -70,7 +70,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-seg{display:inline-flex;border:1px solid var(--ax-line);border-radius:10px;background:var(--ax-input-bg);box-shadow:var(--ax-input-shadow);padding:2px;gap:2px}
 .dp-seg button{font:inherit;font-size:.82rem;font-weight:600;color:var(--ax-muted);background:transparent;border:0;border-radius:8px;padding:.4rem .75rem;cursor:pointer;transition:background .12s,color .12s;white-space:nowrap}
 .dp-seg button:hover{color:var(--ax-ink);background:var(--ax-tab-hover-bg)}
-.dp-seg button[aria-checked=true],.dp-seg button[aria-pressed=true]{background:var(--ax-accent);color:var(--ax-accent-ink)}
+.dp-seg button[aria-checked=true],.dp-seg button[aria-pressed=true],.dp-viewbar [aria-selected=true]{background:var(--ax-accent);color:var(--ax-accent-ink)}
 .dp-seg button:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
 .control.dp-toggle{cursor:pointer;color:var(--ax-ink)}
 .control.dp-toggle input{appearance:none;-webkit-appearance:none;position:relative;width:2.3rem;min-width:0;height:1.3rem;padding:0;margin:0;border-radius:999px;border:1px solid var(--ax-line);background:var(--ax-slider-track);cursor:pointer;transition:background .15s,border-color .15s}
@@ -401,6 +401,16 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .subtab-btn:hover{background:var(--ax-pill-hover)}
 .subtab-btn.active{color:var(--ax-accent-ink);background:var(--ax-btn-bg);border-bottom:0}
 .subtabwrap{grid-column:1/-1}
+
+/* ---- ::VIEW / ::ENDVIEW: alternative views of one panel (#214) ---- */
+.dp-views{grid-column:1/-1;display:flex;flex-direction:column;gap:.7rem}
+.dp-viewbar{align-self:flex-end}
+.dp-viewpane{margin:0}
+@media(max-width:760px){
+  .dp-viewbar{align-self:flex-start;max-width:100%;overflow-x:auto}
+  .dp-viewbar button{min-height:24px}
+}
+@media print{.dp-viewbar{display:none}}
 
 /* ---- served nav (serve / locked pages with 2+ dashboards) ---- */
 .served-nav{position:sticky;top:0;z-index:50;display:flex;gap:.25rem;padding:.5rem 1rem;background:var(--ax-nav-bg);border-bottom:1px solid var(--ax-nav-border);flex-wrap:wrap;align-items:center;box-shadow:var(--ax-nav-shadow)}

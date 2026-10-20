@@ -73,7 +73,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
     e("HIGH", &[], R::High, "encoding", true, "candlestick high price"),
     e("LOW", &[], R::Low, "encoding", true, "candlestick low price"),
-    e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size"),
+    e("SIZE", &[], R::Size, "encoding", true, "bubble size for a scatter (maps a measure to point area); on a map a symbol's area (graduated symbols) or a flow's width; a constant (4::SIZE) sets the point size"),
     e("Q1", &["QUARTILE1", "LOWER_QUARTILE"], R::Q1, "encoding", true,
       "a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT)"),
     e("MEDIAN", &["Q2"], R::Median, "encoding", true, "the median line of a box from statistics (see ::Q1)"),
@@ -246,6 +246,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
     e("TRANSITION", &["TWEEN"], R::Transition, "modifier", true,
       "on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart"),
+    e("HOVER_FOCUS", &["HOVERFOCUS"], R::HoverFocus, "modifier", true,
+      "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     // ── KPIs & text ────────────────────────────────────────────────────────
@@ -340,6 +342,10 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
+    e("VIEW", &["ALT_VIEW"], R::View, "layout", false,
+      "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
+    e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
+      "close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it)"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
     e("TRACK", &["STRIP_BELOW", "STRIP_UNDER"], R::Track, "layout", true,
       "a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar"),
@@ -352,7 +358,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("THEME", &[], R::Theme, "chrome", false,
       "dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON"),
     e("LOCALE", &[], R::Locale, "chrome", false,
-      "number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR'"),
+      "number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR'"),
     e("DASHBOARD_TITLE", &["DASHBOARDTITLE", "PAGE_TITLE"], R::DashboardTitle, "chrome", false,
       "dashboard title: page header, browser tab and export title"),
     e("BRAND", &["BRAND_NAME"], R::Brand, "chrome", false,
@@ -502,7 +508,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
-                | Role::SelectAs | Role::Drill | Role::Empty
+                | Role::SelectAs | Role::Drill | Role::Empty | Role::View | Role::ViewEnd
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -620,6 +626,8 @@ mod tests {
             "PLACEHOLDER",
             "SELECT_AS",
             "DRILL",
+            "VIEW",
+            "ENDVIEW",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -762,6 +770,8 @@ mod tests {
             Role::Boundaries,
             Role::Tab,
             Role::SubTab,
+            Role::View,
+            Role::ViewEnd,
             Role::Size,
             Role::YFormat,
             Role::XFormat,
@@ -820,6 +830,7 @@ mod tests {
             Role::Story,
             Role::StoryBy,
             Role::Transition,
+            Role::HoverFocus,
             Role::Track,
             Role::Diagram,
             Role::Upstream,
@@ -884,6 +895,8 @@ mod tests {
                 | Role::Boundaries
                 | Role::Tab
                 | Role::SubTab
+                | Role::View
+                | Role::ViewEnd
                 | Role::Size
                 | Role::YFormat
                 | Role::XFormat
@@ -942,6 +955,7 @@ mod tests {
                 | Role::Story
                 | Role::StoryBy
                 | Role::Transition
+                | Role::HoverFocus
                 | Role::Track
                 | Role::Diagram
                 | Role::Upstream

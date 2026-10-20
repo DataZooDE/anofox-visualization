@@ -409,6 +409,45 @@ fn headless_header_shows_the_freshness_chip() {
     );
 }
 
+/// A date-only `::ASOF` (#282) renders as a calendar day: no time, no
+/// time-zone shift ("Data as of 01/01/2020 (…)", never "… UTC").
+#[test]
+fn date_only_asof_renders_as_a_day() {
+    struct Fresh(&'static str);
+    impl DataProvider for Fresh {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("stale") {
+                return Ok(vec![
+                    ("c0".into(), s(&[self.0])),
+                    ("o".into(), s(&["stale=24h"])),
+                ]);
+            }
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+            ])
+        }
+    }
+    let script = "SELECT '2020-01-01'::ASOF, 'stale=24h';\n\
+                  SELECT week::XAXIS, sum(n)::BARCHART FROM t GROUP BY ALL;";
+    let svg = render_dashboard_svg(
+        script,
+        &mut Fresh("2020-01-01"),
+        &DashboardOptions::default(),
+    )
+    .unwrap();
+    let chip = svg
+        .split("class=\"dp-asof\"")
+        .nth(1)
+        .and_then(|s| s.split("</text>").next())
+        .expect("a freshness chip");
+    assert!(chip.contains("Data as of 01/01/2020 ("), "{chip}");
+    assert!(!chip.contains("UTC"), "{chip}");
+}
+
 /// `::INFO` (#36): headless panels carry an ⓘ whose SVG `<title>` is the
 /// definition (a hover tooltip wherever the SVG is shown).
 #[test]
@@ -571,5 +610,130 @@ fn headless_contract_title_is_the_first_non_null_value() {
     assert!(
         svg.contains("Coefficients — ols") && svg.contains("Coefficients — huber"),
         "{svg}"
+    );
+}
+
+// #214: a headless (`--svg`/FFI/Python) render of a ::VIEW group draws only
+// its default (first) alternative — the others are never even queried — and
+// a ::COL pending when the group opens sets the whole group's width.
+struct ViewMock;
+impl DataProvider for ViewMock {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        // A bare one-column query: either a ::COL's own number (its literal
+        // text sits right before " AS c0") or a ::VIEW marker's value (not a
+        // number — render_inner never reads a marker's rows, only its
+        // static `view` field, so any reply is fine).
+        if sql.contains("AS c0") && !sql.contains("AS c1") {
+            let core = sql
+                .split("SELECT ")
+                .nth(1)
+                .and_then(|s| s.split(" AS c0").next())
+                .unwrap_or("");
+            return Ok(vec![(
+                "c0".into(),
+                f(&[core.trim().parse().unwrap_or(0.0)]),
+            )]);
+        }
+        let title = ["Weekly", "Other", "Solo"]
+            .into_iter()
+            .find(|t| sql.contains(&format!("'{t}'")))
+            .unwrap_or("");
+        Ok(vec![
+            ("c0".into(), s(&["W1", "W2"])),
+            ("c1".into(), f(&[1.0, 2.0])),
+            ("c2".into(), s(&[title])),
+        ])
+    }
+}
+
+/// The width attribute of the first placed (`<svg x=…>`) panel.
+fn first_panel_width(svg: &str) -> &str {
+    let at = svg.find("<svg x=").expect("a placed panel");
+    let rest = &svg[at..];
+    let w0 = rest.find("width=\"").expect("a width attr") + "width=\"".len();
+    let w1 = rest[w0..].find('"').expect("closing quote") + w0;
+    &rest[w0..w1]
+}
+
+#[test]
+fn view_group_draws_only_its_default_alternative() {
+    let script = "\
+        SELECT 'Lines' AS yoy ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::TITLE FROM t GROUP BY ALL;\n\
+        SELECT 'Bars' AS yoy2 ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::LINECHART, 'Other'::TITLE FROM t GROUP BY ALL;";
+    let svg = render_dashboard_svg(script, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    assert!(
+        svg.contains("Weekly"),
+        "the default alternative renders: {svg}"
+    );
+    assert!(
+        !svg.contains("Other"),
+        "the other alternative is never drawn (not even queried): {svg}"
+    );
+}
+
+#[test]
+fn view_group_width_is_set_by_a_pending_col_at_its_open() {
+    let plain = "SELECT 4::COL;\nSELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::TITLE FROM t GROUP BY ALL;";
+    let view = "\
+        SELECT 4::COL;\n\
+        SELECT 'Lines' AS yoy ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::TITLE FROM t GROUP BY ALL;\n\
+        SELECT 'Bars' AS yoy2 ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::LINECHART, 'Other'::TITLE FROM t GROUP BY ALL;";
+    let w_plain = render_dashboard_svg(plain, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    let w_view = render_dashboard_svg(view, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    assert_eq!(
+        first_panel_width(&w_plain),
+        first_panel_width(&w_view),
+        "the group's pending ::COL sets its default alternative's width, same as an \
+         ordinary panel's: {w_plain} / {w_view}"
+    );
+}
+
+#[test]
+fn view_group_without_a_col_spans_the_full_row() {
+    let full =
+        "SELECT 12::COL;\nSELECT week::XAXIS, sum(n)::BARCHART, 'Solo'::TITLE FROM t GROUP BY ALL;";
+    let view = "\
+        SELECT 'Lines' AS yoy ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::TITLE FROM t GROUP BY ALL;";
+    let w_full = render_dashboard_svg(full, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    let w_view = render_dashboard_svg(view, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    assert_eq!(
+        first_panel_width(&w_full),
+        first_panel_width(&w_view),
+        "absent a pending ::COL, the group spans the full row (12), same as an explicit \
+         12::COL panel's: {w_full} / {w_view}"
+    );
+}
+
+#[test]
+fn view_group_col_does_not_leak_into_a_later_plain_panel() {
+    let script = "\
+        SELECT 4::COL;\n\
+        SELECT 'Lines' AS yoy ::VIEW;\n\
+        SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly'::TITLE FROM t GROUP BY ALL;\n\
+        SELECT 1::ENDVIEW;\n\
+        SELECT week::XAXIS, sum(n)::LINECHART, 'Solo'::TITLE FROM t GROUP BY ALL;";
+    let baseline = "SELECT week::XAXIS, sum(n)::LINECHART, 'Solo'::TITLE FROM t GROUP BY ALL;";
+    let w_script =
+        render_dashboard_svg(script, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    let w_baseline =
+        render_dashboard_svg(baseline, &mut ViewMock, &DashboardOptions::default()).unwrap();
+    // The 2nd (non-view) panel's width — not the group's 1st.
+    let at = w_script.rfind("<svg x=").expect("a 2nd placed panel");
+    let w2 = &w_script[at..];
+    let w0 = w2.find("width=\"").unwrap() + "width=\"".len();
+    let w1 = w2[w0..].find('"').unwrap() + w0;
+    let w2 = &w2[w0..w1];
+    assert_eq!(
+        w2,
+        first_panel_width(&w_baseline),
+        "the view group's ::COL width must not leak past ::ENDVIEW: {w_script}"
     );
 }

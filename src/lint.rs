@@ -47,7 +47,7 @@ pub struct Diagnostic {
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
     /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
-    /// `transition/unknown` (warnings) | `diagram/null-id` |
+    /// `transition/unknown` | `hover-focus/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `box/missing` (error: a box from statistics without
@@ -57,7 +57,13 @@ pub struct Diagnostic {
     /// `requires/bad-variable` | `requires/on-setup` |
     /// `requires/tab-always-hidden` (warnings) | `optional/missing` (a note: a
     /// `-- @requires` input is missing, so the panel shows "Not available" —
-    /// a ::TAB / ::SUBTAB is hidden with its panels).
+    /// a ::TAB / ::SUBTAB / ::VIEW alternative is hidden with its panels).
+    /// `::VIEW` groups ([`view_diags`], #214): `view/duplicate-label` |
+    /// `view/empty-label` | `view/duplicate-name` | `view/bad-name` |
+    /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
+    /// `view/mixed-names` | `view/empty` | `view/open-ended` |
+    /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
+    /// (notes).
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
@@ -146,6 +152,9 @@ where
     let mut rendered_panels = 0usize; // visible panels (charts/tables/kpis/text/markdown)
     let mut has_tabs = false;
     let mut sections = sql::requires::Sections::default(); // hidden tabs
+                                                           // design/too-many-panels counts only a ::VIEW group's shown (first
+                                                           // reached) alternative (#214) — a switcher only ever shows one.
+    let mut view_pick = sql::views::StaticPick::default();
     let mut group_depth = 0i32;
     let mut kpi_run = 0usize; // consecutive top-level KPI tiles
     let mut kpi_run_stmt = 0usize; // stmt index where the current run started
@@ -223,24 +232,32 @@ where
                 ));
             }
             if decided_here {
+                let what = if p.view.as_ref().is_some_and(|v| v.marker) {
+                    "::VIEW"
+                } else if tab == Some(true) {
+                    "::SUBTAB"
+                } else {
+                    "::TAB"
+                };
                 diags.push(Diagnostic {
                     severity: Severity::Note,
                     stmt,
                     code: "optional/missing",
                     message: format!(
-                        "optional input `{path}` is missing — this {} is hidden, with its panels \
-                         (`-- @requires`)",
-                        if tab == Some(true) {
-                            "::SUBTAB"
-                        } else {
-                            "::TAB"
-                        }
+                        "optional input `{path}` is missing — this {what} is hidden, with its \
+                         panels (`-- @requires`)",
                     ),
                     sql: short.clone(),
                 });
             }
             continue;
         }
+        // Count only the group's shown (first-reached) alternative toward
+        // the cross-panel design counters — a switcher only ever shows one
+        // of them (#214). Computed right after the hidden-section check, so
+        // a requires-hidden alternative's marker never advances this (the
+        // first alternative StaticPick does see is the first *shown* one).
+        let counts_for_design = !view_pick.drop_panel(&p);
         // An optional input that is missing: the statement is skipped (setup
         // never reaches the prelude) and its panel reads "Not available".
         let unmet = if tab.is_some() {
@@ -285,7 +302,7 @@ where
             // Its "Not available" card still takes the panel's place: a KPI
             // tile stays in its run, any other panel ends it — with or
             // without the file, the same verdict.
-            if opts.design && !p.setup && is_content_panel(&p.roles) {
+            if opts.design && !p.setup && is_content_panel(&p.roles) && counts_for_design {
                 count_design_panel(
                     &p.roles,
                     group_depth == 0,
@@ -406,7 +423,7 @@ where
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
                 // (its "Not available" / error card takes the panel's place)
-                if opts.design && is_content_panel(&p.roles) {
+                if opts.design && is_content_panel(&p.roles) && counts_for_design {
                     count_design_panel(
                         &p.roles,
                         group_depth == 0,
@@ -873,7 +890,7 @@ where
                     });
                 }
             }
-            if opts.design {
+            if opts.design && counts_for_design {
                 rendered_panels += 1;
                 flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
             }
@@ -1034,16 +1051,20 @@ where
             // Count content panels (charts/tables/markdown) toward the
             // scan-budget, but NOT individual KPI tiles — a strip of KPIs is one
             // band to scan, not N panels. A non-KPI content panel ends a run of
-            // top-level KPI tiles.
-            count_design_panel(
-                &p.roles,
-                group_depth == 0,
-                stmt,
-                &mut kpi_run,
-                &mut kpi_run_stmt,
-                &mut rendered_panels,
-                &mut diags,
-            );
+            // top-level KPI tiles. Only a ::VIEW group's shown alternative
+            // counts (#214) — the checks below still run for every
+            // alternative; only the scan-budget total excludes the rest.
+            if counts_for_design {
+                count_design_panel(
+                    &p.roles,
+                    group_depth == 0,
+                    stmt,
+                    &mut kpi_run,
+                    &mut kpi_run_stmt,
+                    &mut rendered_panels,
+                    &mut diags,
+                );
+            }
 
             if let Some(k) = chart_kind(&p.roles) {
                 let titled = p.roles.iter().any(|(_, r)| matches!(r, Role::Title));
@@ -1155,6 +1176,215 @@ where
         }
     }
 
+    diags.extend(view_diags(&sql::plan(script)));
+    diags
+}
+
+/// `::VIEW` group structure checks (#214): see [`Diagnostic::code`] for the
+/// full `view/*` list. Run once over the whole plan (not interleaved into
+/// the main statement loop above, since several of these need to see a
+/// whole group, or every group, at once).
+fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let scan = sql::views::scan(plan);
+
+    for &i in &scan.stray_ends {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: i + 1,
+            code: "view/stray-end",
+            message: "::ENDVIEW with no open ::VIEW group to close".into(),
+            sql: short(i),
+        });
+    }
+
+    let mut seen_ids: Vec<(String, usize)> = Vec::new();
+    for g in &scan.groups {
+        let marker_stmt = g.markers[0] + 1;
+        if g.markers.len() == 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "view/lone",
+                message: "a ::VIEW group with a single alternative draws a switcher with one \
+                          option — add another alternative, or drop the ::VIEW"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if g.unbalanced_group {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "view/unbalanced-group",
+                message: "a ::GROUP opened inside this ::VIEW group is never closed before it \
+                          ends — add its ::ENDGROUP, or close the box after the ::VIEW group \
+                          instead"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if !g.named && scan.groups.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Note,
+                stmt: marker_stmt,
+                code: "view/unnamed",
+                message: "this ::VIEW group has no alias (`AS name`) — with more than one group \
+                          on the dashboard, name each so `?view.<name>=` can address it"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if let Some((_, other)) = seen_ids.iter().find(|(id, _)| *id == g.id) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "view/duplicate-name",
+                message: format!(
+                    "this ::VIEW group's id `{}` is also statement {other}'s — group ids must \
+                     be unique on one dashboard",
+                    g.id
+                ),
+                sql: short(g.markers[0]),
+            });
+        } else {
+            seen_ids.push((g.id.clone(), marker_stmt));
+        }
+
+        // Per-alternative: alias validity, label diagnostics, and whether it
+        // has anything to show.
+        let mut aliases: Vec<String> = Vec::new();
+        let mut labels: Vec<(String, usize)> = Vec::new(); // (label text, marker stmt), non-empty only
+        for (alt, &mi) in g.markers.iter().enumerate() {
+            let p = &plan[mi];
+            if let Some(alias) = sql::views::marker_alias(p) {
+                if !sql::views::valid_id(&alias) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Error,
+                        stmt: mi + 1,
+                        code: "view/bad-name",
+                        message: format!(
+                            "::VIEW alias `{alias}` is not a plain identifier — use \
+                             `^[A-Za-z_][A-Za-z0-9_]*$`"
+                        ),
+                        sql: short(mi),
+                    });
+                }
+                aliases.push(alias);
+            }
+            match p.view.as_ref().and_then(|v| v.label.clone()) {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "view/computed-label",
+                    message: "this alternative's label is a computed expression, not a plain \
+                              string literal — its button text can't be checked here"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) if t.is_empty() => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: mi + 1,
+                    code: "view/empty-label",
+                    message: "this alternative's label is empty (or NULL) — it needs text for \
+                              its switcher button"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) => labels.push((t, mi + 1)),
+            }
+            // Does this alternative have anything that actually draws?
+            let end = g.markers.get(alt + 1).copied().unwrap_or(g.end);
+            let has_content = (mi + 1..end).any(|j| {
+                let m = &plan[j];
+                !m.setup && !roles::is_directive_panel(&m.roles)
+            });
+            if !has_content {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "view/empty",
+                    message: "this alternative has no rendering statement — it would show a \
+                              blank view"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            // An input inside a view: it would need its own getvariable()
+            // binding re-primed per alternative, which no renderer does.
+            for (j, m) in plan.iter().enumerate().take(end).skip(mi + 1) {
+                if input_kind(&m.roles).is_some() {
+                    diags.push(Diagnostic {
+                        severity: Severity::Note,
+                        stmt: j + 1,
+                        code: "view/input-inside",
+                        message: "an input inside a ::VIEW group only takes effect while that \
+                                  alternative happens to be the one shown"
+                            .into(),
+                        sql: short(j),
+                    });
+                }
+            }
+        }
+        if aliases
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "view/mixed-names",
+                message: "this ::VIEW group's alternatives use different aliases — one name \
+                          identifies the whole group; the others are ignored"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        for (k, (text, stmt)) in labels.iter().enumerate() {
+            if let Some((_, other)) = labels[..k].iter().find(|(t, _)| t == text) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: *stmt,
+                    code: "view/duplicate-label",
+                    message: format!(
+                        "this alternative's label `{text}` is also statement {other}'s — each \
+                         alternative needs a distinct label"
+                    ),
+                    sql: short(*stmt - 1),
+                });
+            }
+        }
+        // No ::ENDVIEW, and the last alternative holds more panels than any
+        // other: likely a missing ::ENDVIEW swallowed what followed it.
+        if !g.closed_by_endview && g.markers.len() > 1 {
+            let counts: Vec<usize> = g
+                .markers
+                .iter()
+                .enumerate()
+                .map(|(alt, &mi)| {
+                    let end = g.markers.get(alt + 1).copied().unwrap_or(g.end);
+                    (mi + 1..end).filter(|&j| !plan[j].setup).count()
+                })
+                .collect();
+            if let (Some(&last), rest) = (counts.last(), &counts[..counts.len() - 1]) {
+                if rest.iter().all(|&n| n < last) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: *g.markers.last().unwrap() + 1,
+                        code: "view/open-ended",
+                        message: "no ::ENDVIEW closes this group, and its last alternative holds \
+                                  more panels than any other — check whether a missing \
+                                  ::ENDVIEW swallowed statements meant to follow it"
+                            .into(),
+                        sql: short(*g.markers.last().unwrap()),
+                    });
+                }
+            }
+        }
+    }
     diags
 }
 
@@ -1723,7 +1953,7 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
 /// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
-/// `::CATEGORY`), an unknown `::TRANSITION`.
+/// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -1755,6 +1985,12 @@ fn motion_diags(
             out.push((
                 "transition/unknown",
                 format!("::TRANSITION `{v}` is not 'tween' or 'none' — the chart is swapped"),
+            ));
+        }
+        if *r == Role::HoverFocus && !crate::HOVER_FOCUS_MODES.contains(&v.as_str()) {
+            out.push((
+                "hover-focus/unknown",
+                format!("::HOVER_FOCUS `{v}` is not 'series' or 'none' — hovering a mark focuses its series"),
             ));
         }
         if *r == Role::StoryBy {
@@ -1800,7 +2036,8 @@ fn map_diags(
     rows: &[Map<String, Value>],
 ) -> Vec<(Severity, &'static str, String)> {
     let mut out = region_diags(roles, rows);
-    let Some(geom) = roles
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    let geom = roles
         .iter()
         .find(|(i, r)| {
             *r == Role::Geometry
@@ -1808,10 +2045,14 @@ fn map_diags(
                     .iter()
                     .any(|t| t.trim().parse::<f64>().is_err())
         })
-        .map(|(i, _)| *i)
-    else {
+        .map(|(i, _)| *i);
+    // M2a fix: the projection/classes/too-many-marks checks used to run only
+    // on WKT (::MAP) panels, so a ::REGION or ::LAT/::LON map's
+    // ::PROJECTION, ::CLASSES and point count went unchecked.
+    let is_map = geom.is_some() || has(Role::Region) || (has(Role::Lat) && has(Role::Lon));
+    if !is_map {
         return out;
-    };
+    }
     let first = |want: Role| {
         roles
             .iter()
@@ -1840,14 +2081,15 @@ fn map_diags(
             ));
         }
     }
-    let wkt = column_texts(rows, geom);
+    let wkt = geom.map(|g| column_texts(rows, g)).unwrap_or_default();
     let filled = roles.iter().any(|(i, r)| {
         matches!(r, Role::Value(_))
-            || (*r == Role::Geometry && *i != geom && !column_texts(rows, *i).is_empty())
+            || (*r == Role::Geometry && Some(*i) != geom && !column_texts(rows, *i).is_empty())
     });
-    let areas = wkt
-        .iter()
-        .any(|t| t.trim_start().to_ascii_uppercase().contains("POLYGON"));
+    let areas = has(Role::Region)
+        || wkt
+            .iter()
+            .any(|t| t.trim_start().to_ascii_uppercase().contains("POLYGON"));
     if filled
         && areas
         && projection
@@ -1863,7 +2105,7 @@ fn map_diags(
                 .to_string(),
         ));
     }
-    let points: usize = wkt
+    let wkt_points: usize = wkt
         .iter()
         .map(|t| match ggplot_rs::spatial::parse_wkt(t) {
             Some(ggplot_rs::spatial::Geometry::Point(_)) => 1,
@@ -1871,6 +2113,25 @@ fn map_diags(
             _ => 0,
         })
         .sum();
+    // ::LAT/::LON rows with both numbers
+    let latlon_points = match (
+        roles.iter().find(|(_, r)| *r == Role::Lat).map(|(i, _)| *i),
+        roles.iter().find(|(_, r)| *r == Role::Lon).map(|(i, _)| *i),
+    ) {
+        (Some(li), Some(lo)) => {
+            let lats = cells(rows, li);
+            let lons = cells(rows, lo);
+            lats.iter()
+                .zip(lons.iter())
+                .filter(|(a, b)| {
+                    a.as_deref().and_then(|s| s.parse::<f64>().ok()).is_some()
+                        && b.as_deref().and_then(|s| s.parse::<f64>().ok()).is_some()
+                })
+                .count()
+        }
+        _ => 0,
+    };
+    let points = wkt_points + latlon_points;
     if points > MAP_POINTS_WARN {
         out.push((
             Severity::Warning,
@@ -1880,6 +2141,32 @@ fn map_diags(
                  cells (the h3 extension) or to regions, to keep the map light"
             ),
         ));
+    }
+    // M2a: ::SIZE rows that a graduated-symbol map won't draw (zero,
+    // negative or missing — size is the symbol's area, not a position).
+    if let Some(si) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Size)
+        .map(|(i, _)| *i)
+    {
+        let k = cells(rows, si)
+            .iter()
+            .filter(|v| match v.as_deref().and_then(|s| s.parse::<f64>().ok()) {
+                Some(n) => !(n.is_finite() && n > 0.0),
+                None => true,
+            })
+            .count();
+        // only when at least one row *does* have a usable size (otherwise
+        // ::SIZE isn't driving symbols at all — no map/* lint for that)
+        if k > 0 && k < rows.len() {
+            out.push((
+                Severity::Warning,
+                "map/size-not-positive",
+                format!(
+                    "{k} rows have a zero, negative or missing ::SIZE and are not drawn — size is the symbol's area"
+                ),
+            ));
+        }
     }
     out
 }
@@ -3703,6 +3990,158 @@ mod design_tests {
         assert!(!has(&d2, "design/too-many-panels"), "{d2:?}");
     }
 
+    /// #214: `design/too-many-panels` counts only a ::VIEW group's shown
+    /// (first) alternative — a switcher only ever shows one at a time.
+    #[test]
+    fn too_many_panels_counts_only_the_shown_alternative() {
+        let panel = "SELECT a::XAXIS, b::BARCHART, 'T'::TITLE FROM t;\n";
+        let five = panel.repeat(5); // under the threshold alone; 2x would not be
+        let script = format!("SELECT 'A'::VIEW;\n{five}SELECT 'B'::VIEW;\n{five}");
+        let data = rows(
+            3,
+            |i| json!({ "c0": format!("c{i}"), "c1": (3 - i) as f64 }),
+        );
+        let d = check(&script, |_q| Ok(data.clone()));
+        assert!(!has(&d, "design/too-many-panels"), "{d:?}");
+    }
+
+    #[test]
+    fn view_lone_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/lone"), "{d:?}");
+    }
+
+    #[test]
+    fn view_duplicate_label_errors() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/duplicate-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_empty_label_errors() {
+        let d = check(
+            "SELECT ''::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty-label"), "{d:?}");
+        let d = check(
+            "SELECT NULL::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_computed_label_warns() {
+        let d = check(
+            "SELECT a||'x'::VIEW FROM t;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/computed-label"), "{d:?}");
+    }
+
+    #[test]
+    fn view_mixed_names_warns() {
+        let d = check(
+            "SELECT 'Lines' AS yoy ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars' AS qoq ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/mixed-names"), "{d:?}");
+    }
+
+    #[test]
+    fn view_duplicate_name_errors() {
+        let d = check(
+            "SELECT 'Lines' AS g1 ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 1::ENDVIEW;\n\
+             SELECT 'Bars' AS g1 ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/duplicate-name"), "{d:?}");
+    }
+
+    #[test]
+    fn view_bad_name_errors() {
+        let d = check(
+            "SELECT 'Lines' AS \"2x\" ::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/bad-name"), "{d:?}");
+    }
+
+    #[test]
+    fn view_empty_alternative_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT 'Bars'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/empty"), "{d:?}");
+    }
+
+    #[test]
+    fn view_open_ended_warns() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;\n\
+             SELECT a::XAXIS, d::LINECHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/open-ended"), "{d:?}");
+    }
+
+    #[test]
+    fn view_unbalanced_group_errors() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT 1::GROUP;\nSELECT 1::ENDVIEW;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/unbalanced-group"), "{d:?}");
+    }
+
+    #[test]
+    fn view_stray_end_warns() {
+        let d = check(
+            "SELECT a::XAXIS, b::BARCHART FROM t;\nSELECT 1::ENDVIEW;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/stray-end"), "{d:?}");
+    }
+
+    #[test]
+    fn view_input_inside_notes() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT DISTINCT zone::DROPDOWN FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/input-inside"), "{d:?}");
+    }
+
+    #[test]
+    fn view_unnamed_notes_with_multiple_groups() {
+        let d = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 1::ENDVIEW;\n\
+             SELECT 'Bars' AS g2 ::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/unnamed"), "{d:?}");
+        // the single-group case is not flagged — nothing else to tell it apart from
+        let d2 = check(
+            "SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d2, "view/unnamed"), "{d2:?}");
+    }
+
     #[test]
     fn engine_warnings_become_render_warnings() {
         // A density per category where every group has one value: the stat
@@ -3761,6 +4200,72 @@ mod design_tests {
         assert_eq!(
             codes("SELECT g::MAP FROM t;", pts),
             vec![(Severity::Warning, "map/too-many-marks")]
+        );
+    }
+
+    /// M2a fix: `map_diags` used to return early (no WKT) before checking
+    /// `::PROJECTION`/`::CLASSES`/too-many-marks on `::REGION` or
+    /// `::LAT`/`::LON` maps.
+    #[test]
+    fn map_modifiers_are_checked_on_region_and_point_maps() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .filter(|d| d.code.starts_with("map/"))
+                .map(|d| (d.severity, d.code))
+                .collect()
+        };
+        let sql = "SELECT c::REGION, v::BARCHART, 'robinson'::PROJECTION FROM t;";
+        assert_eq!(
+            codes(
+                sql,
+                vec![json!({ "c0": "DE-BY", "c1": 1.0, "c2": "robinson" })]
+            ),
+            vec![(Severity::Warning, "map/unknown-projection")]
+        );
+        let pts: Vec<Value> = (0..20_001)
+            .map(|i| json!({ "c0": (i % 80) as f64, "c1": 10.0 }))
+            .collect();
+        assert_eq!(
+            codes("SELECT lat::LAT, lon::LON FROM t;", pts),
+            vec![(Severity::Warning, "map/too-many-marks")]
+        );
+    }
+
+    #[test]
+    fn size_not_positive_is_flagged() {
+        let codes = |rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                "SELECT lat::LAT, lon::LON, n::SIZE FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/size-not-positive")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let row = |lat: f64, lon: f64, n: Value| json!({ "c0": lat, "c1": lon, "c2": n });
+        assert!(codes(vec![
+            row(50.0, 10.0, json!(1.0)),
+            row(51.0, 10.0, json!(2.0))
+        ])
+        .is_empty());
+        assert_eq!(
+            codes(vec![
+                row(50.0, 10.0, json!(1.0)),
+                row(51.0, 10.0, json!(0.0)),
+                row(52.0, 10.0, Value::Null),
+            ]),
+            vec![(Severity::Warning, "map/size-not-positive")]
         );
     }
 
@@ -3823,9 +4328,15 @@ mod design_tests {
                 .into_iter()
                 .map(|d| d.code)
                 .filter(|c| {
-                    ["animate/", "linestyle/", "story/", "transition/"]
-                        .iter()
-                        .any(|p| c.starts_with(p))
+                    [
+                        "animate/",
+                        "linestyle/",
+                        "story/",
+                        "transition/",
+                        "hover-focus/",
+                    ]
+                    .iter()
+                    .any(|p| c.starts_with(p))
                 })
                 .collect()
         };
@@ -3869,6 +4380,20 @@ mod design_tests {
             ),
             vec!["transition/unknown"]
         );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "dim" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'dim'::HOVER_FOCUS FROM t;",
+                row
+            ),
+            vec!["hover-focus/unknown"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "none" });
+        assert!(codes(
+            "SELECT x::XAXIS, y::BARCHART, 'none'::HOVER_FOCUS FROM t;",
+            row
+        )
+        .is_empty());
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
     }

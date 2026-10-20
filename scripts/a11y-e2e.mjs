@@ -433,6 +433,85 @@ for (const scheme of ["light", "dark"]) {
   await lp.close();
 }
 
+// The inline "Layout" example's ::VIEW switcher (#214: Revenue → By week →
+// Bars/Lines/Table, added in web/app.js's "examples: Revenue → By week as a
+// ::VIEW switcher" commit) — always checked here, whatever --dashboard was
+// asked for on the command line: axe, keyboard (Arrow/Home/End move +
+// activate, aria-selected updates, focus stays on the tab — which is exactly
+// what a document-level handler such as dpNav intercepting the key would
+// break, so this also shows it never does), phone width 390 (no horizontal
+// overflow, the view bar visible and tappable, the panel full width), and
+// reduced motion (no .dp-switching animation class, the same
+// reducedMotion: "reduce" simulation this script already uses elsewhere).
+{
+  const vp = await browser.newPage({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
+  vp.on("pageerror", (e) => errs.push(String(e)));
+  await vp.goto(`${base}?dashboard=${encodeURIComponent("How is revenue split by week and channel?")}`);
+  await vp.waitForSelector(".dp-viewbar [role='tab']", { timeout: 60000 });
+  await vp.waitForFunction(() => document.querySelector(".dash .panel") && !document.body.classList.contains("loading"), null, { timeout: 60000 });
+  const viewTabs = () => vp.$$eval(".dp-viewbar [role='tab']", (l) => l.map((b) => b.textContent));
+  const selected = () => vp.$$eval(".dp-viewbar [role='tab']", (l) => l.map((b) => b.getAttribute("aria-selected")));
+  if (JSON.stringify(await viewTabs()) !== '["Bars","Lines","Table"]') fail(`::VIEW switcher tabs: ${JSON.stringify(await viewTabs())}`);
+
+  await vp.focus(".dp-viewbar [role='tab']:first-child");
+  await vp.keyboard.press("ArrowRight");
+  // activateView's refocus() moves the focus on the next animation frame
+  // (the new controls attach once the run has rendered), not synchronously.
+  await vp.waitForFunction(() => document.activeElement === document.querySelectorAll(".dp-viewbar [role='tab']")[1], null, { timeout: 5000 });
+  let st = await vp.evaluate(() => {
+    const btns = [...document.querySelectorAll(".dp-viewbar [role='tab']")];
+    const pane = document.getElementById(btns[1].getAttribute("aria-controls"));
+    return { sel: btns.map((b) => b.getAttribute("aria-selected")), focused: document.activeElement === btns[1], shown: pane?.style.display !== "none" };
+  });
+  if (st.sel[1] !== "true" || !st.focused || !st.shown) fail(`::VIEW switcher ArrowRight: ${JSON.stringify(st)}`);
+  await vp.keyboard.press("End");
+  if ((await selected())[2] !== "true") fail(`::VIEW switcher End: ${JSON.stringify(await selected())}`);
+  await vp.keyboard.press("Home");
+  if ((await selected())[0] !== "true") fail(`::VIEW switcher Home: ${JSON.stringify(await selected())}`);
+  console.log("::VIEW switcher keyboard: Bars →(ArrowRight) Lines →(End) Table →(Home) Bars, focus kept on the tab throughout");
+
+  if (axe && existsSync(axe)) {
+    await vp.addScriptTag({ path: axe });
+    const res = await vp.evaluate(async () => window.axe.run(".dp-views", { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] } }));
+    for (const v of res.violations) console.log(`axe ::VIEW switcher ${v.impact}: ${v.id} (${v.nodes.length}) ${v.help}`);
+    const bad = res.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+    if (bad.length) fail(`axe ::VIEW switcher: ${bad.map((v) => v.id).join(", ")}`);
+    else console.log(`axe ::VIEW switcher: ${res.passes.length} rules pass, no serious violation`);
+  }
+
+  // Reduced motion: switching to a different alternative applies no
+  // .dp-switching class (this context's reducedMotion: "reduce" makes
+  // dpAnim.still() true — see web/app.js's activateView).
+  await vp.click(".dp-viewbar [role='tab']:nth-child(2)"); // Bars → Lines
+  await vp.waitForTimeout(100);
+  const switching = await vp.evaluate(() => !!document.querySelector(".dp-switching"));
+  if (switching) fail("reduced motion: .dp-switching was applied on a view switch");
+
+  // Phone width (390): no horizontal overflow, the view bar visible and
+  // tappable, the active pane's panel full width.
+  await vp.setViewportSize({ width: 390, height: 844 });
+  await vp.waitForTimeout(300);
+  const phone = await vp.evaluate(() => {
+    const bar = document.querySelector(".dp-viewbar");
+    const btn = bar?.querySelector('[role="tab"][aria-selected="true"]');
+    const pane = btn && document.getElementById(btn.getAttribute("aria-controls"));
+    const br = btn?.getBoundingClientRect();
+    const pr = pane?.getBoundingClientRect();
+    return {
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      barVisible: !!bar && getComputedStyle(bar).display !== "none" && bar.getBoundingClientRect().width > 0,
+      tapSize: br ? Math.min(br.width, br.height) : 0,
+      paneWidth: pr?.width ?? 0,
+    };
+  });
+  console.log("::VIEW switcher phone (390):", JSON.stringify(phone));
+  if (phone.overflow > 1) fail(`::VIEW switcher phone 390: horizontal overflow ${phone.overflow}px`);
+  if (!phone.barVisible) fail("::VIEW switcher phone 390: the view bar is not visible");
+  if (phone.tapSize < 24) fail(`::VIEW switcher phone 390: the tab is too small to tap (${phone.tapSize}px)`);
+  if (phone.paneWidth < 300) fail(`::VIEW switcher phone 390: the panel is not full width (${phone.paneWidth}px)`);
+  await vp.close();
+}
+
 if (axe && existsSync(axe)) {
   await page.addScriptTag({ path: axe });
   const res = await page.evaluate(async () =>

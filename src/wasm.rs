@@ -1,7 +1,7 @@
 //! wasm-bindgen surface for the browser dashboard builder. DuckDB-Wasm runs the
 //! SQL in-page; these functions plan the annotated script and render each panel
 //! to SVG — so the whole pipeline is client-side, no server, no DuckDB
-//! extension. Build with: `wasm-pack build --features wasm`.
+//! extension. Build with: `wasm-pack build --profile wasm --features wasm`.
 //!
 //! Every export is wrapped so a failure returns an error value (an error SVG
 //! for renders, `[]` for JSON) rather than throwing. Note that on
@@ -18,7 +18,9 @@ use wasm_bindgen::prelude::*;
 /// Plan a dashboard script into JSON:
 /// `[{ "setup": bool, "sql": string, "roles": [[colIdx, "ROLE", name], …],
 ///    "contract": null | {"macro": name, "rows": k, "args": k+1,
-///                        "groups": [[colIdx, name], …]} }]`.
+///                        "groups": [[colIdx, name], …]},
+///    "view": null | {"group": idx, "alt": n, "marker": bool, "id": string,
+///                     "label": string?} }]` (#214).
 /// The caller runs each `sql` through DuckDB-Wasm (setup statements for effect,
 /// panels with `-json`) and passes the rows back to [`render_panel`] — or, for
 /// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
@@ -57,6 +59,13 @@ fn plan_json(script: &str) -> String {
                 })),
                 "requires": p.requires,
                 "tab_requires": p.tab_requires,
+                "view": p.view.as_ref().map(|v| serde_json::json!({
+                    "group": v.group,
+                    "alt": v.alt,
+                    "marker": v.marker,
+                    "id": v.id,
+                    "label": v.label,
+                })),
             })
         })
         .collect();

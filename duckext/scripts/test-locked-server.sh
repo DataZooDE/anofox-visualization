@@ -15,10 +15,15 @@
 #   * `-- @requires` on a ::TRACK (#162) and on a ::TAB / ::SUBTAB, whose
 #     panels then never run (#163) — with NODE_PATH also in a browser
 #     (requires-tabs-e2e.mjs).
+#   * `-- @requires` on a ::VIEW alternative (#214): hidden exactly like a
+#     ::TAB/::SUBTAB's (only its own alternative, never its siblings), every
+#     alternative hidden hides the whole group, and `?view.*` never reaches
+#     the server — with NODE_PATH also in a browser (views-e2e.mjs).
 #   * parquet footers are cached across requests; a file renamed into place is
 #     always read fresh, an in-place rewrite at the same size and mtime second
 #     is not (#209).
 #   * the result cache keys on the variables a panel can depend on (#210).
+#   * a database with foreign keys (#283).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -433,6 +438,77 @@ else
 fi
 stop
 
+# 6b. `-- @requires` on a ::VIEW group (#214): like a ::TAB/::SUBTAB, an
+# alternative's own `-- @requires` hides only itself — no button, no pane, a
+# direct request for its own statement or its panels answers "Not available"
+# — and when every alternative of a group is hidden, the whole group (and
+# each of its statements) disappears too. `?view.<id>=<label>` is a
+# client-side URL concern only: `/d/<id>` ignores the query string
+# entirely, so a crafted value can never be reflected or change the page.
+mkdir -p "$T/vruns/r1" "$T/vruns/r2" "$T/vdash"
+"$DUCKDB" -c "COPY (SELECT DATE '2026-01-01' + to_days(i::INT) AS day, i AS v FROM range(10) t(i)) TO $(q "$T/vruns/r1/present.parquet");
+  COPY (SELECT DATE '2026-01-01' + to_days(i::INT) AS day, i AS v FROM range(10) t(i)) TO $(q "$T/vruns/r2/present.parquet");
+  COPY (SELECT 7 AS v) TO $(q "$T/vruns/r1/fc.parquet");
+  COPY (SELECT 1 AS v) TO $(q "$T/vruns/r1/zx.parquet");
+  COPY (SELECT 1 AS v) TO $(q "$T/vruns/r1/zy.parquet");" >/dev/null
+cat > "$T/vdash/views.sql" <<'SQL'
+SELECT unnest(['r1', 'r2']) AS run ::DROPDOWN;
+SELECT 10 AS boost ::NUMBER;
+SET VARIABLE rd = getvariable('anofox_data') || '/' || getvariable('run');
+-- @requires ${rd}/fc.parquet
+SELECT 'Lines' AS yoy ::VIEW;
+SELECT day::XAXIS, (v * getvariable('boost'))::LINECHART, 'Revenue (lines)'::TITLE FROM read_parquet(getvariable('rd') || '/present.parquet') ORDER BY day;
+SELECT 'Bars'::VIEW;
+SELECT 420::HEIGHT;
+SELECT day::XAXIS, (v * getvariable('boost'))::BARCHART, 'Revenue (bars)'::TITLE FROM read_parquet(getvariable('rd') || '/present.parquet') ORDER BY day;
+SELECT 'Table'::VIEW;
+SELECT 'all'::TOTALS;
+SELECT day::TABLE, (v * getvariable('boost')) AS revenue ::MONEY FROM read_parquet(getvariable('rd') || '/present.parquet') ORDER BY day;
+SELECT 1::ENDVIEW;
+-- @requires ${rd}/zx.parquet
+SELECT 'Alpha'::VIEW;
+SELECT 1::BIGINT AS one ::METRIC;
+-- @requires ${rd}/zy.parquet
+SELECT 'Beta'::VIEW;
+SELECT 2::BIGINT AS two ::METRIC;
+SQL
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/vdash"), $PORT,
+  json_object('data', $(q "$T/vruns"), 'path_vars', ['run']));" || fail "views server"
+# statements: 0/1 = the run dropdown / boost number; 2 = setup (rd); 3/4 =
+# the "yoy" group's Lines marker/chart (needs fc.parquet, r1 only); 5-7 =
+# Bars (no requires, always shown); 8-10 = Table (no requires, always
+# shown); 11 = ::ENDVIEW; 12/13 = group "2"'s Alpha marker/KPI (needs
+# zx.parquet, r1 only); 14/15 = Beta marker/KPI (needs zy.parquet, r1 only)
+# — on r2 every alternative of group "2" is hidden, so the whole group is.
+[ "$(panel 4 '{"run":"r1"}' views)" = 200 ] || fail "shown alternative (Lines, r1): $(cat "$T/body")"
+na "$(panel 4 '{"run":"r2"}' views)" "Lines hidden on r2"
+[ "$(panel 7 '{"run":"r2"}' views)" = 200 ] || fail "Bars has no requires, always shown: $(cat "$T/body")"
+[ "$(panel 10 '{"run":"r2"}' views)" = 200 ] || fail "Table has no requires, always shown: $(cat "$T/body")"
+# the marker's own statement answers "Not available" too — exactly how the
+# browser decides a ::VIEW is hidden (tabShown() in web/app.js).
+na "$(panel 3 '{"run":"r2"}' views)" "Lines marker, r2"
+[ "$(panel 3 '{"run":"r1"}' views)" = 200 ] || fail "Lines marker, r1: $(cat "$T/body")"
+# every alternative of group "2" hidden on r2 (and so is the group); on r1
+# (both files present) every one of its statements runs.
+for i in 12 13 14 15; do na "$(panel $i '{"run":"r2"}' views)" "group 2, statement $i, r2"; done
+for i in 12 13 14 15; do [ "$(panel $i '{"run":"r1"}' views)" = 200 ] || fail "group 2, statement $i, r1: $(cat "$T/body")"; done
+# `?view.<id>=<label>` never reaches the server (a purely client-side URL
+# concern, #214's security review item 1): `/d/<id>` ignores the query
+# string entirely, so a crafted value is never reflected and the page is
+# byte-identical with or without it.
+curl -s "http://127.0.0.1:$PORT/d/views" > "$T/vpage_plain"
+curl -s "http://127.0.0.1:$PORT/d/views?view.yoy=%3Cscript%3Ealert(1)%3C%2Fscript%3E" > "$T/vpage_xss"
+cmp -s "$T/vpage_plain" "$T/vpage_xss" || fail "?view.x=<script> changed the served page"
+grep -qi "<script>alert(1)" "$T/vpage_xss" && fail "?view.x=<script> was reflected in the page"
+echo "OK: ::VIEW -- @requires hides only its own alternative; every alternative hidden hides the group; ?view.* never reflected"
+if [ -n "${NODE_PATH:-}" ]; then
+  node "$(dirname "$0")/views-e2e.mjs" "http://127.0.0.1:$PORT" || fail "browser checks (views-e2e.mjs)"
+  echo "OK: in a browser — only the active alternative's panels are asked; switching views asks exactly the new one"
+else
+  echo "SKIP: browser checks (set NODE_PATH to a node_modules with playwright)"
+fi
+stop
+
 # 7. Parquet footers are cached across requests (#209): the snapshot has
 # parquet_metadata_cache on (viewers can't turn it off). A file renamed into
 # the data folder is always read fresh, also through a setup view; an
@@ -487,3 +563,49 @@ grep -q "epoch 2" "$T/out" || fail "parquet cache refresh: $(cat "$T/out")"
 grep -q "parquet_metadata_cache:" "$T/out" && fail "parquet_metadata_cache warning: $(cat "$T/out")"
 stop
 echo "OK: parquet footers cached across requests; a file renamed into place reads fresh, also after a refresh"
+
+# 8. A database with foreign keys (#283): a bare COPY FROM DATABASE fails on it
+# (duckdb/duckdb#16785), so the snapshot copies schema first, then table by
+# table, parents first; a generated column and a sequence default copy as
+# values; a self-referencing table is copied without its constraints. From a
+# -readonly session, and the source is checked unchanged afterwards.
+"$DUCKDB" "$T/fk.duckdb" -c "
+CREATE SEQUENCE sq;
+CREATE TABLE suppliers(supplier_id VARCHAR PRIMARY KEY, name VARCHAR);
+CREATE TABLE materials(material_id VARCHAR PRIMARY KEY, supplier_id VARCHAR REFERENCES suppliers(supplier_id),
+  price DOUBLE, price2 DOUBLE GENERATED ALWAYS AS (price * 2));
+CREATE TABLE actuals(material_id VARCHAR REFERENCES materials(material_id), qty INTEGER, n BIGINT DEFAULT nextval('sq'));
+CREATE TABLE tree(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES tree(id));
+INSERT INTO suppliers SELECT 'SUP-' || lpad(i::VARCHAR, 3, '0'), 's' || i FROM range(50) r(i);
+INSERT INTO materials (material_id, supplier_id, price) SELECT 'M-' || i, 'SUP-' || lpad((i % 50)::VARCHAR, 3, '0'), i FROM range(500) r(i);
+INSERT INTO actuals (material_id, qty) SELECT 'M-' || (i % 500), i FROM range(20000) r(i);
+INSERT INTO tree VALUES (1, NULL); INSERT INTO tree VALUES (2, 1); INSERT INTO tree VALUES (3, 2);
+CREATE VIEW per_supplier AS SELECT supplier_id, sum(qty) AS q FROM actuals JOIN materials USING (material_id) GROUP BY ALL;" >/dev/null
+if "$DUCKDB" -c "ATTACH $(q "$T/fk.duckdb") AS s (READ_ONLY); ATTACH ':memory:' AS d; COPY FROM DATABASE s TO d;" >/dev/null 2>&1; then
+  echo "NOTE: a bare COPY FROM DATABASE copies the FK fixture now (duckdb/duckdb#16785 fixed?)"
+fi
+fkstate() { "$DUCKDB" -readonly -noheader -list "$T/fk.duckdb" -c "SELECT count(*) FROM duckdb_constraints() WHERE database_name = current_database(); SELECT count(*), sum(n) FROM actuals; SELECT count(*) FROM tree;"; }
+before="$(fkstate)"
+mkdir -p "$T/fkdash"
+cat > "$T/fkdash/fk.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM actuals;
+SELECT sum(price2)::BIGINT AS s ::METRIC FROM materials;
+SELECT count(*)::BIGINT AS n ::METRIC FROM tree WHERE parent IS NOT NULL;
+SELECT count(*)::BIGINT AS n ::METRIC FROM per_supplier;
+SELECT max(n)::BIGINT AS n ::METRIC FROM actuals;
+SQL
+start "$T/fk.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/fkdash"), $PORT, '{}');" || fail "a database with foreign keys could not be served"
+[ "$(panel 0 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK actuals: $(cat "$T/body")"
+[ "$(panel 1 '{}' fk)" = 200 ] && grep -qE '"c0":249500(\.0)?[,}]' "$T/body" || fail "FK generated column: $(cat "$T/body")"
+[ "$(panel 2 '{}' fk)" = 200 ] && grep -qE '"c0":2(\.0)?[,}]' "$T/body" || fail "FK self-referencing table: $(cat "$T/body")"
+[ "$(panel 3 '{}' fk)" = 200 ] && grep -qE '"c0":50(\.0)?[,}]' "$T/body" || fail "FK view: $(cat "$T/body")"
+[ "$(panel 4 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK sequence default: $(cat "$T/body")"
+grep -q "table main.tree of 'fk' copied without its constraints" "$T/out" || fail "FK: no warning for tree: $(cat "$T/out")"
+grep -qE "main\.(materials|actuals|suppliers) of 'fk' copied without" "$T/out" && fail "FK: a table lost its constraints: $(cat "$T/out")"
+echo "SELECT anofox_serve_refresh($PORT);" >&3
+for _ in $(seq 50); do grep -q "epoch 2" "$T/out" && break; sleep 0.2; done
+grep -q "epoch 2" "$T/out" || fail "FK refresh: $(cat "$T/out")"
+[ "$(panel 0 '{}' fk)" = 200 ] && grep -qE '"c0":20000(\.0)?[,}]' "$T/body" || fail "FK after refresh: $(cat "$T/body")"
+stop
+[ "$before" = "$(fkstate)" ] || fail "FK: the source database changed"
+echo "OK: a database with foreign keys is snapshotted table by table, parents first; a self-referencing table without its constraints; the source is untouched"
