@@ -19,20 +19,13 @@ use std::collections::BTreeMap;
 /// Header carrying the per-server token for non-browser clients.
 pub const TOKEN_HEADER: &str = "X-Anofox-Token";
 
-/// HTML-escape text for element content *and* attribute values.
+/// HTML-escape text for element content *and* attribute values. Delegates
+/// to [`crate::format::escape_xml`] — the one shared escaper every SVG/HTML
+/// writer in the crate uses — so a stray control character in served HTML
+/// is replaced the same way it is in headless SVG output, instead of two
+/// escapers silently drifting apart.
 pub fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
+    crate::format::escape_xml(s)
 }
 
 /// Serialise JSON for embedding inside an inline `<script>`: escapes `<`, `>`,
