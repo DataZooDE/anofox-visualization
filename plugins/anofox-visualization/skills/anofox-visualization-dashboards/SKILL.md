@@ -22,13 +22,13 @@ description: >
   panels, the Explore data page, the `dashboard --describe` / `--check`
   generate-validate-repair loop with its lint codes, the design contract
   and the gotchas that silently break a panel.
-version: 2026.10.19
+version: 2026.10.20
 user-invocable: false
 ---
 
 # Anofox Visualization — ::ROLE Dashboards (build-dashboard)
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.19) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
+**Extension:** `anofox_visualization` (CalVer 2026.10.20) | **Tools:** `dashboard` CLI (`--describe`, `--check`, `--roles`), browser builder, `serve` | **Docs:** `docs/DOCS.md`, `docs/dashboard-design.md` in the repository
 
 A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel (chart, KPI, table, input). Statements without a role (`CREATE TABLE`, `SET`, `LOAD`, …) run as setup, in order, on one session. Your output is one SQL script.
 
@@ -58,7 +58,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `box/missing`, `box/unordered`, `box/null` | error / warning / warning | a box from statistics without `::Q1`/`::MEDIAN`/`::Q3`, with one whisker, without `::XAXIS` or beside a chart measure; Q1 ≤ median ≤ Q3 broken or a whisker inside the box; a NULL quartile (not drawn) |
 | `requires/unknown-variable`, `requires/empty-alternative`, `requires/bad-variable`, `requires/on-setup`, `requires/tab-always-hidden` | warning (`--strict` fails) | a `${name}` in `-- @requires` with no value here (that path counts as missing; `--check --data <dir>` sets `anofox_data`); `a \|` / `a \|\| b` / a line with no path; a malformed `${…}`; `@requires` on a setup statement that reads no file (a viewer could skip it: put it on the statement that reads the file); a tab's `${name}` set only by a `SET VARIABLE` below the tab (a locked server always hides it: set it above) |
 | `view/duplicate-label`, `view/empty-label`, `view/duplicate-name`, `view/bad-name`, `view/unbalanced-group` (error) · `view/lone`, `view/computed-label`, `view/mixed-names`, `view/empty`, `view/open-ended`, `view/stray-end` (warning) · `view/input-inside`, `view/unnamed` (note) | mostly warning, five are errors | a `::VIEW` switcher's label repeated / blank / a computed expression; two groups sharing one id, or an alias that isn't a plain identifier; a `::GROUP` opened inside a view not closed inside it; a group with only one alternative; different aliases inside one group; an alternative with no rendering statement; no `::ENDVIEW` with the last view holding the most panels; a stray `::ENDVIEW`; an input inside a view (its control only shows there); 2+ groups in the script with one unnamed |
-| `animate/unknown`, `animate/reveal-no-xline`, `linestyle/unknown`, `story/bad-by`, `transition/unknown` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from; a `::LINESTYLE` that is not `flow`/`dashed`/`solid`; a `::STORY_BY` that is not `x`/`series` (or `series` without a `::CATEGORY`); a `::TRANSITION` that is not `tween`/`none` |
+| `animate/unknown`, `animate/reveal-no-xline`, `linestyle/unknown`, `story/bad-by`, `transition/unknown`, `hover-focus/unknown` | warning | an `::ANIMATE` value that is not `auto`/`draw`/`grow`/`reveal`/`none`; `'reveal'` without an `::XLINE` to start from; a `::LINESTYLE` that is not `flow`/`dashed`/`solid`; a `::STORY_BY` that is not `x`/`series` (or `series` without a `::CATEGORY`); a `::TRANSITION` that is not `tween`/`none`; a `::HOVER_FOCUS` that is not `series`/`none` |
 | `track/no-chart` | warning | a `::TRACK` that does not directly follow a chart with a numeric / date `::XAXIS` (only a `::HEIGHT` may sit between): it is drawn as a panel of its own |
 | `annotation/unpaired` | warning | a label / range end without its partner, or unequal numbers of `::BAND_LOWER` and `::BAND_UPPER` |
 | `diagram/null-id`, `diagram/duplicate-node`, `diagram/unknown-node`, `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction`, `diagram/too-large` | warning | a `::DIAGRAM` row without an id; an id twice (the first row wins); an edge naming an id that is no row (not drawn); `::EDGES` that is not a list of `{from, to}` structs; an edge style that is not `solid`/`dashed`/`flow`; a `::DIRECTION` that is not `LR`/`TB`; more than 150 nodes / 300 edges (the first ones are drawn) |
@@ -76,7 +76,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Group | Roles (aliases in brackets) |
 |---|---|
 | Chart kind (on the measure) | `::BARCHART` `::BARCHART_STACKED` `::BARCHART_PERCENT` `::BARCHART_STACKED_PERCENT` · `::LINECHART` `::LINECHART_PERCENT` `::STEP` `::SMOOTH` · `::AREACHART` `::AREACHART_STACKED` · `::SCATTER` `::BUBBLE` `::JITTER` · `::PIE` `::DONUTCHART` · `::GAUGE` · `::RADAR` · `::WATERFALL` `::BULLET` `::FUNNEL` · `::HISTOGRAM` `::DENSITY` `::BOXPLOT` `::VIOLIN` `::QQ` · `::HEATMAP` `::CALENDAR` · `::CANDLESTICK` · `::SPARKLINE` · `::MAP` (WKT) · `::REGION` (a code from the built-in boundaries: `'DE'`/`'DEU'`, `'DE-BY'`, AGS `'09162'`, NUTS `'DE212'`) · `::LAT` + `::LON` (points) · `::BASEMAP` (WKT or `'world'`, `'de-states'`, `'de-districts'`) · `::DIAGRAM` (on the node id, see *Diagrams*) |
-| Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble) · `::OPEN` `::HIGH` `::LOW` (candles) |
+| Encoding | `::XAXIS` (`::X`) · `::YAXIS` (`::Y`, heatmap rows) · `::CATEGORY` (`::SERIES`, `::COLOR`) discrete colour · `::LABEL` (section heading alone; else chart / per-mark label) · `::TITLE` (panel title bar) · `::SIZE` (bubble; on a map: a symbol's area, graduated — largest first, size legend) · `::OPEN` `::HIGH` `::LOW` (candles) |
 | Box plot from statistics (one row per box, no `::BOXPLOT`) | `::Q1` `::MEDIAN` `::Q3` (required) · `::WHISKER_LOW` + `::WHISKER_HIGH` · `::MEAN` (a dot) · `::OUTLIERS` (a list) — e.g. `quantile_cont(v, 0.25)::Q1, median(v)::MEDIAN, quantile_cont(v, 0.75)::Q3` with `GROUP BY` the `::XAXIS`, for populations too large to send as raw rows |
 | Intervals, facets | `::YMIN` + `::YMAX` (a `::SCATTER` → pointrange, bars / lines → error bars, dodged by `::CATEGORY`) · `::XMIN` + `::XMAX` · `::FACET` / `::FACET_FREE` + `::FACET_NCOL` · `::RANK` + `::LABEL_TOP` · `::CENSOR` (Kaplan-Meier `+`) |
 | Annotations | `::REFLINE` (`::YLINE`, `::TARGET`) · `::XLINE` (number, date or timestamp) · `::BAND_LOWER` + `::BAND_UPPER` (several pairs, in column order = a nested fan: 95 / 80 / 50 %) · `CASE WHEN flag THEN day END::MARKAREA` (a shaded region per run of flagged days) · `::DATALABELS` · `'slope,intercept'::ABLINE` · `1::IDENTITY` · `p::COOKS_CONTOUR` |
@@ -414,6 +414,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | where it happens: by country / state / district code | `code::REGION` + the measure (`'quantile 5'::CLASSES`, `8::LABEL_TOP`); built-in countries, German states and districts — no geodata needed |
 | where it happens: by location | `lat::LAT, lon::LON` points over `'world'::BASEMAP` (or `'de-states'`) |
 | any other geography (WKT) | `::MAP` |
+| how much, where (counts at places) | `lat::LAT, lon::LON` (or `code::REGION`) + `n::SIZE`: graduated symbols, area ∝ n; colour by a measure or `::CATEGORY` |
 | a process, pipeline or lineage: steps and what flows between them | `::DIAGRAM` (one row per step; edges from `::UPSTREAM` or `::EDGES`) |
 | row-level detail | `::TABLE` (`::PAGED` if large / remote); flag / rank with `::FLAG` / `::HIGHLIGHT`, not colour alone |
 

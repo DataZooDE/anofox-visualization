@@ -1,7 +1,7 @@
 //! wasm-bindgen surface for the browser dashboard builder. DuckDB-Wasm runs the
 //! SQL in-page; these functions plan the annotated script and render each panel
 //! to SVG — so the whole pipeline is client-side, no server, no DuckDB
-//! extension. Build with: `wasm-pack build --features wasm`.
+//! extension. Build with: `wasm-pack build --profile wasm --features wasm`.
 //!
 //! Every export is wrapped so a failure returns an error value (an error SVG
 //! for renders, `[]` for JSON) rather than throwing. Note that on

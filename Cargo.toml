@@ -9,7 +9,7 @@ default-members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "2026.10.19"
+version = "2026.10.20"
 edition = "2021"
 license = "BUSL-1.1"
 
@@ -76,3 +76,21 @@ roxmltree = "0.21"
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
+
+# The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
+# Separate from [profile.release] (native DuckDB extension + the `serve`/
+# `dashboard` binaries), which is NOT touched here and stays Cargo's defaults.
+# Without this, wasm-pack's default profile (opt-level 3, no LTO, 16 codegen
+# units) made per-PR wasm size deltas mostly codegen noise (±20-40 K, functions
+# get reshuffled across codegen units by unrelated changes) — see
+# ~/projects/duckdb/wasm-size-m2.md. Fat LTO + one codegen unit alone removes
+# most of that noise; opt-level "z" was then chosen over the default 3 and
+# over "s" from a 3-way raw/gzip size vs. browser render-time measurement
+# (showcase + delivery-coverage dashboards, Playwright, 5 runs each): "z" is
+# the smallest (-34.5% raw / -29.1% gzip vs. opt 3) and showed no render-time
+# regression on either dashboard.
+[profile.wasm]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"

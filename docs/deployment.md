@@ -59,6 +59,12 @@ port. So once `GET /healthz` answers `{"status":"ok",...}`, the server is ready.
 For the 2-million-row load-test data that took 2–5 s. The snapshot changes
 only when it is refreshed (§5).
 
+A database with foreign keys is copied schema first, then table by table,
+parents before children: DuckDB's own `COPY FROM DATABASE` fails on one
+(duckdb/duckdb#16785). A table whose foreign key references itself is copied
+without its constraints and indexes (the startup message says so); the data
+and the results are the same.
+
 The process must stay in the foreground. The DuckDB CLI exits when its stdin
 ends, and the servers stop with it. [`deploy/run-locked.sh`](../deploy/run-locked.sh)
 gives the CLI a stdin that never ends: a FIFO it holds open for both reading and

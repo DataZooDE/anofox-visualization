@@ -2,12 +2,14 @@
 //!
 //! **Authoring** (default): `serve [db]` launches the embedded browser builder
 //! wired to a DuckDB file via a `/query` endpoint that runs client-supplied SQL
-//! (through the `duckdb` CLI). Because it runs arbitrary SQL it is locked to
-//! the author: loopback bind only, the `Host` header must be loopback (DNS
-//! rebinding), cross-origin requests are refused (CSRF), and every request needs
-//! the random per-run token from the printed URL (`?token=` → `HttpOnly;
-//! SameSite=Strict` cookie, or the `X-Anofox-Token` header). Bodies containing
-//! CLI dot-commands (`.shell`, `.read`, …) are refused before reaching the CLI.
+//! (through one long-lived `duckdb` CLI session, so ATTACH, TEMP objects and
+//! variables persist between statements, #275). Because it runs arbitrary SQL
+//! it is locked to the author: loopback bind only, the `Host` header must be
+//! loopback (DNS rebinding), cross-origin requests are refused (CSRF), and
+//! every request needs the random per-run token from the printed URL
+//! (`?token=` → `HttpOnly; SameSite=Strict` cookie, or the `X-Anofox-Token`
+//! header). Bodies containing CLI dot-commands (`.shell`, `.read`, …) are
+//! refused before reaching the CLI.
 //!
 //! **Serve** (`--dashboards <dir>`): the secure, consumer-facing mode. Dashboards
 //! (annotated `.sql` files) live on the server; the client only selects a
@@ -27,7 +29,7 @@ use anofox_visualization::theme::DashboardChrome;
 use anofox_visualization::{page, render_with_title, sql, track, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -87,6 +89,15 @@ const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
     std::process::exit(2)
+}
+
+/// An `AppBrand::set` error, named by the flag that caused it (#267): the
+/// brand's keys use `_` (`logo_dark`), the flags `-` (`--app-logo-dark`).
+fn app_flag_error(e: &str) -> String {
+    let n = e
+        .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+        .unwrap_or(e.len());
+    format!("--app-{}{}", e[..n].replace('_', "-"), &e[n..])
 }
 
 fn parse_args() -> Opts {
@@ -186,7 +197,7 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|| usage(&format!("{a} needs a value")));
                 o.app
                     .set(&a["--app-".len()..].replace('-', "_"), &v, true)
-                    .unwrap_or_else(|e| usage(&format!("--app-{e}")));
+                    .unwrap_or_else(|e| usage(&app_flag_error(&e)));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
             "--home" => {
@@ -536,10 +547,13 @@ fn authoring_mode(o: &Opts) {
     if o.open_browser {
         let _ = open::that(&url);
     }
-    run_workers(server, 1, move |req| handle_authoring(&guard, &db, req));
+    let session = Mutex::new(AuthoringSession::new(db.clone()));
+    run_workers(server, 1, move |req| {
+        handle_authoring(&guard, &session, req)
+    });
 }
 
-fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
+fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, mut req: Request) {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/").to_string();
     let m = meta(&req);
@@ -577,7 +591,7 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         if sv::has_dot_command(&sql) {
             return text(req, 400, "CLI dot-commands are not allowed");
         }
-        return match run_duckdb(db, &["-json"], &sql, Duration::ZERO) {
+        return match session.lock().unwrap_or_else(|p| p.into_inner()).run(&sql) {
             Ok(body) => {
                 let body = if body.trim().is_empty() {
                     "[]".into()
@@ -623,6 +637,233 @@ fn handle_authoring(guard: &AuthoringGuard, db: &str, mut req: Request) {
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
     }
+}
+
+// ---------- the authoring session (#275) ----------
+
+/// One long-lived `duckdb` CLI process for the builder's `/query`s, so what a
+/// statement leaves in the session — ATTACH, TEMP tables / views / macros,
+/// SET VARIABLE, LOAD, SET, USE — is there for the next one (as in DuckDB-Wasm
+/// and `anofox_serve()`). Each body is written to a file in a private
+/// directory and run with `.read`; a `.print` marker and a `.read` of a
+/// missing `end-<nonce>` file mark the end of its stdout and stderr (dot
+/// commands: they still run in an aborted transaction). The nonce is fresh
+/// per request, so a query can't fake the end. If the CLI exits, the next
+/// query starts a new session.
+struct AuthoringSession {
+    db: String,
+    dir: PathBuf,
+    live: Option<Live>,
+}
+
+struct Live {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    out: BufReader<std::process::ChildStdout>,
+    err: std::sync::mpsc::Receiver<String>,
+}
+
+enum RoundErr {
+    /// The statement failed; the session is fine.
+    Sql(String),
+    /// The CLI is gone (stderr's tail).
+    Ended(String),
+}
+
+impl AuthoringSession {
+    fn new(db: String) -> Self {
+        let dir = private_dir("anofox-session");
+        let p = dir.to_string_lossy();
+        if p.contains(['\'', '\n', '\r']) {
+            eprintln!(
+                "error: the temp directory path ({p}) contains a quote or a line break; set TMPDIR to another directory"
+            );
+            std::process::exit(1);
+        }
+        AuthoringSession {
+            db,
+            dir,
+            live: None,
+        }
+    }
+
+    fn run(&mut self, sql: &str) -> Result<String, String> {
+        if self.live.is_none() {
+            self.live = Some(Live::spawn(&self.db, &self.dir)?);
+        }
+        let r = self
+            .live
+            .as_mut()
+            .expect("a live session")
+            .round(&self.dir, sql);
+        let _ = std::fs::remove_file(self.dir.join("q.sql"));
+        match r {
+            Ok(out) => Ok(out),
+            Err(RoundErr::Sql(e)) => Err(e),
+            Err(RoundErr::Ended(tail)) => {
+                if let Some(mut l) = self.live.take() {
+                    let _ = l.child.kill();
+                    let _ = l.child.wait();
+                }
+                Err(format!(
+                    "the DuckDB session ended; the next query starts a new one (ATTACH, TEMP objects and variables are gone){}",
+                    if tail.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", tail.trim())
+                    }
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for AuthoringSession {
+    fn drop(&mut self) {
+        if let Some(mut l) = self.live.take() {
+            let _ = l.child.kill();
+            let _ = l.child.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Live {
+    fn spawn(db: &str, dir: &Path) -> Result<Live, String> {
+        let mut child = Command::new("duckdb")
+            .arg(db)
+            .arg("-json")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("duckdb: {e}"))?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let out = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let err_pipe = child.stderr.take().expect("piped stderr");
+        let (tx, err) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(err_pipe).lines() {
+                let Ok(l) = line else { break };
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut live = Live {
+            child,
+            stdin,
+            out,
+            err,
+        };
+        // Reset what a `~/.duckdbrc` could otherwise break or hang every
+        // request with (#275 L2): `.bail on` would exit the CLI at the
+        // stderr end marker's deliberate "missing file" error, and a
+        // leftover `.output …` would swallow the `.print` marker. These are
+        // server-written dot commands, sent before the warm-up round's own
+        // markers; the client-side dot-command refusal is unaffected.
+        match live.round_with(dir, ".bail off\n.output\n.mode json\n", "") {
+            Ok(_) | Err(RoundErr::Sql(_)) => Ok(live),
+            Err(RoundErr::Ended(t)) => {
+                // #275 L4: don't leak a zombie when the session never came up.
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                Err(format!("duckdb did not start: {}", t.trim()))
+            }
+        }
+    }
+
+    fn round(&mut self, dir: &Path, sql: &str) -> Result<String, RoundErr> {
+        self.round_with(dir, "", sql)
+    }
+
+    fn round_with(&mut self, dir: &Path, preamble: &str, sql: &str) -> Result<String, RoundErr> {
+        let q = dir.join("q.sql");
+        // Drop any previous (now read-only, #275 L3) staged query first.
+        let _ = std::fs::remove_file(&q);
+        write_private(&q, sql)
+            .map_err(|e| RoundErr::Sql(format!("could not stage the query: {e}")))?;
+        // Read-only once staged (#275 L3): the query can't rewrite its own
+        // file out from under the CLI's still-open `.read` of it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o400));
+        }
+        let nonce = sv::random_token();
+        let done = format!("__anofox_done_{nonce}");
+        let script = format!(
+            "{preamble}.read '{}'\n.print {done}\n.read '{}'\n",
+            q.display(),
+            dir.join(format!("end-{nonce}")).display()
+        );
+        if self
+            .stdin
+            .write_all(script.as_bytes())
+            .and_then(|_| self.stdin.flush())
+            .is_err()
+        {
+            return Err(RoundErr::Ended(self.drain_err()));
+        }
+        let mut out = String::new();
+        loop {
+            let mut line = String::new();
+            match self.out.read_line(&mut line) {
+                Ok(0) | Err(_) => return Err(RoundErr::Ended(self.drain_err())),
+                Ok(_) => {
+                    // #275 L1: the marker is matched as a line's suffix, not
+                    // only as a whole line, so a statement's output that
+                    // doesn't end in `\n` (no trailing newline, or a `\r`
+                    // line terminator) can't merge with the marker and hang
+                    // this loop forever.
+                    let l = line.trim_end_matches(['\r', '\n']);
+                    if let Some(head) = l.strip_suffix(done.as_str()) {
+                        out.push_str(head);
+                        break;
+                    }
+                    out.push_str(&line);
+                }
+            }
+        }
+        let mut err = String::new();
+        loop {
+            match self.err.recv() {
+                Ok(l) if l.contains(&nonce) => break,
+                Ok(l) => {
+                    err.push_str(&l);
+                    err.push('\n');
+                }
+                Err(_) => return Err(RoundErr::Ended(err)),
+            }
+        }
+        if err.trim().is_empty() {
+            Ok(out)
+        } else {
+            Err(RoundErr::Sql(err.trim_end().to_string()))
+        }
+    }
+
+    /// stderr's remaining lines, once the CLI is gone.
+    fn drain_err(&mut self) -> String {
+        let mut s = String::new();
+        while let Ok(l) = self.err.recv_timeout(Duration::from_millis(200)) {
+            s.push_str(&l);
+            s.push('\n');
+        }
+        s
+    }
+}
+
+/// Create/overwrite `p` (0600 on Unix) with `text`.
+fn write_private(p: &Path, text: &str) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(p)?.write_all(text.as_bytes())
 }
 
 // ---------- serve mode (server owns the SQL; consumers pick id + params) ----------
@@ -1033,7 +1274,15 @@ fn route_serve(
             respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
             200
         }
-        Err(e) => reply(req, 400, &e),
+        Err(PageError::Viewer(e)) => reply(req, 400, &e),
+        Err(PageError::Server(e)) => {
+            eprintln!(
+                "[anofox-serve] dashboard '{}' failed: {}",
+                dash.id,
+                access::diag(&e)
+            );
+            reply(req, 400, PAGE_ERROR)
+        }
     }
 }
 
@@ -1078,10 +1327,126 @@ fn cache_key(
     )
 }
 
+/// The first row of `duckdb -json` output as `(column, text)` pairs (NULL → None).
+fn first_row_cells(json: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let rows = sql::parse_rows_json(json)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|row| {
+            row.into_iter()
+                .map(|(k, v)| {
+                    let t = match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        v => Some(v.to_string()),
+                    };
+                    (k, t)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `requires_unmet`'s answers, memoized for one render (#274 L1): keyed by
+/// `(prefix, "{reqs:?}")`, since the same gate is often asked more than once
+/// — a `::TAB`/`::SUBTAB`/`::VIEW` marker's own check (`Sections::step`) and
+/// then, for a panel directly inside it, its own identical `-- @requires`.
+type RequiresCache = HashMap<(String, String), Option<String>>;
+
+/// `-- @requires` on the script-free page (#274), gated as the browser and
+/// the locked server gate it: the shared check (`sql::requires::check`, as
+/// `dashboard --check` and the static renderers use it), each query in the
+/// same locked `duckdb -readonly` session the panels run in, with this
+/// request's variables (`prefix`). That session can open no file
+/// (`enable_external_access = false`), so a `glob` that fails counts as
+/// missing here — fail closed, unlike `check` on an author's own session.
+/// The glob probe itself never spawns `duckdb` (#274 L1): in this locked
+/// session the only path a `glob` can ever see is the served database's own
+/// file or its `.wal` (#274 I2), so any other path is decided as missing
+/// from the query text alone, the same `sql::requires::glob_sql` the shared
+/// `check` would have sent. `check`'s own semantics are unchanged; only this
+/// closure short-circuits. `Some(requirement)` (as written) when one is not
+/// met.
+fn requires_unmet(
+    st: &ServeState,
+    prefix: &str,
+    reqs: &[sql::requires::Requirement],
+    cache: &mut RequiresCache,
+) -> Option<String> {
+    let key = (prefix.to_string(), format!("{reqs:?}"));
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let missing = sql::requires::check(reqs, |q, session| {
+        if !session {
+            let n = if q == sql::requires::glob_sql(&st.db)
+                || q == sql::requires::glob_sql(&format!("{}.wal", st.db))
+            {
+                "1"
+            } else {
+                "0"
+            };
+            return Ok(vec![("n".to_string(), Some(n.to_string()))]);
+        }
+        run_duckdb(
+            &st.db,
+            &["-readonly", "-json"],
+            &format!("{prefix}{q}"),
+            st.timeout,
+        )
+        .and_then(|json| first_row_cells(json.trim()))
+    })
+    .missing;
+    cache.insert(key, missing.clone());
+    missing
+}
+
+/// A panel whose own `-- @requires` input is missing (#274): the browser's
+/// "Not available" card (web/app.js `mkNotAvailable`), without the file's
+/// name — this page carries none of the dashboard's SQL.
+const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nodata\" role=\"status\"><strong>Not available</strong><span>An optional input of this panel is missing.</span></div></figure>";
+
 /// Render one dashboard to a view-only HTML page: binds the (whitelisted)
 /// values as DuckDB variables and runs each panel's fixed query READ-ONLY, with
 /// external access disabled and the configuration locked after the
 /// server-declared `-- @load`s.
+type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
+
+/// Why the script-free page could not be drawn (#279). `Viewer` text is safe
+/// to show (no data, SQL or paths: a timeout, the row cap); `Server` text — a
+/// DuckDB error, which can quote file paths, SQL and values — goes to the
+/// server log only, and the viewer gets [`PAGE_ERROR`] (as the locked
+/// server does, duckext `POLICY_PANEL_ERROR`).
+enum PageError {
+    Viewer(String),
+    Server(String),
+}
+
+const PAGE_ERROR: &str = "this dashboard could not be shown (the server log has the details)";
+
+/// Why a panel's own renderer could not draw it (#285), redacted like
+/// [`PAGE_ERROR`] (#279): the renderer's `<pre>error: …</pre>` text can quote
+/// a role option's value (e.g. an `::ABLINE` or `::SMOOTH_METHOD` argument),
+/// which can itself carry data. Details go to the server log only, via
+/// `access::diag`.
+const PANEL_RENDER_ERROR_HTML: &str = "<pre>this panel could not be drawn</pre>";
+
+/// A `run_duckdb` error as a [`PageError`]: only its own timeout is shown.
+fn page_error(e: String) -> PageError {
+    if e.starts_with("query timed out after ") {
+        PageError::Viewer(e)
+    } else {
+        PageError::Server(e)
+    }
+}
+
+/// One read-only panel query → rows.
+fn page_rows(st: &ServeState, q: &str) -> Result<Rows, PageError> {
+    let json = run_duckdb(&st.db, &["-readonly", "-json"], q, st.timeout).map_err(page_error)?;
+    sql::parse_rows_json(json.trim()).map_err(PageError::Server)
+}
+
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1089,7 +1454,7 @@ fn render_dashboard_page(
     claims: Option<&Claims>,
     scope: Option<&Scope>,
     embed_link: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, PageError> {
     let value_of = |name: &str| -> String {
         resolved
             .iter()
@@ -1149,18 +1514,28 @@ fn render_dashboard_page(
 
     // Phase 1: query every panel (read-only) and collect the chrome
     // directives, so a ::THEME anywhere styles the whole page.
-    type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
     let mut chrome = DashboardChrome::default();
-    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
     let mut view_pick = sql::views::StaticPick::default();
+    // #274: a ::TAB / ::SUBTAB / ::VIEW alternative whose `-- @requires`
+    // input is missing is left out with its panels (the tabs are flattened
+    // here; the next shown alternative is the one drawn) — as the static
+    // renderers do (src/dashboard.rs `execute`).
+    let mut sections = sql::requires::Sections::default();
+    // #274 L1: memoized per render — the same gate is often asked more than
+    // once (a tab/view marker's own check, then a panel inside it).
+    let mut req_cache = RequiresCache::new();
     for panel in sql::plan(&dash.script) {
+        let hidden = sections.step(&panel, |reqs| {
+            requires_unmet(st, &prefix, reqs, &mut req_cache)
+        });
         if panel.setup {
             continue; // read-only mode: setup is done once at --init, not per request
         }
-        if view_pick.drop_panel(&panel) {
+        if hidden.is_some() || view_pick.drop_panel(&panel) {
             continue;
         }
         let chrome_role = panel
@@ -1168,17 +1543,26 @@ fn render_dashboard_page(
             .iter()
             .map(|(_, r)| *r)
             .find(|r| anofox_visualization::roles::is_chrome_directive(*r));
+        // #274 L2: the panel's own `-- @requires` gates it whatever it is —
+        // an ordinary chart, an `::INPUT` or a chrome directive — so a
+        // missing input never reaches that panel's query and turns into a
+        // 400 naming the file; it is simply left out (below).
+        let gated = !panel.requires.is_empty()
+            && requires_unmet(st, &prefix, &panel.requires, &mut req_cache).is_some();
         // An input binds its default (as the browser does on first load) so
         // the getvariable() panels read it — unless a whitelisted `-- @param`
-        // already sets that variable.
+        // already sets that variable. Gated: left out, so the variable keeps
+        // its built-in default, as the static renderer leaves it too.
         if let Some(kind) = anofox_visualization::inputs::input_kind(&panel.roles) {
+            if gated {
+                continue;
+            }
             let q = format!(
                 "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
                 panel.sql.trim().trim_end_matches(';'),
                 st.max_rows
             );
-            let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
-            let rows: Rows = sql::parse_rows_json(json.trim())?;
+            let rows: Rows = page_rows(st, &q)?;
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
@@ -1197,18 +1581,30 @@ fn render_dashboard_page(
         {
             continue;
         }
+        // Gated: a chrome directive is left out — its query never runs.
+        if chrome_role.is_some() && gated {
+            continue;
+        }
+        // #274: the panel's own `-- @requires` (never a chrome directive's or a
+        // ::SECTION's): not met → a "Not available" card; a ::TRACK strip is
+        // left out of its chart instead.
+        if chrome_role.is_none() && !section && gated {
+            if !track::is_track(&panel.roles) {
+                queried.push((panel, Rows::new(), true));
+            }
+            continue;
+        }
         let q = format!(
             "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
             panel.sql.trim().trim_end_matches(';'),
             st.max_rows + 1
         );
-        let json = run_duckdb(&st.db, &["-readonly", "-json"], &q, st.timeout)?;
-        let rows: Rows = sql::parse_rows_json(json.trim())?;
+        let rows: Rows = page_rows(st, &q)?;
         if rows.len() > st.max_rows {
-            return Err(format!(
+            return Err(PageError::Viewer(format!(
                 "a panel of '{}' returned more than {} rows",
                 dash.id, st.max_rows
-            ));
+            )));
         }
         if let Some(r) = chrome_role {
             let cell = |v: &serde_json::Value| match v {
@@ -1224,9 +1620,9 @@ fn render_dashboard_page(
             chrome.apply_row(r, cells);
             continue;
         }
-        queried.push((panel, rows));
+        queried.push((panel, rows, false));
     }
-    let set = chrome.resolve(theme_default())?;
+    let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
     let opts = RenderOptions {
         locale: t
@@ -1241,11 +1637,26 @@ fn render_dashboard_page(
     // Phase 2: render.
     let mut panels = String::new();
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows)) = queried.next() {
+    while let Some((panel, rows, na)) = queried.next() {
+        if na {
+            panels.push_str(NOT_AVAILABLE_HTML);
+            // its strips go with it
+            while queried
+                .next_if(|(q, _, _)| track::is_track(&q.roles))
+                .is_some()
+            {}
+            continue;
+        }
         if let Some(cp) = &panel.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
-                let svg =
-                    r.unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e.to_string())));
+                let svg = r.unwrap_or_else(|e| {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' panel render failed: {}",
+                        dash.id,
+                        access::diag(&e.to_string())
+                    );
+                    PANEL_RENDER_ERROR_HTML.to_string()
+                });
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
             }
             continue;
@@ -1267,14 +1678,21 @@ fn render_dashboard_page(
         );
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).
         let svg = anofox_visualization::host::catch_panic(|| {
             render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
         })
-        .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "[anofox-serve] dashboard '{}' panel render failed: {}",
+                dash.id,
+                access::diag(&e)
+            );
+            PANEL_RENDER_ERROR_HTML.to_string()
+        });
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
@@ -1363,6 +1781,68 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_errors_show_only_safe_text() {
+        assert!(matches!(
+            page_error("query timed out after 30s".into()),
+            PageError::Viewer(_)
+        ));
+        assert!(matches!(
+            page_error(
+                "Catalog Error: Table with name secret does not exist!\nLINE 1: SELECT …".into()
+            ),
+            PageError::Server(_)
+        ));
+    }
+
+    #[test]
+    fn authoring_session_keeps_state_and_restarts() {
+        if Command::new("duckdb").arg("-version").output().is_err() {
+            eprintln!("skipped authoring_session_keeps_state_and_restarts: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = AuthoringSession::new(":memory:".into());
+        s.run("SET VARIABLE x = 42").unwrap();
+        let out = s.run("SELECT getvariable('x') AS v").unwrap();
+        assert!(out.contains("\"v\":42"), "{out}");
+        s.live.as_mut().unwrap().child.kill().unwrap();
+        let e = s.run("SELECT 1 AS a").unwrap_err();
+        assert!(e.contains("session ended"), "{e}");
+        let out = s.run("SELECT getvariable('x') AS v").unwrap();
+        assert!(out.contains("\"v\":null"), "{out}");
+    }
+
+    #[test]
+    fn app_flag_errors_name_the_flag() {
+        let mut b = AppBrand::default();
+        let e = b.set("logo_dark", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark must be an http(s) URL"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b
+            .set("logo_dark", "/nonexistent/anofox-267.png", true)
+            .unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo-dark: '/nonexistent/anofox-267.png'"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("logo", "ftp://x/l.png", true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-logo must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+        let e = b.set("tagline", &"x".repeat(1000), true).unwrap_err();
+        assert!(
+            app_flag_error(&e).starts_with("--app-tagline must be"),
+            "{}",
+            app_flag_error(&e)
+        );
+    }
 
     #[test]
     fn render_cache_expires_and_is_capped() {

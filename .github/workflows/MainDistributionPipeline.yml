@@ -2,7 +2,7 @@ name: Main Extension Distribution Pipeline
 on:
   push:
     branches: [master]
-    tags: ['**']
+    tags: ['**', '!wasm-ext-*']
   pull_request:
   workflow_dispatch:
 

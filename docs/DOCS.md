@@ -35,7 +35,7 @@ terminal.
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
 | `::LOW` |  | encoding | candlestick low price |
-| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); a constant (4::SIZE) sets the point size |
+| `::SIZE` |  | encoding | bubble size for a scatter (maps a measure to point area); on a map a symbol's area (graduated symbols) or a flow's width; a constant (4::SIZE) sets the point size |
 | `::Q1` | `::QUARTILE1`, `::LOWER_QUARTILE` | encoding | a box plot from statistics, one row per box: the lower quartile (with ::MEDIAN and ::Q3; no ::BOXPLOT) |
 | `::MEDIAN` | `::Q2` | encoding | the median line of a box from statistics (see ::Q1) |
 | `::Q3` | `::QUARTILE3`, `::UPPER_QUARTILE` | encoding | the upper quartile of a box from statistics (see ::Q1) |
@@ -127,6 +127,7 @@ terminal.
 | `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |
 | `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
 | `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
+| `::HOVER_FOCUS` | `::HOVERFOCUS` | modifier | hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts) |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
@@ -189,7 +190,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
@@ -668,10 +669,12 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_partial(tbl, kind := 'component')` | **term, x, partial_residual** (component), or **term, x_residual, y_residual** (added_variable) | one panel per term: component + residual (points, component line, loess — a binary / ≤ 3-level term gets jittered points and the group means instead) or added-variable (points + least-squares line through the origin, slope in the title) |
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
+| `anofox_plot_cv(tbl, x := NULL)` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period \| x**, id, y; or **fold_id**, train_start, train_end, test_start, test_end | one lane per fold, the train and test windows as bars along ds (or an integer period), coloured by split; a caption says the fold count, whether the test windows overlap or leave gaps, and how many series share the same folds. Series with identical folds are drawn once; up to 6 different ones get a panel per id, else an error. Width 640, height 260 |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
 | `anofox_plot_checks(tbl, x := NULL, kind := NULL)` | **check_name, status, value**, lower_threshold, upper_threshold, identifier, message, run_ts \| ds, check_type, table_name, column_name | a data-quality check band (default): one panel per check (own x scale, sorted), the value as a dot coloured by status (fail red, warn amber, pass green, else muted) against the lower_threshold..upper_threshold acceptance band (light green), one lane per `identifier`; over several `run_ts` / `ds` values (or `kind := 'strip'`) a status strip instead, one lane per check, a dot per run. The status, check label, identifier and message are on hover; `x :=` names the time column (default `run_ts`, else `ds`) |
+| `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -788,9 +791,10 @@ to 1.00 (0.9952 reads "AUC 0.995").
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`check_name\` / \`lower_threshold\` /
   \`upper_threshold\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
-  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
-  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
+  \`fold_id\`, \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one
+  (\`term\`, \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
+  \`team\` is no \`term\`. A shared generic name such as \`kind\`, \`value\`, \`x\`
+  or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
@@ -810,6 +814,18 @@ SELECT anofox_plot_prediction(p) FROM (
   UNION ALL BY NAME
   SELECT id, ds, NULL AS y, yhat, yhat_lower, yhat_upper
   FROM ts_forecast_by('sales', id, ds, y, 'AutoETS', 14, '1d')) p;
+```
+
+`anofox_plot_decomposition` (provisional, `decomposition` schema) reads
+anofox-forecast's `ts_mstl_decomposition_by` (its `trend`/`seasonal`/
+`remainder` LISTs, `seasonal` per `periods`) and `ts_forecast_explain_by`
+(its `decomposition` STRUCT) as they come. anofox-orchestration's
+`decomposition_seasonal` file's `period` is the *seasonal* period, not a
+time step, so write:
+
+```sql
+SELECT unique_id AS id, t AS period, 'seasonal_' || period AS component, seasonal AS value
+FROM decomposition_seasonal;
 ```
 
 See `examples/regression/` (fixtures for every schema, plus scripts against
@@ -1120,6 +1136,50 @@ and `<circle>`s for points. Features are drawn in row order.
   Antarctica —, `'de-states'`, `'de-districts'`, `'world-50m'`) or a second
   WKT column, drawn first in a pale land colour with hairline borders;
   `::ALPHA` sets the data layer's opacity.
+
+#### Graduated symbols (`::SIZE`)
+
+```sql
+SELECT ags::REGION, customers::SIZE, dc_name::CATEGORY, district::LABEL,
+       'Customers per district, by distribution centre'::TITLE
+FROM coverage;
+```
+
+A numeric `::SIZE` column with at least two distinct finite values draws a
+circle at each feature's anchor instead of filling it — the point itself
+(`::LAT`/`::LON`, a WKT `POINT`), or a region's/polygon's pole of
+inaccessibility — scaled so its **area** is proportional to the value:
+`r = rmax · √(v / vmax)`, `rmax` a 4 % share of the panel's shorter side
+(clamped 6–28 px). Lines ignore `::SIZE` and draw as today. A constant
+`::SIZE` (e.g. `4::SIZE`) sets every symbol to that fixed radius in px, with
+no size legend. Symbols are drawn **largest first** (so small ones stay
+visible), which is the one place a map breaks row order — `data-row` still
+holds the row.
+
+Colour follows the same rule as a choropleth: the measure through the
+sequential/diverging ramp (classes, `::RANGE` and `::MIDPOINT` all work),
+else `::CATEGORY`, else the brand tint; `::ALPHA` sets the fill opacity
+(default 0.75).
+
+On a `::REGION` map with no explicit `::BASEMAP`, the whole matched layer
+(Antarctica excluded) is drawn automatically as an unfitted backdrop — the
+map still fits to the drawn symbols, not to the whole layer — and the rows'
+own regions are not filled individually (D4); an explicit `::BASEMAP` keeps
+today's behaviour (fitted too).
+
+A **size legend** stacks under the colour legend: nested circles at three
+"nice" values (the largest, a quarter and a sixteenth of it, deduplicated,
+dropping any under 3 px), bottom-aligned, each with a leader line to its
+formatted value.
+
+Each symbol carries `data-size` (the raw value) and `data-fsize` (formatted,
+always present); `data-value` is the colour measure, or the size value when
+there is no colour measure. The summary reads "`n` symbols
+(`projection`). Largest: `name` `value`; smallest: `name` `value`. Area ∝
+`measure`", then the colour classes/no-data as a choropleth, then "`k` not
+drawn (zero or negative size)" when any are skipped. `dashboard --check`
+flags skipped rows with `map/size-not-positive`.
+
 - **Labels** (`::LABEL_TOP n`: the n most important; `::DATALABELS`: all
   that fit): a region's name sits at its pole of inaccessibility (inside even
   a C-shaped region), a point's to its right, in the ink with a halo in the
@@ -1131,10 +1191,11 @@ and `<circle>`s for points. Features are drawn in row order.
 - **Hover / click / zoom**: each feature carries `data-row`, `data-series`
   (its `::CATEGORY`, else its `::LABEL`), `data-value`, `data-label`,
   `data-x` (its key — the row — when it has no label; else the label is the
-  key) and `data-class`; the root carries `data-map`,
-  `data-proj` and `data-classes`. Scroll zooms and drag pans in the browser
-  (double-click resets); the zoom window is in the projected units, and each
-  zoom re-renders, so simplification acts as level of detail.
+  key) and `data-class`; a graduated symbol adds `data-size`/`data-fsize`
+  (above); the root carries `data-map`, `data-proj` and `data-classes`.
+  Scroll zooms and drag pans in the browser (double-click resets); the zoom
+  window is in the projected units, and each zoom re-renders, so
+  simplification acts as level of detail.
 - **Accessibility**: the SVG's `<desc>` (and the chart's aria label) is one
   sentence — "400 regions (equal-area conic). Highest: München 980; lowest:
   Zweibrücken 12. 5 quantile classes: 80 / 80 / 80 / 80 / 80; 3 without
@@ -1546,9 +1607,11 @@ injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
 `de-locale.sql`).
 
 **Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
-`en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
-formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
-legends / month names identically in the browser and the CLI:
+`en-GB`, `en-IE`, `de-DE`, `fr-FR` (other regions fall back to their
+language; English with a euro-area region, e.g. `en-DE`, `en-NL` or `en-EU`,
+reads as `en-IE`). It formats KPI tiles, table cells (numbers and ISO dates)
+and chart axes / legends / month names identically in the browser and the
+CLI:
 
 | | en-US | de-DE | fr-FR |
 |---|---|---|---|
@@ -1558,6 +1621,9 @@ legends / month names identically in the browser and the CLI:
 | `::COMPACT` 1234567 | 1.2M | 1,2 Mio. | 1,2 M |
 | date 2026-10-15 (tables) | 2026-10-15 (unchanged) | 15.10.2026 | 15/10/2026 |
 | axis | `1,000` · `Oct 2026` | `1.000` · `Okt. 2026` | `1 000` · `oct. 2026` |
+
+`en-IE` is English with the euro: `€12,400`, `12.5%`, `1,234,567.5`, dates
+`15/10/2026`, the choice for English labels with euro amounts.
 
 `?locale=de-DE` overrides it for one viewer (not in served/locked mode).
 
@@ -1591,10 +1657,13 @@ SELECT max(loaded_at)::ASOF, 'stale=24h' FROM etl_log;   -- s, m, h, d or w
 
 The value is a `TIMESTAMP`, `TIMESTAMPTZ` or `DATE`; a timestamp without a time
 zone is read as **UTC** (prefer `TIMESTAMPTZ`, e.g. `now()` or a `loaded_at`
-written with one). The chip shows the time in the viewer's zone and the
-dashboard locale (the date is added when it isn't today) and keeps its relative
-age current while the page is open. It is in every output: the browser, a
-locked server, the static HTML of `dashboard file.sql out.html` /
+written with one). A `DATE` (or `'YYYY-MM-DD'` text) is a calendar day: the
+chip shows the date alone, with no time and no time-zone shift ("Data as of
+01.01.2026 (291 d ago)", "today" on the day). The chip shows the time in the
+viewer's zone and the dashboard locale (the date is added when it isn't today)
+and keeps its relative age current while the page is open. It is in every
+output: the browser, a locked server, the static HTML of
+`dashboard file.sql out.html` /
 `serve --dashboards` (rendered at build time, then refreshed by the page's
 script against the viewer's clock) and headless SVG (`dashboard --svg`,
 `render_dashboard_svg`: rendered at render time, in UTC). `--check` warns when
@@ -1857,6 +1926,13 @@ Every panel carries its own state — there is no full-page spinner:
   see *A live data folder* in [secure serving](secure-serving.md).
   Elsewhere (the builder, `serve`) the statement's own missing-input error
   decides.
+  The script-free page of `serve --dashboards` checks them as well, with the
+  request's variables, but its session can open no file
+  (`enable_external_access = false`): there every `-- @requires` input is
+  missing — a gated panel reads *Not available* (without naming the file), a
+  gated strip is left out of its chart, and a gated tab or `::VIEW`
+  alternative is left out with its panels (the next shown alternative is
+  drawn).
 
   A statement skipped for a missing input is skipped for whoever picked that
   run: never put `@requires` on a setup statement whose effect narrows what a
@@ -1901,7 +1977,8 @@ Every panel carries its own state — there is no full-page spinner:
   answers the tab's statement *Not available*), and so is every panel in it,
   whoever asks: a hidden tab's panels never run. As for panels, a locked
   server checks the paths only with a data folder. The static renderers
-  (`dashboard file.sql`, `dashboard --svg`) leave the tab's panels out.
+  (`dashboard file.sql`, `dashboard --svg`) and the script-free page of
+  `serve --dashboards` leave the tab's panels out.
 
   `dashboard --check` reports a missing input as a **note** (`optional/missing`),
   not an error — `--strict` still passes. It warns about a `${name}` with no
@@ -1925,6 +2002,8 @@ point markers and dim as whole lines). **Linked highlighting**: click any
 series/bar to highlight it across all panels and dim the rest — click empty
 space (or the mark again) to clear. Series colours are **consistent across
 charts**.
+
+> **Hover focus**: hovering a bar, point, line or area of a chart with several series (a `::CATEGORY`, or several measures) emphasises that whole series and fades the others, as hovering its legend entry does; moving off clears it. Focusing a mark from the keyboard does the same. A click still sets the sticky linked highlighting: while it (or a brush, a named selection or a `::STORY` step) is on, hovering changes nothing. It is off where each series is a single mark (a pie, a single-series bar), on maps (hovering a map feature emphasises its series on every map instead), diagrams, heatmaps, calendars and `::TRACK` strips, above 2,000 marks, on a touch tap (a tap is a click), and with `'none'::HOVER_FOCUS`. The change is instant (no animation). Static output (the HTML export, `dashboard file.sql out.html`, the script-free served page) has no hover focus. `--check` warns on a value other than `'series'` / `'none'` (`hover-focus/unknown`).
 
 **Cross-filter**: a click also sets a DuckDB variable `selected` to the clicked
 value and re-runs the dashboard. Panels *opt in* by referencing it — filtered
@@ -2367,11 +2446,7 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 
 ### Rendering limits & data hygiene
 
-- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter
-  x axis or in a `::CATEGORY` keep the largest 29 (by total |measure|, or row
-  count for raw-row charts) and fold the rest into **"Other"** (summed for
-  bars/lines/areas/pies). Hosts can change it (`max_categories` in a
-  `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
+- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter x axis or in a `::CATEGORY` keep 29. By default those are the largest (by total |measure|, or row count for raw-row charts). When the rows come ranked by the measure (an `ORDER BY` on it, either direction), they are the **first 29 in row order**, so a worst-first ranking keeps its worst. The rest fold into **"Other"** (summed for bars/lines/areas/pies). A **rate or an average** is never summed: with `'percent'::YFORMAT`, or a measure named like one (`%`, `pct`, `rate`, `ratio`, `share`, `per`, `avg`, `mean`, `score`, …, the table totals' rule), the chart keeps 30 levels and leaves the rest out. To show fewer, `LIMIT` the query. Hosts can change it (`max_categories` in a `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
 - **Long lines are downsampled**: a line/area/step series with more than 5,000
   points is reduced with LTTB (Largest-Triangle-Three-Buckets), which keeps the
   visual shape (`max_line_points` / `RenderOptions::max_line_points`).
@@ -2426,7 +2501,7 @@ compiled to wasm** renders the panels. Everything is client-side — static file
 no backend, no DuckDB extension.
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
 
@@ -2613,7 +2688,7 @@ plus a `/query` endpoint backed by a **live** DuckDB — so the UI operates on y
 real tables (big data stays in DuckDB), and opens the browser for you:
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 cargo build --bin serve --features serve
 ./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080/?token=…
 #   --port N     choose the port
@@ -2918,7 +2993,7 @@ for marks without them (SVGs from older renderers). Map features carry
 else their `::LABEL`), `data-value` (the measure) and `data-label` (the
 `::LABEL` text), and a map's root `<svg>` carries `data-map` (see Maps). The root `<svg>` carries the drawn
 domain (`data-domain`, `data-xdomain`/`data-ydomain`, `data-xlevels`,
-`data-flip`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
+`data-flip`), and `data-hover-focus="none"` (`'none'::HOVER_FOCUS`), which seeds the scroll/drag zoom. It’s pure DOM — no chart
 runtime, works on static HTML.
 
 ---
