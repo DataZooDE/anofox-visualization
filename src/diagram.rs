@@ -2091,8 +2091,13 @@ pub(crate) fn render(
         out = with_root_attr(out, "data-transition", "tween");
     }
     // the width (px) at which the drawing shows at its own size: a narrow
-    // screen scrolls the panel sideways instead of shrinking the text
-    out = with_root_attr(out, "data-fit", &format!("{:.0}", w / s));
+    // screen scrolls the panel sideways instead of shrinking the text.
+    // For an extreme diagram/canvas aspect ratio `s` can floor to exactly
+    // 0.0 (#149: case 373 of the spec fuzzer — a huge layout squeezed into a
+    // clamped-to-32px canvas), and `w / 0.0` is a non-finite `data-fit`.
+    // Fall back to the diagram's own (always-finite) unscaled width.
+    let fit = if s > 0.0 { w / s } else { p.w };
+    out = with_root_attr(out, "data-fit", &format!("{:.0}", fit));
     with_root_attr(out, "data-diagram", d.dir.as_str())
 }
 
@@ -2542,6 +2547,25 @@ mod tests {
         assert!(edge("monitor&gt;calibrate").contains(r#"stroke-width="1.6""#));
         let root = &svg[..svg.find('>').unwrap()];
         assert!(root.contains(r#"data-transition="tween""#) && root.contains(" data-fit=\""));
+    }
+
+    /// #149: a wide layout (many unconnected nodes, so none wrap into a
+    /// second row) squeezed into a canvas clamped down to `MIN_DIM` used to
+    /// floor the fit scale to exactly `0.0`, making `data-fit = w / 0.0`
+    /// non-finite (fuzz case 373: `data-fit="inf"`). `data-fit` must always
+    /// parse as a finite number, however degenerate the aspect ratio.
+    #[test]
+    fn data_fit_is_finite_for_a_degenerate_aspect_ratio() {
+        let n = 40;
+        let ids: Vec<Value> = (0..n).map(|i| s(&format!("n{i}"))).collect();
+        let cols = vec![Column::new("c0", Role::Diagram, ids)];
+        // width=1 is clamped up to MIN_DIM (32px): far too narrow for 40
+        // unconnected nodes laid out side by side.
+        let svg = render_with(&cols, 1, 640, &RenderOptions::default()).unwrap();
+        let doc = roxmltree::Document::parse(&svg).expect("well-formed");
+        let fit = doc.root_element().attribute("data-fit").unwrap();
+        let v: f64 = fit.parse().unwrap();
+        assert!(v.is_finite(), "data-fit=\"{fit}\" is not finite");
     }
 
     /// M3: swimlanes keep each lane's nodes in one band (bands do not
