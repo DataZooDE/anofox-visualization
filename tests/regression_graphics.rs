@@ -321,6 +321,55 @@ fn mark_colours(svg: &str) -> std::collections::BTreeSet<String> {
     out
 }
 
+// ggplot-rs 0.22's GeomBoxplot widens the y scale to the outlier extent
+// itself (`setup_data`'s internal ymin_final/ymax_final), so the old
+// `boxstats::extent_rows` geom_blank layer is gone; the mean dot's own y
+// training was always just its ordinary GeomPoint layer, same as any other
+// mapped y. Both a mean and an outlier far outside the whiskers must still
+// widen the y axis (no silently clipped extent).
+#[test]
+fn box_from_statistics_y_scale_covers_a_far_mean_and_outlier() {
+    let stats = vec![
+        Column::new("x", Role::X, strs(&["a"])),
+        Column::new("q1", Role::Q1, nums(&[2.0])),
+        Column::new("m", Role::Median, nums(&[4.0])),
+        Column::new("q3", Role::Q3, nums(&[6.0])),
+        Column::new("lo", Role::WhiskerLow, nums(&[0.0])),
+        Column::new("hi", Role::WhiskerHigh, nums(&[8.0])),
+        Column::new("mean", Role::Mean, nums(&[55.0])),
+        Column::new("out", Role::Outliers, strs(&["[-40]"])),
+    ];
+    let s = svg(stats);
+    // The mean dot (y=55) and the outlier (y=-40) must both land strictly
+    // inside the panel — proof the y domain widened to cover them, not
+    // clipped at the whiskers [0, 8].
+    let plot: Vec<f64> = {
+        let k = s.find("data-plot=\"").unwrap() + 11;
+        s[k..k + s[k..].find('"').unwrap()]
+            .split(' ')
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let mean_dot = s
+        .split("<circle ")
+        .skip(1)
+        .find(|t| t.contains("r=\"2.60\""))
+        .expect("the mean dot (r=2.6)");
+    let outlier = s
+        .split("<circle ")
+        .skip(1)
+        .find(|t| t.contains("r=\"2.00\""))
+        .expect("the outlier circle (r=2)");
+    for c in [mean_dot, outlier] {
+        let k = c.find("cy=\"").unwrap() + 4;
+        let cy: f64 = c[k..k + c[k..].find('"').unwrap()].parse().unwrap();
+        assert!(
+            cy >= plot[1] - 0.5 && cy <= plot[1] + plot[3] + 0.5,
+            "cy {cy} outside the panel {plot:?}: the y scale clipped it"
+        );
+    }
+}
+
 #[test]
 fn box_from_statistics_looks_like_the_raw_box() {
     use anofox_visualization::{render_with, theme, RenderOptions};

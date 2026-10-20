@@ -1667,10 +1667,7 @@ fn render_placed(
             o.theme.finish_svg(svg)
         };
         let svg = with_xline_dates(svg, &cols);
-        let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
-        if boxstats::is_stats(&cols) {
-            svg = boxstats::with_tips(svg, &cols, o);
-        }
+        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         Ok((svg, warnings))
     })
 }
@@ -2403,7 +2400,7 @@ fn cartesian(
     // A box from statistics: its quartiles, whiskers and outliers.
     let box_stats = kind == Kind::Boxplot && boxstats::is_stats(cols);
     if box_stats {
-        data.extend(boxstats::data_columns(cols));
+        data.extend(boxstats::data_columns(cols, o));
     }
     // Censoring marks on a step curve (`::CENSOR`).
     let censor = kind == Kind::Step
@@ -2879,27 +2876,26 @@ fn cartesian(
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
         Kind::Boxplot if box_stats => {
-            let mut p = plot
+            // identity: ggplot-rs 0.22 reads lower/middle/upper/ymin/ymax/
+            // outliers straight off the data (ggplot-rs#318 B3-5) — and
+            // widens the y scale to the outlier extent itself, so no more
+            // geom_blank extent layer for outliers is needed. `tooltip` in
+            // `boxstats::layer_aes()` is the box's own hover text (`btip`,
+            // built as data in `boxstats::data_columns`, not a post-render
+            // `<title>` rewrite).
+            let p = plot
                 .geom_boxplot_with(GeomBoxplot {
                     fill: body_fill,
                     color: o.theme.chart_label(),
                     width: 0.6,
                     alpha: 1.0,
                 })
-                .stat(boxstats::StatBoxStats)
+                .stat(StatIdentity)
                 .layer_aes(boxstats::layer_aes());
-            // The outliers and means lie beyond the whiskers the y scale sees.
-            let (ex, ey) = boxstats::extent_rows(cols);
-            if !ex.is_empty() {
-                p = p
-                    .geom_blank()
-                    .layer_data(vec![("x".to_string(), ex), ("y".to_string(), ey)])
-                    .layer_aes(Aes::new().x("x").y("y"));
-            }
-            if let Some(mean) = find_role(cols, Role::Mean) {
-                let n = mean.values.len();
-                p = p
-                    .geom_point_with(GeomPoint {
+            match find_role(cols, Role::Mean) {
+                Some(mean) => {
+                    let n = mean.values.len();
+                    p.geom_point_with(GeomPoint {
                         size: 2.6,
                         color: o.theme.chart_label(),
                         alpha: 1.0,
@@ -2907,14 +2903,29 @@ fn cartesian(
                     .layer_data(vec![
                         ("x".to_string(), x.values.clone()),
                         ("y".to_string(), mean.values.clone()),
-                        (
-                            "label".to_string(),
-                            vec![Value::Str(boxstats::MEAN_LABEL.into()); n],
-                        ),
+                        ("btip".to_string(), col_of(&data, "btip")),
+                        // The mean dot is drawn by its own (real) GeomPoint
+                        // layer, so it carries a title/data-* like any other
+                        // point (ggplot-rs has no "decorative, no mark
+                        // metadata" layer kind yet — sipemu/ggplot-rs
+                        // follow-up filed from #331/#318). `data-decorative`
+                        // is a normal mapped `data_attr`, read by
+                        // web/app.js to keep it out of the hover list,
+                        // crosshair grouping and click/select/drill, the
+                        // same way a reference-rule mark already is, while
+                        // it still shows its own (the box's) tooltip.
+                        ("dec".to_string(), vec![Value::Str("mean".into()); n]),
                     ])
-                    .layer_aes(Aes::new().x("x").y("y").label("label"));
+                    .layer_aes(
+                        Aes::new()
+                            .x("x")
+                            .y("y")
+                            .tooltip("btip")
+                            .data_attr("decorative", "dec"),
+                    )
+                }
+                None => p,
             }
-            p
         }
         Kind::Boxplot => plot.geom_boxplot_with(GeomBoxplot {
             fill: body_fill,
