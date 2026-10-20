@@ -16,7 +16,7 @@
 -- regions are underserved? Asked by the head of sales logistics, who plans
 -- where the next depot goes.
 --
--- Tabs: Coverage · Customers · Clusters · On time · Underserved.
+-- Tabs: Coverage · Customers · Clusters · Flows · On time · Underserved.
 -- Natively, run from web/:  dashboard --check examples/delivery-coverage.sql
 
 SELECT 'Where do our deliveries and customers cluster, and which regions are underserved?'::DASHBOARD_TITLE;
@@ -137,7 +137,25 @@ SELECT k.lat ::LAT, k.lon ::LON, count(*) AS "Customers" ::SIZE, k.name || ' DC'
        'Customers served by each distribution centre, last 12 weeks.'::INFO
 FROM dc_customers c JOIN dc_dcs k USING (dc) GROUP BY ALL ORDER BY 3 DESC;
 
--- ── 4 · On time ──────────────────────────────────────────────────────────────
+-- ── 4 · Flows ────────────────────────────────────────────────────────────────
+-- Flow maps (::ORIGIN/::DEST, M2b): one arc per DC-state pair, width by
+-- delivery volume. The Dortmund DC's own state (DE-NW) is by far its
+-- largest flow (24,263 deliveries over 12 weeks) — checked against the
+-- data in the SQL comments below.
+SELECT 'Flows'::TAB;
+SELECT 8::COL; SELECT 560::HEIGHT;
+SELECT {'lon': k.lon, 'lat': k.lat, 'name': k.name || ' DC'} ::ORIGIN, d.state ::DEST,
+       sum(v.deliveries)::DOUBLE AS "Deliveries" ::SIZE, k.name || ' DC' ::CATEGORY,
+       'The Dortmund DC delivers most within its own state, North Rhine-Westphalia'::TITLE,
+       'Deliveries from each DC into each state, last 12 weeks; width by volume.'::INFO
+FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags)
+GROUP BY ALL ORDER BY 3 DESC;
+SELECT 4::COL; SELECT 560::HEIGHT;
+SELECT k.name || ' DC' AS "From" ::TABLE, d.state AS "Into", sum(v.deliveries) AS "Deliveries" ::COMPACT,
+       'The ten largest flows'::TITLE
+FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags) GROUP BY ALL ORDER BY 3 DESC LIMIT 10;
+
+-- ── 5 · On time ──────────────────────────────────────────────────────────────
 SELECT 'On time'::TAB;
 SELECT 6::COL;
 SELECT 520::HEIGHT;
@@ -156,7 +174,7 @@ SELECT week AS "Week" ::XAXIS, k.name || ' DC' ::CATEGORY,
        'Weekly share of on-time deliveries per DC. Nürnberg''s area reaches furthest into the east.'::INFO
 FROM dc_deliveries d JOIN dc_dcs k USING (dc) GROUP BY week, k.name ORDER BY k.name, week;
 
--- ── 5 · Underserved ──────────────────────────────────────────────────────────
+-- ── 6 · Underserved ──────────────────────────────────────────────────────────
 SELECT 'Underserved'::TAB;
 SELECT 6::COL;
 SELECT 520::HEIGHT;

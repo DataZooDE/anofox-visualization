@@ -100,4 +100,26 @@ assert.deepEqual(chartMarks({ querySelectorAll: () => [point, today] }), [point]
   const rows = [...html.matchAll(/<tr><td>(.*?)<\/td>/g)].map((m) => m[1]);
   assert.deepEqual(rows, ["Dortmund", "Hamburg"]);
 }
+
+// M2b: a flow map's as-table has from/to columns (data-orig/data-dest),
+// sorted by data-size descending.
+{
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmtTipValue = (v) => String(Math.round(Number(v) * 1000) / 1000);
+  const mapTableHtml = new Function("escapeHtml", "fmtTipValue", `${grab("mapTableHtml")}\nreturn mapTableHtml;`)(
+    escapeHtml,
+    fmtTipValue
+  );
+  const f = (a) => el(a);
+  const marks = [
+    f({ "data-row": "0", "data-orig": "Dortmund DC", "data-dest": "DE-NW", "data-value": "100", "data-size": "100", "data-fsize": "100" }),
+    f({ "data-row": "1", "data-orig": "Hamburg DC", "data-dest": "DE-SH", "data-value": "40", "data-size": "40", "data-fsize": "40" }),
+  ];
+  const svg = { getAttribute: () => null, querySelectorAll: () => marks };
+  const html = mapTableHtml(svg, 200, "Flows");
+  assert.ok(html.includes('<th scope="col">from</th>'), html);
+  assert.ok(html.includes('<th scope="col">to</th>'), html);
+  const rows = [...html.matchAll(/<tr><td>(.*?)<\/td>/g)].map((m) => m[1]);
+  assert.deepEqual(rows, ["Dortmund DC", "Hamburg DC"]);
+}
 console.log("a11y_test: ok");

@@ -2100,10 +2100,15 @@ fn map_diags(
     // M2a fix: the projection/classes/too-many-marks checks used to run only
     // on WKT (::MAP) panels, so a ::REGION or ::LAT/::LON map's
     // ::PROJECTION, ::CLASSES and point count went unchecked.
-    let is_map = geom.is_some() || has(Role::Region) || (has(Role::Lat) && has(Role::Lon));
+    let is_map = geom.is_some()
+        || has(Role::Region)
+        || (has(Role::Lat) && has(Role::Lon))
+        || has(Role::Origin)
+        || has(Role::Dest);
     if !is_map {
         return out;
     }
+    out.extend(flow_diags(roles, rows));
     let first = |want: Role| {
         roles
             .iter()
@@ -2218,6 +2223,176 @@ fn map_diags(
                 ),
             ));
         }
+    }
+    out
+}
+
+/// A raw cell of result column `idx` (clones a struct/object cell too,
+/// unlike [`cells`], which only captures strings/numbers).
+fn raw_cell(rows: &[Map<String, Value>], idx: usize, i: usize) -> Option<Value> {
+    rows.get(i)?
+        .get(&format!("c{idx}"))
+        .or_else(|| rows[i].values().nth(idx))
+        .cloned()
+}
+
+/// How one `::ORIGIN`/`::DEST` cell resolves, read straight from its raw
+/// JSON cell (a struct column's cell is a JSON object, not a string — see
+/// [`cells`]'s doc comment on that limitation).
+enum FlowEnd {
+    Code(String),
+    Point,
+    Missing,
+}
+
+fn flow_end_kind(v: &Value) -> FlowEnd {
+    match v {
+        Value::Null => FlowEnd::Missing,
+        Value::Object(o) => {
+            let has = |keys: &[&str]| {
+                o.iter()
+                    .any(|(k, _)| keys.iter().any(|w| k.eq_ignore_ascii_case(w)))
+            };
+            if has(&["lon", "lng", "x"]) && has(&["lat", "y"]) {
+                FlowEnd::Point
+            } else {
+                FlowEnd::Missing
+            }
+        }
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                FlowEnd::Missing
+            } else if t.starts_with('{') || t.to_ascii_uppercase().starts_with("POINT") {
+                FlowEnd::Point
+            } else {
+                FlowEnd::Code(t.to_string())
+            }
+        }
+        Value::Number(n) => FlowEnd::Code(n.to_string()),
+        _ => FlowEnd::Missing,
+    }
+}
+
+/// Flow-map lint (`::ORIGIN`/`::DEST`, M2b): one end without the other, an
+/// end that matches no region, flows that start and end at the same place,
+/// and too many flows on one map.
+fn flow_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let oi = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Origin)
+        .map(|(i, _)| *i);
+    let di = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Dest)
+        .map(|(i, _)| *i);
+    let has_values = |idx: Option<usize>| {
+        idx.is_some_and(|i| {
+            (0..rows.len()).any(|r| raw_cell(rows, i, r).is_some_and(|v| !v.is_null()))
+        })
+    };
+    let (has_o, has_d) = (has_values(oi), has_values(di));
+    if has_o != has_d {
+        out.push((
+            Severity::Warning,
+            "map/flow-needs-both",
+            "::ORIGIN without ::DEST (or the reverse) — a flow needs both ends; nothing is drawn"
+                .to_string(),
+        ));
+    }
+    let (Some(oi), Some(di)) = (oi, di) else {
+        return out;
+    };
+    if !(has_o && has_d) {
+        return out;
+    }
+    let n = rows.len();
+    let o_ends: Vec<FlowEnd> = (0..n)
+        .map(|i| {
+            raw_cell(rows, oi, i)
+                .map(|v| flow_end_kind(&v))
+                .unwrap_or(FlowEnd::Missing)
+        })
+        .collect();
+    let d_ends: Vec<FlowEnd> = (0..n)
+        .map(|i| {
+            raw_cell(rows, di, i)
+                .map(|v| flow_end_kind(&v))
+                .unwrap_or(FlowEnd::Missing)
+        })
+        .collect();
+    let forced = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Boundaries)
+        .and_then(|(i, _)| column_texts(rows, *i).into_iter().next())
+        .and_then(|s| crate::map::layer_name(&s));
+    let mut codes: Vec<Option<String>> = Vec::new();
+    for e in o_ends.iter().chain(d_ends.iter()) {
+        if let FlowEnd::Code(c) = e {
+            codes.push(Some(c.clone()));
+        }
+    }
+    if !codes.is_empty() {
+        if let Some(m) = crate::map::boundaries::match_codes(&codes, forced) {
+            if m.unmatched_count > 0 {
+                let list: Vec<String> = m
+                    .unmatched
+                    .iter()
+                    .take(5)
+                    .map(|c| format!("'{c}'"))
+                    .collect();
+                out.push((
+                    Severity::Warning,
+                    "map/flow-missing-end",
+                    format!(
+                        "{} flows have an end that matches nothing and are not drawn: {}{}",
+                        m.unmatched_count,
+                        list.join(", "),
+                        if m.unmatched_count > list.len() {
+                            ", …"
+                        } else {
+                            ""
+                        }
+                    ),
+                ));
+            }
+        }
+    }
+    // self-flows: both ends resolve to the same region code (a Point end's
+    // coordinates aren't parsed at lint time — the renderer's own
+    // self-flow count, in the panel's a11y summary, is exact).
+    let self_flows = (0..n)
+        .filter(|&i| {
+            matches!(
+                (&o_ends[i], &d_ends[i]),
+                (FlowEnd::Code(a), FlowEnd::Code(b)) if a.eq_ignore_ascii_case(b)
+            )
+        })
+        .count();
+    if self_flows > 0 {
+        out.push((
+            Severity::Note,
+            "map/flow-self",
+            format!("{self_flows} flows start and end at the same place and are not drawn"),
+        ));
+    }
+    let both = (0..n)
+        .filter(|&i| {
+            !matches!(o_ends[i], FlowEnd::Missing) && !matches!(d_ends[i], FlowEnd::Missing)
+        })
+        .count();
+    if both > 2_000 {
+        out.push((
+            Severity::Warning,
+            "map/too-many-flows",
+            format!(
+                "{both} flows on one map (over 2,000) — aggregate to fewer origin/destination pairs (e.g. states) to keep it readable"
+            ),
+        ));
     }
     out
 }
@@ -4362,6 +4537,98 @@ mod design_tests {
             ]),
             vec![(Severity::Warning, "map/size-not-positive")]
         );
+    }
+
+    #[test]
+    fn flow_needs_both_ends() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
+                .into_iter()
+                .filter(|d| d.code.starts_with("map/flow"))
+                .map(|d| (d.severity, d.code))
+                .collect()
+        };
+        let d = codes("SELECT o::ORIGIN FROM t;", vec![json!({ "c0": "DE-BY" })]);
+        assert_eq!(d, vec![(Severity::Warning, "map/flow-needs-both")]);
+    }
+
+    #[test]
+    fn flow_missing_end_is_flagged() {
+        let codes = |rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                "SELECT o::ORIGIN, d::DEST FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/flow-missing-end")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        assert!(codes(vec![json!({ "c0": "DE-BY", "c1": "DE-BW" })]).is_empty());
+        assert_eq!(
+            codes(vec![json!({ "c0": "DE-BY", "c1": "ZZ-NOPE" })]),
+            vec![(Severity::Warning, "map/flow-missing-end")]
+        );
+    }
+
+    #[test]
+    fn flow_self_is_flagged() {
+        let codes = |rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                "SELECT o::ORIGIN, d::DEST FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/flow-self")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        assert!(codes(vec![json!({ "c0": "DE-BY", "c1": "DE-BW" })]).is_empty());
+        assert_eq!(
+            codes(vec![json!({ "c0": "DE-BY", "c1": "de-by" })]),
+            vec![(Severity::Note, "map/flow-self")]
+        );
+    }
+
+    #[test]
+    fn too_many_flows_is_flagged() {
+        let codes = |rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                "SELECT o::ORIGIN, d::DEST FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions { design: false },
+            )
+            .into_iter()
+            .filter(|d| d.code == "map/too-many-flows")
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let few: Vec<Value> = (0..10)
+            .map(|i| json!({ "c0": format!("POINT({i} 1)"), "c1": "POINT(0 0)" }))
+            .collect();
+        assert!(codes(few).is_empty());
+        let many: Vec<Value> = (0..2_001)
+            .map(|i| json!({ "c0": format!("POINT({i} 1)"), "c1": "POINT(0 0)" }))
+            .collect();
+        assert_eq!(codes(many), vec![(Severity::Warning, "map/too-many-flows")]);
     }
 
     #[test]

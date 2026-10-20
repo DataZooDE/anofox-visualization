@@ -39,6 +39,12 @@ pub(super) enum Extra {
         /// `(radius px, label)`, largest first.
         items: Vec<(f64, String)>,
     },
+    /// A flow-width key (M2b): horizontal line samples with nice values.
+    Widths {
+        title: Option<String>,
+        /// `(width px, label)`, widest first.
+        items: Vec<(f64, String)>,
+    },
 }
 
 /// The legend box: its content, the no-data count, the title and size.
@@ -151,6 +157,59 @@ fn sizes_extra(o: &RenderOptions, m: &Model, w: f64, h: f64) -> Option<(Extra, f
     Some((
         Extra::Sizes {
             title: sym.title.clone(),
+            items,
+        },
+        width,
+        height,
+    ))
+}
+
+/// The width-key extra of a flow map (`None` without a varying `::SIZE`,
+/// mirroring [`sizes_extra`]'s guard).
+fn widths_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
+    let fl = m.flows.as_ref()?;
+    if fl.fixed.is_some() || fl.vmax <= 0.0 {
+        return None;
+    }
+    let v1 = nice_floor(fl.vmax);
+    if v1 <= 0.0 {
+        return None;
+    }
+    let v2 = nice_floor(v1 / 4.0);
+    let v3 = nice_floor(v1 / 16.0);
+    let mut values = vec![v1, v2, v3];
+    values.retain(|v| *v > 0.0);
+    values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let tw = |s: &str| crate::ticks::text_width(s, FONT);
+    // The exact scale the overlay (`overlay.rs`) maps `linewidth` through,
+    // so the legend's key widths are never a second, hand-rolled formula
+    // that could drift from what's actually drawn.
+    use ggplot_rs::scale::Scale as _;
+    let scale = ggplot_rs::scale::linewidth::ScaleLinewidthContinuous::new()
+        .with_range(0.75, 8.0)
+        .with_transform(ggplot_rs::scale::transform::ScaleTransform::Sqrt)
+        .with_limits(0.0, fl.vmax);
+    let width_of = |v: f64| -> f64 {
+        scale
+            .map_to_size(&ggplot_rs::prelude::Value::Float(v))
+            .unwrap_or(0.75)
+    };
+    let items: Vec<(f64, String)> = values
+        .into_iter()
+        .map(|v| (width_of(v), fl.fmt.short(v, &o.locale)))
+        .filter(|(w, _)| *w >= 1.0)
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let widest_label = items.iter().map(|(_, l)| tw(l)).fold(0.0, f64::max);
+    let line_len = 24.0_f64;
+    let width = line_len + 6.0 + widest_label;
+    let title_row = if fl.title.is_some() { ROW } else { 0.0 };
+    let height = title_row + items.len() as f64 * ROW;
+    Some((
+        Extra::Widths {
+            title: fl.title.clone(),
             items,
         },
         width,
@@ -312,6 +371,11 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
     let mut ew = 0.0_f64;
     let mut eh = 0.0_f64;
     if let Some((extra, xw, xh)) = sizes_extra(o, m, w, h) {
+        ew = ew.max(xw);
+        eh += xh + EXTRA_GAP;
+        extras.push(extra);
+    }
+    if let Some((extra, xw, xh)) = widths_extra(o, m) {
         ew = ew.max(xw);
         eh += xh + EXTRA_GAP;
         extras.push(extra);
@@ -525,6 +589,29 @@ pub(super) fn legend_svg(
                         lx - cx
                     ));
                     g.push_str(&text(lx, base_y - 2.0 * r - 3.0, "start", &ink, "", label));
+                }
+            }
+            Extra::Widths { title, items } => {
+                if let Some(t) = title {
+                    g.push_str(&text(
+                        PAD,
+                        y + ROW / 2.0 - 1.0,
+                        "start",
+                        &muted,
+                        " font-weight=\"600\"",
+                        t,
+                    ));
+                    y += ROW;
+                }
+                const LINE: f64 = 24.0;
+                for (w, label) in items {
+                    let cy = y + ROW / 2.0;
+                    g.push_str(&format!(
+                        "<line x1=\"{PAD}\" y1=\"{cy:.1}\" x2=\"{:.1}\" y2=\"{cy:.1}\" stroke=\"{muted}\" stroke-width=\"{w:.2}\" stroke-linecap=\"round\"/>",
+                        PAD + LINE
+                    ));
+                    g.push_str(&text(PAD + LINE + 6.0, cy, "start", &ink, "", label));
+                    y += ROW;
                 }
             }
         }
