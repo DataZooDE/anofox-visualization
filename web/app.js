@@ -1384,6 +1384,19 @@ function pageDb() {
   if (preview) throw new Error(PREVIEW_PAGE_DB);
   return db;
 }
+// sec-review-272 H-1: "Apply, don't run" must actually hold — nothing may
+// run the just-applied (unconfirmed) SQL on the page's own DuckDB until the
+// viewer explicitly presses Run or Ctrl/⌘+Enter. Sits beside `preview`: a
+// preview's own re-renders never reach the page DB anyway (they dispatch to
+// preview.run), so the guard in run() only matters once `preview` is null
+// again — which is exactly when a held, unconfirmed Apply is waiting.
+let applyHold = false;
+let previewRefreshSaved = null; // sec-review-272 H-1/L-2: the viewer's own #refresh value, while a RELOAD role in the preview's own SQL overwrites it
+function clearApplyHold() {
+  if (!applyHold) return;
+  applyHold = false;
+  if ($("refresh")) $("refresh").disabled = false;
+}
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1748,7 +1761,13 @@ function assistHost() {
     editor: { get: () => $("sql").value, replace: editorReplace, focus: () => $("sql").focus() },
     preview: { enter: previewEnter, exit: previewExit, active: () => !!preview },
     onPreviewExit: (cb) => previewExitListeners.add(cb),
-    run: () => run(),
+    // sec-review-272 H-1: assist-ui only calls this from Apply's "run"
+    // choice and Undo — both a direct, confirmed user action — so it clears
+    // the hold and runs explicitly, same as the #run button.
+    run: () => {
+      clearApplyHold();
+      return run(true, { explicit: true });
+    },
     dashName: { get: () => $("dash-name").value, set: (v) => ($("dash-name").value = v) },
     keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }),
     ui: { toast: sideToast, status, isPhone: () => matchMedia(SIDE_DRAWER).matches, opener: () => lastOpener },
@@ -1763,6 +1782,17 @@ function assistHost() {
 // unenforced.
 async function openAssistant(opts = {}) {
   if (!assistCfg.enabled) return;
+  // Info-3 (sec-review-272, defence in depth): assistCfg.enabled is set
+  // once at boot and not re-read here — on a page that was never served or
+  // embedded (assistConfig() already disables it for those), a scripted
+  // click on the hidden button, or a submitted start-card form, could still
+  // reach this in View (or Explore) mode. Re-check the same live formula
+  // assistUiSync() uses to decide the button's own visibility — not
+  // `!preview`: reopening (the toolbar ✦, Ctrl/⌘+I) while a preview is
+  // already active is the normal, intended way back into the panel (the
+  // phone sheet closes to show the preview but the panel itself is not
+  // torn down; P2/P3 below exercise exactly this), not a bypass.
+  if (servedMode || document.body.classList.contains("embed") || bodyMode() !== "edit") return;
   lastOpener = opts.opener || null;
   try {
     await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
@@ -2034,7 +2064,10 @@ async function boot() {
   }
 
   $("run").disabled = false;
-  $("run").onclick = () => run();
+  $("run").onclick = () => {
+    clearApplyHold();
+    run(true, { explicit: true });
+  };
   wireLint();
 
   // SQL editor: highlight overlay + scroll sync
@@ -2045,6 +2078,16 @@ async function boot() {
     // the preview — no rerun prompt: the grid shows "Not run yet."
     if (preview) previewExit({ rerun: false });
     assistUiSync();
+  });
+  // sec-review-272 H-1: the editor's own explicit "run this" shortcut —
+  // the other half of clearApplyHold()'s escape hatch, next to the #run
+  // button. Safe during an active preview too: run() always dispatches to
+  // preview.run while one is active, never the page DB.
+  $("sql").addEventListener("keydown", (e) => {
+    if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "Enter")) return;
+    e.preventDefault();
+    clearApplyHold();
+    run(true, { explicit: true });
   });
   $("sql").addEventListener("scroll", () => {
     $("hl").scrollTop = $("sql").scrollTop;
@@ -3526,6 +3569,7 @@ function loadDash(name, sql, key) {
   // about to replace, not to the new one.
   void (async () => {
     if (preview) await previewExit({ rerun: false });
+    clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
     closeSideMenu();
     curDash = key || null;
     if (key) rememberDash(key);
@@ -3536,7 +3580,7 @@ function loadDash(name, sql, key) {
     if (bodyMode() === "explore") setMode("edit");
     markActive();
     assistUiSync();
-    run();
+    run(true, { explicit: true });
   })();
 }
 
@@ -3591,6 +3635,12 @@ async function previewEnter({ sql, run: runner }) {
   } catch (_) {}
   dpLazy.gen++;
   await dpLazy.tail; // no page render job still in flight (#244's C-1 window)
+  // sec-review-272 H-1/L-2: a page RELOAD timer (or value) must not survive
+  // into, or leak out of, the preview — and the proposal's own ::RELOAD
+  // (set while rendering below) must not outlive the preview either.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  previewRefreshSaved = $("refresh") ? $("refresh").value : null;
   previewSaved = dashStateSave();
   dashStateReset();
   preview = Object.freeze({ sql, run: runner });
@@ -3601,8 +3651,13 @@ async function previewEnter({ sql, run: runner }) {
 }
 // Leave the preview (Discard, Apply, a new Send, or a navigation away).
 // `rerun`: true re-renders the page's own (restored) dashboard; false shows
-// "Not run yet." (Apply, don't run) without running anything.
-async function previewExit({ rerun = true } = {}) {
+// "Not run yet." (Apply, don't run) without running anything. `hold`
+// (sec-review-272 H-1): Apply's "Apply, don't run" path — the editor now
+// holds unconfirmed SQL, so nothing implicit (a timer, the dark toggle, the
+// refresh select, Esc, a cross-filter click, an OS theme change, …) may run
+// it on the page's own DuckDB until the viewer explicitly presses Run or
+// Ctrl/⌘+Enter (run()'s own `explicit` guard, not this flag's job to check).
+async function previewExit({ rerun = true, hold = false } = {}) {
   if (!preview) return;
   try {
     await runActive;
@@ -3610,6 +3665,15 @@ async function previewExit({ rerun = true } = {}) {
   dpLazy.gen++;
   await dpLazy.tail;
   preview = null;
+  // H-1/L-2: clear the proposal's own RELOAD timer and restore the
+  // viewer's own #refresh value — neither may keep running/showing the
+  // preview's choice once the preview is over.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  if (previewRefreshSaved !== null) {
+    if ($("refresh")) $("refresh").value = previewRefreshSaved;
+    previewRefreshSaved = null;
+  }
   dashStateRestore(previewSaved);
   previewSaved = null;
   document.body.classList.remove("previewing");
@@ -3620,7 +3684,11 @@ async function previewExit({ rerun = true } = {}) {
       cb();
     } catch (_) {}
   }
-  if (rerun) await run(true);
+  if (hold) {
+    applyHold = true;
+    if ($("refresh")) $("refresh").disabled = true;
+    $("grid").replaceChildren(notRunCard());
+  } else if (rerun) await run(true);
   else $("grid").replaceChildren(notRunCard());
 }
 
@@ -6432,6 +6500,15 @@ function fillLink(tpl, vars) {
 // a new tab. Other schemes are refused (safeUrl).
 function followLink(url) {
   const u = String(url ?? "").trim();
+  // sec-review-272 H-2: a chart ::LINK is a *computed* SQL string, never a
+  // literal the gate can see — one click, before Apply, would otherwise
+  // open a window or navigate to any origin the proposal's SQL can build,
+  // exfiltrating the preview's data. In-page navigation (#tab, ?v.x=…) stays
+  // allowed: it only touches local dpVars/tab state, nothing leaves the tab.
+  if (preview && !(u.startsWith("#") || u.startsWith("?"))) {
+    sideToast("Links are off in the preview.", "OK", () => {});
+    return;
+  }
   if (u.startsWith("#") || u.startsWith("?")) {
     const qi = u.indexOf("?");
     const tab = u.startsWith("#") ? decodeURIComponent(qi < 0 ? u.slice(1) : u.slice(1, qi)) : null;
@@ -7217,7 +7294,18 @@ let runActive = null; // the run in progress (a promise)
 // animates its replaced charts from their old marks.
 let dpMotion = null;
 let runQueued = null; // null, or the `fresh` flag of the queued follow-up run
-function run(fresh = true) {
+// sec-review-272 H-1: `opts.explicit` is the one escape hatch from
+// `applyHold` — true only from the #run button, Ctrl/⌘+Enter and loadDash
+// (the three places that clear the hold outright; see clearApplyHold()). A
+// run while a preview is active is always safe regardless (every query
+// dispatches to preview.run, never the page DB — runSqlInner/pageConn), so
+// the hold only ever matters once `preview` is null again.
+function run(fresh = true, opts = {}) {
+  const explicit = !!(opts && opts.explicit);
+  if (applyHold && !preview && !explicit) {
+    $("grid").replaceChildren(notRunCard());
+    return;
+  }
   if (runActive) {
     runQueued = (runQueued ?? false) || fresh;
     return runActive;
@@ -11364,6 +11452,14 @@ function brandImgOrigins(cfg) {
     if (typeof u !== "string" || !/^https:\/\//i.test(u)) continue;
     try {
       const x = new URL(u);
+      // Info-2 (sec-review-272): a CSP source path ending in "/" is a
+      // *prefix* match (the whole folder, or — for a bare "/" — the whole
+      // origin), not an exact file. `logo: "https://b.example/"` or
+      // ".../img/?v=1" (pathname "/img/") would silently widen img-src far
+      // past the one file this is meant to allow. Skip it instead: a
+      // misconfigured logo URL loses its image rather than opening the
+      // origin to every other image on it.
+      if (!x.pathname || x.pathname === "/" || x.pathname.endsWith("/")) continue;
       out.push(x.origin + x.pathname);
     } catch (_) {}
   }
@@ -13761,19 +13857,23 @@ $("preview-bar")?.addEventListener("click", (e) => e.stopPropagation());
 // #244: links are off during a preview (a ::MARKDOWN panel in the
 // assistant's proposal) — a cross-origin link is never model-reachable
 // before Apply, so it is blocked on click rather than rendered differently.
+// sec-review-272 H-2: every link but an in-page '#…' one is blocked, same
+// origin included — a same-origin ::LINK (e.g. '/…?r={value}') navigated the
+// tab away via the browser's own default action before, losing the preview
+// (and, on a shared static origin, handing the new page a readable
+// sessionStorage key). Blocking here (capture phase, preventDefault +
+// stopPropagation) also stops the click from ever reaching a handler that
+// would call followLink() — which has its own, independent guard (H-2) for
+// paths that reach it without a rendered <a> at all (a chart mark's click).
 function previewLinkGuard(e) {
   if (!preview) return;
   const a = e.target.closest?.("a[href]");
   if (!a) return;
-  let origin = null;
-  try {
-    origin = new URL(a.href, location.href).origin;
-  } catch (_) {}
-  if (origin !== location.origin) {
-    e.preventDefault();
-    e.stopPropagation();
-    sideToast("Links are off in the preview.", "OK", () => {});
-  }
+  const href = a.getAttribute("href") || "";
+  if (href.startsWith("#")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  sideToast("Links are off in the preview.", "OK", () => {});
 }
 $("grid").addEventListener("click", previewLinkGuard, true);
 $("grid").addEventListener("auxclick", previewLinkGuard, true);

@@ -228,6 +228,29 @@ export { splitStatements };
 function code(sql) {
   return String(sql).replace(LIT_OR_COMMENT, (m) => (m[0] === '"' ? m : /^--|^\/\*/.test(m) ? " " : "''"));
 }
+// Comments blanked, literals left exactly as written — unlike code(), which
+// empties them too. Used only to name a class-3 statement's target (M-1:
+// the Apply dialog), never for classification itself.
+function stripCommentsKeepLiterals(sql) {
+  return String(sql).replace(LIT_OR_COMMENT, (m) => (/^--|^\/\*/.test(m) ? " " : m));
+}
+// classifyStatement's own w0, exposed so a refused statement (gate()) can
+// carry its keyword without re-deriving the same tokenisation (M-1).
+export function firstKeyword(sql) {
+  const c = code(sql).trim().replace(/^\(+\s*/, "");
+  return c.toUpperCase().split(/[^A-Z0-9_]+/).filter(Boolean)[0] || "";
+}
+// ATTACH's database path / COPY's "TO" target, read from the original text
+// (code() would have emptied the literal) — named in the Apply dialog's
+// reason (M-1) and in proposalReaders, instead of the bare keyword alone.
+function attachTarget(sql) {
+  const m = /\bATTACH\s+(?:DATABASE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?'((?:[^'\\]|\\.|'')*)'/i.exec(stripCommentsKeepLiterals(sql));
+  return m ? m[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+}
+function copyTarget(sql) {
+  const m = /\bTO\s+'((?:[^'\\]|\\.|'')*)'/i.exec(stripCommentsKeepLiterals(sql));
+  return m ? m[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+}
 // String literals ('…', E'…' with backslash escapes, $$…$$), quoted
 // identifiers and comments, in one pass (so a quote inside one is not the
 // start of another).
@@ -370,6 +393,18 @@ export function classifyStatement(sql, opts) {
       return LOADABLE.has(w1.toLowerCase()) ? { cls: 2, kind: "load", reason: "" } : write("load", `LOAD ${w1.toLowerCase()}`);
     case "USE":
       return { cls: 2, kind: "use", reason: "" };
+    case "ATTACH": {
+      // M-1: named, not just the keyword — the Apply dialog's reason must
+      // say *what* it attaches, not repeat "ATTACH".
+      const t = attachTarget(sql);
+      return write("attach", t ? `attaches database '${t}'` : "ATTACH");
+    }
+    case "COPY": {
+      const t = copyTarget(sql);
+      return write("write", t ? `writes file '${t}'` : "COPY");
+    }
+    case "INSTALL":
+      return write("write", w1 ? `installs the '${w1.toLowerCase()}' extension` : "INSTALL");
     case "":
       return { cls: 3, kind: "empty", reason: "no statement" };
   }
@@ -796,7 +831,17 @@ export function redactSecrets(sql) {
 export function proposalReaders(sql) {
   const out = new Set(pathsOf(sql));
   for (const m of code(sql).matchAll(/\b(read_\w+|\w+_scan|glob|st_read\w*|query|query_table|iceberg_\w+|delta_\w+)\s*\(/gi)) out.add(`${m[1]}()`);
-  for (const m of code(sql).matchAll(/\b(ATTACH|COPY|INSTALL|LOAD|EXPORT|IMPORT)\b/gi)) out.add(m[1].toUpperCase());
+  // M-1: ATTACH and COPY list their target, not just the bare keyword.
+  for (const piece of splitStatements(sql)) {
+    const kw = firstKeyword(piece);
+    if (kw === "ATTACH") {
+      const t = attachTarget(piece);
+      out.add(t ? `ATTACH '${t}'` : "ATTACH");
+    } else if (kw === "COPY") {
+      const t = copyTarget(piece);
+      out.add(t ? `COPY → '${t}'` : "COPY");
+    } else if (["INSTALL", "LOAD", "EXPORT", "IMPORT"].includes(kw)) out.add(kw);
+  }
   return [...out];
 }
 
@@ -1309,7 +1354,7 @@ export function wasmTools(opts) {
         let why = k.cls === 3 ? [k.reason || k.kind] : [];
         for (const alt of requiresOf(p)) if (looksLikeUrl(alt) || alt.includes("${")) why.push(`@requires ${alt}`);
         if (!why.length) why = await inspect(p.sql, own, known, objs, names);
-        if (why.length) refused.push({ sql: p.sql, reason: why.join("; ") });
+        if (why.length) refused.push({ sql: p.sql, reason: why.join("; "), keyword: firstKeyword(p.sql) });
         noteMade(p.sql, objs);
       }
       return { allowed: !refused.length, statements: refused };

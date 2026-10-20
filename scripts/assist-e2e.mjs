@@ -54,6 +54,14 @@ const REPLY_HOSTILE_TMPL = readFileSync(path.join(fixDir, "reply-hostile.txt"), 
 const HOSTILE = HOSTILE_TMPL.replaceAll("${REC}", String(REC_PORT));
 const REPLY_HOSTILE = REPLY_HOSTILE_TMPL.replaceAll("${REC}", String(REC_PORT));
 const SETUP_AND_METRIC = `${SALES_SETUP}\nSELECT count(*) AS n ::METRIC FROM sales;\n`;
+// M9b (sec-review-272 H-1): a proposal with exactly one class-3 statement
+// that is harmless to actually run for real — SET memory_limit is refused
+// (not on SETTABLE) but has no reader, no ATTACH/INSTALL/COPY, nothing that
+// reaches the network or writes a file — so "Apply, don't run" then a real
+// explicit Run proves the hold both holds (no dialog bypass needed to
+// reach it: refused.length > 0 alone gets the three-button dialog) and
+// lifts, without the test itself running anything dangerous for real.
+const HOLD_CLEAN = `${SALES_SETUP}\nSET memory_limit='2GB';\nSELECT count(*) AS n ::METRIC FROM sales;\n`;
 
 const results = [];
 const record = (name, ok, note = "") => {
@@ -258,6 +266,14 @@ if (run("never")) {
     await page.goto(`${BASE}?mode=view#sql=${b64(SETUP_AND_METRIC)}`);
     await settled(page);
     record("N7 view mode: #assist-btn hidden", await page.evaluate(() => document.getElementById("assist-btn")?.hidden !== false));
+    // Info-3 (sec-review-272, defence in depth): a scripted click on the
+    // hidden button (bypassing the UI, not a real pointer event) must still
+    // do nothing in View mode — assistCfg.enabled alone is not re-checked;
+    // openAssistant() re-reads the live mode itself.
+    await page.evaluate(() => document.getElementById("assist-btn")?.click());
+    await page.waitForTimeout(300);
+    record("N7 view mode: a scripted click on the hidden button opens nothing", await page.evaluate(() => document.getElementById("assist-pane")?.hidden !== false && !document.querySelector(".dp-dialog") && !document.querySelector("meta[data-anofox-assist]")));
+    record("N7 view mode: scripted click still did not request assist-ui.js", !staticLog.some((p) => /assist-ui\.js/.test(p)));
     await page.click("#mode-edit");
     await page.waitForFunction(() => document.getElementById("assist-btn")?.hidden === false, null, { timeout: 15000 }).catch(() => {});
     record("N7 edit mode: #assist-btn visible", await page.evaluate(() => document.getElementById("assist-btn")?.hidden === false));
@@ -437,6 +453,34 @@ if (run("main")) {
     await page.waitForTimeout(150);
     record("M5: Esc closes, focus back on #preview-diff", await page.evaluate(() => document.activeElement?.id === "preview-diff"));
   }
+  // M5b (sec-review-272 L-1): "Preview again" must not leak an engine
+  // connection — each re-preview should close the previous session's
+  // connection first, so CONNECT minus DISCONNECT on the engine's own
+  // Worker (index 1: "M3: engine sanity: 2 workers" above) nets to 1, not
+  // 2/3/4 after repeated cycles. Typing in the editor exits the preview
+  // without discarding the proposal (the existing #sql "input" listener),
+  // so "Preview again" (#ai-preview) becomes clickable again each time.
+  {
+    const { page } = M3;
+    for (let i = 0; i < 3; i++) {
+      await page.fill("#sql", CLEAN + "\n-- edited " + i);
+      await page.waitForTimeout(150);
+      record(`M5b: #ai-preview is shown once the preview has exited (cycle ${i})`, await page.evaluate(() => document.getElementById("ai-preview")?.hidden === false));
+      await page.click("#ai-preview");
+      await page.waitForTimeout(300);
+      record(`M5b: #ai-preview hides again once the preview is active (cycle ${i})`, await page.evaluate(() => document.getElementById("ai-preview")?.hidden === true));
+    }
+    const engineMsgs = (await dbSpy(page)).msgs.filter((m) => m.w === 1 && (m.type === "CONNECT" || m.type === "DISCONNECT"));
+    const net = engineMsgs.filter((m) => m.type === "CONNECT").length - engineMsgs.filter((m) => m.type === "DISCONNECT").length;
+    record("M5b: CONNECT - DISCONNECT on the engine Worker nets to 1 after 3 re-preview cycles", net === 1, `${JSON.stringify(engineMsgs.map((m) => m.type))} net=${net}`);
+    // Restore exactly the state M5 left (previewing, empty editor) so M6's
+    // own "editor === the proposal's SQL" / "no dialog" checks (which
+    // compare against the empty editor Send started from) still hold.
+    await page.fill("#sql", "");
+    await page.waitForTimeout(150);
+    await page.click("#ai-preview");
+    await page.waitForTimeout(300);
+  }
   // M6: Apply (no dialog expected: no readers, no class 3, not stale).
   {
     const { page } = M3;
@@ -498,6 +542,38 @@ if (run("main")) {
     const n0 = await mark(page);
     await page.waitForTimeout(300);
     record("M9: zero page-DB messages since Send's preview start", pageMsgs(await since(page, n0)).length === 0);
+    // H-2 (sec-review-272): a chart ::LINK with a *computed* (not literal)
+    // URL must not open a window or navigate on click, during the preview
+    // — before Apply, the gate never saw a URL literal to refuse. Checked
+    // while the preview is still showing the hostile proposal's own panels
+    // (the one place they're rendered at all).
+    {
+      let popup = null;
+      const onPopup = (p) => (popup = p);
+      context.on("page", onPopup);
+      const beforeUrl = page.url();
+      const nLink = await mark(page);
+      await page.evaluate(() => document.querySelector(".panel-svg > svg .dp-hit")?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      await page.waitForTimeout(400);
+      context.off("page", onPopup);
+      if (popup) await popup.close().catch(() => {});
+      record("M9: a chart ::LINK (computed URL) does not open a window or navigate during the preview", !popup && page.url() === beforeUrl);
+      record("M9: recorder still empty after the chart ::LINK click", recLog.length === 0, JSON.stringify(recLog));
+      record("M9: zero page-DB messages from the chart ::LINK click", pageMsgs(await since(page, nLink)).length === 0);
+    }
+    // H-2: a table ::LINK to a same-origin path — the click guard used to
+    // let same-origin anchors through (only cross-origin was blocked),
+    // so the browser's own default navigation moved the tab away,
+    // dropping the preview and any unsaved work.
+    {
+      const beforeUrl = page.url();
+      const nTable = await mark(page);
+      await page.evaluate(() => document.querySelector(".dash .dp-link")?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })));
+      await page.waitForTimeout(400);
+      record("M9: a table ::LINK to a same-origin path does not navigate during the preview", page.url() === beforeUrl);
+      record("M9: recorder still empty after the table ::LINK click", recLog.length === 0, JSON.stringify(recLog));
+      record("M9: zero page-DB messages from the table ::LINK click", pageMsgs(await since(page, nTable)).length === 0);
+    }
     await page.click("#ai-apply");
     await page.waitForSelector(".dp-dialog", { timeout: 10000 });
     const dlgText = await page.evaluate(() => document.querySelector(".dp-dialog")?.textContent || "");
@@ -509,6 +585,63 @@ if (run("main")) {
     record('M9: grid shows "Not run yet"', /Not run yet/.test(await page.evaluate(() => document.querySelector(".dash")?.textContent || "")));
     record("M9: zero page-DB messages from the Apply click", pageMsgs(await since(page, n1)).length === 0);
     record("M9: recorder still empty", recLog.length === 0);
+    // H-1/L-2 (sec-review-272): "Apply, don't run" must actually hold — the
+    // proposal's own ::RELOAD timer, the dark toggle, the refresh select
+    // and Esc must none of them run the just-applied (unconfirmed) SQL on
+    // the page's own DuckDB. Before the fix, the RELOAD timer alone did
+    // this on its own within about 2s, with no further action at all.
+    {
+      const n2 = await mark(page);
+      await page.waitForTimeout(3000); // >= 3 RELOAD ticks (the proposal's own SELECT 1::RELOAD) if the timer survived
+      record("M9 H-1: 3s pass with the applied SQL held — zero page-DB messages (the RELOAD timer)", pageMsgs(await since(page, n2)).length === 0);
+      const n3 = await mark(page);
+      await page.click("#dark");
+      await page.waitForTimeout(300);
+      record("M9 H-1: the dark toggle does not run the held SQL", pageMsgs(await since(page, n3)).length === 0);
+      const refreshDisabled = await page.evaluate(() => document.getElementById("refresh")?.disabled === true);
+      record("M9 H-1: #refresh is disabled while the hold is up", refreshDisabled);
+      const n4 = await mark(page);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+      record("M9 H-1: Esc does not run the held SQL", pageMsgs(await since(page, n4)).length === 0);
+      record('M9 H-1: the grid still shows "Not run yet" (nothing silently ran)', /Not run yet/.test(await page.evaluate(() => document.querySelector(".dash")?.textContent || "")));
+      record("M9 H-1: recorder still empty after 3s + dark + Esc", recLog.length === 0, JSON.stringify(recLog));
+    }
+    await context.close();
+  }
+
+  // M9b: H-1's hold lifts on an explicit Run — a *harmless* proposal (one
+  // refused SET, no reader, no ATTACH/INSTALL/COPY) so actually running it
+  // for real after "Apply, don't run" is safe, and proves the hold is not
+  // permanent: it is meant to require confirmation, not to break Apply.
+  {
+    const { context, page, mock } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_h9b", "propose_dashboard", { sql: HOLD_CLEAN, summary: "Hold test.", panels: [{ stmt: 3, title: "n", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.click("#ai-apply");
+    await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+    await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+    await page.waitForTimeout(400);
+    record('M9b: "Apply, don\'t run" shows "Not run yet"', /Not run yet/.test(await page.evaluate(() => document.querySelector(".dash")?.textContent || "")));
+    const n5 = await mark(page);
+    await page.click("#dark"); // a passive trigger must still be held
+    await page.waitForTimeout(300);
+    record("M9b: the dark toggle alone still does not run it", pageMsgs(await since(page, n5)).length === 0);
+    const n6 = await mark(page);
+    await page.click("#run"); // the explicit escape hatch
+    await page.waitForTimeout(1500);
+    record("M9b: an explicit Run click lifts the hold and actually runs it", pageMsgs(await since(page, n6)).length > 0);
+    const refreshReenabled = await page.evaluate(() => document.getElementById("refresh")?.disabled === false);
+    record("M9b: #refresh is re-enabled once the hold lifts", refreshReenabled);
     await context.close();
   }
 

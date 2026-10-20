@@ -34,6 +34,12 @@
 .ai-issues li{border-left:3px solid var(--ui-err-ink);padding-left:.4rem}
 .ai-open li{border-left:3px solid var(--ui-warn);padding-left:.4rem}
 .ai-issues h4,.ai-open h4{font-size:.8rem;margin:.4rem 0 .2rem;color:var(--ui-muted)}
+/* M-1 (sec-review-272): each refused statement in full, not a truncated
+   first line — the .ai-pre inside is the same scrollable/capped block the
+   diff dialog already uses. */
+.ai-refused{list-style:none;margin:.3rem 0;padding:0;display:flex;flex-direction:column;gap:.5rem}
+.ai-refused li{border-left:3px solid var(--ui-warn);padding-left:.4rem}
+.ai-refused .ai-pre{margin-top:.2rem}
 .ai-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}
 .ai-statusline{display:flex;align-items:center;gap:.5rem;padding:.2rem .7rem;min-height:1.8rem;color:var(--ui-ink);font-size:.78rem}
 .ai-debug{margin:0;padding:0 .7rem;color:var(--ui-muted);font-size:.72rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}

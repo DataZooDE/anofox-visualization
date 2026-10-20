@@ -541,7 +541,11 @@ export function mountAssistant(hostArg) {
   }
 
   // ---- small dialog helper (app.js's dpDialog markup/classes) ----
-  function dialog({ title, body, buttons, cancel = null, size = null }) {
+  // Info-1 (sec-review-272): a destructured-in-signature parameter reads
+  // Object.prototype too (a polluted prototype's `buttons`/`cancel`/…
+  // would pass unseen) — ownOpts() first, like every other options bag.
+  function dialog(opts) {
+    const { title, body, buttons, cancel = null, size = null } = ownOpts(opts);
     return new Promise((resolve) => {
       const opener = doc.activeElement;
       const veil = mk("div", "md-dialog dp-dialog");
@@ -695,7 +699,8 @@ export function mountAssistant(hostArg) {
   function kb(n) {
     return `${Math.max(1, Math.round(n / 1024))} KB`;
   }
-  async function sentDialog(payload, engine, { send } = {}) {
+  async function sentDialog(payload, engine, opts = {}) {
+    const { send } = ownOpts(opts);
     const body = doc.createDocumentFragment();
     body.append(textP(`To: ${payload.destination}`));
     body.append(textP(payload.statics.map((s) => `${s.name} (${kb(s.bytes)})`).join(", ")));
@@ -802,10 +807,30 @@ export function mountAssistant(hostArg) {
     }
     if (m.sections.refused.length) {
       body.append(textP("It also runs statements the assistant may not run by itself:"));
-      const ul = mk("ul");
+      const ul = mk("ul", "ai-refused");
       for (const r of m.sections.refused) {
         const li = mk("li");
-        li.textContent = `${String(r.sql).split("\n")[0].slice(0, 120)} — ${r.reason}`;
+        const reasonP = mk("p", "ai-why");
+        reasonP.textContent = r.reason || "";
+        // M-1: the statement in full (whitespace collapsed, a scrollable
+        // <pre> of text nodes — never innerHTML), its keyword in <strong>,
+        // capped so one huge statement can't push the dialog off-screen.
+        const pre = mk("pre", "ai-pre");
+        pre.tabIndex = 0;
+        const collapsed = String(r.sql).replace(/\s+/g, " ").trim();
+        const CAP = 2000;
+        const shown = collapsed.length > CAP ? collapsed.slice(0, CAP) : collapsed;
+        const kw = r.keyword || "";
+        if (kw && shown.toUpperCase().startsWith(kw)) {
+          const strong = mk("strong");
+          strong.textContent = shown.slice(0, kw.length);
+          pre.appendChild(strong);
+          pre.appendChild(doc.createTextNode(shown.slice(kw.length)));
+        } else {
+          pre.appendChild(doc.createTextNode(shown));
+        }
+        if (collapsed.length > CAP) pre.appendChild(doc.createTextNode(`\n… ${collapsed.length - CAP} more characters`));
+        li.append(reasonP, pre);
         ul.appendChild(li);
       }
       body.appendChild(ul);
@@ -984,6 +1009,13 @@ export function mountAssistant(hostArg) {
 
   // ---- the flows ----
   async function open(opts = {}) {
+    // Info-1: read through ownOpts, not a bare opts.request/opts.send (a
+    // polluted Object.prototype.send would auto-send without the consent
+    // dialog's own skip-consent checkbox ever being set — no pollution
+    // source was found, but the read itself should be safe regardless).
+    // `send` is renamed on the way out: the outer send() function below
+    // must not be shadowed by the option of the same name.
+    const { request, send: wantSend } = ownOpts(opts);
     await ensureCss();
     if (!el.title) build();
     S.open = true;
@@ -1000,17 +1032,18 @@ export function mountAssistant(hostArg) {
         return;
       }
     }
-    if (opts.request) el.q.value = opts.request;
-    if (opts.send) await send(opts.request);
+    if (request) el.q.value = request;
+    if (wantSend) await send(request);
     else el.q.focus();
   }
   function close(opts = {}) {
+    const { toPreview } = ownOpts(opts);
     pane.hidden = true;
     syncPhone(false);
     S.open = false;
     document.getElementById("assist-btn")?.setAttribute("aria-expanded", "false");
     document.getElementById("tab-assist")?.setAttribute("aria-selected", "false");
-    if (!opts.toPreview) host.ui.opener()?.focus?.();
+    if (!toPreview) host.ui.opener()?.focus?.();
   }
   function toggle() {
     if (S.open) close();
@@ -1097,7 +1130,7 @@ export function mountAssistant(hostArg) {
       }
       if (r.kind === "proposal" || (r.kind === "stopped" && r.proposal)) {
         if (r.text) logEntry("ai-bot", r.text);
-        showProposal(r.proposal, tools);
+        await showProposal(r.proposal, tools);
         S.conv.history = null;
       } else if (r.kind === "reply") {
         logEntry("ai-bot", r.text);
@@ -1131,15 +1164,26 @@ export function mountAssistant(hostArg) {
     }
   }
 
-  function showProposal(p, tools) {
-    S.session?.close();
+  // L-1 (sec-review-272): the one place a session is ever closed — called
+  // from every exit path (enterPreview's own start, discardPreview,
+  // host.onPreviewExit) so "Preview again", typing, loadDash, Explore and a
+  // new Send each close at most once (S.session is nulled first, so a
+  // second call anywhere else is a no-op) instead of leaking a CONNECT per
+  // "Preview again" click.
+  function closeSession() {
+    const s = S.session;
+    S.session = null;
+    s?.close();
+  }
+  async function showProposal(p, tools) {
     S.proposal = p;
     S.tools = tools;
     renderCard();
     el.cardTitle.focus();
-    enterPreview();
+    await enterPreview();
   }
-  function enterPreview() {
+  async function enterPreview() {
+    closeSession();
     S.session = S.tools.previewSession(S.proposal.sql);
     const run = async (sql) => {
       try {
@@ -1152,15 +1196,20 @@ export function mountAssistant(hostArg) {
         throw e;
       }
     };
-    host.preview.enter({ sql: S.proposal.sql, run });
+    // L-1: hide "Preview again" right away — host.preview.enter() awaits
+    // several things (any run in flight, the lazy tail) before `preview`
+    // actually becomes truthy, and renderCard() (called by the proposal-card
+    // flow right after this) must not show it live again meanwhile.
+    if (el.previewBtn) el.previewBtn.hidden = true;
+    await host.preview.enter({ sql: S.proposal.sql, run });
     if (host.ui.isPhone()) {
       close({ toPreview: true });
       document.getElementById("preview-title")?.focus();
     }
+    renderCard();
   }
   function discardPreview() {
-    S.session?.close();
-    S.session = null;
+    closeSession();
   }
   async function discard() {
     await host.preview.exit({ rerun: true });
@@ -1183,7 +1232,10 @@ export function mountAssistant(hostArg) {
       choice = await applyDialog(m);
       if (!choice) return;
     }
-    await host.preview.exit({ rerun: false });
+    // sec-review-272 H-1: "Apply, don't run" holds the page DB until the
+    // viewer explicitly runs it (Run / Ctrl+Enter) — nothing implicit may
+    // run the SQL about to go into the editor below.
+    await host.preview.exit({ rerun: false, hold: choice === "norun" });
     discardPreview();
     const title = p.summary || "Applied dashboard";
     S.hist.push({ before: now, after: p.sql, title });
@@ -1262,6 +1314,11 @@ export function mountAssistant(hostArg) {
   }
 
   host.onPreviewExit(() => {
+    // L-1: every exit of the preview — however it happens (Discard, Apply,
+    // typing in the editor, loadDash, Explore, a new Send) — closes this
+    // module's own engine session too, not only the ones that go through
+    // discard()/apply() here.
+    closeSession();
     if (el.previewBtn) el.previewBtn.hidden = !S.proposal;
   });
 

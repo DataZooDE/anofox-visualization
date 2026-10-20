@@ -683,6 +683,40 @@ it is useful without any AI.
 - **Apply's buttons (D2).** *Apply and run* / *Apply, don't run* (the SQL goes into the editor; nothing runs until Run) / *Cancel* — the dialog only when there is a reader, a class-3 statement or a stale editor to confirm; otherwise *Apply* is one click. `tools.gate(sql)` always runs first, in the engine, regardless of the dialog.
 - **Conversations (D3).** Each Send is a new request from the current editor; only a clarifying *reply* (no proposal) carries its history into the next Send. Full follow-ups and refining an unapplied proposal stay in M2-2.
 - **The eval's results (D4).** Not committed in M1-3 (`tests/assist-eval/results/` is gitignored); the owner runs the live seed once with their own key and the numbers go into the PR body. M3-3 adds `results/latest/` and CI.
+
+**sec-review-272 (fix round, PR #272): two safeguards the PR described but did
+not fully hold.** H-1: *"Apply, don't run"* did not hold — a `::RELOAD` timer,
+the dark toggle, the refresh select or Esc could still run the just-applied
+SQL on the page's own DuckDB with no further action from the viewer. Fixed
+with an `applyHold` flag (`web/app.js`) that `run()` checks before any
+non-explicit call, cleared only by the `#run` button, Ctrl/⌘+Enter or
+`loadDash`; the preview's own `::RELOAD` timer and the viewer's `#refresh`
+value are now saved/cleared around every preview (also L-2, the same timer
+outliving the preview into the page's own dashboard afterward). H-2: a chart
+`::LINK` with a *computed* (not literal) URL could `window.open`/navigate on
+one click during the preview — before Apply, the gate never saw a URL
+literal to refuse — and a same-origin table `::LINK` could move the tab away
+via the browser's own default navigation (the click guard only blocked
+cross-origin). Fixed in `followLink` and `previewLinkGuard` (`web/app.js`):
+every link but `#…`/`?…` is refused during a preview. M-1: the Apply
+dialog's refused-statement list showed only a truncated first line and a
+bare keyword ("ATTACH — ATTACH"), hiding a multi-line `ATTACH`/`COPY`'s
+actual target; it now renders each statement in full (capped, scrollable)
+with the keyword in `<strong>`, and `classifyStatement`/`proposalReaders`
+name the target ("attaches database 'md:'", "writes file 'out.csv'"). L-1:
+"Preview again" could leak an engine connection per click, and showed while
+a preview was already active (a render-order gap before `host.preview.enter`
+resolved); `assist-ui.js` now closes any session before opening the next one
+and hides the button immediately. Info items: `assist_ownopts_test.mjs` now
+scans every function in `web/assist-ui.js` (not only its exports) at any
+nesting depth; `brandImgOrigins` skips a logo URL whose path is empty or
+ends in `/` (would otherwise widen `img-src` to a folder or the whole
+origin); `openAssistant` re-checks the live lock state directly, not only
+`assistCfg.enabled`. Tests: `scripts/assist-e2e.mjs` M5b (L-1, a Worker
+CONNECT/DISCONNECT count), the M9 extension (H-1, H-2) and M9b (H-1's hold
+lifting on an explicit Run); `tests/web/assist_test.mjs` (M-1's
+`classifyStatement`/`proposalReaders`/`gate` wording); the widened
+`assist_ownopts_test.mjs`.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |
