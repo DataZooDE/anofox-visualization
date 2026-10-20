@@ -1197,15 +1197,22 @@ export function mountAssistant(hostArg) {
       }
     };
     // L-1: hide "Preview again" right away — host.preview.enter() awaits
-    // several things (any run in flight, the lazy tail) before `preview`
-    // actually becomes truthy, and renderCard() (called by the proposal-card
-    // flow right after this) must not show it live again meanwhile.
+    // several things (any run in flight, the lazy tail, then the preview's
+    // own render) before `preview` actually becomes truthy, and renderCard()
+    // (called by the proposal-card flow right after this) must not show it
+    // live again meanwhile.
     if (el.previewBtn) el.previewBtn.hidden = true;
-    await host.preview.enter({ sql: S.proposal.sql, run });
+    const entered = host.preview.enter({ sql: S.proposal.sql, run });
+    // The phone sheet's own close + the preview title's focus are the
+    // immediate UI feedback for "Send" (sec-review-272 regression check:
+    // this must not wait for `entered`, which only resolves once the
+    // preview has actually rendered — gating the sheet close on that left
+    // the full-screen panel up, unresponsive, for the whole render).
     if (host.ui.isPhone()) {
       close({ toPreview: true });
       document.getElementById("preview-title")?.focus();
     }
+    await entered;
     renderCard();
   }
   function discardPreview() {
