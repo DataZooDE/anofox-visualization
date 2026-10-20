@@ -2,23 +2,24 @@
 """Conformance harness: every anofox-tabular result producer → our plots.
 
 anofox_tabular does not take part in the anofox contract yet: no function
-carries `tags['anofox.contract']`, there is no `anofox_contract_version()`. Two
-producers already match a contract schema as they come — `run_checks` and
-`agg_check` follow the `check` schema as they come — and every other producer
-needs an adapter. So the producers are every `anofox_tab_*` table function
-(plus anything tagged `anofox.contract = '1'`, should upstream start tagging),
-each with a curated recipe: the call on small deterministic tables
-(duplicates, NULLs, outliers, schema drift) and an adapter that reshapes its
-output into the nearest contract schema (summary / events / terms /
-prediction / check) or a generic chart. The adapters name the columns they
-read, so an upstream rename fails here.
+carries `tags['anofox.contract']`, there is no `anofox_contract_version()`.
+Three producers already match a contract schema as they come — `run_checks`
+and `agg_check` follow the `check` schema, `profile_correlations` the
+`matrix` schema — and every other producer needs an adapter. So the
+producers are every `anofox_tab_*` table function (plus anything tagged
+`anofox.contract = '1'`, should upstream start tagging), each with a curated
+recipe: the call on small deterministic tables (duplicates, NULLs, outliers,
+schema drift) and an adapter that reshapes its output into the nearest
+contract schema (summary / events / terms / prediction / check / matrix) or
+a generic chart. The adapters name the columns they read, so an upstream
+rename fails here.
 
 Per producer:
   raw      `anofox_plot(t)` on the output as it comes — expected to match no
            schema (XPASS, and fails the run, otherwise: time to tag it and
-           add a contract case, as in decide_conformance.py) — except the two
-           `NATIVE` producers (`run_checks`, `agg_check`), whose raw output is
-           expected to match the `check` schema already
+           add a contract case, as in decide_conformance.py) — except the
+           `NATIVE` producers (`run_checks`, `agg_check`, `profile_correlations`),
+           whose raw output is expected to match its schema already
   auto     `anofox_plot(t)` on the adapted table (contract adapters only)
   specific the schema's macro on the adapted table
   generic  a chart macro (`anofox_bar`, `anofox_xyc`, …) for shapes no
@@ -118,19 +119,27 @@ def check_ts(src: str, label: str, value: str, lower: str, upper: str) -> str:
             f"({lower})::DOUBLE AS lower_threshold, ({upper})::DOUBLE AS upper_threshold, message FROM {src})")
 
 
-SUMMARY, EVENTS, TERMS, PRED, CHECK, GENERIC = "summary", "events", "terms", "prediction", "check", "generic"
+SUMMARY, EVENTS, TERMS, PRED, CHECK, MATRIX, GENERIC = (
+    "summary", "events", "terms", "prediction", "check", "matrix", "generic",
+)
 SPECIFIC = {
     SUMMARY: "anofox_plot_summary(t)",
     EVENTS: "anofox_plot_events(t)",
     TERMS: "anofox_plot_terms(t)",
     PRED: "anofox_plot_prediction(t)",
     CHECK: "anofox_plot_checks(t)",
+    MATRIX: "anofox_plot_matrix(t)",
 }
 
 # Producers whose raw output already follows a contract schema (checked with
 # check_out, not check_raw, on the `raw` case): anofox-tabular#107 already
-# proposes our `check` column names, so run_checks / agg_check need no adapter.
-NATIVE: dict[str, str] = {"anofox_tab_run_checks": CHECK, "anofox_tab_agg_check": CHECK}
+# proposes our `check` column names, so run_checks / agg_check need no adapter;
+# profile_correlations' column_a/column_b/pearson already follows `matrix`.
+NATIVE: dict[str, str] = {
+    "anofox_tab_run_checks": CHECK,
+    "anofox_tab_agg_check": CHECK,
+    "anofox_tab_profile_correlations": MATRIX,
+}
 
 # Module configuration / status functions: not analysis results, not plotted.
 NOT_RESULTS = {"anofox_tab_email_config", "anofox_tab_pii_config", "anofox_tab_pii_status",
@@ -247,9 +256,10 @@ recipe("anofox_tab_profile_table", "anofox_tab_profile_table('d')", SUMMARY,
 recipe("anofox_tab_profile_summary", "anofox_tab_profile_summary('d')", SUMMARY,
        summary("anofox_tab_profile_summary('d')", ["row_count", "column_count", "numeric_columns", "string_columns",
                                                     "temporal_columns", "total_null_rate", "duplicate_row_count"]))
-recipe("anofox_tab_profile_correlations", "anofox_tab_profile_correlations('d')", SUMMARY,
-       "(SELECT model_id, metric, value FROM (UNPIVOT (SELECT column_a || ' × ' || column_b AS model_id, pearson, spearman, n::DOUBLE AS n "
-       "FROM anofox_tab_profile_correlations('d')) ON COLUMNS(* EXCLUDE (model_id)) INTO NAME metric VALUE value))")
+# profile_correlations already follows the `matrix` schema as it comes: a
+# pair list (column_a, column_b, pearson), mirrored to the full matrix.
+recipe("anofox_tab_profile_correlations", "anofox_tab_profile_correlations('d')", MATRIX,
+       "(SELECT * FROM anofox_tab_profile_correlations('d'))")
 
 
 def cases(producers: list[str]) -> list[dict]:
@@ -324,6 +334,8 @@ EXTRA = {
     + ") t",
     # run_checks grouped by table: one call per table, as it comes (#182).
     "run_checks_by_table": "SELECT table_name, anofox_plot_checks(t) FROM anofox_tab_run_checks('checks') t GROUP BY table_name",
+    # profile_correlations by the Spearman measure instead of Pearson (#183).
+    "correlations_spearman": "SELECT anofox_plot_matrix(t, value := 'spearman') FROM anofox_tab_profile_correlations('d') t",
 }
 
 # Build warnings the harness accepts (none today).
