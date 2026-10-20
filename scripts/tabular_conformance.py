@@ -2,19 +2,23 @@
 """Conformance harness: every anofox-tabular result producer → our plots.
 
 anofox_tabular does not take part in the anofox contract yet: no function
-carries `tags['anofox.contract']`, there is no `anofox_contract_version()`, and
-none of its outputs matches a contract schema as it comes. So the producers are
-every `anofox_tab_*` table function (plus anything tagged
-`anofox.contract = '1'`, should upstream start tagging), each with a curated
-recipe: the call on small deterministic tables (duplicates, NULLs, outliers,
-schema drift) and an adapter that reshapes its output into the nearest
-contract schema (summary / events / terms / prediction) or a generic chart.
-The adapters name the columns they read, so an upstream rename fails here.
+carries `tags['anofox.contract']`, there is no `anofox_contract_version()`. Two
+producers already match a contract schema as they come — `run_checks` and
+`agg_check` follow the `check` schema as they come — and every other producer
+needs an adapter. So the producers are every `anofox_tab_*` table function
+(plus anything tagged `anofox.contract = '1'`, should upstream start tagging),
+each with a curated recipe: the call on small deterministic tables
+(duplicates, NULLs, outliers, schema drift) and an adapter that reshapes its
+output into the nearest contract schema (summary / events / terms /
+prediction / check) or a generic chart. The adapters name the columns they
+read, so an upstream rename fails here.
 
 Per producer:
   raw      `anofox_plot(t)` on the output as it comes — expected to match no
-           schema; one that renders is XPASS and fails the run (time to
-           tag it and add a contract case), as in decide_conformance.py
+           schema (XPASS, and fails the run, otherwise: time to tag it and
+           add a contract case, as in decide_conformance.py) — except the two
+           `NATIVE` producers (`run_checks`, `agg_check`), whose raw output is
+           expected to match the `check` schema already
   auto     `anofox_plot(t)` on the adapted table (contract adapters only)
   specific the schema's macro on the adapted table
   generic  a chart macro (`anofox_bar`, `anofox_xyc`, …) for shapes no
@@ -107,13 +111,26 @@ def events(src: str, kind: str, value: str, threshold: str) -> str:
             f"message AS label, ({value})::DOUBLE AS value, ({threshold})::DOUBLE AS threshold FROM {src})")
 
 
-SUMMARY, EVENTS, TERMS, PRED, GENERIC = "summary", "events", "terms", "prediction", "generic"
+def check_ts(src: str, label: str, value: str, lower: str, upper: str) -> str:
+    """Per-reference-date check rows → check (check_name, ds, status, value, lower/upper_threshold)
+    for a status strip (`anofox_plot_checks`)."""
+    return (f"(SELECT '{label}' AS check_name, reference_date AS ds, status, ({value})::DOUBLE AS value, "
+            f"({lower})::DOUBLE AS lower_threshold, ({upper})::DOUBLE AS upper_threshold, message FROM {src})")
+
+
+SUMMARY, EVENTS, TERMS, PRED, CHECK, GENERIC = "summary", "events", "terms", "prediction", "check", "generic"
 SPECIFIC = {
     SUMMARY: "anofox_plot_summary(t)",
     EVENTS: "anofox_plot_events(t)",
     TERMS: "anofox_plot_terms(t)",
     PRED: "anofox_plot_prediction(t)",
+    CHECK: "anofox_plot_checks(t)",
 }
+
+# Producers whose raw output already follows a contract schema (checked with
+# check_out, not check_raw, on the `raw` case): anofox-tabular#107 already
+# proposes our `check` column names, so run_checks / agg_check need no adapter.
+NATIVE: dict[str, str] = {"anofox_tab_run_checks": CHECK, "anofox_tab_agg_check": CHECK}
 
 # Module configuration / status functions: not analysis results, not plotted.
 NOT_RESULTS = {"anofox_tab_email_config", "anofox_tab_pii_config", "anofox_tab_pii_status",
@@ -128,39 +145,45 @@ def recipe(name: str, src: str, schema: str, plot: str, variant: str = "") -> No
     RECIPES.setdefault(name, []).append((variant, src, schema, plot))
 
 
-def check(name: str, call: str, metrics: list[str]) -> None:
-    """A one-row data-quality check → summary of its measured numbers."""
-    recipe(name, call, SUMMARY, summary(call, metrics))
+def check_adapt(call: str, label: str, value: str, lower: str = "NULL", upper: str = "NULL") -> str:
+    """A one-row check's call → the `check` schema: its measure as `value`, its bounds renamed."""
+    return (f"(SELECT '{label}' AS check_name, status, ({value})::DOUBLE AS value, "
+            f"({lower})::DOUBLE AS lower_threshold, ({upper})::DOUBLE AS upper_threshold, message FROM {call})")
+
+
+def check(name: str, call: str, label: str, value: str, lower: str = "NULL", upper: str = "NULL") -> None:
+    """A one-row data-quality check → the `check` schema."""
+    recipe(name, call, CHECK, check_adapt(call, label, value, lower, upper))
 
 
 check("anofox_tab_agg_check", "anofox_tab_agg_check('d', 'amount', 'avg', 50, 150)",
-      ["value", "lower_threshold", "upper_threshold"])
+      "mean amount", "value", "lower_threshold", "upper_threshold")
 check("anofox_tab_compliance", "anofox_tab_compliance('d', 'amount > 0', 1.0)",
-      ["compliance_rate", "threshold"])
+      "amount positive", "compliance_rate", "threshold")
 check("anofox_tab_distinct_count", "anofox_tab_distinct_count('d', 'channel', 2, 10)",
-      ["distinct_count", "min_threshold", "max_threshold"])
+      "channels", "distinct_count", "min_threshold", "max_threshold")
 check("anofox_tab_duplicate_count", "anofox_tab_duplicate_count('d', 'channel, amount, qty, day', 0)",
-      ["duplicate_count", "total_count", "threshold"])
+      "duplicates", "duplicate_count", upper="threshold")
 check("anofox_tab_freshness", "anofox_tab_freshness('d', 'ts', INTERVAL 1 DAY, TIMESTAMP '2026-07-15 00:00')",
-      ["age_seconds", "epoch(threshold) - epoch(metric_value) AS seconds_past_due"])
+      "freshness", "age_seconds", upper="age_seconds - (epoch(threshold) - epoch(metric_value))")
 check("anofox_tab_iqr", "anofox_tab_iqr('d', 'amount', 1.5)",
-      ["q1", "q3", "lower_bound", "upper_bound", "outlier_count"])
+      "amount IQR outliers", "outlier_count", upper="0")
 check("anofox_tab_match_rate", "anofox_tab_match_rate('d', 'cust', 'customer', 'customer_id', 0.99)",
-      ["match_rate", "threshold"])
+      "customer match", "match_rate", "threshold")
 check("anofox_tab_null_rate", "anofox_tab_null_rate('d', 'customer', 0.05)",
-      ["null_rate", "threshold", "null_count"])
+      "customer present", "null_rate", upper="threshold")
 check("anofox_tab_occurrence", "anofox_tab_occurrence('d', 'channel', 'max', 1, 50)",
-      ["occurrence", "distinct_values", "lower_threshold", "upper_threshold"])
+      "channel occurrence", "occurrence", "lower_threshold", "upper_threshold")
 check("anofox_tab_regex_match", "anofox_tab_regex_match('d', 'email', '^[^@]+@[^@]+\\.[a-z]+$', 0.98)",
-      ["match_rate", "min_threshold", "max_threshold"])
+      "email format", "match_rate", "min_threshold", "max_threshold")
 check("anofox_tab_schema_check", "anofox_tab_schema_check('d_new', ['id', 'amount', 'phone'])",
-      ["len(missing_columns) AS missing_columns"])
+      "schema", "len(missing_columns)", upper="0")
 check("anofox_tab_values_in_set", "anofox_tab_values_in_set('d', 'status', ['shipped', 'delivered'], 1.0)",
-      ["in_set_rate", "threshold", "len(sample_violations) AS sample_violations"])
+      "status known", "in_set_rate", "threshold")
 check("anofox_tab_volume", "anofox_tab_volume('d', 100, 1000)",
-      ["row_count", "min_threshold", "max_threshold"])
+      "rows", "row_count", "min_threshold", "max_threshold")
 check("anofox_tab_zscore", "anofox_tab_zscore('d', 'amount', 3.0)",
-      ["mean", "stddev", "outlier_rate"])
+      "amount z-score outliers", "outlier_count", upper="0")
 for _f, _cols, _x in (("anofox_tab_dbscan", "'amount'", []), ("anofox_tab_dbscan_mv", "'amount, qty'", ["n_columns"])):
     recipe(_f, f"{_f}('d', {_cols}, 5.0, 3)", SUMMARY,
            summary(f"{_f}('d', {_cols}, 5.0, 3)", ["cluster_count", "noise_count", "noise_rate", "largest_cluster_size"] + _x),
@@ -169,11 +192,9 @@ for _f, _cols, _x in (("anofox_tab_dbscan", "'amount'", []), ("anofox_tab_dbscan
            f"SELECT anofox_xyc(d.amount, d.qty, t.point_type, kind := 'SCATTER') FROM {_f}('d', {_cols}, 5.0, 3, 'clusters') t "
            "JOIN (SELECT *, row_number() OVER () AS row_id FROM d) d USING (row_id)", "clusters")
 
-# run_checks: the suite → summary, one dot per (table, identifier) and a panel per check.
-recipe("anofox_tab_run_checks", "anofox_tab_run_checks('checks')", SUMMARY,
-       "(SELECT table_name || coalesce(' ' || identifier, '') AS model_id, check_name AS metric, value, "
-       "lower_threshold AS conf_low, upper_threshold AS conf_high, status, run_ts, check_type, column_name, message "
-       "FROM anofox_tab_run_checks('checks'))")
+# run_checks: the suite already follows the `check` schema as it comes.
+recipe("anofox_tab_run_checks", "anofox_tab_run_checks('checks')", CHECK,
+       "(SELECT * FROM anofox_tab_run_checks('checks'))")
 
 # Time-aware checks: one call per reference date → events on a timeline.
 _mai = "anofox_tab_metric_anomaly_iqr('daily', 'day', 'revenue', 14, 1.5, 'both', {day})"
@@ -244,7 +265,10 @@ def cases(producers: list[str]) -> list[dict]:
             key = name.removeprefix("anofox_tab_") + (f"[{variant}]" if variant else "")
             raw = src if src.startswith("(") else src
             base = {"name": name, "key": key, "schema": schema}
-            out.append({**base, "which": "raw", "sql": f"SELECT anofox_plot(t) FROM {raw} t"})
+            out.append({
+                **base, "which": "raw", "native": name in NATIVE,
+                "sql": f"SELECT anofox_plot(t) FROM {raw} t",
+            })
             if schema == GENERIC:
                 out.append({**base, "which": "generic", "sql": plot})
                 continue
@@ -280,6 +304,26 @@ EXTRA = {
     "anofox_tab_values_in_set('d', 'status', ['shipped', 'delivered'], 1.0)) t",
     # The aliases are the same functions: a short name renders the same way.
     "alias_null_rate": "SELECT anofox_plot_summary(t) FROM " + summary("null_rate('d', 'customer', 0.05)", ["null_rate", "threshold"]) + " t",
+    # Several single checks on one band: a panel per check (#182).
+    "checks_board": "SELECT anofox_plot_checks(t) FROM ("
+    + check_adapt("anofox_tab_null_rate('d', 'customer', 0.05)", "customer present", "null_rate", upper="threshold")
+    + " UNION ALL "
+    + check_adapt("anofox_tab_compliance('d', 'amount > 0', 1.0)", "amount positive", "compliance_rate", "threshold")
+    + " UNION ALL "
+    + check_adapt("anofox_tab_match_rate('d', 'cust', 'customer', 'customer_id', 0.99)", "customer match", "match_rate", "threshold")
+    + " UNION ALL "
+    + check_adapt("anofox_tab_values_in_set('d', 'status', ['shipped', 'delivered'], 1.0)", "status known", "in_set_rate", "threshold")
+    + ") t",
+    # The three time-aware checks as a status strip over several reference dates (#182).
+    "checks_over_time": "SELECT anofox_plot_checks(t) FROM ("
+    + check_ts(per_day(_mai), "revenue IQR", "metric_value", "lower_bound", "upper_bound")
+    + " UNION ALL "
+    + check_ts(per_day(_rcc), "row count change", "rel_change", "lower_threshold", "upper_threshold")
+    + " UNION ALL "
+    + check_ts(per_day(_rvs), "status in set", "in_set_rate", "threshold", "NULL")
+    + ") t",
+    # run_checks grouped by table: one call per table, as it comes (#182).
+    "run_checks_by_table": "SELECT table_name, anofox_plot_checks(t) FROM anofox_tab_run_checks('checks') t GROUP BY table_name",
 }
 
 # Build warnings the harness accepts (none today).
@@ -339,7 +383,11 @@ def main() -> int:
 
     def one(c):
         ok, out = q(c["sql"], "-json")
-        return c, (check_raw(ok, out, ALLOWED_WARNINGS) if c["which"] == "raw" else check_out(ok, out))
+        if c["which"] == "raw":
+            # NATIVE producers (run_checks, agg_check) already match the
+            # `check` schema as they come: OK is expected, not NOSCHEMA.
+            return c, (check_out(ok, out) if c.get("native") else check_raw(ok, out, ALLOWED_WARNINGS))
+        return c, check_out(ok, out)
 
     results = run_all(runs, one, a.jobs, a.out, key=lambda c: f"{c['key']}.{c['which']}")
     names = svg_names(results)
@@ -354,19 +402,21 @@ def main() -> int:
     # Coverage: producer → schema → plot calls OK / raw detection.
     plots = [r for r in results if r[4]["which"] not in ("raw", "extra")]
     raw = {r[4]["key"]: r[1] for r in results if r[4]["which"] == "raw"}
+    native_keys = {r[4]["key"] for r in results if r[4]["which"] == "raw" and r[4].get("native")}
     print(f"\n{'producer':40s} {'schema':10s} {'plots':6s} raw anofox_plot")
     for key in sorted({r[4]["key"] for r in plots}):
         mine = [r for r in plots if r[4]["key"] == key]
         good = sum(1 for r in mine if r[1] == "OK")
-        print(f"{key:40s} {mine[0][4]['schema']:10s} {good}/{len(mine):<4d} "
-              f"{'no schema' if raw.get(key) == 'NOSCHEMA' else raw.get(key)}")
+        raw_text = "as it comes" if key in native_keys else ("no schema" if raw.get(key) == "NOSCHEMA" else raw.get(key))
+        print(f"{key:40s} {mine[0][4]['schema']:10s} {good}/{len(mine):<4d} {raw_text}")
     failed = [r for r in results if r[1] not in ("OK", "NOSCHEMA")]
     passed = sum(1 for r in results if r[1] == "OK" and r[4]["which"] != "raw")
     total = sum(1 for r in results if r[4]["which"] != "raw")
     covered = len({c["name"] for c in todo if not c.get("missing")})
     noschema = sum(1 for s in raw.values() if s == "NOSCHEMA")
+    native = len(native_keys)
     print(f"\n{covered}/{len(results_)} producers covered, {passed}/{total} plot calls OK, "
-          f"{noschema}/{len(raw)} raw outputs match no contract schema")
+          f"{noschema}/{len(raw)} raw outputs match no contract schema, {native}/{len(raw)} plot as they come")
     keep = lambda n: not n.endswith(".auto") and ".raw" not in n
     if not a.no_montage:
         write_montage(a.out, names, keep)

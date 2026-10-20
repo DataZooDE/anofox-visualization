@@ -2,7 +2,9 @@
 //! (`docs/plans/integration-contract.md`): `terms`, `prediction`, `curve`,
 //! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
 //! `test` (`tests`: a comparison forest; `compare`: groups with significance
-//! brackets), partial-residual plots (`partial`), a cross-validation fold
+//! brackets), partial-residual plots (`partial`), data-quality `checks`
+//! (anofox-tabular's `run_checks` / `agg_check`: a band per check coloured
+//! by status, or a status strip over time), a cross-validation fold
 //! timeline (`cv`, provisional), time-series `decomposition` (stacked
 //! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
 //! `events` (alarms, parameter changes) and an `auto` dispatch on the column
@@ -20,6 +22,7 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod checks;
 mod curves;
 mod cv;
 mod decomposition;
@@ -50,6 +53,7 @@ pub const PLOTS: &[&str] = &[
     "cv",
     "decomposition",
     "events",
+    "checks",
     "diagram",
     "auto",
 ];
@@ -207,6 +211,7 @@ fn render_plot(
             return crate::render_placed(&cols, place, w, h, o);
         }
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
+        "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -546,6 +551,11 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "diagnostics"
     } else if has("metric") && has("value") {
         "summary"
+    } else if has("status")
+        && has("value")
+        && (has("check_name") || has("lower_threshold") || has("upper_threshold"))
+    {
+        "checks"
     } else if has("partial_residual") || has("x_residual") && has("y_residual") {
         "partial"
     } else if has("fold_id") && (has("split") || has("test_start") || has("train_end")) {
@@ -568,8 +578,9 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
-             partial_residual), cv folds (fold_id, split, ds), decomposition (ds | period, \
-             component, value) or events (ds | period, kind){}",
+             partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
+             ds), decomposition (ds | period, component, value) or events (ds | period, \
+             kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -586,6 +597,11 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
     ("prediction", &["yhat"], &["yhat"]),
     ("curve", &["curve_type", "x", "y"], &["curve_type"]),
     ("summary", &["metric", "value"], &["metric"]),
+    (
+        "checks",
+        &["check_name", "status", "value"],
+        &["check_name", "lower_threshold", "upper_threshold"],
+    ),
     (
         "diagnostics",
         &["fitted", "residual"],
@@ -1104,6 +1120,87 @@ mod tests {
         );
         let e = detect(&rows(r#"[{"a":1}]"#)).unwrap_err().to_string();
         assert!(e.contains("contract v1"), "{e}");
+    }
+
+    #[test]
+    fn checks_band_and_strip() {
+        // run_checks-shaped rows.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"run_ts":"2026-10-19 10:00:00","check_name":"rows","value":120,
+                    "lower_threshold":100,"upper_threshold":null,"status":"pass",
+                    "identifier":null,"message":"ok"}]"#
+            ))
+            .unwrap(),
+            "checks"
+        );
+        // agg_check-shaped rows.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"status":"pass","agg":"avg","value":69.5,"lower_threshold":50,
+                    "upper_threshold":150,"message":"m"}]"#
+            ))
+            .unwrap(),
+            "checks"
+        );
+        // status + value alone is not enough: no schema, and no closest hint.
+        let e = detect(&rows(r#"[{"status":"ok","value":1}]"#))
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("closest"), "{e}");
+        let e = go("auto", r#"[{"check_name":"x","status":"pass"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("closest: checks, missing value"), "{e}");
+
+        // Band: 3 checks, one with identifiers app/web.
+        let band = r#"[
+            {"check_name":"rows","status":"pass","value":120,"lower_threshold":100,"upper_threshold":null},
+            {"check_name":"customer present","status":"fail","value":0.08,"lower_threshold":null,"upper_threshold":0.05,"identifier":"app"},
+            {"check_name":"customer present","status":"fail","value":0.03,"lower_threshold":null,"upper_threshold":0.05,"identifier":"web"},
+            {"check_name":"status known","status":"pass","value":1.0,"lower_threshold":1.0,"upper_threshold":null}]"#;
+        let svg = go("checks", band, "{}").unwrap();
+        dump("checks_band", &svg);
+        assert!(svg.contains(r#"data-panel="2""#), "{svg}");
+        assert!(svg.contains(">customer present</text>"), "{svg}");
+        assert!(svg.contains(">app</text>"), "{svg}");
+        let neg = RenderOptions::default().theme.colors.negative;
+        assert!(
+            svg.contains(&format!("#{:02X}{:02X}{:02X}", neg.0, neg.1, neg.2)),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // Strip: 2 checks x 3 distinct ds values.
+        let strip = r#"[
+            {"check_name":"rows","ds":"2026-10-01","status":"pass","value":120},
+            {"check_name":"rows","ds":"2026-10-02","status":"pass","value":121},
+            {"check_name":"rows","ds":"2026-10-03","status":"warn","value":90},
+            {"check_name":"customer present","ds":"2026-10-01","status":"pass","value":0.01},
+            {"check_name":"customer present","ds":"2026-10-02","status":"fail","value":0.08},
+            {"check_name":"customer present","ds":"2026-10-03","status":"pass","value":0.02}]"#;
+        let svg = go("checks", strip, "{}").unwrap();
+        dump("checks_strip", &svg);
+        assert!(!svg.contains("data-panel="), "{svg}");
+        assert!(
+            svg.contains(">rows</text>") && svg.contains(">customer present</text>"),
+            "{svg}"
+        );
+        assert!(svg.matches("<circle").count() >= 6, "{svg}");
+
+        let e = go(
+            "checks",
+            r#"[{"check_name":"a","status":"pass","value":1}]"#,
+            r#"{"kind":"nope"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("kind := 'nope'"), "{e}");
+
+        let e = go("checks", r#"[{"check_name":"a","status":"pass"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs column(s) value"), "{e}");
     }
 
     const TUKEY: &str = r#"[
