@@ -4168,23 +4168,20 @@ impl FmtGradient {
             Aesthetic::Fill,
             ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
         );
-        // `ScaleColorGradientN` has no `with_limits`/fixed-domain
-        // constructor (ggplot-rs 0.19): it always auto-trains its min/max
-        // from the layer's own fill values, which ignores `Ramp::min` /
-        // `Ramp::max` — the domain a `matrix` heatmap's `domain :=` option
-        // asks for (e.g. a correlation's fixed −1..1, even when the data
-        // itself happens to span a narrower range after mirroring). `train`
-        // only ever widens the recorded range (`Scale::train`, never
-        // shrinks it), and the real data trains again once this scale joins
-        // the plot, so seeding it with the ramp's own domain here fixes the
-        // domain without the data ever being allowed to narrow it. A no-op
-        // for every other heatmap, whose ramp is already built from that
-        // same data (`Ramp::new`/`Ramp::status`).
+        // Fix the domain to `Ramp::min`/`Ramp::max` — the domain a `matrix`
+        // heatmap's `domain :=` option asks for (e.g. a correlation's fixed
+        // −1..1, even when the data itself spans a narrower range after
+        // mirroring). `Squish` (not the default `Censor`) keeps a value
+        // fractionally outside the domain (float noise in the common case,
+        // where the ramp's own domain already matches the data) at the
+        // nearest end colour rather than turning it grey (#324's pre-0.21
+        // workaround trained the scale's own min/max instead, since
+        // `ScaleColorGradientN` had no fixed-domain builder; this is the
+        // same "never narrower than the ramp" intent through the native
+        // API). A no-op for every other heatmap, whose ramp is already
+        // built from that same data (`Ramp::new`/`Ramp::status`).
         if ramp.min.is_finite() && ramp.max.is_finite() && ramp.min <= ramp.max {
-            ggplot_rs::scale::Scale::train(
-                &mut inner,
-                &[Value::Float(ramp.min), Value::Float(ramp.max)],
-            );
+            inner = inner.with_limits(ramp.min, ramp.max).with_oob(Oob::Squish);
         }
         FmtGradient { inner, fmt, locale }
     }
