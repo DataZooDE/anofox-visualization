@@ -444,4 +444,3 @@ fn the_headless_dashboard_leaves_out_hidden_tabs_and_missing_strips() {
     assert_eq!(cards(&svg), cards(&three));
     assert!(cards(&three) > cards(&render_dashboard_svg(one, &mut Files, &opts).unwrap()));
 }
-

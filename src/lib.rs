@@ -1320,10 +1320,12 @@ pub fn render_with_title(
     })
 }
 
-/// The last step of every contract render: drop non-finite marks, apply the
-/// theme variant, record the build warnings.
+/// The last step of every contract render: apply the theme variant and
+/// record the build warnings. Non-finite marks are dropped by ggplot-rs
+/// itself (0.21, B2-1): `draw_line` splits runs at a non-finite vertex and
+/// `draw_quadratic`/arrows drop a non-finite path outright.
 pub(crate) fn finish_contract_svg(svg: String, warnings: &[String], o: &RenderOptions) -> String {
-    with_warnings_attr(o.theme.finish_svg(strip_nonfinite_marks(svg)), warnings)
+    with_warnings_attr(o.theme.finish_svg(svg), warnings)
 }
 
 /// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
@@ -1718,7 +1720,7 @@ fn render_placed(
         let svg = if map::is_map(&cols) {
             o.theme.with_font(svg)
         } else {
-            o.theme.finish_svg(strip_nonfinite_marks(svg))
+            o.theme.finish_svg(svg)
         };
         let svg = with_rule_marks(with_xline_dates(svg, &cols));
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
@@ -2019,103 +2021,8 @@ pub(crate) fn finish_grid(
             .render_svg_native_at(x, y, w, h)
             .map(|s| (s, Vec::new())),
     }
-    .map(|(s, warnings)| (ticks::fit_x_labels(strip_nonfinite_marks(s)), warnings))
+    .map(|(s, warnings)| (ticks::fit_x_labels(s), warnings))
     .map_err(|e| format!("render failed: {e:?}"))
-}
-
-/// Geometry attributes whose values must be finite numbers.
-const GEOMETRY_ATTRS: &[&str] = &[
-    "x",
-    "y",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "cx",
-    "cy",
-    "r",
-    "rx",
-    "ry",
-    "width",
-    "height",
-    "points",
-    "d",
-    "transform",
-    "stroke-width",
-    "font-size",
-    "opacity",
-    "fill-opacity",
-    "viewBox",
-];
-
-/// Does a start tag carry `NaN`/`inf` in a geometry attribute?
-fn tag_has_nonfinite(tag: &str) -> bool {
-    let mut rest = tag;
-    while let Some(eq) = rest.find("=\"") {
-        let name = rest[..eq]
-            .rsplit(|c: char| c.is_whitespace())
-            .next()
-            .unwrap_or("");
-        let after = &rest[eq + 2..];
-        let Some(end) = after.find('"') else {
-            return false;
-        };
-        let val = &after[..end];
-        if GEOMETRY_ATTRS.contains(&name)
-            && val
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
-                .any(|t| {
-                    let t = t.trim_start_matches('-').to_ascii_lowercase();
-                    t == "nan" || t == "inf" || t == "infinity"
-                })
-        {
-            return true;
-        }
-        rest = &after[end + 1..];
-    }
-    false
-}
-
-/// Safety net: drop any element whose geometry contains a non-finite number
-/// (the plotting engine can emit `NaN` for degenerate inputs, e.g. a violin of
-/// a constant group). The SVG we write never contains a raw `>` inside an
-/// attribute, so a tag scan is exact.
-fn strip_nonfinite_marks(svg: String) -> String {
-    if !(svg.contains("NaN") || svg.contains("inf")) {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len());
-    let mut i = 0;
-    while let Some(lt) = svg[i..].find('<') {
-        let start = i + lt;
-        out.push_str(&svg[i..start]);
-        let Some(gt) = svg[start..].find('>') else {
-            out.push_str(&svg[start..]);
-            return out;
-        };
-        let tag_end = start + gt + 1;
-        let tag = &svg[start..tag_end];
-        if !tag.starts_with("</") && !tag.starts_with("<svg") && tag_has_nonfinite(tag) {
-            if tag.ends_with("/>") {
-                i = tag_end;
-                continue;
-            }
-            let name: String = tag[1..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            let close = format!("</{name}>");
-            i = svg[tag_end..]
-                .find(&close)
-                .map(|p| tag_end + p + close.len())
-                .unwrap_or(tag_end);
-            continue;
-        }
-        out.push_str(tag);
-        i = tag_end;
-    }
-    out.push_str(&svg[i..]);
-    out
 }
 
 fn render_inner(
