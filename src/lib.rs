@@ -1320,10 +1320,12 @@ pub fn render_with_title(
     })
 }
 
-/// The last step of every contract render: drop non-finite marks, apply the
-/// theme variant, record the build warnings.
+/// The last step of every contract render: apply the theme variant and
+/// record the build warnings. Non-finite marks are dropped by ggplot-rs
+/// itself (0.21, B2-1): `draw_line` splits runs at a non-finite vertex and
+/// `draw_quadratic`/arrows drop a non-finite path outright.
 pub(crate) fn finish_contract_svg(svg: String, warnings: &[String], o: &RenderOptions) -> String {
-    with_warnings_attr(o.theme.finish_svg(strip_nonfinite_marks(svg)), warnings)
+    with_warnings_attr(o.theme.finish_svg(svg), warnings)
 }
 
 /// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
@@ -1718,15 +1720,12 @@ fn render_placed(
         let svg = if map::is_map(&cols) {
             o.theme.with_font(svg)
         } else {
-            o.theme.finish_svg(strip_nonfinite_marks(svg))
+            o.theme.finish_svg(svg)
         };
-        let svg = with_line_styles(with_rule_marks(with_xline_dates(svg, &cols)), &cols);
+        let svg = with_xline_dates(svg, &cols);
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         if boxstats::is_stats(&cols) {
             svg = boxstats::with_tips(svg, &cols, o);
-        }
-        if find_role(&cols, Role::Track).is_some() {
-            svg = track::lane_tips(svg);
         }
         Ok((svg, warnings))
     })
@@ -1767,51 +1766,6 @@ fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
     svg
 }
 
-/// Mark the reference rules (`::XLINE`, `::REFLINE`/`::YLINE`, threshold
-/// lines) `data-rule="x"` / `"y"`: they carry a tooltip like the data marks,
-/// but hosts must not read them as data (a chart's summary, its keyboard
-/// walk). A rule is a dashed, titled 2-point polyline along one axis.
-fn with_rule_marks(svg: String) -> String {
-    if !svg.contains(" stroke-dasharray=\"") {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len() + 64);
-    let mut rest = svg.as_str();
-    while let Some(i) = rest.find("<polyline ") {
-        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
-            break;
-        };
-        let tag = &rest[i..end];
-        let pts: Vec<(&str, &str)> = tag
-            .find(" points=\"")
-            .map(|k| &tag[k + 9..])
-            .and_then(|p| p.split('"').next())
-            .map(|p| {
-                p.split_whitespace()
-                    .filter_map(|xy| xy.split_once(','))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let axis = match pts[..] {
-            [(x1, _), (x2, _)] if x1 == x2 => Some("x"),
-            [(_, y1), (_, y2)] if y1 == y2 => Some("y"),
-            _ => None,
-        };
-        let rule = axis.filter(|_| {
-            tag.contains(" stroke-dasharray=\"")
-                && !tag.ends_with('/')
-                && rest[end + 1..].starts_with("<title>")
-        });
-        out.push_str(&rest[..end]);
-        if let Some(a) = rule {
-            out.push_str(&format!(" data-rule=\"{a}\""));
-        }
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Epoch seconds as `2026-10-12` (or `2026-10-12 08:30:00` off midnight).
 fn xline_date_text(secs: i64) -> String {
     let day = crate::period::Date::from_days(secs.div_euclid(86_400)).iso();
@@ -1825,85 +1779,6 @@ fn xline_date_text(secs: i64) -> String {
 
 /// The `::LINESTYLE` values.
 pub const LINE_STYLES: &[&str] = &["solid", "dashed", "flow"];
-
-/// `::LINESTYLE`: dash the lines of the series whose rows say `'dashed'` or
-/// `'flow'` (every data line when there is no `::CATEGORY`), and mark the
-/// flowing ones `class="dp-flow"` — the browser moves their dashes (pure CSS),
-/// static output keeps plain dashes.
-fn with_line_styles(svg: String, cols: &[Column]) -> String {
-    let Some(st) = find_role(cols, Role::LineStyle) else {
-        return svg;
-    };
-    let cat = find_role(cols, Role::Category);
-    // series → flowing?  (None key = every line: no ::CATEGORY)
-    let mut styled: Vec<(Option<String>, bool)> = Vec::new();
-    for (i, v) in st.values.iter().enumerate() {
-        let Some(s) = v.as_str().map(|s| s.trim().to_ascii_lowercase()) else {
-            continue;
-        };
-        if s != "flow" && s != "dashed" {
-            continue;
-        }
-        let key = match cat {
-            Some(c) => match c.values.get(i) {
-                Some(Value::Str(k)) => Some(k.clone()),
-                Some(v) => v.as_f64().map(|f| f.to_string()),
-                None => None,
-            },
-            None => None,
-        };
-        if cat.is_some() && key.is_none() {
-            continue;
-        }
-        match styled.iter_mut().find(|(k, _)| *k == key) {
-            Some(e) => e.1 |= s == "flow",
-            None => styled.push((key, s == "flow")),
-        }
-    }
-    if styled.is_empty() {
-        return svg;
-    }
-    let attr = |tag: &str, name: &str| -> Option<String> {
-        let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-        Some(tag[k..k + tag[k..].find('"')?].to_string())
-    };
-    let mut out = String::with_capacity(svg.len() + 256);
-    let mut rest = svg.as_str();
-    while let Some(i) = rest.find("<polyline ") {
-        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
-            break;
-        };
-        let tag = &rest[i..end];
-        let points = attr(tag, "points").unwrap_or_default();
-        // a data line: not a dashed rule, not a 2-point grid / axis line
-        let data_line = !tag.contains(" stroke-dasharray=\"")
-            && (tag.contains(" data-series=\"") || points.split_whitespace().count() > 2);
-        let hit = if !data_line {
-            None
-        } else if cat.is_some() {
-            let s = attr(tag, "data-series").map(|s| s.replace("&amp;", "&"));
-            styled.iter().find(|(k, _)| s.is_some() && *k == s)
-        } else {
-            styled.first()
-        };
-        let (head, close) = match tag.strip_suffix('/') {
-            Some(h) => (h, "/>"),
-            None => (tag, ">"),
-        };
-        out.push_str(&rest[..i]);
-        out.push_str(head);
-        if let Some((_, flow)) = hit {
-            out.push_str(" stroke-dasharray=\"6 4\"");
-            if *flow {
-                out.push_str(" class=\"dp-flow\"");
-            }
-        }
-        out.push_str(close);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
 
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
@@ -2098,103 +1973,8 @@ pub(crate) fn finish_grid(
             .render_svg_native_at(x, y, w, h)
             .map(|s| (s, Vec::new())),
     }
-    .map(|(s, warnings)| (ticks::fit_x_labels(strip_nonfinite_marks(s)), warnings))
+    .map(|(s, warnings)| (ticks::fit_x_labels(s), warnings))
     .map_err(|e| format!("render failed: {e:?}"))
-}
-
-/// Geometry attributes whose values must be finite numbers.
-const GEOMETRY_ATTRS: &[&str] = &[
-    "x",
-    "y",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "cx",
-    "cy",
-    "r",
-    "rx",
-    "ry",
-    "width",
-    "height",
-    "points",
-    "d",
-    "transform",
-    "stroke-width",
-    "font-size",
-    "opacity",
-    "fill-opacity",
-    "viewBox",
-];
-
-/// Does a start tag carry `NaN`/`inf` in a geometry attribute?
-fn tag_has_nonfinite(tag: &str) -> bool {
-    let mut rest = tag;
-    while let Some(eq) = rest.find("=\"") {
-        let name = rest[..eq]
-            .rsplit(|c: char| c.is_whitespace())
-            .next()
-            .unwrap_or("");
-        let after = &rest[eq + 2..];
-        let Some(end) = after.find('"') else {
-            return false;
-        };
-        let val = &after[..end];
-        if GEOMETRY_ATTRS.contains(&name)
-            && val
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
-                .any(|t| {
-                    let t = t.trim_start_matches('-').to_ascii_lowercase();
-                    t == "nan" || t == "inf" || t == "infinity"
-                })
-        {
-            return true;
-        }
-        rest = &after[end + 1..];
-    }
-    false
-}
-
-/// Safety net: drop any element whose geometry contains a non-finite number
-/// (the plotting engine can emit `NaN` for degenerate inputs, e.g. a violin of
-/// a constant group). The SVG we write never contains a raw `>` inside an
-/// attribute, so a tag scan is exact.
-fn strip_nonfinite_marks(svg: String) -> String {
-    if !(svg.contains("NaN") || svg.contains("inf")) {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len());
-    let mut i = 0;
-    while let Some(lt) = svg[i..].find('<') {
-        let start = i + lt;
-        out.push_str(&svg[i..start]);
-        let Some(gt) = svg[start..].find('>') else {
-            out.push_str(&svg[start..]);
-            return out;
-        };
-        let tag_end = start + gt + 1;
-        let tag = &svg[start..tag_end];
-        if !tag.starts_with("</") && !tag.starts_with("<svg") && tag_has_nonfinite(tag) {
-            if tag.ends_with("/>") {
-                i = tag_end;
-                continue;
-            }
-            let name: String = tag[1..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            let close = format!("</{name}>");
-            i = svg[tag_end..]
-                .find(&close)
-                .map(|p| tag_end + p + close.len())
-                .unwrap_or(tag_end);
-            continue;
-        }
-        out.push_str(tag);
-        i = tag_end;
-    }
-    out.push_str(&svg[i..]);
-    out
 }
 
 fn render_inner(
@@ -2922,6 +2702,56 @@ fn cartesian(
             }
         }
     }
+    // ::LINESTYLE 'flow'/'dashed' rows dash their line through the native
+    // linetype aesthetic (ggplot-rs's own 6,3 dash, an accepted visual delta)
+    // instead of the old `with_line_styles` string surgery, which wrote
+    // `class="dp-flow"` — malformed since 0.21 already writes `class="gg-mark
+    // …"` on every mark. `data_attr` exposes the raw value so the browser can
+    // still drive the moving-dash animation off `[data-linestyle="flow"]`.
+    // Mapped only on the line-drawing layer itself (`dash_aes`/`undash`
+    // below), not the shared/global aes: a point marker has no line to dash,
+    // and giving every layer the aesthetic would force every layer's legend
+    // contribution to Some(false) before ggplot-rs would agree to suppress
+    // the (otherwise unwanted) linetype legend — which would also swallow
+    // the real ::CATEGORY colour legend.
+    let line_style = find_role(cols, Role::LineStyle);
+    if let Some(ls) = line_style {
+        let vals: Vec<Value> = ls
+            .values
+            .iter()
+            .map(
+                |v| match v.as_str().map(|s| s.trim().to_ascii_lowercase()) {
+                    Some(s) if s == "flow" || s == "dashed" => Value::Str(s),
+                    // `Value::Na` maps to the scale's `"NA"` level (`key_str`)
+                    // without writing a `data-linestyle` attribute at all
+                    // (`set_row_extras` skips NA `data_attr` columns) — unlike
+                    // the literal string `"NA"`, which would write one on every
+                    // plain/solid row.
+                    _ => Value::Na,
+                },
+            )
+            .collect();
+        data.push(("linestyle".to_string(), vals));
+    }
+    // Add the linetype aesthetic + its manual scale and `data-linestyle` to
+    // the most recently added layer, and keep it (and the `cat` colour it
+    // inherits) out of the legend box.
+    let dash_aes = |plot: GGPlot| -> GGPlot {
+        if line_style.is_none() {
+            return plot;
+        }
+        plot.layer_aes(
+            Aes::new()
+                .linetype("linestyle")
+                .data_attr("linestyle", "linestyle"),
+        )
+        .scale_linetype_manual(vec![
+            ("NA", Linetype::Solid),
+            ("flow", Linetype::Dashed),
+            ("dashed", Linetype::Dashed),
+        ])
+        .show_legend(false)
+    };
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
     // Shaded x-regions (`::MARKAREA`, one or more columns): a light band behind
@@ -3061,18 +2891,18 @@ fn cartesian(
             .position(facet_position::PerFacet(PositionFill)),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
-        Kind::Line | Kind::LinePercent => plot
-            .geom_line_with(thin_line())
-            .geom_point_with(small_point()),
+        Kind::Line | Kind::LinePercent => {
+            plot = dash_aes(plot.geom_line_with(thin_line()));
+            plot.geom_point_with(small_point())
+        }
         // One step line per series (+ `::CENSOR` marks).
         Kind::Step => {
-            plot = plot
-                .geom_step_with(GeomStep {
-                    color: brand,
-                    width: 1.2,
-                    ..Default::default()
-                })
-                .geom_point_with(small_point());
+            plot = dash_aes(plot.geom_step_with(GeomStep {
+                color: brand,
+                width: 1.2,
+                ..Default::default()
+            }))
+            .geom_point_with(small_point());
             if censor {
                 plot = plot.geom_censor_marks_with(
                     GeomCensorMarks {
@@ -4290,23 +4120,20 @@ impl FmtGradient {
             Aesthetic::Fill,
             ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
         );
-        // `ScaleColorGradientN` has no `with_limits`/fixed-domain
-        // constructor (ggplot-rs 0.19): it always auto-trains its min/max
-        // from the layer's own fill values, which ignores `Ramp::min` /
-        // `Ramp::max` — the domain a `matrix` heatmap's `domain :=` option
-        // asks for (e.g. a correlation's fixed −1..1, even when the data
-        // itself happens to span a narrower range after mirroring). `train`
-        // only ever widens the recorded range (`Scale::train`, never
-        // shrinks it), and the real data trains again once this scale joins
-        // the plot, so seeding it with the ramp's own domain here fixes the
-        // domain without the data ever being allowed to narrow it. A no-op
-        // for every other heatmap, whose ramp is already built from that
-        // same data (`Ramp::new`/`Ramp::status`).
+        // Fix the domain to `Ramp::min`/`Ramp::max` — the domain a `matrix`
+        // heatmap's `domain :=` option asks for (e.g. a correlation's fixed
+        // −1..1, even when the data itself spans a narrower range after
+        // mirroring). `Squish` (not the default `Censor`) keeps a value
+        // fractionally outside the domain (float noise in the common case,
+        // where the ramp's own domain already matches the data) at the
+        // nearest end colour rather than turning it grey (#324's pre-0.21
+        // workaround trained the scale's own min/max instead, since
+        // `ScaleColorGradientN` had no fixed-domain builder; this is the
+        // same "never narrower than the ramp" intent through the native
+        // API). A no-op for every other heatmap, whose ramp is already
+        // built from that same data (`Ramp::new`/`Ramp::status`).
         if ramp.min.is_finite() && ramp.max.is_finite() && ramp.min <= ramp.max {
-            ggplot_rs::scale::Scale::train(
-                &mut inner,
-                &[Value::Float(ramp.min), Value::Float(ramp.max)],
-            );
+            inner = inner.with_limits(ramp.min, ramp.max).with_oob(Oob::Squish);
         }
         FmtGradient { inner, fmt, locale }
     }

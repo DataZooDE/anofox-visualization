@@ -47,12 +47,13 @@ const many = "abcdef".split("").map((s, i) => ({ series: s, x: "1", value: i }))
 assert.match(chartSummary("Line chart", "T", many, fmt), /6 series \(a, b, c, d, and 2 more\)/);
 assert.equal(chartSummary("Gauge", "Uptime", [], fmt), "Gauge: Uptime.");
 
-// Reference rules (`data-rule`: ::XLINE "Today", ::REFLINE) keep their tooltip
-// but are no data point: neither a series in the summary nor a keyboard stop.
-const chartMarks = new Function(`${grab("chartMarks")}\nreturn chartMarks;`)();
+// Reference rules (geom_vline/geom_hline: ::XLINE "Today", ::REFLINE) keep
+// their tooltip but are no data point: neither a series in the summary nor a
+// keyboard stop.
+const chartMarks = new Function(`${grab("isRuleMark")}\n${grab("chartMarks")}\nreturn chartMarks;`)();
 const el = (attrs) => ({ getAttribute: (k) => attrs[k] ?? null, hasAttribute: (k) => k in attrs });
 const point = el({ "data-tip": "Observed: 12", "data-series": "Observed" });
-const today = el({ "data-tip": "2026-10-12", "data-x": "2026-10-12", "data-rule": "x" });
+const today = el({ "data-tip": "2026-10-12", "data-x": "2026-10-12", "data-geom": "vline" });
 assert.deepEqual(chartMarks({ querySelectorAll: () => [point, today] }), [point]);
 
 // "Charts as tables" for a ::MAP: one row per feature (a multipoint's dots

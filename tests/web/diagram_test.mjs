@@ -28,7 +28,7 @@ assert.deepEqual(metricRole({ roles: [[0, "COMPACT"], [1, "LABEL"]] }), [0, "COM
 const kinds = line(/^const CHART_KINDS = \[[\s\S]*?^\];/m);
 globalThis.CSS = { escape: (v) => String(v).replace(/["\\]/g, "\\$&") };
 const { chartKind, chartMarks, markGrid, diagramTextHtml, diagramNodeLabel, diagramStep } = new Function(
-  `${kinds}\n${grab("chartKind")}\n${grab("chartMarks")}\n${grab("markGrid")}\n${grab("escapeHtml")}\n${grab("diagramTextHtml")}\n${grab("diagramNodeLabel")}\n${grab("diagramStep")}\nreturn { chartKind, chartMarks, markGrid, diagramTextHtml, diagramNodeLabel, diagramStep };`
+  `${kinds}\n${grab("chartKind")}\n${grab("isRuleMark")}\n${grab("chartMarks")}\n${grab("markGrid")}\n${grab("escapeHtml")}\n${grab("diagramTextHtml")}\n${grab("diagramNodeLabel")}\n${grab("diagramStep")}\nreturn { chartKind, chartMarks, markGrid, diagramTextHtml, diagramNodeLabel, diagramStep };`
 )();
 assert.equal(chartKind([[0, "DIAGRAM", ""], [1, "LABEL", ""]]), "Diagram");
 

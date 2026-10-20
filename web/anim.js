@@ -33,12 +33,15 @@ export function animKit(win) {
   // Data marks only — never grid, axis or reference rules (2-point polylines).
   // ggplot-rs tags points and bars with data-x, series lines and bands with
   // data-series; a single-series line carries neither, so it is told apart
-  // from the grid by having more than two points.
+  // from the grid by having more than two points. A flowing (::LINESTYLE
+  // 'flow') line keeps `stroke-dasharray` set but is still a data mark —
+  // it carries `data-linestyle="flow"` (the linetype aesthetic, #318 C2),
+  // not a class of its own.
   const npts = (el) => (el.getAttribute("points") || "").trim().split(/\s+/).length;
   const linesOf = (svg) =>
     [...svg.querySelectorAll("polyline")].filter(
       (pl) =>
-        pl.classList.contains("dp-flow") ||
+        pl.getAttribute("data-linestyle") === "flow" ||
         (!pl.hasAttribute("stroke-dasharray") && (pl.hasAttribute("data-series") || npts(pl) > 2))
     );
   const bandsOf = (svg) => [...svg.querySelectorAll("polygon")].filter((pg) => npts(pg) > 2);
@@ -210,8 +213,8 @@ export function animKit(win) {
     if (svg.hasAttribute("data-diagram")) return enterDiagram(svg);
     const P = plotOf(svg);
     const lines = linesOf(svg);
-    const flowing = lines.filter((l) => l.classList.contains("dp-flow"));
-    const drawn = lines.filter((l) => !l.classList.contains("dp-flow"));
+    const flowing = lines.filter((l) => l.getAttribute("data-linestyle") === "flow");
+    const drawn = lines.filter((l) => l.getAttribute("data-linestyle") !== "flow");
     const bands = bandsOf(svg);
     const bars = barsOf(svg);
     const points = pointsOf(svg);

@@ -1350,7 +1350,10 @@ fn hexbin_counts_or_sums() {
     assert_eq!(h.len(), 1, "{s}");
     assert_eq!(attr(h[0], "data-count"), Some("3"));
     assert_eq!(attr(h[0], "data-value"), Some("3"));
-    assert!(attr(h[0], "data-fvalue").is_some(), "{}", h[0]);
+    // `data-fvalue` is ggplot-rs-reserved (0.21): a count-only hex's
+    // formatted text is `data-vtext` instead (`map/overlay.rs`).
+    assert!(attr(h[0], "data-vtext").is_some(), "{}", h[0]);
+    assert!(attr(h[0], "data-fvalue").is_none(), "{}", h[0]);
     assert!(attr(h[0], "data-label").unwrap().contains('N'), "{}", h[0]);
 
     // with a measure, the value sums it instead of counting rows

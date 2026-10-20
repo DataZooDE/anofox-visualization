@@ -757,9 +757,12 @@ fn render_panel_svg(
         );
     }
 
-    // A ::MARKDOWN box: its text, plain and wrapped (no rich formatting
-    // headless), under the title.
+    // A ::MARKDOWN box: its text, plain and wrapped (no rich formatting, no
+    // TeX typesetting, headless) — but its `{{col}}` / `{{col:fmt}}`
+    // placeholders are still filled from the statement's own row (#327:
+    // they used to print literally, e.g. `{{z}}`), under the title.
     if let Some(md) = markdown_text(rows, roles) {
+        let md = markdown_fill(&md, rows, &ropts.locale);
         let t = &ropts.theme;
         let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
         if let Some(tt) = &title {
@@ -931,6 +934,10 @@ fn table_svg(
             Col { fmt, cells, p }
         })
         .collect();
+    // `{value}`: the row's first column, as the browser's table reads it
+    // (`k0` in `web/app.js` `renderTable`) — the first not already dropped
+    // as a `::TITLE` / `::INFO` column.
+    let value_idx = (0..rows.len()).find(|i| !skip.contains(i));
     let text = |c: &Col, r: usize| {
         c.cells
             .get(r)
@@ -1072,6 +1079,34 @@ fn table_svg(
         let y = top + 23.0 + (r as f64 + 1.0) * row_h - 6.0;
         for (k, c) in cols.iter().enumerate() {
             let (x, a) = anchor(k);
+            // A `::LINK` cell: its raw value is a drill-through template —
+            // fill it from this row ({value} = the row's first column,
+            // {column} any named column), then draw a real `<a>` so the
+            // link works without a script (#327: it used to print the
+            // unfilled template, e.g. `?v.supplier={value}`, as plain text).
+            if c.fmt == Some("LINK") {
+                let raw = c
+                    .cells
+                    .get(r)
+                    .map(|v| match v {
+                        Cell::Text(s) => s.clone(),
+                        _ => text(c, r),
+                    })
+                    .unwrap_or_default();
+                let filled = fill_link_row(&raw, rows, r, value_idx);
+                let label = esc(&link_label(&filled));
+                match headless_link_href(&filled) {
+                    Some(href) => s.push_str(&format!(
+                        "<a href=\"{href}\"><text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{link}\" text-decoration=\"underline\">{label}</text></a>",
+                        href = esc(&href),
+                        link = hex(th.colors.link),
+                    )),
+                    None => s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">{label}</text>"
+                    )),
+                }
+                continue;
+            }
             let t = text(c, r);
             let neg_num = right(k) && c.cells.get(r).and_then(Cell::num).is_some_and(|n| n < 0.0);
             let trend = c.fmt == Some("TREND");
@@ -1135,6 +1170,126 @@ fn table_svg(
     s
 }
 
+/// `{name}` placeholders of a `::LINK` table cell, filled from the row at
+/// `r`: `{value}` is the row's first column (`value_idx`, as the browser's
+/// table reads it — `k0` in `web/app.js` `renderTable`), `{column}` any
+/// named column of the same row — URL-encoded. Mirrors the browser's
+/// `fillLink` / `linkCell` (web/app.js), so a headless/served table link
+/// cell fills the same template the interactive one does (#327).
+fn fill_link_row(
+    tpl: &str,
+    rows: &[(String, Vec<Value>)],
+    r: usize,
+    value_idx: Option<usize>,
+) -> String {
+    let lookup = |name: &str| -> String {
+        let v = if name == "value" {
+            value_idx
+                .and_then(|i| rows.get(i))
+                .and_then(|(_, vs)| vs.get(r))
+        } else {
+            // The row's own column names — a case-sensitive lookup, as a JS
+            // object property read is (`vars[k]` in web/app.js `linkCell`).
+            rows.iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, vs)| vs.get(r))
+        };
+        v.map(value_str).unwrap_or_default()
+    };
+    let chars: Vec<char> = tpl.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            let start = i + 1;
+            let mut j = start;
+            if j < chars.len() && (chars[j].is_ascii_alphabetic() || chars[j] == '_') {
+                j += 1;
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '}' {
+                    let name: String = chars[start..j].iter().collect();
+                    out.push_str(&url_encode_component(&lookup(&name)));
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `encodeURIComponent`-equivalent percent-encoding (the unreserved set:
+/// letters, digits, `- _ . ! ~ * ' ( )`), matching the browser's `fillLink`.
+fn url_encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The filled `::LINK` target as an `href` for the headless/served page,
+/// which has no tabs (every `::TAB`'s panels are flattened onto one page —
+/// see `execute` / `src/bin/serve.rs` `render_dashboard_page`): `#Tab?v.x=1`
+/// keeps only `?v.x=1` (a same-page reload that sets the variable — there is
+/// no tab to jump to), `?v.x=1`, `/d/<id>?…` and an `http(s)://` URL are kept
+/// whole. `None` when there is nothing safe or useful to link to (another
+/// scheme, or a bare `#Tab` with no variable to set).
+fn headless_link_href(url: &str) -> Option<String> {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix('#') {
+        let q = rest.find('?')?;
+        let qs = &rest[q..];
+        return (qs.len() > 1).then(|| qs.to_string());
+    }
+    if url.starts_with('?') || (url.starts_with('/') && !url.starts_with("//")) {
+        return Some(url.to_string());
+    }
+    let low = url.to_ascii_lowercase();
+    if low.starts_with("http://") || low.starts_with("https://") {
+        return Some(url.to_string());
+    }
+    None
+}
+
+/// The cell's visible text for a filled `::LINK` — never the raw URL (an
+/// internal `?v.x=…` / `#Tab…` is plumbing, not something to show), matching
+/// the browser's `linkCell` label (web/app.js): the tab name for `#Tab…`,
+/// "Open ↗" for an external `http(s)` URL, else "Open →".
+fn link_label(url: &str) -> String {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix('#') {
+        let tab = rest.split('?').next().unwrap_or("").trim();
+        if !tab.is_empty() {
+            return format!("{tab} →");
+        }
+    }
+    let low = url.to_ascii_lowercase();
+    if low.starts_with("http://") || low.starts_with("https://") {
+        "Open ↗".to_string()
+    } else {
+        "Open →".to_string()
+    }
+}
+
 /// Line height of a headless ::MARKDOWN box.
 const MD_LINE: f64 = 18.0;
 
@@ -1144,6 +1299,92 @@ fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Opti
     column_at(rows, *i)
         .and_then(|(_, v)| v.first())
         .map(value_str)
+}
+
+/// `{{name}}` / `{{name:fmt}}` in a ::MARKDOWN panel's text, filled from the
+/// statement's own row (`crate::sql::MD_PREFIX`'s `"md:name"` columns, else a
+/// `*`-expanded column of that name — `crate::lint::md_column`). The headless
+/// / served counterpart of the browser's `markdownWithValues` (web/app.js),
+/// minus the rich-text rendering itself — only the value substitution, which
+/// does not depend on a script. An unknown column, or anything that is not a
+/// `{{…}}` placeholder (a `$…$` TeX formula, `**bold**`, …), is left exactly
+/// as written for `markdown_lines` below to handle (#327).
+fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
+    let keys: Vec<&String> = rows.iter().map(|(n, _)| n).collect();
+    let mut out = String::new();
+    let mut rest = md;
+    loop {
+        let Some(a) = rest.find("{{") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..a]);
+        let Some(b) = rest[a + 2..].find("}}") else {
+            out.push_str(&rest[a..]);
+            break;
+        };
+        let inner = &rest[a + 2..a + 2 + b];
+        let next = &rest[a + 2 + b + 2..];
+        let (name, spec) = match inner.split_once(':') {
+            Some((n, f)) => (n.trim(), Some(f.trim())),
+            None => (inner.trim(), None),
+        };
+        let ident = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ' ');
+        let filled = ident
+            .then(|| crate::lint::md_column(keys.iter().copied(), name))
+            .flatten()
+            .and_then(|key| rows.iter().find(|(n, _)| n == key))
+            .and_then(|(_, vs)| vs.first())
+            .map(|v| md_format_value(v, spec, l));
+        match filled {
+            Some(text) => out.push_str(&text),
+            None => {
+                out.push_str("{{");
+                out.push_str(inner);
+                out.push_str("}}");
+            }
+        }
+        rest = next;
+    }
+    out
+}
+
+/// One `{{col:fmt}}` value: money / percent / compact / metric (numbers, as
+/// the KPI roles), `text` as written, `date` as the stored value reads
+/// (headless: no locale reformat); no spec = a plain grouped number or the
+/// value as written. Mirrors the browser's `mdValue` (web/app.js).
+fn md_format_value(v: &Value, spec: Option<&str>, l: &Locale) -> String {
+    if matches!(v, Value::Na) {
+        return "–".to_string();
+    }
+    let spec = spec.map(|s| s.to_ascii_lowercase());
+    if let Some(fmt) = spec.as_deref().and_then(md_metric_fmt) {
+        if let Some(n) = v.as_f64() {
+            return crate::format::format_number_l(n, fmt, l);
+        }
+    }
+    match spec.as_deref() {
+        Some("text") | Some("date") => value_str(v),
+        _ => match v.as_f64() {
+            Some(n) => crate::format::format_number_l(n, crate::MetricFmt::Plain, l),
+            None => value_str(v),
+        },
+    }
+}
+
+/// `{{col:fmt}}` → [`MetricFmt`](crate::MetricFmt) (`web/app.js` `MD_FMT`).
+fn md_metric_fmt(spec: &str) -> Option<crate::MetricFmt> {
+    use crate::MetricFmt::*;
+    Some(match spec {
+        "money" | "currency" | "usd" | "eur" | "dollar" => Money,
+        "percent" | "pct" => Percent,
+        "compact" => Compact,
+        "metric" | "number" | "num" => Plain,
+        _ => return None,
+    })
 }
 
 /// Marks a word of a formula in [`markdown_lines`] (drawn monospace).
@@ -1293,5 +1534,103 @@ mod md_tests {
             "{svg}"
         );
         assert!(!svg.contains('\u{E002}'), "{svg}");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn value_is_the_rows_first_non_title_column() {
+        let rows = vec![
+            ("Supplier".to_string(), vec![Value::Str("Castings".into())]),
+            (
+                "Highlight".to_string(),
+                vec![Value::Str("?v.supplier={value}".into())],
+            ),
+        ];
+        let filled = fill_link_row("?v.supplier={value}", &rows, 0, Some(0));
+        assert_eq!(filled, "?v.supplier=Castings");
+    }
+
+    #[test]
+    fn named_column_placeholders_are_looked_up_by_exact_name() {
+        let rows = vec![
+            ("sku".to_string(), vec![Value::Str("SKU-1".into())]),
+            ("city".to_string(), vec![Value::Str("Berlin, DE".into())]),
+        ];
+        // {value} still reads the first column; {city} the named one — and a
+        // non-ASCII / reserved value gets URL-encoded, as the browser's
+        // `fillLink` does.
+        let filled = fill_link_row("#Detail?v.sku={value}&v.city={city}", &rows, 0, Some(0));
+        assert_eq!(filled, "#Detail?v.sku=SKU-1&v.city=Berlin%2C%20DE");
+    }
+
+    #[test]
+    fn an_unknown_placeholder_fills_empty_like_the_browser() {
+        let rows = vec![("sku".to_string(), vec![Value::Str("SKU-1".into())])];
+        assert_eq!(fill_link_row("?v.x={nope}", &rows, 0, Some(0)), "?v.x=");
+    }
+
+    #[test]
+    fn headless_href_drops_a_tab_fragment_the_flattened_page_has_no_use_for() {
+        // Every ::TAB is flattened onto one page headless (see `execute`) —
+        // only the query string is a same-page reload that means anything.
+        assert_eq!(
+            headless_link_href("#Stock & pipeline?v.sku=SKU-1"),
+            Some("?v.sku=SKU-1".to_string())
+        );
+        // A bare tab jump with nothing to set links nowhere useful headless.
+        assert_eq!(headless_link_href("#Stock & pipeline"), None);
+        assert_eq!(
+            headless_link_href("?v.supplier=Castings"),
+            Some("?v.supplier=Castings".to_string())
+        );
+        assert_eq!(
+            headless_link_href("/d/other?v.x=1"),
+            Some("/d/other?v.x=1".to_string())
+        );
+        assert_eq!(
+            headless_link_href("https://en.wikipedia.org/wiki/Castings"),
+            Some("https://en.wikipedia.org/wiki/Castings".to_string())
+        );
+        assert_eq!(headless_link_href("javascript:alert(1)"), None);
+        assert_eq!(headless_link_href("//evil.example"), None);
+    }
+
+    #[test]
+    fn label_matches_the_browsers_linkcell_convention() {
+        assert_eq!(link_label("?v.supplier=Castings"), "Open \u{2192}");
+        assert_eq!(
+            link_label("#Stock & pipeline?v.sku=1"),
+            "Stock & pipeline \u{2192}"
+        );
+        assert_eq!(
+            link_label("https://en.wikipedia.org/wiki/Castings"),
+            "Open \u{2197}"
+        );
+    }
+
+    #[test]
+    fn markdown_fill_substitutes_known_columns_and_leaves_unknown_ones_as_written() {
+        let rows = vec![
+            ("c0".to_string(), vec![Value::Str("x".into())]),
+            ("md:z".to_string(), vec![Value::Float(1.64)]),
+            ("md:lvl".to_string(), vec![Value::Str("95 %".into())]),
+        ];
+        let l = crate::format::Locale::EN_US;
+        let out = markdown_fill("z = {{z}} at {{lvl}}; {{nope}} stays", &rows, &l);
+        assert_eq!(out, "z = 1.64 at 95 %; {{nope}} stays");
+    }
+
+    #[test]
+    fn markdown_fill_honours_a_format_spec() {
+        let rows = vec![("md:extra".to_string(), vec![Value::Float(18.2)])];
+        let l = crate::format::Locale::EN_US;
+        assert_eq!(
+            markdown_fill("{{extra:eur}}", &rows, &l),
+            crate::format::format_number_l(18.2, crate::MetricFmt::Money, &l)
+        );
     }
 }
