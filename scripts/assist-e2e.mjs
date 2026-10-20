@@ -826,9 +826,18 @@ if (run("main")) {
   // don't run") must not let the proposal's hidden-tab lazy jobs — idle-
   // prefetched while the preview sat there — run on the page database
   // once that lazy work finally executes. Adapted from the reviewer's own
-  // probe8.mjs (`ltype`/`lnorun`).
+  // probe8.mjs (`ltype`/`lnorun`). "Apply, don't run" also calls
+  // host.editor.replace(p.sql) — AFTER previewExit() itself resolves —
+  // so a trial whose 80 ms happens to outlast the whole exit (previewExit
+  // already deferred-and-ran the pending explicit request, or finished
+  // before Ctrl+Enter even fired) lands with the proposal now legitimately
+  // IN the editor: pressing Ctrl+Enter then is an ordinary confirmed run,
+  // not a window hit, exactly as the reviewer's own probe found ("landed
+  // after the exit … a legitimate explicit run … not counted"). `ltype`
+  // has no such ambiguity (typing never puts the proposal in the editor),
+  // so it always asserts strictly.
   for (const mode of ["ltype", "lnorun"]) {
-    for (let trial = 0; trial < 2; trial++) {
+    for (let trial = 0; trial < 3; trial++) {
       const { context, page } = await mainCtx(() =>
         sse({ content: [toolUse(`toolu_lazy_${mode}${trial}`, "propose_dashboard", { sql: LAZY_PROP, summary: "Lazy.", panels: [{ stmt: 1, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
       );
@@ -855,10 +864,18 @@ if (run("main")) {
         page.evaluate(() => [...document.querySelectorAll(".dp-dialog button")].find((b) => /Apply, don/.test(b.textContent))?.click());
       }
       await page.waitForTimeout(80); // the exit window H-1R2's race needs
-      await page.evaluate(() => document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true })));
+      const st = await page.evaluate(() => {
+        const previewing = document.body.classList.contains("previewing");
+        document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+        return { previewing, editorIsProposal: /LAZYMARK/.test(document.getElementById("sql")?.value || "") };
+      });
       await page.waitForTimeout(15000); // the hidden tab's slow panels get a chance to run
       const hits = await w0with(page, n0, LAZY_RE);
-      record(`M9g ${mode} trial ${trial}: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      if (mode === "lnorun" && st.editorIsProposal) {
+        console.log(`M9g ${mode} trial ${trial}: not counted — the editor already held the applied proposal at Ctrl+Enter (a legitimate confirmed run), state=${JSON.stringify(st)}`);
+      } else {
+        record(`M9g ${mode} trial ${trial}: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, `${JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90)))} state=${JSON.stringify(st)}`);
+      }
       await context.close();
     }
   }
