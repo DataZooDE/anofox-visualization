@@ -644,6 +644,32 @@ fn main_select_list(stmt: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// A top-level `UNION [ALL]` / `INTERSECT [ALL]` / `EXCEPT [ALL]` reads as
+/// one SELECT list across every branch (#294): locate each branch's own
+/// item-list span (`byte start, byte end`), outermost (main) branch first.
+/// For a plain query (no set operation) this is just `[main_select_list]`.
+fn select_list_spans(stmt: &str) -> Vec<(usize, usize)> {
+    const SET_OPS: &[&str] = &["UNION", "INTERSECT", "EXCEPT"];
+    let mut spans = Vec::new();
+    let mut from = 0usize;
+    while let Some(sel) = lex::find_top_level_keyword(stmt, "SELECT", from) {
+        let start = sel + "SELECT".len();
+        let end = lex::find_top_level_any(stmt, LIST_END, start)
+            .map(|(p, _)| p)
+            .unwrap_or(stmt.len());
+        spans.push((start, end));
+        // Another branch follows only if a set-op keyword still shows up
+        // (at depth 0) somewhere after this branch's item list — e.g. past
+        // its own FROM/WHERE. A trailing ORDER BY/LIMIT on the whole union
+        // has none left, so the loop stops there.
+        match lex::find_top_level_any(stmt, SET_OPS, end) {
+            Some((p, _)) => from = p,
+            None => break,
+        }
+    }
+    spans
+}
+
 /// A recognised trailing `::ROLE` on a select item, honouring the SQL-type
 /// ambiguity rules (see the module docs). `inputs_ok` = this SELECT is an
 /// input statement.
@@ -666,15 +692,45 @@ pub const MD_PREFIX: &str = "md:";
 pub const INFO_COLUMN: &str = "__anofox_info";
 
 /// Rewrite `<expr>::ROLE` casts in the SELECT list into `<expr> AS c{i}`.
+/// A top-level `UNION`/`INTERSECT`/`EXCEPT` reads its roles from the main
+/// (first) branch only, but every later branch's own `::ROLE` casts are
+/// stripped too — left alone, DuckDB sees them as real (nonexistent) type
+/// casts and raises a raw SQL error instead of rendering the panel (#294).
 pub fn rewrite(stmt: &str) -> Rewritten {
     let none = || (stmt.to_string(), Vec::new(), Vec::new());
     if !is_query_statement(stmt) {
         return none();
     }
-    let Some((sel, list_end)) = main_select_list(stmt) else {
+    let spans = select_list_spans(stmt);
+    let Some(&(sel, list_end)) = spans.first() else {
         return none();
     };
-    let (head, list, tail) = (&stmt[..sel], &stmt[sel..list_end], &stmt[list_end..]);
+    let (items0, roles, names) = rewrite_list(&stmt[sel..list_end]);
+    if roles.is_empty() {
+        return none();
+    }
+    let mut out = String::new();
+    out.push_str(&stmt[..sel]);
+    out.push(' ');
+    out.push_str(&items0);
+    let mut prev_end = list_end;
+    for &(s, e) in &spans[1..] {
+        out.push(' ');
+        out.push_str(&stmt[prev_end..s]);
+        out.push(' ');
+        let (items, _, _) = rewrite_list(&stmt[s..e]);
+        out.push_str(&items);
+        prev_end = e;
+    }
+    out.push(' ');
+    out.push_str(&stmt[prev_end..]);
+    (out, roles, names)
+}
+
+/// Rewrite one SELECT list's items (`<expr>::ROLE` → `<expr> AS c{i}`, same
+/// rules as [`rewrite`]) and return the joined item text plus the roles and
+/// display names found, keyed by position within this list.
+fn rewrite_list(list: &str) -> Rewritten {
     let split = split_top_commas(list);
 
     // Unambiguous roles present in the list decide whether the SQL-type tokens
@@ -730,11 +786,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
                 _ => it.trim().to_string(),
             })
             .collect();
-        return (
-            format!("{head} {} {tail}", items.join(", ")),
-            roles,
-            Vec::new(),
-        );
+        return (items.join(", "), roles, Vec::new());
     }
 
     let markdown = unambiguous.contains(&Role::Markdown);
@@ -829,7 +881,7 @@ pub fn rewrite(stmt: &str) -> Rewritten {
             items.push(format!("{} AS c{i}", trailing_alias(item).0));
         }
     }
-    (format!("{head} {} {tail}", items.join(", ")), roles, names)
+    (items.join(", "), roles, names)
 }
 
 /// `Some(s)` if `s` is a bare SQL identifier (so a plain `col ::LINECHART` can
@@ -1059,5 +1111,96 @@ mod option_label_tests {
             "{:?}",
             p[0].roles
         );
+    }
+}
+
+#[cfg(test)]
+mod union_tests {
+    use super::*;
+
+    // #294: a top-level UNION ALL's later branches left their ::ROLE casts
+    // unstripped — DuckDB then saw e.g. `week::XAXIS` as a real (nonexistent)
+    // type cast and raised a raw SQL error instead of the panel rendering.
+    #[test]
+    fn roles_are_stripped_from_every_union_all_branch() {
+        let (s, roles, names) = rewrite(
+            "SELECT week::XAXIS, metric::CATEGORY, n::LINECHART FROM sessions WHERE metric = 'A'\n\
+             UNION ALL\n\
+             SELECT week::XAXIS, metric::CATEGORY, n::LINECHART FROM sessions WHERE metric = 'B'",
+        );
+        assert!(
+            !s.contains("::XAXIS") && !s.contains("::CATEGORY") && !s.contains("::LINECHART"),
+            "{s}"
+        );
+        // The main (first) branch's roles decide the panel's shape.
+        assert_eq!(
+            roles,
+            vec![
+                (0, Role::X),
+                (1, Role::Category),
+                (2, Role::Value(Kind::Line))
+            ]
+        );
+        assert_eq!(names, vec![(2, "n".to_string())]);
+        // Both branches keep the same positional aliases and DOUBLE cast on
+        // the measure column, so DuckDB can union them without a type error.
+        assert_eq!(s.matches("week AS c0").count(), 2, "{s}");
+        assert_eq!(s.matches("metric AS c1").count(), 2, "{s}");
+        assert_eq!(s.matches("CAST(n AS DOUBLE) AS c2").count(), 2, "{s}");
+        assert_eq!(s.matches("UNION ALL").count(), 1, "{s}");
+    }
+
+    // A later branch need not repeat the casts: its bare columns just take
+    // the same positional aliases as the main branch.
+    #[test]
+    fn a_later_branch_without_casts_still_gets_positional_aliases() {
+        let (s, roles, _) =
+            rewrite("SELECT week::XAXIS, n::LINECHART FROM a UNION ALL SELECT week, n FROM b");
+        assert_eq!(roles, vec![(0, Role::X), (1, Role::Value(Kind::Line))]);
+        assert_eq!(s.matches("week AS c0").count(), 2, "{s}");
+        assert!(s.trim_end().ends_with("n AS c1 FROM b"), "{s}");
+    }
+
+    // Three-way UNION ALL (and plain UNION / INTERSECT / EXCEPT): every
+    // branch gets stripped, not just a second one.
+    #[test]
+    fn three_way_union_and_other_set_ops_all_strip() {
+        for op in ["UNION ALL", "UNION", "INTERSECT", "EXCEPT"] {
+            let sql = format!(
+                "SELECT week::XAXIS, n::LINECHART FROM a {op} SELECT week::XAXIS, n::LINECHART FROM b {op} SELECT week::XAXIS, n::LINECHART FROM c"
+            );
+            let (s, roles, _) = rewrite(&sql);
+            assert!(
+                !s.contains("::XAXIS") && !s.contains("::LINECHART"),
+                "{op}: {s}"
+            );
+            assert_eq!(
+                roles,
+                vec![(0, Role::X), (1, Role::Value(Kind::Line))],
+                "{op}"
+            );
+            assert_eq!(s.matches("CAST(n AS DOUBLE) AS c1").count(), 3, "{op}: {s}");
+        }
+    }
+
+    // A trailing ORDER BY/LIMIT on the whole UNION result doesn't confuse the
+    // branch-finder into treating it as another branch.
+    #[test]
+    fn order_by_and_limit_after_the_union_are_left_alone() {
+        let (s, roles, _) = rewrite(
+            "SELECT week::XAXIS, n::LINECHART FROM a UNION ALL SELECT week::XAXIS, n::LINECHART FROM b ORDER BY 1 LIMIT 10",
+        );
+        assert_eq!(roles, vec![(0, Role::X), (1, Role::Value(Kind::Line))]);
+        assert!(s.trim_end().ends_with("ORDER BY 1 LIMIT 10"), "{s}");
+        assert_eq!(s.matches("CAST(n AS DOUBLE) AS c1").count(), 2, "{s}");
+    }
+
+    // No UNION at all: unchanged behaviour (single-span path).
+    #[test]
+    fn a_plain_query_is_unaffected() {
+        let (s, roles, names) = rewrite("SELECT d ::XAXIS, v ::LINECHART FROM t");
+        assert!(s.contains("CAST(v AS DOUBLE) AS c1"), "{s}");
+        assert_eq!(roles, vec![(0, Role::X), (1, Role::Value(Kind::Line))]);
+        assert_eq!(names, vec![(1, "v".to_string())]);
     }
 }

@@ -2385,7 +2385,11 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 - **Casts are read from the main `SELECT` list** — the first `SELECT` at
   bracket depth 0. A leading `WITH` CTE list is fine
   (`WITH s AS (…) SELECT week::XAXIS, n::LINECHART FROM s`); casts inside a CTE
-  body or subquery are ordinary SQL.
+  body or subquery are ordinary SQL. A top-level `UNION`/`UNION ALL`/
+  `INTERSECT`/`EXCEPT` reads as one SELECT list: the **first** branch's roles
+  decide the panel's shape, and every later branch's own `::ROLE` casts are
+  stripped the same way (repeat them or not — a bare column just takes the
+  same position).
 - **A `::ROLE` may follow an `AS` alias on any column.** The alias is replaced by
   the internal `c{i}` name. For a measure it becomes the legend name of a combo
   chart; for an input it *is* the DuckDB variable name
