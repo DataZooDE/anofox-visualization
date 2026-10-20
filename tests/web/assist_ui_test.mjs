@@ -401,12 +401,38 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
 {
   const body = grabFn(appJs, "runSqlInner");
   const bc = stripComments(body);
-  const previewIdx = bc.indexOf("if (runPreviewToken) return runPreviewToken.run(sql);");
+  const tokenIdx = bc.indexOf("const token = pv !== undefined ? pv : runPreviewToken;");
+  const dispatchIdx = bc.indexOf("if (token) return token.run(sql);");
   const prepareIdx = bc.indexOf("prepareSql(");
-  assert.ok(previewIdx >= 0 && prepareIdx >= 0 && previewIdx < prepareIdx, "runPreviewToken dispatch comes before prepareSql(");
-  // The dispatch must never read the live, mutable global directly.
+  assert.ok(
+    tokenIdx >= 0 && dispatchIdx >= 0 && prepareIdx >= 0 && tokenIdx < dispatchIdx && dispatchIdx < prepareIdx,
+    "the pv-or-runPreviewToken dispatch comes before prepareSql("
+  );
+  // The dispatch must never read the live, mutable global directly, and a
+  // caller's own explicitly-passed `pv` (sec-review-272-rereview H-1R2: a
+  // lazy/prefetch job bound to the run that created it) must win outright
+  // over the global, which a lazy job's query may run long after.
   assert.doesNotMatch(bc, /if \(preview\) return preview\.run\(sql\);/, "runSqlInner must not dispatch on the live `preview` (H-1R)");
+  assert.doesNotMatch(bc, /if \(runPreviewToken\) return runPreviewToken\.run\(sql\);/, "runSqlInner must not dispatch on the bare global alone (H-1R2)");
   assert.match(appClean, /guardPage\(pageAdapter\(/);
+}
+// G10c (sec-review-272-rereview final check, H-1R2): every lazy/prefetch
+// job is tied to the preview (or page, if null) the run that created it
+// captured — never to the live, mutable global — both for whether it
+// runs at all (lazyRunJob/lazyPump) and for where its own queries go
+// (panelSql/runSetup/runSql take `pv` explicitly).
+{
+  const lazyRunJobBody = stripComments(grabFn(appJs, "lazyRunJob"));
+  assert.match(lazyRunJobBody, /L\.pv !== preview/, "lazyRunJob must skip a job whose captured preview no longer matches the live one");
+  const lazyPumpBody = stripComments(grabFn(appJs, "lazyPump"));
+  assert.match(lazyPumpBody, /L\.pv !== preview/, "lazyPump's own loop must break once its L.pv no longer matches the live preview");
+  assert.match(stripComments(grabFn(appJs, "panelSql")), /async function panelSql\(sql, at, pv\)/, "panelSql must take pv explicitly");
+  assert.match(stripComments(grabFn(appJs, "runSetup")), /async function runSetup\(sql, pv\)/, "runSetup must take pv explicitly");
+  assert.match(appClean, /const lazy = dpLazyTabs \? \{ gen: dpLazy\.gen, pv, fresh,/, "the lazy object must carry its own run's pv");
+  // run()'s finally also bumps dpLazy.gen whenever it drops a stale token
+  // (belt-and-suspenders alongside the L.pv checks above).
+  const runFinally = stripComments(grabFn(appJs, "run"));
+  assert.match(runFinally, /if \(runPreviewToken && runPreviewToken !== preview\) \{\s*runPreviewToken = null;\s*dpLazy\.gen\+\+;\s*\}/, "run()'s finally must bump dpLazy.gen when it drops a stale runPreviewToken");
 }
 // G10b (sec-review-272-rereview H-1R): runPreviewToken is captured once,
 // synchronously, in run() — not re-read live inside runOnce() after an

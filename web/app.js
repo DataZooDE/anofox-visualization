@@ -1428,6 +1428,17 @@ let runPreviewToken = null;
 // own ::RELOAD timer ticking, a dropdown, the dark toggle, … — is dropped
 // instead of being queued to run once the exit completes.
 let previewExiting = false;
+// H-1R2 (sec-review-272-rereview final check): an EXPLICIT run (#run,
+// Ctrl/⌘+Enter) that arrives while `previewExiting` is true — most
+// naturally right after typing in the editor, or right after "Apply,
+// don't run" — is deferred rather than let through: letting it through
+// used to capture `pv` = the dying preview (still non-null at that exact
+// moment) and give it a FRESH `dpLazy.gen` that survives the exit's own
+// invalidation, so the proposal's hidden-tab lazy jobs (its own deferred
+// setup included) could later run on the page database once the exit
+// dropped the stale token. previewExit() runs this itself, with
+// `preview` already null, once it has fully finished.
+let pendingExplicit = null; // null, or the `fresh` flag of a deferred explicit run
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1598,30 +1609,43 @@ async function ensureDataFiles(sql) {
 // the same panel + kind supersedes this one (it then rejects with an AbortError).
 // `setup`: the statement is one of the dashboard's own setup statements.
 // `at` (served mode): the statement's plan index (see servedRequest).
-async function runSql(sql, page, kind, setup, at) {
+// `pv` (sec-review-272-rereview final check, H-1R2): the render-loop
+// callers (panelSql/runSetup, below) pass the preview (or page, if null)
+// the RUN that queued this particular query was captured under — NOT the
+// live, mutable `preview`/`runPreviewToken`, which may have moved on by
+// the time a LAZY job's query actually runs (idle prefetch, a shown tab,
+// an export). Omitted (`undefined`), the legacy render-loop fallback
+// applies: the global `runPreviewToken` runOnce() set for the CURRENT
+// top-level run. `pv` may legitimately be `null` (a page-originated job).
+async function runSql(sql, page, kind, setup, at, pv) {
   const t0 = performance.now();
   try {
-    return await runSqlInner(sql, page, kind, setup, at);
+    return await runSqlInner(sql, page, kind, setup, at, pv);
   } finally {
     // timing for the perf check (scripts/perf-e2e.mjs reads the "dp:sql" entries)
     performance.measure("dp:sql", { start: t0, detail: String(sql).slice(0, 120) });
   }
 }
-async function runSqlInner(sql, page, kind, setup, at) {
+async function runSqlInner(sql, page, kind, setup, at, pv) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
-  // #244 C-1 / sec-review-272-rereview H-1R: before prepareSql and before any
-  // page handle — dispatch on `runPreviewToken`, the preview THIS RUN was
-  // started under (captured once, synchronously, in run() — see there and
-  // runOnce()), never the live, mutable `preview`. A run queued by the
-  // proposal's own ::RELOAD timer (or any other trigger firing mid-render)
-  // can still be in flight once Discard/"Apply, don't run" has already set
-  // `preview = null`; reading the live global here is exactly how that
-  // run's later statements (ATTACH, SET, …) reached the page database
-  // across the exit boundary. `runPreviewToken.run()` always stays inside
-  // the assistant's guarded engine session regardless of what `preview` is
-  // *now* — it can never fall through to pageConn() below.
-  if (runPreviewToken) return runPreviewToken.run(sql);
+  // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
+  // before any page handle — dispatch on the TOKEN this particular call
+  // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
+  // to the run that created it) wins outright and never consults the
+  // global at all; otherwise fall back to `runPreviewToken`, the preview
+  // the CURRENT top-level run was started under (captured once,
+  // synchronously, in run() — see there and runOnce()), never the live,
+  // mutable `preview`. A run queued by the proposal's own ::RELOAD timer
+  // (or any other trigger firing mid-render) can still be in flight once
+  // Discard/"Apply, don't run" has already set `preview = null`; reading
+  // the live global here is exactly how that run's later statements
+  // (ATTACH, SET, …) reached the page database across the exit boundary.
+  // `token.run()` always stays inside the assistant's guarded engine
+  // session regardless of what `preview` is *now* — it can never fall
+  // through to pageConn() below.
+  const token = pv !== undefined ? pv : runPreviewToken;
+  if (token) return token.run(sql);
   await prepareSql(sql);
   if (servedMode) {
     // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
@@ -3808,7 +3832,19 @@ async function previewExit({ rerun = true, hold = false } = {}) {
     } catch (_) {}
   }
   previewExiting = false;
-  if (hold) {
+  // H-1R2 (sec-review-272-rereview final check): an explicit run (#run,
+  // Ctrl/⌘+Enter) that arrived while this exit was in progress is honoured
+  // NOW, exactly as if it had just been pressed — `preview` is null here,
+  // so Info-5's own rule applies (clearApplyHold() only when !preview) —
+  // instead of whatever this exit would otherwise have shown. It
+  // supersedes the hold entirely: the viewer explicitly asked to run,
+  // during the exit, so there is nothing left to hold.
+  const pend = pendingExplicit;
+  pendingExplicit = null;
+  if (pend !== null) {
+    clearApplyHold();
+    await run(pend, { explicit: true });
+  } else if (hold) {
     applyHold = true;
     if ($("refresh")) $("refresh").disabled = true;
     // M-2 (sec-review-272-rereview): Check runs on the page database
@@ -7347,9 +7383,9 @@ const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join
 // result a query already returned: the cache stays valid. Anything else (a
 // re-run, a replaced object, an INSERT…) starts a new epoch.
 const CREATE_RE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO|FUNCTION|SEQUENCE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w."]+)/i;
-async function runSetup(sql) {
+async function runSetup(sql, pv) {
   const sig = varSig(sql);
-  await runSql(sql, undefined, undefined, true);
+  await runSql(sql, undefined, undefined, true, undefined, pv);
   const code = sqlCode(sql);
   const made = CREATE_RE.exec(code);
   const name = made && made[1].toLowerCase();
@@ -7368,7 +7404,7 @@ function lazyFlushSetup(L, upto, at) {
     while (L.setup.length && L.setup[0] < upto) {
       const k = L.setup.shift();
       try {
-        await runSetup(L.stmts[k].sql);
+        await runSetup(L.stmts[k].sql, L.pv);
       } catch (e) {
         if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(L.stmts[k]))}`);
         else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
@@ -7403,7 +7439,7 @@ async function lazyPool(jobs, inline) {
 // — a cross-filter re-run or a tab shown again skips the queries whose inputs
 // did not change. A full run clears the cache. A query that fails on a missing
 // table or function while setup is still deferred runs that setup and retries.
-async function panelSql(sql, at) {
+async function panelSql(sql, at, pv) {
   const key = `${dpSetupEpoch}\u0000${varSig(sql)}\u0000${sql}${servedMode ? "\u0000" + at : ""}`;
   if (dpResults.has(key)) {
     performance.mark("dp:cache-hit");
@@ -7411,12 +7447,12 @@ async function panelSql(sql, at) {
   }
   let rows;
   try {
-    rows = await runSql(sql, undefined, undefined, undefined, at);
+    rows = await runSql(sql, undefined, undefined, undefined, at, pv);
   } catch (e) {
     const L = dpLazy.building;
     if (!(L && L.setup.length && /does not exist|Catalog Error/i.test(String(e)))) throw e;
     await lazyFlushSetup(L, Infinity, null);
-    return panelSql(sql, at);
+    return panelSql(sql, at, pv);
   }
   if (rows.length < 4e6) {
     dpResults.set(key, rows);
@@ -7430,7 +7466,16 @@ async function panelSql(sql, at) {
 // animates everything itself).
 async function lazyRunJob(job, inline = false) {
   const L = job.run;
-  if (job.done || L.gen !== dpLazy.gen) return;
+  // H-1R2 (sec-review-272-rereview final check): a job's own `L.pv` — the
+  // preview (or page, if null) the RUN that created it was captured under
+  // — must still match the LIVE `preview`, not only the lazy generation
+  // (L.gen). An explicit run that starts DURING a preview's exit gets a
+  // fresh generation (previewExit() already bumped dpLazy.gen before its
+  // own awaits), so `L.gen === dpLazy.gen` stays true even once that
+  // preview is gone; `L.pv` does not. Skipping here is the structural
+  // backstop; lazyPump()'s own loop (below) is the one that stops this
+  // from being retried forever.
+  if (job.done || L.gen !== dpLazy.gen || L.pv !== preview) return;
   job.done = true;
   performance.mark("dp:lazy", { detail: job.i });
   await lazyFlushSetup(L, job.i, job.ph);
@@ -7443,7 +7488,7 @@ async function lazyRunJob(job, inline = false) {
     const ts = L.stmts[t.i];
     if (out.lastChart) {
       try {
-        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i), roles: ts.roles, height: t.height });
+        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i, L.pv), roles: ts.roles, height: t.height });
       } catch (e) {
         // A strip whose optional input is missing is left out (#162).
         if (isOptionalMissing(ts, e)) console.info(`track skipped (optional input missing): ${requiresText(reqsOf(ts))}`);
@@ -7482,12 +7527,18 @@ async function lazyPump() {
   try {
     for (;;) {
       const L = dpLazy.cur;
-      if (!L || runActive || L.gen !== dpLazy.gen) break;
+      // H-1R2 (sec-review-272-rereview final check): the whole pump loop
+      // stops outright once this generation's own preview (or page) is no
+      // longer the live one — not just once its gen is stale. lazyRunJob()
+      // has the same check as a backstop (e.g. lazyFlushAll()'s direct,
+      // per-job calls bypass this loop), but breaking here is what keeps
+      // this loop from busy-looping on a job it will only ever skip.
+      if (!L || runActive || L.gen !== dpLazy.gen || L.pv !== preview) break;
       const open = () => L.jobs.filter((j) => !j.done && j.ph.isConnected);
       let job = open().find((j) => paneShown(j.ph));
       if (!job && dpLazyPrefetch) {
         await idleTask();
-        if (runActive || L.gen !== dpLazy.gen) break;
+        if (runActive || L.gen !== dpLazy.gen || L.pv !== preview) break;
         // D3: a hidden ::VIEW alternative's jobs are never idle-prefetched
         // (unlike a hidden tab's) — they run only once their view is shown.
         job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j) && !j.view);
@@ -7558,13 +7609,21 @@ function run(fresh = true, opts = {}) {
     $("grid").replaceChildren(notRunCard());
     return;
   }
-  // sec-review-272-rereview H-1R: dropped synchronously, before even
-  // queueing — previewExit() sets this (and clears dpTimer/runQueued)
-  // before its own first await, so a timer tick (or any other implicit
-  // trigger) landing in that exact window can neither start nor queue a
-  // run that would otherwise race the exit. (`explicit` — #run,
-  // Ctrl/⌘+Enter — is let through regardless, same spirit as applyHold.)
-  if (previewExiting && !explicit) return runActive;
+  // sec-review-272-rereview H-1R: a non-explicit call is dropped
+  // synchronously, before even queueing — previewExit() sets this (and
+  // clears dpTimer/runQueued) before its own first await, so a timer
+  // tick (or any other implicit trigger) landing in that exact window
+  // can neither start nor queue a run that would otherwise race the
+  // exit.
+  // H-1R2 (final check): an EXPLICIT call (#run, Ctrl/⌘+Enter) is no
+  // longer let through immediately either — it is DEFERRED until the
+  // exit has fully finished (previewExit() runs it itself, below, with
+  // `preview` already null and a fresh, un-stale `dpLazy.gen`). Running
+  // it right away used to capture `pv` = the dying preview.
+  if (previewExiting) {
+    pendingExplicit = explicit ? (pendingExplicit ?? false) || fresh : pendingExplicit;
+    return runActive;
+  }
   // sec-review-272-rereview H-1R: captured HERE, synchronously, not inside
   // runOnce() — when this call is the queued follow-up started from a
   // PRIOR run's own `finally` block below, this line executes before
@@ -7592,7 +7651,16 @@ function run(fresh = true, opts = {}) {
       // `preview` (an exit happened while this run was in flight). Never
       // reset it unconditionally here: a token that still equals the
       // live `preview` belongs to an ongoing preview and must survive.
-      if (runPreviewToken && runPreviewToken !== preview) runPreviewToken = null;
+      // H-1R2 (sec-review-272-rereview final check): belt-and-suspenders
+      // alongside the structural L.pv !== preview check in lazyRunJob()/
+      // lazyPump() above — whenever a stale token is actually dropped
+      // here, this run's own lazy jobs (captured at the SAME `dpLazy.gen`
+      // runOnce() was given) are voided outright too, exactly as a brand
+      // new run voids the previous one's.
+      if (runPreviewToken && runPreviewToken !== preview) {
+        runPreviewToken = null;
+        dpLazy.gen++;
+      }
       if (runQueued !== null) {
         const f = runQueued;
         runQueued = null;
@@ -7641,7 +7709,13 @@ async function runOnce(fresh = true, pv = preview) {
     servedCache.clear();
   }
   // Lazy tabs: this run's deferred setup statements and panel jobs.
-  const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
+  // H-1R2 (sec-review-272-rereview final check): `pv` travels with the
+  // lazy object itself — lazyRunJob()/lazyPump() check it against the
+  // LIVE `preview` before a deferred job ever runs (it may run long after
+  // this runOnce() call has returned), and panelSql()/runSetup() take it
+  // explicitly so the dispatch in runSqlInner() never has to guess from
+  // the (by-then possibly stale) global `runPreviewToken`.
+  const lazy = dpLazyTabs ? { gen: dpLazy.gen, pv, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
   dpLazy.building = lazy;
   const tabAt = []; // statement -> the ::TAB/::VIEW whose section it is in (-1: before the first)
   // A ::VIEW marker starts a deferred-setup section too (#214): its
@@ -7694,10 +7768,10 @@ async function runOnce(fresh = true, pv = preview) {
           lazy.setup.push(i);
           continue;
         }
-        await runSetup(s.sql);
+        await runSetup(s.sql, pv);
       } else if (isInput(s)) {
         const kind = inputKind(s);
-        const rows = JSON.parse(await panelSql(s.sql, i));
+        const rows = JSON.parse(await panelSql(s.sql, i, pv));
         if (!rows.length) continue;
         // Optional ::LABEL column → the control's caption (default: the variable
         // name). A ::DATERANGE keeps its columns as they are (from, to, label).
@@ -7848,7 +7922,7 @@ async function runOnce(fresh = true, pv = preview) {
         // A contract plot call (SELECT anofox_plot_terms(t) FROM … t): the planner
         // rewrote it to return the rows (+ named args) as JSON; render each
         // result row (one per GROUP BY key) with the contract renderer.
-        const rows = JSON.parse(await panelSql(s.sql, i));
+        const rows = JSON.parse(await panelSql(s.sql, i, pv));
         const span = Math.min(12, nextSpan || defaultSpan);
         const title = titleOf(s, JSON.stringify(rows.slice(0, 1)));
         const mk = (caption) => {
@@ -7959,10 +8033,10 @@ async function runOnce(fresh = true, pv = preview) {
             const fl = colFilters();
             if (fl.length) page.filters = fl;
           }
-          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx));
+          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx, pv));
           const sql = page_sql(base, JSON.stringify(page));
           if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
-          return JSON.parse(await runSql(sql));
+          return JSON.parse(await runSql(sql, undefined, undefined, undefined, undefined, pv));
         };
         let stats = null; // the statistics row of the current filters (n = row count)
         let unfiltered = null; // the row count without search / column filters
@@ -8090,7 +8164,7 @@ async function runOnce(fresh = true, pv = preview) {
         nextIa = {};
         nextEmpty = "";
       } else {
-        const rowsJson = await panelSql(s.sql, i);
+        const rowsJson = await panelSql(s.sql, i, pv);
         if (isMapPanel(s.roles)) await ensureBoundaries(rowsJson, s.roles);
         if (trackHost) {
           // A thin strip under the chart before it, on its x axis (same panel).
@@ -8377,13 +8451,13 @@ async function runOnce(fresh = true, pv = preview) {
     if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
     if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
-    if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s))) {
+    if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s, pv))) {
       console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = d;
       lastChart = null;
       continue;
     }
-    if (d === "VIEW" && !(await tabShown(s))) {
+    if (d === "VIEW" && !(await tabShown(s, pv))) {
       console.info(`view hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = "VIEW";
       lastChart = null;
@@ -9755,11 +9829,11 @@ function mkNotAvailable(s) {
 // is the variable's value now (unset: that alternative is missing), a
 // relative path resolves against `anofox_data` when it is set, and DuckDB's
 // glob() looks for it (a glob that fails: missing).
-async function tabShown(s) {
+async function tabShown(s, pv) {
   if (!s.requires || !s.requires.length) return true;
   if (servedMode) {
     try {
-      await runSql(s.sql, undefined, undefined, false, s.i);
+      await runSql(s.sql, undefined, undefined, false, s.i, pv);
       return true;
     } catch (e) {
       if (isOptionalMissing(s, e)) return false;
@@ -9772,7 +9846,7 @@ async function tabShown(s) {
   for (const p of s.requires.flat()) for (const m of String(p).matchAll(/\$\{([A-Za-z_]\w*)\}/g)) if (!names.some((n) => n.toLowerCase() === m[1].toLowerCase())) names.push(m[1]);
   let row = {};
   try {
-    row = JSON.parse(await runSql("SELECT " + names.map((n, i) => `CAST(getvariable(${lit(n)}) AS VARCHAR) AS v${i}`).join(", ")))[0] || {};
+    row = JSON.parse(await runSql("SELECT " + names.map((n, i) => `CAST(getvariable(${lit(n)}) AS VARCHAR) AS v${i}`).join(", "), undefined, undefined, undefined, undefined, pv))[0] || {};
   } catch (_) {}
   const val = (n) => row["v" + names.findIndex((x) => x.toLowerCase() === n.toLowerCase())] ?? null;
   const root = val("anofox_data");
@@ -9785,7 +9859,7 @@ async function tabShown(s) {
       if (unset || p.includes("${")) continue;
       const full = root && !absolute(p) ? root.replace(/\/+$/, "") + "/" + p.replace(/^\.\//, "") : p;
       try {
-        const r = JSON.parse(await runSql(`SELECT CAST(count(*) AS VARCHAR) AS n FROM glob(${lit(full)})`));
+        const r = JSON.parse(await runSql(`SELECT CAST(count(*) AS VARCHAR) AS n FROM glob(${lit(full)})`, undefined, undefined, undefined, undefined, pv));
         if (Number(r[0] && r[0].n) > 0) {
           met = true;
           break;

@@ -79,6 +79,18 @@ const CHECK_HOLD = `SET memory_limit='3GB';\nATTACH ':memory:' AS check_attach;\
 // preview must never write into the address bar (setViewParam's missing
 // `if (preview) return;` guard).
 const VIEWP = `SELECT region ::XAXIS, ROUND(SUM(units*price),0) ::BARCHART, 'Revenue'::TITLE FROM sales GROUP BY 1 ORDER BY 2 DESC;\nSELECT 'v1' AS rrview ::VIEW;\nSELECT count(*) AS n ::METRIC FROM sales;\nSELECT (SELECT 'L-' || sum(units)::VARCHAR FROM sales) ::VIEW;\n`;
+// H-1R2 (sec-review-272-rereview final check): a hidden ::TAB with a
+// deferred CREATE and six slow prefetched panels — adapted verbatim from
+// the reviewer's own probe template, scratch-244/tmp/rr/probe8.mjs. The
+// idle prefetch starts the hidden tab's slow jobs while the preview sits
+// there; the user then exits (typing, or "Apply, don't run") and, about
+// 80 ms later — still inside the exit — presses Ctrl/⌘+Enter in the
+// editor. None of the hidden tab's statements (including its own
+// deferred CREATE) may reach the page database once that lazy work
+// finally runs.
+const LAZY_SLOW = (k) => `SELECT count(*) AS n${k} ::METRIC FROM range(400000000) t(x) WHERE x % 7 = ${k};`;
+const LAZY_PROP = `SELECT 'Main'::TAB;\nSELECT 'RACEMARK' AS m ::METRIC;\nSELECT 'Hidden'::TAB;\nCREATE OR REPLACE TABLE lazymark_tbl AS SELECT 1 AS x;\n${[1, 2, 3, 4, 5, 6].map(LAZY_SLOW).join("\n")}\nSELECT 'LAZYMARK' AS q ::METRIC;\n`;
+const LAZY_RE = /RACEMARK|LAZYMARK|lazymark_tbl/;
 
 const results = [];
 const record = (name, ok, note = "") => {
@@ -807,6 +819,48 @@ if (run("main")) {
     record("M9f: no error shown in the Explore console", !/error/i.test(await page.evaluate(() => document.getElementById("xq-err")?.textContent || "")));
     record('M9f: #xq-info shows a row count, not stuck on "Running…"', !/^Running/.test(await page.evaluate(() => document.getElementById("xq-info")?.textContent || "")));
     await context.close();
+  }
+
+  // M9g (sec-review-272-rereview final check, H-1R2): an explicit run
+  // (Ctrl/⌘+Enter) pressed ~80 ms into a preview exit (typing, or "Apply,
+  // don't run") must not let the proposal's hidden-tab lazy jobs — idle-
+  // prefetched while the preview sat there — run on the page database
+  // once that lazy work finally executes. Adapted from the reviewer's own
+  // probe8.mjs (`ltype`/`lnorun`).
+  for (const mode of ["ltype", "lnorun"]) {
+    for (let trial = 0; trial < 2; trial++) {
+      const { context, page } = await mainCtx(() =>
+        sse({ content: [toolUse(`toolu_lazy_${mode}${trial}`, "propose_dashboard", { sql: LAZY_PROP, summary: "Lazy.", panels: [{ stmt: 1, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+      );
+      await gotoEdit(page, SETUP_AND_METRIC);
+      await page.click("#assist-btn");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await addKey(page);
+      await page.fill("#ai-q", "x");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await page.click('.dp-dialog button:has-text("Send")');
+      await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+      await page.waitForTimeout(2500); // let the idle prefetch start the hidden tab's slow jobs
+      const n0 = await mark(page);
+      if (mode === "ltype") {
+        page.evaluate(() => {
+          const t = document.getElementById("sql");
+          t.value += " ";
+          t.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+      } else {
+        await page.click("#ai-apply");
+        await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+        page.evaluate(() => [...document.querySelectorAll(".dp-dialog button")].find((b) => /Apply, don/.test(b.textContent))?.click());
+      }
+      await page.waitForTimeout(80); // the exit window H-1R2's race needs
+      await page.evaluate(() => document.getElementById("sql")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true })));
+      await page.waitForTimeout(15000); // the hidden tab's slow panels get a chance to run
+      const hits = await w0with(page, n0, LAZY_RE);
+      record(`M9g ${mode} trial ${trial}: zero page-DB messages with the hidden tab's text after the exit`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      await context.close();
+    }
   }
 
   // M10: the key leak sweep (sk-ant- never appears anywhere).

@@ -796,6 +796,30 @@ matched too. Tests: `scripts/assist-e2e.mjs` M9f (an Explore query after
 "Apply, don't run" must still reach the page worker — confirmed to FAIL
 without the fix); `tests/web/assist_test.mjs`'s backslash-literal and
 `OR REPLACE DATABASE` cases.
+
+**sec-review-272-rereview (fix round 4, PR #272): H-1R2, a High regression
+from round 3's own `finally` reset.** An explicit Ctrl/⌘+Enter pressed
+~80 ms into a preview exit (typing, or "Apply, don't run") captured the
+dying preview as its `pv` and got a *fresh* `dpLazy.gen` that survived the
+exit's own invalidation, so a proposal's hidden-tab lazy jobs (idle-
+prefetched while the preview sat there, deferred setup included) could
+later run on the page database once `run()`'s `finally` dropped the stale
+token. Fixed structurally: every lazy/prefetch job now carries the `pv`
+of the run that created it (`lazy.pv`, `runOnce`); `lazyRunJob`/`lazyPump`
+refuse to run/continue once `L.pv !== preview` (live); `runSqlInner`
+dispatches on an *explicitly passed* `pv` first, never the global alone,
+so `panelSql`/`runSetup`/the `panelBody` closure thread it all the way
+down. `run()`'s own `finally` also bumps `dpLazy.gen` whenever it drops a
+stale token (belt-and-suspenders). An explicit run arriving during
+`previewExiting` is now deferred (`pendingExplicit`) and run by
+`previewExit()` itself, once `preview` is already `null` — clearing the
+hold per Info-5's own rule, instead of painting the dead proposal over
+"Not run yet". Test: `scripts/assist-e2e.mjs` M9g (`ltype`/`lnorun`,
+adapted from the reviewer's own `probe8.mjs`) — confirmed 4/4 FAIL against
+the pre-fix head, 4/4 pass after. An adversarial audit of every
+`runSql`/`pageConn`/`pageDb` path reachable after a preview ends (lazy
+jobs, the render loop, the `::RELOAD` timer, Explore/add-file/MotherDuck/
+Check, `::VIEW` switches) was posted to the PR.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |
