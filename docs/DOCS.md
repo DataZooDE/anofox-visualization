@@ -2392,11 +2392,7 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 
 ### Rendering limits & data hygiene
 
-- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter
-  x axis or in a `::CATEGORY` keep the largest 29 (by total |measure|, or row
-  count for raw-row charts) and fold the rest into **"Other"** (summed for
-  bars/lines/areas/pies). Hosts can change it (`max_categories` in a
-  `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
+- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter x axis or in a `::CATEGORY` keep 29. By default those are the largest (by total |measure|, or row count for raw-row charts). When the rows come ranked by the measure (an `ORDER BY` on it, either direction), they are the **first 29 in row order**, so a worst-first ranking keeps its worst. The rest fold into **"Other"** (summed for bars/lines/areas/pies). A **rate or an average** is never summed: with `'percent'::YFORMAT`, or a measure named like one (`%`, `pct`, `rate`, `ratio`, `share`, `per`, `avg`, `mean`, `score`, …, the table totals' rule), the chart keeps 30 levels and leaves the rest out. To show fewer, `LIMIT` the query. Hosts can change it (`max_categories` in a `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
 - **Long lines are downsampled**: a line/area/step series with more than 5,000
   points is reduced with LTTB (Largest-Triangle-Three-Buckets), which keeps the
   visual shape (`max_line_points` / `RenderOptions::max_line_points`).
