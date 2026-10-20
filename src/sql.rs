@@ -706,9 +706,14 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         return none();
     };
     let (items0, roles, names) = rewrite_list(&stmt[sel..list_end]);
-    if roles.is_empty() {
-        return none();
-    }
+    // No early bail-out when `roles` is empty: `rewrite_list` still renamed
+    // every item to `c{i}` (or left `::MARKDOWN`'s named columns / `*` alone)
+    // even without a recognised role, and callers that use this `sql`
+    // directly regardless of `roles` — e.g. `contract_call::plan_contract`,
+    // which rewrites a contract call's payload columns this way and may have
+    // no other `::ROLE` cast at all — depend on that rewrite happening. It is
+    // [`plan_statements`], not this function, that decides setup vs. panel
+    // from `roles.is_empty()` and falls back to the original `stmt` text.
     let mut out = String::new();
     out.push_str(&stmt[..sel]);
     out.push(' ');

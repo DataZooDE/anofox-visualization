@@ -566,9 +566,25 @@ mod tests {
         assert!(p.sql.contains("AS c1"), "{}", p.sql);
         assert!(p.sql.contains("json_object() AS c2"), "{}", p.sql);
         assert!(p.sql.contains("'Curves' AS c3"), "{}", p.sql);
-        // Without a title it is still a panel, not setup.
+        // Without a title it is still a panel, not setup — and its payload
+        // columns are still renamed to c{i} even though `roles` ends up
+        // empty (#294 regression: `rewrite()` must not bail out early just
+        // because the main SELECT list carries no recognised role — this is
+        // the only rewrite `plan_contract` gets, unlike an ordinary panel,
+        // which falls back to the unmodified `stmt` text in that case via
+        // [`plan_statements`], not `rewrite()` itself).
         let p = &crate::sql::plan("SELECT anofox_plot(t) FROM x t")[0];
         assert!(!p.setup && p.roles.is_empty() && p.contract.is_some());
+        assert!(
+            p.sql.contains("AS c0") && p.sql.contains("AS c1"),
+            "{}",
+            p.sql
+        );
+        assert!(
+            !p.sql.contains("AS anofox_rows") && !p.sql.contains("AS anofox_args"),
+            "{}",
+            p.sql
+        );
         // Ordinary panels carry no contract.
         assert!(crate::sql::plan("SELECT a::XAXIS, b::BARCHART FROM t")[0]
             .contract
