@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_decomposition/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -328,6 +328,39 @@ statement error
 SELECT anofox_plot_events(e) FROM (VALUES ('x', 'alarm')) e(kind, severity);
 ----
 needs an event time
+
+# ── decomposition (#188, provisional) ────────────────────────────────────────
+statement ok
+CREATE TABLE decomp AS SELECT * FROM (VALUES
+  (DATE '2024-01-01', 'trend', 1.0), (DATE '2024-01-02', 'trend', 1.2),
+  (DATE '2024-01-01', 'seasonal', 0.1), (DATE '2024-01-02', 'seasonal', -0.1),
+  (DATE '2024-01-01', 'remainder', 0.02), (DATE '2024-01-02', 'remainder', -0.01)
+) t(ds, component, value);
+
+query I
+SELECT anofox_plot_decomposition(d) LIKE '<svg%>trend</text>%>remainder</text>%' FROM decomp d;
+----
+true
+
+query I
+SELECT anofox_plot(d) LIKE '<svg%' FROM decomp d;
+----
+true
+
+# ts_mstl_decomposition_by's list output (seasonal[][] + periods[]): one
+# labelled panel per seasonal period.
+query I
+SELECT anofox_plot(m) LIKE '<svg%seasonal (7)%' FROM (
+  SELECT 'B' AS id, [1.0, 2.0, 3.0] AS trend, [[0.1, -0.1, 0.0]] AS seasonal,
+         [0.0, 0.1, -0.1] AS remainder, [7] AS periods) m;
+----
+true
+
+statement error
+SELECT anofox_plot_decomposition(d) FROM (VALUES
+  ('A', DATE '2024-01-01', 'trend', 1.0), ('B', DATE '2024-01-01', 'trend', 2.0)) d(id, ds, component, value);
+----
+GROUP BY id
 
 # ── contract version ─────────────────────────────────────────────────────────
 query I

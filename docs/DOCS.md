@@ -670,8 +670,9 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
+| `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -787,9 +788,10 @@ to 1.00 (0.9952 reads "AUC 0.995").
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
-  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
-  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
+  \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`,
+  \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
+  \`team\` is no \`term\`. A shared generic name such as \`kind\`, \`value\`, \`x\`
+  or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
@@ -809,6 +811,18 @@ SELECT anofox_plot_prediction(p) FROM (
   UNION ALL BY NAME
   SELECT id, ds, NULL AS y, yhat, yhat_lower, yhat_upper
   FROM ts_forecast_by('sales', id, ds, y, 'AutoETS', 14, '1d')) p;
+```
+
+`anofox_plot_decomposition` (provisional, `decomposition` schema) reads
+anofox-forecast's `ts_mstl_decomposition_by` (its `trend`/`seasonal`/
+`remainder` LISTs, `seasonal` per `periods`) and `ts_forecast_explain_by`
+(its `decomposition` STRUCT) as they come. anofox-orchestration's
+`decomposition_seasonal` file's `period` is the *seasonal* period, not a
+time step, so write:
+
+```sql
+SELECT unique_id AS id, t AS period, 'seasonal_' || period AS component, seasonal AS value
+FROM decomposition_seasonal;
 ```
 
 See `examples/regression/` (fixtures for every schema, plus scripts against
