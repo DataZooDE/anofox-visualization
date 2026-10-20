@@ -1389,10 +1389,165 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
     Ok((out, loads))
 }
 
+/// Copy the DuckDB database `src` into the empty, attached `dst` (#283).
+/// Without foreign keys: `COPY FROM DATABASE`. With them, DuckDB inserts every
+/// table in one plan and a child's FK check doesn't see its parent's rows
+/// (duckdb/duckdb#16785), so: the schema (`… (SCHEMA)`), then one INSERT per
+/// table, parents first. A table whose INSERT still fails (a self-referencing
+/// FK: DuckDB doesn't see rows of the same statement) is re-created without
+/// constraints (CREATE TABLE AS) if no other table references it.
+/// Every write names `dst` (catalog-qualified); `src` is only read.
+fn copy_database(
+    live: &Conn,
+    src: &str,
+    dst: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let lit = sql_string_literal(src);
+    let edges: Vec<(String, String, String)> = live
+        .query(&format!(
+            "SELECT schema_name::VARCHAR, table_name::VARCHAR, referenced_table::VARCHAR \
+             FROM duckdb_constraints() WHERE database_name = {lit} AND constraint_type = 'FOREIGN KEY'"
+        ))?
+        .string_rows(100_000)?
+        .into_iter()
+        .filter_map(|r| Some((r[0].clone()?, r[1].clone()?, r[2].clone()?)))
+        .collect();
+    if edges.is_empty() {
+        return live.exec(&format!(
+            "COPY FROM DATABASE {} TO {}",
+            quote_ident(src),
+            quote_ident(dst)
+        ));
+    }
+    live.exec(&format!(
+        "COPY FROM DATABASE {} TO {} (SCHEMA)",
+        quote_ident(src),
+        quote_ident(dst)
+    ))?;
+    let tables: Vec<(String, String)> = live
+        .query(&format!(
+            "SELECT schema_name::VARCHAR, table_name::VARCHAR FROM duckdb_tables() \
+             WHERE database_name = {lit} AND NOT internal AND NOT temporary ORDER BY 1, 2"
+        ))?
+        .string_rows(100_000)?
+        .into_iter()
+        .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
+        .collect();
+    for i in fk_order(&tables, &edges) {
+        let (schema, table) = &tables[i];
+        let qual = |db: &str| {
+            format!(
+                "{}.{}.{}",
+                quote_ident(db),
+                quote_ident(schema),
+                quote_ident(table)
+            )
+        };
+        let (from, to) = (qual(src), qual(dst));
+        let cols = insertable_columns(live, src, &to, schema, table)?
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Err(e) = live.exec(&format!(
+            "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
+        )) else {
+            continue;
+        };
+        let referenced = edges.iter().any(|(s, c, p)| {
+            s.eq_ignore_ascii_case(schema)
+                && p.eq_ignore_ascii_case(table)
+                && !c.eq_ignore_ascii_case(table)
+        });
+        let first = e.lines().next().unwrap_or("").to_string();
+        if referenced {
+            return Err(format!("{schema}.{table}: {first}"));
+        }
+        live.exec(&format!("DROP TABLE {to}"))
+            .and_then(|_| live.exec(&format!("CREATE TABLE {to} AS SELECT * FROM {from}")))
+            .map_err(|e2| {
+                format!("{schema}.{table}: {first} (and without its constraints: {e2})")
+            })?;
+        warnings.push(format!(
+            "table {schema}.{table} of '{src}' copied without its constraints and indexes: {first}"
+        ));
+    }
+    Ok(())
+}
+
+/// The columns of `schema.table` (in `src`) an INSERT into `to` can name: all
+/// but generated ones. duckdb_columns() doesn't mark those, so a column with
+/// an expression is tried on its own: `INSERT … SELECT NULL WHERE false`
+/// binds (and fails for a generated column) but writes nothing.
+fn insertable_columns(
+    live: &Conn,
+    src: &str,
+    to: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    let rows = live
+        .query(&format!(
+            "SELECT column_name::VARCHAR, (column_default IS NOT NULL)::VARCHAR FROM duckdb_columns() \
+             WHERE database_name = {} AND schema_name = {} AND table_name = {} ORDER BY column_index",
+            sql_string_literal(src), sql_string_literal(schema), sql_string_literal(table)
+        ))?
+        .string_rows(100_000)?;
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(c) = r[0].clone() else { continue };
+        if r[1].as_deref() == Some("true")
+            && live
+                .exec(&format!(
+                    "INSERT INTO {to} ({}) SELECT NULL WHERE false",
+                    quote_ident(&c)
+                ))
+                .is_err()
+        {
+            continue;
+        }
+        out.push(c);
+    }
+    Ok(out)
+}
+
+/// The order to fill `tables` in (#283): each after the tables its foreign
+/// keys reference (`edges`: schema, child, parent; DuckDB keeps an FK within
+/// one schema). Self-references are ignored; ties, and a cycle, go in the
+/// given order. Names match case-insensitively, like DuckDB's.
+fn fk_order(tables: &[(String, String)], edges: &[(String, String, String)]) -> Vec<usize> {
+    let key = |s: &str, t: &str| (s.to_lowercase(), t.to_lowercase());
+    let idx: BTreeMap<(String, String), usize> = tables
+        .iter()
+        .enumerate()
+        .map(|(i, (s, t))| (key(s, t), i))
+        .collect();
+    let mut parents = vec![Vec::new(); tables.len()];
+    for (s, c, p) in edges {
+        if let (Some(&ci), Some(&pi)) = (idx.get(&key(s, c)), idx.get(&key(s, p))) {
+            if ci != pi {
+                parents[ci].push(pi);
+            }
+        }
+    }
+    let mut done = vec![false; tables.len()];
+    let mut out = Vec::with_capacity(tables.len());
+    while out.len() < tables.len() {
+        let next = (0..tables.len())
+            .find(|&i| !done[i] && parents[i].iter().all(|&p| done[p]))
+            .or_else(|| (0..tables.len()).find(|&i| !done[i]))
+            .expect("a table is left");
+        done[next] = true;
+        out.push(next);
+    }
+    out
+}
+
 /// Snapshot the live session into a private directory and open it through a
 /// fresh, locked-down DuckDB instance:
 /// * every DuckDB database attached to the session (or just the default one
-///   with `attach: false`) is copied (`COPY FROM DATABASE`) and re-attached
+///   with `attach: false`) is copied (`COPY FROM DATABASE`; with foreign keys, schema first and then table by table, parents first, #283) and re-attached
 ///   READ_ONLY under its original name; other catalog types (postgres, …) are
 ///   skipped with a warning;
 /// * extensions loaded in the session (and `-- @load`/`options.load`) are
@@ -1450,11 +1605,7 @@ fn build_snapshot(
             sql_string_literal(&f),
             quote_ident(&alias)
         ))?;
-        let r = live.exec(&format!(
-            "COPY FROM DATABASE {} TO {}",
-            quote_ident(&name),
-            quote_ident(&alias)
-        ));
+        let r = copy_database(live, &name, &alias, &mut warnings);
         let d = live.exec(&format!("DETACH {}", quote_ident(&alias)));
         r.and(d)
             .map_err(|e| format!("snapshot of '{name}' failed: {e}"))?;
@@ -2512,6 +2663,32 @@ mod tests {
             meta: sv::parse_dashboard_meta(id, script),
             updated: None,
         }
+    }
+
+    #[test]
+    fn fk_order_puts_parents_first() {
+        let t = |s: &str, n: &str| (s.to_string(), n.to_string());
+        let e = |s: &str, c: &str, p: &str| (s.to_string(), c.to_string(), p.to_string());
+        let tables = vec![
+            t("main", "actuals"),
+            t("main", "materials"),
+            t("main", "suppliers"),
+            t("main", "tree"),
+            t("s2", "materials"),
+        ];
+        let edges = vec![
+            e("main", "actuals", "materials"),
+            e("main", "materials", "Suppliers"),
+            e("main", "tree", "tree"),
+            e("main", "ghost", "materials"),
+        ];
+        assert_eq!(fk_order(&tables, &edges), vec![2, 1, 0, 3, 4]);
+        // a cycle (not creatable in DuckDB, but never a hang): the given order
+        let ab = vec![t("main", "a"), t("main", "b")];
+        assert_eq!(
+            fk_order(&ab, &[e("main", "a", "b"), e("main", "b", "a")]),
+            vec![0, 1]
+        );
     }
 
     #[test]
