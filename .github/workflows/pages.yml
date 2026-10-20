@@ -47,8 +47,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      # Same as ci.yml: the rustwasm installer script ships an old wasm-pack
+      # that rejects `--profile` next to its implicit `--release` (#316).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Build wasm module (→ web/pkg)
         run: wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
