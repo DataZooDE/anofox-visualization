@@ -1720,7 +1720,7 @@ fn render_placed(
         } else {
             o.theme.finish_svg(strip_nonfinite_marks(svg))
         };
-        let svg = with_line_styles(with_rule_marks(with_xline_dates(svg, &cols)), &cols);
+        let svg = with_rule_marks(with_xline_dates(svg, &cols));
         let mut svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
         if boxstats::is_stats(&cols) {
             svg = boxstats::with_tips(svg, &cols, o);
@@ -1825,85 +1825,6 @@ fn xline_date_text(secs: i64) -> String {
 
 /// The `::LINESTYLE` values.
 pub const LINE_STYLES: &[&str] = &["solid", "dashed", "flow"];
-
-/// `::LINESTYLE`: dash the lines of the series whose rows say `'dashed'` or
-/// `'flow'` (every data line when there is no `::CATEGORY`), and mark the
-/// flowing ones `class="dp-flow"` — the browser moves their dashes (pure CSS),
-/// static output keeps plain dashes.
-fn with_line_styles(svg: String, cols: &[Column]) -> String {
-    let Some(st) = find_role(cols, Role::LineStyle) else {
-        return svg;
-    };
-    let cat = find_role(cols, Role::Category);
-    // series → flowing?  (None key = every line: no ::CATEGORY)
-    let mut styled: Vec<(Option<String>, bool)> = Vec::new();
-    for (i, v) in st.values.iter().enumerate() {
-        let Some(s) = v.as_str().map(|s| s.trim().to_ascii_lowercase()) else {
-            continue;
-        };
-        if s != "flow" && s != "dashed" {
-            continue;
-        }
-        let key = match cat {
-            Some(c) => match c.values.get(i) {
-                Some(Value::Str(k)) => Some(k.clone()),
-                Some(v) => v.as_f64().map(|f| f.to_string()),
-                None => None,
-            },
-            None => None,
-        };
-        if cat.is_some() && key.is_none() {
-            continue;
-        }
-        match styled.iter_mut().find(|(k, _)| *k == key) {
-            Some(e) => e.1 |= s == "flow",
-            None => styled.push((key, s == "flow")),
-        }
-    }
-    if styled.is_empty() {
-        return svg;
-    }
-    let attr = |tag: &str, name: &str| -> Option<String> {
-        let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-        Some(tag[k..k + tag[k..].find('"')?].to_string())
-    };
-    let mut out = String::with_capacity(svg.len() + 256);
-    let mut rest = svg.as_str();
-    while let Some(i) = rest.find("<polyline ") {
-        let Some(end) = rest[i..].find('>').map(|e| i + e) else {
-            break;
-        };
-        let tag = &rest[i..end];
-        let points = attr(tag, "points").unwrap_or_default();
-        // a data line: not a dashed rule, not a 2-point grid / axis line
-        let data_line = !tag.contains(" stroke-dasharray=\"")
-            && (tag.contains(" data-series=\"") || points.split_whitespace().count() > 2);
-        let hit = if !data_line {
-            None
-        } else if cat.is_some() {
-            let s = attr(tag, "data-series").map(|s| s.replace("&amp;", "&"));
-            styled.iter().find(|(k, _)| s.is_some() && *k == s)
-        } else {
-            styled.first()
-        };
-        let (head, close) = match tag.strip_suffix('/') {
-            Some(h) => (h, "/>"),
-            None => (tag, ">"),
-        };
-        out.push_str(&rest[..i]);
-        out.push_str(head);
-        if let Some((_, flow)) = hit {
-            out.push_str(" stroke-dasharray=\"6 4\"");
-            if *flow {
-                out.push_str(" class=\"dp-flow\"");
-            }
-        }
-        out.push_str(close);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
 
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
@@ -2922,6 +2843,56 @@ fn cartesian(
             }
         }
     }
+    // ::LINESTYLE 'flow'/'dashed' rows dash their line through the native
+    // linetype aesthetic (ggplot-rs's own 6,3 dash, an accepted visual delta)
+    // instead of the old `with_line_styles` string surgery, which wrote
+    // `class="dp-flow"` — malformed since 0.21 already writes `class="gg-mark
+    // …"` on every mark. `data_attr` exposes the raw value so the browser can
+    // still drive the moving-dash animation off `[data-linestyle="flow"]`.
+    // Mapped only on the line-drawing layer itself (`dash_aes`/`undash`
+    // below), not the shared/global aes: a point marker has no line to dash,
+    // and giving every layer the aesthetic would force every layer's legend
+    // contribution to Some(false) before ggplot-rs would agree to suppress
+    // the (otherwise unwanted) linetype legend — which would also swallow
+    // the real ::CATEGORY colour legend.
+    let line_style = find_role(cols, Role::LineStyle);
+    if let Some(ls) = line_style {
+        let vals: Vec<Value> = ls
+            .values
+            .iter()
+            .map(
+                |v| match v.as_str().map(|s| s.trim().to_ascii_lowercase()) {
+                    Some(s) if s == "flow" || s == "dashed" => Value::Str(s),
+                    // `Value::Na` maps to the scale's `"NA"` level (`key_str`)
+                    // without writing a `data-linestyle` attribute at all
+                    // (`set_row_extras` skips NA `data_attr` columns) — unlike
+                    // the literal string `"NA"`, which would write one on every
+                    // plain/solid row.
+                    _ => Value::Na,
+                },
+            )
+            .collect();
+        data.push(("linestyle".to_string(), vals));
+    }
+    // Add the linetype aesthetic + its manual scale and `data-linestyle` to
+    // the most recently added layer, and keep it (and the `cat` colour it
+    // inherits) out of the legend box.
+    let dash_aes = |plot: GGPlot| -> GGPlot {
+        if line_style.is_none() {
+            return plot;
+        }
+        plot.layer_aes(
+            Aes::new()
+                .linetype("linestyle")
+                .data_attr("linestyle", "linestyle"),
+        )
+        .scale_linetype_manual(vec![
+            ("NA", Linetype::Solid),
+            ("flow", Linetype::Dashed),
+            ("dashed", Linetype::Dashed),
+        ])
+        .show_legend(false)
+    };
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
     // Shaded x-regions (`::MARKAREA`, one or more columns): a light band behind
@@ -3061,18 +3032,18 @@ fn cartesian(
             .position(facet_position::PerFacet(PositionFill)),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
-        Kind::Line | Kind::LinePercent => plot
-            .geom_line_with(thin_line())
-            .geom_point_with(small_point()),
+        Kind::Line | Kind::LinePercent => {
+            plot = dash_aes(plot.geom_line_with(thin_line()));
+            plot.geom_point_with(small_point())
+        }
         // One step line per series (+ `::CENSOR` marks).
         Kind::Step => {
-            plot = plot
-                .geom_step_with(GeomStep {
-                    color: brand,
-                    width: 1.2,
-                    ..Default::default()
-                })
-                .geom_point_with(small_point());
+            plot = dash_aes(plot.geom_step_with(GeomStep {
+                color: brand,
+                width: 1.2,
+                ..Default::default()
+            }))
+            .geom_point_with(small_point());
             if censor {
                 plot = plot.geom_censor_marks_with(
                     GeomCensorMarks {

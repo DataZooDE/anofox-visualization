@@ -159,17 +159,19 @@ fn flow_dashes_the_series_that_asks_for_it() {
         .collect();
     assert!(!fc.is_empty() && !ob.is_empty());
     assert!(
-        fc.iter()
-            .all(|t| t.contains(r#"class="dp-flow""#) && t.contains(r#"stroke-dasharray="6 4""#)),
+        fc.iter().all(|t| {
+            t.contains(r#"data-linestyle="flow""#) && t.contains(r#"stroke-dasharray="6,3""#)
+        }),
         "{fc:?}"
     );
     assert!(
         ob.iter()
-            .all(|t| !t.contains("dp-flow") && !t.contains("stroke-dasharray")),
+            .all(|t| !t.contains("data-linestyle") && !t.contains("stroke-dasharray")),
         "{ob:?}"
     );
-    // grid lines are untouched
-    assert_eq!(svg.matches("dp-flow").count(), fc.len());
+    // no hand-written `class="dp-flow"` — 0.21 already writes `class="gg-mark
+    // …"` on every mark, and a second `class` attribute would be malformed.
+    assert!(!svg.contains("dp-flow"));
 }
 
 #[test]
@@ -181,7 +183,7 @@ fn dashed_without_a_category_styles_the_one_line() {
     ];
     let svg = render(&cols, 400, 300).unwrap();
     assert_eq!(
-        svg.matches(r#"stroke-dasharray="6 4""#).count(),
+        svg.matches(r#"stroke-dasharray="6,3""#).count(),
         1,
         "one data line dashed"
     );

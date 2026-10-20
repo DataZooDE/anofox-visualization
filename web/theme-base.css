@@ -148,16 +148,18 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 @media (max-width:640px){.panel-svg:has(> svg[data-diagram]){overflow-x:auto;background:linear-gradient(90deg,var(--ax-card) 40%,transparent) left/32px 100% no-repeat local,linear-gradient(270deg,var(--ax-card) 40%,transparent) right/32px 100% no-repeat local,linear-gradient(90deg,var(--ax-line),transparent) left/10px 100% no-repeat scroll,linear-gradient(270deg,var(--ax-line),transparent) right/10px 100% no-repeat scroll}}
 @keyframes dp-panel-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
-/* ::LINESTYLE 'flow': the dashes move along the line (6 4 dashes → one period = 10).
+/* ::LINESTYLE 'flow': the dashes move along the line (ggplot-rs's own 6,3
+   dash — one period = 9 — an accepted visual delta from the old 6 4).
    `.dp-flow` is a ::DIAGRAM edge's own hand-written class (src/diagram.rs);
-   a map's flow arcs (#308) carry no class at all — ggplot-rs's curve layer
-   marks them with `data-linestyle="flow"` instead (scoped to map svgs via
-   the `[data-map]` attribute so this never touches a non-map `[data-linestyle]`). */
+   every other flowing line (map flow arcs, #308; plain line/step/smooth
+   charts, #318 C2) is a ggplot-rs linetype-aesthetic mark that carries no
+   class of its own (0.21 already writes `class="gg-mark …"`) — just
+   `data-linestyle="flow"`. */
 @keyframes dp-flow{to{stroke-dashoffset:-20}}
-.panel svg .dp-flow,.panel svg[data-map] [data-linestyle="flow"]{animation:dp-flow 1.2s linear infinite}
+.panel svg .dp-flow,.panel svg [data-linestyle="flow"]{animation:dp-flow 1.2s linear infinite}
 @keyframes dp-dots{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
-@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg[data-map] [data-linestyle="flow"],.panel svg .dp-flow.dp-dots{animation:none}}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg [data-linestyle="flow"],.panel svg .dp-flow.dp-dots{animation:none}}
 /* ::STORY: step controls under the chart, the caption + connector over it */
 .dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
 .dp-story-btn{font:inherit;font-size:.78rem;font-weight:600;line-height:1;padding:.38rem .62rem;border-radius:var(--ax-radius-sm);border:1px solid var(--ax-tool-border);background:var(--ax-btn2-bg);color:var(--ax-ink);cursor:pointer}
