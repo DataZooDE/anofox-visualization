@@ -190,7 +190,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
@@ -670,8 +670,9 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
+| `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -787,9 +788,10 @@ to 1.00 (0.9952 reads "AUC 0.995").
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
   \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`, \`yhat\`) only as itself
-  or with a suffix (\`terms\`, \`yhat_1\`): \`team\` is no \`term\`. A shared generic
-  name such as \`kind\`, \`value\`, \`x\` or \`y\` alone gives no hint;
+  \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`,
+  \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
+  \`team\` is no \`term\`. A shared generic name such as \`kind\`, \`value\`, \`x\`
+  or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
   a list — take one element (estimate[1]) or unnest it*;
 - a column where the row belongs — the table alias is also a column name
@@ -809,6 +811,18 @@ SELECT anofox_plot_prediction(p) FROM (
   UNION ALL BY NAME
   SELECT id, ds, NULL AS y, yhat, yhat_lower, yhat_upper
   FROM ts_forecast_by('sales', id, ds, y, 'AutoETS', 14, '1d')) p;
+```
+
+`anofox_plot_decomposition` (provisional, `decomposition` schema) reads
+anofox-forecast's `ts_mstl_decomposition_by` (its `trend`/`seasonal`/
+`remainder` LISTs, `seasonal` per `periods`) and `ts_forecast_explain_by`
+(its `decomposition` STRUCT) as they come. anofox-orchestration's
+`decomposition_seasonal` file's `period` is the *seasonal* period, not a
+time step, so write:
+
+```sql
+SELECT unique_id AS id, t AS period, 'seasonal_' || period AS component, seasonal AS value
+FROM decomposition_seasonal;
 ```
 
 See `examples/regression/` (fixtures for every schema, plus scripts against
@@ -1558,9 +1572,11 @@ injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
 `de-locale.sql`).
 
 **Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
-`en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
-formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
-legends / month names identically in the browser and the CLI:
+`en-GB`, `en-IE`, `de-DE`, `fr-FR` (other regions fall back to their
+language; English with a euro-area region, e.g. `en-DE`, `en-NL` or `en-EU`,
+reads as `en-IE`). It formats KPI tiles, table cells (numbers and ISO dates)
+and chart axes / legends / month names identically in the browser and the
+CLI:
 
 | | en-US | de-DE | fr-FR |
 |---|---|---|---|
@@ -1570,6 +1586,9 @@ legends / month names identically in the browser and the CLI:
 | `::COMPACT` 1234567 | 1.2M | 1,2 Mio. | 1,2 M |
 | date 2026-10-15 (tables) | 2026-10-15 (unchanged) | 15.10.2026 | 15/10/2026 |
 | axis | `1,000` · `Oct 2026` | `1.000` · `Okt. 2026` | `1 000` · `oct. 2026` |
+
+`en-IE` is English with the euro: `€12,400`, `12.5%`, `1,234,567.5`, dates
+`15/10/2026`, the choice for English labels with euro amounts.
 
 `?locale=de-DE` overrides it for one viewer (not in served/locked mode).
 
@@ -2392,11 +2411,7 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 
 ### Rendering limits & data hygiene
 
-- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter
-  x axis or in a `::CATEGORY` keep the largest 29 (by total |measure|, or row
-  count for raw-row charts) and fold the rest into **"Other"** (summed for
-  bars/lines/areas/pies). Hosts can change it (`max_categories` in a
-  `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
+- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter x axis or in a `::CATEGORY` keep 29. By default those are the largest (by total |measure|, or row count for raw-row charts). When the rows come ranked by the measure (an `ORDER BY` on it, either direction), they are the **first 29 in row order**, so a worst-first ranking keeps its worst. The rest fold into **"Other"** (summed for bars/lines/areas/pies). A **rate or an average** is never summed: with `'percent'::YFORMAT`, or a measure named like one (`%`, `pct`, `rate`, `ratio`, `share`, `per`, `avg`, `mean`, `score`, …, the table totals' rule), the chart keeps 30 levels and leaves the rest out. To show fewer, `LIMIT` the query. Hosts can change it (`max_categories` in a `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
 - **Long lines are downsampled**: a line/area/step series with more than 5,000
   points is reduced with LTTB (Largest-Triangle-Three-Buckets), which keeps the
   visual shape (`max_line_points` / `RenderOptions::max_line_points`).
@@ -2451,7 +2466,7 @@ compiled to wasm** renders the panels. Everything is client-side — static file
 no backend, no DuckDB extension.
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
 
@@ -2638,7 +2653,7 @@ plus a `/query` endpoint backed by a **live** DuckDB — so the UI operates on y
 real tables (big data stays in DuckDB), and opens the browser for you:
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 cargo build --bin serve --features serve
 ./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080/?token=…
 #   --port N     choose the port

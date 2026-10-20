@@ -59,6 +59,14 @@ impl Locale {
         date: "D/M/Y",
         ..Locale::EN_US
     };
+    /// Irish English — English text with the euro (`€12,400`, `12.5%`,
+    /// day-first dates): an English dashboard of a euro-area business (#276).
+    pub const EN_IE: Locale = Locale {
+        tag: "en-IE",
+        currency: "€",
+        date: "D/M/Y",
+        ..Locale::EN_US
+    };
     /// German (Germany): `1.234.567,5`, `1.234 €`, `12,5 %`, `1,2 Mio.`.
     pub const DE_DE: Locale = Locale {
         tag: "de-DE",
@@ -91,30 +99,53 @@ impl Locale {
     };
 
     /// Every supported tag.
-    pub const TAGS: &'static [&'static str] = &["en-US", "en-GB", "de-DE", "fr-FR"];
+    pub const TAGS: &'static [&'static str] = &["en-US", "en-GB", "en-IE", "de-DE", "fr-FR"];
 
     /// Look up a BCP-47 tag (case-insensitive; `_` accepted). A language-only
     /// or other-region tag falls back to its language (`de`, `de-AT` → de-DE,
-    /// `fr-CA` → fr-FR, `en` → en-US). `None` for an unknown language.
+    /// `fr-CA` → fr-FR, `en` → en-US). English with a euro-area region
+    /// (`en-DE`, `en-NL`, `en-EU` → en-IE (English with the euro)). `None`
+    /// for an unknown language.
     pub fn from_tag(tag: &str) -> Option<Locale> {
         let t = tag.trim().replace('_', "-").to_ascii_lowercase();
         let exact = match t.as_str() {
             "en-us" => Some(Locale::EN_US),
             "en-gb" => Some(Locale::EN_GB),
+            "en-ie" => Some(Locale::EN_IE),
             "de-de" => Some(Locale::DE_DE),
             "fr-fr" => Some(Locale::FR_FR),
             _ => None,
         };
-        exact.or_else(|| match t.split('-').next().unwrap_or("") {
-            "en" => Some(Locale::EN_US),
-            "de" => Some(Locale::DE_DE),
-            "fr" => Some(Locale::FR_FR),
-            _ => None,
+        exact.or_else(|| {
+            // English with a euro-area region (or `en-EU`) is English with the euro.
+            const EURO: &[&str] = &[
+                "at", "be", "bg", "cy", "de", "ee", "es", "eu", "fi", "fr", "gr", "hr", "ie", "it",
+                "lt", "lu", "lv", "mt", "nl", "pt", "si", "sk",
+            ];
+            let mut parts = t.split('-');
+            if parts.next() == Some("en") {
+                if let Some(r) = parts.find(|p| p.len() != 4) {
+                    if EURO.contains(&r) {
+                        return Some(Locale::EN_IE);
+                    }
+                }
+            }
+            match t.split('-').next().unwrap_or("") {
+                "en" => Some(Locale::EN_US),
+                "de" => Some(Locale::DE_DE),
+                "fr" => Some(Locale::FR_FR),
+                _ => None,
+            }
         })
     }
 
     /// The matching ggplot-rs locale (chart axes, legends, date labels).
     pub fn gg(&self) -> ggplot_rs::locale::Locale {
+        if self.tag == "en-IE" {
+            let mut g = ggplot_rs::locale::Locale::en_gb().with_currency(self.currency);
+            g.tag = "en-IE".into();
+            return g;
+        }
         ggplot_rs::locale::Locale::from_tag(self.tag)
     }
 
@@ -240,7 +271,10 @@ fn compact_l(n: f64, l: &Locale) -> String {
     if round1(a) < mags[first] {
         return grouped(n, if first == 0 { 1 } else { 0 });
     }
-    let sep = if l.is_default() { "" } else { UNIT_SPACE };
+    // English-style locales (en-US, en-GB, en-IE: `.` decimal) write the
+    // compact unit right against the number (`53.8M`); continental locales
+    // (`,` decimal) put a space before it (`53,8 Mio.`, `1,2 M`).
+    let sep = if l.decimal == '.' { "" } else { UNIT_SPACE };
     let units: Vec<(f64, String)> = mags
         .iter()
         .zip(l.compact.iter())
@@ -512,5 +546,17 @@ mod tests {
             escape_xml(r#"<a href="x" onclick='y'>&</a>"#),
             "&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;&lt;/a&gt;"
         );
+    }
+
+    #[test]
+    fn english_with_the_euro() {
+        for tag in ["en-IE", "en-de", "en_NL", "en-EU"] {
+            assert_eq!(Locale::from_tag(tag), Some(Locale::EN_IE), "{tag}");
+        }
+        assert_eq!(Locale::from_tag("en-CH"), Some(Locale::EN_US));
+        assert_eq!(Locale::from_tag("en"), Some(Locale::EN_US));
+        assert_eq!(Locale::from_tag("en-GB"), Some(Locale::EN_GB));
+        assert_eq!(Locale::EN_IE.gg().currency_symbol, "€");
+        assert_eq!(Locale::EN_IE.gg().tag, "en-IE");
     }
 }

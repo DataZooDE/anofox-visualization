@@ -6,7 +6,7 @@
 // from the wasm build), writes its starter dashboard and lints it against the
 // file. Exit 1 if any starter has an error or a design/* warning.
 //
-//   wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+//   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   cargo build --bin dashboard
 //   node scripts/explore-starters.mjs [--dashboard target/debug/dashboard] [--duckdb duckdb] [--out DIR]
 process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox extensions, whatever was inherited (child processes inherit it)

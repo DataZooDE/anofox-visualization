@@ -8841,7 +8841,12 @@ function contractCaption(title, contract, row) {
 // Default render height of a contract plot (::HEIGHT overrides): the 2×2
 // diagnostics need room, single panels match the chart default.
 function contractHeight(macro) {
-  const H = { anofox_plot_diagnostics: 560, anofox_plot_summary: 360, anofox_plot_terms: 340 };
+  const H = {
+    anofox_plot_diagnostics: 560,
+    anofox_plot_summary: 360,
+    anofox_plot_terms: 340,
+    anofox_plot_decomposition: 520,
+  };
   return H[macro] || 320;
 }
 
