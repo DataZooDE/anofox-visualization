@@ -67,8 +67,10 @@ fn bar_with_category_is_dodged() {
     }
     // A real discrete x (position_dodge): every bar names its x level.
     assert!(s.contains("data-x=\"W1\"") && !s.contains("data-xticks="));
-    // Data labels cannot follow a discrete dodge: that chart keeps numeric
-    // slots, and hosts map a slot back to its x level.
+    // ggplot-rs 0.22's GeomText/GeomLabel honour `position_dodge` on a
+    // discrete x too (ggplot-rs#318 B3-4), so ::DATALABELS dodges the same
+    // real discrete x the bars do — no more numeric-slot fallback, and so
+    // no `data-xticks` root attribute mapping a slot back to its level.
     let s = svg(vec![
         Column::new("w", Role::X, strs(&["W1", "W1", "W2", "W2"])),
         Column::new("c", Role::Category, strs(&["app", "web", "app", "web"])),
@@ -77,7 +79,8 @@ fn bar_with_category_is_dodged() {
     ]);
     let (app, web) = (bars(&s, "app"), bars(&s, "web"));
     assert!(app[0].0 + app[0].1 <= web[0].0 + 0.01, "{app:?} {web:?}");
-    assert!(s.contains("data-xticks="), "x level map on the root");
+    assert!(s.contains("data-x=\"W1\""), "a real discrete x level");
+    assert!(!s.contains("data-xticks="), "no numeric-slot tick map");
 }
 
 // Dodged groups follow the legend (sorted) order, whatever the row order, and

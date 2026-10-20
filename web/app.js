@@ -13128,20 +13128,6 @@ function mapMarkInfo(attr, tip) {
   return { series: series || tip, value, x: label, fx: true, own, detail: "" };
 }
 
-// A discrete x drawn on numeric slots (grouped bars with ::DATALABELS) carries a
-// `data-xticks` map {slot: level} on its root <svg>: show "W1", not "1.225".
-function xTickLabel(el, x) {
-  const root = el.closest && el.closest("svg[data-xticks]");
-  if (!root || x === "") return x;
-  try {
-    const ticks = JSON.parse(root.getAttribute("data-xticks"));
-    const slot = String(Math.round(Number(x)));
-    return ticks[x] ?? ticks[slot] ?? x;
-  } catch (_) {
-    return x;
-  }
-}
-
 // Styled hover tooltips + click-to-highlight LINKING across all panels.
 // Every mark carrying a `<title>` becomes hoverable; its series key (ggplot's
 // `data-series`, else the title part before ": ") is the selection key.
@@ -13287,7 +13273,6 @@ function attachHover() {
     const attr = (k) => el.getAttribute(k);
     const isMapMark = el.hasAttribute("data-row") && !!el.closest("svg[data-map]");
     const info = isMapMark ? mapMarkInfo(attr, txt) : markInfo(attr, txt);
-    if (!info.fx) info.x = xTickLabel(el, info.x);
     const series = info.series;
     el.removeChild(t);
     el.setAttribute("data-series", series);
@@ -13368,7 +13353,7 @@ function attachHover() {
       const ia = el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
-      const key = dx ? String(xTickLabel(el, dx)) : series;
+      const key = dx ? String(dx) : series;
       if (ia && ia.drill && drillInto(ia.drill, key)) return;
       if (ia && ia.link) {
         const k = markKey(el.closest(".panel"), el);
@@ -13482,7 +13467,7 @@ function attachChartA11y() {
     const lanes = !!svg._track && svg.hasAttribute("data-ylevels");
     const items = marks.map((el) => {
       const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip"));
-      return { series: info.series, x: info.fx ? info.x : xTickLabel(el, info.x), value: lanes ? null : markValue(el) };
+      return { series: info.series, x: info.x, value: lanes ? null : markValue(el) };
     });
     // A ::DIAGRAM or a ::MAP brings its own summary from the renderer (steps,
     // stages, loops; regions, extremes, classes).

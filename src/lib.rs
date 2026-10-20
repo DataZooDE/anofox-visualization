@@ -1395,7 +1395,7 @@ pub(crate) enum Panel {
         plot: Box<GGPlot>,
         width: u32,
         height: u32,
-        /// Extra root attributes (e.g. `data-xticks`) written on the `<svg>`.
+        /// Extra root attributes (e.g. `data-track`) written on the `<svg>`.
         attrs: Vec<(&'static str, String)>,
     },
     Own {
@@ -2087,69 +2087,13 @@ fn discrete_dodge(kind: Kind, cols: &[Column]) -> bool {
             || (matches!(kind, Kind::Point | Kind::Bubble) && interval))
 }
 
-/// A discrete x axis turned into numeric slots `1, 2, …` with each group
-/// offset inside its slot — only for grouped marks with ::DATALABELS, which
-/// cannot follow ggplot-rs's discrete `position_dodge` (geom_text ignores the
-/// stored dodge offset).
-///
-/// TODO(ggplot-rs): drop once geom_text honours `position_dodge` on a
-/// discrete x.
-struct Dodged {
-    x: Vec<Value>,
-    breaks: Vec<f64>,
-    labels: Vec<String>,
-    /// Width of one group's sub-slot.
-    step: f64,
-}
-
-fn dodge_discrete(x: &[Value], group: &[Value], width: f64) -> Dodged {
-    let mut labels: Vec<String> = Vec::new();
-    let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for v in x.iter().filter(|v| !matches!(v, Value::Na)) {
-        let s = value_str(v);
-        if !slot.contains_key(&s) {
-            slot.insert(s.clone(), labels.len());
-            labels.push(s);
-        }
-    }
-    // Groups in the sorted order of the colour scale, so the left-to-right
-    // order inside a slot matches the legend.
-    let groups: Vec<String> = distinct_labels(&Column::new("", Role::Category, group.to_vec()));
-    let n = groups.len().max(1) as f64;
-    let step = width / n;
-    let xs = x
-        .iter()
-        .zip(group)
-        .map(|(v, g)| {
-            if matches!(v, Value::Na) {
-                return Value::Na;
-            }
-            let base = slot[&value_str(v)] as f64 + 1.0;
-            let gi = groups.iter().position(|l| *l == value_str(g)).unwrap_or(0) as f64;
-            Value::Float(base + (gi - (n - 1.0) / 2.0) * step)
-        })
-        .collect();
-    Dodged {
-        x: xs,
-        breaks: (1..=labels.len()).map(|i| i as f64).collect(),
-        labels,
-        step,
-    }
-}
-
 /// Half-width of error-bar caps in normalized panel units: 18 % of one bar
 /// (`slot` x units wide) on a discrete x, else 20 % of the smallest gap
-/// between x values.
-fn cap_half_width(
-    x: &[Value],
-    levels: Option<&[String]>,
-    dodged: &Option<Dodged>,
-    slot: f64,
-) -> f64 {
-    if let Some(d) = dodged {
-        // Slots 1..=n on limits [0.4, n + 0.6].
-        return 0.18 * d.step / (d.labels.len() as f64 + 0.2);
-    }
+/// between x values. `slot` is the whole dodge-group's width even when
+/// dodged (not pre-divided by the group count): ggplot-rs's GeomErrorbar
+/// shrinks `cap_width` by the dodge count itself once `position_dodge` is
+/// on the layer (ggplot-rs#318 B3-7).
+fn cap_half_width(x: &[Value], levels: Option<&[String]>, slot: f64) -> f64 {
     if x.iter().any(|v| matches!(v, Value::Str(_))) {
         let n = levels.map_or_else(
             || distinct_labels(&Column::new("", Role::X, x.to_vec())).len(),
@@ -2306,7 +2250,7 @@ fn render_cartesian(
     let (Some(x), Some(cat)) = (find_role(cols, Role::X), find_role(cols, Role::Category)) else {
         return cartesian(o, kind, value, cols, title, width, height, None);
     };
-    if !discrete_dodge(kind, cols) || find_role(cols, Role::DataLabels).is_some() {
+    if !discrete_dodge(kind, cols) {
         return cartesian(o, kind, value, cols, title, width, height, None);
     }
     let n = x.values.len();
@@ -2379,19 +2323,12 @@ fn cartesian(
     if x_discrete && x_interval.is_some() {
         return Err("::XMIN/::XMAX need a numeric ::XAXIS".into());
     }
-    // Grouped marks on a discrete x sit side by side: `position_dodge` (rows
-    // already ordered by `render_cartesian`), or — with ::DATALABELS, which
-    // cannot follow it — numeric slots.
+    // Grouped marks on a discrete x sit side by side under `position_dodge`
+    // (rows already ordered by `render_cartesian`); `GeomText`/`GeomLabel`
+    // honour it too (ggplot-rs#318 B3-4), so ::DATALABELS dodges the same way.
     let dodge_width = if bar { 0.9 } else { 0.6 };
     let dodge = x_levels.is_some();
-    let dodged = (discrete_dodge(kind, cols) && !dodge)
-        .then_some(category)
-        .flatten()
-        .map(|cat| dodge_discrete(&x.values, &cat.values, dodge_width));
-    let xvals = dodged
-        .as_ref()
-        .map(|d| d.x.clone())
-        .unwrap_or_else(|| x.values.clone());
+    let xvals = x.values.clone();
     let yvals = match kind {
         Kind::BarPercent => percent_shares(&x.values, &value.values, category.is_some()),
         // Each segment's share of its bar, so the hover value and the data
@@ -2824,7 +2761,6 @@ fn cartesian(
         Kind::Bar | Kind::BarPercent if dodge => plot
             .geom_col_with(card_col(o))
             .position(position_dodge(dodge_width)),
-        // (A slotted x is already dodged, see `dodge_discrete`.)
         Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
         Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
         Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
@@ -3025,10 +2961,7 @@ fn cartesian(
             plot.geom_errorbar_with(GeomErrorbar {
                 color: (60, 60, 60),
                 width: 1.0,
-                cap_width: cap_half_width(&col_of(&data, "x"), x_levels.as_deref(), &dodged, {
-                    let groups = category.map_or(1, |c| distinct_labels(c).len());
-                    dodge_width / if dodge { groups.max(1) as f64 } else { 1.0 }
-                }),
+                cap_width: cap_half_width(&col_of(&data, "x"), x_levels.as_deref(), dodge_width),
                 alpha: 1.0,
             })
             .layer_aes(span)
@@ -3349,14 +3282,6 @@ fn cartesian(
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
         );
-    } else if let Some(d) = &dodged {
-        plot = plot.scale_x_continuous(
-            ScaleContinuous::new()
-                .with_limits(0.4, d.labels.len() as f64 + 0.6)
-                .with_expand(0.0, 0.0)
-                .with_breaks(d.breaks.clone())
-                .with_labels(d.labels.clone()),
-        );
     } else if !x_discrete {
         let x_fmt = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
         let x_tr = role_str(cols, Role::XScale)
@@ -3410,18 +3335,7 @@ fn cartesian(
     if let Some(t) = &title {
         plot = plot.title(t);
     }
-    let mut panel = Panel::plot(plot, width, height);
-    // A dodged discrete x is drawn on numeric slots: tell hosts which level
-    // each slot is, so a tooltip header reads "W1" rather than "1.225".
-    if let (Some(d), Panel::Plot { attrs, .. }) = (&dodged, &mut panel) {
-        let ticks: serde_json::Map<String, serde_json::Value> = d
-            .breaks
-            .iter()
-            .zip(&d.labels)
-            .map(|(b, l)| (format!("{b}"), serde_json::Value::String(l.clone())))
-            .collect();
-        attrs.push(("data-xticks", serde_json::Value::Object(ticks).to_string()));
-    }
+    let panel = Panel::plot(plot, width, height);
     Ok(panel)
 }
 
