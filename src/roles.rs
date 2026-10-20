@@ -231,6 +231,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "centre of a map's diverging colour ramp (default 0 when the values span it)"),
     e("BOUNDARIES", &["REGION_SET"], R::Boundaries, "modifier", true,
       "the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match)"),
+    e("HEXBIN", &["HEX"], R::Hexbin, "modifier", true,
+      "aggregate a map's points into hexagons: 'auto' or a width across ('25 km'; planar: '2.5'); sums the measure, else counts rows"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),
@@ -766,6 +768,7 @@ mod tests {
             Role::Projection,
             Role::Classes,
             Role::Midpoint,
+            Role::Hexbin,
             Role::Region,
             Role::Lat,
             Role::Lon,
@@ -893,6 +896,7 @@ mod tests {
                 | Role::Projection
                 | Role::Classes
                 | Role::Midpoint
+                | Role::Hexbin
                 | Role::Region
                 | Role::Lat
                 | Role::Lon

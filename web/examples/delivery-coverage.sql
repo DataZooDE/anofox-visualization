@@ -123,13 +123,27 @@ FROM dc_customers;
 -- Graduated symbols (::SIZE, M2a): one circle per district / DC, area by
 -- customer count. Dortmund (the district) and the Dortmund DC both carry the
 -- most customers — checked against the data in the SQL comments below.
+-- Density (::HEXBIN, M2c): the same customers, aggregated into equal-area
+-- hexagons — 916 of them, 20 km across under the automatic conic
+-- projection, densest around 51.44° N, 7.49° E (the Ruhr area, near
+-- Dortmund) with 88 customers — checked against the data by rendering this
+-- very panel and reading its data-summary.
 SELECT 'Clusters'::TAB;
-SELECT 7::COL; SELECT 560::HEIGHT;
+SELECT 7::COL;
+SELECT 'Districts' AS clusters ::VIEW;
+SELECT 560::HEIGHT;
 SELECT ags ::REGION, customers AS "Customers" ::SIZE, dc_name || ' DC' ::CATEGORY,
        district ::LABEL, 8::LABEL_TOP,
        'Dortmund has the most active customers of any district'::TITLE,
        'One circle per district, its area by the number of active customers, coloured by the DC that serves it.'::INFO
 FROM dc_cover WHERE customers > 0 ORDER BY ags;
+SELECT 'Density' AS clusters ::VIEW;
+SELECT 560::HEIGHT;
+SELECT lat ::LAT, lon ::LON, 'auto'::HEXBIN, 'quantile 5'::CLASSES, 'de-states'::BASEMAP,
+       'Customer density peaks near Dortmund, up to 88 per hexagon'::TITLE,
+       'Active customers per hexagon (equal-area), five classes of about equal counts.'::INFO
+FROM dc_customers;
+SELECT 1::ENDVIEW;
 SELECT 5::COL; SELECT 560::HEIGHT;
 SELECT k.lat ::LAT, k.lon ::LON, count(*) AS "Customers" ::SIZE, k.name || ' DC' ::LABEL, ''::DATALABELS,
        'de-states'::BASEMAP,

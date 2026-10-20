@@ -339,6 +339,10 @@ pub enum Role {
     Classes,
     /// The centre of a map's diverging colour ramp (`::MIDPOINT`).
     Midpoint,
+    /// A map's hexagonal density-bin width (`::HEXBIN`, M2c): `'auto'` or a
+    /// width across (`'25 km'`; planar: a bare number) — sums `::Value`
+    /// when present, else counts points per hexagon.
+    Hexbin,
     /// A region code a map looks up in the built-in boundary pack
     /// (`::REGION`): ISO 3166-1 (`'DE'`, `'DEU'`), ISO 3166-2 (`'DE-BY'`), a
     /// German AGS (`'09162'`) or NUTS code (`'DE212'`), else a name.
