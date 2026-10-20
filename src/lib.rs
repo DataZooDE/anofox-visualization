@@ -27,7 +27,6 @@ pub mod contract;
 pub mod dashboard;
 pub mod diagram;
 mod downsample;
-mod facet_position;
 pub mod format;
 pub mod freshness;
 pub mod host;
@@ -2827,12 +2826,8 @@ fn cartesian(
             .position(position_dodge(dodge_width)),
         // (A slotted x is already dodged, see `dodge_discrete`.)
         Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
-        Kind::BarStacked => plot
-            .geom_col_with(card_col(o))
-            .position(facet_position::PerFacet(PositionStack)),
-        Kind::BarStackedPercent => plot
-            .geom_col_with(card_col(o))
-            .position(facet_position::PerFacet(PositionFill)),
+        Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
+        Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
         // so every chart is hoverable (and clickable for linking).
         Kind::Line | Kind::LinePercent => {
@@ -2933,7 +2928,7 @@ fn cartesian(
                 alpha: 0.85,
                 ..Default::default()
             })
-            .position(facet_position::PerFacet(PositionStack)),
+            .position(PositionStack),
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
         Kind::Point | Kind::Bubble => match fixed_size {
@@ -3071,12 +3066,8 @@ fn cartesian(
             })
             .layer_aes(Aes::new().x("x").y("y").label("dlab"));
         plot = match kind {
-            Kind::BarStacked | Kind::AreaStacked => plot.position(facet_position::Centred(
-                facet_position::PerFacet(PositionStack),
-            )),
-            Kind::BarStackedPercent => plot.position(facet_position::Centred(
-                facet_position::PerFacet(PositionFill),
-            )),
+            Kind::BarStacked | Kind::AreaStacked => plot.position(position_stack().with_vjust(0.5)),
+            Kind::BarStackedPercent => plot.position(position_fill().with_vjust(0.5)),
             _ => plot,
         };
     }
