@@ -190,7 +190,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
@@ -1558,9 +1558,11 @@ injects a theme. See `examples/theming/` (`acme.json`, `branded.sql`,
 `de-locale.sql`).
 
 **Locale** (`::LOCALE`, or the theme's `locale`; `en-US` by default): `en-US`,
-`en-GB`, `de-DE`, `fr-FR` (other regions fall back to their language). It
-formats KPI tiles, table cells (numbers and ISO dates) and chart axes /
-legends / month names identically in the browser and the CLI:
+`en-GB`, `en-IE`, `de-DE`, `fr-FR` (other regions fall back to their
+language; English with a euro-area region, e.g. `en-DE`, `en-NL` or `en-EU`,
+reads as `en-IE`). It formats KPI tiles, table cells (numbers and ISO dates)
+and chart axes / legends / month names identically in the browser and the
+CLI:
 
 | | en-US | de-DE | fr-FR |
 |---|---|---|---|
@@ -1570,6 +1572,9 @@ legends / month names identically in the browser and the CLI:
 | `::COMPACT` 1234567 | 1.2M | 1,2 Mio. | 1,2 M |
 | date 2026-10-15 (tables) | 2026-10-15 (unchanged) | 15.10.2026 | 15/10/2026 |
 | axis | `1,000` · `Oct 2026` | `1.000` · `Okt. 2026` | `1 000` · `oct. 2026` |
+
+`en-IE` is English with the euro: `€12,400`, `12.5%`, `1,234,567.5`, dates
+`15/10/2026`, the choice for English labels with euro amounts.
 
 `?locale=de-DE` overrides it for one viewer (not in served/locked mode).
 
@@ -2392,11 +2397,7 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 
 ### Rendering limits & data hygiene
 
-- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter
-  x axis or in a `::CATEGORY` keep the largest 29 (by total |measure|, or row
-  count for raw-row charts) and fold the rest into **"Other"** (summed for
-  bars/lines/areas/pies). Hosts can change it (`max_categories` in a
-  `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
+- **Discrete axes are capped**: more than 30 levels on a bar/box/violin/jitter x axis or in a `::CATEGORY` keep 29. By default those are the largest (by total |measure|, or row count for raw-row charts). When the rows come ranked by the measure (an `ORDER BY` on it, either direction), they are the **first 29 in row order**, so a worst-first ranking keeps its worst. The rest fold into **"Other"** (summed for bars/lines/areas/pies). A **rate or an average** is never summed: with `'percent'::YFORMAT`, or a measure named like one (`%`, `pct`, `rate`, `ratio`, `share`, `per`, `avg`, `mean`, `score`, …, the table totals' rule), the chart keeps 30 levels and leaves the rest out. To show fewer, `LIMIT` the query. Hosts can change it (`max_categories` in a `render_spec` JSON, `RenderOptions::max_categories`; `0` disables).
 - **Long lines are downsampled**: a line/area/step series with more than 5,000
   points is reduced with LTTB (Largest-Triangle-Three-Buckets), which keeps the
   visual shape (`max_line_points` / `RenderOptions::max_line_points`).
