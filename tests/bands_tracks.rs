@@ -260,6 +260,55 @@ fn tracks_share_the_charts_plot_area_and_x_window() {
     assert_eq!(track::heights(&tracks()), vec![34, 54, 50]);
 }
 
+/// `::TRACK`-aligned panels must use `AxisLabelFit::Shift`, not the default
+/// `Reserve` (ggplot-rs#318 step 2): Reserve grows the panel's own margins
+/// to fit an overflowing outer label, which would de-align the chart from
+/// its strips. At a 300 px phone width, with a date axis whose last label
+/// overflows under the default fit, the main chart and every track must
+/// still converge on one plot-area x window and line up.
+#[test]
+fn an_aligned_track_stack_at_phone_width_converges_and_lines_up() {
+    let d = days(40);
+    let chart = || {
+        vec![
+            Column::new("day", Role::X, d.clone()),
+            Column::new(
+                "stock",
+                Role::Value(Kind::Line),
+                nums((0..40).map(|i| 1000.0 + 37.0 * i as f64)),
+            ),
+        ]
+    };
+    let price = vec![
+        Column::new("day", Role::X, d.clone()),
+        Column::new(
+            "p",
+            Role::Value(Kind::Step),
+            nums((0..40).map(|i| 9.0 + (i % 7) as f64)),
+        ),
+        Column::new("t", Role::Track, vec![Value::Str("Price".into()); 40]),
+    ];
+    let svgs =
+        track::render_stack(&chart(), &[(price, 0)], 300, 220, &RenderOptions::default()).unwrap();
+    assert_eq!(svgs.len(), 2);
+    for svg in &svgs {
+        common::assert_safe_svg(svg, "aligned stack at 300px");
+    }
+    let main = plot_rect(&svgs[0]);
+    let track_rect = plot_rect(&svgs[1]);
+    assert!(
+        (main[0] - track_rect[0]).abs() < 0.05 && (main[2] - track_rect[2]).abs() < 0.05,
+        "chart and track plot areas must line up at 300px: {main:?} vs {track_rect:?}"
+    );
+    // Shift keeps the 0.21 panel size (no Reserve-grown margin): the plot
+    // area is not collapsed to AxisLabelFit::Reserve's degenerate minimum.
+    assert!(main[2] > 150.0, "panel width collapsed: {main:?}");
+    // No unresolved overflow (the fit converges: no NaN/inf in either SVG).
+    for svg in &svgs {
+        assert!(!svg.contains("NaN") && !svg.contains("inf"), "{svg}");
+    }
+}
+
 #[test]
 fn lane_tooltips_name_the_lane_and_the_text() {
     let svgs =

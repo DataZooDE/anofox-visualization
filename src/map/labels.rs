@@ -218,7 +218,7 @@ pub(crate) fn place(
     let mut taken: Vec<(f64, f64, f64, f64)> = blocked.to_vec();
     let mut out = Vec::new();
     for c in cands {
-        let tw = crate::ticks::text_width(&c.text, size);
+        let tw = ggplot_rs::render::text::text_width(&c.text, size);
         let th = size * 1.15;
         if c.room.is_some_and(|r| tw > r) {
             continue;

@@ -46,7 +46,6 @@ pub mod sql;
 pub mod table;
 pub mod theme;
 pub mod thresholds;
-pub mod ticks;
 pub mod track;
 mod variance;
 #[cfg(feature = "wasm")]
@@ -625,6 +624,17 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
         width: 0.6,
         ..Default::default()
     });
+    // ggplot-rs#318 step 2: keep outer x labels on-canvas (ggplot-rs 0.22's
+    // `AxisLabelFit`) and thin crowded ones (ggplot2's `check.overlap`).
+    // `::TRACK`-aligned panels must keep their exact plot area so sibling
+    // tracks stay lined up, so they Shift labels inward instead of
+    // Reserve-ing extra margin for them (which would narrow the panel).
+    th.axis_text_x_fit = if o.align.is_some() {
+        AxisLabelFit::Shift
+    } else {
+        AxisLabelFit::Reserve
+    };
+    th.axis_text_x_check_overlap = true;
     th
 }
 
@@ -1531,7 +1541,7 @@ impl Panel {
                         .map(|s| (s, Vec::new())),
                 };
                 svg.map(|(s, w)| {
-                    let mut s = ticks::fit_x_labels(s);
+                    let mut s = s;
                     for (k, v) in &attrs {
                         s = with_root_attr(s, k, v);
                     }
@@ -1973,7 +1983,6 @@ pub(crate) fn finish_grid(
             .render_svg_native_at(x, y, w, h)
             .map(|s| (s, Vec::new())),
     }
-    .map(|(s, warnings)| (ticks::fit_x_labels(s), warnings))
     .map_err(|e| format!("render failed: {e:?}"))
 }
 

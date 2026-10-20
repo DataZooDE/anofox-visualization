@@ -137,7 +137,7 @@ fn sizes_extra(o: &RenderOptions, m: &Model, w: f64, h: f64) -> Option<(Extra, f
     let mut values = vec![v1, v2, v3];
     values.retain(|v| *v > 0.0);
     values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    let tw = |s: &str| crate::ticks::text_width(s, FONT);
+    let tw = |s: &str| ggplot_rs::render::text::text_width(s, FONT);
     let items: Vec<(f64, String)> = values
         .into_iter()
         .map(|v| {
@@ -182,7 +182,7 @@ fn widths_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
     let mut values = vec![v1, v2, v3];
     values.retain(|v| *v > 0.0);
     values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    let tw = |s: &str| crate::ticks::text_width(s, FONT);
+    let tw = |s: &str| ggplot_rs::render::text::text_width(s, FONT);
     // The exact scale the overlay (`overlay.rs`) maps `linewidth` through,
     // so the legend's key widths are never a second, hand-rolled formula
     // that could drift from what's actually drawn.
@@ -230,7 +230,7 @@ fn hexbin_note_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> 
     } else {
         format!("Hexagons {w} across")
     };
-    let tw = crate::ticks::text_width(&text, FONT);
+    let tw = ggplot_rs::render::text::text_width(&text, FONT);
     Some((Extra::Note(text), tw, ROW))
 }
 
@@ -254,7 +254,7 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
             _ => 0,
         }
     };
-    let tw = |s: &str| crate::ticks::text_width(s, FONT);
+    let tw = |s: &str| ggplot_rs::render::text::text_width(s, FONT);
     let max_w = (w - 16.0).max(60.0);
     let mut title = None;
     let mut bar = 0.0;
@@ -445,7 +445,7 @@ pub(super) fn category_rows(items: &[(String, Rgb)], w: f64) -> Vec<Vec<(f64, us
     let mut rows: Vec<Vec<(f64, usize)>> = vec![Vec::new()];
     let mut x = 0.0;
     for (i, (name, _)) in items.iter().enumerate() {
-        let iw = 13.0 + crate::ticks::text_width(name, FONT) + 10.0;
+        let iw = 13.0 + ggplot_rs::render::text::text_width(name, FONT) + 10.0;
         if x + iw - 10.0 > w && !rows.last().unwrap().is_empty() {
             rows.push(Vec::new());
             x = 0.0;
@@ -542,7 +542,7 @@ pub(super) fn legend_svg(
             ticks,
             counts,
         } => {
-            let tw = |s: &str| crate::ticks::text_width(s, FONT);
+            let tw = |s: &str| ggplot_rs::render::text::text_width(s, FONT);
             for (i, c) in colors.iter().enumerate() {
                 let sx = PAD + i as f64 * bar;
                 g.push_str(&format!(

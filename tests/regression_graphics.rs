@@ -2101,7 +2101,7 @@ fn top_legend(svg: &str) -> Vec<(f64, f64, f64, String)> {
             );
             let legend = text.starts_with("carton ") || text.starts_with('+');
             (legend && y < top).then(|| {
-                let w = anofox_visualization::ticks::text_width(&text, size);
+                let w = ggplot_rs::render::text::text_width(&text, size);
                 (x - 16.0, x + w, y, text)
             })
         })

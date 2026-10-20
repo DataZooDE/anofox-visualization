@@ -1708,7 +1708,7 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
         .iter()
         .map(|l| {
             let t: String = l.iter().map(|(s, _)| s.as_str()).collect();
-            crate::ticks::text_width(&t, 1.0)
+            ggplot_rs::render::text::text_width(&t, 1.0)
         })
         .fold(0.0, f64::max);
     let size = if widest > 0.0 {

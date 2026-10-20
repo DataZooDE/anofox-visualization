@@ -18,7 +18,7 @@
 //! TODO(ggplot-rs): wrap horizontal legends in `draw_legend` and reserve
 //! their rows in `PlotLayout`, then drop this pass.
 
-use crate::ticks::text_width;
+use ggplot_rs::render::text::text_width;
 
 /// Height (px) of one legend row: ggplot-rs's `legend_key_height` in the
 /// house themes (`chart_theme`, `void_theme`).
