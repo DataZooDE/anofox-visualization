@@ -769,6 +769,46 @@ if (run("main")) {
     await context.close();
   }
 
+  // M9f (sec-review-272-rereview third pass, L-5): a stale `runPreviewToken`
+  // left pointing at the dead preview after "Apply, don't run" broke the
+  // page's own Explore query ("Cannot read properties of null (reading
+  // 'run')", 3/3 trials) — it never reached any worker at all. Explore
+  // must still work, on the page database, once the exit has finished
+  // (no run in flight any more).
+  {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_l5", "propose_dashboard", { sql: HOLD_CLEAN, summary: "L-5 test.", panels: [{ stmt: 3, title: "n", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(String(e)));
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.click("#ai-apply");
+    await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+    await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+    await page.waitForTimeout(400);
+    const n0 = await mark(page);
+    await page.click("#side-explore");
+    await page.waitForSelector("#xq-sql", { timeout: 15000 });
+    await page.fill("#xq-sql", "SELECT 4242 AS explore_probe");
+    await page.focus("#xq-sql");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+    await page.waitForFunction(() => (document.getElementById("xq-info")?.textContent || "").length > 0, null, { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    record("M9f: no page error running an Explore query after \"Apply, don't run\"", pageErrors.length === 0, JSON.stringify(pageErrors));
+    record("M9f: Explore's query reached the page worker (w0)", pageMsgs(await since(page, n0)).some((m) => /explore_probe/.test(m.sql || "")));
+    record("M9f: no error shown in the Explore console", !/error/i.test(await page.evaluate(() => document.getElementById("xq-err")?.textContent || "")));
+    record('M9f: #xq-info shows a row count, not stuck on "Running…"', !/^Running/.test(await page.evaluate(() => document.getElementById("xq-info")?.textContent || "")));
+    await context.close();
+  }
+
   // M10: the key leak sweep (sk-ant- never appears anywhere).
   {
     const context = await newCtx();

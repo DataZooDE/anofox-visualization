@@ -768,6 +768,34 @@ run" against a `::RELOAD` + slow statement + `ATTACH`/`SET` proposal, the
 reviewer's own probe template), the M9 Check-under-hold case, a `::VIEW`-
 during-preview URL assertion, and `tests/web/assist_test.mjs`'s L-4 spoof
 cases.
+
+**sec-review-272-rereview (fix round 3, PR #272): the third pass's own
+functional/theoretical follow-ups from an otherwise clean review.** L-5:
+a stale `runPreviewToken` (left pointing at the dead preview after
+"Apply, don't run", typing during a preview, or switching to Explore)
+broke the page's own Explore, add-file and MotherDuck queries — not a
+security issue (nothing reaches the page database or the model either
+way), but a functional regression that failed closed. Fixed: `previewExit`
+drops the token once nothing is `runActive`; `run()`'s own `finally` drops
+it once it no longer matches the live `preview`; `runOnce` never resets it
+(a still-active preview's lazy tab jobs need it after `runOnce` returns).
+Info-7 (not reproduced, theoretical): a run captured under a preview could
+still reach a `::RELOAD` statement after `previewExit`'s first,
+synchronous `dpTimer` clear and re-arm the timer for a preview that no
+longer exists. Fixed with a second `dpTimer` clear after `previewExit`'s
+own awaits, and a `pv !== preview` guard in the `RELOAD` role's own arming
+line. Info-8 (parser corner cases, no decoy found): a plain `'…'` literal
+has no backslash escapes in DuckDB (only `''` doubles a quote) —
+`findTarget` read it with `E'…'`'s backslash-aware form regardless, so a
+trailing backslash (a Windows path, `TO 'C:\tmp\'`) swallowed the closing
+quote and gave "target not recognised" for an ordinary target; fixed by
+checking for an actual `E`/`e` right before the opening quote (on the
+original text) before choosing which form to re-read with.
+`ATTACH OR REPLACE DATABASE '…'` (DuckDB's own grammar order) is now
+matched too. Tests: `scripts/assist-e2e.mjs` M9f (an Explore query after
+"Apply, don't run" must still reach the page worker — confirmed to FAIL
+without the fix); `tests/web/assist_test.mjs`'s backslash-literal and
+`OR REPLACE DATABASE` cases.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

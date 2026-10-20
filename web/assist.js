@@ -270,21 +270,31 @@ function maskForTargets(sql) {
 }
 // `re` must match ending exactly on a literal's opening `'` (on the MASK,
 // never the original) — findTarget() then re-reads the literal from the
-// ORIGINAL text at that same offset (so '' / backslash escapes are
-// resolved from the real content, not from filler).
+// ORIGINAL text at that same offset. Info-8 (sec-review-272-rereview
+// third pass): a PLAIN '…' literal has no backslash escapes in DuckDB —
+// only '' doubles a quote — so it is re-read with the simple
+// `(?:[^']|'')*` form; reading it with E'…''s `\\.`-aware form instead
+// turned a literal backslash (a Windows path, `TO 'C:\tmp\'`) into
+// "target not recognised" (the backslash swallowed the closing quote
+// that followed it). Backslash escapes only apply to an E'…' literal,
+// checked on the ORIGINAL text right before the opening quote (never the
+// mask, which has already blanked everything inside).
 function findTarget(sql, re) {
   const s = String(sql);
   const m = re.exec(maskForTargets(s));
   if (!m) return null;
   const at = m.index + m[0].length - 1; // the opening ' itself
-  const lit = /^'((?:[^'\\]|\\.|'')*)'/.exec(s.slice(at));
-  return lit ? lit[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+  const isE = s[at - 1] === "E" || s[at - 1] === "e";
+  const lit = (isE ? /^'((?:[^'\\]|\\.|'')*)'/ : /^'((?:[^']|'')*)'/).exec(s.slice(at));
+  if (!lit) return null;
+  return isE ? lit[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : lit[1].replace(/''/g, "'");
 }
 // ATTACH's database path / COPY's "TO" target — named in the Apply
 // dialog's reason (M-1) and in proposalReaders, instead of the bare
-// keyword alone.
+// keyword alone. Info-8: DuckDB's own grammar order is `OR REPLACE`
+// before `DATABASE` (`ATTACH OR REPLACE DATABASE '…'`), not after.
 function attachTarget(sql) {
-  return findTarget(sql, /\bATTACH\s+(?:DATABASE\s+)?(?:(?:IF\s+NOT\s+EXISTS|OR\s+REPLACE)\s+)?'/i);
+  return findTarget(sql, /\bATTACH\s+(?:OR\s+REPLACE\s+)?(?:DATABASE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?'/i);
 }
 function copyTarget(sql) {
   return findTarget(sql, /\bTO\s+'/i);

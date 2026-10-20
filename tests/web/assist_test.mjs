@@ -268,6 +268,25 @@ assert.equal(A.classifyStatement("SELECT count(*) ::METRIC FROM 'WFS:http://e.ex
   const ore = A.classifyStatement("ATTACH OR REPLACE 'md:' AS m");
   assert.equal(ore.cls, 3);
   assert.match(ore.reason, /attaches database 'md:'/);
+  // Info-8 (sec-review-272-rereview third pass): DuckDB's own grammar
+  // order is OR REPLACE *before* DATABASE.
+  const ored = A.classifyStatement("ATTACH OR REPLACE DATABASE 'md:' AS m");
+  assert.equal(ored.cls, 3);
+  assert.match(ored.reason, /attaches database 'md:'/);
+  // Info-8: a PLAIN '…' literal has no backslash escapes in DuckDB — only
+  // '' doubles a quote. Reading it with E'…''s \\.-aware form instead
+  // swallowed the closing quote that followed a trailing backslash (a
+  // Windows path), giving "target not recognised" for an entirely
+  // ordinary target. The real prefix is still shown either way (no decoy
+  // is possible: the name always starts at the real literal).
+  const bs = A.classifyStatement("COPY (SELECT 1) TO 'C:\\tmp\\'");
+  assert.equal(bs.cls, 3);
+  assert.match(bs.reason, /writes file 'C:\\tmp\\'/);
+  // A doubled quote inside a plain literal still round-trips (unrelated
+  // to backslash handling, must not regress).
+  const dq = A.classifyStatement("ATTACH 'it''s' AS m");
+  assert.equal(dq.cls, 3);
+  assert.match(dq.reason, /attaches database 'it's'/);
 }
 // R3-5 (#225): a qualified temp object's name is its last part
 assert.equal(A.macroDefined("CREATE TEMP MACRO temp.main.lower(x) AS 'shadow'"), "lower");

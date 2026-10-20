@@ -3769,6 +3769,28 @@ async function previewExit({ rerun = true, hold = false } = {}) {
   dpLazy.gen++;
   await dpLazy.tail;
   preview = null;
+  // L-5 (sec-review-272-rereview third pass): a run that started under
+  // THIS preview may still be `runActive` right here (the awaits above
+  // don't guarantee it has reached `run()`'s own `finally` yet) — leave
+  // `runPreviewToken` for that run's own dispatch to keep working, and
+  // for a still-active preview's lazy tab jobs after `runOnce` returns
+  // (never reset it from runOnce itself). Once nothing is active, though,
+  // a stale token left pointing at this now-dead preview would otherwise
+  // misroute the page's own Explore, add-file and MotherDuck queries
+  // (none of which come from a render) into the dead session's `.run`,
+  // which reads a `null` S.session and fails — functionally broken, not
+  // a security issue (nothing reaches the page database either way), but
+  // worth closing: `run()`'s own `finally` below is the other half.
+  if (!runActive) runPreviewToken = null;
+  // Info-7: cleared once already above, synchronously, before the first
+  // await; clear it again here too — the run this function just awaited
+  // (captured under THIS preview, `pv` non-null) still runs its full
+  // layout loop, and if that loop reaches a ::RELOAD statement after the
+  // first clear, it re-arms `dpTimer` (see the RELOAD branch's own
+  // `pv !== preview` guard, run()/runOnce() below) before this line ever
+  // gets a chance to clear it again.
+  clearInterval(dpTimer);
+  dpTimer = null;
   // H-1/L-2: restore the viewer's own #refresh value (the timer itself
   // was already cleared above, synchronously, before any await).
   if (previewRefreshSaved !== null) {
@@ -7562,6 +7584,15 @@ function run(fresh = true, opts = {}) {
       await runOnce(fresh, pv);
     } finally {
       runActive = null;
+      // L-5 (sec-review-272-rereview third pass): the other half of
+      // previewExit's own cleanup — once THIS run (the last one that may
+      // have been holding `runPreviewToken` alive on purpose: a still-
+      // active preview's lazy tab jobs need it after runOnce() returns)
+      // has finished, drop a token that no longer matches the live
+      // `preview` (an exit happened while this run was in flight). Never
+      // reset it unconditionally here: a token that still equals the
+      // live `preview` belongs to an ongoing preview and must survive.
+      if (runPreviewToken && runPreviewToken !== preview) runPreviewToken = null;
       if (runQueued !== null) {
         const f = runQueued;
         runQueued = null;
@@ -8094,7 +8125,14 @@ async function runOnce(fresh = true, pv = preview) {
           // Auto-refresh every N seconds, driven from SQL.
           const secs = parseFloat(firstCell()) || 0;
           clearInterval(dpTimer);
-          if (secs > 0) dpTimer = setInterval(run, secs * 1000);
+          // Info-7 (sec-review-272-rereview third pass): only re-arm when
+          // this run's own preview (`pv`, captured once at runOnce's own
+          // start) still matches the live `preview` — a run that started
+          // under a preview already exited (Discard/"Apply, don't run"/
+          // typing/Explore) reaches this line *after* previewExit's own
+          // (double) dpTimer clear, and would otherwise re-arm a timer
+          // for a preview that no longer exists.
+          if (secs > 0 && pv === preview) dpTimer = setInterval(run, secs * 1000);
           if ($("refresh")) $("refresh").value = [0, 5, 15, 30, 60].includes(secs) ? String(secs) : "0";
         } else if (role(s, "HEADER_IMAGE")) {
           const img = document.createElement("img");
