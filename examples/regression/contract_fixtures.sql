@@ -103,5 +103,35 @@ FROM range(60) r(i);
 SELECT 'partial' AS name, anofox_plot_partial(p) AS svg FROM partial p;
 SELECT 'added_variable' AS name, anofox_plot_partial(p, kind := 'added_variable') AS svg FROM partial p;
 
+-- checks: a data-quality band, one panel per check -------------------------
+CREATE TABLE checks AS SELECT * FROM (VALUES
+  ('rows', 'pass', 120.0, 100.0, NULL, NULL),
+  ('customer present', 'fail', 0.08, NULL, 0.05, 'app'),
+  ('customer present', 'fail', 0.03, NULL, 0.05, 'web'),
+  ('status known', 'pass', 1.0, 1.0, NULL, NULL)
+) t(check_name, status, value, lower_threshold, upper_threshold, identifier);
+SELECT 'checks' AS name, anofox_plot_checks(c) AS svg FROM checks c;
+
+-- cv: three expanding folds (provisional schema) -----------------------------
+CREATE TABLE folds AS
+SELECT 1 AS fold_id, 'train' AS split, (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP AS ds FROM range(0, 20) r(i)
+UNION ALL SELECT 1, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(20, 27) r(i)
+UNION ALL SELECT 2, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(0, 27) r(i)
+UNION ALL SELECT 2, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(27, 34) r(i)
+UNION ALL SELECT 3, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(0, 34) r(i)
+UNION ALL SELECT 3, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(34, 41) r(i);
+SELECT 'cv' AS name, anofox_plot_cv(f) AS svg FROM folds f;
+
+-- decomposition (provisional, #188): trend + weekly seasonality + remainder -
+CREATE TABLE decomp AS
+SELECT (DATE '2024-01-01' + i::INTEGER) AS ds, c.component,
+       CASE c.component
+         WHEN 'trend' THEN 20.0 + 0.3 * i
+         WHEN 'seasonal' THEN 4.0 * sin(2 * pi() * i / 7)
+         ELSE 0.6 * sin(i * 1.7)
+       END AS value
+FROM range(56) r(i), (VALUES ('trend'), ('seasonal'), ('remainder')) c(component);
+SELECT 'decomposition' AS name, anofox_plot_decomposition(d) AS svg FROM decomp d;
+
 -- anofox_plot: dispatch on the column signature ------------------------------
 SELECT 'auto_terms' AS name, anofox_plot(c) AS svg FROM coefs c;

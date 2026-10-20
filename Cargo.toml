@@ -9,7 +9,7 @@ default-members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "2026.10.19"
+version = "2026.10.20"
 edition = "2021"
 license = "BUSL-1.1"
 
@@ -29,9 +29,13 @@ crate-type = ["cdylib", "rlib"]
 # From crates.io (0.17: escaped host attributes, data-domain/series/value,
 # fragments, candlestick/radar/gauge/calendar, plus the statistical geoms —
 # discrete dodge, flip-safe intervals, mapped reference lines, QQ bands, Cook's
-# contours, step ribbons, label repel, PlotGrid). For local ggplot-rs work,
-# `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.19", default-features = false, features = ["sf"] }
+# contours, step ribbons, label repel, PlotGrid; 0.20: arrows via
+# `geom_curve`/`geom_segment` `.arrow()`, the `linewidth` aesthetic, hex
+# binning in data units (`StatBinHex`/`GeomHex` on a fixed lattice), identity
+# colour/fill scales, interactive aesthetics (`Aes::tooltip`, `Aes::data_attr`),
+# and `coord_sf` xlim/ylim/expand + `svg_root_data(false)` for overlay
+# rendering). For local ggplot-rs work, `[patch.crates-io]` it to a path.
+ggplot-rs = { version = "0.20", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
@@ -76,3 +80,21 @@ roxmltree = "0.21"
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
+
+# The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
+# Separate from [profile.release] (native DuckDB extension + the `serve`/
+# `dashboard` binaries), which is NOT touched here and stays Cargo's defaults.
+# Without this, wasm-pack's default profile (opt-level 3, no LTO, 16 codegen
+# units) made per-PR wasm size deltas mostly codegen noise (±20-40 K, functions
+# get reshuffled across codegen units by unrelated changes) — see
+# ~/projects/duckdb/wasm-size-m2.md. Fat LTO + one codegen unit alone removes
+# most of that noise; opt-level "z" was then chosen over the default 3 and
+# over "s" from a 3-way raw/gzip size vs. browser render-time measurement
+# (showcase + delivery-coverage dashboards, Playwright, 5 runs each): "z" is
+# the smallest (-34.5% raw / -29.1% gzip vs. opt 3) and showed no render-time
+# regression on either dashboard.
+[profile.wasm]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"

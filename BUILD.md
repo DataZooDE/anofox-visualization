@@ -32,8 +32,16 @@ duckext/scripts/build-native.sh --release        # → /tmp/anofox_visualization
 # core, CLIs, web
 cargo test --locked --features serve
 cargo run --bin dashboard -- dashboards/sessions.sql
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 ```
+
+`--profile wasm` picks the `[profile.wasm]` Cargo profile (fat LTO, one codegen
+unit, opt-level tuned for size) instead of plain `--release`, which stays
+Cargo's defaults for the native extension/server. CI checks the built
+`web/pkg/anofox_visualization_bg.wasm` against a committed budget
+(`web/wasm-size.txt` + 30 KB, `scripts/check-wasm-size.mjs --check`); after an
+intentional size change, update the baseline with
+`node scripts/check-wasm-size.mjs` and commit `web/wasm-size.txt` (#312).
 
 The C-API crate bindgens the **vendored** headers in `duckext/capi_hdr/` (copied
 from the pinned `duckdb` submodule) — no submodule or download needed;

@@ -148,3 +148,77 @@ fn serve_page_hides_duckdb_errors() {
     );
     assert!(stderr.contains("secret_table_279"), "{stderr}");
 }
+
+/// #285: a panel's own renderer (not its SQL query) fails, quoting a role
+/// option's value back verbatim (`::ABLINE '…' must be 'slope,intercept'`,
+/// src/lib.rs). That value can carry data, so it must never reach the page —
+/// only a generic `<pre>` and the server log, same redaction as #279 above.
+#[test]
+fn panel_render_error_is_redacted() {
+    if !have_duckdb("panel_render_error_is_redacted") {
+        return;
+    }
+    let s = Scratch::new("panel");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("sentinel.sql"),
+        "SELECT x::XAXIS, y::LINECHART, 'hunter2_panel_sentinel_285'::ABLINE FROM t;\n\
+         SELECT x::XAXIS, y::BARCHART FROM t;\n",
+    )
+    .unwrap();
+    let init = s.0.join("init.sql");
+    std::fs::write(
+        &init,
+        "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS x, 2 AS y;\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut conn = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        conn,
+        "GET /d/sentinel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut resp = String::new();
+    conn.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(!body.contains("hunter2_panel_sentinel_285"), "{body}");
+    assert!(body.contains("this panel could not be drawn"), "{body}");
+
+    let out = server.finish();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[anofox-serve] dashboard 'sentinel' panel render failed:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("hunter2_panel_sentinel_285"), "{stderr}");
+}

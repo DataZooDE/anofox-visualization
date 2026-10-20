@@ -133,6 +133,10 @@ AGG_ARGS = {
 for _f in ("t_test_agg", "mann_whitney_u_agg", "brunner_munzel_agg", "permutation_t_test_agg",
            "yuen_agg"):
     AGG_ARGS[_f] = "y, g2"
+# #264: a fixed seed, else the p-value is a fresh Monte Carlo draw every run.
+AGG_ARGS["permutation_t_test_agg"] = "y, g2, {'seed': 42}"
+for _f in ("energy_distance_agg", "mmd_agg"):
+    AGG_ARGS[_f] = "y, g2::INTEGER, {'seed': 42}"
 for _f in ("brown_forsythe_agg", "kruskal_wallis_agg", "one_way_anova_agg"):
     AGG_ARGS[_f] = "y, level3"
 for _f in ("tukey_hsd_agg", "pairwise_t_test_agg", "dunn_test_agg"):
@@ -145,12 +149,26 @@ AGG_FROM = {
 }
 
 
+# Outputs that differ in their last bits between identical runs even on one
+# thread (#264: the summing order changes per process).
+# Rounded, so the SVGs (data-domain prints full precision) are byte-stable.
+ROUND = {
+    "brown_forsythe_agg": ("statistic", "p_value"),
+    "kruskal_wallis_agg": ("statistic", "p_value", "effect_size"),
+    "one_way_anova_agg": ("f_statistic", "statistic", "p_value", "ss_between", "ss_within",
+                          "effect_size"),
+}
+
+
 def agg_sql(name: str) -> str | None:
     args = AGG_ARGS.get(name)
     if args is None:
         return None
     src = AGG_FROM.get(name, "d")
-    return f"(SELECT grp, unnest({name}({args}), recursive := true) FROM {src} GROUP BY grp)"
+    sql = f"(SELECT grp, unnest({name}({args}), recursive := true) FROM {src} GROUP BY grp)"
+    if name in ROUND:
+        sql = "(SELECT * REPLACE (" + ", ".join(f"round({c}, 12) AS {c}" for c in ROUND[name]) + f") FROM {sql})"
+    return sql
 
 
 def cases(producers: list[tuple[str, str, str]]) -> list[dict]:

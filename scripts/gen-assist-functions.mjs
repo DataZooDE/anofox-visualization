@@ -5,9 +5,8 @@
 // the reviewed denials below; a function this list has not seen (another
 // extension, a newer DuckDB) is refused by the assistant's gate. After a
 // DuckDB-Wasm or extension upgrade: run it, review what it prints, commit.
-// CI's web job runs --check with the extensions scripts/fetch-wasm-extensions.sh
-// fetches (#224), so a new get.erpl.io build fails it until the list is
-// regenerated.
+// CI checks --check against the pinned builds (scripts/wasm-extensions.lock,
+// #235), so a lock bump without regenerating this list fails it.
 //
 //   node scripts/gen-assist-functions.mjs           write web/assist/functions.js
 //   node scripts/gen-assist-functions.mjs --check   exit 1 if it is stale
@@ -15,12 +14,15 @@ process.env.DATAZOO_DISABLE_TELEMETRY = "1"; // no usage telemetry from anofox e
 process.env.DATAZOO_NO_BANNER = "1";
 import { createRequire } from "module";
 import { spawn } from "child_process";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const OUT = "web/assist/functions.js";
+export const LOCK = "scripts/wasm-extensions.lock";
 // Reviewed denials: they reach outside the session, change its state, or carry
 // a value into an error message.
 const DENIED = {
@@ -67,45 +69,104 @@ const NATIVE_TABLE_DENIED = {
 const NATIVE_OPERATOR = /_operator$/;
 // Every query_table() / query() call of a macro body, and the one shape whose
 // relation argument build() reads: query_table(CAST(<parameter> AS VARCHAR)).
-const QUERY_CALL = /\bquery(?:_table)?\s*\(/gi;
+// A quoted call ("query_table"(…)) is counted too (#239 N-1); QUERY_TABLE_PARAM
+// stays unquoted-only, so a quoted query_table() ends up in review.
+const QUERY_CALL = /\bquery(?:_table)?"?\s*\(/gi;
 const QUERY_TABLE_PARAM = /\bquery_table\(\s*CAST\(\s*"?([a-z_][a-z0-9_]*)"?\s+AS\s+VARCHAR\s*\)\s*\)/gi;
+// A call in a macro body: a plain or double-quoted name before "(" (#239 N-1).
+const CALL = /(?:"([A-Za-z_][A-Za-z0-9_]*)"|\b([A-Za-z_][A-Za-z0-9_]*))\s*\(/g;
+const callsOf = (body) => new Set([...String(body || "").matchAll(CALL)].map((m) => (m[1] || m[2]).toLowerCase()));
+// File and URL readers (the gate's READER in web/assist.js).
+const READER_CALL = /^(read_\w+|\w+_scan|glob|sniff_csv|parquet_\w+|st_read\w*|iceberg_\w+|delta_\w+)$/i;
+// Core table functions a family macro may call (query/query_table: their own rule).
+const CORE_TABLE_OK = new Set(["range", "generate_series", "unnest", "unlist", "query_table", "query"]);
+// Reviewed natives outside the families that their table macros wrap (#239
+// N-1): table in-out functions whose TABLE argument is the macro's relation and
+// whose other arguments are column names or options; no SQL of their own.
+const NATIVE_HELPER_ALLOWED = new Set(
+  (
+    "_ts_coverage_native _ts_cv_folds_native _ts_cv_forecast_native _ts_cv_hydrate_native " +
+    "_ts_cv_split_native _ts_detect_changepoints_by_native _ts_features_native _ts_fill_forward_native _ts_fill_gaps_native " +
+    "_ts_forecast_panel_native _ts_forecast_var_native _ts_mase_native _ts_metrics_native _ts_mstl_decomposition_native " +
+    "_ts_quantile_loss_native _ts_rmae_native _ts_stats_by_native"
+  ).split(" ")
+);
+
+// The pinned DuckDB-Wasm builds for `version` (scripts/wasm-extensions.lock,
+// #235): hashes each web/localext/<version>/<platform>/<ext>.duckdb_extension.wasm
+// and throws when it doesn't match the lock (a stale or unfetched file), so a
+// build this script's duckdb_functions() rowset didn't come from can't slip
+// into the generated list unnoticed. Returns a short fingerprint of the
+// pinned shas, recorded in the header so --check also catches a lock bump
+// that wasn't followed by regenerating web/assist/functions.js.
+function pinned(version) {
+  const lines = readFileSync(path.join(root, LOCK), "utf8").split("\n");
+  const rows = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const [ver, p, e, sha] = t.split(/\s+/);
+    if (ver === version) rows.push({ p, e, sha });
+  }
+  if (!rows.length) throw new Error(`${LOCK} pins no builds for DuckDB ${version}`);
+  for (const r of rows) {
+    const file = path.join(root, "web/localext", version, r.p, `${r.e}.duckdb_extension.wasm`);
+    const got = createHash("sha256").update(readFileSync(file)).digest("hex");
+    if (got !== r.sha) throw new Error(`${path.relative(root, file)} is not the pinned build (${got}): run scripts/fetch-wasm-extensions.sh`);
+  }
+  return createHash("sha256")
+    .update(rows.map((r) => `${r.p} ${r.e} ${r.sha}`).join("\n"))
+    .digest("hex")
+    .slice(0, 12);
+}
 
 // The DuckDB-Wasm connection the browser (and the tests) use, with json,
 // anofox_statistics and anofox_forecast loaded from web/localext, served
 // locally (the blocking bundle fetches extensions synchronously).
 async function collect() {
-  const require = createRequire(path.join(root, "tests/web/package.json"));
-  const duckdb = require("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs");
-  const dist = path.dirname(require.resolve("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs"));
-  const db = await duckdb.createDuckDB(
-    { eh: { mainModule: path.join(dist, "duckdb-eh.wasm"), mainWorker: path.join(dist, "duckdb-node-eh.worker.cjs") } },
-    new duckdb.VoidLogger(),
-    duckdb.NODE_RUNTIME
-  );
-  await db.instantiate();
-  db.open({ allowUnsignedExtensions: true });
-  const c = db.connect();
-  const rows = (s) => JSON.parse(JSON.stringify(c.query(s).toArray().map((r) => r.toJSON()), (_, v) => (typeof v === "bigint" ? Number(v) : v)));
-  const port = 19500 + (process.pid % 400);
-  const server = spawn("python3", ["-u", "-m", "http.server", String(port), "--bind", "127.0.0.1"], {
-    cwd: path.join(root, "web/localext"),
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  await new Promise((ok) => server.stdout.once("data", ok));
+  // #239 N-3: a fresh HOME, so DuckDB-Wasm's extension cache
+  // (~/.duckdb/extensions/127.0.0.1:<port>/) can't serve an old build.
+  const home = mkdtempSync(path.join(os.tmpdir(), "gen-assist-home-"));
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
   try {
-    c.query("INSTALL json; LOAD json");
-    c.query(`SET custom_extension_repository='http://127.0.0.1:${port}'`);
-    for (const e of ["anofox_statistics", "anofox_forecast"]) {
-      c.query(`FORCE INSTALL ${e}`);
-      c.query(`LOAD ${e}`);
-    }
-    c.query("RESET custom_extension_repository");
+    const require = createRequire(path.join(root, "tests/web/package.json"));
+    const duckdb = require("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs");
+    const dist = path.dirname(require.resolve("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs"));
+    const db = await duckdb.createDuckDB(
+      { eh: { mainModule: path.join(dist, "duckdb-eh.wasm"), mainWorker: path.join(dist, "duckdb-node-eh.worker.cjs") } },
+      new duckdb.VoidLogger(),
+      duckdb.NODE_RUNTIME
+    );
+    await db.instantiate();
+    db.open({ allowUnsignedExtensions: true });
+    const c = db.connect();
+    const rows = (s) => JSON.parse(JSON.stringify(c.query(s).toArray().map((r) => r.toJSON()), (_, v) => (typeof v === "bigint" ? Number(v) : v)));
     const version = rows("SELECT version() AS v")[0].v;
-    const exts = rows("SELECT extension_name AS n, extension_version AS v FROM duckdb_extensions() WHERE loaded ORDER BY 1");
-    const fns = rows("SELECT lower(function_name) AS f, function_type AS t, parameters AS p, macro_definition AS m FROM duckdb_functions() WHERE internal");
-    return { version, exts, fns };
+    const pin = pinned(version);
+    const port = 19500 + (process.pid % 400);
+    const server = spawn("python3", ["-u", "-m", "http.server", String(port), "--bind", "127.0.0.1"], {
+      cwd: path.join(root, "web/localext"),
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    await new Promise((ok) => server.stdout.once("data", ok));
+    try {
+      c.query("INSTALL json; LOAD json");
+      c.query(`SET custom_extension_repository='http://127.0.0.1:${port}'`);
+      for (const e of ["anofox_statistics", "anofox_forecast"]) {
+        c.query(`FORCE INSTALL ${e}`);
+        c.query(`LOAD ${e}`);
+      }
+      c.query("RESET custom_extension_repository");
+      const exts = rows("SELECT extension_name AS n, extension_version AS v FROM duckdb_extensions() WHERE loaded ORDER BY 1");
+      const fns = rows("SELECT lower(function_name) AS f, function_type AS t, parameters AS p, macro_definition AS m FROM duckdb_functions() WHERE internal");
+      return { version, exts, fns, pin };
+    } finally {
+      server.kill();
+    }
   } finally {
-    server.kill();
+    process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
   }
 }
 
@@ -150,8 +211,27 @@ export function build(fns) {
       left.add(r.f);
       if (!NATIVE_OPERATOR.test(r.f) && !Object.hasOwn(NATIVE_TABLE_DENIED, r.f)) review.push(`${r.f}: a native table function (add it to NATIVE_TABLE_ALLOWED or NATIVE_TABLE_DENIED)`);
     }
-  const natives = [...left];
-  for (const r of fns) if (r.t === "table_macro" && natives.some((f) => new RegExp(`\\b${f}\\s*\\(`, "i").test(r.m || ""))) left.add(r.f);
+  const kinds = new Map();
+  for (const r of fns) (kinds.get(r.f) || kinds.set(r.f, new Set()).get(r.f)).add(r.t);
+  for (const r of fns)
+    if (r.t === "table_macro" && ANOFOX_FAMILY.test(r.f))
+      for (const c of callsOf(r.m)) {
+        if (ANOFOX_FAMILY.test(c) || CORE_TABLE_OK.has(c)) continue;
+        if (READER_CALL.test(c)) review.push(`${r.f}: calls ${c}(), a file or URL reader`);
+        else if (kinds.get(c)?.has("table") && !NATIVE_HELPER_ALLOWED.has(c))
+          review.push(`${r.f}: calls ${c}(), a native table function outside its family (review it into NATIVE_HELPER_ALLOWED)`);
+        else if (kinds.get(c)?.has("table_macro")) review.push(`${r.f}: calls ${c}(), a table macro outside its family`);
+      }
+  // A table macro that calls a left-out function (quoted or not, directly or
+  // through another macro) is left out too.
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const r of fns)
+      if (r.t === "table_macro" && !left.has(r.f) && [...callsOf(r.m)].some((c) => left.has(c))) {
+        left.add(r.f);
+        grew = true;
+      }
+  }
   const tables = [...new Set(fns.filter((r) => ANOFOX_FAMILY.test(r.f) && (r.t === "table_macro" || (r.t === "table" && NATIVE_TABLE_ALLOWED.has(r.f)))).map((r) => r.f))]
     .filter((f) => !left.has(f))
     .sort();
@@ -234,7 +314,7 @@ const EXPORTS_COMMENT = `// SCALAR_ALLOWED: the scalar, aggregate and window fun
 `;
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { version, exts, fns } = await collect();
+  const { version, exts, fns, pin } = await collect();
   const { scalars, denied, builtin, rel, tables, left, review } = build(fns);
   console.log(`scalars: ${scalars.length}, denied: ${denied.size}, builtin: ${builtin.length}, anofox tables: ${tables.length}, relation keys: ${Object.keys(rel).length}`);
   console.log(`left out: ${JSON.stringify(left)}`);
@@ -247,7 +327,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const wasmVersion = JSON.parse(readFileSync(path.join(root, "tests/web/package.json"), "utf8")).dependencies["@duckdb/duckdb-wasm"];
   const extsText = exts.map((e) => `${e.n} ${e.v}`).join(", ");
-  const header = `// Generated by scripts/gen-assist-functions.mjs from duckdb_functions() of DuckDB ${version} (DuckDB-Wasm ${wasmVersion}) with ${extsText}; do not edit.\n`;
+  const header = `// Generated by scripts/gen-assist-functions.mjs from duckdb_functions() of DuckDB ${version} (DuckDB-Wasm ${wasmVersion}) with ${extsText}, pinned builds ${pin} (${LOCK}); do not edit.\n`;
   const body = [header, EXPORTS_COMMENT, renderNameSet("SCALAR_ALLOWED", scalars), renderDeniedMap(denied), renderNameSet("BUILTIN", builtin), renderNameSet("ANOFOX_TABLES", tables), renderRelationArgs(rel)].join("\n");
   const file = path.join(root, OUT);
   if (process.argv.includes("--check")) {

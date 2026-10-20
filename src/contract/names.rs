@@ -70,6 +70,22 @@ pub(super) const COLUMNS: &[&str] = &[
     "kind",
     "label",
     "severity",
+    "check_name",
+    "status",
+    "lower_threshold",
+    "upper_threshold",
+    "message",
+    "identifier",
+    "run_ts",
+    "fold_id",
+    "train_start",
+    "train_end",
+    "test_start",
+    "test_end",
+    "observed",
+    "trend",
+    "seasonal",
+    "remainder",
 ];
 
 /// Other common spellings of a contract column, as [`norm`] writes them

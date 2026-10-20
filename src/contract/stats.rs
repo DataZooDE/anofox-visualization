@@ -722,6 +722,7 @@ fn test_panel(
                 color: INK,
                 width: if mode == "p" { 9.0 } else { 2.0 },
                 alpha: if mode == "p" { 0.85 } else { 1.0 },
+                ..Default::default()
             })
             .layer_data(vec![
                 ("x".into(), vec![Value::Float(base); n]),
@@ -1354,6 +1355,7 @@ pub(super) fn partial(
                         color: crate::darken(brand, 0.3),
                         width: 1.8,
                         alpha: 1.0,
+                        ..Default::default()
                     })
                     .layer_data(frame);
             }
@@ -2088,6 +2090,7 @@ pub(super) fn prediction(
             color: brand,
             width: 1.6,
             alpha: 1.0,
+            ..Default::default()
         });
         plot = plot.scale_color(look::series_scale(Aesthetic::Color, &others));
         ylab = format!("difference vs {rf}");
@@ -2212,6 +2215,7 @@ pub(super) fn prediction(
             color: brand,
             width: 1.7,
             alpha: 1.0,
+            ..Default::default()
         });
         if several {
             plot = plot.scale_color(look::series_scale(Aesthetic::Color, &mlevels));
@@ -2508,6 +2512,7 @@ pub(super) fn km(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
                     color: if key.is_some() { colors[si] } else { brand },
                     width: 1.0,
                     alpha: 0.7,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     ("x".into(), vec![Value::Float(m)]),
