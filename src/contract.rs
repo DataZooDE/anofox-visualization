@@ -79,28 +79,6 @@ pub(crate) fn render(
     place: Place,
 ) -> Result<(String, Vec<String>), RenderError> {
     render_plot(plot, rows, options, width, height, o, place)
-        .map(|(svg, warnings)| (slim_points(svg), warnings))
-}
-
-/// ggplot-rs writes `fill-opacity="1.000"` on every point; 1 is the SVG
-/// default and no ancestor sets another, so drop it from `<circle>` marks
-/// (about a tenth of a scatter's bytes: diagnostics are mostly points).
-fn slim_points(svg: String) -> String {
-    const OPAQUE: &str = " fill-opacity=\"1.000\"";
-    if !svg.contains(OPAQUE) {
-        return svg;
-    }
-    let mut out = String::with_capacity(svg.len());
-    let mut rest = svg.as_str();
-    while let Some(i) = rest.find("<circle ") {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let end = rest.find('>').map_or(rest.len(), |e| e + 1);
-        out.push_str(&rest[..end].replacen(OPAQUE, "", 1));
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
 }
 
 fn render_plot(
@@ -1262,14 +1240,8 @@ mod tests {
 
     #[test]
     fn opaque_points_carry_no_fill_opacity() {
-        let s = super::slim_points(
-            r#"<circle cx="1" fill-opacity="1.000"><title>a</title></circle><circle fill-opacity="0.500"/><rect fill-opacity="1.000"/>"#
-                .into(),
-        );
-        assert_eq!(
-            s,
-            r#"<circle cx="1"><title>a</title></circle><circle fill-opacity="0.500"/><rect fill-opacity="1.000"/>"#
-        );
+        // ggplot-rs 0.21 (B2-2) omits `fill-opacity`/`stroke-opacity` itself
+        // when the value is 1 — no `slim_points` string surgery needed.
         let obs: Vec<String> = (0..30)
             .map(|i| {
                 format!(
