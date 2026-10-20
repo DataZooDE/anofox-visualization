@@ -12,6 +12,10 @@
 //!   `src/bin/serve.rs` and the extension's `anofox_serve*` functions.
 //! * [`app_brand`] — the builder's app bar per installation (name, tagline,
 //!   logo), validated for `serve --app-*` and `anofox_serve(port, options)`.
+//! * [`telemetry`] — `DATAZOO_DISABLE_TELEMETRY` defaults to off for every
+//!   anofox extension an embedding can load (#333): `dashboard`/`serve`
+//!   `main()` and the extension's own load callback each call
+//!   [`telemetry::ensure_default_once`] first thing.
 
 pub mod access;
 pub mod app_brand;
@@ -19,6 +23,7 @@ pub mod app_brand;
 pub mod auth;
 pub mod policy;
 pub mod serving;
+pub mod telemetry;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 

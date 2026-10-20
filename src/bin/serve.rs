@@ -263,6 +263,11 @@ fn parse_args() -> Opts {
 }
 
 fn main() {
+    // Owner decision (#333): the anofox extensions this binary's `duckdb`
+    // child sessions may LOAD default to no telemetry. Must run before any
+    // thread or `duckdb` child exists — first line of `main`, see
+    // `host::telemetry` for the default and its thread-safety reasoning.
+    anofox_visualization::host::telemetry::ensure_default_once();
     if std::env::args().nth(1).as_deref() == Some("api-key") {
         api_key_cli(std::env::args().skip(2).collect());
     }

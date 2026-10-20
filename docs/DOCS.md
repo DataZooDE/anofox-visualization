@@ -3127,22 +3127,54 @@ anofox-visualization sends nothing. The anofox extensions whose results it
 plots (anofox_statistics, anofox_forecast, anofox_tabular, anofox_optimize,
 anofox_decide) send pseudonymous usage telemetry by default, to PostHog EU:
 that the extension loaded and which of its functions ran, with call counts —
-per their `TELEMETRY.md`, never data, SQL, table or column names. To switch
-it off for all five, set the variable in the environment of the process that
-loads them (the DuckDB CLI, `dashboard`, `dashboard serve`, or the session
-that calls `anofox_serve_dashboards`):
+per their `TELEMETRY.md`, never data, SQL, table or column names. It is
+switched off for all five with one variable, checked before anything is sent:
 
 ```bash
 export DATAZOO_DISABLE_TELEMETRY=1      # 1, true or yes
 ```
 
-It is checked before anything is sent. `SET anofox_telemetry_enabled = false`
-is not enough on its own: it comes after `LOAD`, which already reports the
-load, and with several anofox extensions loaded it reaches only the first one
-loaded (they share the setting's name). A locked server sets
-`lock_configuration` after a dashboard's `-- @load` lines, so a dashboard
-can't change it either: use the variable. This repository's CI, tests and
-scripts set it.
+**Off by default wherever anofox-visualization runs** (#333): the
+`dashboard` and `serve` binaries, and the `anofox_visualization` extension
+itself, set `DATAZOO_DISABLE_TELEMETRY=1` for the process the moment they
+start — before any thread or DuckDB instance exists for the binaries, and as
+the first thing the extension's own load callback does — *unless the
+variable is already set*, to anything at all. That covers the DuckDB CLI
+loading `anofox_visualization` first, `dashboard`, `dashboard serve`
+(`serve --dashboards`), and the session that calls
+`anofox_serve_dashboards`, including every anofox extension it loads
+afterwards in that process (they all check the same variable).
+
+To opt back in, set the variable yourself to anything other than
+`1`/`true`/`yes` — most simply `DATAZOO_DISABLE_TELEMETRY=0` — in the
+environment *before* anofox-visualization loads; once it has set the
+default, it never overwrites an explicit value either way. Loading
+anofox-visualization into a session that already has telemetry enabled for
+some other reason, and that you want to keep that way, needs no action: an
+explicit value is always left alone.
+
+**Load order still matters for an anofox extension loaded *before*
+anofox-visualization in the same session**: its load event already went out
+by the time anofox-visualization's default takes effect. anofox-visualization
+still runs a best-effort `SET anofox_telemetry_enabled = false` right after —
+only when its own effective default is "disabled" — which silences that
+extension (and the locked server's own re-`LOAD` of it into its snapshot) for
+the rest of the process, if the setting exists at all (checked via
+`duckdb_settings()` first, so this is a silent no-op otherwise); with several
+anofox extensions already loaded it only reaches whichever one registered the
+setting first (they share the name). `SET anofox_telemetry_enabled = false`
+run by hand has the same limits: it comes after `LOAD`, which already reports
+the load, and reaches only the first anofox extension loaded. **Load
+anofox-visualization first — or set the variable yourself before anything
+loads — when that order matters to you.**
+
+A locked server (`dashboard serve --dashboards`, `anofox_serve_dashboards`)
+sets `lock_configuration` right after a dashboard's `-- @load` lines, so a
+dashboard's own SQL can never `SET anofox_telemetry_enabled` back on for the
+rest of that session either; the process-wide environment default is what
+actually keeps every anofox extension silent regardless of load order. This
+repository's CI, tests and scripts force the variable to `1` regardless of
+what's inherited, same as any other caller that wants to guarantee it.
 
 The browser builder runs only anofox_statistics and anofox_forecast, and their
 DuckDB-Wasm builds have the telemetry compiled out: a visitor's browser sends

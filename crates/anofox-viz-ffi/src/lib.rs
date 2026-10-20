@@ -68,6 +68,37 @@ pub unsafe extern "C" fn anofox_viz_render(
     }
 }
 
+/// Owner decision (#333): default `DATAZOO_DISABLE_TELEMETRY` to "1" for this
+/// process if it is unset, so every anofox extension this C++ extension's
+/// host DuckDB loads afterwards stays silent by default. An explicit value —
+/// whatever it is — is the user's own choice and is left alone. The C++ side
+/// calls this first thing in its `LoadInternal` (before registering anything),
+/// which DuckDB runs on the thread that issued `LOAD`, before that
+/// statement's own worker threads exist; see
+/// `anofox_visualization::host::telemetry` for the full thread-safety
+/// reasoning (the write itself is guarded by a `Once`, run at most once per
+/// process).
+#[no_mangle]
+pub extern "C" fn anofox_viz_ensure_telemetry_default() {
+    anofox_visualization::host::telemetry::ensure_default_once();
+}
+
+/// Is `DATAZOO_DISABLE_TELEMETRY` currently disabling telemetry, under the
+/// exact parsing the anofox extensions use ("1"/"true"/"yes")? The C++ side
+/// calls this after [`anofox_viz_ensure_telemetry_default`] to decide whether
+/// the best-effort `SET anofox_telemetry_enabled = false` (for an anofox
+/// extension loaded before this one, whose load event already went out) is
+/// actually this process's intent — an explicit opt-in must not be
+/// overridden by a forced `SET`.
+#[no_mangle]
+pub extern "C" fn anofox_viz_telemetry_is_disabled() -> bool {
+    anofox_visualization::host::telemetry::is_disabled(
+        std::env::var(anofox_visualization::host::telemetry::VAR)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Free a string returned through [`anofox_viz_render`].
 ///
 /// # Safety

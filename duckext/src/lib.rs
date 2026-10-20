@@ -20,6 +20,7 @@ pub(crate) mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 mod db;
+use anofox_visualization::host::telemetry;
 use db::capi;
 use ffi::*;
 use std::ffi::{CStr, CString};
@@ -465,10 +466,46 @@ unsafe fn register_scalar(
     ok
 }
 
+/// Best effort (#333): if `anofox_telemetry_enabled` exists — some anofox
+/// extension, loaded before us in this database, already registered it —
+/// turn it off. `duckdb_settings()` is checked first so this is a silent
+/// no-op, never a SQL error, when no such extension is loaded. It only
+/// reaches whichever anofox extension registered the setting first (every
+/// anofox extension shares the one name), so a sibling loaded even earlier,
+/// in a different database connection that already sent its load event, is
+/// unaffected by this call either way — load anofox_visualization first, or
+/// set `DATAZOO_DISABLE_TELEMETRY` in the environment before anything loads,
+/// when that matters (see docs/DOCS.md).
+pub(crate) fn best_effort_disable_existing_setting(conn: &db::Conn) {
+    let has_setting = conn
+        .query("SELECT 1 FROM duckdb_settings() WHERE name = 'anofox_telemetry_enabled'")
+        .map(|mut r| {
+            let mut any = false;
+            let _ = r.for_each_first(|_| {
+                any = true;
+                Ok(())
+            });
+            any
+        })
+        .unwrap_or(false);
+    if has_setting {
+        let _ = conn.exec("SET anofox_telemetry_enabled = false");
+    }
+}
+
 unsafe fn init(
     info: duckdb_extension_info,
     access: &duckdb_extension_access,
 ) -> Result<(), String> {
+    // Owner decision (#333): default DATAZOO_DISABLE_TELEMETRY to "1" for
+    // this process, as the very first thing this load callback does — see
+    // `anofox_visualization::host::telemetry` for the default, the explicit
+    // opt-in it leaves alone, and the thread-safety reasoning (DuckDB runs
+    // this on the thread that issued LOAD, before that statement's own
+    // worker threads exist; `ensure_default_once` still guards the actual
+    // `set_var` with a `Once` as the safest practical choice against a
+    // DuckDB build with other threads already running).
+    anofox_visualization::host::telemetry::ensure_default_once();
     let get_api = access.get_api.ok_or("no get_api")?;
     let api_ptr = get_api(info, c"v1.2.0".as_ptr()) as *const duckdb_ext_api_v1;
     if api_ptr.is_null() {
@@ -485,6 +522,20 @@ unsafe fn init(
         return Err("could not connect".into());
     }
     let conn = db::Conn::owned(raw);
+
+    // Best effort for an anofox extension loaded BEFORE us: its load event
+    // already went out (that happens at its own LOAD, not at a later SET),
+    // but disabling `anofox_telemetry_enabled` here still silences anything
+    // it or a sibling would send for the rest of this session — the setting
+    // is shared by name across every anofox extension loaded into this
+    // database (#333). Only when our own effective default is "disabled":
+    // an explicit opt-in (DATAZOO_DISABLE_TELEMETRY=0/false/no/anything
+    // else) must not be overridden by a forced SET. duckdb_settings() is
+    // checked first so a DuckDB build with no anofox extension loaded at
+    // all — the setting doesn't exist yet — never errors.
+    if telemetry::is_disabled(std::env::var(telemetry::VAR).ok().as_deref()) {
+        best_effort_disable_existing_setting(&conn);
+    }
 
     use duckdb_type::*;
     if !register_scalar(
