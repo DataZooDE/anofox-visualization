@@ -81,6 +81,7 @@ the axes and colour series.
 - **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot. The folder groups itself from header comments (`-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`): a grouped nav (a searchable menu above 8 dashboards) and a `/` landing page of cards with descriptions, owners and a ✓ certified badge.
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks) and a `build-dashboard` agent skill that writes dashboards from a prompt.
+- **AI assistant in the browser builder** *(preview; off unless `app-config.json` enables it)* — a plain-language request becomes a dashboard, reviewed before it's applied; calls Claude directly with your own key, in a locked DuckDB-Wasm sandbox that never touches the page's own data before you apply it ([docs](docs/DOCS.md)).
 
 ## Quick Start
 

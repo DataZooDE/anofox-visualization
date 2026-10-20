@@ -676,7 +676,261 @@ it is useful without any AI.
 | **M1-1. Lint in the browser** | `lint_step` wasm export (§3.4); Edit-mode *Check* button listing diagnostics with statement links | `src/wasm.rs`, `src/lint.rs` (a small replay adapter), `web/app.js`, `web/index.html` | Rust: `lint_step` = native lint on all `web/examples/*.sql` and the explore starters; node test of the JS fixed-point loop; e2e: *Check* on a broken example | 1.5 d |
 | **M1-2. Assistant core** | `web/assist.js`: transport interface, (a) browser-key via the SDK, the loop, the tools, the statement classifier and write gate, the budget and cancel; `web/assist/instructions.md`; `scripts/gen-assist-guide.mjs` + markers in the dashboards skill; the role reference from `roles_json()` | `web/assist.js`, `web/assist/*`, `scripts/gen-assist-guide.mjs`, the dashboards `SKILL.md` (markers only), `tests/web_js.rs` | `tests/web/assist_test.mjs`: the loop with a fake transport (self-correction, the round limit, cancel, refusal, `max_tokens`), the classifier table (≥ 60 cases), prefix stability hash; CI check that `guide.md` is current | 2.5 d |
 | **#204. The assistant engine + tab CSP** | `web/assist-csp.js` (the meta CSP, proven by an enforcement probe), `web/assist-engine.js` (`buildEngine`, the lock, the Arrow snapshot), `wasmTools`' `requireLocked`/`previewRunner` (§3.6); the boot ratchet; `app-config.json`'s `assistant.remember` (opt-in; always off on `*.github.io`/`*.gitlab.io`) | `web/assist-csp.js`, `web/assist-engine.js`, `web/assist.js`, `web/app.js`, `web/index.html` | `tests/web/assist_engine_test.mjs`, `tests/web/assist_csp_test.mjs`, `scripts/assist-sandbox-e2e.mjs` (manual, Playwright) | — |
-| **M1-3. Panel and new-from-question** | **Depends on #204** (the locked assistant engine + the tab CSP): call `applyAssistCsp` before `loadSdk`/the key dialog; build the engine with `assistDeps()` (`web/app.js`), keyed by `pageFingerprint()` so it rebuilds when the page's tables change; every preview query (panels, inputs, drills, cross-filter, `::PAGED` pages, lazy tabs) through `tools.previewRunner()` — **C-1 (carried over from #204's security review): the preview must be structurally unable to reach the page's own `conn`**, not just guarded by the gate; the panel, *What will be sent*, preview, diff, apply / undo (native + history + toast), the key dialog, `assistConfig.framed`/`.remember`, the *New dashboard* entry, phone sheet, a11y; `assistant` block in `app-config.json`; 10-prompt eval seed + `scripts/assist-eval.mjs` (live, manual) | `web/assist-ui.js` (new module, not in the 12.7 K-line `app.js`), `web/app.js` (hooks), `web/index.html`, `web/app-config.example.json`, `tests/assist-eval/` | `scripts/assist-e2e.mjs` (Playwright with a mocked Messages endpoint: prompt → preview → apply → Ctrl+Z → undo toast; the write-confirmation dialog; nothing sent before *Send*; **C-1's spy: inputs, drills, pages and tab switches in a preview, with a spy on the page connection seeing zero statements and the recorder seeing nothing**; **C-2: the boot ratchet and this panel's open handler share one memoised `applyAssistCsp` — a failed probe on either path clears the key**); `a11y-e2e` + phone; a test that the module is never loaded with `window.__served` or `?embed=1` | 2 d |
+| **M1-3. Panel and new-from-question** — **delivered (#244)** | **Depends on #204/#256** (the locked assistant engine + the tab CSP): call `applyAssistCsp` before `loadSdk`/the key dialog; build the engine with `assistDeps()` (`web/app.js`), keyed by `pageFingerprint()` so it rebuilds when the page's tables change; every preview query (panels, inputs, drills, cross-filter, `::PAGED` pages, lazy tabs) through **`tools.previewSession()`** — **C-1 (carried over from #204's security review): the preview must be structurally unable to reach the page's own `conn`**, not just guarded by the gate; the panel, *What will be sent*, preview, diff, apply / undo (native + history + toast), the key dialog, `assistConfig.framed`/`.remember`, the *New dashboard* entry, phone sheet, a11y; `assistant` block in `app-config.json`; 10-prompt eval seed + `scripts/assist-eval.mjs` (live, manual) | `web/assist-ui.js` (new module, not in the 13 K-line `app.js`), `web/app.js` (hooks), `web/index.html`, `web/app-config.example.json`, `tests/assist-eval/` | `scripts/assist-e2e.mjs` (Playwright with a mocked Messages endpoint: prompt → preview → apply → Ctrl+Z → undo toast; the write-confirmation dialog; nothing sent before *Send*; **C-1's spy: inputs, drills, pages and tab switches in a preview, with a spy on the page connection seeing zero statements and the recorder seeing nothing**; **C-2: the boot ratchet and this panel's open handler share one memoised `applyAssistCsp` — a failed probe on either path clears the key**); `a11y-e2e` + phone; a test that the module is never loaded with `window.__served` or `?embed=1` | 2 d |
+
+**Deviations from this row, decided by the owner on #244 (all accepted):**
+- **The preview session (D1).** `tools.previewRunner()` (one scratch session per call) would lose a dashboard's `SET VARIABLE`s, TEMP tables and macros between the render loop's calls — inputs, drills and pages would break, or setup would re-run per panel. `web/lint.js`'s `scratchSession` + `web/assist.js`'s `tools.previewSession()` give the preview **one** engine connection for its whole lifetime instead, with the same guard/allowed-set and the same per-call lock re-check, and no `prepare`. `previewRunner` is unchanged and still used by the tool loop's own `run_sql`/`check_dashboard`.
+- **Apply's buttons (D2).** *Apply and run* / *Apply, don't run* (the SQL goes into the editor; nothing runs until Run) / *Cancel* — the dialog only when there is a reader, a class-3 statement or a stale editor to confirm; otherwise *Apply* is one click. `tools.gate(sql)` always runs first, in the engine, regardless of the dialog.
+- **Conversations (D3).** Each Send is a new request from the current editor; only a clarifying *reply* (no proposal) carries its history into the next Send. Full follow-ups and refining an unapplied proposal stay in M2-2.
+- **The eval's results (D4).** Not committed in M1-3 (`tests/assist-eval/results/` is gitignored); the owner runs the live seed once with their own key and the numbers go into the PR body. M3-3 adds `results/latest/` and CI.
+
+**sec-review-272 (fix round, PR #272): two safeguards the PR described but did
+not fully hold.** H-1: *"Apply, don't run"* did not hold — a `::RELOAD` timer,
+the dark toggle, the refresh select or Esc could still run the just-applied
+SQL on the page's own DuckDB with no further action from the viewer. Fixed
+with an `applyHold` flag (`web/app.js`) that `run()` checks before any
+non-explicit call, cleared only by the `#run` button, Ctrl/⌘+Enter or
+`loadDash`; the preview's own `::RELOAD` timer and the viewer's `#refresh`
+value are now saved/cleared around every preview (also L-2, the same timer
+outliving the preview into the page's own dashboard afterward). H-2: a chart
+`::LINK` with a *computed* (not literal) URL could `window.open`/navigate on
+one click during the preview — before Apply, the gate never saw a URL
+literal to refuse — and a same-origin table `::LINK` could move the tab away
+via the browser's own default navigation (the click guard only blocked
+cross-origin). Fixed in `followLink` and `previewLinkGuard` (`web/app.js`):
+every link but `#…`/`?…` is refused during a preview. M-1: the Apply
+dialog's refused-statement list showed only a truncated first line and a
+bare keyword ("ATTACH — ATTACH"), hiding a multi-line `ATTACH`/`COPY`'s
+actual target; it now renders each statement in full (capped, scrollable)
+with the keyword in `<strong>`, and `classifyStatement`/`proposalReaders`
+name the target ("attaches database 'md:'", "writes file 'out.csv'"). L-1:
+"Preview again" could leak an engine connection per click, and showed while
+a preview was already active (a render-order gap before `host.preview.enter`
+resolved); `assist-ui.js` now closes any session before opening the next one
+and hides the button immediately. Info items: `assist_ownopts_test.mjs` now
+scans every function in `web/assist-ui.js` (not only its exports) at any
+nesting depth; `brandImgOrigins` skips a logo URL whose path is empty or
+ends in `/` (would otherwise widen `img-src` to a folder or the whole
+origin); `openAssistant` re-checks the live lock state directly, not only
+`assistCfg.enabled`. Tests: `scripts/assist-e2e.mjs` M5b (L-1, a Worker
+CONNECT/DISCONNECT count), the M9 extension (H-1, H-2) and M9b (H-1's hold
+lifting on an explicit Run); `tests/web/assist_test.mjs` (M-1's
+`classifyStatement`/`proposalReaders`/`gate` wording); the widened
+`assist_ownopts_test.mjs`.
+
+**sec-review-272-rereview (fix round 2, PR #272): the first round's own
+fixes left a C-1/H-1 exit-boundary race.** H-1R (High): a render queued by
+the proposal's own `::RELOAD` timer (or any other implicit trigger firing
+mid-render) could still be in flight when Discard or "Apply, don't run"
+set `preview = null` — its later statements (`ATTACH`, `SET`, …) then
+reached `pageConn()` because `runSqlInner` read the live, mutable
+`preview`, not the preview this particular run had actually started
+under. Fixed by capturing the preview a run started under once,
+synchronously, in `run()` (`const pv = preview`, before anything can race
+it), threading it into `runOnce(fresh, pv)`, and dispatching on that
+(`runPreviewToken`, set at `runOnce`'s own first line) in `runSqlInner`
+instead of the live global — a run tied to a preview can now never fall
+through to the page database, however the live state changes underneath
+it. `previewEnter`/`previewExit` also clear `dpTimer` and `runQueued`, and
+set a `previewExiting` flag `run()` honours, synchronously before their
+first await (defence in depth for a run that was only *queued*, not yet
+in flight). M-2: the "Check" button ran the held, unconfirmed SQL on the
+page database too (`scratchRunner(pageDb(), …)`) — same promise as Run,
+same hold: `#lint-run` is now disabled/retitled alongside `#refresh` in
+`previewExit({hold})`/`clearApplyHold()`, and `runLint()` itself refuses
+outright while `applyHold` is set (defence in depth). L-3: `setViewParam`
+was missing the `if (preview) return;` guard its siblings
+(`setTabParam`/`syncUrlState`) already had, so a `::VIEW` button clicked
+during the preview wrote a model-computed label into the address bar
+(and `shareLink()` would carry it into a link); `dpView`/`dpViewDefault`
+were also missing from `dashStateSave`/`dashStateRestore`, so the
+preview's view choices leaked into the page's next render. L-4: the M-1
+target naming could be spoofed with a quoted identifier
+(`AS "TO 'decoy.csv'"`) or a literal's own content (`' TO ''x'' '`)
+sitting where the `ATTACH`/`COPY` target regex looked; `attachTarget`/
+`copyTarget` now locate the target's position in a length-preserving
+mask (`maskForTargets`, `web/assist.js`) that blanks every quoted
+identifier, comment and literal interior first, then re-read the real
+text from the *original* string at that same offset — a spoof has
+nothing left to hide behind. `ATTACH OR REPLACE` is also recognised, and
+an unrecognised target says so in plain words instead of repeating the
+keyword. Info-4: a second Send during an active preview closed the *new*
+session instead of the old one (L-1 regression) — `enterPreview()` now
+exits any active preview first, before the new session is even created.
+Info-5: Ctrl+Enter during a preview unconditionally cleared `applyHold`,
+so held "Apply, don't run" → a new Send → Ctrl+Enter → Discard ran the
+editor's still-held SQL on the page database; both `clearApplyHold()`
+call sites now check `!preview` first. Info-6: the hold is in-memory only
+(a reload or an opened Save/Share link runs the held SQL like any other
+dashboard) — documented in the "Not run yet" card's own text. Tests:
+`scripts/assist-e2e.mjs`'s race-condition case (Discard and "Apply, don't
+run" against a `::RELOAD` + slow statement + `ATTACH`/`SET` proposal, the
+reviewer's own probe template), the M9 Check-under-hold case, a `::VIEW`-
+during-preview URL assertion, and `tests/web/assist_test.mjs`'s L-4 spoof
+cases.
+
+**sec-review-272-rereview (fix round 3, PR #272): the third pass's own
+functional/theoretical follow-ups from an otherwise clean review.** L-5:
+a stale `runPreviewToken` (left pointing at the dead preview after
+"Apply, don't run", typing during a preview, or switching to Explore)
+broke the page's own Explore, add-file and MotherDuck queries — not a
+security issue (nothing reaches the page database or the model either
+way), but a functional regression that failed closed. Fixed: `previewExit`
+drops the token once nothing is `runActive`; `run()`'s own `finally` drops
+it once it no longer matches the live `preview`; `runOnce` never resets it
+(a still-active preview's lazy tab jobs need it after `runOnce` returns).
+Info-7 (not reproduced, theoretical): a run captured under a preview could
+still reach a `::RELOAD` statement after `previewExit`'s first,
+synchronous `dpTimer` clear and re-arm the timer for a preview that no
+longer exists. Fixed with a second `dpTimer` clear after `previewExit`'s
+own awaits, and a `pv !== preview` guard in the `RELOAD` role's own arming
+line. Info-8 (parser corner cases, no decoy found): a plain `'…'` literal
+has no backslash escapes in DuckDB (only `''` doubles a quote) —
+`findTarget` read it with `E'…'`'s backslash-aware form regardless, so a
+trailing backslash (a Windows path, `TO 'C:\tmp\'`) swallowed the closing
+quote and gave "target not recognised" for an ordinary target; fixed by
+checking for an actual `E`/`e` right before the opening quote (on the
+original text) before choosing which form to re-read with.
+`ATTACH OR REPLACE DATABASE '…'` (DuckDB's own grammar order) is now
+matched too. Tests: `scripts/assist-e2e.mjs` M9f (an Explore query after
+"Apply, don't run" must still reach the page worker — confirmed to FAIL
+without the fix); `tests/web/assist_test.mjs`'s backslash-literal and
+`OR REPLACE DATABASE` cases.
+
+**sec-review-272-rereview (fix round 4, PR #272): H-1R2, a High regression
+from round 3's own `finally` reset.** An explicit Ctrl/⌘+Enter pressed
+~80 ms into a preview exit (typing, or "Apply, don't run") captured the
+dying preview as its `pv` and got a *fresh* `dpLazy.gen` that survived the
+exit's own invalidation, so a proposal's hidden-tab lazy jobs (idle-
+prefetched while the preview sat there, deferred setup included) could
+later run on the page database once `run()`'s `finally` dropped the stale
+token. Fixed structurally: every lazy/prefetch job now carries the `pv`
+of the run that created it (`lazy.pv`, `runOnce`); `lazyRunJob`/`lazyPump`
+refuse to run/continue once `L.pv !== preview` (live); `runSqlInner`
+dispatches on an *explicitly passed* `pv` first, never the global alone,
+so `panelSql`/`runSetup`/the `panelBody` closure thread it all the way
+down. `run()`'s own `finally` also bumps `dpLazy.gen` whenever it drops a
+stale token (belt-and-suspenders). An explicit run arriving during
+`previewExiting` is now deferred (`pendingExplicit`) and run by
+`previewExit()` itself, once `preview` is already `null` — clearing the
+hold per Info-5's own rule, instead of painting the dead proposal over
+"Not run yet". Test: `scripts/assist-e2e.mjs` M9g (`ltype`/`lnorun`,
+adapted from the reviewer's own `probe8.mjs`) — confirmed 4/4 FAIL against
+the pre-fix head, 4/4 pass after. An adversarial audit of every
+`runSql`/`pageConn`/`pageDb` path reachable after a preview ends (lazy
+jobs, the render loop, the `::RELOAD` timer, Explore/add-file/MotherDuck/
+Check, `::VIEW` switches) was posted to the PR.
+
+**sec-review-272-rereview (fix round 5, PR #272): H-1R3, a High regression
+from round 4's own `pendingExplicit`.** `previewExit`'s tail ran a deferred
+explicit run (`pend`) *ahead of* its `hold` branch: `if (pend !== null)
+{…} else if (hold) {…}`. For "Apply, don't run" specifically, `apply()`
+(`assist-ui.js`) writes the proposal into the editor only *after*
+`host.preview.exit()` resolves, so a Ctrl/⌘+Enter pressed ~80 ms into that
+exit ran the OLD editor text (harmless by itself) but then let the
+proposal land in the editor completely unheld: `applyHold` was never set,
+`#refresh`/`#lint-run` stayed enabled, no "Not run yet" card — and the
+very next implicit trigger (a dark-mode toggle, in the reviewer's probe)
+ran the unconfirmed proposal straight onto the page database. Fixed by
+flipping the check order: `if (hold) {…} else if (pend !== null) {…}` —
+`hold` now always wins and the deferred run is dropped outright when it
+does, exactly as the design intended before `pendingExplicit` existed.
+Test: `scripts/assist-e2e.mjs` **M9h** (adapted from the reviewer's
+`probe9.mjs`/`probe10.mjs`) — "Apply, don't run", Ctrl+Enter ~80 ms into
+the exit, then a dark-toggle click and an Esc press — asserts the editor
+holds the proposal, `#refresh`/`#lint-run` stay disabled, "Not run yet" is
+shown, and 0 proposal statements reach the page worker through either
+implicit trigger; confirmed 5/8 assertions FAIL against the pre-fix head
+(`7215ff6`), reproducing the reviewer's own evidence (`RACEMARK` and
+`CREATE OR REPLACE TABLE lazymark_tbl` on the page worker after one
+dark-toggle click) exactly, all pass after. M9g's `lnorun` mode was
+hardened against passing vacuously: it now requires at least one of its
+trials to actually land in the exit window (`previewing=true &&
+!editorIsProposal`), retrying with shorter delays and failing the mode
+outright if none do. An adversarial list of every path that can clear
+`applyHold` — and confirmation that each is an explicit user action
+occurring only once any active preview has already exited — was posted
+to the PR.
+
+**sec-review-272-rereview (fix round 6, PR #272): M-3 and L-6, the fifth
+pass's own findings against the hold.** **M-3 (Medium):** the hold was
+moment-bound, not content-bound — after "Apply, don't run", panel Undo
+(which correctly runs the old SQL and clears `applyHold`) followed by a
+native Ctrl+Z in the editor (or Run of other text followed by
+Ctrl+Shift+Z) brought the unconfirmed proposal straight back with no
+hold, so a dark toggle or Esc then ran its class-3 statements
+(`ATTACH`/`SET`) on the page database. **L-6 (Low):** `previewExit`'s
+`else if (pend !== null)` ran a deferred Ctrl+Enter from a *later*,
+unrelated preview's non-hold exit even when an *earlier* hold (a
+different, still-unconfirmed proposal) was already in place, clearing
+that earlier hold and running the editor — which still held the earlier
+proposal. Fixed together: a new `heldSql` remembers the exact text of
+the unconfirmed proposal (`host.hold.arm(p.sql)`, called from `apply()`
+right after it writes the proposal into the editor); a new `armHold()`
+is the one place that visually arms the hold; the `#sql` `input`
+handler (which fires on native undo/redo exactly as on typing) re-arms
+whenever the editor's text comes back to exactly `heldSql`, regardless
+of how `applyHold` was last cleared; `run()` itself refuses any
+non-explicit run whose text equals `heldSql` as a belt-and-braces
+check; `heldSql` itself is cleared only by an explicit run of *exactly*
+that text (`#run`/Ctrl+Enter outside a preview, confirmed via
+`confirmHeldIfMatch()`) or by `loadDash()` of another dashboard — never
+merely by typing something else. `previewExit`'s `pend` branch gained
+`&& !applyHold` (L-6): an existing hold always beats a deferred run,
+re-arming (idempotently) rather than leaving a stale preview frame in
+the grid. Test: `scripts/assist-e2e.mjs` **M9i** (Undo+Ctrl+Z and
+Run+Ctrl+Shift+Z, each then a dark toggle and Esc) and a dedicated
+**L-6** case (an earlier hold vs. a later preview's deferred Ctrl+Enter,
+landing deterministically in the same synchronous script as Discard,
+not a timing race) — both adapted from the reviewer's own `probe11.mjs`
+(`undo`/`send2`); confirmed 8 assertions FAIL against the pre-fix head
+(`ec1bcde`), reproducing the reviewer's evidence exactly (`HOLDMARK`,
+`hold_attach`, `memory_limit='3GB'` all reaching the page worker), all
+pass after. The audit comment's hold-clearing list was updated to match
+(`heldSql`'s own setter/clearers, and the corrected item 5).
+
+**sec-review-272-rereview (fix round 7, PR #272): M-3R and L-7, the sixth
+pass's own findings against the hold.** **M-3R (Medium):** a model-chosen
+CRLF proposal defeated the text-bound hold outright — `apply()` armed
+with the *raw* `p.sql`, but the `<textarea>` silently normalises CRLF/CR
+to LF, so the armed text never equalled `$("sql").value` again; the same
+mismatch made panel Undo refuse CRLF proposals (`S.hist`'s own `after:
+p.sql` never matched either). **L-7 (Low):** the single `heldSql` only
+covered the *one exact text* a hold started with — a trivial edit made
+*while held* (a trailing space, a blank line, a trailing comment) was,
+correctly, not a confirmation, but Ctrl-Z/redo back to *that edited*
+version (after running something else) was not recognised as held
+either. Fixed together: `apply()` (`assist-ui.js`) now normalises
+`p.sql` once, at the very top (`.replace(/\r\n?/g, "\n")`, the same
+normalisation the textarea itself applies), and uses that text for the
+stale check, `gate`/`readers`, `S.hist`, `editor.replace` *and*
+`host.hold.arm()` — plus `host.hold.arm()` is called with
+`host.editor.get()` (the editor's own, now-normalised value) rather than
+the SQL variable again, belt-and-braces. The single `heldSql` became a
+small, bounded (≤50) `heldTexts` `Set` (`web/app.js`): the `#sql` `input`
+handler now records the current text into it on every edit made *while*
+`applyHold` is true (not just re-arming on an exact match), and re-arms
+whenever the current text is a *member*; `run()`'s own belt-and-braces
+check uses membership too. Critically, confirming (`confirmHeldIfMatch()`)
+now *removes only that one entry* (`heldTexts.delete(...)`), never
+`heldTexts.clear()` — the first implementation tried `.clear()` and
+broke immediately: `applyHold` stays numerically true for the whole
+stretch between an edit and whatever runs it, so an unrelated
+throwaway text (typed over the proposal, then explicitly run instead of
+it) got recorded as "shown while held" by the same generic rule, and
+confirming *that* text wiped every genuinely-still-unconfirmed entry
+(the original proposal) out of the set along with it — caught by the
+project's own M9i/L-7 e2e cases before this round shipped, not by a
+later review pass. `loadDash()` clears the whole set, same as before.
+Test: `scripts/assist-e2e.mjs` **M9i** gained a CRLF `run+redo` variant,
+a dedicated CRLF Undo case, and three L-7 cases (append a space / a
+blank line / a trailing comment while held, then run other text, Ctrl-Z,
+dark toggle, Esc) — all adapted from the reviewer's own `probe12.mjs`
+(`crlf`, `ws`); confirmed 12 assertions FAIL against the pre-fix head
+(`e950583`), reproducing the reviewer's evidence exactly, all pass
+after. Full suites green: `tests/web/*.mjs` (38 files), `scripts/
+assist-e2e.mjs` 217 ok / 0 FAIL (all tags, including every earlier
+round's cases), `cargo fmt --all --check` clean.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

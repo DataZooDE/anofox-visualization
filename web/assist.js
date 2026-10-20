@@ -13,7 +13,7 @@
 //   * the tools over DuckDB-Wasm, each in a scratch session (web/lint.js).
 // A pure ES module (no DOM): the panel (M1-3) drives it, and
 // tests/web/assist_test.mjs runs it under Node with scripted model turns.
-import { lintScript, ownOpts, rowsJson, scratchRunner, splitStatements } from "./lint.js";
+import { lintScript, ownOpts, rowsJson, scratchRunner, scratchSession, splitStatements } from "./lint.js";
 import { CATALOG_SQL, idLike, profileTable, qid } from "./explore.js";
 import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/functions.js";
 // #204: the assistant's own locked DuckDB-Wasm instance. wasmTools runs
@@ -228,6 +228,77 @@ export { splitStatements };
 function code(sql) {
   return String(sql).replace(LIT_OR_COMMENT, (m) => (m[0] === '"' ? m : /^--|^\/\*/.test(m) ? " " : "''"));
 }
+// classifyStatement's own w0, exposed so a refused statement (gate()) can
+// carry its keyword without re-deriving the same tokenisation (M-1).
+export function firstKeyword(sql) {
+  const c = code(sql).trim().replace(/^\(+\s*/, "");
+  return c.toUpperCase().split(/[^A-Z0-9_]+/).filter(Boolean)[0] || "";
+}
+// L-4 (sec-review-272-rereview): a length-preserving mask of `sql` — every
+// comment and quoted identifier ("…") is blanked ENTIRELY (same length),
+// and every string literal's INTERIOR is blanked too, but its own
+// delimiters are kept, so a regex run against this mask can still see
+// "a real top-level string literal starts here" without ever being misled
+// by "TO '…'"-shaped text sitting inside a quoted *identifier* (a column
+// alias such as `AS "TO 'decoy.csv'"`) or inside a literal's own CONTENT
+// (`' TO ''x'' '`) — both of which attachTarget/copyTarget used to read as
+// the real target, because stripCommentsKeepLiterals() left them exactly
+// as written. Positions line up 1:1 with the original, so a match's
+// offset in the mask is the same offset in `sql`.
+function maskForTargets(sql) {
+  const s = String(sql);
+  const fill = (n) => "x".repeat(Math.max(0, n));
+  let out = "";
+  let last = 0;
+  for (const m of s.matchAll(LIT_OR_COMMENT)) {
+    const t = m[0];
+    out += s.slice(last, m.index);
+    if (t[0] === '"' || /^--|^\/\*/.test(t)) {
+      out += " ".repeat(t.length); // a quoted identifier or a comment: never a target literal
+    } else if (/^[Ee]'/.test(t)) {
+      out += t.slice(0, 2) + fill(t.length - 3) + t.slice(-1); // E'…'
+    } else if (t[0] === "$") {
+      const tagLen = t.indexOf("$", 1) + 1; // the opening $tag$'s own length
+      out += t.slice(0, tagLen) + fill(t.length - 2 * tagLen) + t.slice(-tagLen);
+    } else {
+      out += t[0] + fill(t.length - 2) + t.slice(-1); // a plain '…' literal: keep the quotes
+    }
+    last = m.index + t.length;
+  }
+  out += s.slice(last);
+  return out;
+}
+// `re` must match ending exactly on a literal's opening `'` (on the MASK,
+// never the original) — findTarget() then re-reads the literal from the
+// ORIGINAL text at that same offset. Info-8 (sec-review-272-rereview
+// third pass): a PLAIN '…' literal has no backslash escapes in DuckDB —
+// only '' doubles a quote — so it is re-read with the simple
+// `(?:[^']|'')*` form; reading it with E'…''s `\\.`-aware form instead
+// turned a literal backslash (a Windows path, `TO 'C:\tmp\'`) into
+// "target not recognised" (the backslash swallowed the closing quote
+// that followed it). Backslash escapes only apply to an E'…' literal,
+// checked on the ORIGINAL text right before the opening quote (never the
+// mask, which has already blanked everything inside).
+function findTarget(sql, re) {
+  const s = String(sql);
+  const m = re.exec(maskForTargets(s));
+  if (!m) return null;
+  const at = m.index + m[0].length - 1; // the opening ' itself
+  const isE = s[at - 1] === "E" || s[at - 1] === "e";
+  const lit = (isE ? /^'((?:[^'\\]|\\.|'')*)'/ : /^'((?:[^']|'')*)'/).exec(s.slice(at));
+  if (!lit) return null;
+  return isE ? lit[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : lit[1].replace(/''/g, "'");
+}
+// ATTACH's database path / COPY's "TO" target — named in the Apply
+// dialog's reason (M-1) and in proposalReaders, instead of the bare
+// keyword alone. Info-8: DuckDB's own grammar order is `OR REPLACE`
+// before `DATABASE` (`ATTACH OR REPLACE DATABASE '…'`), not after.
+function attachTarget(sql) {
+  return findTarget(sql, /\bATTACH\s+(?:OR\s+REPLACE\s+)?(?:DATABASE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?'/i);
+}
+function copyTarget(sql) {
+  return findTarget(sql, /\bTO\s+'/i);
+}
 // String literals ('…', E'…' with backslash escapes, $$…$$), quoted
 // identifiers and comments, in one pass (so a quote inside one is not the
 // start of another).
@@ -370,6 +441,23 @@ export function classifyStatement(sql, opts) {
       return LOADABLE.has(w1.toLowerCase()) ? { cls: 2, kind: "load", reason: "" } : write("load", `LOAD ${w1.toLowerCase()}`);
     case "USE":
       return { cls: 2, kind: "use", reason: "" };
+    case "ATTACH": {
+      // M-1: named, not just the keyword — the Apply dialog's reason must
+      // say *what* it attaches, not repeat "ATTACH". L-4
+      // (sec-review-272-rereview): when no literal target can be found
+      // (a dynamic form such as `ATTACH getenv('x')`, not a spoof — see
+      // findTarget()/maskForTargets() above, which already can't be
+      // fooled by one), say so in plain words rather than just repeating
+      // the keyword the dialog already shows in <strong>.
+      const t = attachTarget(sql);
+      return write("attach", t ? `attaches database '${t}'` : "target not recognised: read the statement below");
+    }
+    case "COPY": {
+      const t = copyTarget(sql);
+      return write("write", t ? `writes file '${t}'` : "target not recognised: read the statement below");
+    }
+    case "INSTALL":
+      return write("write", w1 ? `installs the '${w1.toLowerCase()}' extension` : "INSTALL");
     case "":
       return { cls: 3, kind: "empty", reason: "no statement" };
   }
@@ -796,7 +884,17 @@ export function redactSecrets(sql) {
 export function proposalReaders(sql) {
   const out = new Set(pathsOf(sql));
   for (const m of code(sql).matchAll(/\b(read_\w+|\w+_scan|glob|st_read\w*|query|query_table|iceberg_\w+|delta_\w+)\s*\(/gi)) out.add(`${m[1]}()`);
-  for (const m of code(sql).matchAll(/\b(ATTACH|COPY|INSTALL|LOAD|EXPORT|IMPORT)\b/gi)) out.add(m[1].toUpperCase());
+  // M-1: ATTACH and COPY list their target, not just the bare keyword.
+  for (const piece of splitStatements(sql)) {
+    const kw = firstKeyword(piece);
+    if (kw === "ATTACH") {
+      const t = attachTarget(piece);
+      out.add(t ? `ATTACH '${t}'` : "ATTACH");
+    } else if (kw === "COPY") {
+      const t = copyTarget(piece);
+      out.add(t ? `COPY → '${t}'` : "COPY");
+    } else if (["INSTALL", "LOAD", "EXPORT", "IMPORT"].includes(kw)) out.add(kw);
+  }
   return [...out];
 }
 
@@ -1309,7 +1407,7 @@ export function wasmTools(opts) {
         let why = k.cls === 3 ? [k.reason || k.kind] : [];
         for (const alt of requiresOf(p)) if (looksLikeUrl(alt) || alt.includes("${")) why.push(`@requires ${alt}`);
         if (!why.length) why = await inspect(p.sql, own, known, objs, names);
-        if (why.length) refused.push({ sql: p.sql, reason: why.join("; ") });
+        if (why.length) refused.push({ sql: p.sql, reason: why.join("; "), keyword: firstKeyword(p.sql) });
         noteMade(p.sql, objs);
       }
       return { allowed: !refused.length, statements: refused };
@@ -1330,6 +1428,22 @@ export function wasmTools(opts) {
         const names = await catalogNames();
         return scratchRunner(db, { timeoutMs: checkQueryMs, guard: guardFor(allowed, names) })(sql);
       };
+    },
+    // C-1 (#244): the preview's whole render loop (inputs, drills, pages,
+    // tabs) in ONE guarded engine session — the same `allowed` set and guard
+    // as previewRunner above, the lock re-checked before every call (`before:
+    // locked`), so a dashboard's SET VARIABLEs and TEMP objects carry from one
+    // render call to the next exactly as they do on the page's own connection.
+    // No `prepare`: scratchSession takes none (#244 §6.1).
+    previewSession(proposalSql) {
+      const planned = JSON.parse(plan(proposalSql));
+      const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
+      let names = null;
+      return scratchSession(db, {
+        timeoutMs: checkQueryMs,
+        before: locked,
+        guard: async (piece, ctx) => guardFor(allowed, (names ||= await catalogNames()))(piece, ctx),
+      });
     },
   };
   return tools;

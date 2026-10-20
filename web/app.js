@@ -32,7 +32,7 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
 import { engineExtensions, pageAdapter } from "./assist-engine.js";
-import { KEY_SLOT, keyStore, rememberAllowed } from "./assist.js";
+import { KEY_SLOT, assistConfig, keyStore, rememberAllowed } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1191,6 +1191,23 @@ function syncHL() {
   hl.scrollTop = $("sql").scrollTop;
   hl.scrollLeft = $("sql").scrollLeft;
 }
+// #244: Apply replaces the editor's text with the assistant's SQL, through
+// the browser's own undo stack (execCommand("insertText")) rather than a
+// plain `.value =`, so Ctrl+Z undoes it like any other edit (M7). Falls
+// back to a plain assignment (native undo lost) where insertText is
+// unavailable. The `input` event this fires is also what exits a preview
+// (app.js's `#sql` input listener) — Apply itself exits the preview first.
+function editorReplace(text) {
+  const ta = $("sql");
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand && document.execCommand("insertText", false, text);
+  if (!ok || ta.value !== text) {
+    ta.value = text;
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  syncHL();
+}
 
 let backend = "wasm"; // "live" (HTTP /query) or "wasm" (DuckDB-Wasm)
 let conn = null;
@@ -1349,6 +1366,133 @@ let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(),
 // every boot, even on an installation that opted in on its own,
 // non-shared domain.
 let assistantRememberOptIn = false;
+// #244: the assistant's own state. `assistCfg` is assistConfig()'s result
+// (boot() sets it once, after appBrandReady resolves — assistFlags());
+// `appAssistBlock` is read only inside appBrandLoad() (G2); `assistUi` is
+// the mounted panel (mountAssistant(), lazily imported on first open);
+// `lastOpener` is where focus returns to on close (the toolbar button, the
+// start card's button, or Ctrl/⌘+I's document.activeElement).
+let assistCfg = { enabled: false, reason: "boot" },
+  appAssistBlock = null,
+  assistUi = null,
+  lastOpener = null;
+
+// #244 C-1: while a proposal is previewed, the dashboard renders `preview.sql`
+// and every query goes to `preview.run` — a guarded session in the
+// assistant's locked engine (assist-ui.js → tools.previewSession). Nothing
+// may reach the page's own DuckDB until Apply: pageConn()/pageDb() (every
+// other use of `conn`/`db` in this file goes through them) and the guarded
+// `pageAdapter` (assistDeps(), §3.5) all throw while a preview is active.
+let preview = null; // Object.freeze({ sql, run(sql) -> Promise<rowsJson text> }) | null
+let previewSaved = null; // the page dashboard's UI state, restored on exit (dashStateSave)
+const PREVIEW_PAGE_DB = "the page's DuckDB is not used during a preview (#244)";
+function pageConn() {
+  if (preview) throw new Error(PREVIEW_PAGE_DB);
+  return conn;
+}
+function pageDb() {
+  if (preview) throw new Error(PREVIEW_PAGE_DB);
+  return db;
+}
+// sec-review-272 H-1: "Apply, don't run" must actually hold — nothing may
+// run the just-applied (unconfirmed) SQL on the page's own DuckDB until the
+// viewer explicitly presses Run or Ctrl/⌘+Enter. Sits beside `preview`: a
+// preview's own re-renders never reach the page DB anyway (they dispatch to
+// preview.run), so the guard in run() only matters once `preview` is null
+// again — which is exactly when a held, unconfirmed Apply is waiting.
+let applyHold = false;
+// L-7 (sec-review-272-rereview sixth pass): every text the editor has
+// shown WHILE held counts as held, not just the one exact text "Apply,
+// don't run" started with — typing (or native undo/redo producing) a
+// trivial edit (a trailing space, a blank line, an appended comment) is
+// not a confirmation, so that edited version must stay just as unheld-
+// proof as the original. A small, bounded (≈50) ordered set: the #sql
+// `input` handler below adds the current text to it on every edit made
+// WHILE `applyHold` is true (armHold()'s own first edit included, since
+// editorReplace() dispatches that same event), and re-arms whenever the
+// current text is a MEMBER, however `applyHold` was last cleared — native
+// undo/redo (Ctrl+Z / Ctrl+Shift+Z) included, which is exactly how an
+// Undo- or Run-cleared hold could otherwise let a still-unconfirmed text
+// straight back into the editor with no hold at all (M-3). Cleared ONLY
+// by an explicit run of a text that IS a member (#run/Ctrl+Enter outside
+// a preview, or Apply's own "run" choice) or by loadDash() of another
+// dashboard — never merely by typing something else, and never by an
+// explicit run of a text that ISN'T a member (that only clears
+// `applyHold`, see clearApplyHold()).
+let heldTexts = new Set();
+function heldTextsAdd(sql) {
+  heldTexts.delete(sql); // re-insert at the end (most-recently-seen), cheap no-op if absent
+  heldTexts.add(sql);
+  if (heldTexts.size > 50) heldTexts.delete(heldTexts.values().next().value); // evict the oldest
+}
+let previewRefreshSaved = null; // sec-review-272 H-1/L-2: the viewer's own #refresh value, while a RELOAD role in the preview's own SQL overwrites it
+function clearApplyHold() {
+  if (!applyHold) return;
+  applyHold = false;
+  if ($("refresh")) $("refresh").disabled = false;
+  // M-2 (sec-review-272-rereview): only re-enable Check the way wireLint()
+  // itself would have — a live/served backend hides #lint-run and never
+  // enables it at all.
+  if ($("lint-run") && backend !== "live" && !servedMode) {
+    $("lint-run").disabled = false;
+    $("lint-run").title = "";
+  }
+}
+// M-3 (sec-review-272-rereview fifth pass): the one place that visually
+// arms the hold — #refresh/#lint-run disabled, "Not run yet" shown.
+// Called by previewExit()'s own `hold` branch (a fresh "Apply, don't
+// run") and by every place below that notices the editor's text is a
+// member of `heldTexts`.
+function armHold() {
+  applyHold = true;
+  if ($("refresh")) $("refresh").disabled = true;
+  // M-2 (sec-review-272-rereview): Check runs on the page database
+  // (scratchRunner(pageDb(), …)) — it must be just as held as Run.
+  if ($("lint-run")) {
+    $("lint-run").disabled = true;
+    $("lint-run").title = "Run or discard the applied SQL first";
+  }
+  $("grid").replaceChildren(notRunCard());
+}
+// M-3/L-7: an explicit run of the CURRENT text removes only that one
+// entry from `heldTexts` — a no-op if it isn't a member. Deliberately NOT
+// `heldTexts.clear()`: `heldTextsAdd()` fires for every edit made while
+// `applyHold` is still numerically true, including a text that is about
+// to be explicitly run and is otherwise unrelated to the proposal (typed
+// over it entirely, e.g. "run other text" in the L-7/M-3 undo/redo
+// dance) — confirming THAT text must not also release every OTHER,
+// still-genuinely-unconfirmed text the set remembers (the original
+// proposal, or an earlier edit of it). Only the one text actually just
+// run is no longer "unconfirmed"; everything else stays exactly as
+// unconfirmed as before.
+function confirmHeldIfMatch() {
+  heldTexts.delete($("sql").value);
+}
+// sec-review-272-rereview H-1R: the preview a run() call started under,
+// captured synchronously in run() (never read live mid-run — see
+// runSqlInner). Set at the very top of runOnce(), before its first await,
+// from the `pv` run() captured at ITS OWN call time; runOnce() invocations
+// are strictly sequential (run()'s own single-flight `runActive`/`runQueued`
+// guarantee no two are ever in flight together), so one module-level slot
+// is safe.
+let runPreviewToken = null;
+// sec-review-272-rereview H-1R: true synchronously from the very start of
+// previewExit() until it finishes (set and cleared before any await), so a
+// non-explicit run() call landing in that narrow window — the proposal's
+// own ::RELOAD timer ticking, a dropdown, the dark toggle, … — is dropped
+// instead of being queued to run once the exit completes.
+let previewExiting = false;
+// H-1R2 (sec-review-272-rereview final check): an EXPLICIT run (#run,
+// Ctrl/⌘+Enter) that arrives while `previewExiting` is true — most
+// naturally right after typing in the editor, or right after "Apply,
+// don't run" — is deferred rather than let through: letting it through
+// used to capture `pv` = the dying preview (still non-null at that exact
+// moment) and give it a FRESH `dpLazy.gen` that survives the exit's own
+// invalidation, so the proposal's hidden-tab lazy jobs (its own deferred
+// setup included) could later run on the page database once the exit
+// dropped the stale token. previewExit() runs this itself, with
+// `preview` already null, once it has fully finished.
+let pendingExplicit = null; // null, or the `fresh` flag of a deferred explicit run
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1360,10 +1504,10 @@ async function ensureGeo() {
   if (!db) throw new Error("in-browser DuckDB not ready");
   if (!geoReady) {
     geoReady = (async () => {
-      await conn.query("INSTALL spatial; LOAD spatial;");
+      await pageConn().query("INSTALL spatial; LOAD spatial;");
       const reg = async (name, url) => {
         const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
-        await db.registerFileBuffer(name, bytes);
+        await pageDb().registerFileBuffer(name, bytes);
       };
       await reg(
         "quakes.geojson",
@@ -1393,7 +1537,7 @@ async function ensureExtension(name) {
     extReady[name] = (async () => {
       // json (from the default repo) is needed by some anofox macros.
       try {
-        await conn.query("INSTALL json; LOAD json;");
+        await pageConn().query("INSTALL json; LOAD json;");
       } catch (_) {
         /* usually bundled */
       }
@@ -1401,14 +1545,14 @@ async function ensureExtension(name) {
       // injection (or a sibling repo on the shared github.io origin) must
       // not move where unsigned anofox extensions come from.
       const repo = new URL("localext", import.meta.url).href.replace(/\/$/, "");
-      await conn.query(`SET custom_extension_repository='${repo}';`);
+      await pageConn().query(`SET custom_extension_repository='${repo}';`);
       try {
-        await conn.query(`INSTALL ${name};`);
-        await conn.query(`LOAD ${name};`);
+        await pageConn().query(`INSTALL ${name};`);
+        await pageConn().query(`LOAD ${name};`);
       } finally {
         // Restore the default repo so other autoloaded extensions (parquet,
         // spatial, …) still resolve — ours only hosts the anofox extensions.
-        await conn.query("RESET custom_extension_repository;");
+        await pageConn().query("RESET custom_extension_repository;");
       }
     })().catch((e) => {
       throw new Error(
@@ -1445,7 +1589,7 @@ async function ensureForecast(sql) {
   if (/m5_monthly/i.test(sql) && !fcParquet) {
     fcParquet = (async () => {
       const bytes = new Uint8Array(await (await fetch("m5_monthly.parquet")).arrayBuffer());
-      await db.registerFileBuffer("m5_monthly.parquet", bytes);
+      await pageDb().registerFileBuffer("m5_monthly.parquet", bytes);
     })().catch((e) => {
       fcParquet = null;
       throw e;
@@ -1502,7 +1646,7 @@ async function ensureDataFiles(sql) {
         dataFiles[n] = (async () => {
           const r = await fetch(n);
           if (!r.ok) throw new Error(`couldn't fetch ${n} (HTTP ${r.status})`);
-          await db.registerFileBuffer(n, new Uint8Array(await r.arrayBuffer()));
+          await pageDb().registerFileBuffer(n, new Uint8Array(await r.arrayBuffer()));
         })().catch((e) => {
           delete dataFiles[n];
           throw e;
@@ -1519,18 +1663,43 @@ async function ensureDataFiles(sql) {
 // the same panel + kind supersedes this one (it then rejects with an AbortError).
 // `setup`: the statement is one of the dashboard's own setup statements.
 // `at` (served mode): the statement's plan index (see servedRequest).
-async function runSql(sql, page, kind, setup, at) {
+// `pv` (sec-review-272-rereview final check, H-1R2): the render-loop
+// callers (panelSql/runSetup, below) pass the preview (or page, if null)
+// the RUN that queued this particular query was captured under — NOT the
+// live, mutable `preview`/`runPreviewToken`, which may have moved on by
+// the time a LAZY job's query actually runs (idle prefetch, a shown tab,
+// an export). Omitted (`undefined`), the legacy render-loop fallback
+// applies: the global `runPreviewToken` runOnce() set for the CURRENT
+// top-level run. `pv` may legitimately be `null` (a page-originated job).
+async function runSql(sql, page, kind, setup, at, pv) {
   const t0 = performance.now();
   try {
-    return await runSqlInner(sql, page, kind, setup, at);
+    return await runSqlInner(sql, page, kind, setup, at, pv);
   } finally {
     // timing for the perf check (scripts/perf-e2e.mjs reads the "dp:sql" entries)
     performance.measure("dp:sql", { start: t0, detail: String(sql).slice(0, 120) });
   }
 }
-async function runSqlInner(sql, page, kind, setup, at) {
+async function runSqlInner(sql, page, kind, setup, at, pv) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+  // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
+  // before any page handle — dispatch on the TOKEN this particular call
+  // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
+  // to the run that created it) wins outright and never consults the
+  // global at all; otherwise fall back to `runPreviewToken`, the preview
+  // the CURRENT top-level run was started under (captured once,
+  // synchronously, in run() — see there and runOnce()), never the live,
+  // mutable `preview`. A run queued by the proposal's own ::RELOAD timer
+  // (or any other trigger firing mid-render) can still be in flight once
+  // Discard/"Apply, don't run" has already set `preview = null`; reading
+  // the live global here is exactly how that run's later statements
+  // (ATTACH, SET, …) reached the page database across the exit boundary.
+  // `token.run()` always stays inside the assistant's guarded engine
+  // session regardless of what `preview` is *now* — it can never fall
+  // through to pageConn() below.
+  const token = pv !== undefined ? pv : runPreviewToken;
+  if (token) return token.run(sql);
   await prepareSql(sql);
   if (servedMode) {
     // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
@@ -1550,7 +1719,7 @@ async function runSqlInner(sql, page, kind, setup, at) {
     return (await r.text()) || "[]";
   }
   // (DATE / TIMESTAMP / DECIMAL back to what the CLI's JSON reads: web/lint.js)
-  return rowsJson(await conn.query(sql));
+  return rowsJson(await pageConn().query(sql));
 }
 
 // The anofox/spatial extensions a statement's text needs (#204 M-1: used
@@ -1578,6 +1747,34 @@ async function prepareSql(sql) {
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
 }
 
+// #244 §3.5: the assistant's view of the page's own DuckDB (pageAdapter)
+// must also refuse while a preview is active — the engine build
+// (assist-ui's ensureEngine) always exits a preview before it reads the
+// page, but this is the backstop (C-1), same spirit as pageConn()/pageDb():
+// every method of `adapter` throws PREVIEW_PAGE_DB instead of running.
+function guardPage(adapter) {
+  const out = {};
+  for (const k of Object.keys(adapter)) {
+    const v = adapter[k];
+    out[k] =
+      typeof v === "function"
+        ? (...a) => {
+            if (preview) throw new Error(PREVIEW_PAGE_DB);
+            return v.apply(adapter, a);
+          }
+        : v;
+  }
+  return out;
+}
+// The 'data/<x>/<y>.(csv|parquet)' literals an editor script names, plus
+// m5_monthly.parquet when it is named (ensureForecast's own file) — editor
+// text only, never the model's SQL (M-1): assistDeps().files() fixes the
+// assistant engine's allow-listed file set *before* it is built and locked.
+function editorFileNames(sql) {
+  const out = new Set([...String(sql).matchAll(/'(data\/[\w-]+\/[\w.-]+\.(?:csv|parquet))'/g)].map((m) => m[1]));
+  if (/m5_monthly/i.test(sql)) out.add("m5_monthly.parquet");
+  return [...out];
+}
 // #204: what M1-3 (#244) needs to build the assistant engine — not wired to
 // anything yet, and not on `window` (a static grep test,
 // tests/web/assist_engine_test.mjs item 12): the module that opens the
@@ -1593,11 +1790,180 @@ function assistDeps() {
       URL.revokeObjectURL(url);
       return d;
     },
-    page: pageAdapter(db, { handles: xpHandles }),
+    page: guardPage(pageAdapter(db, { handles: xpHandles })),
     extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions($("sql").value) }),
-    prepareFiles: () => ensureDataFiles($("sql").value), // editor text only — never the model's
+    files: () => [...new Set([...editorFileNames($("sql").value), ...xpHandles.keys()])],
+    // #244: also the forecast parquet (ensureForecast's own memoised
+    // registration) — editor text only, never the model's SQL (M-1).
+    prepareFiles: async () => {
+      const s = $("sql").value;
+      await ensureDataFiles(s);
+      if (/m5_monthly/i.test(s)) await ensureForecast("m5_monthly");
+    },
     imgOrigins: async () => brandImgOrigins(await appBrandReady),
   };
+}
+
+// ---- the assistant panel: config, entry, host (#244 M1-3) ----
+
+// R1: a URL param can only ever turn the assistant *off* (embed=1 already
+// does, through assistConfig's own `embed` check) — never on, and never
+// supply any other field. assistConfig() itself is called in exactly one
+// place, below, with `appAssistBlock` (read only in appBrandLoad(), G1/G2).
+function assistFlags() {
+  return { served: !!window.__served || servedMode, embed: document.body.classList.contains("embed"), live: backend === "live", framed: isFramed(), host: location.hostname };
+}
+function isFramed() {
+  try {
+    return window.top !== window.self;
+  } catch (_) {
+    return true; // cross-origin frame: can't read window.top — treat as framed (fail closed, T11)
+  }
+}
+// Visibility (§5.4): the toolbar button, the editor tabs, and the start
+// card (hidden once the editor has text, or while the panel is already
+// open — reopening shows the conversation, not the start card again).
+function assistUiSync() {
+  const on = assistCfg.enabled && !servedMode && !document.body.classList.contains("embed") && bodyMode() === "edit";
+  const btn = $("assist-btn");
+  if (btn) btn.hidden = !on;
+  const tabs = document.querySelector(".ed-tabs");
+  if (tabs) tabs.hidden = !on;
+  const start = $("assist-start");
+  if (start) start.hidden = !on || $("sql").value.trim() !== "" || !!assistUi?.isOpen();
+}
+// The editor-column tabs (SQL / ✦ Assistant): a standard ARIA tablist
+// (←/→, Home/End move and activate; selecting the Assistant tab opens the
+// panel; selecting SQL closes it).
+function wireEdTabs() {
+  const tabSql = $("tab-sql"),
+    tabAssist = $("tab-assist");
+  if (!tabSql || !tabAssist) return;
+  const tabs = [tabSql, tabAssist];
+  const select = (tab, focus) => {
+    for (const t of tabs) {
+      const sel = t === tab;
+      t.setAttribute("aria-selected", String(sel));
+      t.tabIndex = sel ? 0 : -1;
+    }
+    if (focus) tab.focus();
+    if (tab === tabAssist) openAssistant({ opener: tab });
+    else assistUi?.close();
+  };
+  tabSql.onclick = () => select(tabSql, false);
+  tabAssist.onclick = () => select(tabAssist, false);
+  tabSql.closest('[role="tablist"]')?.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(document.activeElement);
+    if (i < 0) return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      select(tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length], true);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      select(tabs[0], true);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      select(tabs[tabs.length - 1], true);
+    }
+  });
+}
+// The host object mountAssistant(host) gets — built fresh on every open,
+// never put on `window` (G12): assist-ui.js sees exactly this surface, and
+// nothing else of app.js's state.
+function assistHost() {
+  return {
+    config: assistCfg,
+    deps: assistDeps(),
+    wasm: { plan, lintStep: lint_step, pageSql: page_sql, rolesJson: roles_json, dashboardMeta: dashboard_meta, version: wasmVersion },
+    editor: { get: () => $("sql").value, replace: editorReplace, focus: () => $("sql").focus() },
+    preview: { enter: previewEnter, exit: previewExit, active: () => !!preview },
+    onPreviewExit: (cb) => previewExitListeners.add(cb),
+    // M-3/M-3R (sec-review-272-rereview fifth/sixth pass): called by
+    // apply() (assist-ui.js) right after it writes the "Apply, don't run"
+    // choice's proposal into the editor, with the editor's OWN (now
+    // normalised — see apply()'s own fix for M-3R) value, never the raw
+    // model text — a CRLF proposal would otherwise never match
+    // `$("sql").value`, which the browser has already normalised to LF,
+    // and the text-bound hold below would never re-arm for it. Belt-and-
+    // braces alongside the #sql `input` handler's own generic "record
+    // every text shown while held" logic (L-7), which already adds this
+    // exact value too, since editorReplace() dispatches that same event.
+    hold: { arm: (sql) => heldTextsAdd(sql) },
+    // sec-review-272 H-1: assist-ui only calls this from Apply's "run"
+    // choice and Undo — both a direct, confirmed user action — so it clears
+    // the hold and runs explicitly, same as the #run button.
+    run: () => {
+      // M-3/L-7: an explicit run removes the current text from
+      // `heldTexts`, if it's a member — Undo normally runs OTHER text
+      // (the pre-apply SQL), which may itself have been transiently
+      // added by this same edit (editor.replace() firing `input` while
+      // `applyHold` was still true, right before this call clears it);
+      // removing just that one entry leaves every genuinely unconfirmed
+      // text (the proposal) untouched.
+      confirmHeldIfMatch();
+      clearApplyHold();
+      return run(true, { explicit: true });
+    },
+    dashName: { get: () => $("dash-name").value, set: (v) => ($("dash-name").value = v) },
+    keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }),
+    ui: { toast: sideToast, status, isPhone: () => matchMedia(SIDE_DRAWER).matches, opener: () => lastOpener },
+    debug: new URLSearchParams(location.search).get("assist_debug") === "1", // display only
+  };
+}
+// Click ✦, the Assistant tab, the start card's submit, or Ctrl/⌘+I: proves
+// the tab-wide CSP (R7, the same memoised promise boot()'s key-presence
+// check shares — C-2), then lazily imports assist-ui.js (R6: never before
+// this point) and mounts it once. A failed CSP probe fails closed: the key
+// is cleared and the assistant turns itself off rather than opening
+// unenforced.
+async function openAssistant(opts = {}) {
+  if (!assistCfg.enabled) return;
+  // Info-3 (sec-review-272, defence in depth): assistCfg.enabled is set
+  // once at boot and not re-read here — on a page that was never served or
+  // embedded (assistConfig() already disables it for those), a scripted
+  // click on the hidden button, or a submitted start-card form, could still
+  // reach this in View (or Explore) mode. Re-check the same live formula
+  // assistUiSync() uses to decide the button's own visibility — not
+  // `!preview`: reopening (the toolbar ✦, Ctrl/⌘+I) while a preview is
+  // already active is the normal, intended way back into the panel (the
+  // phone sheet closes to show the preview but the panel itself is not
+  // torn down; P2/P3 below exercise exactly this), not a bypass.
+  if (servedMode || document.body.classList.contains("embed") || bodyMode() !== "edit") return;
+  lastOpener = opts.opener || null;
+  try {
+    await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+  } catch (_) {
+    keyStore(sessionStorage, localStorage, { remember: false }).clear();
+    assistCfg = { enabled: false, reason: "csp" };
+    assistUiSync();
+    status("The assistant is not available in this browser: its security policy could not be enforced.");
+    return;
+  }
+  assistUi ||= (await import("./assist-ui.js")).mountAssistant(assistHost());
+  assistUi.open(opts);
+}
+// Toolbar button, the start card, Ctrl/⌘+I.
+function wireAssist() {
+  const btn = $("assist-btn");
+  if (btn) btn.onclick = () => openAssistant({ opener: btn });
+  wireEdTabs();
+  const startForm = $("assist-start");
+  if (startForm) {
+    startForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const request = $("assist-start-q")?.value.trim();
+      if (!request) return;
+      openAssistant({ request, send: true, opener: startForm.querySelector("button[type=submit]") });
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "i")) return;
+    const editable = !servedMode && !document.body.classList.contains("embed") && !preview;
+    if (!(assistCfg.enabled && editable && bodyMode() === "edit" && !document.querySelector(".dp-dialog"))) return;
+    e.preventDefault();
+    if (assistUi?.isOpen()) assistUi.close();
+    else openAssistant({ opener: document.activeElement });
+  });
 }
 
 async function boot() {
@@ -1685,7 +2051,19 @@ async function boot() {
   INLINE_SAMPLES.forEach((sql, i) => addExample(sql, `Example ${i + 1}`));
   if (!window.__served) await loadFileSamples();
   renderSidebar();
-  $("side-new").onclick = () => loadDash("", "");
+  // #244 §5.4: with the assistant on, ＋ New dashboard opens straight into
+  // the "Describe the dashboard you want…" start card instead of a blank
+  // editor — `assistUiSync()` (loadDash → assistUiSync) shows it once the
+  // editor is actually empty.
+  $("side-new").onclick = () => {
+    const m = bodyMode();
+    const toAssist = assistCfg.enabled && !servedMode && !document.body.classList.contains("embed") && (m === "edit" || m === "view");
+    loadDash("", "");
+    if (toAssist) {
+      setMode("edit");
+      $("assist-start-q")?.focus();
+    }
+  };
   $("save").onclick = saveDash;
   // One name: renaming in the toolbar renames the page title (::DASHBOARD_TITLE,
   // when the SQL has one); saving keeps the two together too.
@@ -1826,11 +2204,65 @@ async function boot() {
   }
 
   $("run").disabled = false;
-  $("run").onclick = () => run();
+  $("run").onclick = () => {
+    // Info-5 (sec-review-272-rereview): #run is disabled during an active
+    // preview (PREVIEW_TOOLBAR_IDS), so this guard is belt-and-suspenders
+    // — see the Ctrl+Enter handler below, where it matters for real.
+    if (!preview) {
+      // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): an explicit
+      // run confirms the current text, if it's a member of `heldTexts` —
+      // see `confirmHeldIfMatch()`/`heldTexts` above.
+      confirmHeldIfMatch();
+      clearApplyHold();
+    }
+    run(true, { explicit: true });
+  };
   wireLint();
 
   // SQL editor: highlight overlay + scroll sync
-  $("sql").addEventListener("input", syncHL);
+  $("sql").addEventListener("input", () => {
+    syncHL();
+    // #244: editing the SQL directly (the editorReplace() of an Apply fires
+    // this too, but Apply itself already exited the preview first) leaves
+    // the preview — no rerun prompt: the grid shows "Not run yet."
+    if (preview) previewExit({ rerun: false });
+    // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): the hold is
+    // bound to the unconfirmed proposal's TEXT (every version shown while
+    // held, not only the original one — typing is not a confirmation),
+    // not to a moment in time. This same "input" event fires on native
+    // undo/redo (Ctrl+Z / Ctrl+Shift+Z) as much as on typing or
+    // editorReplace() — while held, record whatever is now in the editor
+    // (L-7); once no longer held, re-arm if the current text is one we
+    // recorded earlier, however it got there (M-3) and however `applyHold`
+    // was cleared in between (Undo, Run of other text…).
+    const v = $("sql").value;
+    if (applyHold) heldTextsAdd(v);
+    else if (heldTexts.has(v)) armHold();
+    assistUiSync();
+  });
+  // sec-review-272 H-1: the editor's own explicit "run this" shortcut —
+  // the other half of clearApplyHold()'s escape hatch, next to the #run
+  // button. Safe during an active preview too: run() always dispatches to
+  // preview.run while one is active, never the page DB.
+  $("sql").addEventListener("keydown", (e) => {
+    if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "Enter")) return;
+    e.preventDefault();
+    // Info-5 (sec-review-272-rereview): only clear the hold when NOT
+    // previewing. This Ctrl+Enter always re-runs the PREVIEW while one is
+    // active (run() dispatches to preview.run, never the editor's held
+    // SQL) — but clearing the hold here unconditionally meant: held
+    // "Apply, don't run" -> a new Send (a fresh preview) -> Ctrl+Enter (to
+    // re-run THAT preview) -> Discard. Discard's own previewExit({rerun:
+    // true}) then ran the EDITOR's still-held SQL on the page database,
+    // unblocked, with no Run ever pressed on THAT SQL.
+    if (!preview) {
+      // M-3 (sec-review-272-rereview fifth pass): same confirmation rule
+      // as the #run button above.
+      confirmHeldIfMatch();
+      clearApplyHold();
+    }
+    run(true, { explicit: true });
+  });
   $("sql").addEventListener("scroll", () => {
     $("hl").scrollTop = $("sql").scrollTop;
     $("hl").scrollLeft = $("sql").scrollLeft;
@@ -1860,6 +2292,16 @@ async function boot() {
 
   status(backend === "live" ? "live DuckDB · ready" : "DuckDB-Wasm · ready");
   run();
+  finishAssistBoot(); // #244: after run() has started — never delays the first render
+}
+// R1: assistConfig(appAssistBlock, assistFlags()) — called exactly once,
+// here, once appAssistBlock is known (appBrandLoad(), awaited via
+// appBrandReady) and the #256 ratchet block above has run.
+async function finishAssistBoot() {
+  await appBrandReady;
+  assistCfg = assistConfig(appAssistBlock, assistFlags());
+  wireAssist();
+  assistUiSync();
 }
 
 // ---- Check (#145): the lint of `dashboard --check`, in the browser ----
@@ -1879,6 +2321,16 @@ function wireLint() {
   $("lint-run").onclick = () => runLint();
 }
 async function runLint() {
+  const say0 = (html) => ($("lint-status").innerHTML = html);
+  // M-2 (sec-review-272-rereview): Check runs its queries on the PAGE
+  // database (scratchRunner(pageDb(), …) below) — same promise as Run
+  // ("nothing runs until you press Run"), same hold. #lint-run is also
+  // disabled while held (previewExit({hold}) / clearApplyHold()); this is
+  // the defence in depth for any other way of reaching this function.
+  if (applyHold) {
+    say0("Run or discard the applied SQL first.");
+    return;
+  }
   const tok = ++lintState.tok;
   const script = $("sql").value;
   const btn = $("lint-run");
@@ -1887,7 +2339,7 @@ async function runLint() {
   btn.setAttribute("aria-busy", "true");
   say("Checking…");
   try {
-    const run = scratchRunner(db, { prepare: prepareSql });
+    const run = scratchRunner(pageDb(), { prepare: prepareSql });
     const res = await lintScript(script, {
       step: lint_step,
       run,
@@ -3233,11 +3685,11 @@ function delDash(id) {
     () => document.querySelector("#side-nav .side-item") || $("side-new")
   );
 }
-function loadDash(name, sql, key) {
-  closeSideMenu();
-  curDash = key || null;
-  if (key) rememberDash(key);
-  // A different dashboard starts clean — don't carry tab/filter/page state over.
+// A different dashboard (or a preview's exit, #244) starts clean — don't
+// carry tab/filter/page state over. dashStateSave()/dashStateRestore() are
+// the same reset, but save-then-restore instead of clearing, so entering and
+// leaving a preview round-trips the page dashboard's own UI state exactly.
+function dashStateReset() {
   dpTab = null;
   dpTableUI = {};
   dpSubTab = {};
@@ -3256,13 +3708,280 @@ function loadDash(name, sql, key) {
   dpSort = {};
   dpPaged = {};
   dpFilterText = {};
-  $("sql").value = sql;
-  $("dash-name").value = name || "";
-  syncHL();
-  if (bodyMode() === "explore") setMode("edit");
-  markActive();
-  run();
+  dpVars = {};
 }
+function dashStateSave() {
+  return {
+    dpTab,
+    dpTableUI: { ...dpTableUI },
+    dpSubTab: { ...dpSubTab },
+    // L-3 (sec-review-272-rereview): dpView/dpViewDefault were reset by
+    // dashStateReset() (previewEnter) but never saved/restored here, so a
+    // preview's own ::VIEW choices leaked into the page's next render and
+    // the page's own choices were lost. Object.assign(Object.create(null), …)
+    // keeps the null prototype these two are built with (#273 L1).
+    dpView: Object.assign(Object.create(null), dpView),
+    dpViewDefault: Object.assign(Object.create(null), dpViewDefault),
+    dpFilter,
+    dpSelected,
+    dpZoomGroups: { ...dpZoomGroups },
+    dpXf: { ...dpXf },
+    dpUrlSeed: { ...dpUrlSeed },
+    dpVarDefault: { ...dpVarDefault },
+    dpPeriodUrl: { ...dpPeriodUrl },
+    dpRange: { ...dpRange },
+    dpDrill: { ...dpDrill },
+    dpPage: { ...dpPage },
+    dpSort: { ...dpSort },
+    dpPaged: { ...dpPaged },
+    dpFilterText: { ...dpFilterText },
+    dpVars: { ...dpVars },
+  };
+}
+function dashStateRestore(saved) {
+  if (!saved) return;
+  ({ dpTab, dpFilter, dpSelected } = saved);
+  dpTableUI = saved.dpTableUI;
+  dpSubTab = saved.dpSubTab;
+  dpView = saved.dpView;
+  dpViewDefault = saved.dpViewDefault;
+  dpZoomGroups = saved.dpZoomGroups;
+  dpXf = saved.dpXf;
+  dpUrlSeed = saved.dpUrlSeed;
+  dpVarDefault = saved.dpVarDefault;
+  dpPeriodUrl = saved.dpPeriodUrl;
+  dpRange = saved.dpRange;
+  dpDrill = saved.dpDrill;
+  dpPage = saved.dpPage;
+  dpSort = saved.dpSort;
+  dpPaged = saved.dpPaged;
+  dpFilterText = saved.dpFilterText;
+  dpVars = saved.dpVars;
+}
+function loadDash(name, sql, key) {
+  // #244: leaving a dashboard exits an active preview first (no rerun
+  // prompt) — the preview's "before" state belongs to the dashboard we're
+  // about to replace, not to the new one.
+  void (async () => {
+    if (preview) await previewExit({ rerun: false });
+    clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
+    heldTexts.clear(); // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): and releases every text recorded while held — a different dashboard's own undo/redo stack has nothing to do with it
+    closeSideMenu();
+    curDash = key || null;
+    if (key) rememberDash(key);
+    dashStateReset();
+    $("sql").value = sql;
+    $("dash-name").value = name || "";
+    syncHL();
+    if (bodyMode() === "explore") setMode("edit");
+    markActive();
+    assistUiSync();
+    run(true, { explicit: true });
+  })();
+}
+
+// ---- the assistant's preview (#244 C-1) ----
+// assist-ui.js is told through host.onPreviewExit(cb) so its card can switch
+// to "Preview again" once the preview actually ends (Discard, Apply, a new
+// Send, or the viewer navigating away via loadDash/setMode/#sql input).
+const previewExitListeners = new Set();
+// The toolbar buttons a preview disables (nothing may Run/Save/Share/export/
+// Check/start a new dashboard while the grid shows someone else's SQL that
+// isn't in the editor). Each button's own `disabled`/`title` is restored on
+// exit. The dark toggle and the refresh select stay enabled: a re-run of the
+// preview stays in the engine (runSqlInner dispatches to it regardless).
+const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "md", "lint-run", "side-new"];
+let previewToolbarPrev = null;
+function previewToolbar(on) {
+  if (on) {
+    previewToolbarPrev = {};
+    for (const id of PREVIEW_TOOLBAR_IDS) {
+      const el = $(id);
+      if (!el) continue;
+      previewToolbarPrev[id] = { disabled: el.disabled, title: el.title };
+      el.disabled = true;
+      el.title = "Apply or discard the preview first";
+    }
+  } else {
+    for (const id of PREVIEW_TOOLBAR_IDS) {
+      const el = $(id);
+      if (!el || !previewToolbarPrev?.[id]) continue;
+      el.disabled = previewToolbarPrev[id].disabled;
+      el.title = previewToolbarPrev[id].title;
+    }
+    previewToolbarPrev = null;
+  }
+}
+// The grid while a preview was applied without running ("Apply, don't run").
+function notRunCard() {
+  const d = document.createElement("div");
+  d.className = "dp-notrun";
+  // Info-6 (sec-review-272-rereview): the hold itself is in-memory only
+  // (a reload, or opening a Save/Share link, runs this SQL like any other
+  // dashboard — expected, but worth saying so where the viewer is looking).
+  d.textContent = "Not run yet. Press Run ▸ to run it. Saving or sharing now will include this SQL.";
+  return d;
+}
+// Enter the preview: the dashboard renders `sql` and every query goes to
+// `runner(sql)` (assist-ui.js's guarded engine session) until previewExit().
+// The page's own UI state (tab, filters, drill, …) is saved and restored
+// around it, exactly as switching to a different dashboard and back would
+// (dashStateSave/Reset/Restore) — but never written to the URL (§3.4).
+async function previewEnter({ sql, run: runner }) {
+  // sec-review-272-rereview H-1R: synchronously, before anything else
+  // (even the old preview's own exit just below) — a run already queued
+  // by a ::RELOAD timer tick (or any other implicit trigger) must not
+  // survive into the new preview's own setup window. previewExit() does
+  // the same at its own top; this covers the (rarer) case of entering a
+  // brand-new preview with nothing previously active.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  runQueued = null;
+  if (preview) await previewExit({ rerun: false });
+  try {
+    await runActive;
+  } catch (_) {}
+  dpLazy.gen++;
+  await dpLazy.tail; // no page render job still in flight (#244's C-1 window)
+  // sec-review-272 H-1/L-2: a page RELOAD timer (or value) must not survive
+  // into, or leak out of, the preview — and the proposal's own ::RELOAD
+  // (set while rendering below) must not outlive the preview either.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  previewRefreshSaved = $("refresh") ? $("refresh").value : null;
+  previewSaved = dashStateSave();
+  dashStateReset();
+  preview = Object.freeze({ sql, run: runner });
+  document.body.classList.add("previewing");
+  if ($("preview-bar")) $("preview-bar").hidden = false;
+  previewToolbar(true);
+  await run(true);
+}
+// Leave the preview (Discard, Apply, a new Send, or a navigation away).
+// `rerun`: true re-renders the page's own (restored) dashboard; false shows
+// "Not run yet." (Apply, don't run) without running anything. `hold`
+// (sec-review-272 H-1): Apply's "Apply, don't run" path — the editor now
+// holds unconfirmed SQL, so nothing implicit (a timer, the dark toggle, the
+// refresh select, Esc, a cross-filter click, an OS theme change, …) may run
+// it on the page's own DuckDB until the viewer explicitly presses Run or
+// Ctrl/⌘+Enter (run()'s own `explicit` guard, not this flag's job to check).
+async function previewExit({ rerun = true, hold = false } = {}) {
+  // sec-review-272-rereview H-1R: synchronously, before the first await —
+  // a run already queued (the proposal's own ::RELOAD timer, or any other
+  // implicit trigger) while this preview was active must not be allowed
+  // to start once we begin exiting, and nothing non-explicit may start or
+  // queue a new one until the exit finishes. This is a defence in depth:
+  // a run already IN FLIGHT (not merely queued) is the `runPreviewToken`
+  // fix in run()/runOnce()/runSqlInner()'s job, not this one's — by the
+  // time that run reaches its own query dispatch, `preview` here may
+  // already be null, same as always; what matters is which preview THAT
+  // run was started under, captured once at ITS OWN start.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  runQueued = null;
+  previewExiting = true;
+  if (!preview) {
+    previewExiting = false;
+    return;
+  }
+  try {
+    await runActive;
+  } catch (_) {}
+  dpLazy.gen++;
+  await dpLazy.tail;
+  preview = null;
+  // L-5 (sec-review-272-rereview third pass): a run that started under
+  // THIS preview may still be `runActive` right here (the awaits above
+  // don't guarantee it has reached `run()`'s own `finally` yet) — leave
+  // `runPreviewToken` for that run's own dispatch to keep working, and
+  // for a still-active preview's lazy tab jobs after `runOnce` returns
+  // (never reset it from runOnce itself). Once nothing is active, though,
+  // a stale token left pointing at this now-dead preview would otherwise
+  // misroute the page's own Explore, add-file and MotherDuck queries
+  // (none of which come from a render) into the dead session's `.run`,
+  // which reads a `null` S.session and fails — functionally broken, not
+  // a security issue (nothing reaches the page database either way), but
+  // worth closing: `run()`'s own `finally` below is the other half.
+  if (!runActive) runPreviewToken = null;
+  // Info-7: cleared once already above, synchronously, before the first
+  // await; clear it again here too — the run this function just awaited
+  // (captured under THIS preview, `pv` non-null) still runs its full
+  // layout loop, and if that loop reaches a ::RELOAD statement after the
+  // first clear, it re-arms `dpTimer` (see the RELOAD branch's own
+  // `pv !== preview` guard, run()/runOnce() below) before this line ever
+  // gets a chance to clear it again.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  // H-1/L-2: restore the viewer's own #refresh value (the timer itself
+  // was already cleared above, synchronously, before any await).
+  if (previewRefreshSaved !== null) {
+    if ($("refresh")) $("refresh").value = previewRefreshSaved;
+    previewRefreshSaved = null;
+  }
+  dashStateRestore(previewSaved);
+  previewSaved = null;
+  document.body.classList.remove("previewing");
+  if ($("preview-bar")) $("preview-bar").hidden = true;
+  previewToolbar(false);
+  for (const cb of previewExitListeners) {
+    try {
+      cb();
+    } catch (_) {}
+  }
+  previewExiting = false;
+  const pend = pendingExplicit;
+  pendingExplicit = null;
+  // H-1R3 (sec-review-272-rereview fourth pass): `hold` ALWAYS wins over a
+  // deferred explicit run, full stop — checked first, before `pend` is
+  // even consulted. H-1R2's fix ran `pend` here unconditionally, ahead of
+  // the `hold` branch: for "Apply, don't run" specifically, apply() only
+  // writes the proposal into the editor AFTER this exit resolves (see
+  // host.editor.replace(p.sql) in assist-ui.js's apply(), called after
+  // its own `await host.preview.exit(...)`), so a `pend` run firing here
+  // rendered the OLD editor text — while the PROPOSAL (now applied into
+  // the editor moments later, back in apply()) sat there unheld: `hold`
+  // never got applied, #refresh/#lint-run were never disabled, and the
+  // very next implicit trigger (dark toggle, Esc, the refresh timer) ran
+  // the unheld proposal on the page database. Dropping `pend` outright
+  // when `hold` is set closes that: the viewer's Ctrl+Enter during an
+  // "Apply, don't run" exit is simply superseded by the hold it's exiting
+  // into — same as it always was before H-1R2 ever existed. `pend` still
+  // wins over an ordinary (non-hold) exit, same as H-1R2 intended.
+  if (hold) {
+    // M-3: arms `applyHold` + the UI; `heldTexts` itself is populated
+    // separately — by the #sql `input` handler (L-7's generic "record
+    // every text shown while held" logic) once apply() (assist-ui.js)
+    // writes the proposal into the editor, which hasn't happened yet at
+    // this point in THIS function, and belt-and-braces by
+    // host.hold.arm().
+    armHold();
+  } else if (pend !== null && !applyHold) {
+    // H-1R2: honoured now, exactly as if it had just been pressed —
+    // `preview` is null here, so Info-5's own rule applies
+    // (clearApplyHold() only when !preview). M-3/L-7: this IS an explicit
+    // run of the current editor text, so it confirms that one `heldTexts`
+    // entry too, if it happens to be a member.
+    confirmHeldIfMatch();
+    clearApplyHold();
+    await run(pend, { explicit: true });
+  } else if (pend !== null) {
+    // L-6 (sec-review-272-rereview fifth pass): an EXISTING hold (an
+    // earlier, still-unconfirmed "Apply, don't run" — `applyHold` is
+    // already true, left by a DIFFERENT exit) also wins over a deferred
+    // run from THIS exit: drop `pend` outright. Without this, a
+    // Ctrl+Enter pressed during a later, unrelated preview's non-hold
+    // exit (Discard, typing) would clear the earlier hold and run the
+    // editor — which still holds the earlier, never-confirmed proposal.
+    // The viewer presses Run once more, outside any preview, to confirm
+    // either text. Re-arm (idempotent: applyHold/the UI are already set)
+    // because THIS exit's own preview may have just overwritten the grid
+    // with its own last render — "Not run yet" must come back, not a
+    // stale frame of the preview that was just discarded.
+    armHold();
+  } else if (rerun) await run(true);
+  else $("grid").replaceChildren(notRunCard());
+}
+
 // Save the editor as a saved dashboard under the toolbar name. The open
 // saved dashboard is updated (renamed, when the name changed); a name that
 // belongs to another dashboard asks "Replace …?" first. The page title
@@ -3733,6 +4452,7 @@ function bodyMode() {
 }
 function setMode(m) {
   if (m === "explore" && servedMode) m = "view"; // a locked server never exposes Explore (no SQL endpoint)
+  if (m === "explore" && preview) previewExit({ rerun: false }); // #244: leaving edit exits the preview
   document.body.classList.remove("mode-view", "mode-explore");
   if (m === "view") document.body.classList.add("mode-view");
   else if (m === "explore") document.body.classList.add("mode-explore");
@@ -3741,6 +4461,7 @@ function setMode(m) {
   $("side-explore").classList.toggle("active", m === "explore");
   document.querySelectorAll(".dash .dp-title[data-title]").forEach(paintHeadTitle);
   if (m === "explore") loadCatalog();
+  assistUiSync();
 }
 
 // ---- Explore data (#97): catalog, column cards, charts, starter dashboards ----
@@ -3972,10 +4693,10 @@ async function xpAddFiles(files) {
     try {
       catMsg(`Reading ${f.name}…`);
       try {
-        await db.registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
+        await pageDb().registerFileHandle(path, f, 2 /* DuckDBDataProtocol.BROWSER_FILEREADER */, true);
         xpHandles.set(path, f); // #204: the assistant engine registers this handle directly
       } catch (_) {
-        await db.registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
+        await pageDb().registerFileBuffer(path, new Uint8Array(await f.arrayBuffer()));
       }
       await runSql(xp.fileViewSql(view, reader, path));
       lastFq = fqn("memory", "main", view);
@@ -5097,8 +5818,8 @@ function xqTools(sql, rows) {
       dl("⤓ Parquet", "Download the result as Parquet", async () => {
         const name = "explore-result.parquet";
         await runSql(`COPY (${xp.stripSemi(sql)}) TO '${name}' (FORMAT parquet)`);
-        const buf = await db.copyFileToBuffer(name);
-        await db.dropFile(name).catch(() => {});
+        const buf = await pageDb().copyFileToBuffer(name);
+        await pageDb().dropFile(name).catch(() => {});
         download(new Blob([buf], { type: "application/vnd.apache.parquet" }), "query.parquet");
       })
     );
@@ -5446,8 +6167,10 @@ function dashHeader() {
   const b = (v && v.brand) || {};
   const chip = mkAsof();
   // The builder's Edit mode edits the name and logo in place (#60); a served or
-  // embedded dashboard (and View mode) shows them as they are.
-  const editable = !servedMode && !document.body.classList.contains("embed");
+  // embedded dashboard (and View mode) shows them as they are. #244: a
+  // preview is never editable either — it's the assistant's proposal, not
+  // yet in the editor.
+  const editable = !servedMode && !document.body.classList.contains("embed") && !preview;
   if (!b.title && !b.name && !b.logo && !editable) {
     if (!chip) return null;
     const h = document.createElement("div");
@@ -5500,6 +6223,7 @@ const LOGO_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image
 // Write `value` as the dashboard's ::<roleName> statement, then re-run; `focusKey`
 // names the header control to focus again once the new header is on screen.
 function editChrome(roleName, value, focusKey) {
+  if (preview) return; // #244: dashHeader() never renders the edit UI during a preview; belt and braces
   const ta = $("sql");
   const next = setChromeSql(ta.value, roleName, value);
   if (next !== ta.value) {
@@ -5709,6 +6433,7 @@ function getTabParam() {
   }
 }
 function setTabParam(name) {
+  if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
     u.searchParams.set("tab", name);
@@ -5723,6 +6448,13 @@ function setTabParam(name) {
 // default, the first SHOWN alternative). Independent of `?tab=` / `?v.*`: it
 // never resets them, and they never reset it.
 function setViewParam(id, label) {
+  // L-3 (sec-review-272-rereview): #244: the URL never carries the
+  // preview's state — setTabParam() and syncUrlState() both already carry
+  // this guard; a model-chosen ::VIEW alternative (its label can be any
+  // computed string, e.g. an aggregate over the user's own data) must not
+  // write into the address bar, where shareLink() would then carry it into
+  // a link the viewer sends, before the proposal was ever applied.
+  if (preview) return;
   try {
     const u = new URL(location.href);
     if (label === dpViewDefault[id]) u.searchParams.delete("view." + id);
@@ -5958,6 +6690,7 @@ function urlStateParams() {
   return out;
 }
 function syncUrlState() {
+  if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
     for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.")) u.searchParams.delete(k);
@@ -6131,6 +6864,15 @@ function fillLink(tpl, vars) {
 // a new tab. Other schemes are refused (safeUrl).
 function followLink(url) {
   const u = String(url ?? "").trim();
+  // sec-review-272 H-2: a chart ::LINK is a *computed* SQL string, never a
+  // literal the gate can see — one click, before Apply, would otherwise
+  // open a window or navigate to any origin the proposal's SQL can build,
+  // exfiltrating the preview's data. In-page navigation (#tab, ?v.x=…) stays
+  // allowed: it only touches local dpVars/tab state, nothing leaves the tab.
+  if (preview && !(u.startsWith("#") || u.startsWith("?"))) {
+    sideToast("Links are off in the preview.", "OK", () => {});
+    return;
+  }
   if (u.startsWith("#") || u.startsWith("?")) {
     const qi = u.indexOf("?");
     const tab = u.startsWith("#") ? decodeURIComponent(qi < 0 ? u.slice(1) : u.slice(1, qi)) : null;
@@ -6765,9 +7507,9 @@ const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join
 // result a query already returned: the cache stays valid. Anything else (a
 // re-run, a replaced object, an INSERT…) starts a new epoch.
 const CREATE_RE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO|FUNCTION|SEQUENCE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w."]+)/i;
-async function runSetup(sql) {
+async function runSetup(sql, pv) {
   const sig = varSig(sql);
-  await runSql(sql, undefined, undefined, true);
+  await runSql(sql, undefined, undefined, true, undefined, pv);
   const code = sqlCode(sql);
   const made = CREATE_RE.exec(code);
   const name = made && made[1].toLowerCase();
@@ -6786,7 +7528,7 @@ function lazyFlushSetup(L, upto, at) {
     while (L.setup.length && L.setup[0] < upto) {
       const k = L.setup.shift();
       try {
-        await runSetup(L.stmts[k].sql);
+        await runSetup(L.stmts[k].sql, L.pv);
       } catch (e) {
         if (isOptionalMissing(L.stmts[k], e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(L.stmts[k]))}`);
         else if (at) at.before(mkErrorCard(e, L.stmts[k].sql, true));
@@ -6821,7 +7563,7 @@ async function lazyPool(jobs, inline) {
 // — a cross-filter re-run or a tab shown again skips the queries whose inputs
 // did not change. A full run clears the cache. A query that fails on a missing
 // table or function while setup is still deferred runs that setup and retries.
-async function panelSql(sql, at) {
+async function panelSql(sql, at, pv) {
   const key = `${dpSetupEpoch}\u0000${varSig(sql)}\u0000${sql}${servedMode ? "\u0000" + at : ""}`;
   if (dpResults.has(key)) {
     performance.mark("dp:cache-hit");
@@ -6829,12 +7571,12 @@ async function panelSql(sql, at) {
   }
   let rows;
   try {
-    rows = await runSql(sql, undefined, undefined, undefined, at);
+    rows = await runSql(sql, undefined, undefined, undefined, at, pv);
   } catch (e) {
     const L = dpLazy.building;
     if (!(L && L.setup.length && /does not exist|Catalog Error/i.test(String(e)))) throw e;
     await lazyFlushSetup(L, Infinity, null);
-    return panelSql(sql, at);
+    return panelSql(sql, at, pv);
   }
   if (rows.length < 4e6) {
     dpResults.set(key, rows);
@@ -6848,7 +7590,16 @@ async function panelSql(sql, at) {
 // animates everything itself).
 async function lazyRunJob(job, inline = false) {
   const L = job.run;
-  if (job.done || L.gen !== dpLazy.gen) return;
+  // H-1R2 (sec-review-272-rereview final check): a job's own `L.pv` — the
+  // preview (or page, if null) the RUN that created it was captured under
+  // — must still match the LIVE `preview`, not only the lazy generation
+  // (L.gen). An explicit run that starts DURING a preview's exit gets a
+  // fresh generation (previewExit() already bumped dpLazy.gen before its
+  // own awaits), so `L.gen === dpLazy.gen` stays true even once that
+  // preview is gone; `L.pv` does not. Skipping here is the structural
+  // backstop; lazyPump()'s own loop (below) is the one that stops this
+  // from being retried forever.
+  if (job.done || L.gen !== dpLazy.gen || L.pv !== preview) return;
   job.done = true;
   performance.mark("dp:lazy", { detail: job.i });
   await lazyFlushSetup(L, job.i, job.ph);
@@ -6861,7 +7612,7 @@ async function lazyRunJob(job, inline = false) {
     const ts = L.stmts[t.i];
     if (out.lastChart) {
       try {
-        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i), roles: ts.roles, height: t.height });
+        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i, L.pv), roles: ts.roles, height: t.height });
       } catch (e) {
         // A strip whose optional input is missing is left out (#162).
         if (isOptionalMissing(ts, e)) console.info(`track skipped (optional input missing): ${requiresText(reqsOf(ts))}`);
@@ -6900,12 +7651,18 @@ async function lazyPump() {
   try {
     for (;;) {
       const L = dpLazy.cur;
-      if (!L || runActive || L.gen !== dpLazy.gen) break;
+      // H-1R2 (sec-review-272-rereview final check): the whole pump loop
+      // stops outright once this generation's own preview (or page) is no
+      // longer the live one — not just once its gen is stale. lazyRunJob()
+      // has the same check as a backstop (e.g. lazyFlushAll()'s direct,
+      // per-job calls bypass this loop), but breaking here is what keeps
+      // this loop from busy-looping on a job it will only ever skip.
+      if (!L || runActive || L.gen !== dpLazy.gen || L.pv !== preview) break;
       const open = () => L.jobs.filter((j) => !j.done && j.ph.isConnected);
       let job = open().find((j) => paneShown(j.ph));
       if (!job && dpLazyPrefetch) {
         await idleTask();
-        if (runActive || L.gen !== dpLazy.gen) break;
+        if (runActive || L.gen !== dpLazy.gen || L.pv !== preview) break;
         // D3: a hidden ::VIEW alternative's jobs are never idle-prefetched
         // (unlike a hidden tab's) — they run only once their view is shown.
         job = open().find((j) => paneShown(j.ph)) || open().find((j) => !lazyHeavy(L, j) && !j.view);
@@ -6964,7 +7721,50 @@ let runActive = null; // the run in progress (a promise)
 // animates its replaced charts from their old marks.
 let dpMotion = null;
 let runQueued = null; // null, or the `fresh` flag of the queued follow-up run
-function run(fresh = true) {
+// sec-review-272 H-1: `opts.explicit` is the one escape hatch from
+// `applyHold` — true only from the #run button, Ctrl/⌘+Enter and loadDash
+// (the three places that clear the hold outright; see clearApplyHold()). A
+// run while a preview is active is always safe regardless (every query
+// dispatches to preview.run, never the page DB — runSqlInner/pageConn), so
+// the hold only ever matters once `preview` is null again.
+function run(fresh = true, opts = {}) {
+  const explicit = !!(opts && opts.explicit);
+  if (!preview && !explicit) {
+    // M-3/L-7 (sec-review-272-rereview fifth/sixth pass) belt-and-braces:
+    // the #sql `input` handler is the primary place a content-matching
+    // hold gets re-armed; catch it here too, right before any
+    // non-explicit run would otherwise reach the page database, in case
+    // some other path ever changes the editor's text to a member of
+    // `heldTexts` without going through that handler.
+    if (heldTexts.has($("sql").value)) armHold();
+    if (applyHold) {
+      $("grid").replaceChildren(notRunCard());
+      return;
+    }
+  }
+  // sec-review-272-rereview H-1R: a non-explicit call is dropped
+  // synchronously, before even queueing — previewExit() sets this (and
+  // clears dpTimer/runQueued) before its own first await, so a timer
+  // tick (or any other implicit trigger) landing in that exact window
+  // can neither start nor queue a run that would otherwise race the
+  // exit.
+  // H-1R2 (final check): an EXPLICIT call (#run, Ctrl/⌘+Enter) is no
+  // longer let through immediately either — it is DEFERRED until the
+  // exit has fully finished (previewExit() runs it itself, below, with
+  // `preview` already null and a fresh, un-stale `dpLazy.gen`). Running
+  // it right away used to capture `pv` = the dying preview.
+  if (previewExiting) {
+    pendingExplicit = explicit ? (pendingExplicit ?? false) || fresh : pendingExplicit;
+    return runActive;
+  }
+  // sec-review-272-rereview H-1R: captured HERE, synchronously, not inside
+  // runOnce() — when this call is the queued follow-up started from a
+  // PRIOR run's own `finally` block below, this line executes before
+  // previewExit() (awaiting that prior run) can ever resume, so `preview`
+  // is still guaranteed to be whatever it was when the follow-up was
+  // queued. Threaded into runOnce() so runSqlInner() can dispatch on it
+  // instead of the live, mutable global (see there).
+  const pv = preview;
   if (runActive) {
     runQueued = (runQueued ?? false) || fresh;
     return runActive;
@@ -6973,9 +7773,27 @@ function run(fresh = true) {
     try {
       dpLazy.gen++; // the old dashboard's lazy jobs are void …
       await dpLazy.tail; // … once the one in flight (a single query) settles
-      await runOnce(fresh);
+      await runOnce(fresh, pv);
     } finally {
       runActive = null;
+      // L-5 (sec-review-272-rereview third pass): the other half of
+      // previewExit's own cleanup — once THIS run (the last one that may
+      // have been holding `runPreviewToken` alive on purpose: a still-
+      // active preview's lazy tab jobs need it after runOnce() returns)
+      // has finished, drop a token that no longer matches the live
+      // `preview` (an exit happened while this run was in flight). Never
+      // reset it unconditionally here: a token that still equals the
+      // live `preview` belongs to an ongoing preview and must survive.
+      // H-1R2 (sec-review-272-rereview final check): belt-and-suspenders
+      // alongside the structural L.pv !== preview check in lazyRunJob()/
+      // lazyPump() above — whenever a stale token is actually dropped
+      // here, this run's own lazy jobs (captured at the SAME `dpLazy.gen`
+      // runOnce() was given) are voided outright too, exactly as a brand
+      // new run voids the previous one's.
+      if (runPreviewToken && runPreviewToken !== preview) {
+        runPreviewToken = null;
+        dpLazy.gen++;
+      }
       if (runQueued !== null) {
         const f = runQueued;
         runQueued = null;
@@ -6985,7 +7803,15 @@ function run(fresh = true) {
   })();
   return runActive;
 }
-async function runOnce(fresh = true) {
+async function runOnce(fresh = true, pv = preview) {
+  // sec-review-272-rereview H-1R: the single assignment that lets
+  // runSqlInner() (and everything prepareSql() would otherwise reach:
+  // ensureGeo/ensureExtension/ensureForecast/ensureDataFiles, all page-DB
+  // touching) dispatch on THIS run's own preview, synchronously, before
+  // this function's first await — never on the live `preview`, which a
+  // concurrent previewExit() may change under us (see run()'s own capture
+  // of `pv`, and clearApplyHold()/previewExit() nearby).
+  runPreviewToken = pv;
   const tRun = performance.now();
   const grid = $("grid");
   const motion = dpMotion; // what started this run (a drill, a drill-through)
@@ -6999,7 +7825,10 @@ async function runOnce(fresh = true) {
   newGrid.className = "grid";
   let stmts;
   try {
-    stmts = JSON.parse(plan($("sql").value));
+    // #244: the only render read of the editor — while a proposal is
+    // previewed, the plan is built from its SQL instead, never the editor's.
+    // `pv`, not the live `preview` (sec-review-272-rereview H-1R): see above.
+    stmts = JSON.parse(plan(pv ? pv.sql : $("sql").value));
     stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
   } catch (e) {
     grid.replaceChildren();
@@ -7013,7 +7842,13 @@ async function runOnce(fresh = true) {
     servedCache.clear();
   }
   // Lazy tabs: this run's deferred setup statements and panel jobs.
-  const lazy = dpLazyTabs ? { gen: dpLazy.gen, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
+  // H-1R2 (sec-review-272-rereview final check): `pv` travels with the
+  // lazy object itself — lazyRunJob()/lazyPump() check it against the
+  // LIVE `preview` before a deferred job ever runs (it may run long after
+  // this runOnce() call has returned), and panelSql()/runSetup() take it
+  // explicitly so the dispatch in runSqlInner() never has to guess from
+  // the (by-then possibly stale) global `runPreviewToken`.
+  const lazy = dpLazyTabs ? { gen: dpLazy.gen, pv, fresh, stmts, setup: [], jobs: [], panelBody: null } : null;
   dpLazy.building = lazy;
   const tabAt = []; // statement -> the ::TAB/::VIEW whose section it is in (-1: before the first)
   // A ::VIEW marker starts a deferred-setup section too (#214): its
@@ -7066,10 +7901,10 @@ async function runOnce(fresh = true) {
           lazy.setup.push(i);
           continue;
         }
-        await runSetup(s.sql);
+        await runSetup(s.sql, pv);
       } else if (isInput(s)) {
         const kind = inputKind(s);
-        const rows = JSON.parse(await panelSql(s.sql, i));
+        const rows = JSON.parse(await panelSql(s.sql, i, pv));
         if (!rows.length) continue;
         // Optional ::LABEL column → the control's caption (default: the variable
         // name). A ::DATERANGE keeps its columns as they are (from, to, label).
@@ -7220,7 +8055,7 @@ async function runOnce(fresh = true) {
         // A contract plot call (SELECT anofox_plot_terms(t) FROM … t): the planner
         // rewrote it to return the rows (+ named args) as JSON; render each
         // result row (one per GROUP BY key) with the contract renderer.
-        const rows = JSON.parse(await panelSql(s.sql, i));
+        const rows = JSON.parse(await panelSql(s.sql, i, pv));
         const span = Math.min(12, nextSpan || defaultSpan);
         const title = titleOf(s, JSON.stringify(rows.slice(0, 1)));
         const mk = (caption) => {
@@ -7331,10 +8166,10 @@ async function runOnce(fresh = true) {
             const fl = colFilters();
             if (fl.length) page.filters = fl;
           }
-          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx));
+          if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx, pv));
           const sql = page_sql(base, JSON.stringify(page));
           if (sql.startsWith("{")) throw new Error(JSON.parse(sql).error);
-          return JSON.parse(await runSql(sql));
+          return JSON.parse(await runSql(sql, undefined, undefined, undefined, undefined, pv));
         };
         let stats = null; // the statistics row of the current filters (n = row count)
         let unfiltered = null; // the row count without search / column filters
@@ -7462,7 +8297,7 @@ async function runOnce(fresh = true) {
         nextIa = {};
         nextEmpty = "";
       } else {
-        const rowsJson = await panelSql(s.sql, i);
+        const rowsJson = await panelSql(s.sql, i, pv);
         if (isMapPanel(s.roles)) await ensureBoundaries(rowsJson, s.roles);
         if (trackHost) {
           // A thin strip under the chart before it, on its x axis (same panel).
@@ -7497,7 +8332,14 @@ async function runOnce(fresh = true) {
           // Auto-refresh every N seconds, driven from SQL.
           const secs = parseFloat(firstCell()) || 0;
           clearInterval(dpTimer);
-          if (secs > 0) dpTimer = setInterval(run, secs * 1000);
+          // Info-7 (sec-review-272-rereview third pass): only re-arm when
+          // this run's own preview (`pv`, captured once at runOnce's own
+          // start) still matches the live `preview` — a run that started
+          // under a preview already exited (Discard/"Apply, don't run"/
+          // typing/Explore) reaches this line *after* previewExit's own
+          // (double) dpTimer clear, and would otherwise re-arm a timer
+          // for a preview that no longer exists.
+          if (secs > 0 && pv === preview) dpTimer = setInterval(run, secs * 1000);
           if ($("refresh")) $("refresh").value = [0, 5, 15, 30, 60].includes(secs) ? String(secs) : "0";
         } else if (role(s, "HEADER_IMAGE")) {
           const img = document.createElement("img");
@@ -7742,13 +8584,13 @@ async function runOnce(fresh = true) {
     if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
     if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
-    if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s))) {
+    if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s, pv))) {
       console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = d;
       lastChart = null;
       continue;
     }
-    if (d === "VIEW" && !(await tabShown(s))) {
+    if (d === "VIEW" && !(await tabShown(s, pv))) {
       console.info(`view hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = "VIEW";
       lastChart = null;
@@ -9120,11 +9962,11 @@ function mkNotAvailable(s) {
 // is the variable's value now (unset: that alternative is missing), a
 // relative path resolves against `anofox_data` when it is set, and DuckDB's
 // glob() looks for it (a glob that fails: missing).
-async function tabShown(s) {
+async function tabShown(s, pv) {
   if (!s.requires || !s.requires.length) return true;
   if (servedMode) {
     try {
-      await runSql(s.sql, undefined, undefined, false, s.i);
+      await runSql(s.sql, undefined, undefined, false, s.i, pv);
       return true;
     } catch (e) {
       if (isOptionalMissing(s, e)) return false;
@@ -9137,7 +9979,7 @@ async function tabShown(s) {
   for (const p of s.requires.flat()) for (const m of String(p).matchAll(/\$\{([A-Za-z_]\w*)\}/g)) if (!names.some((n) => n.toLowerCase() === m[1].toLowerCase())) names.push(m[1]);
   let row = {};
   try {
-    row = JSON.parse(await runSql("SELECT " + names.map((n, i) => `CAST(getvariable(${lit(n)}) AS VARCHAR) AS v${i}`).join(", ")))[0] || {};
+    row = JSON.parse(await runSql("SELECT " + names.map((n, i) => `CAST(getvariable(${lit(n)}) AS VARCHAR) AS v${i}`).join(", "), undefined, undefined, undefined, undefined, pv))[0] || {};
   } catch (_) {}
   const val = (n) => row["v" + names.findIndex((x) => x.toLowerCase() === n.toLowerCase())] ?? null;
   const root = val("anofox_data");
@@ -9150,7 +9992,7 @@ async function tabShown(s) {
       if (unset || p.includes("${")) continue;
       const full = root && !absolute(p) ? root.replace(/\/+$/, "") + "/" + p.replace(/^\.\//, "") : p;
       try {
-        const r = JSON.parse(await runSql(`SELECT CAST(count(*) AS VARCHAR) AS n FROM glob(${lit(full)})`));
+        const r = JSON.parse(await runSql(`SELECT CAST(count(*) AS VARCHAR) AS n FROM glob(${lit(full)})`, undefined, undefined, undefined, undefined, pv));
         if (Number(r[0] && r[0].n) > 0) {
           met = true;
           break;
@@ -11205,6 +12047,7 @@ function appBrandApply(cfg) {
   applyPageBrand();
   document.body.classList.add("brand-ready");
 }
+const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 async function appBrandLoad() {
   let file = null;
   // A locked server has no app-config.json (and no app bar).
@@ -11212,7 +12055,11 @@ async function appBrandLoad() {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 1500);
     try {
-      const r = await fetch("app-config.json", { cache: "no-cache", signal: ctl.signal });
+      // #244 R1/L-3: import.meta.url, never a bare relative path — the same
+      // consistency rule as assist-csp.js's appBase()/LOCALEXT: what the
+      // assistant's config is read from must be the app's own directory,
+      // never movable by a <base> injection.
+      const r = await fetch(new URL("app-config.json", import.meta.url), { cache: "no-cache", signal: ctl.signal });
       if (r.ok) file = await r.json();
     } catch (e) {
       if (e instanceof SyntaxError) console.warn("app-config.json is not valid JSON — ignored");
@@ -11222,6 +12069,13 @@ async function appBrandLoad() {
   }
   const cfg = appBrandMerge(file, window.__anofoxApp);
   appBrandApply(cfg);
+  // #244 R1: the assistant's config comes only from here — app-config.json
+  // (static hosting) or window.__anofoxApp (the serving process), exactly
+  // the same two sources and the same "later wins" the brand itself uses.
+  // Never the URL, never a dashboard's own SQL/comment: assistConfig() is
+  // called in exactly one place (boot(), after this resolves) with this
+  // block as its first argument (G1/G2 static greps).
+  appAssistBlock = isObj(window.__anofoxApp?.assistant) ? window.__anofoxApp.assistant : isObj(file?.assistant) ? file.assistant : null;
   // sec-review-256 L-2 / R-1 check: window.__anofoxApp (the serving
   // process) wins over app-config.json (static hosting), the same "later
   // wins" order appBrandMerge uses — but only when it actually says
@@ -11251,6 +12105,14 @@ function brandImgOrigins(cfg) {
     if (typeof u !== "string" || !/^https:\/\//i.test(u)) continue;
     try {
       const x = new URL(u);
+      // Info-2 (sec-review-272): a CSP source path ending in "/" is a
+      // *prefix* match (the whole folder, or — for a bare "/" — the whole
+      // origin), not an exact file. `logo: "https://b.example/"` or
+      // ".../img/?v=1" (pathname "/img/") would silently widen img-src far
+      // past the one file this is meant to allow. Skip it instead: a
+      // misconfigured logo URL loses its image rather than opening the
+      // origin to every other image on it.
+      if (!x.pathname || x.pathname === "/" || x.pathname.endsWith("/")) continue;
       out.push(x.origin + x.pathname);
     } catch (_) {}
   }
@@ -13806,6 +14668,32 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
 document.querySelector(".dash").addEventListener("click", () => {
   if (clearSelections()) run(false);
 });
+// #244: the preview bar sits inside .dash (§5.1) — a click on one of its
+// buttons must not also bubble into the clear-on-click handler above.
+$("preview-bar")?.addEventListener("click", (e) => e.stopPropagation());
+// #244: links are off during a preview (a ::MARKDOWN panel in the
+// assistant's proposal) — a cross-origin link is never model-reachable
+// before Apply, so it is blocked on click rather than rendered differently.
+// sec-review-272 H-2: every link but an in-page '#…' one is blocked, same
+// origin included — a same-origin ::LINK (e.g. '/…?r={value}') navigated the
+// tab away via the browser's own default action before, losing the preview
+// (and, on a shared static origin, handing the new page a readable
+// sessionStorage key). Blocking here (capture phase, preventDefault +
+// stopPropagation) also stops the click from ever reaching a handler that
+// would call followLink() — which has its own, independent guard (H-2) for
+// paths that reach it without a rendered <a> at all (a chart mark's click).
+function previewLinkGuard(e) {
+  if (!preview) return;
+  const a = e.target.closest?.("a[href]");
+  if (!a) return;
+  const href = a.getAttribute("href") || "";
+  if (href.startsWith("#")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  sideToast("Links are off in the preview.", "OK", () => {});
+}
+$("grid").addEventListener("click", previewLinkGuard, true);
+$("grid").addEventListener("auxclick", previewLinkGuard, true);
 // Esc does the same (unless a dialog, menu or text field has the key).
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || e.defaultPrevented) return;

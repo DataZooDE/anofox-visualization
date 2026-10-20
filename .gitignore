@@ -17,3 +17,6 @@ __pycache__/
 
 # EU NUTS layers a user fetches for themselves (scripts/fetch-nuts.sh): never committed
 web/data/boundaries/nuts*.csv
+
+# #244: the assistant eval seed's live results (real API calls, cost money) — never committed
+/tests/assist-eval/results/

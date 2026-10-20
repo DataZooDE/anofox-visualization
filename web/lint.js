@@ -211,6 +211,98 @@ export function splitStatements(sql) {
   return out;
 }
 
+// One long-lived scratch session (#244, C-1): scratchRunner's isolation — a
+// fresh connection whose own in-memory database is first on the search path
+// — kept open across calls, so a dashboard's SET VARIABLEs and TEMP objects
+// carry from one statement to the next as on the page's own connection
+// (scratchRunner's fresh session per call would lose them: inputs, drills
+// and pages would break, and setup would have to re-run per panel). Calls
+// are serialised (a promise tail): `before()` runs before every call (the
+// caller's engine-lock re-check); `guard(piece, ctx)` before every
+// statement of that call, sharing one `ctx.state` across the whole session
+// (so a temp macro or variable a later call sees was set by an earlier
+// one). No `prepare` parameter: under the locked engine there is nothing
+// left to prepare (web/assist.js's wasmTools comment), and a `prepare`
+// driven by the model's SQL would defeat the point of the lock.
+export function scratchSession(db, opts = {}) {
+  const { toRows = rowsJson, timeoutMs = 0, guard, before } = ownOpts(opts);
+  let cP = null; // the connection, attached once on first use
+  let name = null;
+  let home = null;
+  let closed = false;
+  let tail = Promise.resolve(); // serialises calls over the one connection
+  const state = {}; // shared across every call of this session (guard's ctx.state)
+  const attach = async () => {
+    const c = await db.connect();
+    name = `anofox_lint_${++scratchSeq}`;
+    home = `"${String((await c.query("SELECT current_database() AS d")).toArray()[0].toJSON().d).replace(/"/g, '""')}"`;
+    await c.query(`ATTACH ':memory:' AS ${name}`);
+    await c.query(`USE ${name}`);
+    await c.query(`SET search_path = '${name}.main,${home.replace(/'/g, "''")}.main'`);
+    return c;
+  };
+  const conn = () => (cP ||= attach());
+  const runCall = async (sql) => {
+    if (closed) throw new Error("the preview was closed");
+    const c = await conn();
+    if (before) await before();
+    const pieces = splitStatements(sql);
+    if (guard) {
+      const ctx = { query: async (q) => rowsJson(await runOne(c, q)), state };
+      for (const piece of pieces) await guard(piece, ctx);
+    }
+    const work = (async () => {
+      let last = null;
+      for (const piece of pieces) last = await runOne(c, piece);
+      return toRows(last || { schema: { fields: [] }, toArray: () => [] });
+    })();
+    if (!timeoutMs) return await work;
+    let timer;
+    const late = new Promise((_, reject) => {
+      timer = setTimeout(async () => {
+        try {
+          await c.cancelSent?.();
+        } catch (_) {}
+        reject(new Error(`the query took longer than ${timeoutMs / 1000} s and was cancelled`));
+      }, timeoutMs);
+    });
+    work.catch(() => {});
+    try {
+      return await Promise.race([work, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return {
+    // Serialised: each call waits for the previous one's settlement (success
+    // or failure) before it starts, so two overlapping calls never interleave
+    // statements on the one connection.
+    run(sql) {
+      const p = tail.then(() => runCall(sql), () => runCall(sql));
+      tail = p.then(
+        () => {},
+        () => {}
+      );
+      return p;
+    },
+    async close() {
+      closed = true;
+      await tail.catch(() => {});
+      if (!cP) return;
+      const c = await cP;
+      try {
+        if (home) {
+          await c.query(`USE ${home}`);
+          await c.query(`DETACH DATABASE IF EXISTS ${name}`);
+        }
+      } catch (_) {
+        /* the connection is closed next anyway */
+      }
+      await c.close();
+    },
+  };
+}
+
 // A DuckDB-Wasm result as rows' JSON text ([{col: value, …}, …]) — what
 // web/app.js hands to render_panel. DuckDB-Wasm returns DATE / TIMESTAMP as
 // epoch numbers (back to ISO strings, so date variables and axes read as

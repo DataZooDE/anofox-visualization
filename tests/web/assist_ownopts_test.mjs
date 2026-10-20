@@ -16,13 +16,26 @@
 // real security effect: sec-review-256 "Last check"). This version also
 // flags that pattern outright, and extends the file list with explore.js,
 // which "final check"'s FILES never covered.
+//
+// #244: web/assist-ui.js joins the scan too — the panel builds its own
+// options objects (applyModel, diffScripts, buildCtx-shaped calls, …) and
+// must follow the same rule as every other assistant module.
+//
+// sec-review-272 Info-1: the above only ever looked at *exported* functions
+// — assist-ui.js's own inner ones (dialog, sentDialog, open, close: built
+// by mountAssistant(), never exported, called only from inside the module)
+// read their options bags directly and went unchecked. web/assist-ui.js
+// alone (the file this review covered) is now scanned for every function —
+// `function NAME(...)` and `const NAME = (...) =>`, exported or not, at any
+// nesting depth — not just its top-level exports; the other four files keep
+// the narrower (exported-only) scan.
 import { readFileSync } from "fs";
 import path from "path";
 import assert from "assert/strict";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
-const FILES = ["web/assist.js", "web/assist-engine.js", "web/assist-csp.js", "web/lint.js", "web/explore.js"];
+const FILES = ["web/assist.js", "web/assist-engine.js", "web/assist-csp.js", "web/lint.js", "web/explore.js", "web/assist-ui.js"];
 const OPTS_NAMES = new Set(["opts", "options", "config", "cfg", "o"]);
 
 // Splits a parameter list (or any comma-separated text) on top-level
@@ -186,11 +199,90 @@ function exportedFunctions(src) {
   return out;
 }
 
+// Every `function NAME(...)` and `const NAME = (...) =>` in `cleanSrc`
+// (already comment-stripped, so "function" inside a comment can't be
+// mistaken for a declaration), exported or not, at any nesting depth —
+// [{name, params, body, kind}], same shape as exportedFunctions() above.
+function allFunctions(cleanSrc) {
+  const out = [];
+  const declRe = /\bfunction\s+(\w+)\s*\(/g;
+  let m;
+  while ((m = declRe.exec(cleanSrc))) {
+    const name = m[1];
+    const parenStart = declRe.lastIndex - 1;
+    let depth = 0,
+      i = parenStart,
+      paramEnd = -1;
+    for (; i < cleanSrc.length; i++) {
+      if (cleanSrc[i] === "(") depth++;
+      else if (cleanSrc[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          paramEnd = i;
+          break;
+        }
+      }
+    }
+    const params = topLevelSplit(cleanSrc.slice(parenStart + 1, paramEnd));
+    const bodyStart = cleanSrc.indexOf("{", paramEnd);
+    const body = braceBlock(cleanSrc, bodyStart);
+    out.push({ name, params, body, kind: "function" });
+    // Unlike exportedFunctions() above, lastIndex is NOT skipped past the
+    // whole body: a nested function (dialog, sentDialog, open, close, …,
+    // all declared inside mountAssistant's one big body) must still be
+    // found by the next iteration, not stepped over.
+  }
+  const arrowRe = /\bconst\s+(\w+)\s*=\s*(?:async\s*)?\(/g;
+  while ((m = arrowRe.exec(cleanSrc))) {
+    const name = m[1];
+    const parenStart = arrowRe.lastIndex - 1;
+    let depth = 0,
+      i = parenStart,
+      paramEnd = -1;
+    for (; i < cleanSrc.length; i++) {
+      if (cleanSrc[i] === "(") depth++;
+      else if (cleanSrc[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          paramEnd = i;
+          break;
+        }
+      }
+    }
+    if (paramEnd < 0) continue;
+    const params = topLevelSplit(cleanSrc.slice(parenStart + 1, paramEnd));
+    // Only a genuine arrow function (see exportedFunctions() above).
+    const afterParen = cleanSrc.slice(paramEnd + 1).match(/^\s*=>\s*/);
+    if (!afterParen) continue;
+    const bodyAt = paramEnd + 1 + afterParen[0].length;
+    let body;
+    if (cleanSrc[bodyAt] === "{") body = braceBlock(cleanSrc, bodyAt);
+    else {
+      let depth2 = 0,
+        j = bodyAt;
+      for (; j < cleanSrc.length; j++) {
+        const c = cleanSrc[j];
+        if ("([{".includes(c)) depth2++;
+        else if (")]}".includes(c)) depth2--;
+        else if (c === ";" && depth2 <= 0) break;
+        else if (c === "\n" && depth2 <= 0) break;
+      }
+      body = cleanSrc.slice(bodyAt, j);
+    }
+    out.push({ name, params, body, kind: "arrow" });
+  }
+  return out;
+}
+
 let checked = 0;
 let destructuredSeen = 0;
 for (const rel of FILES) {
   const src = readFileSync(path.join(root, rel), "utf8");
-  for (const fn of exportedFunctions(src)) {
+  // Info-1: assist-ui.js's inner (non-exported) functions are in scope too
+  // — everything mountAssistant() builds, at any nesting depth — since the
+  // comment-stripped source makes the two scans' function shapes identical.
+  const fns = rel === "web/assist-ui.js" ? allFunctions(stripComments(src)) : exportedFunctions(src);
+  for (const fn of fns) {
     if (fn.name === "ownOpts") continue; // the helper itself: nothing to protect it from
     const cleanBody = stripComments(fn.body);
     for (const raw of fn.params) {
