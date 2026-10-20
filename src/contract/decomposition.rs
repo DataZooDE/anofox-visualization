@@ -621,6 +621,7 @@ pub(super) fn decomposition(
         color: brand,
         width: 1.6,
         alpha: 1.0,
+        ..Default::default()
     });
     if several {
         plot = plot.scale_color(look::series_scale(Aesthetic::Color, &models));

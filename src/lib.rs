@@ -4614,6 +4614,7 @@ fn render_sparkline(
             color: steel,
             width: 2.6,
             alpha: 1.0,
+            ..Default::default()
         })
         .geom_point_with(GeomPoint {
             size: 4.2,
@@ -5094,6 +5095,7 @@ fn render_gauge(
                 color: o.theme.colors.card,
                 width: 2.0,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(vec![
                 ("x".to_string(), num(xs.clone())),
@@ -5108,6 +5110,7 @@ fn render_gauge(
             color: o.theme.colors.ink,
             width: 3.5,
             alpha: 1.0,
+            ..Default::default()
         })
         .layer_data(vec![
             ("x".to_string(), num(vec![shown])),

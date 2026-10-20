@@ -149,6 +149,7 @@ pub(super) fn roc(
         color: o.brand(),
         width: 1.7,
         alpha: 1.0,
+        ..Default::default()
     });
     let keys: Vec<String> = series.iter().map(|s| s.0.clone()).collect();
     let colors = look::level_colors(&keys);
@@ -238,6 +239,7 @@ pub(super) fn pr(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
         color: o.brand(),
         width: 1.7,
         alpha: 1.0,
+        ..Default::default()
     });
     let several = series.len() > 1;
     plot = if several {
@@ -335,6 +337,7 @@ pub(super) fn calibration(
         color: o.brand(),
         width: 1.3,
         alpha: 0.9,
+        ..Default::default()
     });
     // Points sized by the bin's count.
     let (mut px, mut py, mut pk, mut pn) = (vec![], vec![], vec![], vec![]);
@@ -461,6 +464,7 @@ pub(super) fn acf(
                 color: o.brand(),
                 width: 1.6,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(vec![
                 ("x".into(), pick(&x)),
