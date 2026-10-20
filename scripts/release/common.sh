@@ -58,5 +58,5 @@ rust_target() { rustc -vV | sed -n 's/^host: //p' | tr -d '\r'; }
 ensure_web_pkg() {
   if [ "${SKIP_WASM:-0}" = "1" ] || [ -f "$ROOT/web/pkg/anofox_visualization_bg.wasm" ]; then return 0; fi
   command -v wasm-pack >/dev/null || { echo "wasm-pack is required (or SKIP_WASM=1)" >&2; return 1; }
-  ( cd "$ROOT" && wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm )
+  ( cd "$ROOT" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm )
 }

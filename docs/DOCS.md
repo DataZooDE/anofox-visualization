@@ -2452,7 +2452,7 @@ compiled to wasm** renders the panels. Everything is client-side — static file
 no backend, no DuckDB extension.
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
 
@@ -2639,7 +2639,7 @@ plus a `/query` endpoint backed by a **live** DuckDB — so the UI operates on y
 real tables (big data stays in DuckDB), and opens the browser for you:
 
 ```sh
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 cargo build --bin serve --features serve
 ./target/debug/serve mydata.duckdb          # opens http://127.0.0.1:8080/?token=…
 #   --port N     choose the port
