@@ -8,6 +8,11 @@ use serde_json::json;
 
 const PROXY_SECRET: &str = "0123456789abcdef0123456789abcdef";
 const EMBED_SECRET: &str = "embed-secret-0123456789abcdef0123456789";
+/// The OIDC authorization code used in tests. Deliberately not a valid hex
+/// or base64 substring (contains `-` outside base64url's position rules and
+/// letters past `f`), so it can't appear by chance inside the random hex
+/// IDs or base64 tokens that also end up in the audit log.
+const TEST_AUTH_CODE: &str = "not-a-real-code-ZQ9";
 
 fn tmpdir() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -402,7 +407,7 @@ fn oidc_login_session_logout_and_audit() {
         "email": "alice@example.com", "email_verified": true, "nonce": q["nonce"], "iat": now, "exp": now + 60}),
     );
     f.set(&format!("{ISS}/token"), json!({"id_token": idt}));
-    let cb = format!("/auth/callback?code=abc&state={}", q["state"]);
+    let cb = format!("/auth/callback?code={TEST_AUTH_CODE}&state={}", q["state"]);
     let h = [("Cookie", state_cookie.as_str())];
     let r = a.route(&req("GET", &cb, &h)).unwrap();
     assert_eq!(r.status, 303, "{:?}", String::from_utf8_lossy(&r.body));
@@ -480,7 +485,7 @@ fn oidc_login_session_logout_and_audit() {
         &key[17..],
         &session[oidc::SESSION_COOKIE.len() + 1..],
         &idt,
-        "abc",
+        TEST_AUTH_CODE,
         PROXY_SECRET,
         EMBED_SECRET,
     ] {
