@@ -1,20 +1,28 @@
-//! The flow layer (`::ORIGIN`/`::DEST`, M2b): drawn by ggplot-rs
-//! (`geom_curve` + `arrow()` + the `linewidth` aesthetic + an identity
-//! colour scale + interactive aesthetics) instead of hand-written SVG — see
-//! issue #318 (visualization logic belongs in ggplot-rs) and upstream
-//! ggplot-rs issues #125 (arrow), #126 (linewidth), #128 (identity scales),
-//! #129 (interactive aesthetics).
+//! The flow and hexbin overlays: drawn by ggplot-rs instead of hand-written
+//! SVG — see issue #318 (visualization logic belongs in ggplot-rs).
 //!
-//! The consumer still does the data prep (`flows.rs`: unprojected endpoint
-//! parsing, matching codes, width/colour resolution before drawing) and the
-//! legend box math (`legend.rs`); this module only builds a `DataFrame` from
-//! already-projected flow rows and composes the rendered fragment.
+//! - **Flows** (`::ORIGIN`/`::DEST`, M2b): `geom_curve` + `arrow()` + the
+//!   `linewidth` aesthetic + an identity colour scale + interactive
+//!   aesthetics — upstream ggplot-rs issues #125 (arrow), #126 (linewidth),
+//!   #128 (identity scales), #129 (interactive aesthetics).
+//! - **Hexbin** (`::HEXBIN`, M2c): `geom_hex` drawing cells that
+//!   `hexbin::of`'s `StatBinHex::compute_group` already binned, through
+//!   `StatIdentity` (the consumer pre-bins; `geom_hex`'s own default stat
+//!   would re-bin) and `scale_fill_identity` for the pre-resolved per-cell
+//!   colour — upstream ggplot-rs issues #127 (the `StatBinHex` rewrite onto
+//!   a fixed lattice) and #128 (identity scales).
+//!
+//! The consumer still does the data prep (`flows.rs`/`hexbin.rs`:
+//! unprojected endpoint/point parsing, matching codes, width/colour
+//! resolution before drawing) and the legend box math (`legend.rs`); this
+//! module only builds a `DataFrame` from already-projected rows and
+//! composes the rendered fragment.
 //!
 //! Positions are fed through **already-projected, pre-pixel** coordinates
-//! (`Flow::o`/`Flow::d`): the plot's `CoordSf`, built from the same
-//! `Frame::window`, performs the identical data→pixel affine transform
-//! `Frame::at` used to do by hand, so feeding it pixel coordinates too would
-//! double-transform every position.
+//! (`Flow::o`/`Flow::d`, hexbin cell centres): the plot's `CoordSf`, built
+//! from the same `Frame::window`, performs the identical data→pixel affine
+//! transform `Frame::at` used to do by hand, so feeding it pixel
+//! coordinates too would double-transform every position.
 
 use ggplot_rs::prelude::*;
 
@@ -22,6 +30,7 @@ use crate::theme::{hex, mix};
 use crate::{find_role, value_str, Column, RenderOptions, Role};
 
 use super::flows::{Flows, FLOW_CAP};
+use super::hexbin::{self, Hexbin};
 use super::{Fill, Frame, Model, Rgb, ValueScale};
 
 /// Draw the flow overlay and splice it into the map body. Returns the
@@ -308,4 +317,134 @@ pub(super) fn render(
         .unwrap_or_default();
 
     (frag, n, extra_self, cap_warn)
+}
+
+/// Draw the hexbin overlay and splice it into the map body. `hb` is already
+/// binned (`hexbin::of`'s `StatBinHex::compute_group`, data prep only);
+/// this only resolves each cell's colour (`fill_of`'s `Fill::Measure` scale,
+/// the same choropleth colour-class logic — "hexbin colour classes stay in
+/// the consumer for now") and draws. Returns the rendered SVG fragment
+/// (empty when there are no occupied cells) and the number of hexagons
+/// drawn (for the "aggregate in SQL" mark-budget warning in `mod.rs`).
+pub(super) fn render_hexbin(
+    o: &RenderOptions,
+    hb: &Hexbin,
+    scale: &ValueScale,
+    frame: &Frame,
+    card: Rgb,
+    w: f64,
+    h: f64,
+) -> (String, usize) {
+    if hb.cells.is_empty() {
+        return (String::new(), 0);
+    }
+    let lattice = hexbin::lattice_of(hb);
+    let n = hb.cells.len();
+
+    let (mut xs, mut ys, mut widths, mut heights) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    let mut fills = Vec::with_capacity(n);
+    let mut rows = Vec::with_capacity(n);
+    let mut keys = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(n);
+    let mut classes = Vec::with_capacity(n);
+    let mut counts = Vec::with_capacity(n);
+    let mut labels = Vec::with_capacity(n);
+    let mut fvalues = Vec::with_capacity(n);
+    let mut tooltips = Vec::with_capacity(n);
+
+    for (i, ((q, r), cell)) in hb.cells.iter().enumerate() {
+        let (cx, cy) = lattice.centre(*q as i64, *r as i64);
+        let value = if hb.has_measure {
+            cell.sum
+        } else {
+            cell.n as f64
+        };
+        let (color, class) = scale.color(value);
+        let fvalue = scale.fmt.full(value, &o.locale);
+        let label = hexbin::label_of(cell, hb.planar);
+        let n_points = format!("point{}", if cell.n == 1 { "" } else { "s" });
+        let title = if hb.has_measure {
+            format!("{label}: {fvalue} ({} {n_points})", cell.n)
+        } else {
+            format!("{label}: {} {n_points}", cell.n)
+        };
+
+        xs.push(Value::Float(cx));
+        ys.push(Value::Float(cy));
+        widths.push(Value::Float(hb.width));
+        heights.push(Value::Float(hb.width));
+        fills.push(Value::Str(hex(color)));
+        rows.push(Value::Integer(i as i64));
+        // `data-x` by default would be the row's `x` aesthetic (a numeric
+        // projected coordinate); this replaces it with the cell's "q,r"
+        // key, as the old hand-written code did.
+        keys.push(Value::Str(format!("{q},{r}")));
+        values.push(Value::Float(value));
+        classes.push(
+            class
+                .map(|k| Value::Integer((k + 1) as i64))
+                .unwrap_or(Value::Na),
+        );
+        counts.push(Value::Integer(cell.n as i64));
+        labels.push(Value::Str(label));
+        fvalues.push(if hb.has_measure {
+            Value::Na
+        } else {
+            Value::Str(fvalue)
+        });
+        tooltips.push(Value::Str(title));
+    }
+
+    let df: Vec<(String, Vec<Value>)> = vec![
+        ("x".into(), xs),
+        ("y".into(), ys),
+        ("width".into(), widths),
+        ("height".into(), heights),
+        ("fill_color".into(), fills),
+        ("row".into(), rows),
+        ("key".into(), keys),
+        ("value".into(), values),
+        ("class".into(), classes),
+        ("count".into(), counts),
+        ("label".into(), labels),
+        ("fvalue".into(), fvalues),
+        ("tooltip_col".into(), tooltips),
+    ];
+
+    let aes = Aes::new()
+        .x("x")
+        .y("y")
+        .fill("fill_color")
+        .tooltip("tooltip_col")
+        .data_attr("row", "row")
+        .data_attr("value", "value")
+        .data_attr("class", "class")
+        .data_attr("count", "count")
+        .data_attr("label", "label")
+        .data_attr("fvalue", "fvalue")
+        .data_attr("x", "key");
+
+    let [x0, x1, y0, y1] = frame.window(w, h);
+    let frag = GGPlot::new(df)
+        .aes(aes)
+        .geom_hex_with(GeomHex {
+            color: card,
+            line_width: 0.4,
+            alpha: 1.0,
+        })
+        .stat(StatIdentity)
+        .scale_fill_identity()
+        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
+        .theme_void()
+        .legend_position(LegendPosition::None)
+        .svg_root_data(false)
+        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
+        .unwrap_or_default();
+
+    (frag, n)
 }

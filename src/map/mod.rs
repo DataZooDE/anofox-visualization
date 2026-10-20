@@ -1501,53 +1501,15 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         }
     }
 
-    // ---- density binning (::HEXBIN, M2c): one hexagon per occupied cell,
-    // BTreeMap order, coloured by the sum of a measure or a count of points.
+    // ---- density binning (::HEXBIN, M2c): a ggplot-rs overlay (`geom_hex`
+    // drawing cells `hexbin::of` already binned via `StatBinHex` — see
+    // `overlay.rs` and issue #318), spliced in here the same way the flow
+    // overlay is above: after the basemap and before `labels_svg` below.
     if let Some(hb) = &m.hexbin {
         if let Fill::Measure(scale) = &m.fill {
-            out.push_str(&format!(
-                "<g class=\"dp-hexes\" stroke=\"{}\" stroke-width=\".4\">",
-                hex(card)
-            ));
-            for (i, ((q, r), cell)) in hb.cells.iter().enumerate() {
-                let value = if hb.has_measure {
-                    cell.sum
-                } else {
-                    cell.n as f64
-                };
-                let (color, class) = scale.color(value);
-                let fvalue = scale.fmt.full(value, &o.locale);
-                let label = hexbin::label_of(cell, hb.planar);
-                let n_points = format!("point{}", if cell.n == 1 { "" } else { "s" });
-                let title = if hb.has_measure {
-                    format!("{label}: {fvalue} ({} {n_points})", cell.n)
-                } else {
-                    format!("{label}: {} {n_points}", cell.n)
-                };
-                let verts: Vec<_> = hexbin::ring(*q, *r, hb.size, hb.origin)
-                    .iter()
-                    .map(|p| tenths(frame.at(*p)))
-                    .collect();
-                let mut d = String::new();
-                push_path(&mut d, &verts, true);
-                let mut data =
-                    format!(" data-row=\"{i}\" data-x=\"{q},{r}\" data-value=\"{value}\"");
-                if let Some(k) = class {
-                    data.push_str(&format!(" data-class=\"{}\"", k + 1));
-                }
-                data.push_str(&format!(" data-count=\"{}\"", cell.n));
-                data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
-                if !hb.has_measure {
-                    data.push_str(&format!(" data-fvalue=\"{}\"", attr(&fvalue)));
-                }
-                out.push_str(&format!(
-                    "<path d=\"{d}\" fill=\"{}\"{data}><title>{}</title></path>",
-                    hex(color),
-                    esc(&title)
-                ));
-                marks += 1;
-            }
-            out.push_str("</g>");
+            let (frag, added_marks) = overlay::render_hexbin(o, hb, scale, &frame, card, w, h);
+            out.push_str(&frag);
+            marks += added_marks;
             if hb.cells.len() > hexbin::HEX_WARN {
                 warnings.push(format!(
                     "map: {} hexagons — use a larger ::HEXBIN",

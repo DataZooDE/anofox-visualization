@@ -1327,7 +1327,9 @@ fn flows_render_within_budget() {
 
 // ---- M2c: density binning (::HEXBIN) ---------------------------------
 
-/// The drawn hexagons: `<path>`s with `data-count` (unique to a hex cell).
+/// The drawn hexagons: ggplot-rs's `geom_hex` draws each occupied cell as a
+/// `<polygon>` (not the old hand-written `<path>`), still carrying
+/// `data-count` (unique to a hex cell, set via `Aes::data_attr`).
 fn hexes(svg: &str) -> Vec<&str> {
     features(svg)
         .into_iter()

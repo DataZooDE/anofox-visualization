@@ -6,11 +6,24 @@
 //! Applies only when `::HEXBIN` is present and the input resolves to points
 //! (`::LAT`/`::LON`, or WKT `POINT`/`MULTIPOINT`); otherwise it is ignored
 //! (`dashboard --check` flags this — `map/hexbin-needs-points`).
+//!
+//! The lattice itself (bin membership, the per-cell `count`/`n`) comes from
+//! ggplot-rs's `StatBinHex::compute_group` on a fixed hex lattice (issue
+//! #318: visualization logic belongs in ggplot-rs, not hand-written
+//! hex-grid math) — the actual drawing is `super::overlay`'s `geom_hex`
+//! renderer. This module only does data prep: point extraction/projection,
+//! `::HEXBIN` size resolution, and the per-cell mean *raw* (pre-projection)
+//! position (`StatBinHex` doesn't compute that; it's specific to this
+//! consumer's "around …" label), via `HexLattice::locate`.
 
 use std::collections::BTreeMap;
 
 use crate::{cell_num, find_role, role_str, Column, Kind, RenderOptions, Role};
+use ggplot_rs::data::DataFrame;
 use ggplot_rs::prelude::Value;
+use ggplot_rs::scale::ScaleSet;
+use ggplot_rs::stat::binhex::{HexLattice, StatBinHex};
+use ggplot_rs::stat::Stat;
 
 use super::project::{Extent, Proj};
 use super::{Fill, Shape};
@@ -85,13 +98,12 @@ impl CellAgg {
     }
 }
 
-/// The binned grid: its width, circumradius, origin and occupied cells, in
-/// deterministic `(r, q)` order.
+/// The binned grid: its width, origin and occupied cells, in deterministic
+/// `(r, q)` order (ggplot-rs's `StatBinHex` output order).
 pub(crate) struct Hexbin {
-    /// The written width across, metres (or planar units) — D7.
+    /// The written width across, metres (or planar units) — D7. Also the
+    /// `HexLattice`'s `w == h` centre-to-centre spacing: a regular hexagon.
     pub width: f64,
-    /// Circumradius `s = width / √3`.
-    pub size: f64,
     /// The grid's origin: the unzoomed projected data box's `(x0, y0)`.
     pub origin: (f64, f64),
     /// Occupied cells, `((q, r), agg)`, in the `BTreeMap`'s `(r, q)` order.
@@ -107,51 +119,13 @@ pub(crate) struct Hexbin {
 /// `::HEXBIN` (the plan's "Caps").
 pub(crate) const HEX_WARN: usize = 20_000;
 
-const SQRT3: f64 = 1.732_050_807_568_877_2;
-
-/// Pointy-top axial hex centre, in the same projected units as `size`.
-fn axial_to_xy(q: f64, r: f64, size: f64) -> (f64, f64) {
-    (size * (SQRT3 * q + SQRT3 / 2.0 * r), size * (1.5 * r))
-}
-
-/// Round fractional cube coordinates to the nearest hex, fixing whichever
-/// component had the largest rounding error so `x + y + z == 0` holds
-/// (the standard "cube rounding" algorithm).
-fn cube_round(x: f64, y: f64, z: f64) -> (i32, i32, i32) {
-    let (mut rx, mut ry, mut rz) = (x.round(), y.round(), z.round());
-    let (dx, dy, dz) = ((rx - x).abs(), (ry - y).abs(), (rz - z).abs());
-    if dx > dy && dx > dz {
-        rx = -ry - rz;
-    } else if dy > dz {
-        ry = -rx - rz;
-    } else {
-        rz = -rx - ry;
-    }
-    (rx as i32, ry as i32, rz as i32)
-}
-
-/// The axial `(q, r)` cell of a point `size`-relative to the grid's origin
-/// (pointy-top orientation).
-fn point_to_hex(x: f64, y: f64, size: f64) -> (i32, i32) {
-    let q = (SQRT3 / 3.0 * x - y / 3.0) / size;
-    let r = (2.0 / 3.0 * y) / size;
-    let (cx, cz) = (q, r);
-    let cy = -cx - cz;
-    let (rx, _, rz) = cube_round(cx, cy, cz);
-    (rx, rz)
-}
-
-/// The six vertices of hexagon `(q, r)`, in the same projected coordinate
-/// space as `origin` — test-only, and used by [`super`]'s SVG writer.
-pub(crate) fn ring(q: i32, r: i32, size: f64, origin: (f64, f64)) -> [[f64; 2]; 6] {
-    let (cx, cy) = axial_to_xy(q as f64, r as f64, size);
-    let (cx, cy) = (cx + origin.0, cy + origin.1);
-    let mut pts = [[0.0; 2]; 6];
-    for (i, p) in pts.iter_mut().enumerate() {
-        let a = (std::f64::consts::PI / 180.0) * (60.0 * i as f64 - 30.0);
-        *p = [cx + size * a.cos(), cy + size * a.sin()];
-    }
-    pts
+/// The `HexLattice` a resolved [`Hexbin`] was binned on — reconstructed
+/// (not stored on `Hexbin` itself) since `width`/`origin` already pin it
+/// down exactly; used by `super::overlay`'s hexbin renderer to get each
+/// cell's centre (`StatBinHex::compute_group`'s `x`/`y` would also give
+/// this, but we don't carry those columns through `Hexbin::cells`).
+pub(super) fn lattice_of(hb: &Hexbin) -> HexLattice {
+    HexLattice::new(hb.width, hb.width, hb.origin)
 }
 
 /// Raw (pre-projection) points to bin: `::LAT`/`::LON` pairs, else the
@@ -215,30 +189,89 @@ pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
         let span = if span > 0.0 { span } else { 1_000.0 };
         super::legend::nice_floor(span / 40.0).max(f64::MIN_POSITIVE)
     });
-    let size = width / SQRT3;
     let origin = (extent.x0, extent.y0);
     let measure = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
-    let mut cells: BTreeMap<(i32, i32), CellAgg> = BTreeMap::new();
-    for (row, raw, p) in &projected {
-        let (q, r) = point_to_hex(p[0] - origin.0, p[1] - origin.1, size);
-        let v = measure.and_then(|m| m.values.get(*row)).and_then(cell_num);
-        let e = cells.entry((r, q)).or_default();
-        e.n += 1;
-        if let Some(v) = v {
-            e.sum += v;
-        }
-        e.a_sum += raw[0];
-        e.b_sum += raw[1];
-    }
     let has_measure = measure.is_some_and(|m| m.values.iter().any(|v| cell_num(v).is_some()));
-    // re-key to (q, r) for the public contract (data-x writes "q,r")
-    let cells: Vec<((i32, i32), CellAgg)> = cells
-        .into_iter()
-        .map(|((r, q), agg)| ((q, r), agg))
-        .collect();
+
+    // D7/the ggplot-rs plan's C1 §4: a fixed lattice (`binwidth` *and*
+    // `origin` both given), so zoom/export never re-bin. A `weight` column
+    // (D8) makes `compute_group`'s `count` output come out as Σ measure
+    // when there's one, else a plain point count (weight defaults to 1 per
+    // point when the column is absent) — this consumer's own "sum of the
+    // measure, else count of points" rule, for free.
+    let mut df = DataFrame::new();
+    df.add_column(
+        "x".to_string(),
+        projected
+            .iter()
+            .map(|(_, _, p)| Value::Float(p[0]))
+            .collect(),
+    );
+    df.add_column(
+        "y".to_string(),
+        projected
+            .iter()
+            .map(|(_, _, p)| Value::Float(p[1]))
+            .collect(),
+    );
+    if let Some(m) = measure {
+        df.add_column(
+            "weight".to_string(),
+            projected
+                .iter()
+                .map(|(row, _, _)| {
+                    m.values
+                        .get(*row)
+                        .and_then(cell_num)
+                        .map(Value::Float)
+                        .unwrap_or(Value::Na)
+                })
+                .collect(),
+        );
+    }
+    let bins = StatBinHex::new()
+        .binwidth(width, width)
+        .origin(origin.0, origin.1)
+        .compute_group(&df, &ScaleSet::new());
+
+    // The per-cell mean *raw* position, for `label_of`'s "around …" text —
+    // `StatBinHex` doesn't compute this (it's specific to this consumer's
+    // label): `locate()` each raw point on the same lattice it used.
+    let lattice = HexLattice::new(width, width, origin);
+    let mut means: BTreeMap<(i64, i64), (f64, f64)> = BTreeMap::new();
+    for (_, raw, p) in &projected {
+        let (q, r) = lattice.locate(p[0], p[1]);
+        let e = means.entry((q, r)).or_insert((0.0, 0.0));
+        e.0 += raw[0];
+        e.1 += raw[1];
+    }
+
+    let col = |name: &str| bins.column(name).unwrap_or(&[]);
+    let (qs, rs, counts, ns) = (col("q"), col("r"), col("count"), col("n"));
+    let n_rows = bins.nrows();
+    let mut cells: Vec<((i32, i32), CellAgg)> = Vec::with_capacity(n_rows);
+    for i in 0..n_rows {
+        let q = qs[i].as_f64().unwrap_or(0.0) as i32;
+        let r = rs[i].as_f64().unwrap_or(0.0) as i32;
+        let sum = counts[i].as_f64().unwrap_or(0.0);
+        let n = ns[i].as_f64().unwrap_or(0.0) as u64;
+        let (a_sum, b_sum) = means
+            .get(&(q as i64, r as i64))
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        cells.push((
+            (q, r),
+            CellAgg {
+                n,
+                sum,
+                a_sum,
+                b_sum,
+            },
+        ));
+    }
+
     Some(Hexbin {
         width,
-        size,
         origin,
         cells,
         n_points: projected.len(),
@@ -368,12 +401,15 @@ mod tests {
             e.add([10.0, 65.0]);
             e
         });
-        let size = 50_000.0; // an arbitrary circumradius, metres
+        // One lattice, origin (0,0): `locate()` finds whichever cell each
+        // projected point falls in, so the two latitudes don't need to be
+        // (and in general won't be) in the same cell.
+        let lattice = HexLattice::new(50_000.0, 50_000.0, (0.0, 0.0));
         let at = |lon: f64, lat: f64| -> f64 {
             let p = proj.forward([lon, lat]).unwrap();
-            let (q, r) = point_to_hex(p[0], p[1], size);
-            let verts = ring(q, r, size, (0.0, 0.0));
-            area(&verts.map(|[x, y]| (x, y)))
+            let (q, r) = lattice.locate(p[0], p[1]);
+            let verts = lattice.vertices(q, r);
+            area(&verts)
         };
         let a0 = at(0.0, 0.0);
         let a60 = at(0.0, 60.0);
