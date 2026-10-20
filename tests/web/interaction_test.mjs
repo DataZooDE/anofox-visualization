@@ -111,4 +111,19 @@ assert.equal(seriesFocusable(two(2001)), false, "a dense chart keeps the plain h
   assert.equal(isRuleMark(elWith({ "data-geom": "point" })), false, "an ordinary point");
 }
 
+// #330: ::ROWSELECT must bind on a key column whose rendered text happens
+// to look numeric (an id like "791", even cast to VARCHAR) — only the
+// cell's right-alignment cares about that, never whether a click sets
+// getvariable('<first column>'). Regression: a `.numeric` gate on this once
+// silently dropped the click handler (and so the binding) with no warning.
+{
+  const { rowSelectable } = new Function(`${grab("rowSelectable")}\nreturn { rowSelectable };`)();
+  assert.equal(rowSelectable("single", "picked"), true, "a plain text key column");
+  assert.equal(rowSelectable("single", "picked"), true, "a numeric-looking key column is still selectable");
+  assert.equal(rowSelectable("multi", "picked"), true);
+  assert.equal(rowSelectable("none", "picked"), false, "a table that never opted in");
+  assert.equal(rowSelectable("single", null), false, "no key column at all");
+  assert.equal(rowSelectable("single", undefined), false);
+}
+
 console.log("interaction_test: ok");

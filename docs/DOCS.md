@@ -2209,6 +2209,16 @@ SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
 WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
 ```
 
+The click-to-variable binding fires regardless of whether the first column's
+*rendered text* happens to look numeric (an id like `791`, even cast to
+`VARCHAR`) — only the cell's right-alignment cares about that. The variable
+it writes is named after that table's first column, never chosen by you:
+two `::ROWSELECT` tables that end up with the same first-column name (even
+in different `::TAB`s) silently share one selection — a click in either
+toggles both, which looks like nothing happened. `dashboard --check` flags
+this (`interaction/rowselect-shared-name`); alias one table's first column
+to a different name if the sharing isn't intended.
+
 #### Named chart selections (`::SELECT_AS`)
 
 By default every chart click writes the one shared `selected`. A
