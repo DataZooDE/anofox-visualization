@@ -1943,7 +1943,12 @@ fn is_positional_key(k: &str) -> bool {
 /// The row key a `{{name}}` placeholder reads, as `markdownWithValues` in
 /// `web/app.js` resolves it: the statement's own `"md:name"` column, else a
 /// `*`-expanded column of that name — never a positional `c{i}` key (#138).
-fn md_column<'a>(keys: impl Iterator<Item = &'a String> + Clone, name: &str) -> Option<&'a String> {
+/// `pub(crate)`: the headless/served renderer (`crate::dashboard`) fills the
+/// same placeholders from the same row, so it shares this lookup.
+pub(crate) fn md_column<'a>(
+    keys: impl Iterator<Item = &'a String> + Clone,
+    name: &str,
+) -> Option<&'a String> {
     let pre = crate::sql::MD_PREFIX;
     keys.clone()
         .find(|k| {

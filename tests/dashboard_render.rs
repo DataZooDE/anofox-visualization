@@ -737,3 +737,89 @@ fn view_group_col_does_not_leak_into_a_later_plain_panel() {
         "the view group's ::COL width must not leak past ::ENDVIEW: {w_script}"
     );
 }
+
+// #327: a headless/served `::TABLE`'s `::LINK` column used to print its
+// unfilled template (`?v.supplier={value}`) as plain text instead of a
+// working link — `fill_link_row` (src/dashboard.rs) never ran outside the
+// browser.
+#[test]
+fn table_link_cell_is_filled_and_linked_not_printed_literally() {
+    struct LinkMock;
+    impl DataProvider for LinkMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("Highlight") {
+                return Ok(vec![
+                    ("Supplier".into(), s(&["Castings", "Seals"])),
+                    (
+                        "Highlight".into(),
+                        s(&["?v.supplier={value}", "?v.supplier={value}"]),
+                    ),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "SELECT supplier AS \"Supplier\" ::TABLE, \
+                   '?v.supplier={value}' AS \"Highlight\" ::LINK \
+                   FROM t;";
+    let mut db = LinkMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        !svg.contains("{value}"),
+        "the LINK template must be filled per row, not shown literally: {svg}"
+    );
+    assert!(
+        svg.contains("<a href=\"?v.supplier=Castings\">") && svg.contains("Open \u{2192}"),
+        "each row's cell must become a working, labelled link: {svg}"
+    );
+    assert!(
+        svg.contains("<a href=\"?v.supplier=Seals\">"),
+        "a 2nd row must fill its own value, not the 1st row's: {svg}"
+    );
+}
+
+// #327: a headless/served `::MARKDOWN` panel's `{{col}}` placeholders used
+// to print literally (`{{z}}`) instead of the statement's own row — the
+// `markdown_fill`/`md_column` substitution only ran in the browser.
+// `\bar L` (raw TeX outside `{{…}}`) staying as written is the existing,
+// tested, intentional headless behaviour (no KaTeX without a script) — not
+// part of this bug.
+#[test]
+fn markdown_placeholders_are_filled_not_printed_literally() {
+    struct MdMock;
+    impl DataProvider for MdMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("md:z") {
+                return Ok(vec![
+                    (
+                        "c0".into(),
+                        s(&["z is the service-level factor ({{z}} at {{lvl}}); adds \u{20ac}{{extra}}k"]),
+                    ),
+                    ("md:z".into(), f(&[1.64])),
+                    ("md:lvl".into(), s(&["95 %"])),
+                    ("md:extra".into(), f(&[18.2])),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "SELECT 'z is the service-level factor ({{z}} at {{lvl}}); adds \u{20ac}{{extra}}k' ::MARKDOWN, \
+                   1.64 AS z, '95 %' AS lvl, 18.2 AS extra \
+                   FROM t;";
+    let mut db = MdMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        !svg.contains("{{z}}") && !svg.contains("{{lvl}}") && !svg.contains("{{extra}}"),
+        "every {{{{col}}}} placeholder must be filled from the row, not shown literally: {svg}"
+    );
+    assert!(
+        svg.contains("1.64") && svg.contains("95 %") && svg.contains("18.2"),
+        "the filled values must appear: {svg}"
+    );
+}
