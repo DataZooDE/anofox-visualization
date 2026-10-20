@@ -669,10 +669,12 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_partial(tbl, kind := 'component')` | **term, x, partial_residual** (component), or **term, x_residual, y_residual** (added_variable) | one panel per term: component + residual (points, component line, loess — a binary / ≤ 3-level term gets jittered points and the group means instead) or added-variable (points + least-squares line through the origin, slope in the title) |
 | `anofox_plot_obs(tbl, kind := 'resid_fitted', label_top := 3)` | **fitted, residual**, row_id, std_residual, leverage, cooks_d, n_params | one diagnostic: `resid_fitted`, `qq`, `scale_location`, `leverage` (Cook's distance contours 0.5 and 1 from `n_params`, both signs in view), `cooks` (index plot, the 4/n line labelled, top rows labelled above their stems); the `label_top` largest-Cook's rows are labelled by `row_id` |
 | `anofox_plot_diagnostics(tbl, label_top := 3)` | as `obs` | the plot.lm 2×2 as one SVG (a ggplot-rs `PlotGrid`: root `data-grid="2 2"`, each sub-plot a nested `<svg data-panel="i">`; one legend when several models are compared) |
+| `anofox_plot_cv(tbl, x := NULL)` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period \| x**, id, y; or **fold_id**, train_start, train_end, test_start, test_end | one lane per fold, the train and test windows as bars along ds (or an integer period), coloured by split; a caption says the fold count, whether the test windows overlap or leave gaps, and how many series share the same folds. Series with identical folds are drawn once; up to 6 different ones get a panel per id, else an error. Width 640, height 260 |
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
+| `anofox_plot_checks(tbl, x := NULL, kind := NULL)` | **check_name, status, value**, lower_threshold, upper_threshold, identifier, message, run_ts \| ds, check_type, table_name, column_name | a data-quality check band (default): one panel per check (own x scale, sorted), the value as a dot coloured by status (fail red, warn amber, pass green, else muted) against the lower_threshold..upper_threshold acceptance band (light green), one lane per `identifier`; over several `run_ts` / `ds` values (or `kind := 'strip'`) a status strip instead, one lane per check, a dot per run. The status, check label, identifier and message are on hover; `x :=` names the time column (default `run_ts`, else `ds`) |
 | `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
-| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, partial_residual → partial, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
+| `anofox_plot(tbl)` | any of the above | picks the plot from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold with status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id / statistic+method → tests, kind \| severity with ds \| period → events. Errors name the contract version (`anofox_contract_version()` = `'1'`) |
 
 Besides these, the column macros `anofox_bar(x, y)`, `anofox_line(x, y)`,
 `anofox_scatter(x, y)`, `anofox_area(x, y)`, `anofox_xy(x, y, kind := …)`
@@ -787,9 +789,10 @@ to 1.00 (0.9952 reads "AUC 0.995").
   none matches, the closest one and what it misses — *…; closest: terms,
   missing estimate (did you mean \`estimat\`?)* — but only when the table has
   (or nearly has) a column that identifies that schema (\`term\` / \`estimate\`,
-  \`yhat\`, \`curve_type\`, \`metric\`, \`fitted\` / \`residual\`, \`partial_residual\`,
-  \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one (\`term\`,
-  \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
+  \`yhat\`, \`curve_type\`, \`metric\`, \`check_name\` / \`lower_threshold\` /
+  \`upper_threshold\`, \`fitted\` / \`residual\`, \`partial_residual\`,
+  \`fold_id\`, \`trend\` / \`remainder\`, \`p_value\`, \`ds\` / \`period\`) — a short one
+  (\`term\`, \`yhat\`, \`trend\`) only as itself or with a suffix (\`terms\`, \`yhat_1\`):
   \`team\` is no \`term\`. A shared generic name such as \`kind\`, \`value\`, \`x\`
   or \`y\` alone gives no hint;
 - a list where a number is read — *column \`estimate\` must be numeric, got
@@ -989,6 +992,38 @@ that are not in the rows are not drawn and reported as a render warning
 anofox-decide's outputs, through the SQL that makes them contract tables.
 `scripts/tabular_conformance.py` does the same for anofox-tabular, whose
 outputs need an adapter to a contract schema first.
+
+### Plotting anofox-tabular results
+
+[anofox-tabular](https://github.com/DataZooDE/anofox-tabular)'s suite check
+(`anofox_tab_run_checks`) and its single-check aggregate
+(`anofox_tab_agg_check`) already emit the `check` schema (`check_name`,
+`status`, `value`, `lower_threshold`, `upper_threshold`, …) as they come, so
+they plot without reshaping:
+
+```sql
+SELECT anofox_plot(t) FROM anofox_tab_run_checks('checks') t;
+```
+
+The other one-row checks (`null_rate`, `compliance`, `distinct_count`, …) use
+their own column names for the measure and its bounds, so name them in a
+subquery (the adapter `scripts/tabular_conformance.py` uses):
+
+```sql
+SELECT anofox_plot_checks(t) FROM (
+  SELECT 'customer present' AS check_name, status, null_rate AS value,
+         NULL::DOUBLE AS lower_threshold, threshold AS upper_threshold, message
+  FROM anofox_tab_null_rate('d', 'customer', 0.05)
+) t;
+```
+
+The time-aware checks (`metric_anomaly_iqr`, `rel_count_change`,
+`rolling_values_in_set`) read as `events` (`reference_date` → `ds`, `fail` /
+`warn` → `alarm` / `warning`, `message` → `label`) for a timeline, or as
+`check` (`reference_date` → `ds`) for a status strip over several runs. See
+`docs/plans/integration-contract.md` ("anofox-tabular producers") for the
+full adapter table, and `scripts/tabular_conformance.py` for every producer
+rendered end to end.
 
 ### Heatmaps
 
@@ -1473,8 +1508,20 @@ show them; selection and filtering keep using the raw values.
 ### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
-`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. The toolbar also has
-an **auto-refresh** interval.
+`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. Without a
+`::CATEGORY`, several columns of the **same** chart family (e.g.
+`events::LINECHART, failures::LINECHART`, or `events::BARCHART,
+failures::BARCHART`) get a real legend, one entry per column, named by the
+column's own header (an `AS alias` wins; a bare column name otherwise) — not
+a positional `c1`, `c2`, … placeholder. A **mixed** combo (a different-kind
+overlay on a base chart, e.g. `sessions::BARCHART, revenue::LINECHART`) keeps
+the base in the brand colour with no legend; each overlay just takes the next
+palette colour so it never disappears into the base. For a legend that also
+dodges (bars side by side instead of overlaid) or needs a title other than
+the column header, pivot to the long form instead: one shared measure column
+plus a `::CATEGORY` naming the series.
+
+The toolbar also has an **auto-refresh** interval.
 
 ### Themes, dark mode, branding and locale
 
@@ -1985,7 +2032,23 @@ Clicking a channel narrows those panels to that channel; clicking empty space
 clears. See the **"Cross-filter"** sample. (Browser builder / `serve` only.)
 
 **Selecting table rows** is opt-in per table, with a `::ROWSELECT` directive
-before it (tables without one are not clickable):
+before it (tables without one are not clickable). Like `::COL`/`::HEIGHT`,
+`::ROWSELECT` (and `::TOTALS`, `::COLGROUP`, `::FLAG`, `::HIGHLIGHT`,
+`::SUBTOTAL`, `::SELECT_AS`, `::DRILL`, `::EMPTY` — every `[layout]` role
+described as "next table's …" / "next panel's …") is its own **preceding**
+statement, never a column on the table/chart's own `SELECT`:
+
+```sql skip
+-- Wrong: looks like a column, passes `--check` clean, but 'single' and
+-- 'none' render as literal extra table columns and the row click does
+-- nothing (`dashboard --check --strict` now flags this: `layout/next-panel`).
+SELECT id ::TABLE, name, 'single'::ROWSELECT, 'none'::TOTALS FROM t;
+
+-- Right: each directive is its own statement, read for the table that follows.
+SELECT 'single'::ROWSELECT;
+SELECT 'none'::TOTALS;
+SELECT id ::TABLE, name FROM t;
+```
 
 | `SELECT … ::ROWSELECT;` | A click on a row… |
 |---|---|
@@ -2385,7 +2448,11 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
 - **Casts are read from the main `SELECT` list** — the first `SELECT` at
   bracket depth 0. A leading `WITH` CTE list is fine
   (`WITH s AS (…) SELECT week::XAXIS, n::LINECHART FROM s`); casts inside a CTE
-  body or subquery are ordinary SQL.
+  body or subquery are ordinary SQL. A top-level `UNION`/`UNION ALL`/
+  `INTERSECT`/`EXCEPT` reads as one SELECT list: the **first** branch's roles
+  decide the panel's shape, and every later branch's own `::ROLE` casts are
+  stripped the same way (repeat them or not — a bare column just takes the
+  same position).
 - **A `::ROLE` may follow an `AS` alias on any column.** The alias is replaced by
   the internal `c{i}` name. For a measure it becomes the legend name of a combo
   chart; for an input it *is* the DuckDB variable name

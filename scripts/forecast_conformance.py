@@ -68,8 +68,8 @@ CREATE TABLE fc AS SELECT * FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '
 # The dated conformal API (main) calibrates per group into a table.
 SETUP_DATED = "CREATE TABLE cal AS SELECT * FROM ts_conformal_calibrate('btc', id, actual, forecast, params := {'alpha': 0.1});"
 
-PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS, DECOMP = (
-    "prediction", "summary", "terms", "obs", "curve", "test", "events", "decomposition")
+PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS, CV, DECOMP = (
+    "prediction", "summary", "terms", "obs", "curve", "test", "events", "cv", "decomposition")
 SPECIFIC = {
     PRED: "anofox_plot_prediction(t)",
     SUMMARY: "anofox_plot_summary(t)",
@@ -78,6 +78,7 @@ SPECIFIC = {
     CURVE: "anofox_plot_curve(t)",
     TEST: "anofox_plot_tests(t)",
     EVENTS: "anofox_plot_events(t)",
+    CV: "anofox_plot_cv(t)",
     DECOMP: "anofox_plot_decomposition(t)",
 }
 
@@ -174,6 +175,19 @@ def producers(dated: bool) -> dict[str, dict]:
     add("ts_forecast_explain_by", DECOMP,
         "(SELECT * FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A')",
         "direct")
+
+    # ── cross-validation folds → cv (provisional) ───────────────────────────
+    add("ts_cv_folds_by", CV, "ts_cv_folds_by('s', id, ds, y, 3, 7, MAP{})", "direct")
+    # training ends of Feb 20 / Feb 24 / Feb 28 give overlapping test windows.
+    add("ts_cv_split_by", CV,
+        "ts_cv_split_by('s', id, ds, y, ['2024-02-20'::TIMESTAMP, '2024-02-24'::TIMESTAMP, "
+        "'2024-02-28'::TIMESTAMP], 7, MAP{})", "direct")
+    add("ts_cv_split_folds_by", CV,
+        "ts_cv_split_folds_by('s', id, ds, ['2024-02-20'::TIMESTAMP, '2024-03-01'::TIMESTAMP], 7, '1d', MAP{})",
+        "direct")
+    add("ts_cv_split_index_by", CV,
+        "(SELECT group_col AS id, date_col AS ds, fold_id, split FROM "
+        "ts_cv_split_index_by('s', id, ds, ['2024-02-20'::TIMESTAMP, '2024-03-01'::TIMESTAMP], 7, '1d', MAP{}))")
 
     # ── in-sample fit → obs (the plot.lm 2×2) ───────────────────────────────
     add("ts_forecast_inspect_by", OBS,
@@ -277,9 +291,8 @@ OUT_OF_SCOPE = {
         "ts_drop_constant_by", "ts_drop_edge_zeros_by", "ts_drop_gappy_by", "ts_drop_leading_zeros_by",
         "ts_drop_short_by", "ts_drop_trailing_zeros_by", "ts_drop_zeros_by", "ts_diff_by",
         "ts_fill_forward_operator")},
-    **{f: "cross-validation split (the folds, not a result; plotted through ts_cv_forecast_by)" for f in (
-        "ts_cv_folds_by", "ts_cv_split_by", "ts_cv_split_folds_by", "ts_cv_split_index_by", "ts_cv_hydrate_by",
-        "ts_check_leakage")},
+    **{f: "feature hydration / leakage check (not a fold layout)" for f in (
+        "ts_cv_hydrate_by", "ts_check_leakage")},
     **{f: "key / timestamp validation and hierarchy helpers" for f in (
         "ts_validate_timestamps_by", "ts_validate_timestamps_summary_by", "ts_validate_separator",
         "ts_combine_keys", "ts_split_keys", "ts_aggregate_hierarchy")},
@@ -317,6 +330,8 @@ EXTRA = {
                        f"SELECT * FROM ts_forecast_by('s', id, ds, y, 'Theta', 14, '1d', {FC}) UNION ALL BY NAME "
                        f"SELECT * FROM ts_forecast_by('s', id, ds, y, 'SeasonalNaive', 14, '1d', {FC})) p WHERE id = 'B'",
     "forecast_per_series": f"SELECT id, anofox_plot_prediction(f) FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', {FC}) f "
+                           "GROUP BY id ORDER BY id",
+    "cv_folds_per_series": "SELECT id, anofox_plot_cv(f) FROM ts_cv_folds_by('s', id, ds, y, 3, 7, MAP{}) f "
                            "GROUP BY id ORDER BY id",
     "backtest_two_models": "SELECT anofox_plot_prediction(b) FROM bt b WHERE id = 'A'",
     "changepoints_over_history": "SELECT anofox_plot_prediction(p, events := (SELECT list(e) FROM ("

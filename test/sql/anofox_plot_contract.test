@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_decomposition/_events, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_decomposition/_events/_checks, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -285,6 +285,23 @@ SELECT anofox_plot_curve(c) LIKE '%AUC 0.995%' FROM (VALUES ('roc', 0.0, 0.0, 0.
 ----
 true
 
+# ── cv fold timeline (provisional, #189) ──────────────────────────────────────
+# One lane per fold_id: train/test windows as bars along an integer period.
+query II
+SELECT anofox_plot_cv(f) LIKE '<svg%>fold 1</text>%', anofox_plot(f) LIKE '<svg%' FROM (
+  SELECT 1 AS fold_id, 'train' AS split, i AS period FROM range(10) r(i)
+  UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f;
+----
+true	true
+
+# The span form (fold_id, train_start/train_end, test_start/test_end).
+query I
+SELECT anofox_plot_cv(f) LIKE '<svg%1 fold%' FROM (VALUES
+  (1, '2024-01-01'::TIMESTAMP, '2024-02-20'::TIMESTAMP, '2024-02-21'::TIMESTAMP, '2024-02-27'::TIMESTAMP)
+) f(fold_id, train_start, train_end, test_start, test_end);
+----
+true
+
 # ── events and integer periods (#66) ─────────────────────────────────────────
 statement ok
 CREATE TABLE alarms AS SELECT * FROM (VALUES
@@ -328,6 +345,40 @@ statement error
 SELECT anofox_plot_events(e) FROM (VALUES ('x', 'alarm')) e(kind, severity);
 ----
 needs an event time
+
+# ── checks (#182) ────────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE checks3 AS SELECT * FROM (VALUES
+  ('rows', 'pass', 120.0, 100.0, NULL),
+  ('customer present', 'fail', 0.08, NULL, 0.05),
+  ('status known', 'pass', 1.0, 1.0, NULL)
+) t(check_name, status, value, lower_threshold, upper_threshold);
+
+# One panel per check, a dot coloured by status against the acceptance band.
+query II
+SELECT anofox_plot_checks(c) LIKE '<svg%>customer present</text>%', anofox_plot(c) LIKE '<svg%'
+FROM checks3 c;
+----
+true	true
+
+statement ok
+CREATE TABLE checks_strip AS SELECT * FROM (VALUES
+  ('rows', DATE '2026-10-01', 'pass', 120.0),
+  ('rows', DATE '2026-10-02', 'warn', 90.0),
+  ('customer present', DATE '2026-10-01', 'pass', 0.01),
+  ('customer present', DATE '2026-10-02', 'fail', 0.08)
+) t(check_name, ds, status, value);
+
+# Several ds values: a status strip, one lane per check.
+query I
+SELECT anofox_plot_checks(c) LIKE '<svg%>rows</text>%' FROM checks_strip c;
+----
+true
+
+statement error
+SELECT anofox_plot_checks(c) FROM (VALUES ('a', 'pass')) c(check_name, status);
+----
+needs column(s) value
 
 # ── decomposition (#188, provisional) ────────────────────────────────────────
 statement ok

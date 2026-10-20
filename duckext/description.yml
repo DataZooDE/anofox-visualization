@@ -9,7 +9,7 @@ extension:
   name: anofox_visualization
   description: Render charts and dashboards straight from SQL — the ggplot-rs grammar of graphics, emitted as SVG.
   # Keep in sync with [workspace.package] version in the root Cargo.toml.
-  version: 2026.10.19
+  version: 2026.10.20
   language: Rust
   build: cmake
   requires_toolchains: rust
