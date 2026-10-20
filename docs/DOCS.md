@@ -1473,8 +1473,20 @@ show them; selection and filtering keep using the raw values.
 ### Combo charts, auto-refresh
 
 A panel with **multiple measure columns** overlays them as combo layers, e.g.
-`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. The toolbar also has
-an **auto-refresh** interval.
+`SELECT week::XAXIS, sessions::BARCHART, revenue::LINECHART`. Without a
+`::CATEGORY`, several columns of the **same** chart family (e.g.
+`events::LINECHART, failures::LINECHART`, or `events::BARCHART,
+failures::BARCHART`) get a real legend, one entry per column, named by the
+column's own header (an `AS alias` wins; a bare column name otherwise) — not
+a positional `c1`, `c2`, … placeholder. A **mixed** combo (a different-kind
+overlay on a base chart, e.g. `sessions::BARCHART, revenue::LINECHART`) keeps
+the base in the brand colour with no legend; each overlay just takes the next
+palette colour so it never disappears into the base. For a legend that also
+dodges (bars side by side instead of overlaid) or needs a title other than
+the column header, pivot to the long form instead: one shared measure column
+plus a `::CATEGORY` naming the series.
+
+The toolbar also has an **auto-refresh** interval.
 
 ### Themes, dark mode, branding and locale
 

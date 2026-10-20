@@ -2825,33 +2825,55 @@ fn cartesian(
         data.push(("dlab".to_string(), dl));
     }
 
+    // Several measure columns of the same bar family (e.g. two ::BARCHART
+    // columns, no overlay of a different kind): still a legend-worthy combo
+    // like the non-bar case below, just coloured through `fill` — a bar's
+    // own colour is its fill, not its stroke (#292). A *mixed* combo (bars
+    // with a line/area/point overlay) keeps the plain "overlay takes the
+    // next palette colour, no legend" treatment just below instead.
+    let bar_family = |k: Kind| {
+        matches!(
+            k,
+            Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
+        )
+    };
+    let pure_bar_combo = bar
+        && extras
+            .iter()
+            .all(|c| matches!(c.role, Role::Value(k) if bar_family(k)));
+
     // Multi-measure combo with no explicit CATEGORY (e.g. observed+trend,
     // actual+predicted, or a line with a changepoint-point overlay): colour each
     // measure distinctly and name it in the legend by its column header, so the
     // series are separable. The default single-series theming would otherwise
     // paint every measure the same brand colour.
-    let combo_names: Vec<String> = if category.is_none() && !extras.is_empty() && !bar {
-        let n = value.values.len();
-        let name_of = |c: &Column, i: usize| {
-            if c.name.is_empty() {
-                format!("series {}", i + 1)
-            } else {
-                c.name.clone()
+    let combo_names: Vec<String> =
+        if category.is_none() && !extras.is_empty() && (!bar || pure_bar_combo) {
+            let n = value.values.len();
+            let name_of = |c: &Column, i: usize| {
+                if c.name.is_empty() {
+                    format!("series {}", i + 1)
+                } else {
+                    c.name.clone()
+                }
+            };
+            let mut names = vec![name_of(value, 0)];
+            for ev in &extras {
+                let idx = names.len();
+                names.push(name_of(ev, idx));
             }
+            for (k, nm) in names.iter().enumerate() {
+                data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
+            }
+            aes = if pure_bar_combo {
+                aes.fill("__s0")
+            } else {
+                aes.color("__s0")
+            };
+            names
+        } else {
+            Vec::new()
         };
-        let mut names = vec![name_of(value, 0)];
-        for ev in &extras {
-            let idx = names.len();
-            names.push(name_of(ev, idx));
-        }
-        for (k, nm) in names.iter().enumerate() {
-            data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
-        }
-        aes = aes.color("__s0");
-        names
-    } else {
-        Vec::new()
-    };
 
     // Single-series marks take the brand colour (geoms added with explicit
     // `geom_*_with` styles below set it themselves; mapped colours win).
@@ -3279,7 +3301,12 @@ fn cartesian(
             let yk = format!("y{}", k + 2);
             let mut lay = Aes::new().x("x").y(&yk);
             if !combo_names.is_empty() {
-                lay = lay.color(&format!("__s{}", k + 1));
+                let s = format!("__s{}", k + 1);
+                lay = if pure_bar_combo {
+                    lay.fill(&s)
+                } else {
+                    lay.color(&s)
+                };
             }
             // A bar-based combo keeps its bars in the brand colour (no combo
             // legend): each overlay takes the next palette colour, so a line
@@ -3492,12 +3519,21 @@ fn cartesian(
     }
     if !combo_names.is_empty() {
         // Combo measures → distinct palette colours in column order, keyed by
-        // column header.
-        plot = plot.scale_color(
-            ScaleColorDiscrete::new(Aesthetic::Color)
-                .with_levels(combo_names.clone())
-                .with_palette(dz_palette(o)),
-        );
+        // column header. A pure bar combo is coloured through `fill` (a
+        // bar's own colour), everything else through `color` (#292).
+        plot = if pure_bar_combo {
+            plot.scale_fill(
+                ScaleColorDiscrete::new(Aesthetic::Fill)
+                    .with_levels(combo_names.clone())
+                    .with_palette(dz_palette(o)),
+            )
+        } else {
+            plot.scale_color(
+                ScaleColorDiscrete::new(Aesthetic::Color)
+                    .with_levels(combo_names.clone())
+                    .with_palette(dz_palette(o)),
+            )
+        };
     }
     if bar && category.is_none() && combo_names.is_empty() {
         // A plain bar chart is one series: a legend of one says nothing.
