@@ -717,6 +717,57 @@ CONNECT/DISCONNECT count), the M9 extension (H-1, H-2) and M9b (H-1's hold
 lifting on an explicit Run); `tests/web/assist_test.mjs` (M-1's
 `classifyStatement`/`proposalReaders`/`gate` wording); the widened
 `assist_ownopts_test.mjs`.
+
+**sec-review-272-rereview (fix round 2, PR #272): the first round's own
+fixes left a C-1/H-1 exit-boundary race.** H-1R (High): a render queued by
+the proposal's own `::RELOAD` timer (or any other implicit trigger firing
+mid-render) could still be in flight when Discard or "Apply, don't run"
+set `preview = null` — its later statements (`ATTACH`, `SET`, …) then
+reached `pageConn()` because `runSqlInner` read the live, mutable
+`preview`, not the preview this particular run had actually started
+under. Fixed by capturing the preview a run started under once,
+synchronously, in `run()` (`const pv = preview`, before anything can race
+it), threading it into `runOnce(fresh, pv)`, and dispatching on that
+(`runPreviewToken`, set at `runOnce`'s own first line) in `runSqlInner`
+instead of the live global — a run tied to a preview can now never fall
+through to the page database, however the live state changes underneath
+it. `previewEnter`/`previewExit` also clear `dpTimer` and `runQueued`, and
+set a `previewExiting` flag `run()` honours, synchronously before their
+first await (defence in depth for a run that was only *queued*, not yet
+in flight). M-2: the "Check" button ran the held, unconfirmed SQL on the
+page database too (`scratchRunner(pageDb(), …)`) — same promise as Run,
+same hold: `#lint-run` is now disabled/retitled alongside `#refresh` in
+`previewExit({hold})`/`clearApplyHold()`, and `runLint()` itself refuses
+outright while `applyHold` is set (defence in depth). L-3: `setViewParam`
+was missing the `if (preview) return;` guard its siblings
+(`setTabParam`/`syncUrlState`) already had, so a `::VIEW` button clicked
+during the preview wrote a model-computed label into the address bar
+(and `shareLink()` would carry it into a link); `dpView`/`dpViewDefault`
+were also missing from `dashStateSave`/`dashStateRestore`, so the
+preview's view choices leaked into the page's next render. L-4: the M-1
+target naming could be spoofed with a quoted identifier
+(`AS "TO 'decoy.csv'"`) or a literal's own content (`' TO ''x'' '`)
+sitting where the `ATTACH`/`COPY` target regex looked; `attachTarget`/
+`copyTarget` now locate the target's position in a length-preserving
+mask (`maskForTargets`, `web/assist.js`) that blanks every quoted
+identifier, comment and literal interior first, then re-read the real
+text from the *original* string at that same offset — a spoof has
+nothing left to hide behind. `ATTACH OR REPLACE` is also recognised, and
+an unrecognised target says so in plain words instead of repeating the
+keyword. Info-4: a second Send during an active preview closed the *new*
+session instead of the old one (L-1 regression) — `enterPreview()` now
+exits any active preview first, before the new session is even created.
+Info-5: Ctrl+Enter during a preview unconditionally cleared `applyHold`,
+so held "Apply, don't run" → a new Send → Ctrl+Enter → Discard ran the
+editor's still-held SQL on the page database; both `clearApplyHold()`
+call sites now check `!preview` first. Info-6: the hold is in-memory only
+(a reload or an opened Save/Share link runs the held SQL like any other
+dashboard) — documented in the "Not run yet" card's own text. Tests:
+`scripts/assist-e2e.mjs`'s race-condition case (Discard and "Apply, don't
+run" against a `::RELOAD` + slow statement + `ATTACH`/`SET` proposal, the
+reviewer's own probe template), the M9 Check-under-hold case, a `::VIEW`-
+during-preview URL assertion, and `tests/web/assist_test.mjs`'s L-4 spoof
+cases.
 | **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |

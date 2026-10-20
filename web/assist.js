@@ -228,28 +228,66 @@ export { splitStatements };
 function code(sql) {
   return String(sql).replace(LIT_OR_COMMENT, (m) => (m[0] === '"' ? m : /^--|^\/\*/.test(m) ? " " : "''"));
 }
-// Comments blanked, literals left exactly as written — unlike code(), which
-// empties them too. Used only to name a class-3 statement's target (M-1:
-// the Apply dialog), never for classification itself.
-function stripCommentsKeepLiterals(sql) {
-  return String(sql).replace(LIT_OR_COMMENT, (m) => (/^--|^\/\*/.test(m) ? " " : m));
-}
 // classifyStatement's own w0, exposed so a refused statement (gate()) can
 // carry its keyword without re-deriving the same tokenisation (M-1).
 export function firstKeyword(sql) {
   const c = code(sql).trim().replace(/^\(+\s*/, "");
   return c.toUpperCase().split(/[^A-Z0-9_]+/).filter(Boolean)[0] || "";
 }
-// ATTACH's database path / COPY's "TO" target, read from the original text
-// (code() would have emptied the literal) — named in the Apply dialog's
-// reason (M-1) and in proposalReaders, instead of the bare keyword alone.
+// L-4 (sec-review-272-rereview): a length-preserving mask of `sql` — every
+// comment and quoted identifier ("…") is blanked ENTIRELY (same length),
+// and every string literal's INTERIOR is blanked too, but its own
+// delimiters are kept, so a regex run against this mask can still see
+// "a real top-level string literal starts here" without ever being misled
+// by "TO '…'"-shaped text sitting inside a quoted *identifier* (a column
+// alias such as `AS "TO 'decoy.csv'"`) or inside a literal's own CONTENT
+// (`' TO ''x'' '`) — both of which attachTarget/copyTarget used to read as
+// the real target, because stripCommentsKeepLiterals() left them exactly
+// as written. Positions line up 1:1 with the original, so a match's
+// offset in the mask is the same offset in `sql`.
+function maskForTargets(sql) {
+  const s = String(sql);
+  const fill = (n) => "x".repeat(Math.max(0, n));
+  let out = "";
+  let last = 0;
+  for (const m of s.matchAll(LIT_OR_COMMENT)) {
+    const t = m[0];
+    out += s.slice(last, m.index);
+    if (t[0] === '"' || /^--|^\/\*/.test(t)) {
+      out += " ".repeat(t.length); // a quoted identifier or a comment: never a target literal
+    } else if (/^[Ee]'/.test(t)) {
+      out += t.slice(0, 2) + fill(t.length - 3) + t.slice(-1); // E'…'
+    } else if (t[0] === "$") {
+      const tagLen = t.indexOf("$", 1) + 1; // the opening $tag$'s own length
+      out += t.slice(0, tagLen) + fill(t.length - 2 * tagLen) + t.slice(-tagLen);
+    } else {
+      out += t[0] + fill(t.length - 2) + t.slice(-1); // a plain '…' literal: keep the quotes
+    }
+    last = m.index + t.length;
+  }
+  out += s.slice(last);
+  return out;
+}
+// `re` must match ending exactly on a literal's opening `'` (on the MASK,
+// never the original) — findTarget() then re-reads the literal from the
+// ORIGINAL text at that same offset (so '' / backslash escapes are
+// resolved from the real content, not from filler).
+function findTarget(sql, re) {
+  const s = String(sql);
+  const m = re.exec(maskForTargets(s));
+  if (!m) return null;
+  const at = m.index + m[0].length - 1; // the opening ' itself
+  const lit = /^'((?:[^'\\]|\\.|'')*)'/.exec(s.slice(at));
+  return lit ? lit[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+}
+// ATTACH's database path / COPY's "TO" target — named in the Apply
+// dialog's reason (M-1) and in proposalReaders, instead of the bare
+// keyword alone.
 function attachTarget(sql) {
-  const m = /\bATTACH\s+(?:DATABASE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?'((?:[^'\\]|\\.|'')*)'/i.exec(stripCommentsKeepLiterals(sql));
-  return m ? m[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+  return findTarget(sql, /\bATTACH\s+(?:DATABASE\s+)?(?:(?:IF\s+NOT\s+EXISTS|OR\s+REPLACE)\s+)?'/i);
 }
 function copyTarget(sql) {
-  const m = /\bTO\s+'((?:[^'\\]|\\.|'')*)'/i.exec(stripCommentsKeepLiterals(sql));
-  return m ? m[1].replace(/''/g, "'").replace(/\\(.)/g, "$1") : null;
+  return findTarget(sql, /\bTO\s+'/i);
 }
 // String literals ('…', E'…' with backslash escapes, $$…$$), quoted
 // identifiers and comments, in one pass (so a quote inside one is not the
@@ -395,13 +433,18 @@ export function classifyStatement(sql, opts) {
       return { cls: 2, kind: "use", reason: "" };
     case "ATTACH": {
       // M-1: named, not just the keyword — the Apply dialog's reason must
-      // say *what* it attaches, not repeat "ATTACH".
+      // say *what* it attaches, not repeat "ATTACH". L-4
+      // (sec-review-272-rereview): when no literal target can be found
+      // (a dynamic form such as `ATTACH getenv('x')`, not a spoof — see
+      // findTarget()/maskForTargets() above, which already can't be
+      // fooled by one), say so in plain words rather than just repeating
+      // the keyword the dialog already shows in <strong>.
       const t = attachTarget(sql);
-      return write("attach", t ? `attaches database '${t}'` : "ATTACH");
+      return write("attach", t ? `attaches database '${t}'` : "target not recognised: read the statement below");
     }
     case "COPY": {
       const t = copyTarget(sql);
-      return write("write", t ? `writes file '${t}'` : "COPY");
+      return write("write", t ? `writes file '${t}'` : "target not recognised: read the statement below");
     }
     case "INSTALL":
       return write("write", w1 ? `installs the '${w1.toLowerCase()}' extension` : "INSTALL");

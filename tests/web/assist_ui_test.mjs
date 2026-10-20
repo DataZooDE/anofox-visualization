@@ -392,14 +392,34 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   assert.equal([...appClean.matchAll(/conn = await db\.connect\(\)/g)].length, 1, "conn = await db.connect() occurs exactly once (boot)");
   assert.equal([...appClean.matchAll(/scratchRunner\(db\b/g)].length, 0, "scratchRunner(db, …) must always be scratchRunner(pageDb(), …)");
 }
-// G10: runSqlInner dispatches to preview.run before prepareSql(; guardPage(pageAdapter( exists.
+// G10: runSqlInner dispatches on its own captured preview token (not the
+// live, mutable `preview` — sec-review-272-rereview H-1R: a run queued
+// while a preview was active could still be in flight once Discard/"Apply,
+// don't run" had already nulled the global, and the live read let its
+// later statements fall through to pageConn()) before prepareSql(;
+// guardPage(pageAdapter( exists.
 {
   const body = grabFn(appJs, "runSqlInner");
   const bc = stripComments(body);
-  const previewIdx = bc.indexOf("if (preview) return preview.run(sql);");
+  const previewIdx = bc.indexOf("if (runPreviewToken) return runPreviewToken.run(sql);");
   const prepareIdx = bc.indexOf("prepareSql(");
-  assert.ok(previewIdx >= 0 && prepareIdx >= 0 && previewIdx < prepareIdx, "preview.run dispatch comes before prepareSql(");
+  assert.ok(previewIdx >= 0 && prepareIdx >= 0 && previewIdx < prepareIdx, "runPreviewToken dispatch comes before prepareSql(");
+  // The dispatch must never read the live, mutable global directly.
+  assert.doesNotMatch(bc, /if \(preview\) return preview\.run\(sql\);/, "runSqlInner must not dispatch on the live `preview` (H-1R)");
   assert.match(appClean, /guardPage\(pageAdapter\(/);
+}
+// G10b (sec-review-272-rereview H-1R): runPreviewToken is captured once,
+// synchronously, in run() — not re-read live inside runOnce() after an
+// await — and threaded into runOnce(fresh, pv), which assigns it before
+// its own first await.
+{
+  const runBody = stripComments(grabFn(appJs, "run"));
+  assert.match(runBody, /const pv = preview;/, "run() must capture `pv` synchronously, before anything async");
+  assert.match(runBody, /runOnce\(fresh, pv\)/, "run() must thread its captured `pv` into runOnce()");
+  const runOnceBody = stripComments(grabFn(appJs, "runOnce"));
+  const tokenIdx = runOnceBody.indexOf("runPreviewToken = pv;");
+  const firstAwaitIdx = runOnceBody.indexOf("await ");
+  assert.ok(tokenIdx >= 0 && firstAwaitIdx >= 0 && tokenIdx < firstAwaitIdx, "runOnce() must set runPreviewToken before its first await");
 }
 // G11: assist-ui.js has no literal `import(` and never mentions duckdb.
 {

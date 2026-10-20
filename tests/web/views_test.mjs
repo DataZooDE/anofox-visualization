@@ -154,7 +154,7 @@ assert.deepEqual(readViewSeed("?v.region=EU"), {}, "readViewSeed must ignore v.*
   const history = { replaceState: (_s, _t, u) => (globalThis.location.href = String(u)) };
   globalThis.history = history;
   const dpViewDefault = { yoy: "Lines" };
-  const { setViewParam } = new Function("dpViewDefault", `${grab("setViewParam")}\nreturn { setViewParam };`)(dpViewDefault);
+  const { setViewParam } = new Function("dpViewDefault", "preview", `${grab("setViewParam")}\nreturn { setViewParam };`)(dpViewDefault, false);
   setViewParam("yoy", "Bars"); // not the default: the key is set
   assert.ok(new URL(globalThis.location.href).searchParams.get("view.yoy") === "Bars");
   setViewParam("yoy", "Lines"); // the group's default: the key is removed
@@ -162,6 +162,24 @@ assert.deepEqual(readViewSeed("?v.region=EU"), {}, "readViewSeed must ignore v.*
   // ?tab=/other params are untouched either way (independent state, #214).
   assert.equal(new URL(globalThis.location.href).searchParams.get("tab"), "A");
   assert.equal(new URL(globalThis.location.href).searchParams.get("other"), "1");
+  delete globalThis.location;
+  delete globalThis.history;
+}
+
+// ---- L-3 (sec-review-272-rereview): setViewParam is a no-op during a
+// preview — #244's "the URL never carries the preview's state" (same
+// guard setTabParam/syncUrlState already have), so a model-chosen ::VIEW
+// label clicked before Apply can never reach the address bar (and so
+// shareLink() can never carry it into a link) ----
+{
+  globalThis.location = { href: "http://x.test/dash?tab=A" };
+  const history = { replaceState: (_s, _t, u) => (globalThis.location.href = String(u)) };
+  globalThis.history = history;
+  const dpViewDefault = { yoy: "Lines" };
+  const { setViewParam } = new Function("dpViewDefault", "preview", `${grab("setViewParam")}\nreturn { setViewParam };`)(dpViewDefault, true);
+  const before = globalThis.location.href;
+  setViewParam("yoy", "Bars");
+  assert.equal(globalThis.location.href, before, "setViewParam must not touch the URL while preview is set");
   delete globalThis.location;
   delete globalThis.history;
 }

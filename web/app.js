@@ -1406,7 +1406,28 @@ function clearApplyHold() {
   if (!applyHold) return;
   applyHold = false;
   if ($("refresh")) $("refresh").disabled = false;
+  // M-2 (sec-review-272-rereview): only re-enable Check the way wireLint()
+  // itself would have — a live/served backend hides #lint-run and never
+  // enables it at all.
+  if ($("lint-run") && backend !== "live" && !servedMode) {
+    $("lint-run").disabled = false;
+    $("lint-run").title = "";
+  }
 }
+// sec-review-272-rereview H-1R: the preview a run() call started under,
+// captured synchronously in run() (never read live mid-run — see
+// runSqlInner). Set at the very top of runOnce(), before its first await,
+// from the `pv` run() captured at ITS OWN call time; runOnce() invocations
+// are strictly sequential (run()'s own single-flight `runActive`/`runQueued`
+// guarantee no two are ever in flight together), so one module-level slot
+// is safe.
+let runPreviewToken = null;
+// sec-review-272-rereview H-1R: true synchronously from the very start of
+// previewExit() until it finishes (set and cleared before any await), so a
+// non-explicit run() call landing in that narrow window — the proposal's
+// own ::RELOAD timer ticking, a dropdown, the dark toggle, … — is dropped
+// instead of being queued to run once the exit completes.
+let previewExiting = false;
 
 // The earthquake map examples read the live USGS feed (GeoJSON) with DuckDB's
 // `spatial` extension. Load it and register the feed on first use (memoised),
@@ -1589,10 +1610,18 @@ async function runSql(sql, page, kind, setup, at) {
 async function runSqlInner(sql, page, kind, setup, at) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
-  // #244 C-1: before prepareSql and before any page handle — while a
-  // proposal is previewed, every render-loop query goes to the assistant's
-  // guarded engine session, never to the page's own DuckDB.
-  if (preview) return preview.run(sql);
+  // #244 C-1 / sec-review-272-rereview H-1R: before prepareSql and before any
+  // page handle — dispatch on `runPreviewToken`, the preview THIS RUN was
+  // started under (captured once, synchronously, in run() — see there and
+  // runOnce()), never the live, mutable `preview`. A run queued by the
+  // proposal's own ::RELOAD timer (or any other trigger firing mid-render)
+  // can still be in flight once Discard/"Apply, don't run" has already set
+  // `preview = null`; reading the live global here is exactly how that
+  // run's later statements (ATTACH, SET, …) reached the page database
+  // across the exit boundary. `runPreviewToken.run()` always stays inside
+  // the assistant's guarded engine session regardless of what `preview` is
+  // *now* — it can never fall through to pageConn() below.
+  if (runPreviewToken) return runPreviewToken.run(sql);
   await prepareSql(sql);
   if (servedMode) {
     // Capture a viewer's SET VARIABLE (never sent as SQL) … The dashboard's
@@ -2079,7 +2108,10 @@ async function boot() {
 
   $("run").disabled = false;
   $("run").onclick = () => {
-    clearApplyHold();
+    // Info-5 (sec-review-272-rereview): #run is disabled during an active
+    // preview (PREVIEW_TOOLBAR_IDS), so this guard is belt-and-suspenders
+    // — see the Ctrl+Enter handler below, where it matters for real.
+    if (!preview) clearApplyHold();
     run(true, { explicit: true });
   };
   wireLint();
@@ -2100,7 +2132,15 @@ async function boot() {
   $("sql").addEventListener("keydown", (e) => {
     if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "Enter")) return;
     e.preventDefault();
-    clearApplyHold();
+    // Info-5 (sec-review-272-rereview): only clear the hold when NOT
+    // previewing. This Ctrl+Enter always re-runs the PREVIEW while one is
+    // active (run() dispatches to preview.run, never the editor's held
+    // SQL) — but clearing the hold here unconditionally meant: held
+    // "Apply, don't run" -> a new Send (a fresh preview) -> Ctrl+Enter (to
+    // re-run THAT preview) -> Discard. Discard's own previewExit({rerun:
+    // true}) then ran the EDITOR's still-held SQL on the page database,
+    // unblocked, with no Run ever pressed on THAT SQL.
+    if (!preview) clearApplyHold();
     run(true, { explicit: true });
   });
   $("sql").addEventListener("scroll", () => {
@@ -2161,6 +2201,16 @@ function wireLint() {
   $("lint-run").onclick = () => runLint();
 }
 async function runLint() {
+  const say0 = (html) => ($("lint-status").innerHTML = html);
+  // M-2 (sec-review-272-rereview): Check runs its queries on the PAGE
+  // database (scratchRunner(pageDb(), …) below) — same promise as Run
+  // ("nothing runs until you press Run"), same hold. #lint-run is also
+  // disabled while held (previewExit({hold}) / clearApplyHold()); this is
+  // the defence in depth for any other way of reaching this function.
+  if (applyHold) {
+    say0("Run or discard the applied SQL first.");
+    return;
+  }
   const tok = ++lintState.tok;
   const script = $("sql").value;
   const btn = $("lint-run");
@@ -3545,6 +3595,13 @@ function dashStateSave() {
     dpTab,
     dpTableUI: { ...dpTableUI },
     dpSubTab: { ...dpSubTab },
+    // L-3 (sec-review-272-rereview): dpView/dpViewDefault were reset by
+    // dashStateReset() (previewEnter) but never saved/restored here, so a
+    // preview's own ::VIEW choices leaked into the page's next render and
+    // the page's own choices were lost. Object.assign(Object.create(null), …)
+    // keeps the null prototype these two are built with (#273 L1).
+    dpView: Object.assign(Object.create(null), dpView),
+    dpViewDefault: Object.assign(Object.create(null), dpViewDefault),
     dpFilter,
     dpSelected,
     dpZoomGroups: { ...dpZoomGroups },
@@ -3566,6 +3623,8 @@ function dashStateRestore(saved) {
   ({ dpTab, dpFilter, dpSelected } = saved);
   dpTableUI = saved.dpTableUI;
   dpSubTab = saved.dpSubTab;
+  dpView = saved.dpView;
+  dpViewDefault = saved.dpViewDefault;
   dpZoomGroups = saved.dpZoomGroups;
   dpXf = saved.dpXf;
   dpUrlSeed = saved.dpUrlSeed;
@@ -3636,7 +3695,10 @@ function previewToolbar(on) {
 function notRunCard() {
   const d = document.createElement("div");
   d.className = "dp-notrun";
-  d.textContent = "Not run yet. Press Run ▸ to run it.";
+  // Info-6 (sec-review-272-rereview): the hold itself is in-memory only
+  // (a reload, or opening a Save/Share link, runs this SQL like any other
+  // dashboard — expected, but worth saying so where the viewer is looking).
+  d.textContent = "Not run yet. Press Run ▸ to run it. Saving or sharing now will include this SQL.";
   return d;
 }
 // Enter the preview: the dashboard renders `sql` and every query goes to
@@ -3645,6 +3707,15 @@ function notRunCard() {
 // around it, exactly as switching to a different dashboard and back would
 // (dashStateSave/Reset/Restore) — but never written to the URL (§3.4).
 async function previewEnter({ sql, run: runner }) {
+  // sec-review-272-rereview H-1R: synchronously, before anything else
+  // (even the old preview's own exit just below) — a run already queued
+  // by a ::RELOAD timer tick (or any other implicit trigger) must not
+  // survive into the new preview's own setup window. previewExit() does
+  // the same at its own top; this covers the (rarer) case of entering a
+  // brand-new preview with nothing previously active.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  runQueued = null;
   if (preview) await previewExit({ rerun: false });
   try {
     await runActive;
@@ -3674,18 +3745,32 @@ async function previewEnter({ sql, run: runner }) {
 // it on the page's own DuckDB until the viewer explicitly presses Run or
 // Ctrl/⌘+Enter (run()'s own `explicit` guard, not this flag's job to check).
 async function previewExit({ rerun = true, hold = false } = {}) {
-  if (!preview) return;
+  // sec-review-272-rereview H-1R: synchronously, before the first await —
+  // a run already queued (the proposal's own ::RELOAD timer, or any other
+  // implicit trigger) while this preview was active must not be allowed
+  // to start once we begin exiting, and nothing non-explicit may start or
+  // queue a new one until the exit finishes. This is a defence in depth:
+  // a run already IN FLIGHT (not merely queued) is the `runPreviewToken`
+  // fix in run()/runOnce()/runSqlInner()'s job, not this one's — by the
+  // time that run reaches its own query dispatch, `preview` here may
+  // already be null, same as always; what matters is which preview THAT
+  // run was started under, captured once at ITS OWN start.
+  clearInterval(dpTimer);
+  dpTimer = null;
+  runQueued = null;
+  previewExiting = true;
+  if (!preview) {
+    previewExiting = false;
+    return;
+  }
   try {
     await runActive;
   } catch (_) {}
   dpLazy.gen++;
   await dpLazy.tail;
   preview = null;
-  // H-1/L-2: clear the proposal's own RELOAD timer and restore the
-  // viewer's own #refresh value — neither may keep running/showing the
-  // preview's choice once the preview is over.
-  clearInterval(dpTimer);
-  dpTimer = null;
+  // H-1/L-2: restore the viewer's own #refresh value (the timer itself
+  // was already cleared above, synchronously, before any await).
   if (previewRefreshSaved !== null) {
     if ($("refresh")) $("refresh").value = previewRefreshSaved;
     previewRefreshSaved = null;
@@ -3700,9 +3785,16 @@ async function previewExit({ rerun = true, hold = false } = {}) {
       cb();
     } catch (_) {}
   }
+  previewExiting = false;
   if (hold) {
     applyHold = true;
     if ($("refresh")) $("refresh").disabled = true;
+    // M-2 (sec-review-272-rereview): Check runs on the page database
+    // (scratchRunner(pageDb(), …)) — it must be just as held as Run.
+    if ($("lint-run")) {
+      $("lint-run").disabled = true;
+      $("lint-run").title = "Run or discard the applied SQL first";
+    }
     $("grid").replaceChildren(notRunCard());
   } else if (rerun) await run(true);
   else $("grid").replaceChildren(notRunCard());
@@ -6174,6 +6266,13 @@ function setTabParam(name) {
 // default, the first SHOWN alternative). Independent of `?tab=` / `?v.*`: it
 // never resets them, and they never reset it.
 function setViewParam(id, label) {
+  // L-3 (sec-review-272-rereview): #244: the URL never carries the
+  // preview's state — setTabParam() and syncUrlState() both already carry
+  // this guard; a model-chosen ::VIEW alternative (its label can be any
+  // computed string, e.g. an aggregate over the user's own data) must not
+  // write into the address bar, where shareLink() would then carry it into
+  // a link the viewer sends, before the proposal was ever applied.
+  if (preview) return;
   try {
     const u = new URL(location.href);
     if (label === dpViewDefault[id]) u.searchParams.delete("view." + id);
@@ -7437,6 +7536,21 @@ function run(fresh = true, opts = {}) {
     $("grid").replaceChildren(notRunCard());
     return;
   }
+  // sec-review-272-rereview H-1R: dropped synchronously, before even
+  // queueing — previewExit() sets this (and clears dpTimer/runQueued)
+  // before its own first await, so a timer tick (or any other implicit
+  // trigger) landing in that exact window can neither start nor queue a
+  // run that would otherwise race the exit. (`explicit` — #run,
+  // Ctrl/⌘+Enter — is let through regardless, same spirit as applyHold.)
+  if (previewExiting && !explicit) return runActive;
+  // sec-review-272-rereview H-1R: captured HERE, synchronously, not inside
+  // runOnce() — when this call is the queued follow-up started from a
+  // PRIOR run's own `finally` block below, this line executes before
+  // previewExit() (awaiting that prior run) can ever resume, so `preview`
+  // is still guaranteed to be whatever it was when the follow-up was
+  // queued. Threaded into runOnce() so runSqlInner() can dispatch on it
+  // instead of the live, mutable global (see there).
+  const pv = preview;
   if (runActive) {
     runQueued = (runQueued ?? false) || fresh;
     return runActive;
@@ -7445,7 +7559,7 @@ function run(fresh = true, opts = {}) {
     try {
       dpLazy.gen++; // the old dashboard's lazy jobs are void …
       await dpLazy.tail; // … once the one in flight (a single query) settles
-      await runOnce(fresh);
+      await runOnce(fresh, pv);
     } finally {
       runActive = null;
       if (runQueued !== null) {
@@ -7457,7 +7571,15 @@ function run(fresh = true, opts = {}) {
   })();
   return runActive;
 }
-async function runOnce(fresh = true) {
+async function runOnce(fresh = true, pv = preview) {
+  // sec-review-272-rereview H-1R: the single assignment that lets
+  // runSqlInner() (and everything prepareSql() would otherwise reach:
+  // ensureGeo/ensureExtension/ensureForecast/ensureDataFiles, all page-DB
+  // touching) dispatch on THIS run's own preview, synchronously, before
+  // this function's first await — never on the live `preview`, which a
+  // concurrent previewExit() may change under us (see run()'s own capture
+  // of `pv`, and clearApplyHold()/previewExit() nearby).
+  runPreviewToken = pv;
   const tRun = performance.now();
   const grid = $("grid");
   const motion = dpMotion; // what started this run (a drill, a drill-through)
@@ -7473,7 +7595,8 @@ async function runOnce(fresh = true) {
   try {
     // #244: the only render read of the editor — while a proposal is
     // previewed, the plan is built from its SQL instead, never the editor's.
-    stmts = JSON.parse(plan(preview ? preview.sql : $("sql").value));
+    // `pv`, not the live `preview` (sec-review-272-rereview H-1R): see above.
+    stmts = JSON.parse(plan(pv ? pv.sql : $("sql").value));
     stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
   } catch (e) {
     grid.replaceChildren();

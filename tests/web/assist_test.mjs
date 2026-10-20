@@ -241,8 +241,33 @@ assert.equal(A.classifyStatement("SELECT count(*) ::METRIC FROM 'WFS:http://e.ex
   assert.equal(i1.cls, 3);
   assert.match(i1.reason, /installs the 'spatial' extension/);
   // a target DuckDB can't give (a dynamic/odd form) still names the
-  // keyword, never crashes or silently loses the refusal.
-  assert.equal(A.classifyStatement("ATTACH DATABASE getenv('X') AS y").cls, 3);
+  // keyword, never crashes or silently loses the refusal — and now says so
+  // in plain words (L-4, sec-review-272-rereview) rather than repeating
+  // the bare keyword the dialog's <strong> already shows.
+  const dyn = A.classifyStatement("ATTACH DATABASE getenv('X') AS y");
+  assert.equal(dyn.cls, 3);
+  assert.match(dyn.reason, /target not recognised/);
+}
+// L-4 (sec-review-272-rereview): a quoted identifier's own text, or a
+// literal's own content, must never be read as the real ATTACH/COPY
+// target — attachTarget/copyTarget used to run their regex over text that
+// kept both exactly as written, so either could be mistaken for the
+// REAL "TO '…'"/"ATTACH '…'" the statement actually runs.
+{
+  // a column alias shaped like a fake COPY target
+  const spoof1 = A.classifyStatement(`COPY (SELECT 1 AS "TO 'decoy.csv'") TO 'real.csv'`);
+  assert.equal(spoof1.cls, 3);
+  assert.match(spoof1.reason, /writes file 'real\.csv'/);
+  assert.doesNotMatch(spoof1.reason, /decoy/);
+  assert.deepEqual(A.proposalReaders(`COPY (SELECT 1 AS "TO 'decoy.csv'") TO 'real.csv'`), ["real.csv", "COPY → 'real.csv'"]);
+  // a string literal's own content shaped like a fake COPY target
+  const spoof2 = A.classifyStatement("COPY (SELECT ' TO ''x'' ') TO 'real.csv'");
+  assert.equal(spoof2.cls, 3);
+  assert.match(spoof2.reason, /writes file 'real\.csv'/);
+  // ATTACH OR REPLACE is recognised (not just IF NOT EXISTS)
+  const ore = A.classifyStatement("ATTACH OR REPLACE 'md:' AS m");
+  assert.equal(ore.cls, 3);
+  assert.match(ore.reason, /attaches database 'md:'/);
 }
 // R3-5 (#225): a qualified temp object's name is its last part
 assert.equal(A.macroDefined("CREATE TEMP MACRO temp.main.lower(x) AS 'shadow'"), "lower");

@@ -1183,6 +1183,15 @@ export function mountAssistant(hostArg) {
     await enterPreview();
   }
   async function enterPreview() {
+    // Info-4 (sec-review-272-rereview): exit any already-active preview
+    // FIRST, before the new session even exists. host.preview.enter()
+    // (awaited below) does its own exit when one is active, but by then
+    // S.session already held the NEW session — its exit fires
+    // host.onPreviewExit -> closeSession() here, which closed the BRAND
+    // NEW session instead of the old one (a second Send while previewing
+    // left every panel's `run` calling S.session.run on null). Closing
+    // the old one here means closeSession() just below is a no-op.
+    if (host.preview.active()) await host.preview.exit({ rerun: false });
     closeSession();
     S.session = S.tools.previewSession(S.proposal.sql);
     const run = async (sql) => {

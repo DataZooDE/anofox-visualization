@@ -62,6 +62,23 @@ const SETUP_AND_METRIC = `${SALES_SETUP}\nSELECT count(*) AS n ::METRIC FROM sal
 // reach it: refused.length > 0 alone gets the three-button dialog) and
 // lifts, without the test itself running anything dangerous for real.
 const HOLD_CLEAN = `${SALES_SETUP}\nSET memory_limit='2GB';\nSELECT count(*) AS n ::METRIC FROM sales;\n`;
+// H-1R (sec-review-272-rereview): a render queued by the proposal's own
+// ::RELOAD timer (or any other trigger firing mid-render) can still be in
+// flight when the viewer rejects the proposal — Discard, or Apply's
+// "Apply, don't run". ATTACH/SET need no network to prove the race (no
+// REC_PORT dependency): adapted from the re-review's own probe template,
+// scratch-244/tmp/rr/probe3.mjs (`discard,norun`), which reproduced this
+// 3 of 3 trials against the unfixed code.
+const RACE = `SELECT 0.1::RELOAD;\nSELECT 'RACEMARK' AS m ::METRIC;\nSELECT count(*) AS n ::METRIC FROM range(60000000) t(x) WHERE x % 7 = 3;\nSELECT 'RACEMARK2' AS m2 ::METRIC;\nATTACH ':memory:' AS race_attach;\nSET memory_limit='3GB';\nSELECT 'RACEMARK3' AS m3 ::METRIC;\n`;
+// M-2 (sec-review-272-rereview): a proposal with a refused SET/ATTACH and
+// a remote read_csv, to prove "Check" can't run any of it on the page
+// database while held.
+const CHECK_HOLD = `SET memory_limit='3GB';\nATTACH ':memory:' AS check_attach;\nSELECT 'CHECKMARK' AS m ::METRIC;\nSELECT * FROM read_csv('http://127.0.0.1:${REC_PORT}/check.csv') ::TABLE;\n`;
+// L-3 (sec-review-272-rereview): a ::VIEW group with a model-computed
+// (not literal) second alternative's label — clicking it during the
+// preview must never write into the address bar (setViewParam's missing
+// `if (preview) return;` guard).
+const VIEWP = `SELECT region ::XAXIS, ROUND(SUM(units*price),0) ::BARCHART, 'Revenue'::TITLE FROM sales GROUP BY 1 ORDER BY 2 DESC;\nSELECT 'v1' AS rrview ::VIEW;\nSELECT count(*) AS n ::METRIC FROM sales;\nSELECT (SELECT 'L-' || sum(units)::VARCHAR FROM sales) ::VIEW;\n`;
 
 const results = [];
 const record = (name, ok, note = "") => {
@@ -181,6 +198,12 @@ const dbSpy = (page) => page.evaluate(() => window.__dbSpy);
 const mark = async (page) => (await dbSpy(page)).msgs.length;
 const since = async (page, n) => (await dbSpy(page)).msgs.slice(n);
 const pageMsgs = (msgs) => msgs.filter((m) => m.w === 0);
+// H-1R/M-2 (sec-review-272-rereview): page-worker messages since mark `n0`
+// whose SQL matches `re` — a tighter check than pageMsgs() alone when
+// other, legitimate page-DB traffic (restoring the page's own dashboard)
+// is expected around the same window; this isolates the PROPOSAL's own
+// text specifically.
+const w0with = async (page, n0, re) => pageMsgs(await since(page, n0)).filter((m) => m.sql && re.test(m.sql));
 
 // A default mock handler: turn 1 profiles "sales", turn 2 proposes CLEAN.
 function defaultHandler() {
@@ -642,6 +665,107 @@ if (run("main")) {
     record("M9b: an explicit Run click lifts the hold and actually runs it", pageMsgs(await since(page, n6)).length > 0);
     const refreshReenabled = await page.evaluate(() => document.getElementById("refresh")?.disabled === false);
     record("M9b: #refresh is re-enabled once the hold lifts", refreshReenabled);
+    await context.close();
+  }
+
+  // M9c (sec-review-272-rereview H-1R): Discard and "Apply, don't run"
+  // must never let a render that started under the (now-gone) preview
+  // finish on the page database — a render the proposal's own ::RELOAD
+  // timer queued while the slow range() count was still in flight. Three
+  // trials each, matching the re-review's own probe.
+  for (const mode of ["discard", "norun"]) {
+    for (let trial = 0; trial < 3; trial++) {
+      const { context, page } = await mainCtx(() =>
+        sse({ content: [toolUse(`toolu_race_${mode}${trial}`, "propose_dashboard", { sql: RACE, summary: "Race.", panels: [{ stmt: 3, title: "n", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+      );
+      await gotoEdit(page, SETUP_AND_METRIC);
+      await page.click("#assist-btn");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await addKey(page);
+      await page.fill("#ai-q", "x");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+      await page.click('.dp-dialog button:has-text("Send")');
+      await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+      // Let the slow range() count (and the ::RELOAD timer ticking on top
+      // of it) get well under way before rejecting the proposal — this is
+      // exactly the window H-1R's race needs.
+      await page.waitForTimeout(2500);
+      const n0 = await mark(page);
+      if (mode === "discard") {
+        await page.click("#ai-discard");
+      } else {
+        await page.click("#ai-apply");
+        await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+        await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+      }
+      await page.waitForTimeout(2500); // the slow query's own worker round-trip
+      const hits = await w0with(page, n0, /RACEMARK|race_attach|memory_limit\s*=\s*'3GB'/);
+      record(`M9c ${mode} trial ${trial}: zero page-DB messages with the proposal's own text after exit`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      await context.close();
+    }
+  }
+
+  // M9d (sec-review-272-rereview M-2): "Check" must not run the held,
+  // unconfirmed SQL on the page database either — same promise as Run.
+  {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_m2", "propose_dashboard", { sql: CHECK_HOLD, summary: "Check hold test.", panels: [{ stmt: 3, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.click("#ai-apply");
+    await page.waitForSelector(".dp-dialog", { timeout: 10000 });
+    await page.click('.dp-dialog button:has-text("Apply, don\'t run")');
+    await page.waitForTimeout(400);
+    const lintDisabled = await page.evaluate(() => document.getElementById("lint-run")?.disabled === true);
+    record("M9d: #lint-run is disabled while the hold is up", lintDisabled);
+    const n0 = await mark(page);
+    await page.evaluate(() => {
+      const d = document.querySelector("details:has(#lint)");
+      if (d) d.open = true;
+      document.getElementById("lint-run")?.click();
+    });
+    await page.waitForTimeout(800);
+    const hits = await w0with(page, n0, /CHECKMARK|check_attach|memory_limit\s*=\s*'3GB'|read_csv/);
+    record("M9d: zero page-DB messages from Check while held", hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+    record('M9d: grid still shows "Not run yet"', /Not run yet/.test(await page.evaluate(() => document.querySelector(".dash")?.textContent || "")));
+    await context.close();
+  }
+
+  // M9e (sec-review-272-rereview L-3): a ::VIEW alternative's (model-
+  // computed) label must not reach the address bar while previewing.
+  {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_l3", "propose_dashboard", { sql: VIEWP, summary: "View test.", panels: [{ stmt: 1, title: "rev", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.waitForSelector(".dp-viewbar [role=tab]", { timeout: 15000 });
+    const before = page.url();
+    await page.evaluate(() => {
+      const tabs = [...document.querySelectorAll(".dp-viewbar [role=tab]")];
+      tabs[tabs.length - 1]?.click();
+    });
+    await page.waitForTimeout(300);
+    record("M9e: a ::VIEW click during the preview does not change the URL", page.url() === before, page.url());
+    await page.click("#ai-discard");
+    await page.waitForTimeout(300);
+    record("M9e: the URL is still unchanged after Discard", page.url() === before, page.url());
     await context.close();
   }
 
