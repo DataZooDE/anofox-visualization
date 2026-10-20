@@ -2283,7 +2283,9 @@ fn render_inner(
         Kind::Histogram => return render_histogram(o, value, title.as_deref(), width, height),
         Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
         Kind::QQ => return render_qq(o, value, title.as_deref(), width, height),
-        Kind::Heatmap => return render_heatmap(o, value, cols, title.as_deref(), width, height),
+        Kind::Heatmap => {
+            return render_heatmap(o, value, cols, title.as_deref(), width, height, None)
+        }
         Kind::Calendar => return render_calendar(o, value, cols, title.as_deref(), width, height),
         Kind::Candlestick => {
             return render_candlestick(o, value, cols, title.as_deref(), width, height)
@@ -2834,33 +2836,55 @@ fn cartesian(
         data.push(("dlab".to_string(), dl));
     }
 
+    // Several measure columns of the same bar family (e.g. two ::BARCHART
+    // columns, no overlay of a different kind): still a legend-worthy combo
+    // like the non-bar case below, just coloured through `fill` — a bar's
+    // own colour is its fill, not its stroke (#292). A *mixed* combo (bars
+    // with a line/area/point overlay) keeps the plain "overlay takes the
+    // next palette colour, no legend" treatment just below instead.
+    let bar_family = |k: Kind| {
+        matches!(
+            k,
+            Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
+        )
+    };
+    let pure_bar_combo = bar
+        && extras
+            .iter()
+            .all(|c| matches!(c.role, Role::Value(k) if bar_family(k)));
+
     // Multi-measure combo with no explicit CATEGORY (e.g. observed+trend,
     // actual+predicted, or a line with a changepoint-point overlay): colour each
     // measure distinctly and name it in the legend by its column header, so the
     // series are separable. The default single-series theming would otherwise
     // paint every measure the same brand colour.
-    let combo_names: Vec<String> = if category.is_none() && !extras.is_empty() && !bar {
-        let n = value.values.len();
-        let name_of = |c: &Column, i: usize| {
-            if c.name.is_empty() {
-                format!("series {}", i + 1)
-            } else {
-                c.name.clone()
+    let combo_names: Vec<String> =
+        if category.is_none() && !extras.is_empty() && (!bar || pure_bar_combo) {
+            let n = value.values.len();
+            let name_of = |c: &Column, i: usize| {
+                if c.name.is_empty() {
+                    format!("series {}", i + 1)
+                } else {
+                    c.name.clone()
+                }
+            };
+            let mut names = vec![name_of(value, 0)];
+            for ev in &extras {
+                let idx = names.len();
+                names.push(name_of(ev, idx));
             }
+            for (k, nm) in names.iter().enumerate() {
+                data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
+            }
+            aes = if pure_bar_combo {
+                aes.fill("__s0")
+            } else {
+                aes.color("__s0")
+            };
+            names
+        } else {
+            Vec::new()
         };
-        let mut names = vec![name_of(value, 0)];
-        for ev in &extras {
-            let idx = names.len();
-            names.push(name_of(ev, idx));
-        }
-        for (k, nm) in names.iter().enumerate() {
-            data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
-        }
-        aes = aes.color("__s0");
-        names
-    } else {
-        Vec::new()
-    };
 
     // Single-series marks take the brand colour (geoms added with explicit
     // `geom_*_with` styles below set it themselves; mapped colours win).
@@ -3288,7 +3312,12 @@ fn cartesian(
             let yk = format!("y{}", k + 2);
             let mut lay = Aes::new().x("x").y(&yk);
             if !combo_names.is_empty() {
-                lay = lay.color(&format!("__s{}", k + 1));
+                let s = format!("__s{}", k + 1);
+                lay = if pure_bar_combo {
+                    lay.fill(&s)
+                } else {
+                    lay.color(&s)
+                };
             }
             // A bar-based combo keeps its bars in the brand colour (no combo
             // legend): each overlay takes the next palette colour, so a line
@@ -3501,12 +3530,21 @@ fn cartesian(
     }
     if !combo_names.is_empty() {
         // Combo measures → distinct palette colours in column order, keyed by
-        // column header.
-        plot = plot.scale_color(
-            ScaleColorDiscrete::new(Aesthetic::Color)
-                .with_levels(combo_names.clone())
-                .with_palette(dz_palette(o)),
-        );
+        // column header. A pure bar combo is coloured through `fill` (a
+        // bar's own colour), everything else through `color` (#292).
+        plot = if pure_bar_combo {
+            plot.scale_fill(
+                ScaleColorDiscrete::new(Aesthetic::Fill)
+                    .with_levels(combo_names.clone())
+                    .with_palette(dz_palette(o)),
+            )
+        } else {
+            plot.scale_color(
+                ScaleColorDiscrete::new(Aesthetic::Color)
+                    .with_levels(combo_names.clone())
+                    .with_palette(dz_palette(o)),
+            )
+        };
     }
     if bar && category.is_none() && combo_names.is_empty() {
         // A plain bar chart is one series: a legend of one says nothing.
@@ -3839,6 +3877,7 @@ fn render_heatmap(
     title: Option<&str>,
     width: u32,
     height: u32,
+    domain: Option<(f64, f64)>,
 ) -> Result<Panel, String> {
     let x = cols
         .iter()
@@ -3860,6 +3899,7 @@ fn render_heatmap(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
             (a.min(v), b.max(v))
         });
+    let (min, max) = domain.unwrap_or((min, max));
     let fill = TileFill::of(o, cols, o.theme.seq_low(), min, max)?;
     let tips: Vec<Value> = value
         .values
@@ -4246,14 +4286,29 @@ pub(crate) struct FmtGradient {
 
 impl FmtGradient {
     pub(crate) fn new(ramp: &Ramp, fmt: format::ValueFmt, locale: format::Locale) -> FmtGradient {
-        FmtGradient {
-            inner: ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
-                Aesthetic::Fill,
-                ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
-            ),
-            fmt,
-            locale,
+        let mut inner = ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
+            Aesthetic::Fill,
+            ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
+        );
+        // `ScaleColorGradientN` has no `with_limits`/fixed-domain
+        // constructor (ggplot-rs 0.19): it always auto-trains its min/max
+        // from the layer's own fill values, which ignores `Ramp::min` /
+        // `Ramp::max` — the domain a `matrix` heatmap's `domain :=` option
+        // asks for (e.g. a correlation's fixed −1..1, even when the data
+        // itself happens to span a narrower range after mirroring). `train`
+        // only ever widens the recorded range (`Scale::train`, never
+        // shrinks it), and the real data trains again once this scale joins
+        // the plot, so seeding it with the ramp's own domain here fixes the
+        // domain without the data ever being allowed to narrow it. A no-op
+        // for every other heatmap, whose ramp is already built from that
+        // same data (`Ramp::new`/`Ramp::status`).
+        if ramp.min.is_finite() && ramp.max.is_finite() && ramp.min <= ramp.max {
+            ggplot_rs::scale::Scale::train(
+                &mut inner,
+                &[Value::Float(ramp.min), Value::Float(ramp.max)],
+            );
         }
+        FmtGradient { inner, fmt, locale }
     }
 }
 
@@ -4587,6 +4642,7 @@ fn render_sparkline(
             color: steel,
             width: 2.6,
             alpha: 1.0,
+            ..Default::default()
         })
         .geom_point_with(GeomPoint {
             size: 4.2,
@@ -5067,6 +5123,7 @@ fn render_gauge(
                 color: o.theme.colors.card,
                 width: 2.0,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(vec![
                 ("x".to_string(), num(xs.clone())),
@@ -5081,6 +5138,7 @@ fn render_gauge(
             color: o.theme.colors.ink,
             width: 3.5,
             alpha: 1.0,
+            ..Default::default()
         })
         .layer_data(vec![
             ("x".to_string(), num(vec![shown])),

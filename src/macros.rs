@@ -40,11 +40,28 @@ pub struct MacroSpec {
     pub tags: &'static [(&'static str, &'static str)],
 }
 
+/// `row` collides with the `ROW(...)` constructor keyword: unquoted, DuckDB's
+/// parser rejects it in a parameter-list position (`(tbl, row := NULL)`) and
+/// in a named-argument call (`f(row := 1)`) — but not as a bare expression
+/// reference inside a macro body (`json_object('row', row)` parses fine), so
+/// only the declaration (and any caller using the named form) needs quoting.
+fn quote_reserved(name: &str) -> String {
+    if name == "row" {
+        format!("\"{name}\"")
+    } else {
+        name.to_string()
+    }
+}
+
 impl MacroSpec {
     /// `(p, q := default, …) AS body` — the tail of a `CREATE MACRO name…`.
     pub fn create_sql(&self) -> String {
-        let mut ps: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
-        ps.extend(self.named.iter().map(|(n, d)| format!("{n} := {d}")));
+        let mut ps: Vec<String> = self.params.iter().map(|p| quote_reserved(p)).collect();
+        ps.extend(
+            self.named
+                .iter()
+                .map(|(n, d)| format!("{} := {d}", quote_reserved(n))),
+        );
         format!("({}) AS {}", ps.join(", "), self.body)
     }
 }
@@ -270,6 +287,21 @@ term's coefficient).",
         tags: &[("anofox.consumes", "partial_residuals"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_cv",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
+        body: contract_body!("cv", "'x', x, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Cross-validation layout of a fold table (provisional schema): one lane per fold_id, the \
+train and test windows as bars along ds (or an integer period), so the number of folds, where each training \
+window ends and whether the test windows overlap or leave gaps (said under the plot) show at a glance. Reads \
+ts_cv_folds_by / ts_cv_split_by (id, ds, fold_id, split) and ts_cv_split_folds_by (fold_id, train_start, \
+train_end, test_start, test_end) as they come. Series with identical folds are drawn once; different folds get \
+a panel per id (up to 6).",
+        example: "SELECT anofox_plot_cv(f) FROM (SELECT 1 AS fold_id, 'train' AS split, i AS period FROM range(10) r(i) \
+UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f",
+        tags: &[("anofox.consumes", "cv"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_events",
         params: &["tbl"],
         named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
@@ -281,6 +313,56 @@ to anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e)).",
         example: "SELECT anofox_plot_events(e) FROM (VALUES (3, 'stockout', 'alarm', 'on hand 0'), \
 (7, 'drift', 'warning', 'CUSUM 4.2')) e(period, kind, severity, label)",
         tags: &[("anofox.consumes", "events"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_checks",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("kind", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("checks", "'x', x, 'kind', kind, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Data-quality checks from a `check` table (anofox-tabular run_checks / agg_check as they come; \
+the other checks with their measure as value): one panel per check (own scale), the value as a dot coloured by \
+status (fail red, warn amber, pass green) against the lower_threshold..upper_threshold acceptance band, one lane \
+per identifier, the message on hover. Over several run_ts / ds values (or kind := 'strip') a status strip: one \
+lane per check, a dot per run. x := names the time column.",
+        example: "SELECT anofox_plot_checks(c) FROM (VALUES ('rows', 'pass', 120.0, 100.0, NULL), \
+('customer present', 'fail', 0.083, NULL, 0.05)) c(check_name, status, value, lower_threshold, upper_threshold)",
+        tags: &[("anofox.consumes", "check"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_decomposition",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("components", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "560")],
+        body: contract_body!("decomposition", "'x', x, 'components', components, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Stacked panels of a time-series decomposition sharing one x axis, each with its own y scale: \
+observed, level, trend, each seasonal (seasonal_<period>), remainder (as points). Reads the long `decomposition` \
+table (ds | period, component, value), wide columns (observed, trend, seasonal, remainder; anofox-orchestration's \
+decomposition output) and anofox-forecast's list outputs as they come: ts_mstl_decomposition_by (trend[], \
+seasonal[][], periods[]; x = the period index) and ts_forecast_explain_by (its decomposition STRUCT). One series \
+per call (GROUP BY id). components := ['trend', 'seasonal_7'] picks and orders the panels. Provisional: the \
+long-form column names are to be agreed with anofox-orchestration and anofox-forecast.",
+        example: "SELECT anofox_plot_decomposition(d) FROM (SELECT i AS period, 'trend' AS component, 0.5 * i AS value \
+FROM range(20) r(i) UNION ALL SELECT i, 'seasonal', sin(i) FROM range(20) r(i)) d",
+        tags: &[("anofox.consumes", "decomposition"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_matrix",
+        params: &["tbl"],
+        // `row` is a reserved word (the ROW(...) constructor): quoted by
+        // `create_sql()` ([`quote_reserved`]) in the declaration; callers of
+        // the C-API build override it as `"row" := …`. The FFI/C++ build
+        // registers the bare name directly (bypassing the SQL parser), and
+        // the body's bare `row` reference parses fine as an expression.
+        named: &[("row", "NULL"), ("col", "NULL"), ("value", "NULL"), ("domain", "NULL"), ("mirror", "NULL"), ("labels", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "520"), ("height", "440")],
+        body: contract_body!("matrix", "'row', row, 'col', col, 'value', value, 'domain', domain, 'mirror', mirror, 'labels', labels, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Heatmap of a `matrix` table (row, col, value; anofox-tabular profile_correlations as it \
+comes: column_a x column_b, pearson): one tile per cell, a diverging scale around 0, -1..1 for correlations \
+(domain := [lo, hi] overrides), a pair list mirrored to the full matrix with a diagonal of 1 (mirror := false \
+keeps it as given). Cell values are written when there are at most 144 cells (labels := overrides). value := \
+picks another measure (value := 'spearman'). Confusion and setup matrices (row, col already the full grid) are \
+drawn the same way, without mirroring.",
+        example: "SELECT anofox_plot_matrix(m) FROM (VALUES ('a', 'b', 0.4), ('a', 'c', -0.2), ('b', 'c', 0.7)) \
+m(row, col, value)",
+        tags: &[("anofox.consumes", "matrix"), CONTRACT_TAG],
     },
     MacroSpec {
         name: "anofox_plot_diagram",
@@ -305,11 +387,16 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         body: contract_body!("auto", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
-metric+value -> summary, partial_residual -> partial (component + residual), p_value/test_id -> tests, \
-kind|severity + ds|period -> events. Use the specific anofox_plot_* macro for options.",
+metric+value -> summary, check_name|thresholds + status + value -> checks, partial_residual -> partial \
+(component + residual), fold_id + (split | test_start | train_end) -> cv (provisional), component+value | \
+trend -> decomposition, p_value/test_id -> tests, row+col | column_a+column_b -> matrix, kind|severity + \
+ds|period -> events. Use the specific anofox_plot_* macro for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
-            ("anofox.consumes", "terms,prediction,curve,summary,obs,test,partial_residuals,events"),
+            (
+                "anofox.consumes",
+                "terms,prediction,curve,summary,obs,test,partial_residuals,cv,decomposition,events,check,matrix",
+            ),
             CONTRACT_TAG,
         ],
     },
@@ -339,6 +426,20 @@ mod tests {
         assert!(p.create_sql().starts_with(
             "(tbl, title := NULL, x_label := NULL, y_label := NULL, theme := NULL, locale := NULL, width := 640, height := 400) AS anofox_render("
         ));
+        // `row` collides with the ROW(...) constructor keyword: the generated
+        // SQL quotes the parameter so CREATE MACRO parses.
+        let m = MACROS
+            .iter()
+            .find(|m| m.name == "anofox_plot_matrix")
+            .unwrap();
+        assert!(
+            m.create_sql()
+                .starts_with("(tbl, \"row\" := NULL, col := NULL, value := NULL"),
+            "{}",
+            m.create_sql()
+        );
+        assert_eq!(quote_reserved("row"), "\"row\"");
+        assert_eq!(quote_reserved("col"), "col");
     }
 
     #[test]

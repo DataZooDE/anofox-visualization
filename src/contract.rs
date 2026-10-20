@@ -2,8 +2,14 @@
 //! (`docs/plans/integration-contract.md`): `terms`, `prediction`, `curve`,
 //! `summary`, `obs` (single diagnostic panels and the 2×2 `diagnostics`),
 //! `test` (`tests`: a comparison forest; `compare`: groups with significance
-//! brackets), partial-residual plots (`partial`), point-in-time `events`
-//! (alarms, parameter changes) and an `auto` dispatch on the column
+//! brackets), partial-residual plots (`partial`), data-quality `checks`
+//! (anofox-tabular's `run_checks` / `agg_check`: a band per check coloured
+//! by status, or a status strip over time), a cross-validation fold
+//! timeline (`cv`, provisional), time-series `decomposition` (stacked
+//! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
+//! `events` (alarms, parameter changes), a correlation-style heatmap
+//! (`matrix`: row, col, value; anofox-tabular's `profile_correlations` as it
+//! comes, mirrored to the full matrix) and an `auto` dispatch on the column
 //! signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
@@ -18,10 +24,14 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod checks;
 mod curves;
+mod cv;
+mod decomposition;
 mod events;
 mod graph;
 mod look;
+mod matrix;
 mod names;
 mod stats;
 mod terms;
@@ -43,7 +53,11 @@ pub const PLOTS: &[&str] = &[
     "tests",
     "compare",
     "partial",
+    "cv",
+    "decomposition",
     "events",
+    "checks",
+    "matrix",
     "diagram",
     "auto",
 ];
@@ -118,8 +132,8 @@ fn render_plot(
     // aggregate: one row per test.
     let flat;
     let rows = match plot {
-        "tests" | "auto" => match flatten(rows) {
-            Some(f) if plot == "tests" || detect(rows).is_err() => {
+        "tests" | "auto" | "decomposition" => match flatten(rows) {
+            Some(f) if plot != "auto" || detect(rows).is_err() => {
                 flat = rename(&f).unwrap_or(f);
                 &flat[..]
             }
@@ -192,11 +206,17 @@ fn render_plot(
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
+        "cv" => return direct(&|| cv::cv(&t, options, w, h, o, place)),
+        "decomposition" => {
+            return direct(&|| decomposition::decomposition(&t, options, w, h, o, place))
+        }
         "diagram" => {
             let cols = graph::columns(rows, options).map_err(fail)?;
             return crate::render_placed(&cols, place, w, h, o);
         }
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
+        "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
+        "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -536,12 +556,25 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "diagnostics"
     } else if has("metric") && has("value") {
         "summary"
+    } else if has("status")
+        && has("value")
+        && (has("check_name") || has("lower_threshold") || has("upper_threshold"))
+    {
+        "checks"
     } else if has("partial_residual") || has("x_residual") && has("y_residual") {
         "partial"
+    } else if has("fold_id") && (has("split") || has("test_start") || has("train_end")) {
+        "cv"
+    } else if has("component") && has("value")
+        || has("trend") && (has("remainder") || has("residual") || has("seasonal"))
+    {
+        "decomposition"
     } else if (has("kind") || has("severity")) && (has("ds") || has("period")) {
         "events"
     } else if has("p_value") || has("test_id") || has("statistic") && has("method") {
         "tests"
+    } else if (has("row") && has("col")) || (has("column_a") && has("column_b")) {
+        "matrix"
     } else {
         let keys: Vec<&str> = rows
             .first()
@@ -552,7 +585,9 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              plottable schema — expected terms (term, estimate), prediction (yhat), curve \
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
-             partial_residual) or events (ds | period, kind){}",
+             partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
+             ds), decomposition (ds | period, component, value), matrix (row, col, value) or \
+             events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -570,6 +605,11 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
     ("curve", &["curve_type", "x", "y"], &["curve_type"]),
     ("summary", &["metric", "value"], &["metric"]),
     (
+        "checks",
+        &["check_name", "status", "value"],
+        &["check_name", "lower_threshold", "upper_threshold"],
+    ),
+    (
         "diagnostics",
         &["fitted", "residual"],
         &["fitted", "residual"],
@@ -579,13 +619,30 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["term", "x", "partial_residual"],
         &["partial_residual"],
     ),
+    ("cv", &["fold_id", "split", "ds"], &["fold_id"]),
+    (
+        "decomposition",
+        &["ds", "component", "value"],
+        &["trend", "remainder"],
+    ),
     ("tests", &["p_value"], &["p_value"]),
     ("events", &["ds", "kind"], &["ds"]),
+    (
+        "matrix",
+        &["row", "col", "value"],
+        &["column_a", "column_b"],
+    ),
 ];
 
 /// Columns [`detect`] also reads in place of a required one: `events` takes
-/// `period` for `ds` and `severity` for `kind`.
-const STAND_INS: &[(&str, &str)] = &[("ds", "period"), ("kind", "severity")];
+/// `period` for `ds` and `severity` for `kind`; `matrix` takes a pair list's
+/// `column_a` / `column_b` for `row` / `col`.
+const STAND_INS: &[(&str, &str)] = &[
+    ("ds", "period"),
+    ("kind", "severity"),
+    ("row", "column_a"),
+    ("col", "column_b"),
+];
 
 /// Does the near miss `k` of the identifying column `c` point at its schema
 /// on its own? A long name's does (`estimat`, `curve_typ`); a short one
@@ -1081,6 +1138,87 @@ mod tests {
         );
         let e = detect(&rows(r#"[{"a":1}]"#)).unwrap_err().to_string();
         assert!(e.contains("contract v1"), "{e}");
+    }
+
+    #[test]
+    fn checks_band_and_strip() {
+        // run_checks-shaped rows.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"run_ts":"2026-10-19 10:00:00","check_name":"rows","value":120,
+                    "lower_threshold":100,"upper_threshold":null,"status":"pass",
+                    "identifier":null,"message":"ok"}]"#
+            ))
+            .unwrap(),
+            "checks"
+        );
+        // agg_check-shaped rows.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"status":"pass","agg":"avg","value":69.5,"lower_threshold":50,
+                    "upper_threshold":150,"message":"m"}]"#
+            ))
+            .unwrap(),
+            "checks"
+        );
+        // status + value alone is not enough: no schema, and no closest hint.
+        let e = detect(&rows(r#"[{"status":"ok","value":1}]"#))
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("closest"), "{e}");
+        let e = go("auto", r#"[{"check_name":"x","status":"pass"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("closest: checks, missing value"), "{e}");
+
+        // Band: 3 checks, one with identifiers app/web.
+        let band = r#"[
+            {"check_name":"rows","status":"pass","value":120,"lower_threshold":100,"upper_threshold":null},
+            {"check_name":"customer present","status":"fail","value":0.08,"lower_threshold":null,"upper_threshold":0.05,"identifier":"app"},
+            {"check_name":"customer present","status":"fail","value":0.03,"lower_threshold":null,"upper_threshold":0.05,"identifier":"web"},
+            {"check_name":"status known","status":"pass","value":1.0,"lower_threshold":1.0,"upper_threshold":null}]"#;
+        let svg = go("checks", band, "{}").unwrap();
+        dump("checks_band", &svg);
+        assert!(svg.contains(r#"data-panel="2""#), "{svg}");
+        assert!(svg.contains(">customer present</text>"), "{svg}");
+        assert!(svg.contains(">app</text>"), "{svg}");
+        let neg = RenderOptions::default().theme.colors.negative;
+        assert!(
+            svg.contains(&format!("#{:02X}{:02X}{:02X}", neg.0, neg.1, neg.2)),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // Strip: 2 checks x 3 distinct ds values.
+        let strip = r#"[
+            {"check_name":"rows","ds":"2026-10-01","status":"pass","value":120},
+            {"check_name":"rows","ds":"2026-10-02","status":"pass","value":121},
+            {"check_name":"rows","ds":"2026-10-03","status":"warn","value":90},
+            {"check_name":"customer present","ds":"2026-10-01","status":"pass","value":0.01},
+            {"check_name":"customer present","ds":"2026-10-02","status":"fail","value":0.08},
+            {"check_name":"customer present","ds":"2026-10-03","status":"pass","value":0.02}]"#;
+        let svg = go("checks", strip, "{}").unwrap();
+        dump("checks_strip", &svg);
+        assert!(!svg.contains("data-panel="), "{svg}");
+        assert!(
+            svg.contains(">rows</text>") && svg.contains(">customer present</text>"),
+            "{svg}"
+        );
+        assert!(svg.matches("<circle").count() >= 6, "{svg}");
+
+        let e = go(
+            "checks",
+            r#"[{"check_name":"a","status":"pass","value":1}]"#,
+            r#"{"kind":"nope"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("kind := 'nope'"), "{e}");
+
+        let e = go("checks", r#"[{"check_name":"a","status":"pass"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs column(s) value"), "{e}");
     }
 
     const TUKEY: &str = r#"[
@@ -1679,6 +1817,150 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("needs an event time"), "{e}");
+    }
+
+    const FOLDS: &str = r#"[
+        {"fold_id":1,"split":"train","period":0},{"fold_id":1,"split":"train","period":1},
+        {"fold_id":1,"split":"test","period":2},
+        {"fold_id":2,"split":"train","period":0},{"fold_id":2,"split":"train","period":1},
+        {"fold_id":2,"split":"train","period":2},{"fold_id":2,"split":"test","period":3},
+        {"fold_id":3,"split":"train","period":0},{"fold_id":3,"split":"train","period":1},
+        {"fold_id":3,"split":"train","period":2},{"fold_id":3,"split":"train","period":3},
+        {"fold_id":3,"split":"test","period":4}]"#;
+
+    #[test]
+    fn cv_fold_timeline() {
+        assert_eq!(detect(&rows(FOLDS)).unwrap(), "cv");
+        let svg = go("auto", FOLDS, "{}").unwrap();
+        dump("cv", &svg);
+        assert!(
+            svg.contains(">fold 1</text>") && svg.contains(">fold 3</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+        // A table with fold_id, split, yhat and model_name is still a
+        // prediction (ts_cv_forecast_by's backtest output), not cv.
+        assert_eq!(
+            detect(&rows(
+                r#"[{"fold_id":1,"id":"a","ds":"2024-01-01","y":1,"split":"test","yhat":1.1,"model_name":"AutoETS"}]"#
+            ))
+            .unwrap(),
+            "prediction"
+        );
+    }
+
+    const DECOMP_LONG: &str = r#"[
+        {"ds":"2024-01-01","component":"trend","value":1.0},
+        {"ds":"2024-01-02","component":"trend","value":1.2},
+        {"ds":"2024-01-01","component":"seasonal","value":0.1},
+        {"ds":"2024-01-02","component":"seasonal","value":-0.1},
+        {"ds":"2024-01-01","component":"remainder","value":0.02},
+        {"ds":"2024-01-02","component":"remainder","value":-0.01}]"#;
+
+    #[test]
+    fn decomposition_plots() {
+        let svg = go("decomposition", DECOMP_LONG, "{}").unwrap();
+        dump("decomposition_long", &svg);
+        assert!(
+            svg.contains(">trend</text>") && svg.contains(">remainder</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+        assert_eq!(
+            go("auto", DECOMP_LONG, "{}").unwrap(),
+            go("decomposition", DECOMP_LONG, "{}").unwrap()
+        );
+        // anofox-orchestration's wide table (unique_id, t, method): `t` reads
+        // as `statistic`, which next to `method` would otherwise look like a
+        // `tests` table (#255's gotcha) — decomposition is detected first.
+        let wide: String = format!(
+            "[{}]",
+            (0..10)
+                .map(|i| format!(
+                    r#"{{"unique_id":"a","t":{i},"observed":{o},"trend":1.0,"seasonal":0.1,
+                        "remainder":0.0,"method":"stl"}}"#,
+                    o = i as f64
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(detect(&rows(&wide)).unwrap(), "decomposition");
+        let svg = go("auto", &wide, "{}").unwrap();
+        dump("decomposition_wide_orchestration", &svg);
+        assert!(
+            svg.contains(">observed</text>") && svg.contains(">trend</text>"),
+            "{svg}"
+        );
+        // ts_mstl_decomposition_by's list output: seasonal[][] + periods[] ->
+        // one labelled panel per period.
+        let mstl = r#"[{"id":"B","trend":[1.0,2.0,3.0],"seasonal":[[0.1,-0.1,0.0]],
+            "remainder":[0.0,0.1,-0.1],"periods":[7]}]"#;
+        let svg = go("auto", mstl, "{}").unwrap();
+        dump("decomposition_mstl", &svg);
+        assert!(svg.contains("seasonal (7)"), "{svg}");
+        // ts_forecast_explain_by's STRUCT column is flattened first.
+        let explain = r#"[{"id":"A","decomposition":{"horizon":5,"level":[1.0,1.1,1.2,1.3,1.4],
+            "trend":[1.0,1.0,1.0,1.0,1.0],"seasonal":[0.1,-0.1,0.0,0.1,-0.1],"residual":null}}]"#;
+        let svg = go("auto", explain, "{}").unwrap();
+        dump("decomposition_explain", &svg);
+        assert!(
+            svg.contains(">level</text>")
+                && svg.contains(">trend</text>")
+                && svg.contains(">seasonal</text>"),
+            "{svg}"
+        );
+        let svg2 = go("decomposition", explain, "{}").unwrap();
+        assert_eq!(svg, svg2);
+        // Two series: GROUP BY id.
+        let two = r#"[{"id":"A","ds":"2024-01-01","component":"trend","value":1.0},
+            {"id":"B","ds":"2024-01-01","component":"trend","value":2.0}]"#;
+        let e = go("decomposition", two, "{}").unwrap_err().to_string();
+        assert!(e.contains("GROUP BY id"), "{e}");
+        // components := picks and orders the panels.
+        let svg = go("decomposition", DECOMP_LONG, r#"{"components":["trend"]}"#).unwrap();
+        assert!(
+            svg.contains(">trend</text>") && !svg.contains(">remainder</text>"),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn matrix_dispatch() {
+        // profile_correlations-shaped rows (as it comes): a mirrored heatmap.
+        const PAIRS: &str = r#"[
+            {"column_a":"amount","column_b":"qty","pearson":0.08,"spearman":0.09,"n":120},
+            {"column_a":"id","column_b":"amount","pearson":-0.01,"spearman":-0.01,"n":120}]"#;
+        assert_eq!(detect(&rows(PAIRS)).unwrap(), "matrix");
+        let svg = go("auto", PAIRS, "{}").unwrap();
+        dump("matrix_profile_correlations", &svg);
+        assert!(svg.contains(r#"data-kind="heatmap""#), "{svg}");
+        assert!(svg.contains(">amount</text>"), "{svg}");
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // The fixed −1..1 correlation domain is honoured by the fill scale
+        // itself, not just the colourbar: no cell here is anywhere near −1
+        // (the smallest is −0.01), so the diverging ramp's low endpoint must
+        // not appear — ggplot-rs's continuous fill scale otherwise
+        // auto-trains its domain from the plotted values, which would
+        // narrow −1..1 down to the data's own range and paint the barely
+        // negative −0.01 cell as if it were the worst possible value.
+        let [lo, ..] = RenderOptions::default().theme.diverging_ramp();
+        assert!(
+            !svg.contains(&format!("#{:02X}{:02X}{:02X}", lo.0, lo.1, lo.2)),
+            "{svg}"
+        );
+
+        // A pairwise-test table (p_value next to column_a/column_b) still
+        // reads as `tests`, not `matrix` (tests is checked first).
+        assert_eq!(
+            detect(&rows(r#"[{"column_a":"x","column_b":"y","p_value":0.1}]"#)).unwrap(),
+            "tests"
+        );
+
+        let e = go("auto", r#"[{"column_a":"x"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("closest: matrix, missing col"), "{e}");
     }
 
     #[test]

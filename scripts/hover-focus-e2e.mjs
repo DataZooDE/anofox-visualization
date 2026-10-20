@@ -7,7 +7,7 @@
 // under reduced motion, and a 1,800-point chart still focuses in well under
 // the frame budget.
 //
-//   wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+//   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   python3 serve_nocache.py 8813 &
 //   NODE_PATH=<playwright>/node_modules node scripts/hover-focus-e2e.mjs [--url http://127.0.0.1:8813/]
 import { createRequire } from "module";

@@ -823,6 +823,57 @@ where
             });
         }
 
+        // ::ROWSELECT / ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL /
+        // ::SELECT_AS / ::DRILL / ::EMPTY are "next panel" layout directives — their
+        // own preceding statement, the same shape as ::COL/::HEIGHT (#291).
+        // Embedded as an extra column on a panel's own SELECT instead, the
+        // failure is silent: inside a ::TABLE/::PAGED the cast is stripped
+        // without being read as a role (a literal extra column, like
+        // `thresholds/in-table` above); beside any other panel's own content
+        // it *is* read, but applied to this panel instead of the next one.
+        let is_next_panel_directive = |r: Role| {
+            matches!(
+                r,
+                Role::RowSelect | Role::TableOpt(_) | Role::SelectAs | Role::Drill | Role::Empty
+            )
+        };
+        let is_table_panel = p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable));
+        let mut misplaced: Vec<Role> = Vec::new();
+        if is_table_panel {
+            for t in cast_tokens(raws.get(i).map_or("", String::as_str)) {
+                if let Some(role) = roles::lookup(&t).map(|s| s.role) {
+                    if is_next_panel_directive(role) && !misplaced.contains(&role) {
+                        misplaced.push(role);
+                    }
+                }
+            }
+        } else if p.roles.iter().any(|(_, r)| r.renders()) {
+            for (_, r) in &p.roles {
+                if is_next_panel_directive(*r) && !misplaced.contains(r) {
+                    misplaced.push(*r);
+                }
+            }
+        }
+        for role in misplaced {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "layout/next-panel",
+                message: format!(
+                    "::{tok} is a layout directive for the *next* panel — its own preceding \
+                     statement, like ::COL/::HEIGHT — not a column on this panel's own \
+                     SELECT, where it renders wrong (a literal extra column) or is silently \
+                     misapplied to this panel instead of the next one: move it above, e.g. \
+                     SELECT 'value'::{tok};",
+                    tok = role.token()
+                ),
+                sql: short.clone(),
+            });
+        }
+
         diags.extend(
             motion_diags(&p.roles, &rows)
                 .into_iter()
@@ -3669,6 +3720,50 @@ mod design_tests {
             rows(2, |i| json!({ "region": "N", "m": i, "x": "<0:bad" })),
         );
         assert!(has(&d, "thresholds/in-table"), "{d:?}");
+    }
+
+    /// #291: `::ROWSELECT` / `::TOTALS` / `::EMPTY` (and the rest of the
+    /// `[layout]` "next panel" directives) are their own preceding
+    /// statement, not a column on the panel they modify.
+    #[test]
+    fn next_panel_layout_directives_embedded_in_their_own_panel_are_flagged() {
+        // (A) from #291: ::ROWSELECT and ::TOTALS embedded as extra columns
+        // on the table they were meant to modify — silently dropped by the
+        // ::TABLE rewrite (shown as literal extra columns), not read as
+        // roles at all.
+        let d = lint_one(
+            "SELECT id AS id ::TABLE, name AS \"Name\", 'single'::ROWSELECT, 'none'::TOTALS FROM t;",
+            rows(2, |i| json!({ "id": i, "Name": "a", "c2": "single", "c3": "none" })),
+        );
+        let next_panel: Vec<_> = d.iter().filter(|x| x.code == "layout/next-panel").collect();
+        assert_eq!(next_panel.len(), 2, "{d:?}");
+        assert!(
+            next_panel.iter().any(|x| x.message.contains("::ROWSELECT"))
+                && next_panel.iter().any(|x| x.message.contains("::TOTALS")),
+            "{d:?}"
+        );
+
+        // (B) the correct form: each directive is its own statement before
+        // the table — no warning.
+        let d = lint_one(
+            "SELECT 'single'::ROWSELECT;\nSELECT 'none'::TOTALS;\nSELECT id AS id ::TABLE, name AS \"Name\" FROM t;",
+            rows(2, |i| json!({ "id": i, "Name": "a" })),
+        );
+        assert!(!has(&d, "layout/next-panel"), "{d:?}");
+
+        // ::EMPTY embedded on a chart's own SELECT, beside its measure —
+        // kept as a role (unlike the ::TABLE case above) but applied to the
+        // wrong panel.
+        let d = lint_one(
+            "SELECT day::XAXIS, n::LINECHART, 'No data'::EMPTY FROM t;",
+            rows(2, |i| json!({ "day": i, "n": i, "msg": "No data" })),
+        );
+        assert!(has(&d, "layout/next-panel"), "{d:?}");
+
+        // A lone ::EMPTY (its own statement, the documented form) never
+        // warns — covered already by `optional_inputs_are_notes_and_empty_messages_silence_empty_panels`.
+        let d = lint_one("SELECT 'No data'::EMPTY;", rows(0, |_| json!({})));
+        assert!(!has(&d, "layout/next-panel"), "{d:?}");
     }
 
     /// Lint `'<spec>'::TOTALS` before a table (district, Per 10k, people, on_time ::PERCENT).

@@ -106,6 +106,71 @@ fn brand_and_palette_colours() {
     assert_eq!(fill_of("b").to_lowercase(), slot(2));
 }
 
+/// #292: several measure columns in one SELECT (no ::CATEGORY) — a
+/// multi-series line/bar chart written "wide" — legend each series by its own
+/// column name, not a positional `c1`, `c2`, … placeholder.
+#[test]
+fn combo_measures_legend_by_their_own_column_name() {
+    let x = || Column::new("day", Role::X, nums(&[1.0, 2.0, 3.0]));
+    // Several ::LINECHART columns: already named (regression guard).
+    let line_cols = vec![
+        x(),
+        Column::new("events", Role::Value(Kind::Line), nums(&[10.0, 14.0, 9.0])),
+        Column::new("failures", Role::Value(Kind::Line), nums(&[3.0, 5.0, 2.0])),
+    ];
+    let svg = render(&line_cols, 480, 320).unwrap();
+    assert!(svg.contains(">events<"), "{svg}");
+    assert!(svg.contains(">failures<"), "{svg}");
+    assert!(!svg.contains(">c1<") && !svg.contains(">c2<"), "{svg}");
+    assert!(
+        svg.contains("data-series=\"events\"") && svg.contains("data-series=\"failures\""),
+        "{svg}"
+    );
+
+    // Several ::BARCHART columns: each bar gets its own fill colour + a real
+    // legend entry — not every series painted in the single brand colour
+    // with no way to tell them apart.
+    let bar_cols = vec![
+        x(),
+        Column::new("events", Role::Value(Kind::Bar), nums(&[10.0, 14.0, 9.0])),
+        Column::new("failures", Role::Value(Kind::Bar), nums(&[3.0, 5.0, 2.0])),
+    ];
+    let svg = render(&bar_cols, 480, 320).unwrap();
+    assert!(svg.contains(">events<"), "{svg}");
+    assert!(svg.contains(">failures<"), "{svg}");
+    assert!(!svg.contains(">c1<") && !svg.contains(">c2<"), "{svg}");
+    assert!(
+        svg.contains("data-series=\"events\"") && svg.contains("data-series=\"failures\""),
+        "{svg}"
+    );
+    // The two series' bars are not all the same colour.
+    let fill_of = |series: &str| {
+        let i = svg.find(&format!("data-series=\"{series}\"")).unwrap();
+        let tag = &svg[svg[..i].rfind('<').unwrap()..i];
+        tag[tag.find("fill=\"").unwrap() + 6..][..7].to_string()
+    };
+    assert_ne!(fill_of("events"), fill_of("failures"), "{svg}");
+}
+
+/// #292: a *mixed* combo (bars with a different-kind overlay, e.g. a trend
+/// line on top of bars) keeps its previous behaviour — the overlay takes its
+/// own palette colour and there is no legend — unaffected by the bar-family
+/// combo-legend fix above.
+#[test]
+fn a_mixed_bar_and_line_combo_keeps_its_own_overlay_colour_and_no_legend() {
+    let cols = vec![
+        Column::new("day", Role::X, nums(&[1.0, 2.0, 3.0])),
+        Column::new("actual", Role::Value(Kind::Bar), nums(&[10.0, 14.0, 9.0])),
+        Column::new("trend", Role::Value(Kind::Line), nums(&[9.0, 11.0, 10.0])),
+    ];
+    let svg = render(&cols, 480, 320).unwrap();
+    assert!(
+        !svg.contains(">actual<") && !svg.contains(">trend<"),
+        "{svg}"
+    );
+    assert!(svg.contains("<rect") && svg.contains("<polyline"), "{svg}");
+}
+
 /// The browser offers zoom only for kinds that honour a zoom window; the set
 /// comes from `roles_json()`.
 #[test]

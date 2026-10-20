@@ -362,7 +362,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("THEME", &[], R::Theme, "chrome", false,
       "dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON"),
     e("LOCALE", &[], R::Locale, "chrome", false,
-      "number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'de-DE', 'fr-FR'"),
+      "number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR'"),
     e("DASHBOARD_TITLE", &["DASHBOARDTITLE", "PAGE_TITLE"], R::DashboardTitle, "chrome", false,
       "dashboard title: page header, browser tab and export title"),
     e("BRAND", &["BRAND_NAME"], R::Brand, "chrome", false,

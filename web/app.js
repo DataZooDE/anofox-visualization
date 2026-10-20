@@ -8841,7 +8841,14 @@ function contractCaption(title, contract, row) {
 // Default render height of a contract plot (::HEIGHT overrides): the 2×2
 // diagnostics need room, single panels match the chart default.
 function contractHeight(macro) {
-  const H = { anofox_plot_diagnostics: 560, anofox_plot_summary: 360, anofox_plot_terms: 340 };
+  const H = {
+    anofox_plot_diagnostics: 560,
+    anofox_plot_summary: 360,
+    anofox_plot_terms: 340,
+    anofox_plot_checks: 360,
+    anofox_plot_decomposition: 520,
+    anofox_plot_matrix: 440,
+  };
   return H[macro] || 320;
 }
 
@@ -12279,9 +12286,21 @@ let dpSelected = null;
 // stops) on every map that has it, so two maps side by side read together.
 function mapHoverEmph(series) {
   for (const svg of document.querySelectorAll(".panel svg[data-map]")) {
-    const els = [...svg.querySelectorAll(".dp-hit, [data-head]")];
+    // Flow arrowheads are now ggplot-rs mark-parts (`data-part="arrow"`,
+    // #308), not the old hand-written `data-head` triangle.
+    const els = [...svg.querySelectorAll('.dp-hit, [data-part="arrow"]')];
     const has = series != null && els.some((el) => el.getAttribute("data-series") === series);
-    dpAnim.emph(svg, "hover", has ? (el) => ((el.classList.contains("dp-hit") || el.hasAttribute("data-head")) && el.getAttribute("data-series") !== series ? 0.2 : null) : null);
+    dpAnim.emph(
+      svg,
+      "hover",
+      has
+        ? (el) =>
+            (el.classList.contains("dp-hit") || el.getAttribute("data-part") === "arrow") &&
+            el.getAttribute("data-series") !== series
+              ? 0.2
+              : null
+        : null
+    );
   }
 }
 

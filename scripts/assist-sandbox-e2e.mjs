@@ -5,7 +5,7 @@
 // child process). Manual, like the other *-e2e.mjs scripts; paste the
 // table below into the PR.
 //
-//   wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+//   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   scripts/fetch-wasm-extensions.sh
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/assist-sandbox-e2e.mjs
 //       [--static-port 8791] [--rec-port 8799] [--keep]

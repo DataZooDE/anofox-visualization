@@ -683,6 +683,7 @@ fn per_term(
                 color: o.brand(),
                 width: 1.6,
                 alpha: 1.0,
+                ..Default::default()
             });
             if idx.len() <= 40 {
                 plot = plot.geom_point_with(GeomPoint {
@@ -867,6 +868,7 @@ fn overlay(
                     color: (196, 200, 208),
                     width: 1.0,
                     alpha: 1.0,
+                    ..Default::default()
                 })
                 .layer_data(frame(&cold))
                 .layer_aes(Aes::new().x("x").y("y").group("term"));
@@ -875,6 +877,7 @@ fn overlay(
             color: o.brand(),
             width: 1.7,
             alpha: 1.0,
+            ..Default::default()
         });
         // Direct labels at the unshrunk end (small λ / full L1 norm),
         // spread apart vertically.

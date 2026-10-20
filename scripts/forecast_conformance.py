@@ -68,8 +68,8 @@ CREATE TABLE fc AS SELECT * FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '
 # The dated conformal API (main) calibrates per group into a table.
 SETUP_DATED = "CREATE TABLE cal AS SELECT * FROM ts_conformal_calibrate('btc', id, actual, forecast, params := {'alpha': 0.1});"
 
-PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS = (
-    "prediction", "summary", "terms", "obs", "curve", "test", "events")
+PRED, SUMMARY, TERMS, OBS, CURVE, TEST, EVENTS, CV, DECOMP = (
+    "prediction", "summary", "terms", "obs", "curve", "test", "events", "cv", "decomposition")
 SPECIFIC = {
     PRED: "anofox_plot_prediction(t)",
     SUMMARY: "anofox_plot_summary(t)",
@@ -78,6 +78,8 @@ SPECIFIC = {
     CURVE: "anofox_plot_curve(t)",
     TEST: "anofox_plot_tests(t)",
     EVENTS: "anofox_plot_events(t)",
+    CV: "anofox_plot_cv(t)",
+    DECOMP: "anofox_plot_decomposition(t)",
 }
 
 FC = "MAP{'seasonal_period': '7'}"
@@ -166,20 +168,26 @@ def producers(dated: bool) -> dict[str, dict]:
         "(SELECT d.id, unnest(generate_series(1, len(d.trend))) AS period, unnest(h.ys) AS y, unnest(d.trend) AS yhat, "
         "d.method AS model_name FROM ts_detrend_by('s', id, ds, y, 'auto') d "
         "JOIN (SELECT id, list(y ORDER BY ds) AS ys FROM s GROUP BY id) h USING (id))")
-    # decompositions: one panel per component (no decomposition plot yet)
-    add("ts_mstl_decomposition_by", PRED,
-        "(UNPIVOT (SELECT m.id, unnest(h.dss) AS ds, unnest(m.trend) AS trend, unnest(m.seasonal[1]) AS seasonal, "
-        "unnest(m.remainder) AS remainder FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m "
-        "JOIN (SELECT id, list(ds ORDER BY ds) AS dss FROM s GROUP BY id) h USING (id) WHERE m.id = 'B') "
-        "ON trend, seasonal, remainder INTO NAME component VALUE yhat)",
-        specific="anofox_plot_prediction(t, facet := 'component')")
-    add("ts_forecast_explain_by", PRED,
-        "(UNPIVOT (SELECT id, unnest(generate_series(1, (decomposition).horizon)) AS period, "
-        "unnest((decomposition).level) AS level_, unnest((decomposition).trend) AS trend, "
-        "unnest((decomposition).seasonal) AS seasonal "
-        "FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A') "
-        "ON level_ AS level, trend, seasonal INTO NAME component VALUE yhat)",
-        specific="anofox_plot_prediction(t, facet := 'component')")
+    # decompositions (#188): the list outputs plot as they come.
+    add("ts_mstl_decomposition_by", DECOMP,
+        "(SELECT * FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) WHERE id = 'B')",
+        "direct")
+    add("ts_forecast_explain_by", DECOMP,
+        "(SELECT * FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A')",
+        "direct")
+
+    # ── cross-validation folds → cv (provisional) ───────────────────────────
+    add("ts_cv_folds_by", CV, "ts_cv_folds_by('s', id, ds, y, 3, 7, MAP{})", "direct")
+    # training ends of Feb 20 / Feb 24 / Feb 28 give overlapping test windows.
+    add("ts_cv_split_by", CV,
+        "ts_cv_split_by('s', id, ds, y, ['2024-02-20'::TIMESTAMP, '2024-02-24'::TIMESTAMP, "
+        "'2024-02-28'::TIMESTAMP], 7, MAP{})", "direct")
+    add("ts_cv_split_folds_by", CV,
+        "ts_cv_split_folds_by('s', id, ds, ['2024-02-20'::TIMESTAMP, '2024-03-01'::TIMESTAMP], 7, '1d', MAP{})",
+        "direct")
+    add("ts_cv_split_index_by", CV,
+        "(SELECT group_col AS id, date_col AS ds, fold_id, split FROM "
+        "ts_cv_split_index_by('s', id, ds, ['2024-02-20'::TIMESTAMP, '2024-03-01'::TIMESTAMP], 7, '1d', MAP{}))")
 
     # ── in-sample fit → obs (the plot.lm 2×2) ───────────────────────────────
     add("ts_forecast_inspect_by", OBS,
@@ -283,9 +291,8 @@ OUT_OF_SCOPE = {
         "ts_drop_constant_by", "ts_drop_edge_zeros_by", "ts_drop_gappy_by", "ts_drop_leading_zeros_by",
         "ts_drop_short_by", "ts_drop_trailing_zeros_by", "ts_drop_zeros_by", "ts_diff_by",
         "ts_fill_forward_operator")},
-    **{f: "cross-validation split (the folds, not a result; plotted through ts_cv_forecast_by)" for f in (
-        "ts_cv_folds_by", "ts_cv_split_by", "ts_cv_split_folds_by", "ts_cv_split_index_by", "ts_cv_hydrate_by",
-        "ts_check_leakage")},
+    **{f: "feature hydration / leakage check (not a fold layout)" for f in (
+        "ts_cv_hydrate_by", "ts_check_leakage")},
     **{f: "key / timestamp validation and hierarchy helpers" for f in (
         "ts_validate_timestamps_by", "ts_validate_timestamps_summary_by", "ts_validate_separator",
         "ts_combine_keys", "ts_split_keys", "ts_aggregate_hierarchy")},
@@ -324,6 +331,8 @@ EXTRA = {
                        f"SELECT * FROM ts_forecast_by('s', id, ds, y, 'SeasonalNaive', 14, '1d', {FC})) p WHERE id = 'B'",
     "forecast_per_series": f"SELECT id, anofox_plot_prediction(f) FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', {FC}) f "
                            "GROUP BY id ORDER BY id",
+    "cv_folds_per_series": "SELECT id, anofox_plot_cv(f) FROM ts_cv_folds_by('s', id, ds, y, 3, 7, MAP{}) f "
+                           "GROUP BY id ORDER BY id",
     "backtest_two_models": "SELECT anofox_plot_prediction(b) FROM bt b WHERE id = 'A'",
     "changepoints_over_history": "SELECT anofox_plot_prediction(p, events := (SELECT list(e) FROM ("
                                  "SELECT id, ds, 'changepoint' AS kind, 'alarm' AS severity "
@@ -349,6 +358,15 @@ EXTRA = {
                            "(adf).statistic AS statistic, (adf).p_value AS p_value FROM ts_adf_by('s', id, ds, y) "
                            "UNION ALL SELECT id, 'KPSS', (kpss).statistic, (kpss).p_value "
                            "FROM ts_kpss_by('s', id, ds, y)) t",
+    # the long form, with the real dates back (#188): the same UNPIVOT
+    # adapter as before, but into the decomposition schema's `value`.
+    "mstl_long_with_dates": "SELECT anofox_plot_decomposition(t) FROM (UNPIVOT (SELECT m.id, unnest(h.dss) AS ds, "
+                            "unnest(m.trend) AS trend, unnest(m.seasonal[1]) AS seasonal, unnest(m.remainder) AS remainder "
+                            "FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m "
+                            "JOIN (SELECT id, list(ds ORDER BY ds) AS dss FROM s GROUP BY id) h USING (id) WHERE m.id = 'B') "
+                            "ON trend, seasonal, remainder INTO NAME component VALUE value) t",
+    "mstl_per_series": "SELECT id, anofox_plot_decomposition(m) FROM "
+                       "ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) m GROUP BY id ORDER BY id",
 }
 
 # Build warnings the harness accepts (none today).

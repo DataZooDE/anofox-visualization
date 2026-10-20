@@ -183,7 +183,19 @@ fn widths_extra(o: &RenderOptions, m: &Model) -> Option<(Extra, f64, f64)> {
     values.retain(|v| *v > 0.0);
     values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let tw = |s: &str| crate::ticks::text_width(s, FONT);
-    let width_of = |v: f64| -> f64 { 0.75 + 7.25 * (v / fl.vmax).sqrt() };
+    // The exact scale the overlay (`overlay.rs`) maps `linewidth` through,
+    // so the legend's key widths are never a second, hand-rolled formula
+    // that could drift from what's actually drawn.
+    use ggplot_rs::scale::Scale as _;
+    let scale = ggplot_rs::scale::linewidth::ScaleLinewidthContinuous::new()
+        .with_range(0.75, 8.0)
+        .with_transform(ggplot_rs::scale::transform::ScaleTransform::Sqrt)
+        .with_limits(0.0, fl.vmax);
+    let width_of = |v: f64| -> f64 {
+        scale
+            .map_to_size(&ggplot_rs::prelude::Value::Float(v))
+            .unwrap_or(0.75)
+    };
     let items: Vec<(f64, String)> = values
         .into_iter()
         .map(|v| (width_of(v), fl.fmt.short(v, &o.locale)))
