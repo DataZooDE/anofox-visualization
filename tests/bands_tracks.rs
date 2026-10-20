@@ -265,12 +265,16 @@ fn lane_tooltips_name_the_lane_and_the_text() {
     let svgs =
         track::render_stack(&chart(), &tracks(), 800, 300, &RenderOptions::default()).unwrap();
     assert!(svgs[1].contains(
-        "data-series=\"Promotions\" class=\"gg-mark gg-bar\" data-geom=\"tile\" \
-         data-fvalue=\"Summer sale\"><title>Promotions: Summer sale</title>"
+        "data-series=\"Promotions\" data-vtext=\"Summer sale\" class=\"gg-mark gg-bar\" \
+         data-geom=\"tile\"><title>Promotions: Summer sale</title>"
     ));
-    // a category fill is a colour, not the tooltip's value
+    // a category fill is a colour, not the tooltip's value: GeomTile still
+    // carries its raw fill ("#d64545") as `data-value` natively (unlike the
+    // old `lane_tips`, which stripped it) — `data-vtext` ("Lead time", via
+    // `data_attr`) is the one hosts should read, and `web/app.js`'s
+    // markInfo() prefers it over a raw `data-value`.
     assert!(svgs[2].contains("<title>Lead time: #d64545</title>"));
-    assert!(!svgs[2].contains("data-value=\"#"));
+    assert!(svgs[2].contains("data-vtext=\"#d64545\""));
     // the colour levels are drawn as given
     assert!(svgs[2].contains("fill=\"#D64545\""));
 }

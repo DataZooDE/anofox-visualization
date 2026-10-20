@@ -1727,9 +1727,6 @@ fn render_placed(
         if boxstats::is_stats(&cols) {
             svg = boxstats::with_tips(svg, &cols, o);
         }
-        if find_role(&cols, Role::Track).is_some() {
-            svg = track::lane_tips(svg);
-        }
         Ok((svg, warnings))
     })
 }

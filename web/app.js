@@ -12234,7 +12234,9 @@ function markInfo(attr, tip) {
   const tValue = i >= 0 ? tip.slice(i + 2) : "";
   const ds = attr("data-series");
   const dv = attr("data-value");
-  const fv = attr("data-fvalue");
+  // `data-fvalue` (most marks, via svg_formatted_values) or `data-vtext` (a
+  // ::TRACK lane: `data-fvalue` is ggplot-rs-reserved, see `track.rs`).
+  const fv = attr("data-fvalue") || attr("data-vtext");
   const series = ds !== null && ds !== "" ? ds : tSeries;
   const raw = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
   const value = fv !== null && fv !== "" ? fv : raw;
