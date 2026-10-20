@@ -102,6 +102,41 @@ fn shared_threshold(vs: &[Option<f64>]) -> Option<f64> {
         .then_some(v0)
 }
 
+/// A panel's x limits (lo, hi, span): the finite values and thresholds'
+/// min/max, padded `[lo − 0.08·span, hi + 0.25·span]` (room for the value
+/// text on the right). When no lane has a `lower_threshold` and every value
+/// and threshold is non-negative, the lower limit is forced to 0 instead —
+/// an upper-bound-only acceptance band (`value ≤ upper`) then visibly
+/// covers 0..upper rather than a sliver hugging the threshold.
+fn x_limits(dedup: &[&CheckRow]) -> (f64, f64, f64) {
+    let mut extent: Vec<f64> = Vec::new();
+    for r in dedup {
+        extent.push(r.value);
+        if let Some(v) = r.lower {
+            extent.push(v);
+        }
+        if let Some(v) = r.upper {
+            extent.push(v);
+        }
+    }
+    let lo = extent.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = extent.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = if hi > lo {
+        hi - lo
+    } else if hi != 0.0 {
+        hi.abs()
+    } else {
+        1.0
+    };
+    let has_lower = dedup.iter().any(|r| r.lower.is_some());
+    let xlo = if !has_lower && extent.iter().all(|&v| v >= 0.0) {
+        0.0
+    } else {
+        lo - 0.08 * span
+    };
+    (xlo, hi + 0.25 * span, span)
+}
+
 /// `anofox_plot_checks(tbl)`: a band of checks (default), or a status strip
 /// over time (`kind := 'strip'`, or several `run_ts` / `ds` values).
 pub(super) fn checks(
@@ -257,26 +292,7 @@ fn band(
                 0
             }
         };
-        let mut extent: Vec<f64> = Vec::new();
-        for r in &dedup {
-            extent.push(r.value);
-            if let Some(v) = r.lower {
-                extent.push(v);
-            }
-            if let Some(v) = r.upper {
-                extent.push(v);
-            }
-        }
-        let lo = extent.iter().copied().fold(f64::INFINITY, f64::min);
-        let hi = extent.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let span = if hi > lo {
-            hi - lo
-        } else if hi != 0.0 {
-            hi.abs()
-        } else {
-            1.0
-        };
-        let (xlo, xhi) = (lo - 0.08 * span, hi + 0.25 * span);
+        let (xlo, xhi, span) = x_limits(&dedup);
 
         let xs: Vec<Value> = dedup.iter().map(|r| Value::Float(r.value)).collect();
         let ys: Vec<Value> = dedup
@@ -463,11 +479,15 @@ fn strip(
         time_key.map(look::humanize).unwrap_or_default()
     };
     let plot = labels.apply(look::styled(plot, o, false), &xdefault, "");
-    let plot = if levels.len() < 2 {
-        plot.legend_position(ggplot_rs::theme::LegendPosition::None)
+    // The house default (legend on top) draws level with — and, with a title
+    // set, under — the title text (ggplot-rs anchors the title just above
+    // the panel, not at the top of its own reserved band): put the legend
+    // under the lanes instead, so a title always reads first.
+    let plot = plot.legend_position(if levels.len() < 2 {
+        ggplot_rs::theme::LegendPosition::None
     } else {
-        plot
-    };
+        ggplot_rs::theme::LegendPosition::Bottom
+    });
     stats::finish(plot, w, h, place)
 }
 
@@ -511,5 +531,54 @@ mod tests {
 
         let opts: Row = serde_json::from_str(r#"{"kind":"nope"}"#).unwrap();
         assert!(mode(&t, &opts).is_err());
+    }
+
+    fn row(value: f64, lower: Option<f64>, upper: Option<f64>) -> CheckRow {
+        CheckRow {
+            label: "c".into(),
+            identifier: None,
+            status: "fail".into(),
+            status_raw: "fail".into(),
+            value,
+            lower,
+            upper,
+            message: None,
+            time: None,
+        }
+    }
+
+    #[test]
+    fn x_limits_start_at_zero_for_an_upper_only_nonnegative_panel() {
+        // Upper threshold only, every value and bound ≥ 0: the panel's left
+        // limit is 0, not a sliver hugging the threshold.
+        let r = row(0.083, None, Some(0.05));
+        let (xlo, xhi, _) = x_limits(&[&r]);
+        assert_eq!(xlo, 0.0);
+        assert!(xhi > 0.083);
+
+        // Mirror: a lower threshold only still runs to the data-derived right
+        // limit (unchanged).
+        let r = row(1.0, Some(1.0), None);
+        let (xlo, xhi, _) = x_limits(&[&r]);
+        assert!((0.0..1.0).contains(&xlo), "data-derived left limit: {xlo}");
+        assert!(xhi > 1.0);
+
+        // A negative value is not forced to start at 0.
+        let r = row(-0.1, None, Some(0.05));
+        let (xlo, ..) = x_limits(&[&r]);
+        assert!(
+            xlo < 0.0,
+            "negative values keep their own left limit: {xlo}"
+        );
+
+        // One lane with a lower threshold disables the zero-forcing for the
+        // whole panel, even when another lane has only an upper threshold.
+        let app = row(0.08, None, Some(0.05));
+        let web = row(0.02, Some(0.01), None);
+        let (xlo, ..) = x_limits(&[&app, &web]);
+        assert_ne!(
+            xlo, 0.0,
+            "a lower threshold anywhere in the panel keeps the data-derived limit"
+        );
     }
 }
