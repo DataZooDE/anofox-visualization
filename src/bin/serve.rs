@@ -1425,6 +1425,13 @@ enum PageError {
 
 const PAGE_ERROR: &str = "this dashboard could not be shown (the server log has the details)";
 
+/// Why a panel's own renderer could not draw it (#285), redacted like
+/// [`PAGE_ERROR`] (#279): the renderer's `<pre>error: …</pre>` text can quote
+/// a role option's value (e.g. an `::ABLINE` or `::SMOOTH_METHOD` argument),
+/// which can itself carry data. Details go to the server log only, via
+/// `access::diag`.
+const PANEL_RENDER_ERROR_HTML: &str = "<pre>this panel could not be drawn</pre>";
+
 /// A `run_duckdb` error as a [`PageError`]: only its own timeout is shown.
 fn page_error(e: String) -> PageError {
     if e.starts_with("query timed out after ") {
@@ -1642,8 +1649,14 @@ fn render_dashboard_page(
         }
         if let Some(cp) = &panel.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
-                let svg =
-                    r.unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e.to_string())));
+                let svg = r.unwrap_or_else(|e| {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' panel render failed: {}",
+                        dash.id,
+                        access::diag(&e.to_string())
+                    );
+                    PANEL_RENDER_ERROR_HTML.to_string()
+                });
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
             }
             continue;
@@ -1672,7 +1685,14 @@ fn render_dashboard_page(
         let svg = anofox_visualization::host::catch_panic(|| {
             render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
         })
-        .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e)));
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "[anofox-serve] dashboard '{}' panel render failed: {}",
+                dash.id,
+                access::diag(&e)
+            );
+            PANEL_RENDER_ERROR_HTML.to_string()
+        });
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
