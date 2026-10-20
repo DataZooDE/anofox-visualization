@@ -37,6 +37,24 @@ fn bars(svg: &str, s: &str) -> Vec<(f64, f64)> {
     }
     out
 }
+/// `(x, text)` of every `::DATALABELS` text mark (`data-geom="text"`).
+fn data_label_centers(svg: &str) -> Vec<(f64, String)> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<text ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        let body_end = rest[end..].find("</text>").unwrap() + end;
+        if tag.contains("data-geom=\"text\"") {
+            let k = tag.find(" x=\"").unwrap() + 4;
+            let x: f64 = tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap();
+            out.push((x, rest[end + 1..body_end].to_string()));
+        }
+        rest = &rest[body_end + "</text>".len()..];
+    }
+    out
+}
+
 /// Point lists of non-grid `<polyline>`s (the grid is drawn in the theme's
 /// grid colour).
 fn polylines(svg: &str) -> Vec<String> {
@@ -81,6 +99,38 @@ fn bar_with_category_is_dodged() {
     assert!(app[0].0 + app[0].1 <= web[0].0 + 0.01, "{app:?} {web:?}");
     assert!(s.contains("data-x=\"W1\""), "a real discrete x level");
     assert!(!s.contains("data-xticks="), "no numeric-slot tick map");
+    // Each label sits over its own bar's centre, not its group's (a sibling
+    // layer needs its own position_dodge() — GeomText honouring dodge
+    // doesn't mean it inherits the bars' own position() call).
+    let labels = data_label_centers(&s);
+    assert_eq!(labels.len(), 4, "{s}");
+    let center = |b: (f64, f64)| b.0 + b.1 / 2.0;
+    let bar_for = |t: &str| match t {
+        "30" => app[0],
+        "22" => web[0],
+        "41" => app[1],
+        "28" => web[1],
+        other => panic!("unexpected label {other}"),
+    };
+    for (x, text) in &labels {
+        let want = center(bar_for(text));
+        assert!(
+            (x - want).abs() < 0.5,
+            "label {text} at x={x} not over its bar (centre {want}): {labels:?} {app:?} {web:?}"
+        );
+    }
+    // No two labels share (nearly) the same x: that's the overlap bug this
+    // guards against (both of a group's labels stacking at one x).
+    for i in 0..labels.len() {
+        for j in (i + 1)..labels.len() {
+            assert!(
+                (labels[i].0 - labels[j].0).abs() > 1.0,
+                "{:?} and {:?} overlap",
+                labels[i],
+                labels[j]
+            );
+        }
+    }
 }
 
 // Dodged groups follow the legend (sorted) order, whatever the row order, and

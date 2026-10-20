@@ -3012,6 +3012,12 @@ fn cartesian(
         plot = match kind {
             Kind::BarStacked | Kind::AreaStacked => plot.position(position_stack().with_vjust(0.5)),
             Kind::BarStackedPercent => plot.position(position_fill().with_vjust(0.5)),
+            // Grouped (dodged) bars/points: each layer's position adjustment
+            // is independent, so the label layer needs its own
+            // position_dodge too — GeomText honouring it (ggplot-rs#318
+            // B3-4) only means it *can* dodge, not that it inherits the
+            // bars' own position() call.
+            _ if dodge => plot.position(position_dodge(dodge_width)),
             _ => plot,
         };
     }
