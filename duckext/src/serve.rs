@@ -101,6 +101,12 @@ pub fn stop(port: u16) -> Result<String, String> {
         ));
     };
     r.stop.store(true, Ordering::SeqCst);
+    // #352: a Quack source build in progress (the startup build, or a
+    // `refresh_s` rebuild) is cancelled the same way a timeout would —
+    // otherwise `r.workers.drain(..).join()` below could wait on it forever.
+    if let Some(locked) = &r.locked {
+        locked.source_cancel.store(true, Ordering::SeqCst);
+    }
     for _ in 0..r.workers.len() {
         r.server.unblock();
     }
@@ -976,6 +982,9 @@ struct Locked {
     queries: Queries,
     /// Recent `-- @requires` answers (see [`requires_met`]).
     requires_cache: rq::ExistsCache,
+    /// `options.source` (#352): set to cancel a Quack source build in
+    /// progress — `anofox_serve_stop` sets it; a new build clears it first.
+    source_cancel: Arc<AtomicBool>,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -984,9 +993,10 @@ use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
+        self.source_cancel.store(false, Ordering::SeqCst);
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-            build_snapshot(&conn, &self.opts, &self.loads)?
+            build_snapshot(&conn, &self.opts, &self.loads, &self.source_cancel)?
         };
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(&mut snap, &self.dashboards, p, k)?;
@@ -1082,9 +1092,13 @@ pub fn start_locked(
         // silently get there.
         return Err("anofox-visualization: `auth` is set but no access policy was found (options.policy, or policy.json in the dashboard folder) — pass \"policy\": \"none\" to serve with per-panel claim filters only".into());
     }
+    // The startup build must succeed (fail closed, #352): no `source_cancel`
+    // is wired up yet (nothing can refresh before the server is registered),
+    // so a fresh, never-fired flag is enough here.
+    let startup_cancel = AtomicBool::new(false);
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &opts, &loads)?
+        build_snapshot(&conn, &opts, &loads, &startup_cancel)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(&mut snap, &dashboards, p, k)?;
@@ -1155,6 +1169,7 @@ pub fn start_locked(
         queries,
         // A few seconds: files appear live, a rescan per request is avoided.
         requires_cache: rq::ExistsCache::new(Duration::from_secs(5), 4096),
+        source_cancel: Arc::new(AtomicBool::new(false)),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -1611,6 +1626,7 @@ fn build_snapshot(
     live: &Conn,
     opts: &LockedOptions,
     extra_loads: &[String],
+    source_cancel: &AtomicBool,
 ) -> Result<(Snapshot, Vec<String>), String> {
     let attach_all = opts.attach;
     let mut warnings = Vec::new();
@@ -1687,7 +1703,7 @@ fn build_snapshot(
                 src.r#as
             ));
         }
-        let (name, file, w) = crate::source::copy_from_quack(&dir.0, src)
+        let (name, file, w) = crate::source::copy_from_quack(&dir.0, src, source_cancel)
             .map_err(|e| format!("options.source: {e}"))?;
         warnings.extend(w);
         if opts.search_path.is_empty() {

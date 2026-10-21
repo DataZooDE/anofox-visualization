@@ -21,14 +21,18 @@
 //! first, and [`SourceOpts`]'s `Debug` never prints it (only the *name* of
 //! the env var / file it comes from).
 //!
-//! `copy_from_quack` below has no timeout or cancellation yet (#352 step 3);
-//! those land in the next step, alongside the watchdog.
+//! `copy_from_quack`'s `cancel` parameter plus `opts.timeout` are enforced by
+//! a watchdog thread on a **second** staging connection: interrupting the
+//! client's own connection does not stop a query already running on the
+//! remote side (#352 fact 5), so the watchdog also runs `quack_cancel` there
+//! before `duckdb_interrupt`ing the first connection.
 
 use crate::db::{Conn, Database};
 use crate::serve::{columns_by_table, fk_order, insertable_columns};
 use anofox_visualization::host::serving::{quote_ident, sql_string_literal, valid_ident};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Remote views: materialise them as tables in the snapshot (Quack exposes no
 /// `CREATE VIEW` DDL to replay, only the query result — fact #2), or leave
@@ -251,8 +255,9 @@ pub fn redact(err: &str, token: &str) -> String {
 /// views), then tears both attachments and the secret down.
 ///
 /// `dir`: the snapshot's own private directory (the file is created inside
-/// it). No timeout or cancellation yet (#352 step 3) — a slow or wedged
-/// remote query blocks the build; the watchdog lands in the next step.
+/// it). `cancel`: checked by the internal watchdog alongside `opts.timeout`;
+/// set it from the outside (an `anofox_serve_stop` in flight) to cancel a
+/// build early.
 ///
 /// Returns the database name to attach the file under (`opts.as`), the file
 /// path, and non-fatal warnings (lost FKs/macros/sequences, skipped views,
@@ -260,15 +265,17 @@ pub fn redact(err: &str, token: &str) -> String {
 pub fn copy_from_quack(
     dir: &Path,
     opts: &SourceOpts,
+    cancel: &AtomicBool,
 ) -> Result<(String, PathBuf, Vec<String>), String> {
     let token = read_token(opts)?;
-    build(dir, opts, &token).map_err(|e| redact(&e, &token))
+    build(dir, opts, &token, cancel).map_err(|e| redact(&e, &token))
 }
 
 fn build(
     dir: &Path,
     opts: &SourceOpts,
     token: &str,
+    cancel: &AtomicBool,
 ) -> Result<(String, PathBuf, Vec<String>), String> {
     let mut warnings = Vec::new();
     // 1. A throwaway staging instance: nothing auto-loads or auto-installs,
@@ -302,15 +309,36 @@ fn build(
     let file = dir.join(format!("db_quack_{}.duckdb", sv_random()));
     let f = file.to_string_lossy().into_owned();
     let dst_alias = "__anofox_quack_dst";
-    let result = stg
-        .exec(&format!(
-            "ATTACH {} AS {} (READ_WRITE)",
-            sql_string_literal(&f),
-            dst_alias
-        ))
-        .and_then(|_| copy_schema_and_data(&stg, &alias, dst_alias, opts, &mut warnings));
+    let attach_dst = stg.exec(&format!(
+        "ATTACH {} AS {} (READ_WRITE)",
+        sql_string_literal(&f),
+        dst_alias
+    ));
 
-    // 4. Best-effort teardown either way: DETACH both, DROP the secret.
+    let result = attach_dst.and_then(|_| {
+        // 4. The watchdog: a SECOND connection on the same staging instance
+        // (`Conn` is `Send`, not `Sync` — owned by the watchdog thread, not
+        // borrowed, since a `duckdb_connection` is one-at-a-time).
+        let stg2 = db.connect()?;
+        let intr = stg.interrupter();
+        let deadline = Instant::now() + opts.timeout;
+        let finished = AtomicBool::new(false);
+        let watchdog_alias = alias.clone();
+        std::thread::scope(|scope| {
+            let finished_ref = &finished;
+            scope.spawn(move || {
+                if wait_for_fire(finished_ref, cancel, deadline, Duration::from_millis(50)) {
+                    cancel_remote(&stg2, &watchdog_alias);
+                    intr.interrupt();
+                }
+            });
+            let r = copy_schema_and_data(&stg, &alias, dst_alias, opts, &mut warnings);
+            finished.store(true, Ordering::SeqCst);
+            r
+        })
+    });
+
+    // 5. Best-effort teardown either way: DETACH both, DROP the secret.
     let _ = stg.exec(&format!("DETACH {dst_alias}"));
     let _ = stg.exec(&format!("DETACH {}", quote_ident(&alias)));
     let _ = stg.exec(&format!("DROP SECRET {}", quote_ident(&alias)));
@@ -321,6 +349,50 @@ fn build(
         opts.r#as
     ));
     Ok((opts.r#as.clone(), file, warnings))
+}
+
+/// Poll every `interval` until either `finished` is set (the copy returned on
+/// its own: no need to cancel, returns `false`) or `cancel` is set / `deadline`
+/// passes (the watchdog must fire: returns `true`). Pure timing logic, kept
+/// free of any DuckDB call so it can be unit-tested without a host API.
+fn wait_for_fire(
+    finished: &AtomicBool,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    interval: Duration,
+) -> bool {
+    loop {
+        if finished.load(Ordering::SeqCst) {
+            return false;
+        }
+        if cancel.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Ask a second connection to cancel the query the first one is running on
+/// `alias` (`quack_cancel(catalog, quack_connection_id(alias))`). Best
+/// effort: an error here just means the local `duckdb_interrupt` that
+/// follows is the only thing that fires.
+fn cancel_remote(stg2: &Conn, alias: &str) {
+    let lit = sql_string_literal(alias);
+    let Ok(mut r) = stg2.query(&format!("SELECT quack_connection_id({lit})")) else {
+        return;
+    };
+    let Ok(rows) = r.string_rows(1) else { return };
+    let Some(cid) = rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+    else {
+        return;
+    };
+    let _ = stg2.exec(&format!(
+        "SELECT * FROM quack_cancel({lit}, {})",
+        sql_string_literal(&cid)
+    ));
 }
 
 /// `(SCHEMA)` copy (a bare `COPY FROM DATABASE` fails on a Quack source:
@@ -500,6 +572,7 @@ fn sv_random() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     fn src(json: &str) -> Result<SourceOpts, String> {
         parse(&serde_json::from_str(json).unwrap())
@@ -613,5 +686,67 @@ mod tests {
         .unwrap();
         assert_eq!(read_token(&opts_padded).unwrap(), "topsecret");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_watchdog_fires_at_the_deadline_not_before() {
+        let finished = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        // Not yet: `finished` flips before the (generous) deadline.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let t0 = Instant::now();
+        std::thread::scope(|scope| {
+            let f = &finished;
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                f.store(true, Ordering::SeqCst);
+            });
+            assert!(!wait_for_fire(
+                &finished,
+                &cancel,
+                deadline,
+                Duration::from_millis(5)
+            ));
+        });
+        assert!(
+            t0.elapsed() < Duration::from_secs(1),
+            "did not return promptly on finish"
+        );
+
+        // Fires once the deadline passes, with nothing marking it finished.
+        let finished = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let t0 = Instant::now();
+        assert!(wait_for_fire(
+            &finished,
+            &cancel,
+            deadline,
+            Duration::from_millis(5)
+        ));
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(25),
+            "fired too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "fired too late: {elapsed:?}"
+        );
+
+        // Fires immediately when `cancel` is already set, deadline or not.
+        let finished = AtomicBool::new(false);
+        cancel.store(true, Ordering::SeqCst);
+        let far = Instant::now() + Duration::from_secs(600);
+        let t0 = Instant::now();
+        assert!(wait_for_fire(
+            &finished,
+            &cancel,
+            far,
+            Duration::from_millis(5)
+        ));
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "cancel should fire promptly"
+        );
     }
 }
