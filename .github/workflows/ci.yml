@@ -142,6 +142,47 @@ jobs:
       - name: The assistant's function lists are current
         run: node scripts/gen-assist-functions.mjs --check
 
+      # scripts/telemetry-e2e.mjs (#334): no visitor's browser reports usage to
+      # a third party. Playwright itself came from tests/web's npm install
+      # above (tests/web/package.json devDependencies); only its Chromium
+      # binary is cached here.
+      - name: Cache Playwright's browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('tests/web/package.json') }}
+
+      - name: Install Playwright's Chromium
+        working-directory: tests/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve web/ for the browser e2e checks
+        run: |
+          nohup python3 serve_nocache.py 8947 > "$RUNNER_TEMP/serve_nocache.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/serve_nocache.pid"
+          for i in $(seq 1 30); do curl -fs -o /dev/null http://127.0.0.1:8947/ && break; sleep 0.5; done
+          curl -fs -o /dev/null http://127.0.0.1:8947/ || { echo "::error::serve_nocache.py on :8947 never came up"; cat "$RUNNER_TEMP/serve_nocache.log"; exit 1; }
+
+      # --selftest makes the page also try a PostHog request, which the harness
+      # must record and abort — proving it would have caught a real one.
+      - name: Telemetry e2e selftest (must fail on the PostHog probe)
+        run: |
+          if NODE_PATH="$PWD/tests/web/node_modules" node scripts/telemetry-e2e.mjs --url http://127.0.0.1:8947/ --selftest; then
+            echo "::error::--selftest should fail on its PostHog probe but exited 0"
+            exit 1
+          fi
+          echo "selftest correctly caught and aborted the telemetry probe"
+
+      - name: Telemetry e2e (no request to a telemetry or unexpected host)
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/telemetry-e2e.mjs --url http://127.0.0.1:8947/
+
+      - name: Stop the web/ server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/serve_nocache.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/serve_nocache.pid")" 2>/dev/null || true
+          fi
+
       # Explore data's starter dashboards (#97): every sample table's starter
       # passes `dashboard --check --strict` (profiled with web/explore.js and
       # the wasm page_sql, linted against the native DuckDB CLI).

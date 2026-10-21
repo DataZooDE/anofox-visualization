@@ -8,8 +8,14 @@
 //       [--out ~/.cache/stats-showcase] [--theme dark|light] [--sql file.sql] [--query "&k=v"]
 //       [--width 390]
 //
-// --theme dark   view with the viewer's dark preference (?theme=dark) and fail
-//                if a panel (card or chart SVG) still has a white background
+// Flags take "--flag value" (separate words — required in zsh, where
+// --flag=value would otherwise glue into one argv token) or "--flag=value";
+// an unrecognised --flag fails the run instead of being silently ignored (#309).
+//
+// --theme dark   view with the viewer's dark preference (?theme=dark, plus the
+//                browser's own prefers-color-scheme so native form controls
+//                match) and fail if a panel (card or chart SVG) still has a
+//                white background
 // --sql f.sql    load a dashboard from a file instead of a built-in example
 //                (passed in the #sql hash, like a Share link)
 // --width 390   view the builder at that viewport width (default 1440, where
@@ -35,21 +41,51 @@ import os from "os";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
+// "--flag value" or "--flag=value"; any other --flag fails the run (#309 —
+// --theme=dark / --width=390 used to parse to nothing and silently fall back
+// to defaults, with no indication the flag had been dropped).
+const KNOWN_FLAGS = ["--url", "--dashboard", "--out", "--theme", "--sql", "--query", "--width", "--timeout"];
+const rawArgv = process.argv.slice(2);
+for (const tok of rawArgv) {
+  const name = tok.startsWith("--") ? tok.split("=")[0] : null;
+  if (name && !KNOWN_FLAGS.includes(name)) {
+    console.error(`FAIL: unknown flag ${tok} (known: ${KNOWN_FLAGS.join(", ")})`);
+    process.exit(1);
+  }
+}
 const arg = (k, d) => {
-  const i = process.argv.indexOf(k);
-  return i > 0 ? process.argv[i + 1] : d;
+  const hit = rawArgv.find((a) => a === k || a.startsWith(k + "="));
+  if (hit === undefined) return d;
+  if (hit.includes("=")) return hit.slice(hit.indexOf("=") + 1);
+  return rawArgv[rawArgv.indexOf(hit) + 1];
 };
 const base = arg("--url", "http://127.0.0.1:8791/");
 const dash = arg("--dashboard", "What sets the price of a home?");
 const out = arg("--out", path.join(os.homedir(), ".cache/stats-showcase"));
 const theme = arg("--theme", "");
+if (theme && theme !== "dark" && theme !== "light") {
+  console.error(`FAIL: --theme must be "dark" or "light", got "${theme}"`);
+  process.exit(1);
+}
 const sqlFile = arg("--sql", "");
 const extra = arg("--query", "");
-const width = Number(arg("--width", "0"));
+const widthArg = arg("--width", "0");
+const width = Number(widthArg);
+if (!Number.isFinite(width) || width < 0) {
+  console.error(`FAIL: --width must be a non-negative number, got "${widthArg}"`);
+  process.exit(1);
+}
 mkdirSync(out, { recursive: true });
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: width || 1440, height: 1000 }, reducedMotion: "reduce" });
+const page = await browser.newPage({
+  viewport: { width: width || 1440, height: 1000 },
+  reducedMotion: "reduce",
+  // ?theme= already drives the app's own dark mode (viewerPrefersDark());
+  // match the browser's own color-scheme too, so native form controls
+  // (and any future prefers-color-scheme CSS) follow the same choice.
+  ...(theme ? { colorScheme: theme } : {}),
+});
 const logs = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
