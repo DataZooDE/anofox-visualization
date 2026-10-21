@@ -659,12 +659,12 @@ fn cmd_describe(args: &[String]) {
         eprintln!("usage: dashboard --describe <table|'file.parquet'|read_csv(...)> [--db file]");
         std::process::exit(2);
     };
-    let out = Command::new("duckdb")
-        .arg(&dbfile)
+    let mut cmd = Command::new("duckdb");
+    cmd.arg(&dbfile)
         .arg("-c")
-        .arg(format!("SUMMARIZE SELECT * FROM {src}"))
-        .output()
-        .unwrap_or_else(|e| panic!("run duckdb: {e}"));
+        .arg(format!("SUMMARIZE SELECT * FROM {src}"));
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+    let out = cmd.output().unwrap_or_else(|e| panic!("run duckdb: {e}"));
     if out.status.success() {
         print!("{}", String::from_utf8_lossy(&out.stdout));
     } else {
@@ -690,12 +690,9 @@ fn run_query(
             cmd.arg(":memory:");
         }
     }
-    let out = cmd
-        .arg("-json")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .map_err(|e| format!("run duckdb: {e}"))?;
+    cmd.arg("-json").arg("-c").arg(sql);
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+    let out = cmd.output().map_err(|e| format!("run duckdb: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
@@ -713,11 +710,9 @@ fn run(db: &str, sql: &str, json: bool) -> String {
     if json {
         cmd.arg("-json");
     }
-    let out = cmd
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .unwrap_or_else(|e| panic!("run duckdb: {e}"));
+    cmd.arg("-c").arg(sql);
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+    let out = cmd.output().unwrap_or_else(|e| panic!("run duckdb: {e}"));
     if !out.status.success() {
         eprintln!(
             "duckdb error on: {sql}\n{}",

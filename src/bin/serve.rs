@@ -850,9 +850,10 @@ impl Drop for AuthoringSession {
 
 impl Live {
     fn spawn(db: &str, dir: &Path, round_timeout: Duration) -> Result<Live, String> {
-        let mut child = Command::new("duckdb")
-            .arg(db)
-            .arg("-json")
+        let mut cmd = Command::new("duckdb");
+        cmd.arg(db).arg("-json");
+        anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1961,6 +1962,7 @@ fn list_page(st: &ServeState, scope: Option<&Scope>) -> String {
 fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<String, String> {
     let mut cmd = Command::new("duckdb");
     cmd.arg(db).args(flags).arg("-c").arg(sql);
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

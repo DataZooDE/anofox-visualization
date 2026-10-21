@@ -3279,10 +3279,10 @@ mod tests {
     /// the workflow installs the pinned CLI).
     /// A `policy::Duck` over the `duckdb` CLI (one VARCHAR column).
     fn cli_rows(sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
-        let out = std::process::Command::new("duckdb")
-            .args(["-noheader", "-list", "-c", sql])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new("duckdb");
+        cmd.args(["-noheader", "-list", "-c", sql]);
+        anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+        let out = cmd.output().map_err(|e| e.to_string())?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).into_owned());
         }
@@ -3296,10 +3296,10 @@ mod tests {
             "SELECT json_serialize_sql({})::VARCHAR AS j",
             sql_string_literal(sql)
         );
-        let out = std::process::Command::new("duckdb")
-            .args(["-noheader", "-list", "-c", &q])
-            .output()
-            .ok()?;
+        let mut cmd = std::process::Command::new("duckdb");
+        cmd.args(["-noheader", "-list", "-c", &q]);
+        anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+        let out = cmd.output().ok()?;
         Some(if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {

@@ -9,6 +9,12 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/function/scalar_macro_function.hpp"
+// #352: DuckDB 2.0 keys CreateInfo's qualified name and
+// MacroFunction::default_parameters on `Identifier`, not `string`. This
+// header exists on both v1.5.6 (where it provides a backport shim with
+// implicit string<->Identifier conversions) and v2.0.0 (where those
+// conversions are explicit) -- see the comments on AnofoxMacroInfo() below.
+#include "duckdb/common/identifier.hpp"
 #include <string>
 #ifdef _WIN32
 #include <cctype>
@@ -73,6 +79,28 @@ static void AnofoxRenderFunction(DataChunk &args, ExpressionState &state, Vector
 //      have open, persisting extension-owned definitions into their file. Registering
 //      them as internal catalog entries is what DuckDB's own json extension does.
 //
+// #352: DuckDB 2.0 made `Parser::ParseExpressionList` an instance method (it
+// was `static` through 1.5.6), reached via `Parser::GetBuiltinParser()` --
+// built-in grammar, no ClientContext/session state, matching what the
+// static method gave us since this only ever parses macro bodies baked into
+// the extension, never a caller's SQL. The extension-ci-tools build for
+// either DuckDB version does not reliably expose a `DUCKDB_MAJOR_VERSION`
+// preprocessor define to this translation unit, so the two call shapes
+// (static class method vs. instance method) are picked on
+// `duckdb/parser/token_iterator.hpp`'s presence instead: a header `__has_include`
+// confirmed is new in 2.0.0 and absent from 1.5.6 (unlike `identifier.hpp`
+// above, which exists -- as a 1.5.6-only backport shim -- on both).
+#if __has_include("duckdb/parser/token_iterator.hpp")
+static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
+	auto parser = Parser::GetBuiltinParser();
+	return parser.ParseExpressionList(sql);
+}
+#else
+static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
+	return Parser::ParseExpressionList(sql);
+}
+#endif
+
 // Built like DefaultFunctionGenerator::CreateInternalMacroInfo, without its
 // fixed-size parameter arrays.
 static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
@@ -80,7 +108,7 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 		const char *p = anofox_viz_macro_field(i, f);
 		return std::string(p ? p : "");
 	};
-	auto expressions = Parser::ParseExpressionList(field(1));
+	auto expressions = AnofoxParseExpressionList(field(1));
 	if (expressions.size() != 1) {
 		throw InternalException("anofox_visualization: macro %s must be one expression", field(0));
 	}
@@ -90,17 +118,27 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 		function->parameters.push_back(make_uniq<ColumnRefExpression>(p));
 	}
 	for (size_t j = 0; const char *p = anofox_viz_macro_item(i, 1, j, &second); j++) {
-		auto defaults = Parser::ParseExpressionList(second ? second : "NULL");
+		auto defaults = AnofoxParseExpressionList(second ? second : "NULL");
 		if (defaults.size() != 1) {
 			throw InternalException("anofox_visualization: bad default for %s", std::string(p));
 		}
 		function->parameters.push_back(make_uniq<ColumnRefExpression>(p));
-		function->default_parameters.insert(make_pair(std::string(p), std::move(defaults[0])));
+		// #352: an explicit Identifier(p) key, not a bare std::string: on 2.0
+		// default_parameters is keyed on Identifier (whose string constructor
+		// is explicit there), and on 1.5.6 Identifier's backport shim converts
+		// back to string implicitly either way -- so this spelling, the one
+		// the 2.0 branch itself writes, compiles unchanged on both (see the
+		// identifier.hpp include above).
+		function->default_parameters.insert(make_pair(Identifier(p), std::move(defaults[0])));
 	}
 	auto info = make_uniq<CreateMacroInfo>(CatalogType::MACRO_ENTRY);
 	info->macros.push_back(std::move(function));
-	info->schema = DEFAULT_SCHEMA;
-	info->name = field(0);
+	// #352: same reasoning -- SetSchema/SetName(Identifier(...)) is the 2.0
+	// spelling; 1.5.6's backport shims (SetSchema(string), SetName(string),
+	// plus Identifier's implicit conversion back to string) make it compile
+	// to the same assignment there too. No #if needed.
+	info->SetSchema(DEFAULT_SCHEMA);
+	info->SetName(Identifier(field(0)));
 	info->temporary = true;
 	info->internal = true;
 	for (size_t j = 0; const char *k = anofox_viz_macro_item(i, 2, j, &second); j++) {
