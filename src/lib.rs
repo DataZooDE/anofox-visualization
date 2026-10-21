@@ -1349,7 +1349,14 @@ pub fn render_with_title(
 /// itself (0.21, B2-1): `draw_line` splits runs at a non-finite vertex and
 /// `draw_quadratic`/arrows drop a non-finite path outright.
 pub(crate) fn finish_contract_svg(svg: String, warnings: &[String], o: &RenderOptions) -> String {
-    with_warnings_attr(o.theme.finish_svg(svg), warnings, o.record_warnings)
+    // `with_font`: a no-op on the (usual) `GGPlot` case, needed for a
+    // contract path's own hand-drawn fallback note (`note_svg`) — see its
+    // doc comment.
+    with_warnings_attr(
+        o.theme.finish_svg(o.theme.with_font(svg)),
+        warnings,
+        o.record_warnings,
+    )
 }
 
 /// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
@@ -1691,10 +1698,12 @@ fn render_placed(
 ) -> Result<(String, Vec<String>), RenderError> {
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
-        // A diagram draws its own SVG: none of the chart post-passes apply.
+        // A diagram draws its own SVG: none of the chart post-passes apply,
+        // but it does write the generic font family by hand, like every
+        // other hand-drawn panel — see `Theme::with_font`'s doc comment.
         if let Some(d) = diagram::Diagram::from_columns(cols, &o.locale) {
             let svg = diagram::render(&d, place, w, h, o);
-            return Ok((o.theme.finish_svg(svg), Vec::new()));
+            return Ok((o.theme.finish_svg(o.theme.with_font(svg)), Vec::new()));
         }
         let cols = downsample::prepare(cols, o);
         let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
@@ -1722,9 +1731,15 @@ fn render_placed(
         // own layout_built: it plans the wrap once and draws exactly that
         // plan, then pushes an overflow warning into `warnings` above when
         // even that isn't enough room — see ggplot-rs#318 step 2).
-        // A map paints with the variant's own tokens: no neutral remap.
+        // Every panel's hand-drawn SVG text (headings, notes, a map's own
+        // labels/legend, …) still writes the generic font family by hand,
+        // so `with_font` swaps it in here — the one place a GGPlot panel
+        // and the extension's own panels are both still just `svg: String`
+        // (a no-op on the GGPlot part, #326). A map paints with the
+        // variant's own tokens already: no neutral remap on top.
+        let svg = o.theme.with_font(svg);
         let svg = if map::is_map(&cols) {
-            o.theme.with_font(svg)
+            svg
         } else {
             o.theme.finish_svg(svg)
         };

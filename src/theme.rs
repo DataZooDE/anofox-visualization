@@ -1151,7 +1151,6 @@ impl ResolvedTheme {
     /// all yet (sipemu/ggplot-rs#157, open) — a second reason a partial
     /// switch couldn't be complete. `remap_neutrals` stays.
     pub fn finish_svg(&self, svg: String) -> String {
-        let svg = self.with_font(svg);
         let dz = self.palette.as_slice() == DZ_PALETTE.as_slice();
         if self.variant == Variant::Light && dz {
             return svg;
@@ -1174,6 +1173,18 @@ impl ResolvedTheme {
     }
 
     /// Swap the generic font families for the theme's.
+    ///
+    /// A no-op on a `GGPlot` panel's own SVG: `paint_theme` already sets
+    /// every ggplot-rs `Theme` text element's `family` to the dashboard's
+    /// font, which `resolve_font_family` prefers over the renderer's
+    /// hard-coded `"sans-serif"` fallback, so that literal string is never
+    /// written in the first place. #326 restricts this call to the panels
+    /// that still need it — the extension's own hand-drawn SVG text
+    /// (`heading_svg`, `note_svg`, the `::TITLE` bar, a map's labels/legend,
+    /// a KPI tile, …), which writes the generic `font-family="sans-serif"`/
+    /// `"system-ui,sans-serif"` directly and has no `Theme` of its own to
+    /// set it correctly up front — `render_placed` calls it once on the
+    /// merged SVG rather than `finish_svg` calling it on every chart.
     pub(crate) fn with_font(&self, svg: String) -> String {
         let font = format!(
             "font-family=\"{}\"",
