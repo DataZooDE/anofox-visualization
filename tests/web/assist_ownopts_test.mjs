@@ -1,14 +1,14 @@
 // sec-review-256 (final check, hardened at "last check"): systematic
-// prototype-pollution safety — every *exported* function (a `function`
-// declaration or an `export const f = (…) => …` arrow) in web/assist.js,
-// web/assist-engine.js, web/assist-csp.js, web/lint.js and web/explore.js
-// must never destructure an object parameter directly in its signature
+// prototype-pollution safety — every function (a `function` declaration, a
+// `const f = (…) => …` arrow, or a method-shorthand `f(…) { … }` inside an
+// object literal or class) in web/assist.js, web/assist-engine.js,
+// web/assist-csp.js, web/lint.js, web/explore.js and web/assist-ui.js must
+// never destructure an object parameter directly in its signature
 // (`function f({a, b} = {})` reads *inherited* Object.prototype properties
-// too), and any parameter named like an options bag (opts/options/config/
-// cfg/o, any position) must be passed, by that exact name, to `ownOpts(`
-// somewhere in the function's body — comments stripped first, so a stray
-// mention of "ownOpts(" in a comment, or a call on the wrong argument,
-// doesn't satisfy the check.
+// too), and any parameter named like an options bag must be passed, by
+// that exact name, to `ownOpts(` somewhere in the function's body —
+// comments stripped first, so a stray mention of "ownOpts(" in a comment,
+// or a call on the wrong argument, doesn't satisfy the check.
 //
 // "Final check" only looked at bare parameter *names*, so a parameter
 // destructured right in the signature — which has no bare name at all —
@@ -25,10 +25,28 @@
 // — assist-ui.js's own inner ones (dialog, sentDialog, open, close: built
 // by mountAssistant(), never exported, called only from inside the module)
 // read their options bags directly and went unchecked. web/assist-ui.js
-// alone (the file this review covered) is now scanned for every function —
-// `function NAME(...)` and `const NAME = (...) =>`, exported or not, at any
-// nesting depth — not just its top-level exports; the other four files keep
-// the narrower (exported-only) scan.
+// was widened to every function — exported or not, at any nesting depth.
+//
+// #268 (follow-up from sec-review-256's own "Verdict"): that widening
+// stopped at assist-ui.js. Three more gaps, none exploitable (no pollution
+// path was found for any of them — this is completeness of the STATIC
+// CHECK, not a fix to a live hole), but all three are now closed:
+//  1. Every file is scanned for every function, exported or not — the
+//     same breadth assist-ui.js already had. A `function`/arrow declared
+//     but never exported (a private helper in assist-engine.js, say) could
+//     otherwise destructure an options bag with nobody ever checking.
+//  2. Method shorthand (`name(params) { … }` inside an object literal or
+//     class body — never a `function` keyword, never a `const … =>`) is
+//     now found too: the transport's `send(request, {signal, …})` and the
+//     tool handlers (`list_tables({filter})`, `profile_table({table})`,
+//     `run_sql({sql})`, `check(sql, {signal})` in assist.js's
+//     `wasmTools()`) all destructure directly and went completely unseen
+//     by the old function-or-arrow-only scan.
+//  3. OPTS_NAMES grows by two real parameter names this codebase actually
+//     uses for an options-shaped bag: `limits` (assist-engine.js's
+//     snapshotTables) and `u` (assist.js's spent — a response's `usage`
+//     object, read key-by-key with defaults exactly like every other
+//     options bag here).
 import { readFileSync } from "fs";
 import path from "path";
 import assert from "assert/strict";
@@ -36,7 +54,15 @@ import assert from "assert/strict";
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");
 const FILES = ["web/assist.js", "web/assist-engine.js", "web/assist-csp.js", "web/lint.js", "web/explore.js", "web/assist-ui.js"];
-const OPTS_NAMES = new Set(["opts", "options", "config", "cfg", "o"]);
+const OPTS_NAMES = new Set(["opts", "options", "config", "cfg", "o", "limits"]);
+// #268: a couple of functions use an even less descriptive name for an
+// options-shaped bag (assist.js's `spent(u = {})` is why `u` is here) —
+// these only count as options-like when the signature's own default is
+// the empty object literal `{}`, so an unrelated, same-named parameter
+// that ISN'T an options bag (assist-csp.js's `appBase(u = import.meta.url)`,
+// a URL string — "u" is short for "URL" there, not "usage") is never
+// mistaken for one.
+const OPTS_NAMES_IF_EMPTY_DEFAULT = new Set(["u"]);
 
 // Splits a parameter list (or any comma-separated text) on top-level
 // commas only — commas inside (), [] or {} don't count.
@@ -122,87 +148,12 @@ function stripComments(src) {
   return out;
 }
 
-// Every top-level exported function in `src`: a `function` declaration or
-// an `export const NAME = (...) => ...` arrow — [{name, params, body, kind}].
-// `body` is the brace-matched block for a `{ … }` body, or the raw
-// expression text for an arrow with an implicit return.
-function exportedFunctions(src) {
-  const out = [];
-  const declRe = /export\s+(?:async\s+)?function\s+(\w+)\s*\(/g;
-  let m;
-  while ((m = declRe.exec(src))) {
-    const name = m[1];
-    const parenStart = declRe.lastIndex - 1;
-    let depth = 0,
-      i = parenStart,
-      paramEnd = -1;
-    for (; i < src.length; i++) {
-      if (src[i] === "(") depth++;
-      else if (src[i] === ")") {
-        depth--;
-        if (depth === 0) {
-          paramEnd = i;
-          break;
-        }
-      }
-    }
-    const params = topLevelSplit(src.slice(parenStart + 1, paramEnd));
-    const bodyStart = src.indexOf("{", paramEnd);
-    const body = braceBlock(src, bodyStart);
-    out.push({ name, params, body, kind: "function" });
-    declRe.lastIndex = bodyStart + body.length;
-  }
-  const arrowRe = /export\s+const\s+(\w+)\s*=\s*(?:async\s*)?\(/g;
-  while ((m = arrowRe.exec(src))) {
-    const name = m[1];
-    const parenStart = arrowRe.lastIndex - 1;
-    let depth = 0,
-      i = parenStart,
-      paramEnd = -1;
-    for (; i < src.length; i++) {
-      if (src[i] === "(") depth++;
-      else if (src[i] === ")") {
-        depth--;
-        if (depth === 0) {
-          paramEnd = i;
-          break;
-        }
-      }
-    }
-    if (paramEnd < 0) continue;
-    const params = topLevelSplit(src.slice(parenStart + 1, paramEnd));
-    // Only a genuine arrow function: "=>" (skipping whitespace/newlines)
-    // right after the parameter list, not e.g. a plain function *call*
-    // assigned to a const (which this regex could otherwise also match).
-    const afterParen = src.slice(paramEnd + 1).match(/^\s*=>\s*/);
-    if (!afterParen) continue;
-    const bodyAt = paramEnd + 1 + afterParen[0].length;
-    let body;
-    if (src[bodyAt] === "{") body = braceBlock(src, bodyAt);
-    else {
-      // An implicit-return arrow: take the rest of the statement, up to
-      // the matching top-level ";" or newline-at-depth-0 — good enough for
-      // this test (it only ever needs to see whether "ownOpts(" is there).
-      let depth2 = 0,
-        j = bodyAt;
-      for (; j < src.length; j++) {
-        const c = src[j];
-        if ("([{".includes(c)) depth2++;
-        else if (")]}".includes(c)) depth2--;
-        else if (c === ";" && depth2 <= 0) break;
-        else if (c === "\n" && depth2 <= 0) break;
-      }
-      body = src.slice(bodyAt, j);
-    }
-    out.push({ name, params, body, kind: "arrow" });
-  }
-  return out;
-}
-
 // Every `function NAME(...)` and `const NAME = (...) =>` in `cleanSrc`
 // (already comment-stripped, so "function" inside a comment can't be
 // mistaken for a declaration), exported or not, at any nesting depth —
-// [{name, params, body, kind}], same shape as exportedFunctions() above.
+// [{name, params, body, kind}]. `body` is the brace-matched block for a
+// `{ … }` body, or the raw expression text for an arrow with an implicit
+// return.
 function allFunctions(cleanSrc) {
   const out = [];
   const declRe = /\bfunction\s+(\w+)\s*\(/g;
@@ -274,14 +225,80 @@ function allFunctions(cleanSrc) {
   return out;
 }
 
+// #268: keywords that can precede a `(…) {` shape exactly like a method
+// definition does (`if (x) {`, `catch (e) {`, …) — every one of these is a
+// control-flow construct, never a function, and must not be mistaken for
+// one by methodFunctions() below.
+const METHOD_RESERVED = new Set([
+  "if", "for", "while", "switch", "catch", "do", "else", "function", "return", "typeof", "new", "yield", "await",
+  "get", "set", "static", "class", "try", "finally", "with", "in", "of", "instanceof", "void", "delete", "throw",
+  "case", "default", "export", "import", "const", "let", "var", "async",
+]);
+// Every method-shorthand function (`name(params) { … }`, inside an object
+// literal or a class body — never behind the `function` keyword, never a
+// `const … =>` arrow) in `cleanSrc`, at any nesting depth —
+// [{name, params, body, kind: "method"}]. #268: the old scan only ever
+// matched `function NAME(` or `const NAME = (…) =>`, so a method such as
+// assist.js's `send(request, {signal, …}) {` (the transport) or its
+// `list_tables({filter}) {` / `profile_table({table}) {` / `run_sql({sql})
+// {` / `check(sql, {signal}) {` tool handlers (all inside `wasmTools()`'s
+// returned object) went completely unseen.
+//
+// A method name is only recognised right after a structural boundary — a
+// newline, `;`, `{`, `}`, `(` or `,` — with nothing but whitespace (never
+// another keyword) in between: this is exactly what rules out `function
+// NAME(` (the word "function" sits in that gap) and an arrow's `NAME = (`
+// (there is no `(` immediately after NAME at all, only `=`). What's left
+// that fits "identifier, then `(…)`, then `{`" is either a genuine method,
+// or a control-flow keyword — hence METHOD_RESERVED.
+function methodFunctions(cleanSrc) {
+  const out = [];
+  const methodRe = /(?:^|[\n;{}(,])[ \t]*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/gm;
+  let m;
+  while ((m = methodRe.exec(cleanSrc))) {
+    const name = m[1];
+    if (METHOD_RESERVED.has(name)) continue;
+    const parenStart = methodRe.lastIndex - 1;
+    let depth = 0,
+      i = parenStart,
+      paramEnd = -1;
+    for (; i < cleanSrc.length; i++) {
+      if (cleanSrc[i] === "(") depth++;
+      else if (cleanSrc[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          paramEnd = i;
+          break;
+        }
+      }
+    }
+    if (paramEnd < 0) continue;
+    // A method definition's `)` is followed (modulo whitespace/newlines) by
+    // its `{` body, directly — never `=>` (an arrow), never anything else
+    // (a plain call, a condition used some other way). This is what tells
+    // a real method apart from, say, a call like `foo(x)` that happens to
+    // sit right after a `{`/`;`/`,` boundary.
+    const afterParen = cleanSrc.slice(paramEnd + 1).match(/^[ \t\n]*/);
+    const bodyAt = paramEnd + 1 + afterParen[0].length;
+    if (cleanSrc[bodyAt] !== "{") continue;
+    const params = topLevelSplit(cleanSrc.slice(parenStart + 1, paramEnd));
+    const body = braceBlock(cleanSrc, bodyAt);
+    out.push({ name, params, body, kind: "method" });
+  }
+  return out;
+}
+
 let checked = 0;
 let destructuredSeen = 0;
 for (const rel of FILES) {
   const src = readFileSync(path.join(root, rel), "utf8");
-  // Info-1: assist-ui.js's inner (non-exported) functions are in scope too
-  // — everything mountAssistant() builds, at any nesting depth — since the
-  // comment-stripped source makes the two scans' function shapes identical.
-  const fns = rel === "web/assist-ui.js" ? allFunctions(stripComments(src)) : exportedFunctions(src);
+  // #268: every file is scanned for every function AND every method,
+  // exported or not, at any nesting depth — the same breadth assist-ui.js
+  // (Info-1) already had, now applied everywhere (methodFunctions is new
+  // for every file, assist-ui.js included: mountAssistant() may well build
+  // object literals with method shorthand too).
+  const clean = stripComments(src);
+  const fns = [...allFunctions(clean), ...methodFunctions(clean)];
   for (const fn of fns) {
     if (fn.name === "ownOpts") continue; // the helper itself: nothing to protect it from
     const cleanBody = stripComments(fn.body);
@@ -301,17 +318,23 @@ for (const rel of FILES) {
       // that exact name, somewhere in the (comment-stripped) body — not
       // merely contain the text "ownOpts(" anywhere (a comment, or a call
       // on some other value, must not satisfy this).
-      if (!/^[A-Za-z_$][\w$]*$/.test(base) || !OPTS_NAMES.has(base)) continue;
+      if (!/^[A-Za-z_$][\w$]*$/.test(base)) continue;
+      const defaultPart = raw.includes("=") ? raw.slice(raw.indexOf("=") + 1).trim() : null;
+      const isOpts = OPTS_NAMES.has(base) || (OPTS_NAMES_IF_EMPTY_DEFAULT.has(base) && defaultPart === "{}");
+      if (!isOpts) continue;
       checked++;
       const callRe = new RegExp(`\\bownOpts\\(\\s*${base}\\s*\\)`);
       assert.ok(callRe.test(cleanBody), `${rel}: ${fn.name}(${fn.params.join(", ")}) takes an options parameter "${base}" but never calls ownOpts(${base}) in its body`);
     }
   }
 }
-// A sanity floor: if this drops to 0, the regex/brace-matching above broke
-// silently (e.g. a reformat changed "export function" spacing) and the
-// whole test would pass vacuously.
-assert.ok(checked >= 8, `expected to find at least 8 qualifying functions, found ${checked}`);
+// A sanity floor: if this drops too low, the regex/brace-matching above
+// broke silently (e.g. a reformat changed "export function" spacing, or
+// methodFunctions() stopped finding methods) and the whole test would
+// pass vacuously. #268: the widened scan (every file, every function AND
+// method, exported or not) finds over 40 today — comfortably above the
+// pre-#268 floor of 8, which only ever covered exported functions/arrows.
+assert.ok(checked >= 30, `expected to find at least 30 qualifying functions, found ${checked}`);
 assert.equal(destructuredSeen, 0, "expected zero signature-destructured parameters left (unreachable: assert.fail above throws first)");
 
 console.log(`assist_ownopts_test: ok (${checked} functions checked, 0 signature-destructured parameters)`);

@@ -189,7 +189,11 @@ export function browserKeyTransport(opts) {
   return {
     name: "browser-key",
     destination: base,
-    async send(request, { signal, onText, onToolInput } = {}) {
+    // #268: ownOpts first, same reason as everywhere else in this file —
+    // this used to destructure its second argument directly in the
+    // signature.
+    async send(request, opts = {}) {
+      const { signal, onText, onToolInput } = ownOpts(opts);
       const stream = client.messages.stream(request, { signal });
       if (onText) stream.on("text", (delta) => onText(delta));
       if (onToolInput) stream.on("inputJson", (_, snapshot) => onToolInput(snapshot));
@@ -930,7 +934,12 @@ export function payloadPreview(opts = {}) {
 
 // Input-equivalent tokens of a response's usage: cache writes cost 1.25×,
 // cache reads 0.1×, output 5× the input price.
+// #268: `u` is the API response's own `usage` object, read key-by-key with
+// defaults exactly like every other options bag here — ownOpts first, same
+// reason (no live pollution path was found; this closes the static test's
+// gap, not an actual hole).
 export function spent(u = {}) {
+  u = ownOpts(u);
   return (u.input_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0) + 5 * (u.output_tokens || 0);
 }
 
@@ -1272,7 +1281,10 @@ export function wasmTools(opts) {
   };
   const say = (msg, named) => engineErrorText(msg, named) ?? (quiet() ? quietError(msg, named) : String(msg));
   const tools = {
-    async list_tables({ filter = "" }) {
+    // #268: `opts` here is the model's own tool-call input (`u.input`,
+    // below) — ownOpts first, same reason as everywhere else.
+    async list_tables(opts) {
+      const { filter = "" } = ownOpts(opts);
       await locked();
       const all = await tables();
       const f = String(filter).toLowerCase();
@@ -1288,7 +1300,9 @@ export function wasmTools(opts) {
       for (const [fq, v] of snapshot) if (v?.excluded) rows.push({ name: fq, excluded: v.excluded });
       return stableJson(rows);
     },
-    async profile_table({ table }) {
+    // #268: ditto — `opts` is the model's own tool-call input.
+    async profile_table(opts) {
+      const { table } = ownOpts(opts);
       await locked();
       const t = await resolve(table);
       if (!profiles.has(t.fq)) profiles.set(t.fq, await profileTable(rowsOf, pageSql, t.fq));
@@ -1305,7 +1319,9 @@ export function wasmTools(opts) {
     // One read-only query, as DuckDB's own parser reads it: exactly one
     // SELECT-class statement (json_serialize_sql), nothing denied in its
     // tree; run as one prepared-checked statement with a cancelling timeout.
-    async run_sql({ sql }) {
+    // #268: ditto — `opts` is the model's own tool-call input.
+    async run_sql(opts) {
+      const { sql } = ownOpts(opts);
       await locked();
       const stmts = splitStatements(sql);
       if (stmts.length !== 1) throw new Error("refused: run_sql takes exactly one statement");
@@ -1335,7 +1351,10 @@ export function wasmTools(opts) {
     },
     // The strict check of a whole script: {ok, text, issues}; `signal` (the
     // request's) stops it before its next query ({cancelled: true}).
-    async check(sql, { signal } = {}) {
+    // #268: ownOpts first, same reason as everywhere else — this used to
+    // destructure its second argument directly in the signature.
+    async check(sql, opts = {}) {
+      const { signal } = ownOpts(opts);
       await locked();
       const until = Date.now() + checkMs;
       const planned = JSON.parse(plan(sql));
