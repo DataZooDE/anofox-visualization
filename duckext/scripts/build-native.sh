@@ -72,14 +72,42 @@ if "$DUCKDB" -unsigned -c "LOAD '$EXT'; SELECT anofox_render('not json');" >/dev
   echo "FAIL: a bad spec must raise a SQL error"; exit 1
 fi
 echo "OK: bad spec raises a SQL error"
-# #333: DATAZOO_DISABLE_TELEMETRY defaults to "1" on LOAD, whatever this
-# script's own environment has (CI sets it; strip it here so the check is
-# of the extension's default, not an inherited value). getenv() is a
-# DuckDB-CLI-only function, so this only runs through the duckdb binary.
-TELEMETRY="$(env -u DATAZOO_DISABLE_TELEMETRY "$DUCKDB" -unsigned -noheader -list -c "
+# #333/#335: DATAZOO_DISABLE_TELEMETRY defaults to "1" on LOAD, whatever this
+# script's own environment has (CI sets it; strip it here so the check is of
+# the extension's default, not an inherited value).
+case "$PLATFORM" in
+  windows_*)
+    # DuckDB's SQL getenv() cannot prove this on Windows: it runs inside
+    # duckdb.exe, whose CRT (statically linked for the official CLI release
+    # and for every extension built via the x64-windows-static-release vcpkg
+    # triplet -- confirmed from vcpkg's own triplet file, VCPKG_CRT_LINKAGE
+    # static) snapshots the OS environment block into its own private table
+    # at process startup, before any LOAD runs -- so it can never reflect a
+    # write any extension makes afterwards, fixed or not (see
+    # src/host/telemetry.rs's `windows_crt` module docs for the full CRT
+    # analysis). Ask the extension itself instead, through the
+    # diagnostic-only anofox_telemetry_probe() it registers: it reports
+    # both the OS environment block (std::env::var / SetEnvironmentVariableW
+    # -- what a static-CRT module LOADed after ours would snapshot) and this
+    # process's own CRT cache (getenv / _wgetenv_s -- what this module's own
+    # getenv(), and any sibling sharing a dynamic UCRT with it, would see).
+    # Both must read "1" for the Windows fix to be doing its job.
+    TELEMETRY="$(env -u DATAZOO_DISABLE_TELEMETRY "$DUCKDB" -unsigned -noheader -list -c "
+LOAD '$EXT'; SELECT anofox_telemetry_probe();" | tr -d '\r')"
+    [ "$TELEMETRY" = "os=1 crt=1" ] || { echo "FAIL: DATAZOO_DISABLE_TELEMETRY should default to 1 on LOAD (os+crt), saw '$TELEMETRY'" >&2; exit 1; }
+    echo "OK: DATAZOO_DISABLE_TELEMETRY defaults to 1 on LOAD ($TELEMETRY)"
+    ;;
+  *)
+    # getenv() is a DuckDB-CLI-only function; on Linux/macOS there is one
+    # process-wide environment (no separate CRT table to diverge, see the
+    # module docs above), so DuckDB's own getenv() through the duckdb binary
+    # is already a direct check of what matters.
+    TELEMETRY="$(env -u DATAZOO_DISABLE_TELEMETRY "$DUCKDB" -unsigned -noheader -list -c "
 LOAD '$EXT'; SELECT getenv('DATAZOO_DISABLE_TELEMETRY');" | tr -d '\r')"
-[ "$TELEMETRY" = "1" ] || { echo "FAIL: DATAZOO_DISABLE_TELEMETRY should default to 1 on LOAD, saw '$TELEMETRY'" >&2; exit 1; }
-echo "OK: DATAZOO_DISABLE_TELEMETRY defaults to 1 on LOAD"
+    [ "$TELEMETRY" = "1" ] || { echo "FAIL: DATAZOO_DISABLE_TELEMETRY should default to 1 on LOAD, saw '$TELEMETRY'" >&2; exit 1; }
+    echo "OK: DATAZOO_DISABLE_TELEMETRY defaults to 1 on LOAD"
+    ;;
+esac
 # #179: after USE <other db> the macros are reached qualified or via search_path (BUILD.md, "macro caveat").
 USE_OK="$("$DUCKDB" -unsigned -noheader -list -c "
 LOAD '$EXT';

@@ -3268,6 +3268,45 @@ the load, and reaches only the first anofox extension loaded. **Load
 anofox-visualization first — or set the variable yourself before anything
 loads — when that order matters to you.**
 
+**Windows (#333/#335):** setting an environment variable from inside a
+process does not update every view of "the environment" the way it does on
+Linux/macOS. The OS process environment block (what `SetEnvironmentVariableW`
+— and so Rust's `std::env::set_var`, used above — writes) is a separate thing
+from each module's own C runtime (CRT) environment cache (what `getenv`
+reads); a statically-linked CRT (`/MT`, via `VCPKG_CRT_LINKAGE static`) keeps
+a *private* copy per module, snapshotted from the OS block once, when that
+module starts. The official DuckDB CLI release and the `csrc/` C++ community
+build (built via the `x64-windows-static-release` vcpkg triplet) both use
+that static CRT; the Rust-only `duckext` cdylib (the "full toolkit" release
+build, a plain `cargo build --release` with no `crt-static`) uses the
+*dynamic* UCRT instead — so which of the two linkage models applies depends
+on which of anofox-visualization's two Windows builds is asked. Either way, a
+module that already finished its own CRT snapshot before
+anofox-visualization's default took effect (notably `duckdb.exe` itself,
+which starts long before it `LOAD`s anything) can never see the default
+through its own `getenv()`, regardless of what anofox-visualization does.
+anofox-visualization therefore writes the default through both APIs on
+Windows — `SetEnvironmentVariableW` (reaches a static-CRT module `LOAD`ed
+*after* it, which snapshots from the then-updated OS block) and the CRT's
+own `_wputenv_s` (reaches anofox-visualization's own `getenv()`, and any
+module sharing a dynamic UCRT with it) — which is as far as a single module
+can reach into every other module's own, independent view of "the
+environment". This is also why `SELECT getenv('DATAZOO_DISABLE_TELEMETRY')`
+through the DuckDB CLI is not a meaningful check on Windows (it reads
+`duckdb.exe`'s own pre-`LOAD` snapshot, not anofox-visualization's write);
+`duckext/scripts/build-native.sh`'s Windows smoke test checks through the
+extension's own diagnostic function instead (`anofox_telemetry_probe()`,
+registered on Windows builds only — not part of the public API).
+
+One consequence for the "load order" paragraph above: on Windows, an anofox
+extension loaded *before* anofox-visualization is never reached through the
+environment at all — its own CRT table was already snapshotted at its own
+load, well before anofox-visualization's write exists, so there is no later
+moment (unlike the background-worker send-time read on Linux/macOS) where it
+could still pick the write up. The best-effort `SET anofox_telemetry_enabled
+= false` is the *only* thing that reaches it on Windows, with the same
+first-registrant limit described above.
+
 A locked server (`dashboard serve --dashboards`, `anofox_serve_dashboards`)
 sets `lock_configuration` right after a dashboard's `-- @load` lines, so a
 dashboard's own SQL can never `SET anofox_telemetry_enabled` back on for the
