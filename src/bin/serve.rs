@@ -129,6 +129,7 @@ fn parse_args() -> Opts {
         authoring_timeout: Duration::from_secs(120),
     };
     let (mut log, mut log_vars, mut audit) = (None, None, None);
+    let mut query_timeout_given = false;
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
         v.and_then(|v| v.parse().ok())
@@ -168,7 +169,8 @@ fn parse_args() -> Opts {
             "--timeout" => o.timeout = Duration::from_secs(num(args.next(), "--timeout").max(1)),
             "--query-timeout" => {
                 o.authoring_timeout =
-                    Duration::from_secs(num(args.next(), "--query-timeout").max(1))
+                    Duration::from_secs(num(args.next(), "--query-timeout").max(1));
+                query_timeout_given = true;
             }
             "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
             "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
@@ -254,6 +256,15 @@ fn parse_args() -> Opts {
     }
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
+    }
+    // sec-review-342 L1 Info: --dashboards (static render) and the duckext
+    // locked server never reach `Live::round_with`'s watchdog, so silently
+    // accepting --query-timeout there would suggest a timeout it doesn't
+    // apply — reject it with a clear message instead (`--dashboards` has
+    // its own `--timeout`, for the query itself rather than one round of
+    // the authoring session).
+    if o.dashboards_dir.is_some() && query_timeout_given {
+        usage("--query-timeout applies to authoring mode only (serve <db>); --dashboards has --timeout");
     }
     if let Err(e) = o.app.check() {
         usage(if e.starts_with("logo_dark") {
@@ -930,25 +941,50 @@ impl Live {
         // `reads_stdin` fast path — any round that doesn't finish in
         // `timeout` (a stdin read by a path the fast path misses, or
         // anything else that hangs) gets this child killed instead of
-        // wedging the only authoring worker forever. The handler thread
-        // only sleeps, checks an atomic flag and signals the process by
-        // pid; it never touches `self`, which the round below keeps using.
+        // wedging the only authoring worker forever.
+        //
+        // sec-review-342 L3: the watchdog blocks on `done_rx.recv_timeout`
+        // instead of unconditionally sleeping the full timeout, so a fast
+        // round (the common case) wakes it immediately — dropping
+        // `done_tx` below closes the channel, which `recv_timeout` reports
+        // as `Disconnected` right away — instead of leaving a thread parked
+        // for up to `timeout` with nothing to do. A query loop therefore
+        // can't build up one parked thread per round. `round_with` then
+        // `join`s the watchdog before returning, so the child is never
+        // reaped (by `run()`, `Drop`, …) while a watchdog that might still
+        // call `kill` on its pid is alive — closing the kill-after-check
+        // (TOCTOU) window a sleep-based watchdog leaves between "load
+        // `round_done`" and "kill", where the pid could in theory be
+        // reused by an unrelated process in between.
+        //
+        // `Builder::spawn` (not the panicking `thread::spawn`) so that
+        // hitting the OS thread limit (e.g. a client spawning many rounds
+        // fast enough to still have one watchdog each in flight) degrades
+        // to "this one round has no timeout backstop" instead of a panic
+        // that would take down the single authoring worker.
         let timed_out = Arc::new(AtomicBool::new(false));
-        let round_done = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         #[cfg(unix)]
-        {
-            let (timed_out, round_done, pid) =
-                (timed_out.clone(), round_done.clone(), self.child.id());
-            std::thread::spawn(move || {
-                std::thread::sleep(timeout);
-                if !round_done.load(Ordering::SeqCst) {
-                    timed_out.store(true, Ordering::SeqCst);
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let watchdog = {
+            let (timed_out, pid) = (timed_out.clone(), self.child.id());
+            std::thread::Builder::new()
+                .spawn(move || {
+                    use std::sync::mpsc::RecvTimeoutError;
+                    if let Err(RecvTimeoutError::Timeout) = done_rx.recv_timeout(timeout) {
+                        timed_out.store(true, Ordering::SeqCst);
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
                     }
-                }
-            });
-        }
+                })
+                .ok()
+        };
+        // sec-review-342 L3 (Info): no watchdog on Windows (`serve` is
+        // best-effort there, #275 I3) — a hang there has no backstop beyond
+        // `reads_stdin`'s fast path, and `timed_out`/`done_rx` are simply
+        // unused.
+        #[cfg(not(unix))]
+        let _ = (&timed_out, done_rx);
 
         let result: Result<String, RoundErr> = 'round: {
             let mut out = String::new();
@@ -1000,9 +1036,15 @@ impl Live {
                 Err(RoundErr::Sql(err.trim_end().to_string()))
             }
         };
-        // Tell a still-sleeping watchdog (the round finished well inside
-        // its timeout) that there's nothing left for it to kill.
-        round_done.store(true, Ordering::SeqCst);
+        // Wake a still-waiting watchdog at once (dropping the sender closes
+        // the channel, which its `recv_timeout` sees immediately, rather
+        // than after the full timeout), then join it — the child can't be
+        // reaped anywhere else while it might still be about to `kill` it.
+        drop(done_tx);
+        #[cfg(unix)]
+        if let Some(h) = watchdog {
+            let _ = h.join();
+        }
         result
     }
 

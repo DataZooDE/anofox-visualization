@@ -405,3 +405,102 @@ fn authoring_session_removes_private_dir_on_sigterm() {
         dir.display()
     );
 }
+
+/// The process's thread count, from `/proc/<pid>/status`'s `Threads:` line.
+#[cfg(target_os = "linux")]
+fn thread_count(pid: u32) -> usize {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Threads:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no Threads: line in /proc/{pid}/status:\n{status}"))
+}
+
+/// sec-review-342 L3: the old watchdog spawned a thread that slept the
+/// *full* round timeout (default 120 s) no matter how fast the round
+/// actually finished, so a client sending queries in a loop built up one
+/// parked thread per round. The fixed watchdog blocks on
+/// `recv_timeout(timeout)` and is `join`ed before the round returns, so a
+/// fast round's watchdog wakes (and the thread exits) almost immediately
+/// instead of outliving the round.
+#[cfg(target_os = "linux")]
+#[test]
+fn authoring_session_fast_rounds_do_not_leak_watchdog_threads() {
+    if !have_duckdb("authoring_session_fast_rounds_do_not_leak_watchdog_threads") {
+        return;
+    }
+    let s = Scratch::new("threads");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut child = Kill(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg(s.0.join("a.duckdb"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--no-open",
+                "--query-timeout",
+                "2",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id();
+    let mut out = BufReader::new(child.0.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let tok = line
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(_) => break,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    }
+    // One round so the session's `duckdb` child (and its stderr-reader
+    // thread) is already up before the baseline is taken.
+    let (st, _) = q(port, &tok, "SELECT 1");
+    assert_eq!(st, 200);
+    let before = thread_count(pid);
+
+    for i in 0..500 {
+        let (st, body) = q(port, &tok, &format!("SELECT {i} AS n"));
+        assert_eq!(st, 200, "round {i}: {body}");
+    }
+
+    let after = thread_count(pid);
+    assert!(
+        after <= before + 5,
+        "thread count grew from {before} to {after} over 500 fast rounds \
+         (one parked watchdog per round would add 500)"
+    );
+
+    // The watchdog still works: a round that actually hangs still times
+    // out (same mechanism as authoring_session_recovers_from_an_unblocked_
+    // stdin_read_via_the_round_timeout, just asserted here too since this
+    // test replaces the session's child and could in principle leave the
+    // watchdog unable to find it).
+    let (st, body) = q(port, &tok, "SELECT * FROM read_csv('/dev/' || 'stdin')");
+    assert_eq!(st, 400, "{body}");
+    assert!(
+        body.contains("exceeded") && body.contains("stopped"),
+        "{body}"
+    );
+    let (st, body) = q(port, &tok, "SELECT 1 AS ok");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"ok\":1"), "{body}");
+}

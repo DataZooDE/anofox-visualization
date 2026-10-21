@@ -82,7 +82,16 @@ so the protection is about making sure *only you* can send it:
   — is refused up front (`400`) before it ever reaches the CLI, the same
   way a dot-command is; this fast path is best-effort only (a path built at
   query time, e.g. string concatenation, is not caught by it) and the
-  timeout is what actually bounds the hang either way.
+  timeout is what actually bounds the hang either way. The watchdog that
+  enforces it waits on a channel rather than sleeping the full timeout, so
+  a fast round's watchdog thread exits (and is joined) right away instead
+  of staying parked — a query loop doesn't build up one thread per round —
+  and the session's `duckdb` child is never reaped elsewhere while a
+  watchdog that might still signal it is still running. Unix only: `serve`
+  has no watchdog on Windows (best-effort there, see the deployment notes),
+  so a hang's only backstop there is the fast path above. `--query-timeout`
+  applies to authoring only; passing it with `--dashboards` is a usage
+  error (that server's own `--timeout` bounds a query there instead).
 - **The private session directory is cleaned up even if `serve` is
   killed** (`#304`). `anofox-session-*` (its staged queries) is removed on
   a normal exit as before, and now also on SIGINT/SIGTERM (Ctrl-C, `kill`):
