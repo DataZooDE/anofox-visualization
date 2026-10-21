@@ -1262,6 +1262,133 @@ other claims (`__claim_tenant`, …) can drive row filters only. `hash` is
 pseudonymisation, not encryption: a viewer who knows a value and sees it next
 to its hash elsewhere can match them.
 
+## Quack source (prototype, #352)
+
+**Status: prototype, not yet security-reviewed.** `options.source` builds (part
+of) a locked server's snapshot from a live **DuckDB 2.0 Quack** server
+instead of (or alongside) the local session — serving data that lives on
+another DuckDB 2.0 process, over Quack's own remote-query protocol. It needs
+a **DuckDB 2.0 host** for the extension itself (Quack is a 2.0 feature); the
+`duckext/` Rust build runs unchanged, csrc/ is not involved.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "source": {
+    "uri": "quack:warehouse.internal:9494",
+    "token_file": "/etc/anofox/quack-token",
+    "as": "warehouse",
+    "schemas": ["sales"],
+    "views": "materialize",
+    "timeout_s": 120
+  }
+}');
+```
+
+| `source` key | Default | Meaning |
+|---|---|---|
+| `uri` | (required) | `quack:host:port` (`quack://` is rejected with a hint) |
+| `token_env` / `token_file` | exactly one required | Where the source's auth token comes from; re-read fresh on every build, never cached. Prefer `token_file` (0600) — `token_env` is readable by any SQL that runs in the host session before the lock |
+| `token` | refused | A literal token in the SQL would end up in shell history and query logs |
+| `as` | `"source"` | The database name the copy is attached under; the default database unless `options.search_path` is set; a clash with another attached database refuses to start |
+| `schemas` | every schema the source exposes | Restricts the copy; anything else the source exposes is dropped from the snapshot again, never served |
+| `views` | `"materialize"` | `"materialize"`: copy a remote view's current rows into a table (its definition is not replayed — Quack exposes no view DDL to replay, only query results). `"skip"`: leave it out, with a warning |
+| `timeout_s` | `600` | A deadline for the *whole* build (schema + every table + every materialised view) |
+| `tls.fingerprint` | — | Reserved for a non-local source (open question below: not enforced by this prototype) |
+
+**How the build works.** Quack never enters the serving instance or the
+user's session. Per build, a throwaway staging DuckDB instance (extension
+autoload/autoinstall off) does the work on its own: `LOAD quack`; a `CREATE
+TEMPORARY SECRET (TYPE quack, TOKEN …)` — **never** `ATTACH … (TOKEN …)`,
+which would leak the token into `duckdb_databases().options`; `ATTACH
+'<uri>' AS …`; attach the new snapshot file `READ_WRITE`; one `BEGIN …
+COMMIT` around a `COPY FROM DATABASE … (SCHEMA)` plus one `INSERT` per table
+(a bare `COPY FROM DATABASE` fails on a Quack source — "Multiple streaming
+scans … not implemented" — but the schema-then-per-table form works, and
+the client's `BEGIN…COMMIT` pins one consistent remote view for the whole
+copy); materialise or skip views; `DETACH` both attachments and drop the
+secret. The resulting file then goes through the **existing** `READ_ONLY` +
+`enable_external_access = false` + `lock_configuration = true` path
+unchanged — the same path a local database takes. The serving snapshot
+itself never loads `quack`: a dashboard's `-- @load quack`, `options.load`,
+or the live session already having it loaded are all refused at startup
+(`the 'quack' extension may not be loaded into a locked server`).
+
+Quack exposes no foreign keys, indexes, macros or sequences across the wire
+(a warning notes this); primary keys, `NOT NULL`, generated columns and
+nested types (`LIST`, `STRUCT`, `MAP`, `ENUM`, …) survive the copy.
+
+**Refresh and failure.** The *startup* build must succeed — fail closed, like
+every other snapshot. After that, a Quack source build runs through the
+existing `refresh_s` / `anofox_serve_refresh` path (`Current::rebuild`,
+single-flight): a failed refresh leaves the last good snapshot in service,
+same as any other refresh failure. `/healthz` gains `source_ok` (did the
+*last* build succeed) and `consecutive_failures` (resets to 0 on any
+success) — but only when `options.source` is configured, and as
+numbers/booleans only: the source's URI, its token env/file name and any
+error text never appear there (they go to the server's own stderr, as
+usual). Recovering a dead source can legitimately take tens of seconds on
+the first refresh after it comes back — the client side needs to notice its
+cached connection to the old listener is stale before a fresh one succeeds
+(observed on loopback; see the open question on a `max_stale_s` setting).
+
+**Timeout and cancel.** `timeout_s` is a deadline for the whole build. A
+watchdog thread on a **second** staging connection (the first is busy
+running the copy) polls for the deadline, or for `anofox_serve_stop` being
+called on this server while a build is in flight; firing it runs
+`quack_cancel(catalog, quack_connection_id(alias))` from that second
+connection, then `duckdb_interrupt`s the first — interrupting the client's
+own connection does **not**, by itself, stop a query already running on the
+remote side, so the watchdog always tries the remote cancel first.
+
+**Threat model delta — the review this prototype still needs:**
+
+- The host process holds a credential with **full SQL access to the
+  source's session** for the duration of a build: Quack has no server-side
+  read-only mode, and a client's `READ_ONLY` intent isn't enforced by the
+  protocol. Mitigations already in place: the token lives only in the
+  throwaway staging instance; a temporary secret, never `ATTACH … (TOKEN
+  …)`; redaction on every error on the way out; the serving instance itself
+  never loads `quack` (enforced at startup, not just by `enable_external_access`
+  — belt and suspenders, since even a quack-loaded-but-locked instance
+  refuses every quack call too, "file system operations are disabled").
+- `token_env` is readable by any SQL that runs in the **host session**
+  before the server locks it down (`getenv(name)`); `token_file` is not —
+  **use `token_file`** for anything that isn't a throwaway test.
+- A source can feed **arbitrary schemas and data** into the snapshot:
+  `options.source.schemas` restricts what is copied, but a reviewer must
+  confirm the materialised names and types can't get around
+  `policy_functions.txt` or the access-policy rewrites (#49) — a policy
+  resolves names in the snapshot's catalog, which now includes
+  whatever the source chose to call its tables.
+- Holding the token also lets the **same credential cancel any other
+  client's query** on the source (`quack_cancel` has no authorization
+  scoping beyond the token). A least-privilege Quack server, or an
+  authorization hook upstream of it, is recommended — this prototype
+  doesn't add one.
+- A **non-local source** needs a TLS fingerprint or a proxy in front of it;
+  this prototype does not enforce `tls.fingerprint` (see the open question).
+- The live session already having `quack` loaded, a dashboard's `-- @load
+  quack`, and `options.load: ["quack"]` are all refused at startup — a
+  reviewer should still re-check this denylist whenever extension loading
+  changes.
+
+**Open questions** (not resolved by this prototype):
+
+- Replay a remote view's/macro's DDL instead of materialising it, once Quack
+  exposes one?
+- A `max_stale_s` setting that answers `503` instead of serving data older
+  than that, given a Quack source can go stale for longer than a typical
+  `refresh_s`?
+- Is `tls.fingerprint` enough for a non-local source, or should the
+  prototype require a TLS-terminating proxy instead and refuse a bare
+  non-loopback `quack:` URI?
+- Incremental refresh — Quack has no change-tracking today, so every
+  refresh re-copies every row.
+- Does a 1.5.x-built host, not just 2.0, ever need to talk to a Quack
+  server? (Not supported here; the prototype requires a 2.0 host.)
+- What `heartbeat_timeout` (a `quack_query` parameter this prototype does
+  not set) is appropriate for a production deployment?
+
 ## Deployment
 
 [`deployment.md`](deployment.md) covers deploying a locked server: one process

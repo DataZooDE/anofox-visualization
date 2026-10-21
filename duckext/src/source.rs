@@ -28,7 +28,7 @@
 //! before `duckdb_interrupt`ing the first connection.
 
 use crate::db::{Conn, Database};
-use crate::serve::{columns_by_table, fk_order, insertable_columns};
+use crate::serve::fk_order;
 use anofox_visualization::host::serving::{quote_ident, sql_string_literal, valid_ident};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -289,6 +289,13 @@ fn build(
             e.lines().next().unwrap_or("")
         )
     })?;
+    // quack pools client connections per host:port, process-wide (observed:
+    // reusing a connection that went stale when the source died can hang a
+    // later build against a *different* table of a *restarted* source on
+    // the same port, even from a brand-new staging Database). Clear it at
+    // the start of every build so a build never inherits another one's
+    // pooled state.
+    let _ = stg.query("SELECT * FROM quack_clear_cache()");
 
     // 2. A named TEMPORARY SECRET (never `ATTACH … (TOKEN …)`, which leaks
     // the token into duckdb_databases().options) + the remote attachment.
@@ -420,24 +427,25 @@ fn copy_schema_and_data(
             drop_unwanted_schemas(stg, dst, &opts.schemas, warnings)?;
         }
         let tables = list(stg, src, "duckdb_tables()", "table_name", &opts.schemas)?;
-        let columns = columns_by_table(stg, src)?;
         let edges: Vec<(String, String, String)> = Vec::new(); // Quack exposes no FKs.
-        let empty = Vec::new();
         for i in fk_order(&tables, &edges) {
             let (schema, table) = &tables[i];
             let qual = |db: &str| format!("{}.{}.{}", db, quote_ident(schema), quote_ident(table));
             let (from, to) = (qual(src), qual(dst));
-            let cols = insertable_columns(
-                stg,
-                &to,
-                columns
-                    .get(&(schema.clone(), table.clone()))
-                    .unwrap_or(&empty),
-            )?
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+            // Not `insertable_columns` (serve.rs): that probes each defaulted
+            // column with its own throwaway `INSERT ... WHERE false` and
+            // swallows a failure (a generated column) to skip it — fine in
+            // autocommit, but DuckDB has no SAVEPOINT to isolate a failed
+            // statement from the rest, so inside our explicit BEGIN (needed
+            // for one consistent remote view, #352 fact 3) that failure would
+            // abort the whole transaction before any real INSERT runs. A 2.0
+            // host's `duckdb_columns().is_generated` says so directly instead
+            // (unlike 1.5.x, so this helper is quack-only, not shared).
+            let cols = generated_free_columns(stg, src, schema, table)?
+                .iter()
+                .map(|c| quote_ident(c))
+                .collect::<Vec<_>>()
+                .join(", ");
             stg.exec(&format!(
                 "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
             ))
@@ -501,6 +509,35 @@ fn list(
         .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
         .filter(|(s, _)| schemas.is_empty() || schemas.iter().any(|w| w.eq_ignore_ascii_case(s)))
         .collect())
+}
+
+/// `src.schema.table`'s own column names, in `column_index` order, excluding
+/// generated columns (`duckdb_columns().is_generated` — a 2.0 host only; see
+/// the call site in [`copy_schema_and_data`] for why this doesn't reuse the
+/// probe-based `insertable_columns` the local-database path uses).
+fn generated_free_columns(
+    stg: &Conn,
+    src: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    stg.query(&format!(
+        "SELECT column_name::VARCHAR FROM duckdb_columns() \
+         WHERE database_name = {} AND schema_name = {} AND table_name = {} \
+         AND NOT is_generated ORDER BY column_index",
+        sql_string_literal(src),
+        sql_string_literal(schema),
+        sql_string_literal(table)
+    ))?
+    .string_rows(10_000)?
+    .into_iter()
+    .map(|r| {
+        r.into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| "NULL column_name".to_string())
+    })
+    .collect()
 }
 
 /// Drop every schema of `dst` that isn't in `wanted` (the source may expose

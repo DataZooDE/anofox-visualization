@@ -1810,6 +1810,19 @@ fn build_snapshot(
             if !sv::valid_ident(e) {
                 continue;
             }
+            // #352: `quack` must never be loaded into the serving instance —
+            // only the throwaway staging one `copy_from_quack` opens for
+            // itself. This closes every path that could otherwise get it
+            // loaded here: the live session already having it loaded, a
+            // dashboard's own `-- @load quack`, or `options.load`.
+            if e.eq_ignore_ascii_case("quack") {
+                return Err(
+                    "the 'quack' extension may not be loaded into a locked server (the live \
+                     session has it loaded, a dashboard has `-- @load quack`, or options.load \
+                     names it) — a live Quack source is configured with options.source instead"
+                        .into(),
+                );
+            }
             if let Err(err) = c.exec(&format!("LOAD {}", quote_ident(e))) {
                 let first = err.lines().next().unwrap_or("").to_string();
                 warnings.push(format!("LOAD {e}: {first}"));
