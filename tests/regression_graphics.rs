@@ -1557,6 +1557,151 @@ fn heatmap_diverging_status_and_dark_midpoint() {
     }
 }
 
+/// `(x, y, width, height)` of every `<rect data-geom="tile">` — a heatmap cell.
+fn tile_rects(svg: &str) -> Vec<(f64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<rect ") {
+        let tag = &rest[i..i + rest[i..].find('>').unwrap()];
+        if tag.contains("data-geom=\"tile\"") {
+            let attr = |a: &str| -> f64 {
+                let k = tag.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap()
+            };
+            out.push((attr("x"), attr("y"), attr("width"), attr("height")));
+        }
+        rest = &rest[i + 6..];
+    }
+    out
+}
+
+/// #332: a row with fewer distinct x points than its neighbours (a sparse
+/// `::YAXIS` level on a shared, dense date `::XAXIS`) still gets tiles the
+/// same size as every other row — the x scale's resolution (the smallest
+/// gap anywhere in the shared column, ggplot-rs `GeomTile`) and the y
+/// scale's fixed category slots size every tile alike; only the sparse
+/// row's row has fewer of them, with gaps where it has no data (not taller
+/// or narrower ones).
+#[test]
+fn heatmap_tiles_are_uniform_for_a_sparse_row() {
+    let dense = [
+        "2026-09-01",
+        "2026-09-03",
+        "2026-09-05",
+        "2026-09-07",
+        "2026-09-09",
+        "2026-09-11",
+        "2026-09-13",
+        "2026-09-15",
+    ];
+    let sparse = ["2026-09-01", "2026-09-08", "2026-09-15"];
+    let mut x = Vec::new();
+    let mut y = Vec::new();
+    for d in dense {
+        x.push(d);
+        y.push("sys1");
+    }
+    for d in sparse {
+        x.push(d);
+        y.push("sys2");
+    }
+    let cols = vec![
+        Column::new("w", Role::X, strs(&x)),
+        Column::new("c", Role::Y, strs(&y)),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&vec![0.0; dense.len() + sparse.len()]),
+        ),
+    ];
+    let s = svg(cols);
+    let tiles = tile_rects(&s);
+    assert_eq!(tiles.len(), dense.len() + sparse.len(), "{s}");
+    let (w0, h0) = (tiles[0].2, tiles[0].3);
+    for (x, y, w, h) in &tiles {
+        assert!(
+            (w - w0).abs() < 1e-6 && (h - h0).abs() < 1e-6,
+            "every tile is {w0}x{h0}; got {w}x{h} at ({x}, {y}) — {s}"
+        );
+    }
+    // sys1 (dense, on top) and sys2 (sparse, below) occupy the same height.
+    let heights_of = |series: &str| -> Vec<f64> {
+        let mut rest = s.as_str();
+        let mut out = Vec::new();
+        while let Some(i) = rest.find("<rect ") {
+            let tag = &rest[i..i + rest[i..].find('>').unwrap()];
+            if tag.contains("data-geom=\"tile\"")
+                && tag.contains(&format!("data-series=\"{series}\""))
+            {
+                let k = tag.find(" y=\"").unwrap() + 4;
+                out.push(tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap());
+            }
+            rest = &rest[i + 6..];
+        }
+        out
+    };
+    let sys1_y = heights_of("sys1");
+    let sys2_y = heights_of("sys2");
+    assert!(!sys1_y.is_empty() && !sys2_y.is_empty(), "{s}");
+    assert!(
+        (sys1_y[0] - sys2_y[0]).abs() > 1.0,
+        "sys1 and sys2 are drawn in different bands: {s}"
+    );
+}
+
+/// #332: a text `::HEATMAP` measure (a status word, coloured with `::COLORS`
+/// as a level map) renders — never the old `Conversion Error: Could not
+/// convert string … to DOUBLE` from the SQL planner forcing the column to
+/// DOUBLE, nor a blank "No numeric values to plot" note — and its legend
+/// prints the words themselves, not numeric band boundaries.
+#[test]
+fn heatmap_text_measure_gets_a_categorical_legend() {
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["a", "b", "c", "d"])),
+        Column::new("c", Role::Y, strs(&["r", "r", "r", "r"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            strs(&["blocked", "peer violation", "QP-ready", "QP-ready"]),
+        ),
+        Column::new(
+            "m",
+            Role::GaugeColors,
+            strs(&["blocked:bad; peer violation:warn; QP-ready:good"]),
+        ),
+    ];
+    let t = anofox_visualization::theme::ResolvedTheme::default();
+    let s = render(&cols, 480, 320).expect("renders").to_lowercase();
+    for (word, (r, g, b)) in [
+        ("blocked", t.colors.negative),
+        ("peer violation", t.colors.warning),
+        ("qp-ready", t.colors.positive),
+    ] {
+        let hex = format!("#{r:02x}{g:02x}{b:02x}");
+        let rgb = format!("rgb({r},{g},{b})");
+        assert!(
+            s.contains(&hex) || s.contains(&rgb),
+            "{word}'s colour in {s}"
+        );
+    }
+    // The legend names the words, in the map's written order — never a
+    // numeric band like "≥ 2" / "1–2".
+    let (b, p, q) = (
+        s.find(">blocked<"),
+        s.find(">peer violation<"),
+        s.find(">qp-ready<"),
+    );
+    assert!(b.is_some() && p.is_some() && q.is_some(), "{s}");
+    assert!(b < p && p < q, "legend order follows the ::COLORS map: {s}");
+    assert!(!s.contains("no numeric values"), "{s}");
+    // Without ::COLORS: still a plain discrete legend (dz_scale), not an error.
+    let plain = render(&cols[..3], 480, 320).expect("renders");
+    assert!(
+        !plain.to_lowercase().contains("no numeric values"),
+        "{plain}"
+    );
+}
+
 #[test]
 fn tooltip_values_follow_yformat_and_locale() {
     use anofox_visualization::{format::Locale, render_with, RenderOptions};

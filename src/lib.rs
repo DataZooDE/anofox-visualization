@@ -1965,13 +1965,19 @@ fn render_inner(
     let Role::Value(kind) = value.role else {
         return Err("no measure column".into());
     };
+    // #332: a ::HEATMAP's measure may be text (a status word, coloured with
+    // ::COLORS as a level map) — render_heatmap's own categorical branch
+    // handles it, so the numeric guards below (which exist for every other
+    // kind, whose measure really must be a number) don't apply to it.
+    let categorical_heatmap =
+        kind == Kind::Heatmap && value.values.iter().any(|v| matches!(v, Value::Str(_)));
     // Empty / too-small inputs get a clear note instead of a confusing
     // "requires aesthetic 'x'" error from the plotting engine.
     let n_ok = value.values.iter().filter(|v| v.as_f64().is_some()).count();
     if value.values.is_empty() {
         return Ok(note_svg(title.as_deref(), "No data", width, height));
     }
-    if n_ok == 0 {
+    if n_ok == 0 && !categorical_heatmap {
         return Ok(note_svg(
             title.as_deref(),
             "No numeric values to plot",
@@ -1985,7 +1991,7 @@ fn render_inner(
     } else {
         min_values(kind)
     };
-    if n_ok < need {
+    if n_ok < need && !categorical_heatmap {
         return Ok(note_svg(
             title.as_deref(),
             &format!(
@@ -3583,6 +3589,14 @@ fn render_heatmap(
         .iter()
         .find(|c| c.role == Role::Y)
         .ok_or("heatmap needs a YAXIS column")?;
+    // #332: a string measure (a status word such as 'blocked', coloured
+    // with ::COLORS as a level map) gets a categorical fill scale and
+    // legend — the words themselves, not a numeric ramp/::THRESHOLDS steps,
+    // which need real numbers (the SQL planner no longer forces this column
+    // to DOUBLE, see sql::item_role's Role::Value(Kind::Heatmap) case).
+    if value.values.iter().any(|v| matches!(v, Value::Str(_))) {
+        return render_heatmap_categorical(o, value, cols, title, width, height);
+    }
     let fmt = value_fmt(cols, Kind::Heatmap, &value.values);
     let nums: Vec<f64> = value
         .values
@@ -3696,6 +3710,64 @@ fn render_heatmap(
     }
     let mut panel = Panel::plot(plot, width, height);
     // Hosts: cell labels let hover/click through to the cell; no legend toggle.
+    if let Panel::Plot { attrs, .. } = &mut panel {
+        attrs.push(("data-kind", "heatmap".to_string()));
+    }
+    Ok(panel)
+}
+
+/// `render_heatmap`'s categorical branch (#332): a string `::HEATMAP`
+/// measure gets [`category_scale`] — the same `::COLORS` level map /
+/// default palette + legend a `::CATEGORY` column gets elsewhere — so the
+/// legend prints the status words themselves (`blocked`, `QP-ready`, …)
+/// instead of numeric band boundaries. `GeomTile`'s own fallback (no
+/// `"label"` aesthetic given) uses the fill value as each tile's tooltip, so
+/// the raw word is still there on hover; `::DataLabels` isn't drawn here —
+/// it formats a number, which a status word isn't.
+fn render_heatmap_categorical(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let x = find_role(cols, Role::X).ok_or("heatmap needs an XAXIS column")?;
+    let y = find_role(cols, Role::Y).ok_or("heatmap needs a YAXIS column")?;
+    let data = vec![
+        ("x".to_string(), x.values.clone()),
+        ("y".to_string(), y.values.clone()),
+        ("fill".to_string(), value.values.clone()),
+    ];
+    let mut th = chart_theme(o, 11.0);
+    th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
+    th.legend_key.color = Some(o.theme.colors.card);
+    th.legend_key_width = 9.0;
+    let plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").y("y").fill("fill"))
+        .geom_tile_with(GeomTile {
+            color: o.theme.colors.card,
+            line_width: 2.0,
+            ..Default::default()
+        });
+    let mut plot = plot
+        .scale_fill(category_scale(o, Aesthetic::Fill, value, cols))
+        .theme(th);
+    if let Some(levels) = str_levels(&x.values) {
+        plot = plot.scale_x_discrete(
+            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
+        );
+    }
+    if let Some(mut levels) = str_levels(&y.values) {
+        levels.reverse();
+        plot = plot.scale_y_discrete(
+            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
+        );
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    let mut panel = Panel::plot(plot, width, height);
     if let Panel::Plot { attrs, .. } = &mut panel {
         attrs.push(("data-kind", "heatmap".to_string()));
     }

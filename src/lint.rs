@@ -822,12 +822,17 @@ where
                 };
                 if let Err(e) = crate::thresholds::parse_level_colors(spec) {
                     warn(Severity::Error, "colors/bad-map", e);
-                } else if !p.roles.iter().any(|(_, r)| *r == Role::Category) {
+                } else if !p
+                    .roles
+                    .iter()
+                    .any(|(_, r)| matches!(r, Role::Category | Role::Value(Kind::Heatmap)))
+                {
                     warn(
                         Severity::Warning,
                         "colors/no-category",
-                        "a ::COLORS level map colours the ::CATEGORY levels it names — \
-                         add the column: status::CATEGORY, 'Critical:bad; OK:good'::COLORS"
+                        "a ::COLORS level map colours the ::CATEGORY levels it names (or a \
+                         string ::HEATMAP measure, #332) — add the column: status::CATEGORY, \
+                         'Critical:bad; OK:good'::COLORS"
                             .into(),
                     );
                 }

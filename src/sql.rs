@@ -813,6 +813,21 @@ fn rewrite_list(list: &str) -> Rewritten {
                 Role::Value(Kind::Sparkline) if kpi_stmt => {
                     format!("CAST({} AS DOUBLE[]) AS c{i}", trailing_alias(expr).0)
                 }
+                // #332: a ::HEATMAP's measure is left as its own type (not
+                // forced to DOUBLE, like ::CATEGORY/::Input) so a string
+                // column — a status word such as 'blocked', coloured with
+                // ::COLORS as a level map — reaches the renderer intact for
+                // a categorical legend, instead of erroring (`Conversion
+                // Error: Could not convert string … to DOUBLE`) before it
+                // ever gets there. A numeric measure still arrives as a real
+                // number (DuckDB's own INTEGER/DOUBLE), just not widened.
+                Role::Value(Kind::Heatmap) => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 Role::Value(_)
                 | Role::Metric(_)
                 | Role::Delta
