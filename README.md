@@ -241,6 +241,15 @@ There are two native builds (see [BUILD.md](BUILD.md) for why):
 Both binaries are unsigned: start DuckDB with `-unsigned` (or set
 `allow_unsigned_extensions`).
 
+**DuckDB 2.0.** DuckDB 2.0.0 LTS (2026-10-21) is supported now: the CMake /
+community (`make`) build also compiles and runs its sqllogictests against
+v2.0.0 (`extension-ci-tools@v2.0-cyanoptera`), checked by a non-blocking CI
+job alongside the pinned v1.5.6 build. The C-API full-toolkit build
+(`duckext/`) is unaffected either way — it is version-portable (C-API
+v1.2.0+). This repository's own pin (`.duckdb-version`, v1.5.6) moves to the
+2.0 line around 2.0.1 (~2026-11-18), once duckdb-wasm and the other anofox_*
+extensions have 2.0 builds; see `docs/DOCS.md` and issue #352 for details.
+
 **Render-only (`make`)**
 
 ```sh

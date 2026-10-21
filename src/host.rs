@@ -21,6 +21,7 @@ pub mod access;
 pub mod app_brand;
 #[cfg(feature = "auth")]
 pub mod auth;
+pub mod duckdb_cli;
 pub mod policy;
 pub mod serving;
 pub mod telemetry;

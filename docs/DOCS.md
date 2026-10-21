@@ -5,6 +5,26 @@ SQL-defined dashboards: you annotate SQL result columns with
 renders them with [ggplot-rs](https://github.com/sipemu/ggplot-rs). The core is dependency-light and
 **wasm-compatible**, so the same renderer runs on the CLI and in the browser.
 
+### DuckDB 2.0
+
+DuckDB 2.0.0 LTS shipped 2026-10-21. It's supported now: the community/CMake
+build (`csrc/` + `CMakeLists.txt`) compiles and passes its sqllogictests
+against both v1.5.6 (`extension-ci-tools@v1.5-variegata`, the pinned,
+blocking build) and v2.0.0 (`extension-ci-tools@v2.0-cyanoptera`, a
+non-blocking CI job for now — see `.github/workflows/MainDistributionPipeline.yml`
+and `.github/workflows/ci.yml`'s `duckdb-2.0-smoke` job). The C-API
+full-toolkit build (`duckext/`) already loads unchanged on 2.0 (it targets
+C-API v1.2.0, which is version-portable). `dashboard`/`serve` warn on stderr
+if the `duckdb` CLI on PATH is a different major version than this build's
+pin, since DuckDB's on-disk format is one-way across major versions (a 2.0
+file can't be opened by a 1.x CLI).
+
+This repository's own pin (`.duckdb-version`) stays at **v1.5.6** until
+around **2.0.1** (planned 2026-11-18) — once duckdb-wasm 2.0 is on npm and
+the other anofox_* extensions this one conformance-tests against
+(statistics, optimize, tabular, forecast) have 2.0 builds. See issue #352 and
+`research-duckdb-2.0.md` for the full migration plan.
+
 ---
 
 ## 1. The annotation model

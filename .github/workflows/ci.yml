@@ -91,6 +91,50 @@ jobs:
           pip install "duckdb==1.5.6" -e ".[test]" pingouin lifelines statsforecast nbclient ipykernel
           pytest -q -rs
 
+  duckdb-2.0-smoke:
+    # #352: non-blocking. DuckDB 2.0 LTS shipped 2026-10-21; our release pin
+    # (`.duckdb-version`) stays at v1.5.6 until ~2.0.1, but research found the
+    # Rust C-API cdylib (C_STRUCT, C-API v1.2.0) built for 1.5.6 loads
+    # unchanged on 2.0.0 (research-duckdb-2.0.md). This job builds it fresh
+    # against a real 2.0.0 CLI and runs the locked-server end-to-end smoke
+    # test, so a future break shows up here without failing CI. The 2.0
+    # release asset is named differently (`duckdb-cli-...tar.gz`, not
+    # `duckdb_cli-...zip`) — the pinned jobs above keep the old name.
+    name: DuckDB 2.0 smoke test (Rust C-API cdylib, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache DuckDB CLI (2.0.0)
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/duckdb-2.0.0
+          key: duckdb-cli-2.0.0-linux-amd64
+
+      - name: Install DuckDB CLI (2.0.0)
+        run: |
+          d="$HOME/.local/duckdb-2.0.0"
+          if [ ! -x "$d/duckdb" ]; then
+            mkdir -p "$d"
+            curl -fsSL --retry 3 -o duckdb.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz
+            tar -xzf duckdb.tar.gz -C "$d"
+            chmod +x "$d/duckdb"
+          fi
+          "$d/duckdb" --version
+          echo "$d" >> "$GITHUB_PATH"
+
+      - name: Build the C-API extension (Rust cdylib)
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
+
+      - name: Locked server end to end, against DuckDB 2.0
+        run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
   web:
     # The browser-side tests (tests/web/*.mjs): app.js against the wasm build —
     # table formatting vectors, locale, contract plots, SVG attributes,

@@ -24,6 +24,15 @@ repo:
   github: DataZooDE/anofox-visualization
   # The default branch is `master`. When submitting, pin the release commit SHA.
   ref: master
+  # #352: since 2026-10-19 the community-extensions repo builds `ref` against
+  # DuckDB v2.0.0 only; a v1.5.6 build needs the separate `variegata` field,
+  # pointing to the SAME release commit SHA as `ref` above (our CMakeLists.txt
+  # + csrc/ build unchanged against both — see MainDistributionPipeline.yml
+  # and docs/DOCS.md's "DuckDB 2.0" note). Uncomment and fill in the release
+  # SHA when opening the community PR; call it out at the top of the PR
+  # description, as duckdb/community-extensions#3081 asks:
+  # variegata: <same commit SHA as ref, pinned at submission time>
+
 
 docs:
   hello_world: |

@@ -31,7 +31,20 @@ copy it to `extensions/anofox_visualization/description.yml`, set `repo.ref` to
 the release commit SHA, and open a PR. Their CI runs the same
 extension-ci-tools pipeline as `MainDistributionPipeline.yml` (`build: cmake`,
 `requires_toolchains: rust`) and signs the result. The C++ ABI pins one DuckDB
-version per build (currently v1.5.6).
+version per build.
+
+**DuckDB 2.0 (#352):** since 2026-10-19 the community-extensions repo builds
+`repo.ref` against DuckDB v2.0.0 by default; a v1.5.6 build only happens
+through the separate `variegata` field (duckdb/community-extensions#3081),
+set to the same commit SHA as `ref`. Our `csrc/` + `CMakeLists.txt` build
+unchanged against both v1.5.6 (`extension-ci-tools@v1.5-variegata`) and
+v2.0.0 (`extension-ci-tools@v2.0-cyanoptera`) — see
+`.github/workflows/MainDistributionPipeline.yml`, which runs both. When
+submitting: fill in `variegata` in `description.yml` (commented out there
+until a release SHA exists) and call it out at the top of the PR description,
+as the issue above asks. The pin in `.duckdb-version` (this repository's own
+default) stays at v1.5.6 until ~2.0.1; the community submission ships both
+regardless of that pin.
 
 ## Route 2 — GitHub releases + Pages repository (full toolkit, unsigned)
 
