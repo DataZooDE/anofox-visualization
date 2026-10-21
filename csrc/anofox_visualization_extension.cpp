@@ -133,17 +133,20 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 // anything loads, when that matters (docs/DOCS.md).
 #ifdef _WIN32
 // Windows only (#333/#335): this extension is one Rust-staticlib-into-C++
-// link unit (Corrosion matches the Rust target's `crt-static` feature to
-// this project's own CMAKE_MSVC_RUNTIME_LIBRARY, so in the normal case
-// `anofox_viz_ensure_telemetry_default()`'s own `_wputenv_s` call already
-// writes through the one CRT this whole extension shares) -- but a
-// defensive, independent write from the C++ side costs nothing and does not
-// depend on that matching holding: this module's own `getenv()` (and any
-// future C++ code of ours that might call it, such as a telemetry library
-// linked directly into THIS extension rather than reached through the Rust
-// FFI) sees "1" unconditionally, from a second, C++-native path. Same
-// semantics as the Rust side (anofox_visualization::host::telemetry, see
-// its `windows_crt` module docs for the full CRT analysis): unset or
+// link unit (Corrosion builds `anofox_viz_ffi` for this CMake project, which
+// targets the static CRT via the `x64-windows-static-release` vcpkg
+// triplet) -- but whether Corrosion also matches the Rust target's
+// `crt-static` feature to that choice, so `anofox_viz_ensure_telemetry_
+// default()`'s own `_wputenv_s` call ends up writing through the SAME CRT
+// this C++ code uses, is NOT verified (`CMakeLists.txt`'s
+// `corrosion_import_crate` call sets no such option; it may not match). This
+// defensive, independent write from the C++ side does not depend on that
+// matching holding either way: this module's own `getenv()` (and any future
+// C++ code of ours that might call it, such as a telemetry library linked
+// directly into THIS extension rather than reached through the Rust FFI)
+// sees "1" unconditionally, from a second, C++-native path. Same semantics
+// as the Rust side (anofox_visualization::host::telemetry, see its
+// `windows_crt` module docs for the full CRT analysis): unset or
 // empty/whitespace-only gets the default; any other explicit value,
 // whatever it is, is left alone.
 static void EnsureTelemetryDefaultWinCrt() {

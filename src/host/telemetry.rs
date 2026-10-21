@@ -59,6 +59,16 @@ pub const VAR: &str = "DATAZOO_DISABLE_TELEMETRY";
 ///     doing: it is the one write every later-loaded static-CRT module's own
 ///     snapshot will pick up.
 ///
+/// This crate itself is built the *first* way on Windows (dynamic UCRT) when
+/// it becomes the `duckext` cdylib — the "full toolkit" release build is a
+/// plain `cargo build --release --target x86_64-pc-windows-msvc`, with no
+/// `crt-static` anywhere in `scripts/release/build-extension.sh` or
+/// `duckext/scripts/build-native.sh`. The *second* way (static CRT) is what
+/// the official DuckDB CLI release and the `csrc/` C++ community build (via
+/// the `x64-windows-static-release` vcpkg triplet) use — this crate also
+/// becomes a staticlib linked into that C++ build, but see the `extern "C"`
+/// block below for why that build is not assumed to share its CRT choice.
+///
 /// `_wputenv_s` additionally propagates to the OS environment block itself
 /// (documented CRT behaviour), so calling both is not redundant: it covers
 /// "this module's own `getenv`" and "any OTHER module sharing a dynamic UCRT
@@ -77,9 +87,20 @@ mod windows_crt {
     // Declared directly against the UCRT rather than pulled in via an extra
     // crate: both are ordinary `<stdlib.h>` exports that every `*-pc-windows-
     // msvc` Rust build already links against (statically or dynamically,
-    // matching however the rest of the binary/DLL was built — e.g. Corrosion
-    // matches `crt-static` to the surrounding CMake/MSVC runtime setting for
-    // the `csrc/` build), so no extra link setup is needed here.
+    // matching however this module itself was built), so no extra link setup
+    // is needed here. This module is built two different ways on Windows:
+    // as the `duckext` cdylib (the "full toolkit" release build, a plain
+    // `cargo build --release --target x86_64-pc-windows-msvc` with no
+    // `crt-static` — the dynamic UCRT, Rust's own default), and as a
+    // staticlib linked into the `csrc/` C++ extension by Corrosion (whose
+    // CMake build targets the static CRT, via the `x64-windows-static-
+    // release` vcpkg triplet). Whether Corrosion also passes `crt-static` to
+    // rustc for that second build so the two sides end up sharing the one
+    // CRT is NOT verified here (`CMakeLists.txt`'s `corrosion_import_crate`
+    // call sets no such option) — hence the independent `_putenv_s` write on
+    // the C++ side (`csrc/anofox_visualization_extension.cpp`), which does
+    // not depend on this module's own write reaching the same CRT the C++
+    // code uses.
     extern "C" {
         // int _wputenv_s(const wchar_t *name, const wchar_t *value);
         fn _wputenv_s(name: *const u16, value: *const u16) -> i32;
@@ -265,10 +286,23 @@ pub fn ensure_default_once() {
 /// reports what THIS process (the extension that just called
 /// [`ensure_default_once`]) sees through each view instead, so a smoke test
 /// running *inside* this extension (`duckext/scripts/build-native.sh`, via
-/// the `anofox_telemetry_probe()` SQL function duckext registers) can
-/// assert the fix actually wrote both: the OS block (reaches a later-loaded
-/// static-CRT sibling) and this module's own CRT cache (reaches this same
-/// module's `getenv`, and any sibling sharing a dynamic UCRT with it).
+/// the `anofox_telemetry_probe()` SQL function `duckext` registers on
+/// Windows only, see `duckext/src/lib.rs`) can check the fix.
+///
+/// The two halves are not equally strong evidence:
+///
+///   * `os` is the one that matters: a later-`LOAD`ed static-CRT sibling
+///     snapshots its own CRT table from the OS block, so `os=1` here stands
+///     in for "that sibling's own `getenv()` would see `1`" — the real
+///     outcome, which this process cannot observe directly (it would need a
+///     second static-CRT module reporting its own `getenv()` after `LOAD`).
+///     Note also that `set_var`/`SetEnvironmentVariableW` already wrote the
+///     OS block before this fix existed — `os=1` mostly confirms that part
+///     kept working, not that this change was the one that made it true.
+///   * `crt=1` is a self-check: it reads this module's own CRT table right
+///     after this module's own `_wputenv_s`. It proves that call worked, not
+///     that any OTHER module's `getenv()` sees it — it only would, too, for a
+///     module sharing a dynamic UCRT with this one (see the module docs).
 ///
 /// Format: `"os=<value> crt=<value>"`, each `<value>` the literal current
 /// value or empty if unset. On a non-Windows target `crt` always equals
