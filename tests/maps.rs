@@ -1511,9 +1511,14 @@ fn hexbin_bins_within_budget() {
 /// a WCAG 1.4.11 non-text contrast floor (3:1) against the card colour, in
 /// every built-in theme. The light variant is untouched (its ramp already
 /// goes toward a dark, high-contrast deep end).
+fn hex_rgb(hex: &str) -> (u8, u8, u8) {
+    let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+    (p(1), p(3), p(5))
+}
+
 #[test]
 fn dark_classed_map_classes_clear_a_contrast_floor() {
-    use anofox_visualization::theme::{contrast, hex};
+    use anofox_visualization::theme::{contrast, hex, luminance};
     let wkt: Vec<Value> = (0..6)
         .map(|i| Value::Str(format!("POINT({} {})", 10.0 + i as f64 * 0.3, 50.0)))
         .collect();
@@ -1531,7 +1536,9 @@ fn dark_classed_map_classes_clear_a_contrast_floor() {
                 ],
                 &o,
             );
-            let mut seen = 0;
+            // by class index (1-based, low value to high), so order is checked too.
+            let mut by_class: std::collections::BTreeMap<usize, (u8, u8, u8)> =
+                std::collections::BTreeMap::new();
             for t in features(&s) {
                 let Some(fill) = attr(t, "fill") else {
                     continue;
@@ -1539,9 +1546,14 @@ fn dark_classed_map_classes_clear_a_contrast_floor() {
                 if !fill.starts_with('#') || fill.len() != 7 {
                     continue;
                 }
-                let p = |i: usize| u8::from_str_radix(&fill[i..i + 2], 16).unwrap();
-                let c = (p(1), p(3), p(5));
-                seen += 1;
+                let class: usize = attr(t, "data-class").and_then(|c| c.parse().ok()).unwrap();
+                by_class.insert(class, hex_rgb(fill));
+            }
+            assert!(
+                !by_class.is_empty(),
+                "{name} {label}: no classed features drawn"
+            );
+            for &c in by_class.values() {
                 assert!(
                     contrast(c, card) >= 3.0,
                     "{name} dark {label}: {} against card {} is only {:.2}:1",
@@ -1550,7 +1562,18 @@ fn dark_classed_map_classes_clear_a_contrast_floor() {
                     contrast(c, card)
                 );
             }
-            assert!(seen > 0, "{name} {label}: no classed features drawn");
+            // #311: a sequential ramp's classes must read in a consistent
+            // order (strictly monotonic luminance) — lifting the lowest
+            // class for contrast must not make it read as light as, or
+            // lighter than, a neighbour it used to be darker than.
+            if label == "sequential" {
+                let lums: Vec<f64> = by_class.values().map(|&c| luminance(c)).collect();
+                assert!(
+                    lums.windows(2).all(|w| w[0] < w[1] - 1e-6),
+                    "{name} dark sequential: luminance not strictly monotonic: {lums:?} ({:?})",
+                    by_class.values().map(|c| hex(*c)).collect::<Vec<_>>()
+                );
+            }
         }
     }
     // The light variant's own deep end is already high-contrast against a
@@ -1570,13 +1593,7 @@ fn dark_classed_map_classes_clear_a_contrast_floor() {
         .find_map(|t| attr(t, "fill"))
         .expect("a deepest class");
     assert!(
-        contrast(
-            {
-                let p = |i: usize| u8::from_str_radix(&deepest[i..i + 2], 16).unwrap();
-                (p(1), p(3), p(5))
-            },
-            o.theme.colors.card
-        ) > 4.0,
+        contrast(hex_rgb(deepest), o.theme.colors.card) > 4.0,
         "light theme's deepest class is already dark on a light card: {deepest}"
     );
 }
