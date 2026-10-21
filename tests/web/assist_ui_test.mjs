@@ -502,11 +502,57 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
 // confirmation of that exact text clears the pin again.
 {
   assert.match(appClean, /function heldTextsAdd\(sql, pin\)/, "heldTextsAdd takes a pin flag");
-  assert.match(appClean, /if \(pin\) pinnedHeldText = sql;/);
+  assert.match(appClean, /if \(pin\) \{\s*pinnedHeldText = sql;/, "pin sets pinnedHeldText");
   assert.match(appClean, /if \(oldest === pinnedHeldText\) continue;/, "eviction must skip the pinned entry");
   assert.match(appClean, /hold: \{ arm: \(sql\) => heldTextsAdd\(sql, true\) \}/, "host.hold.arm() pins the proposal's own entry");
   const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
   assert.match(confirmBody, /pinnedHeldText === v\) pinnedHeldText = null/, "a confirmed match releases the pin");
+}
+
+// G18 (M-4, sec-review-343, Medium): the hold must be statement-aware, not
+// just text-aware — a native redo (or any other path) that reassembles
+// only a FRAGMENT of a held proposal is never a member of `heldTexts`
+// (a whole-text set), so a separate, uncapped `heldStatements` set (every
+// normalised statement of a proposal actually armed) must also re-arm the
+// hold whenever the editor contains ANY one of them. Also fixes Info-12
+// (only the newest proposal's entry survived `heldTexts`' LRU cap): this
+// set has no cap, so an earlier, still-unconfirmed proposal's statements
+// are never evicted just because a later one was also armed.
+{
+  assert.match(appClean, /let heldStatements = new Set\(\);/, "a statement-level hold set exists");
+  assert.match(appClean, /function normStmt\(sql\)/, "a comment-stripping, whitespace-collapsing normaliser exists");
+  // normStmt must keep string/dollar-quoted literal CONTENT verbatim — a
+  // sqlCode()-style blank-the-literals normaliser would make two
+  // DIFFERENT statements that only share structure compare equal, a false
+  // re-arm risk the other direction (every literal is a hazard, not a
+  // convenience): a dedicated `normStmt` function must exist, never reuse
+  // of `sqlCode(` for this purpose.
+  const normStmtBody = stripComments(grabFn(appJs, "normStmt"));
+  assert.doesNotMatch(normStmtBody, /sqlCode\(/, "normStmt must not blank string literals (sqlCode does; the hold needs exact literal content)");
+  assert.match(appClean, /function normStatementsOf\(sql\)/);
+  assert.match(appClean, /function editorHeldByStatement\(sql\)/);
+  const heldTextsAddBody = stripComments(grabFn(appJs, "heldTextsAdd"));
+  assert.match(heldTextsAddBody, /for \(const s of normStatementsOf\(sql\)\) heldStatements\.add\(s\)/, "a pinned (fresh) arm also records its statements");
+  const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
+  assert.match(confirmBody, /for \(const s of normStatementsOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run removes only the statements it ran");
+  // Both re-arm sites (the #sql input handler, run()'s belt-and-braces
+  // check) must OR the statement-level check onto the whole-text one.
+  assert.match(appClean, /heldTexts\.has\(v\) \|\| editorHeldByStatement\(v\)/, "the #sql input handler's re-arm check");
+  assert.match(appClean, /heldTexts\.has\(\$\("sql"\)\.value\) \|\| editorHeldByStatement\(\$\("sql"\)\.value\)/, "run()'s belt-and-braces re-arm check");
+  assert.match(appClean, /heldStatements\.clear\(\);/, "loadDash releases the statement-level hold too");
+}
+
+// L-8 (sec-review-343): `heldBasisSql` must not capture an EARLIER,
+// still-unconfirmed proposal's text as the engine's trusted basis — only
+// set it for a FRESH hold when the editor isn't already showing a held
+// proposal (by either the whole-text or the statement-level check).
+{
+  const body = stripComments(grabFn(appJs, "previewExit"));
+  assert.match(
+    body,
+    /if \(!applyHold && !heldTexts\.has\(v\) && !editorHeldByStatement\(v\)\) heldBasisSql = v;/,
+    "heldBasisSql is captured only when the editor isn't already held"
+  );
 }
 
 // G16 (Info-9, sec-review-272-rereview seventh pass, #336): the dark-toggle
@@ -533,9 +579,10 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   assert.match(depsBody, /const s = assistEditorBasis\(\);/);
   assert.doesNotMatch(depsBody, /neededExtensions\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
   assert.doesNotMatch(depsBody, /editorFileNames\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
-  // the one place `heldBasisSql` is captured for a FRESH hold, right
-  // before apply() (assist-ui.js) overwrites the editor with the proposal.
-  assert.match(appClean, /heldBasisSql = \$\("sql"\)\.value;\s*\n\s*armHold\(\);/);
+  // the one place `heldBasisSql` is (conditionally — see L-8 below)
+  // captured for a FRESH hold, right before apply() (assist-ui.js)
+  // overwrites the editor with the proposal.
+  assert.match(appClean, /if \(!applyHold && !heldTexts\.has\(v\) && !editorHeldByStatement\(v\)\) heldBasisSql = v;\s*\n\s*\}\s*\n\s*armHold\(\);/);
 }
 
 console.log("assist_ui_test: ok");

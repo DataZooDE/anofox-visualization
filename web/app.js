@@ -26,7 +26,7 @@ import init, {
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
-import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from "./lint.js";
+import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics, splitStatements } from "./lint.js";
 // #204: the tab-wide CSP (whenever an assistant key is stored) and the
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
@@ -1430,10 +1430,93 @@ let heldTexts = new Set();
 // held proposal" to protect, and a different dashboard's hold has nothing
 // to pin.
 let pinnedHeldText = null;
+// M-4 (sec-review-343, Medium, pre-existing since #272): `heldTexts` only
+// ever matches a WHOLE text exactly. Chromium's native redo of a
+// multi-line textarea `insertText` can replay just a FRAGMENT of the
+// proposal (observed: the proposal minus its first statement) — that
+// fragment is never a member of `heldTexts`, so the hold stayed off and
+// the next implicit trigger ran its class-3 statements on the page
+// database. `heldStatements` is the statement-level counterpart: every
+// *normalised* statement (comments stripped, whitespace collapsed — see
+// `normStmt()`) of a proposal actually armed via `host.hold.arm()` (never
+// a typed variant — this is deliberately NOT a "record every edit" set
+// like `heldTexts`, so it stays small and exact). `editorHeldByStatement()`
+// re-arms whenever the CURRENT editor text contains ANY one of them,
+// however it got there: a redo fragment, a reordering, an edit around the
+// held statements — not just an exact whole-text match. No eviction cap:
+// an explicit run only ever removes the statements it actually ran (see
+// `confirmHeldIfMatch()`), so an EARLIER, still-unconfirmed proposal's
+// statements are never dropped just because a LATER one was also armed
+// (Info-12 — sec-review-343's `pinnedHeldText` was a single slot and only
+// ever protected the newest proposal from `heldTexts`' own ~50-entry cap;
+// this set has no such cap to begin with).
+let heldStatements = new Set();
+// Comments stripped (the same tokenizer as splitStatements(), but
+// discarding comments instead of keeping them) and whitespace collapsed —
+// string/dollar-quoted literals are kept byte-for-byte, unlike sqlCode()
+// (which also blanks literals: fine for "does this statement need an
+// extension", wrong here, where two statements that merely share
+// structure but differ in literal content must NOT compare equal).
+function normStmt(sql) {
+  const s = String(sql);
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    const two = s.slice(i, i + 2);
+    if (c === "'" || c === '"') {
+      const esc = c === "'" && /[Ee]/.test(s[i - 1] || "") && !/[\w$]/.test(s[i - 2] || "");
+      let j = i + 1;
+      for (; j < s.length; j++) {
+        if (esc && s[j] === "\\") j++;
+        else if (s[j] === c) {
+          if (s[j + 1] === c) j++;
+          else break;
+        }
+      }
+      out += s.slice(i, j + 1);
+      i = j;
+    } else if (two === "--") {
+      const j = s.indexOf("\n", i);
+      i = (j < 0 ? s.length : j) - 1;
+    } else if (two === "/*") {
+      const j = s.indexOf("*/", i + 2);
+      i = (j < 0 ? s.length : j + 2) - 1;
+    } else if (c === "$" && /^\$[A-Za-z_]*\$/.test(s.slice(i)) && !/[\w$]/.test(s[i - 1] || "")) {
+      const tag = s.slice(i).match(/^\$[A-Za-z_]*\$/)[0];
+      const j = s.indexOf(tag, i + tag.length);
+      const end = j < 0 ? s.length : j + tag.length;
+      out += s.slice(i, end);
+      i = end - 1;
+    } else {
+      out += c;
+    }
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+// Every non-empty normalised statement of `sql` — [] on a parse hiccup
+// (never throws: an unmatched quote/comment just reads to the end, same
+// as splitStatements()).
+function normStatementsOf(sql) {
+  try {
+    return splitStatements(sql).map(normStmt).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+// M-4: does the CURRENT editor text contain any statement of an armed,
+// still-unconfirmed proposal — a whole match, a fragment, a reordering,
+// an edit around it, whatever reached the editor?
+function editorHeldByStatement(sql) {
+  for (const s of normStatementsOf(sql)) if (heldStatements.has(s)) return true;
+  return false;
+}
 function heldTextsAdd(sql, pin) {
   heldTexts.delete(sql); // re-insert at the end (most-recently-seen), cheap no-op if absent
   heldTexts.add(sql);
-  if (pin) pinnedHeldText = sql;
+  if (pin) {
+    pinnedHeldText = sql;
+    for (const s of normStatementsOf(sql)) heldStatements.add(s); // M-4: this proposal's statements, exact
+  }
   if (heldTexts.size > 50) {
     // Evict the oldest entry that ISN'T the pinned one — a 50+ run of
     // distinct typed/undone variants must still make room for itself
@@ -1508,6 +1591,12 @@ function confirmHeldIfMatch() {
   const v = $("sql").value;
   heldTexts.delete(v);
   if (pinnedHeldText === v) pinnedHeldText = null; // Info-11: a confirmed text is no longer "the held proposal" to pin
+  // M-4: an explicit run removes only the statements it ACTUALLY ran —
+  // the ones present in the just-run text, by exact normalised match —
+  // never the whole set: a DIFFERENT, still-unconfirmed proposal's
+  // statements (Info-12: an earlier proposal A, with B now held) must
+  // stay exactly as held as before.
+  for (const s of normStatementsOf(v)) heldStatements.delete(s);
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see
@@ -2286,7 +2375,11 @@ async function boot() {
     // was cleared in between (Undo, Run of other text…).
     const v = $("sql").value;
     if (applyHold) heldTextsAdd(v);
-    else if (heldTexts.has(v)) armHold();
+    // M-4: re-arm on a whole-text match OR on a statement-level match —
+    // a native redo that only replays a FRAGMENT of the proposal (or any
+    // other reordering/partial reappearance) must re-arm just as surely
+    // as the exact original text.
+    else if (heldTexts.has(v) || editorHeldByStatement(v)) armHold();
     assistUiSync();
   });
   // sec-review-272 H-1: the editor's own explicit "run this" shortcut —
@@ -3815,6 +3908,7 @@ function loadDash(name, sql, key) {
     if (preview) await previewExit({ rerun: false });
     clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
     heldTexts.clear(); // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): and releases every text recorded while held — a different dashboard's own undo/redo stack has nothing to do with it
+    heldStatements.clear(); // M-4 (sec-review-343): ditto, at the statement level
     pinnedHeldText = null; // Info-11: and whatever that hold's own proposal entry was pinned to
     heldBasisSql = ""; // Info-10: a new dashboard makes any earlier hold's basis stale
     closeSideMenu();
@@ -4016,7 +4110,17 @@ async function previewExit({ rerun = true, hold = false } = {}) {
     // the SAME hold (the `pend` branch below, or the #sql input/run()
     // belt-and-braces paths) leaves it alone, since the text it should
     // point at hasn't changed.
-    heldBasisSql = $("sql").value;
+    //
+    // L-8 (sec-review-343): but NOT when the editor is already showing an
+    // EARLIER, still-unconfirmed proposal (A held, and a second Send now
+    // arms B's own hold) — that text is the model's, never a trusted
+    // basis. Guard on `applyHold` (A's hold is already up) AND a direct
+    // membership check (belt-and-braces, in case the two ever desync):
+    // keep whatever basis was captured for A.
+    {
+      const v = $("sql").value;
+      if (!applyHold && !heldTexts.has(v) && !editorHeldByStatement(v)) heldBasisSql = v;
+    }
     armHold();
   } else if (pend !== null && !applyHold) {
     // H-1R2: honoured now, exactly as if it had just been pressed —
@@ -7813,8 +7917,11 @@ function run(fresh = true, opts = {}) {
     // hold gets re-armed; catch it here too, right before any
     // non-explicit run would otherwise reach the page database, in case
     // some other path ever changes the editor's text to a member of
-    // `heldTexts` without going through that handler.
-    if (heldTexts.has($("sql").value)) armHold();
+    // `heldTexts` without going through that handler. M-4: the
+    // statement-level check too, for the same reason — a redo fragment
+    // reaching the editor through some other path must be caught here
+    // too.
+    if (heldTexts.has($("sql").value) || editorHeldByStatement($("sql").value)) armHold();
     if (applyHold) {
       $("grid").replaceChildren(notRunCard());
       return;
