@@ -10105,6 +10105,16 @@ function dualRange(min, max, init, onChange, fmt = null) {
 const NUM_RE = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
 const isNumLike = (v) => (typeof v === "number" ? isFinite(v) : NUM_RE.test(String(v ?? "").replace(/^"|"$/g, "")));
 const isBoolLike = (v) => v === true || v === false || v === "true" || v === "false";
+// ::ROWSELECT's click-to-variable binding (#330): a row is clickable iff the
+// table opted in (`selMode`) and has a key column at all — *never* gated by
+// whether that column's rendered text happens to look numeric (an id like
+// "791", even when its SQL type is VARCHAR). That "looks numeric" test still
+// decides right-alignment / the "num" cell class, a wholly separate concern;
+// conflating the two silently dropped the click handler (and so the
+// getvariable() it sets) on an all-digit key, with no error anywhere.
+function rowSelectable(selMode, k0) {
+  return selMode !== "none" && k0 != null;
+}
 
 // Rich, readable data table: per-column number formats, slim data bars, soft
 // colour scales, a toolbar (row count, search, filter chips, Filters / Totals /
@@ -11286,7 +11296,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   if (k0 != null) coerceSeededSelection(k0, selMode);
   function renderRow(tr, r, repeat = false) {
     const vc = visCols();
-    const selectable = selMode !== "none" && k0 != null && !info[k0].numeric;
+    const selectable = rowSelectable(selMode, k0);
     if (selectable) {
       const keyVal = unquote(r[k0]);
       tr.classList.add("clickable");

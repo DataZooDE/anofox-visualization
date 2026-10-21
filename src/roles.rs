@@ -153,7 +153,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "violin plot — XAXIS groups, measure on y (raw rows)"),
     e("QQ", &["QQPLOT"], R::Value(Kind::QQ), "chart", true, "normal quantile-quantile plot with a 95% pointwise band"),
     e("HEATMAP", &["TILE", "TILES"], R::Value(Kind::Heatmap), "chart", true,
-      "tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0)"),
+      "tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0); \
+       a numeric measure sizes every tile alike regardless of how many x points each row has; \
+       a text measure (status words) takes ::COLORS as a level map for a categorical legend, \
+       like a ::CATEGORY column's"),
     e("CALENDAR", &["CALENDAR_HEATMAP", "CAL_HEATMAP"], R::Value(Kind::Calendar), "chart", true,
       "calendar heatmap (date XAXIS, ≤ 50 years)"),
     e("CANDLESTICK", &["CANDLE", "OHLC"], R::Value(Kind::Candlestick), "chart", true,

@@ -123,17 +123,38 @@ where
     let mut claim = |diags: &mut Vec<Diagnostic>, names: &[String], stmt, kind, sql: &str| {
         for n in names {
             match owners.get(n) {
-                Some(&(other, k)) if other != stmt && (k != kind || kind == "::DRILL") => diags
-                    .push(Diagnostic {
+                // ::DRILL / ::ROWSELECT: always flagged, even repeated by the
+                // same kind — a drill level's own name is reserved, and a
+                // ::ROWSELECT's variable is never chosen by the author (it is
+                // the table's first column), so a repeat is always an
+                // accident, not the deliberate shared name ::SELECT_AS allows.
+                Some(&(other, k))
+                    if other != stmt
+                        && (k != kind || kind == "::DRILL" || kind == "::ROWSELECT") =>
+                {
+                    let (code, hint) = if kind == "::ROWSELECT" && k == "::ROWSELECT" {
+                        (
+                            "interaction/rowselect-shared-name",
+                            "clicking a row in either table sets the same getvariable() and \
+                             silently toggles the other's selection too — alias one table's \
+                             first column to a different name",
+                        )
+                    } else {
+                        (
+                            "interaction/name-clash",
+                            "each overwrites the other; rename one",
+                        )
+                    };
+                    diags.push(Diagnostic {
                         severity: Severity::Warning,
                         stmt,
-                        code: "interaction/name-clash",
+                        code,
                         message: format!(
-                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — \
-                             each overwrites the other; rename one"
+                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — {hint}"
                         ),
                         sql: sql.to_string(),
-                    }),
+                    })
+                }
                 Some(_) => {}
                 None => {
                     owners.insert(n.clone(), (stmt, kind));
@@ -145,6 +166,14 @@ where
     let mut empty_msg = false;
     // A ::TOTALS value waiting for the next table (totals/summed-rate).
     let mut next_totals: Option<String> = None;
+    // A ::ROWSELECT directive waiting for the next table (#330): its click-to-
+    // variable binding is named after that table's first (non-TITLE/INFO)
+    // column, never written by the author, so two tables that happen to
+    // share one (e.g. the same alias, or no alias on the same source column)
+    // silently share one selection — a click in either toggles both. Unlike
+    // ::SELECT_AS / ::DRILL (an explicit, chosen name — reuse there is
+    // allowed), any repeat here is flagged.
+    let mut pending_rowselect: Option<usize> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -793,12 +822,17 @@ where
                 };
                 if let Err(e) = crate::thresholds::parse_level_colors(spec) {
                     warn(Severity::Error, "colors/bad-map", e);
-                } else if !p.roles.iter().any(|(_, r)| *r == Role::Category) {
+                } else if !p
+                    .roles
+                    .iter()
+                    .any(|(_, r)| matches!(r, Role::Category | Role::Value(Kind::Heatmap)))
+                {
                     warn(
                         Severity::Warning,
                         "colors/no-category",
-                        "a ::COLORS level map colours the ::CATEGORY levels it names — \
-                         add the column: status::CATEGORY, 'Critical:bad; OK:good'::COLORS"
+                        "a ::COLORS level map colours the ::CATEGORY levels it names (or a \
+                         string ::HEATMAP measure, #332) — add the column: status::CATEGORY, \
+                         'Critical:bad; OK:good'::COLORS"
                             .into(),
                     );
                 }
@@ -961,6 +995,9 @@ where
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
+            if p.roles.iter().any(|(_, r)| *r == Role::RowSelect) {
+                pending_rowselect = Some(stmt);
+            }
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -1001,6 +1038,17 @@ where
                 diags.extend(totals_unknown_column_diag(
                     &p.roles, &rows, spec, stmt, &short,
                 ));
+            }
+        }
+        // #330: a ::ROWSELECT's click-to-variable binding is named after
+        // this table's first (non-::TITLE/::INFO) column — claim it so a
+        // second ::ROWSELECT table with the same first-column name is
+        // flagged (interaction/rowselect-shared-name), not silently shared.
+        if let Some(rs_stmt) = pending_rowselect.take() {
+            if is_table_panel {
+                if let Some(name) = rowselect_key_column(&p.roles, &rows) {
+                    claim(&mut diags, &[name], rs_stmt, "::ROWSELECT", &short);
+                }
             }
         }
 
@@ -2954,6 +3002,20 @@ fn role_index(roles: &[(usize, Role)], want: Role) -> Option<usize> {
     roles.iter().find(|(_, r)| *r == want).map(|(i, _)| *i)
 }
 
+/// #330: the column a ::ROWSELECT table's click binds to — the first output
+/// column, skipping a ::TITLE (the card caption) or ::INFO (dropped before
+/// the table ever renders) column, the same "first column" the browser
+/// (`web/app.js` `k0 = cols[0]`) picks.
+fn rowselect_key_column(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<String> {
+    let skip_title = role_index(roles, Role::Title);
+    let skip_info = role_index(roles, Role::Info);
+    rows.first()?
+        .keys()
+        .enumerate()
+        .find(|(i, _)| Some(*i) != skip_title && Some(*i) != skip_info)
+        .map(|(_, k)| k.clone())
+}
+
 /// Output-column index of the first measure column (`Role::Value(_)`).
 fn value_index(roles: &[(usize, Role)]) -> Option<usize> {
     roles
@@ -4103,6 +4165,47 @@ mod design_tests {
             |_| Ok(vec![json!({ "c0": "week" }).as_object().unwrap().clone()]),
         );
         assert!(!has(&ok, "interaction/name-clash"), "{ok:?}");
+    }
+
+    /// #330: two `::ROWSELECT` tables whose first column has the same name
+    /// (so the browser derives the same `getvariable()` for both) share one
+    /// selection — a click in either silently toggles the other too. Unlike
+    /// `::SELECT_AS`'s explicit, chosen name (reuse allowed above), this
+    /// name is never typed by the author, so it is always flagged.
+    #[test]
+    fn two_rowselect_tables_sharing_a_first_column_name_clash() {
+        let d = check(
+            "SELECT 'single'::ROWSELECT;\n\
+             SELECT v AS picked ::TABLE, n AS \"N\" FROM a;\n\
+             SELECT 'single'::ROWSELECT;\n\
+             SELECT v AS picked ::TABLE, n AS \"N\" FROM b;",
+            |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "picked": "x1", "N": 1 })))
+                }
+            },
+        );
+        assert!(has(&d, "interaction/rowselect-shared-name"), "{d:?}");
+
+        // Different first-column aliases: each table's variable is its own — clean.
+        let ok = check(
+            "SELECT 'single'::ROWSELECT;\n\
+             SELECT v AS picked_a ::TABLE, n AS \"N\" FROM a;\n\
+             SELECT 'single'::ROWSELECT;\n\
+             SELECT v AS picked_b ::TABLE, n AS \"N\" FROM b;",
+            |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else if q.contains("picked_a") {
+                    Ok(rows(1, |_| json!({ "picked_a": "x1", "N": 1 })))
+                } else {
+                    Ok(rows(1, |_| json!({ "picked_b": "x1", "N": 1 })))
+                }
+            },
+        );
+        assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
     }
 
     #[test]

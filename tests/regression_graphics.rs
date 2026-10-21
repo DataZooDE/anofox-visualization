@@ -1557,6 +1557,232 @@ fn heatmap_diverging_status_and_dark_midpoint() {
     }
 }
 
+/// `(x, y, width, height)` of every `<rect data-geom="tile">` — a heatmap cell.
+fn tile_rects(svg: &str) -> Vec<(f64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<rect ") {
+        let tag = &rest[i..i + rest[i..].find('>').unwrap()];
+        if tag.contains("data-geom=\"tile\"") {
+            let attr = |a: &str| -> f64 {
+                let k = tag.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap()
+            };
+            out.push((attr("x"), attr("y"), attr("width"), attr("height")));
+        }
+        rest = &rest[i + 6..];
+    }
+    out
+}
+
+/// #332: a row with fewer distinct x points than its neighbours (a sparse
+/// `::YAXIS` level on a shared, dense date `::XAXIS`) still gets tiles the
+/// same size as every other row — the x scale's resolution (the smallest
+/// gap anywhere in the shared column, ggplot-rs `GeomTile`) and the y
+/// scale's fixed category slots size every tile alike; only the sparse
+/// row's row has fewer of them, with gaps where it has no data (not taller
+/// or narrower ones).
+#[test]
+fn heatmap_tiles_are_uniform_for_a_sparse_row() {
+    let dense = [
+        "2026-09-01",
+        "2026-09-03",
+        "2026-09-05",
+        "2026-09-07",
+        "2026-09-09",
+        "2026-09-11",
+        "2026-09-13",
+        "2026-09-15",
+    ];
+    let sparse = ["2026-09-01", "2026-09-08", "2026-09-15"];
+    let mut x = Vec::new();
+    let mut y = Vec::new();
+    for d in dense {
+        x.push(d);
+        y.push("sys1");
+    }
+    for d in sparse {
+        x.push(d);
+        y.push("sys2");
+    }
+    let cols = vec![
+        Column::new("w", Role::X, strs(&x)),
+        Column::new("c", Role::Y, strs(&y)),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&vec![0.0; dense.len() + sparse.len()]),
+        ),
+    ];
+    let s = svg(cols);
+    let tiles = tile_rects(&s);
+    assert_eq!(tiles.len(), dense.len() + sparse.len(), "{s}");
+    let (w0, h0) = (tiles[0].2, tiles[0].3);
+    for (x, y, w, h) in &tiles {
+        assert!(
+            (w - w0).abs() < 1e-6 && (h - h0).abs() < 1e-6,
+            "every tile is {w0}x{h0}; got {w}x{h} at ({x}, {y}) — {s}"
+        );
+    }
+    // sys1 (dense, on top) and sys2 (sparse, below) occupy the same height.
+    let heights_of = |series: &str| -> Vec<f64> {
+        let mut rest = s.as_str();
+        let mut out = Vec::new();
+        while let Some(i) = rest.find("<rect ") {
+            let tag = &rest[i..i + rest[i..].find('>').unwrap()];
+            if tag.contains("data-geom=\"tile\"")
+                && tag.contains(&format!("data-series=\"{series}\""))
+            {
+                let k = tag.find(" y=\"").unwrap() + 4;
+                out.push(tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap());
+            }
+            rest = &rest[i + 6..];
+        }
+        out
+    };
+    let sys1_y = heights_of("sys1");
+    let sys2_y = heights_of("sys2");
+    assert!(!sys1_y.is_empty() && !sys2_y.is_empty(), "{s}");
+    assert!(
+        (sys1_y[0] - sys2_y[0]).abs() > 1.0,
+        "sys1 and sys2 are drawn in different bands: {s}"
+    );
+}
+
+/// #332 follow-up: a *date* `::XAXIS` (the real case — DuckDB's DATE type,
+/// `Value::DateTime` here, not the text dates the test above uses) must
+/// still have every tile fill its grid column, not ggplot-rs `GeomTile`'s
+/// own continuous-axis `resolution()` (the smallest gap *anywhere in the
+/// whole shared column*): with two rows at different, interleaved cadences
+/// — sys1 every 2 days, sys2 every 7 but landing 1 day from a sys1 point —
+/// that global minimum (1 day) is narrower than either row's own spacing
+/// (2 and 7 days), so a tile used to fill only a fraction of the gap to its
+/// neighbour. `render_heatmap`'s `heatmap_x_axis` discretizes a date x the
+/// same way the `::YAXIS` already is, so every tile now fills the full
+/// column width (its x step, the gap to its neighbour on the same row) —
+/// asserted at >= 90% to allow the thin card-coloured gap between cells.
+#[test]
+fn heatmap_date_x_tiles_fill_their_column_width() {
+    const DAY: i64 = 86_400;
+    const T0: i64 = 1_788_220_800; // 2026-09-01 UTC, a whole day
+    let dense_days = [0, 2, 4, 6, 8, 10, 12, 14]; // every 2 days
+    let sparse_days = [0, 7, 14]; // every 7 days — day 7 sits 1 day from day 6/8
+    let mut x = Vec::new();
+    let mut y = Vec::new();
+    for &d in &dense_days {
+        x.push(Value::DateTime(T0 + d * DAY));
+        y.push(Value::Str("sys1".to_string()));
+    }
+    for &d in &sparse_days {
+        x.push(Value::DateTime(T0 + d * DAY));
+        y.push(Value::Str("sys2".to_string()));
+    }
+    let n = dense_days.len() + sparse_days.len();
+    let cols = vec![
+        Column::new("w", Role::X, x),
+        Column::new("c", Role::Y, y),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&vec![0.0; n])),
+    ];
+    let s = svg(cols);
+    let tiles = tile_rects(&s);
+    assert_eq!(tiles.len(), n, "{s}");
+    // Grid-column width: the x gap between any two adjacent distinct days
+    // in the series — the minimum here is 1 day (sys1's day 6 to sys2's
+    // day 7), which the discretized axis turns into one shared slot width.
+    let mut xs: Vec<f64> = tiles.iter().map(|(x, _, _, _)| *x).collect();
+    xs.sort_by(|a, b| a.total_cmp(b));
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    let step = xs
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f64::INFINITY, f64::min);
+    let (w0, h0) = (tiles[0].2, tiles[0].3);
+    for (tx, ty, w, h) in &tiles {
+        assert!(
+            (w - w0).abs() < 1e-6 && (h - h0).abs() < 1e-6,
+            "every tile is {w0}x{h0}; got {w}x{h} at ({tx}, {ty}) — {s}"
+        );
+    }
+    assert!(
+        w0 >= 0.9 * step,
+        "tile width {w0} is less than 90% of the x step {step} — {s}"
+    );
+    // The axis prints clean dates, not a half-day continuous-axis artefact.
+    assert!(s.contains(">2026-09-"), "{s}");
+    assert!(!s.contains("12:00:00"), "{s}");
+    // #332 follow-up: thinning the printed labels (9 distinct days, this
+    // panel only fits a handful) must not trip ggplot-rs 0.22's own
+    // crowded-axis auto-rotate — it estimates spacing from *every* grid
+    // column, not just the ones that got a label, so it still thinks this
+    // is too crowded to sit flat and rotates to 45°, which `flat_date_labels`
+    // (`axis_text_x_angle`, a real theme parameter) opts out of. The kept
+    // labels stay centred under their tick (`text-anchor="middle"`), not
+    // right-anchored the way a genuinely rotated label is.
+    assert!(!s.contains("rotate(45.0"), "{s}");
+    assert!(!s.contains("rotate(90.0"), "{s}");
+    assert!(!s.contains("rotate(270.0"), "{s}");
+    let before_label = &s[..s.find(">2026-09-01<").unwrap()];
+    let tag_start = before_label.rfind("<text").unwrap();
+    assert!(
+        before_label[tag_start..].contains("text-anchor=\"middle\""),
+        "the kept label stays centred under its tick, not right-anchored: {}",
+        &before_label[tag_start..]
+    );
+}
+
+/// #332: a text `::HEATMAP` measure (a status word, coloured with `::COLORS`
+/// as a level map) renders — never the old `Conversion Error: Could not
+/// convert string … to DOUBLE` from the SQL planner forcing the column to
+/// DOUBLE, nor a blank "No numeric values to plot" note — and its legend
+/// prints the words themselves, not numeric band boundaries.
+#[test]
+fn heatmap_text_measure_gets_a_categorical_legend() {
+    let cols = vec![
+        Column::new("w", Role::X, strs(&["a", "b", "c", "d"])),
+        Column::new("c", Role::Y, strs(&["r", "r", "r", "r"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            strs(&["blocked", "peer violation", "QP-ready", "QP-ready"]),
+        ),
+        Column::new(
+            "m",
+            Role::GaugeColors,
+            strs(&["blocked:bad; peer violation:warn; QP-ready:good"]),
+        ),
+    ];
+    let t = anofox_visualization::theme::ResolvedTheme::default();
+    let s = render(&cols, 480, 320).expect("renders").to_lowercase();
+    for (word, (r, g, b)) in [
+        ("blocked", t.colors.negative),
+        ("peer violation", t.colors.warning),
+        ("qp-ready", t.colors.positive),
+    ] {
+        let hex = format!("#{r:02x}{g:02x}{b:02x}");
+        let rgb = format!("rgb({r},{g},{b})");
+        assert!(
+            s.contains(&hex) || s.contains(&rgb),
+            "{word}'s colour in {s}"
+        );
+    }
+    // The legend names the words, in the map's written order — never a
+    // numeric band like "≥ 2" / "1–2".
+    let (b, p, q) = (
+        s.find(">blocked<"),
+        s.find(">peer violation<"),
+        s.find(">qp-ready<"),
+    );
+    assert!(b.is_some() && p.is_some() && q.is_some(), "{s}");
+    assert!(b < p && p < q, "legend order follows the ::COLORS map: {s}");
+    assert!(!s.contains("no numeric values"), "{s}");
+    // Without ::COLORS: still a plain discrete legend (dz_scale), not an error.
+    let plain = render(&cols[..3], 480, 320).expect("renders");
+    assert!(
+        !plain.to_lowercase().contains("no numeric values"),
+        "{plain}"
+    );
+}
+
 #[test]
 fn tooltip_values_follow_yformat_and_locale() {
     use anofox_visualization::{format::Locale, render_with, RenderOptions};

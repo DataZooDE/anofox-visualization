@@ -41,7 +41,7 @@ mod symbols;
 mod write;
 
 use crate::format::{escape_xml as esc, ValueFmt};
-use crate::theme::{hex, mix};
+use crate::theme::{contrast, hex, mix};
 use crate::{
     cell_num, find_role, role_num, role_str, value_fmt, value_str, Column, Kind, Ramp,
     RenderOptions, Role,
@@ -750,6 +750,73 @@ impl<'a> Model<'a> {
     }
 }
 
+/// RGB (0..255) to HSL (`h` in 0..360, `s`/`l` in 0..1).
+fn rgb_to_hsl(c: Rgb) -> (f64, f64, f64) {
+    let (r, g, b) = (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0);
+    let (cmax, cmin) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (cmax + cmin) / 2.0;
+    let d = cmax - cmin;
+    if d < 1e-9 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = 60.0
+        * if cmax == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if cmax == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+    (h, s, l)
+}
+
+/// HSL (`h` in 0..360, `s`/`l` in 0..1) to RGB.
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Rgb {
+    if s <= 1e-9 {
+        let v = (l.clamp(0.0, 1.0) * 255.0).round() as u8;
+        return (v, v, v);
+    }
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r1, g1, b1) = match (h.rem_euclid(360.0) / 60.0) as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let to_u8 = |v: f64| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    (to_u8(r1), to_u8(g1), to_u8(b1))
+}
+
+/// #311: lift `c`'s HSL *lightness* — hue and saturation held fixed, so the
+/// colour never greys out — until it clears a WCAG non-text contrast floor
+/// (`min`, 1.4.11's 3:1) against `bg`. A binary search over `l` (increasing
+/// only: every caller here lifts a colour that reads too dark against a
+/// dark `bg`). `c` unchanged once it already clears `min`, so a light theme
+/// (or an already-light colour) never gets this treatment; a colour whose
+/// hue/saturation can't reach `min` even at full lightness returns as light
+/// as it can go (white has the lowest achievable contrast gap, never none).
+fn lift_lightness_for_contrast(c: Rgb, bg: Rgb, min: f64) -> Rgb {
+    if contrast(c, bg) >= min {
+        return c;
+    }
+    let (h, s, l) = rgb_to_hsl(c);
+    let (mut lo, mut hi) = (l, 1.0_f64);
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.0;
+        if contrast(hsl_to_rgb(h, s, mid), bg) >= min {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hsl_to_rgb(h, s, hi)
+}
+
 /// The colour scale of a measure: classes when `::CLASSES` is set, a
 /// diverging ramp when the values span the midpoint (0, or `::MIDPOINT`),
 /// else sequential; `::RANGE` caps the domain.
@@ -843,18 +910,51 @@ fn value_scale(
                             mix(o.brand(), deep, (p - 0.6) / 0.4)
                         }
                     };
-                    let colors = (0..k)
-                        .map(|i| {
-                            if scale.diverging {
-                                let (a, b) = c.bounds(i);
-                                scale.color_at((a + b) / 2.0)
-                            } else if k == 1 {
-                                step(1.0)
-                            } else {
-                                step(i as f64 / (k - 1) as f64)
-                            }
-                        })
-                        .collect();
+                    let dark = t.variant == crate::theme::Variant::Dark;
+                    let colors: Vec<Rgb> = if dark && !scale.diverging && k > 1 {
+                        // #311: a classed choropleth/hexbin's low-value
+                        // classes (this (non-diverging) ramp's darkest) read
+                        // as near-invisible against a dark page. Lifting
+                        // each class independently broke the ramp's
+                        // monotonic lightness (a lifted low class could end
+                        // up as light as, or lighter than, its unlifted
+                        // neighbour) — instead, lift only the low end's
+                        // *lightness* (hue/saturation held fixed, so it
+                        // never greys out) to clear the floor, then
+                        // re-derive every class as a plain interpolation
+                        // between that lifted low end and the (already
+                        // high-contrast) high end, the way the planned
+                        // bivariate palette does (D10, docs/plans/plan-maps.md
+                        // §15: "lifted over the card colour in dark").
+                        // Per-channel interpolation between two fixed
+                        // endpoints is monotonic in each channel, and WCAG
+                        // relative luminance is a non-negative weighted sum
+                        // of (gamma-corrected, monotonic) channels, so the
+                        // resulting ramp is provably monotonic in luminance.
+                        let low = lift_lightness_for_contrast(step(0.0), t.colors.card, 3.0);
+                        let high = lift_lightness_for_contrast(step(1.0), t.colors.card, 3.0);
+                        (0..k)
+                            .map(|i| mix(low, high, i as f64 / (k - 1) as f64))
+                            .collect()
+                    } else {
+                        (0..k)
+                            .map(|i| {
+                                let c = if scale.diverging {
+                                    let (a, b) = c.bounds(i);
+                                    scale.color_at((a + b) / 2.0)
+                                } else if k == 1 {
+                                    step(1.0)
+                                } else {
+                                    step(i as f64 / (k - 1) as f64)
+                                };
+                                if dark {
+                                    lift_lightness_for_contrast(c, t.colors.card, 3.0)
+                                } else {
+                                    c
+                                }
+                            })
+                            .collect()
+                    };
                     scale.classes = Some((method, c, colors));
                 }
             }

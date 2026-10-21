@@ -79,7 +79,7 @@ terminal.
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
 | `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
-| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0) |
+| `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0); a numeric measure sizes every tile alike regardless of how many x points each row has; a text measure (status words) takes ::COLORS as a level map for a categorical legend, like a ::CATEGORY column's |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
@@ -2208,6 +2208,16 @@ SELECT sku, sum(amount) AS total ::TABLE FROM sales GROUP BY sku;
 SELECT sum(amount)::METRIC, 'Selected SKUs'::LABEL FROM sales
 WHERE len(COALESCE(getvariable('sku'), []::VARCHAR[])) = 0 OR list_contains(getvariable('sku'), sku);
 ```
+
+The click-to-variable binding fires regardless of whether the first column's
+*rendered text* happens to look numeric (an id like `791`, even cast to
+`VARCHAR`) — only the cell's right-alignment cares about that. The variable
+it writes is named after that table's first column, never chosen by you:
+two `::ROWSELECT` tables that end up with the same first-column name (even
+in different `::TAB`s) silently share one selection — a click in either
+toggles both, which looks like nothing happened. `dashboard --check` flags
+this (`interaction/rowselect-shared-name`); alias one table's first column
+to a different name if the sharing isn't intended.
 
 #### Named chart selections (`::SELECT_AS`)
 
