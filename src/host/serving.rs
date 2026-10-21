@@ -28,6 +28,15 @@ pub fn html_escape(s: &str) -> String {
     crate::format::escape_xml(s)
 }
 
+/// Like [`html_escape`], but for an attribute value a browser's own form
+/// submission reads back (#340 finding A): delegates to
+/// [`crate::format::escape_xml_attr_roundtrip`], which represents a control
+/// character the XML-safe escaper would otherwise replace with U+FFFD as a
+/// numeric character reference instead, so the value round-trips.
+pub fn html_escape_attr_roundtrip(s: &str) -> String {
+    crate::format::escape_xml_attr_roundtrip(s)
+}
+
 /// Serialise JSON for embedding inside an inline `<script>`: escapes `<`, `>`,
 /// `&` and the JS line separators so the payload can never close the script
 /// element (`</script>`) or open a comment (`<!--`).

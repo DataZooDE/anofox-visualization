@@ -244,6 +244,40 @@ pub fn escape_xml(s: &str) -> String {
     out
 }
 
+/// Escape text for an HTML **attribute value** so it round-trips through a
+/// browser's parser exactly (#340 finding A) — unlike [`escape_xml`], which
+/// replaces an XML-invalid control character with U+FFFD (safe, but lossy:
+/// the browser can no longer submit the original value back). Here such a
+/// character is written as a numeric character reference (`&#1;`), which an
+/// HTML5 parser (unlike strict XML) decodes back to the exact original code
+/// point. Everything else is escaped the same way as [`escape_xml`].
+///
+/// The one input this still can't carry is U+0000 (NUL): HTML5's own
+/// numeric-character-reference algorithm defines `&#0;` as U+FFFD, so no
+/// attribute encoding can round-trip it — the same pre-existing limitation a
+/// literal NUL already has in every HTML parser (and in [`escape_xml`]).
+///
+/// Use this only for an attribute a browser's own form submission reads
+/// back (a served `<option value="…">`); for everything else — including
+/// element text, where an entity reference decodes the same way but a stray
+/// control character has no submission to round-trip — [`escape_xml`]
+/// stays the right, non-surprising choice.
+pub fn escape_xml_attr_roundtrip(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c if !is_xml_valid_char(c) => out.push_str(&format!("&#{};", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Round half away from zero to `digits` decimals (matches `Intl.NumberFormat`
 /// rounding for the values dashboards show), then print without trailing zeros
 /// and with `,` thousands grouping.
@@ -582,6 +616,30 @@ mod tests {
         assert_eq!(escape_xml("x\u{FFFE}y\u{FFFF}z"), "x\u{FFFD}y\u{FFFD}z");
         // Ordinary text (including astral chars) is untouched.
         assert_eq!(escape_xml("caf\u{e9} \u{1F600}"), "caf\u{e9} \u{1F600}");
+    }
+
+    #[test]
+    fn escape_xml_attr_roundtrip_carries_control_characters_as_numeric_refs() {
+        // #340 finding A: every XML-invalid character escape_xml would
+        // replace with U+FFFD is instead a numeric character reference,
+        // which an HTML5 attribute parser decodes back to the exact
+        // original code point — except U+0000, which no HTML encoding can
+        // carry (its own spec defines `&#0;` as U+FFFD too).
+        assert_eq!(
+            escape_xml_attr_roundtrip("a\u{1}b\u{1F}c\u{7F}"),
+            "a&#1;b&#31;c\u{7F}"
+        );
+        assert_eq!(escape_xml_attr_roundtrip("a\u{0}b"), "a&#0;b");
+        assert_eq!(
+            escape_xml_attr_roundtrip("x\u{FFFE}y\u{FFFF}z"),
+            "x&#65534;y&#65535;z"
+        );
+        // \t \n \r, and everything else escape_xml keeps or escapes the
+        // same way (&, <, >, ", '), are identical between the two escapers.
+        assert_eq!(
+            escape_xml_attr_roundtrip("a\tb\nc\rd & <x> \"y\" 'z'"),
+            escape_xml("a\tb\nc\rd & <x> \"y\" 'z'")
+        );
     }
 
     #[test]

@@ -1563,7 +1563,15 @@ fn render_dashboard_page(
         ));
         for opt in &p.allowed {
             let sel = if opt == &val { " selected" } else { "" };
-            selects.push_str(&format!("<option{sel}>{}</option>", esc(opt)));
+            // #340 finding A: an explicit, separately escaped `value` so a
+            // control character the no-JS form submits round-trips exactly,
+            // instead of the option's (XML-safe, lossy) text content being
+            // both the label and the implicit submitted value.
+            selects.push_str(&format!(
+                "<option value=\"{}\"{sel}>{}</option>",
+                sv::html_escape_attr_roundtrip(opt),
+                esc(opt)
+            ));
         }
         selects.push_str("</select></label> ");
     }
