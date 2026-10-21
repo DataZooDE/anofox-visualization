@@ -501,6 +501,10 @@ pub struct LockedOptions {
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
+    /// `source`: build (part of) the snapshot from a live Quack server
+    /// instead of (or alongside) the local session (#352 prototype) — see
+    /// `duckext/src/source.rs` and docs/secure-serving.md, "Quack source".
+    pub source: Option<Arc<crate::source::SourceOpts>>,
 }
 
 /// The `hash` mask's HMAC key. Never printed.
@@ -542,6 +546,7 @@ impl Default for LockedOptions {
             search_path: Vec::new(),
             app: None,
             home: None,
+            source: None,
         }
     }
 }
@@ -675,7 +680,10 @@ impl LockedOptions {
                     let h = val.as_str().map(str::trim).filter(|h| sv::valid_dashboard_id(h)).ok_or("options.home must be a dashboard id (its file name without .sql)")?;
                     o.home = Some(h.to_string());
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home)")),
+                "source" => {
+                    o.source = Some(Arc::new(crate::source::parse(val)?));
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.

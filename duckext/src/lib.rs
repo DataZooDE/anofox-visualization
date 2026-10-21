@@ -37,6 +37,8 @@ mod limits;
 mod panel_cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
+#[cfg(not(target_arch = "wasm32"))]
+mod source;
 
 // Rust's std links a few libc file-I/O imports (`pread`/`pwrite`) whose
 // emscripten signatures don't match DuckDB-Wasm's host module, and they're never
