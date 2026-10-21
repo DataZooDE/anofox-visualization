@@ -10,6 +10,10 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/function/scalar_macro_function.hpp"
 #include <string>
+#ifdef _WIN32
+#include <cctype>
+#include <cstdlib>
+#endif
 
 // The build stamps EXT_VERSION_ANOFOX_VISUALIZATION from the git tag; the
 // fallback keeps the banner honest in local builds that do not, and matches
@@ -127,7 +131,42 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 // registered the setting first, so load order still matters: load
 // anofox_visualization first, or set the environment variable before
 // anything loads, when that matters (docs/DOCS.md).
+#ifdef _WIN32
+// Windows only (#333/#335): this extension is one Rust-staticlib-into-C++
+// link unit (Corrosion matches the Rust target's `crt-static` feature to
+// this project's own CMAKE_MSVC_RUNTIME_LIBRARY, so in the normal case
+// `anofox_viz_ensure_telemetry_default()`'s own `_wputenv_s` call already
+// writes through the one CRT this whole extension shares) -- but a
+// defensive, independent write from the C++ side costs nothing and does not
+// depend on that matching holding: this module's own `getenv()` (and any
+// future C++ code of ours that might call it, such as a telemetry library
+// linked directly into THIS extension rather than reached through the Rust
+// FFI) sees "1" unconditionally, from a second, C++-native path. Same
+// semantics as the Rust side (anofox_visualization::host::telemetry, see
+// its `windows_crt` module docs for the full CRT analysis): unset or
+// empty/whitespace-only gets the default; any other explicit value,
+// whatever it is, is left alone.
+static void EnsureTelemetryDefaultWinCrt() {
+	const char *cur = std::getenv("DATAZOO_DISABLE_TELEMETRY");
+	bool explicit_value = false;
+	if (cur) {
+		for (const char *p = cur; *p; p++) {
+			if (!std::isspace(static_cast<unsigned char>(*p))) {
+				explicit_value = true;
+				break;
+			}
+		}
+	}
+	if (!explicit_value) {
+		_putenv_s("DATAZOO_DISABLE_TELEMETRY", "1");
+	}
+}
+#endif
+
 static void EnsureTelemetryDefault(ExtensionLoader &loader) {
+#ifdef _WIN32
+	EnsureTelemetryDefaultWinCrt();
+#endif
 	anofox_viz_ensure_telemetry_default();
 	if (!anofox_viz_telemetry_is_disabled()) {
 		return; // an explicit opt-in must not be overridden by a forced SET

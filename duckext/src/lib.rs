@@ -189,6 +189,30 @@ unsafe fn define_contract_version(conn: &db::Conn) -> bool {
         )
 }
 
+/// `anofox_telemetry_probe()` → [`telemetry::probe`]. Diagnostic only —
+/// not part of the public API, no stability promise, not advertised in
+/// docs/DOCS.md beyond a pointer to `telemetry::probe`'s doc comment. It
+/// exists so `duckext/scripts/build-native.sh`'s Windows smoke test can
+/// prove #333/#335's fix actually took effect from *inside* this process:
+/// DuckDB's own `getenv()` SQL function cannot (it runs inside `duckdb.exe`,
+/// whose statically-linked CRT snapshots the OS environment before any
+/// `LOAD`), but this function runs inside the extension that just called
+/// `ensure_default_once`, so it can report both views directly.
+unsafe extern "C" fn anofox_telemetry_probe_fn(
+    info: duckdb_function_info,
+    input: duckdb_data_chunk,
+    output: duckdb_vector,
+) {
+    guarded(info, || {
+        let n = capi!(duckdb_data_chunk_get_size)(input).max(1);
+        let probe = telemetry::probe();
+        for i in 0..n {
+            assign_str(output, i, &probe)?;
+        }
+        Ok(())
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod serve_fns {
     use super::*;
@@ -555,6 +579,17 @@ unsafe fn init(
     }
     if !define_contract_version(&conn) {
         return Err("could not register anofox_contract_version".into());
+    }
+    if !register_scalar(
+        conn.raw,
+        c"anofox_telemetry_probe",
+        &[&[]],
+        anofox_telemetry_probe_fn,
+        false,
+        None,
+        None,
+    ) {
+        return Err("could not register anofox_telemetry_probe".into());
     }
     define_macros(&conn);
 
