@@ -73,6 +73,26 @@ static void AnofoxRenderFunction(DataChunk &args, ExpressionState &state, Vector
 //      have open, persisting extension-owned definitions into their file. Registering
 //      them as internal catalog entries is what DuckDB's own json extension does.
 //
+// #352: DuckDB 2.0 made `Parser::ParseExpressionList` an instance method (it
+// was `static` through 1.5.6), and moved `CreateInfo::schema`/`::name` behind
+// a `QualifiedName` (`SetSchema`/`SetName`). Isolated here with one `#if` per
+// concern instead of at each call site. `DUCKDB_MAJOR_VERSION` is only
+// defined (as a compiler -D flag from DuckDB's own top-level CMakeLists.txt)
+// from the release that introduced it; on 1.5.6 it's simply undefined, which
+// `#if defined(...) && ... >= 2` treats as "no", not as a build break.
+//
+// Parses one expression list the way the static 1.x method did: built-in
+// grammar, no ClientContext/session state -- this only ever parses macro
+// bodies baked into the extension at compile time, never a caller's SQL.
+static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
+#if defined(DUCKDB_MAJOR_VERSION) && DUCKDB_MAJOR_VERSION >= 2
+	auto parser = Parser::GetBuiltinParser();
+	return parser.ParseExpressionList(sql);
+#else
+	return Parser::ParseExpressionList(sql);
+#endif
+}
+
 // Built like DefaultFunctionGenerator::CreateInternalMacroInfo, without its
 // fixed-size parameter arrays.
 static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
@@ -80,7 +100,7 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 		const char *p = anofox_viz_macro_field(i, f);
 		return std::string(p ? p : "");
 	};
-	auto expressions = Parser::ParseExpressionList(field(1));
+	auto expressions = AnofoxParseExpressionList(field(1));
 	if (expressions.size() != 1) {
 		throw InternalException("anofox_visualization: macro %s must be one expression", field(0));
 	}
@@ -90,7 +110,7 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 		function->parameters.push_back(make_uniq<ColumnRefExpression>(p));
 	}
 	for (size_t j = 0; const char *p = anofox_viz_macro_item(i, 1, j, &second); j++) {
-		auto defaults = Parser::ParseExpressionList(second ? second : "NULL");
+		auto defaults = AnofoxParseExpressionList(second ? second : "NULL");
 		if (defaults.size() != 1) {
 			throw InternalException("anofox_visualization: bad default for %s", std::string(p));
 		}
@@ -99,8 +119,13 @@ static unique_ptr<CreateMacroInfo> AnofoxMacroInfo(idx_t i) {
 	}
 	auto info = make_uniq<CreateMacroInfo>(CatalogType::MACRO_ENTRY);
 	info->macros.push_back(std::move(function));
+#if defined(DUCKDB_MAJOR_VERSION) && DUCKDB_MAJOR_VERSION >= 2
+	info->SetSchema(DEFAULT_SCHEMA);
+	info->SetName(Identifier(field(0)));
+#else
 	info->schema = DEFAULT_SCHEMA;
 	info->name = field(0);
+#endif
 	info->temporary = true;
 	info->internal = true;
 	for (size_t j = 0; const char *k = anofox_viz_macro_item(i, 2, j, &second); j++) {
