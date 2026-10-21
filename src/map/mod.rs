@@ -41,7 +41,7 @@ mod symbols;
 mod write;
 
 use crate::format::{escape_xml as esc, ValueFmt};
-use crate::theme::{hex, mix};
+use crate::theme::{contrast, hex, mix};
 use crate::{
     cell_num, find_role, role_num, role_str, value_fmt, value_str, Column, Kind, Ramp,
     RenderOptions, Role,
@@ -750,6 +750,27 @@ impl<'a> Model<'a> {
     }
 }
 
+/// #311: lift `c` toward `toward` (mix) until it clears a WCAG non-text
+/// contrast floor (`min`, 1.4.11's 3:1) against `bg` — a binary search over
+/// the mix fraction (monotonic: `toward` is always lighter than `bg` here).
+/// `c` unchanged once it already clears `min`, so a light theme (or an
+/// already-light class) never gets this treatment.
+fn lift_for_contrast(c: Rgb, bg: Rgb, toward: Rgb, min: f64) -> Rgb {
+    if contrast(c, bg) >= min {
+        return c;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        if contrast(mix(c, toward, mid), bg) >= min {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    mix(c, toward, hi)
+}
+
 /// The colour scale of a measure: classes when `::CLASSES` is set, a
 /// diverging ramp when the values span the midpoint (0, or `::MIDPOINT`),
 /// else sequential; `::RANGE` caps the domain.
@@ -845,13 +866,27 @@ fn value_scale(
                     };
                     let colors = (0..k)
                         .map(|i| {
-                            if scale.diverging {
+                            let c = if scale.diverging {
                                 let (a, b) = c.bounds(i);
                                 scale.color_at((a + b) / 2.0)
                             } else if k == 1 {
                                 step(1.0)
                             } else {
                                 step(i as f64 / (k - 1) as f64)
+                            };
+                            // #311: a classed choropleth/hexbin's deep end
+                            // (the low-value classes, this ramp's darkest —
+                            // the diverging ramp's own low/high arms too)
+                            // read as near-invisible against a dark page.
+                            // Lift it toward the dark variant's own (light)
+                            // ink the way the planned bivariate palette does
+                            // (D10, docs/plans/plan-maps.md §15) — a no-op
+                            // once a class already clears the floor, so nothing
+                            // moves in a light theme.
+                            if t.variant == crate::theme::Variant::Dark {
+                                lift_for_contrast(c, t.colors.card, t.colors.ink, 3.0)
+                            } else {
+                                c
                             }
                         })
                         .collect();

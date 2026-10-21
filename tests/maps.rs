@@ -1504,3 +1504,79 @@ fn hexbin_bins_within_budget() {
         s.len()
     );
 }
+
+/// #311: in the dark variant, a classed choropleth/hexbin's darkest classes
+/// (the sequential ramp's low-value end; a diverging ramp's two arms) no
+/// longer read as near-invisible against the dark page — every class clears
+/// a WCAG 1.4.11 non-text contrast floor (3:1) against the card colour, in
+/// every built-in theme. The light variant is untouched (its ramp already
+/// goes toward a dark, high-contrast deep end).
+#[test]
+fn dark_classed_map_classes_clear_a_contrast_floor() {
+    use anofox_visualization::theme::{contrast, hex};
+    let wkt: Vec<Value> = (0..6)
+        .map(|i| Value::Str(format!("POINT({} {})", 10.0 + i as f64 * 0.3, 50.0)))
+        .collect();
+    let sequential = nums(&[1.0, 10.0, 20.0, 50.0, 80.0, 100.0]);
+    let diverging = nums(&[-50.0, -20.0, -5.0, 5.0, 20.0, 50.0]);
+    for name in ["light", "colorblind", "high-contrast"] {
+        for (label, v) in [("sequential", &sequential), ("diverging", &diverging)] {
+            let o = opts(name, true);
+            let card = o.theme.colors.card;
+            let s = draw(
+                vec![
+                    Column::new("g", Role::Geometry, wkt.clone()),
+                    Column::new("v", Role::Value(Kind::Bar), v.clone()),
+                    Column::new("c", Role::Classes, konst("quantile 5", 6)),
+                ],
+                &o,
+            );
+            let mut seen = 0;
+            for t in features(&s) {
+                let Some(fill) = attr(t, "fill") else {
+                    continue;
+                };
+                if !fill.starts_with('#') || fill.len() != 7 {
+                    continue;
+                }
+                let p = |i: usize| u8::from_str_radix(&fill[i..i + 2], 16).unwrap();
+                let c = (p(1), p(3), p(5));
+                seen += 1;
+                assert!(
+                    contrast(c, card) >= 3.0,
+                    "{name} dark {label}: {} against card {} is only {:.2}:1",
+                    hex(c),
+                    hex(card),
+                    contrast(c, card)
+                );
+            }
+            assert!(seen > 0, "{name} {label}: no classed features drawn");
+        }
+    }
+    // The light variant's own deep end is already high-contrast against a
+    // light card — untouched, not merely "also passes 3:1" by coincidence.
+    let o = opts("light", false);
+    let s = draw(
+        vec![
+            Column::new("g", Role::Geometry, wkt),
+            Column::new("v", Role::Value(Kind::Bar), sequential),
+            Column::new("c", Role::Classes, konst("quantile 5", 6)),
+        ],
+        &o,
+    );
+    let deepest = features(&s)
+        .iter()
+        .filter(|t| attr(t, "data-class") == Some("5"))
+        .find_map(|t| attr(t, "fill"))
+        .expect("a deepest class");
+    assert!(
+        contrast(
+            {
+                let p = |i: usize| u8::from_str_radix(&deepest[i..i + 2], 16).unwrap();
+                (p(1), p(3), p(5))
+            },
+            o.theme.colors.card
+        ) > 4.0,
+        "light theme's deepest class is already dark on a light card: {deepest}"
+    );
+}
