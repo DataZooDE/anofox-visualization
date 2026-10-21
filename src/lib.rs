@@ -1496,6 +1496,20 @@ impl Panel {
         }
     }
 
+    /// Queue this panel's [`motion_attrs`] as root attributes — before
+    /// [`finish`](Self::finish) writes them, so a `GGPlot` panel gets them
+    /// through `svg_attr`/`svg_attrs` (B2-3) rather than `with_root_attr`.
+    pub(crate) fn with_motion_attrs(mut self, cols: &[Column]) -> Panel {
+        let extra = motion_attrs(cols);
+        if extra.is_empty() {
+            return self;
+        }
+        match &mut self {
+            Panel::Plot { attrs, .. } | Panel::Own { attrs, .. } => attrs.extend(extra),
+        }
+        self
+    }
+
     /// Write the panel at `place`: the SVG plus the plotting engine's build
     /// warnings (rows dropped for non-finite values, empty layers, …).
     pub(crate) fn finish(self, place: Place) -> Result<(String, Vec<String>), String> {
@@ -1507,19 +1521,23 @@ impl Panel {
                 attrs,
                 ..
             } => {
+                // B2-3: every root attribute (`data-track`, the motion
+                // attrs, …) goes through ggplot-rs's own `svg_attr`/
+                // `svg_attrs` — set before rendering — rather than
+                // `with_root_attr`, which stays for the extension's own
+                // hand-drawn SVGs (`Panel::Own`) below.
+                let plot = if attrs.is_empty() {
+                    plot
+                } else {
+                    Box::new(plot.svg_attrs(attrs.into_iter().map(|(k, v)| (k.to_string(), v))))
+                };
                 let svg = match place {
                     Place::Doc => plot.render_svg_native_with_warnings(width, height),
                     Place::At(x, y) => plot
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map(|(mut s, w)| {
-                    for (k, v) in &attrs {
-                        s = with_root_attr(s, k, v);
-                    }
-                    (s, w)
-                })
-                .map_err(|e| format!("render failed: {e:?}"))
+                svg.map_err(|e| format!("render failed: {e:?}"))
             }
             Panel::Own {
                 width,
@@ -1606,9 +1624,20 @@ pub fn render_with_warnings(
 /// #315/sec-review-342 L2) — a host with no script that ever reads the
 /// attribute, such as the script-free served page, then never gets it on
 /// any SVG a render produces, instead of it being stripped back out of
-/// some of them (a title bar's chart, `::TRACK`s, …) after the fact. The
-/// root start tag ends at the first `>`: every writer escapes `>` inside
-/// attribute values.
+/// some of them (a title bar's chart, `::TRACK`s, …) after the fact — and
+/// omitting it entirely when `warnings` is empty, `record` aside.
+///
+/// ggplot-rs's own `svg_warnings_attr` (B2-3) always writes the attribute,
+/// `"[]"` included, once turned on — it has no "only if non-empty" mode and
+/// no per-render on/off switch either, so it can't reproduce either of
+/// this function's two conditions (several `src/contract.rs` tests pin the
+/// attribute's absence on a warning-free panel, and #342's whole point was
+/// that the script-free page never gets it at all). #326 keeps
+/// `with_root_attr` here on purpose — the one root attribute that stays
+/// string surgery even on a `GGPlot` panel, unlike `with_motion_attrs`'s
+/// move to `svg_attrs` — pending a `svg_warnings_attr` with that shape
+/// upstream. The root start tag ends at the first `>`: every writer
+/// escapes `>` inside attribute values.
 fn with_warnings_attr(svg: String, warnings: &[String], record: bool) -> String {
     if !record || warnings.is_empty() {
         return svg;
@@ -1676,6 +1705,7 @@ fn render_placed(
                     Some(f) => p.fitted(f),
                     None => p,
                 })
+                .map(|p| p.with_motion_attrs(&cols))
                 .and_then(|p| p.finish(place))
         };
         // Aligned with other panels: draw, measure, draw again fitted.
@@ -1701,10 +1731,12 @@ fn render_placed(
         // `::XLINE` dates and every mark's `data-fvalue`/`data-fx` are now
         // ggplot-rs's own job (B2-4 `svg_formatted_values`, on for every
         // `GGPlot` panel since `Panel::plot`, plus the `Value::DateTime`
-        // reflines now carry through `xline_values`). `with_formatted_values`
+        // reflines now carry through `xline_values`); the motion attrs
+        // (`data-animate`, …) went onto the panel before `finish` too, via
+        // `svg_attrs` (B2-3, `Panel::with_motion_attrs`). `with_formatted_values`
         // below only still runs for a map's hand-drawn marks and a
         // gradient-fill measure ggplot-rs can't give a custom formatter yet.
-        let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        let svg = with_formatted_values(svg, &cols, o);
         let svg = without_xline_prefix(svg);
         Ok((svg, warnings))
     })
@@ -1730,13 +1762,21 @@ pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 /// The `::HOVER_FOCUS` values the browser knows.
 pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
-/// Pass a panel's motion directives to the browser as attributes on the SVG
-/// root (static output ignores them): `data-animate` (`::ANIMATE`) and, for
-/// `'reveal'`, `data-xline` — where the reveal starts, in the x axis' unit
-/// (epoch seconds on a date axis, a level on a discrete one); `data-story` +
+/// A panel's motion directives, as root attributes for the browser (static
+/// output ignores them): `data-animate` (`::ANIMATE`) and, for `'reveal'`,
+/// `data-xline` — where the reveal starts, in the x axis' unit (epoch
+/// seconds on a date axis, a level on a discrete one); `data-story` +
 /// `data-story-by` (`::STORY`, `::STORY_BY`); `data-transition`
 /// (`'tween'::TRANSITION`); `data-hover-focus="none"` (`'none'::HOVER_FOCUS`).
-fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
+///
+/// Returned as `(name, value)` pairs rather than spliced into a rendered SVG
+/// string: [`Panel::with_motion_attrs`] sets them on the panel *before* it's
+/// rendered, so a `GGPlot` panel gets them through ggplot-rs's own
+/// `svg_attr`/`svg_attrs` (B2-3) in [`Panel::finish`] — the same allow-listed,
+/// collision-checked path as every other ggplot-rs root attribute — never
+/// `with_root_attr`.
+fn motion_attrs(cols: &[Column]) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
     if let Some(mode) = role_str(cols, Role::Animate).map(|m| m.to_ascii_lowercase()) {
         if ANIMATE_MODES.contains(&mode.as_str()) {
             if mode == "reveal" {
@@ -1746,28 +1786,28 @@ fn with_motion_attrs(mut svg: String, cols: &[Column]) -> String {
                         .map(|f| f.to_string())
                         .or_else(|| c.values.iter().find_map(|v| v.as_str().map(str::to_string)));
                     if let Some(at) = at {
-                        svg = with_root_attr(svg, "data-xline", &at);
+                        out.push(("data-xline", at));
                     }
                 }
             }
-            svg = with_root_attr(svg, "data-animate", &mode);
+            out.push(("data-animate", mode));
         }
     }
     if role_str(cols, Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween")) {
-        svg = with_root_attr(svg, "data-transition", "tween");
+        out.push(("data-transition", "tween".to_string()));
     }
     if role_str(cols, Role::HoverFocus).is_some_and(|m| m.eq_ignore_ascii_case("none")) {
-        svg = with_root_attr(svg, "data-hover-focus", "none");
+        out.push(("data-hover-focus", "none".to_string()));
     }
     if let Some(steps) = story_steps(cols) {
         let by = match role_str(cols, Role::StoryBy).map(|b| b.to_ascii_lowercase()) {
             Some(b) if b == "series" && find_role(cols, Role::Category).is_some() => "series",
             _ => "x",
         };
-        svg = with_root_attr(svg, "data-story-by", by);
-        svg = with_root_attr(svg, "data-story", &steps);
+        out.push(("data-story-by", by.to_string()));
+        out.push(("data-story", steps));
     }
-    svg
+    out
 }
 
 /// A cell as text: a string as is, a number without a trailing `.0`. A
