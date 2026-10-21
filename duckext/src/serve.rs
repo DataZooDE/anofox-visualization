@@ -1436,6 +1436,12 @@ fn copy_database(
         .into_iter()
         .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
         .collect();
+    // #299: one duckdb_columns() scan for the whole database, grouped here,
+    // instead of one scan per table (while `live`'s lock is held) — with
+    // 3,000 FK tables that turned the loop below into ~3,000 full scans of
+    // the database's column catalog.
+    let columns = columns_by_table(live, src)?;
+    let empty = Vec::new();
     for i in fk_order(&tables, &edges) {
         let (schema, table) = &tables[i];
         let qual = |db: &str| {
@@ -1447,11 +1453,17 @@ fn copy_database(
             )
         };
         let (from, to) = (qual(src), qual(dst));
-        let cols = insertable_columns(live, src, &to, schema, table)?
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let cols = insertable_columns(
+            live,
+            &to,
+            columns
+                .get(&(schema.clone(), table.clone()))
+                .unwrap_or(&empty),
+        )?
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
         let Err(e) = live.exec(&format!(
             "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
         )) else {
@@ -1478,38 +1490,59 @@ fn copy_database(
     Ok(())
 }
 
-/// The columns of `schema.table` (in `src`) an INSERT into `to` can name: all
-/// but generated ones. duckdb_columns() doesn't mark those, so a column with
-/// an expression is tried on its own: `INSERT … SELECT NULL WHERE false`
-/// binds (and fails for a generated column) but writes nothing.
-fn insertable_columns(
-    live: &Conn,
-    src: &str,
-    to: &str,
-    schema: &str,
-    table: &str,
-) -> Result<Vec<String>, String> {
+/// `(schema, table) -> [(column, has_default), …]`, a table's own columns in
+/// `column_index` order — what [`columns_by_table`] groups a database's
+/// `duckdb_columns()` scan into.
+type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
+
+/// Every table's columns of database `src`, read in one `duckdb_columns()`
+/// scan (#299) instead of one scan per table.
+fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
     let rows = live
         .query(&format!(
-            "SELECT column_name::VARCHAR, (column_default IS NOT NULL)::VARCHAR FROM duckdb_columns() \
-             WHERE database_name = {} AND schema_name = {} AND table_name = {} ORDER BY column_index",
-            sql_string_literal(src), sql_string_literal(schema), sql_string_literal(table)
+            "SELECT schema_name::VARCHAR, table_name::VARCHAR, column_name::VARCHAR, \
+             (column_default IS NOT NULL)::VARCHAR FROM duckdb_columns() \
+             WHERE database_name = {} ORDER BY schema_name, table_name, column_index",
+            sql_string_literal(src)
         ))?
-        .string_rows(100_000)?;
-    let mut out = Vec::new();
+        .string_rows(1_000_000)?;
+    let mut out: ColumnsByTable = BTreeMap::new();
     for r in rows {
-        let Some(c) = r[0].clone() else { continue };
-        if r[1].as_deref() == Some("true")
+        let (Some(schema), Some(table), Some(col)) = (r[0].clone(), r[1].clone(), r[2].clone())
+        else {
+            continue;
+        };
+        let has_default = r[3].as_deref() == Some("true");
+        out.entry((schema, table))
+            .or_default()
+            .push((col, has_default));
+    }
+    Ok(out)
+}
+
+/// The columns of `columns` (a table's own `(column, has_default)` list, from
+/// [`columns_by_table`]) an INSERT into `to` can name: all but generated
+/// ones. duckdb_columns() doesn't mark those, so a column with a default is
+/// tried on its own: `INSERT … SELECT NULL WHERE false` binds (and fails for
+/// a generated column) but writes nothing.
+fn insertable_columns(
+    live: &Conn,
+    to: &str,
+    columns: &[(String, bool)],
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (c, has_default) in columns {
+        if *has_default
             && live
                 .exec(&format!(
                     "INSERT INTO {to} ({}) SELECT NULL WHERE false",
-                    quote_ident(&c)
+                    quote_ident(c)
                 ))
                 .is_err()
         {
             continue;
         }
-        out.push(c);
+        out.push(c.clone());
     }
     Ok(out)
 }
