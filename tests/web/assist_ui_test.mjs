@@ -529,12 +529,27 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   // of `sqlCode(` for this purpose.
   const normStmtBody = stripComments(grabFn(appJs, "normStmt"));
   assert.doesNotMatch(normStmtBody, /sqlCode\(/, "normStmt must not blank string literals (sqlCode does; the hold needs exact literal content)");
+  // Info-13 (sec-review-343 second pass): every character outside a
+  // literal/quoted identifier/dollar-quote is upper-cased.
+  assert.match(normStmtBody, /out \+= c\.toUpperCase\(\);/, "normStmt upper-cases non-literal text (Info-13)");
   assert.match(appClean, /function normStatementsOf\(sql\)/);
   assert.match(appClean, /function editorHeldByStatement\(sql\)/);
+  // M-5 (sec-review-343 second pass, Medium): a statement's own
+  // line-suffix tails must be held too, not just the whole statement — a
+  // model-crafted multi-line statement (`EXPLAIN\nATTACH …;`, one
+  // harmless statement) can have Chromium's redo fragment (same
+  // drop-the-first-line shape as M-4) land on just its tail
+  // (`ATTACH …;`), a DIFFERENT, harmful statement never otherwise
+  // recorded. `heldEntriesOf` must split on newlines and normalise every
+  // suffix, and both the pinned arm and an explicit confirmation must go
+  // through it (not the whole-statement-only `normStatementsOf`).
+  assert.match(appClean, /function heldEntriesOf\(sql\)/, "a tail-expanding entry builder exists");
+  const heldEntriesBody = stripComments(grabFn(appJs, "heldEntriesOf"));
+  assert.match(heldEntriesBody, /lines\.slice\(i\)\.join\("\\n"\)/, "heldEntriesOf holds every line-suffix tail of a statement");
   const heldTextsAddBody = stripComments(grabFn(appJs, "heldTextsAdd"));
-  assert.match(heldTextsAddBody, /for \(const s of normStatementsOf\(sql\)\) heldStatements\.add\(s\)/, "a pinned (fresh) arm also records its statements");
+  assert.match(heldTextsAddBody, /for \(const s of heldEntriesOf\(sql\)\) heldStatements\.add\(s\)/, "a pinned (fresh) arm records every statement AND tail");
   const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
-  assert.match(confirmBody, /for \(const s of normStatementsOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run removes only the statements it ran");
+  assert.match(confirmBody, /for \(const s of heldEntriesOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run releases every statement AND tail it ran");
   // Both re-arm sites (the #sql input handler, run()'s belt-and-braces
   // check) must OR the statement-level check onto the whole-text one.
   assert.match(appClean, /heldTexts\.has\(v\) \|\| editorHeldByStatement\(v\)/, "the #sql input handler's re-arm check");

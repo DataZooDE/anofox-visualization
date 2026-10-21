@@ -1456,7 +1456,13 @@ let heldStatements = new Set();
 // string/dollar-quoted literals are kept byte-for-byte, unlike sqlCode()
 // (which also blanks literals: fine for "does this statement need an
 // extension", wrong here, where two statements that merely share
-// structure but differ in literal content must NOT compare equal).
+// structure but differ in literal content must NOT compare equal). Info-13
+// (sec-review-343 second pass): every OTHER character — keywords,
+// identifiers, punctuation — is upper-cased; cheap hardening, since
+// literals/quoted identifiers are already kept separate from it. A
+// lower-case retype of a held statement is still not held (only the user,
+// never Chromium's own redo, can produce that — see Info-13's own
+// comment) but it costs nothing to close anyway.
 function normStmt(sql) {
   const s = String(sql);
   let out = "";
@@ -1488,7 +1494,7 @@ function normStmt(sql) {
       out += s.slice(i, end);
       i = end - 1;
     } else {
-      out += c;
+      out += c.toUpperCase(); // Info-13
     }
   }
   return out.replace(/\s+/g, " ").trim();
@@ -1503,9 +1509,34 @@ function normStatementsOf(sql) {
     return [];
   }
 }
-// M-4: does the CURRENT editor text contain any statement of an armed,
-// still-unconfirmed proposal — a whole match, a fragment, a reordering,
-// an edit around it, whatever reached the editor?
+// M-5 (sec-review-343 second pass, Medium): every statement AND every
+// line-suffix tail of it (split at newline boundaries, each normalised
+// the same way) — not just the whole statement. Chromium's redo fragment
+// shape is "drop the first N lines" (same as M-4), so a model-crafted
+// MULTI-LINE statement whose tail is itself a complete, harmful statement
+// escapes a whole-statement-only hold: `EXPLAIN\nATTACH '…' AS x;` is ONE
+// harmless statement (`EXPLAIN ATTACH …` runs nothing), but redo can drop
+// the `EXPLAIN` line and leave `ATTACH '…' AS x;` on its own — a
+// DIFFERENT, harmful statement never recorded on its own. Holding every
+// tail closes that: index 0 is the whole statement (already covered),
+// every later index is a shorter, line-aligned suffix of it.
+function heldEntriesOf(sql) {
+  const out = [];
+  try {
+    for (const raw of splitStatements(sql)) {
+      const lines = String(raw).split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const t = normStmt(lines.slice(i).join("\n"));
+        if (t) out.push(t);
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+// M-4/M-5: does the CURRENT editor text contain any statement of an
+// armed, still-unconfirmed proposal — a whole match, a fragment (whole
+// statement or line-suffix tail), a reordering, an edit around it,
+// whatever reached the editor?
 function editorHeldByStatement(sql) {
   for (const s of normStatementsOf(sql)) if (heldStatements.has(s)) return true;
   return false;
@@ -1515,7 +1546,7 @@ function heldTextsAdd(sql, pin) {
   heldTexts.add(sql);
   if (pin) {
     pinnedHeldText = sql;
-    for (const s of normStatementsOf(sql)) heldStatements.add(s); // M-4: this proposal's statements, exact
+    for (const s of heldEntriesOf(sql)) heldStatements.add(s); // M-4/M-5: this proposal's statements AND their line-suffix tails
   }
   if (heldTexts.size > 50) {
     // Evict the oldest entry that ISN'T the pinned one — a 50+ run of
@@ -1591,12 +1622,13 @@ function confirmHeldIfMatch() {
   const v = $("sql").value;
   heldTexts.delete(v);
   if (pinnedHeldText === v) pinnedHeldText = null; // Info-11: a confirmed text is no longer "the held proposal" to pin
-  // M-4: an explicit run removes only the statements it ACTUALLY ran —
-  // the ones present in the just-run text, by exact normalised match —
-  // never the whole set: a DIFFERENT, still-unconfirmed proposal's
-  // statements (Info-12: an earlier proposal A, with B now held) must
-  // stay exactly as held as before.
-  for (const s of normStatementsOf(v)) heldStatements.delete(s);
+  // M-4/M-5: an explicit run removes only the statements (and their
+  // line-suffix tails) it ACTUALLY ran — the ones present in the
+  // just-run text, by exact normalised match — never the whole set: a
+  // DIFFERENT, still-unconfirmed proposal's statements (Info-12: an
+  // earlier proposal A, with B now held) must stay exactly as held as
+  // before.
+  for (const s of heldEntriesOf(v)) heldStatements.delete(s);
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see

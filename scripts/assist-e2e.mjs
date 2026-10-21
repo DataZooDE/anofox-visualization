@@ -1109,9 +1109,12 @@ if (run("main")) {
     // it — the exact browser-build dependency that the removed
     // `redoUntilProposal` retry papered over (sec-review-343 M-4): it
     // walked PAST the partial-fragment state instead of checking it.
-    const assertHeldOrClean = async (page, label) => {
+    // `re` defaults to HOLD_RE; M9k (M-5) passes a different proposal's
+    // own marker regex, since the whole point is a DIFFERENT proposal
+    // shape (a multi-line statement whose tail is itself a statement).
+    const assertHeldOrClean = async (page, label, re = HOLD_RE) => {
       const value = await page.inputValue("#sql");
-      const hasPiece = HOLD_RE.test(value);
+      const hasPiece = re.test(value);
       if (hasPiece) {
         const st = await holdState(page);
         record(
@@ -1125,12 +1128,12 @@ if (run("main")) {
       const n1 = await mark(page);
       await page.evaluate(() => document.getElementById("dark")?.click());
       await page.waitForTimeout(1200);
-      let hits = await w0with(page, n1, HOLD_RE);
+      let hits = await w0with(page, n1, re);
       record(`${label}: zero page-DB messages after a dark-toggle click`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
       const n2 = await mark(page);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(1200);
-      hits = await w0with(page, n2, HOLD_RE);
+      hits = await w0with(page, n2, re);
       record(`${label}: zero page-DB messages after Esc`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
     };
     const implicitTriggersAreSafe = async (page, label) => {
@@ -1265,6 +1268,56 @@ if (run("main")) {
         JSON.stringify(st)
       );
       await implicitTriggersAreSafe(page, "M9j fragment");
+      await context.close();
+    }
+
+    // M9k (sec-review-343 second pass, M-5, Medium): a model-crafted
+    // MULTI-LINE statement whose line-suffix TAIL is itself a complete,
+    // harmful statement. `EXPLAIN\nATTACH ':memory:' AS hold_attach;` is
+    // ONE harmless statement (`EXPLAIN ATTACH …` runs nothing), but
+    // Chromium's redo fragment (the same "drop the first line" shape as
+    // M-4) can leave just `ATTACH ':memory:' AS hold_attach;` — a
+    // DIFFERENT statement that a whole-statement-only hold never
+    // recorded on its own. Two variants: deterministic (execCommand, not
+    // dependent on any particular Chromium build) and real native redo
+    // (checked at every step, same as M9i's Variant 2/3).
+    const EXPLAIN_HOLD = "EXPLAIN\nATTACH ':memory:' AS hold_attach;\n";
+    const EXPLAIN_RE = /EXPLAIN|hold_attach/;
+    {
+      const { context, page } = await m9iHeldPage("m9k-exec", EXPLAIN_HOLD);
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SELECT 11 AS other ::METRIC;\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      // the tail only — drop the first ("EXPLAIN") line.
+      const tailFragment = EXPLAIN_HOLD.replace(/^EXPLAIN/, "");
+      await page.evaluate((t) => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, t);
+      }, tailFragment);
+      await page.waitForTimeout(300);
+      await assertHeldOrClean(page, "M9k exec: EXPLAIN\\nATTACH tail fragment", EXPLAIN_RE);
+      await context.close();
+    }
+    {
+      const { context, page } = await m9iHeldPage("m9k-redo", EXPLAIN_HOLD);
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z");
+      await page.waitForTimeout(400);
+      await page.keyboard.press("Control+Enter"); // explicit run of the (now old, non-held) editor text
+      await page.waitForTimeout(800);
+      for (let i = 1; i <= 3; i++) {
+        await page.focus("#sql");
+        await page.keyboard.press("Control+Shift+z");
+        await page.waitForTimeout(300);
+        await assertHeldOrClean(page, `M9k redo after redo ${i}`, EXPLAIN_RE);
+      }
       await context.close();
     }
 
