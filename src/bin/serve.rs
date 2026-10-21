@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -73,6 +74,13 @@ struct Opts {
     app: AppBrand,
     /// `--home <id>` (with `--dashboards`): `/` redirects to that dashboard.
     home: Option<String>,
+    /// `--query-timeout SECS` (authoring only, #304/sec-review-342 L1): a
+    /// round that doesn't finish in time gets its `duckdb` child killed
+    /// instead of wedging the only authoring worker forever — the
+    /// structural bound behind the cheap `reads_stdin` fast path, and the
+    /// only thing that also covers a computed or otherwise-missed path to
+    /// the same hang.
+    authoring_timeout: Duration,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -84,7 +92,7 @@ fn theme_default() -> Option<&'static str> {
 /// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
 static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -118,6 +126,7 @@ fn parse_args() -> Opts {
         log: None,
         app: AppBrand::default(),
         home: None,
+        authoring_timeout: Duration::from_secs(120),
     };
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut args = std::env::args().skip(1);
@@ -157,6 +166,10 @@ fn parse_args() -> Opts {
             ),
             "--max-rows" => o.max_rows = num(args.next(), "--max-rows").max(1) as usize,
             "--timeout" => o.timeout = Duration::from_secs(num(args.next(), "--timeout").max(1)),
+            "--query-timeout" => {
+                o.authoring_timeout =
+                    Duration::from_secs(num(args.next(), "--query-timeout").max(1))
+            }
             "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
             "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
             "--theme" => {
@@ -555,7 +568,7 @@ fn authoring_mode(o: &Opts) {
     // #304: clean up the session's private staging directory even if we're
     // killed (Ctrl-C, `kill`) rather than exiting normally.
     install_cleanup_on_signal();
-    let session = Mutex::new(AuthoringSession::new(db.clone()));
+    let session = Mutex::new(AuthoringSession::new(db.clone(), o.authoring_timeout));
     run_workers(server, 1, move |req| {
         handle_authoring(&guard, &session, req)
     });
@@ -680,21 +693,27 @@ static SESSION_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Windows, #275 I3); on Windows the directory is left as before.
 #[cfg(unix)]
 fn install_cleanup_on_signal() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-    extern "C" fn on_signal(_: libc::c_int) {
-        INTERRUPTED.store(true, Ordering::SeqCst);
+    use std::sync::atomic::AtomicI32;
+    // 0 = no signal yet; a real signal number is always > 0.
+    static SIGNALLED: AtomicI32 = AtomicI32::new(0);
+    extern "C" fn on_signal(sig: libc::c_int) {
+        SIGNALLED.store(sig, Ordering::SeqCst);
     }
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     std::thread::spawn(|| loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        let sig = SIGNALLED.load(Ordering::SeqCst);
+        if sig != 0 {
             if let Some(dir) = SESSION_DIR.lock().unwrap_or_else(|p| p.into_inner()).take() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
-            std::process::exit(130); // 128 + SIGINT, the shell's usual convention
+            // 128 + signal number: 130 for SIGINT, 143 for SIGTERM — the
+            // shell's own convention, which supervisors such as systemd
+            // read as a clean stop (sec-review-342 I1; this used to always
+            // exit 130, even on SIGTERM).
+            std::process::exit(128 + sig);
         }
         std::thread::sleep(Duration::from_millis(50));
     });
@@ -715,6 +734,9 @@ struct AuthoringSession {
     db: String,
     dir: PathBuf,
     live: Option<Live>,
+    /// #304/sec-review-342 L1: a round that exceeds this is killed instead
+    /// of wedging the only authoring worker forever.
+    round_timeout: Duration,
 }
 
 struct Live {
@@ -729,10 +751,15 @@ enum RoundErr {
     Sql(String),
     /// The CLI is gone (stderr's tail).
     Ended(String),
+    /// The round ran longer than its timeout and the child was killed
+    /// (sec-review-342 L1): this is the structural backstop for *any* query
+    /// that doesn't finish — a stdin read by a path `reads_stdin` doesn't
+    /// catch, or anything else that hangs.
+    TimedOut(Duration),
 }
 
 impl AuthoringSession {
-    fn new(db: String) -> Self {
+    fn new(db: String, round_timeout: Duration) -> Self {
         let dir = private_dir("anofox-session");
         let p = dir.to_string_lossy();
         if p.contains(['\'', '\n', '\r']) {
@@ -748,18 +775,19 @@ impl AuthoringSession {
             db,
             dir,
             live: None,
+            round_timeout,
         }
     }
 
     fn run(&mut self, sql: &str) -> Result<String, String> {
         if self.live.is_none() {
-            self.live = Some(Live::spawn(&self.db, &self.dir)?);
+            self.live = Some(Live::spawn(&self.db, &self.dir, self.round_timeout)?);
         }
-        let r = self
-            .live
-            .as_mut()
-            .expect("a live session")
-            .round(&self.dir, sql);
+        let r =
+            self.live
+                .as_mut()
+                .expect("a live session")
+                .round(&self.dir, sql, self.round_timeout);
         let _ = std::fs::remove_file(self.dir.join("q.sql"));
         match r {
             Ok(out) => Ok(out),
@@ -776,6 +804,17 @@ impl AuthoringSession {
                     } else {
                         format!(": {}", tail.trim())
                     }
+                ))
+            }
+            Err(RoundErr::TimedOut(d)) => {
+                if let Some(mut l) = self.live.take() {
+                    let _ = l.child.kill();
+                    let _ = l.child.wait();
+                }
+                Err(format!(
+                    "query exceeded {}s and was stopped; the next query starts a new session \
+                     (ATTACH, TEMP objects and variables are gone)",
+                    d.as_secs()
                 ))
             }
         }
@@ -799,7 +838,7 @@ impl Drop for AuthoringSession {
 }
 
 impl Live {
-    fn spawn(db: &str, dir: &Path) -> Result<Live, String> {
+    fn spawn(db: &str, dir: &Path, round_timeout: Duration) -> Result<Live, String> {
         let mut child = Command::new("duckdb")
             .arg(db)
             .arg("-json")
@@ -832,7 +871,7 @@ impl Live {
         // leftover `.output …` would swallow the `.print` marker. These are
         // server-written dot commands, sent before the warm-up round's own
         // markers; the client-side dot-command refusal is unaffected.
-        match live.round_with(dir, ".bail off\n.output\n.mode json\n", "") {
+        match live.round_with(dir, ".bail off\n.output\n.mode json\n", "", round_timeout) {
             Ok(_) | Err(RoundErr::Sql(_)) => Ok(live),
             Err(RoundErr::Ended(t)) => {
                 // #275 L4: don't leak a zombie when the session never came up.
@@ -840,14 +879,25 @@ impl Live {
                 let _ = live.child.wait();
                 Err(format!("duckdb did not start: {}", t.trim()))
             }
+            Err(RoundErr::TimedOut(d)) => {
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                Err(format!("duckdb did not start within {}s", d.as_secs()))
+            }
         }
     }
 
-    fn round(&mut self, dir: &Path, sql: &str) -> Result<String, RoundErr> {
-        self.round_with(dir, "", sql)
+    fn round(&mut self, dir: &Path, sql: &str, timeout: Duration) -> Result<String, RoundErr> {
+        self.round_with(dir, "", sql, timeout)
     }
 
-    fn round_with(&mut self, dir: &Path, preamble: &str, sql: &str) -> Result<String, RoundErr> {
+    fn round_with(
+        &mut self,
+        dir: &Path,
+        preamble: &str,
+        sql: &str,
+        timeout: Duration,
+    ) -> Result<String, RoundErr> {
         let q = dir.join("q.sql");
         // Drop any previous (now read-only, #275 L3) staged query first.
         let _ = std::fs::remove_file(&q);
@@ -861,9 +911,9 @@ impl Live {
             let _ = std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o400));
         }
         let nonce = sv::random_token();
-        let done = format!("__anofox_done_{nonce}");
+        let done_marker = format!("__anofox_done_{nonce}");
         let script = format!(
-            "{preamble}.read '{}'\n.print {done}\n.read '{}'\n",
+            "{preamble}.read '{}'\n.print {done_marker}\n.read '{}'\n",
             q.display(),
             dir.join(format!("end-{nonce}")).display()
         );
@@ -875,42 +925,85 @@ impl Live {
         {
             return Err(RoundErr::Ended(self.drain_err()));
         }
-        let mut out = String::new();
-        loop {
-            let mut line = String::new();
-            match self.out.read_line(&mut line) {
-                Ok(0) | Err(_) => return Err(RoundErr::Ended(self.drain_err())),
-                Ok(_) => {
-                    // #275 L1: the marker is matched as a line's suffix, not
-                    // only as a whole line, so a statement's output that
-                    // doesn't end in `\n` (no trailing newline, or a `\r`
-                    // line terminator) can't merge with the marker and hang
-                    // this loop forever.
-                    let l = line.trim_end_matches(['\r', '\n']);
-                    if let Some(head) = l.strip_suffix(done.as_str()) {
-                        out.push_str(head);
-                        break;
+
+        // sec-review-342 L1: a structural backstop, not just the cheap
+        // `reads_stdin` fast path — any round that doesn't finish in
+        // `timeout` (a stdin read by a path the fast path misses, or
+        // anything else that hangs) gets this child killed instead of
+        // wedging the only authoring worker forever. The handler thread
+        // only sleeps, checks an atomic flag and signals the process by
+        // pid; it never touches `self`, which the round below keeps using.
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let round_done = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        {
+            let (timed_out, round_done, pid) =
+                (timed_out.clone(), round_done.clone(), self.child.id());
+            std::thread::spawn(move || {
+                std::thread::sleep(timeout);
+                if !round_done.load(Ordering::SeqCst) {
+                    timed_out.store(true, Ordering::SeqCst);
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
                     }
-                    out.push_str(&line);
+                }
+            });
+        }
+
+        let result: Result<String, RoundErr> = 'round: {
+            let mut out = String::new();
+            loop {
+                let mut line = String::new();
+                match self.out.read_line(&mut line) {
+                    Ok(0) | Err(_) => {
+                        break 'round Err(if timed_out.load(Ordering::SeqCst) {
+                            RoundErr::TimedOut(timeout)
+                        } else {
+                            RoundErr::Ended(self.drain_err())
+                        })
+                    }
+                    Ok(_) => {
+                        // #275 L1: the marker is matched as a line's suffix, not
+                        // only as a whole line, so a statement's output that
+                        // doesn't end in `\n` (no trailing newline, or a `\r`
+                        // line terminator) can't merge with the marker and hang
+                        // this loop forever.
+                        let l = line.trim_end_matches(['\r', '\n']);
+                        if let Some(head) = l.strip_suffix(done_marker.as_str()) {
+                            out.push_str(head);
+                            break;
+                        }
+                        out.push_str(&line);
+                    }
                 }
             }
-        }
-        let mut err = String::new();
-        loop {
-            match self.err.recv() {
-                Ok(l) if l.contains(&nonce) => break,
-                Ok(l) => {
-                    err.push_str(&l);
-                    err.push('\n');
+            let mut err = String::new();
+            loop {
+                match self.err.recv() {
+                    Ok(l) if l.contains(&nonce) => break,
+                    Ok(l) => {
+                        err.push_str(&l);
+                        err.push('\n');
+                    }
+                    Err(_) => {
+                        break 'round Err(if timed_out.load(Ordering::SeqCst) {
+                            RoundErr::TimedOut(timeout)
+                        } else {
+                            RoundErr::Ended(err)
+                        })
+                    }
                 }
-                Err(_) => return Err(RoundErr::Ended(err)),
             }
-        }
-        if err.trim().is_empty() {
-            Ok(out)
-        } else {
-            Err(RoundErr::Sql(err.trim_end().to_string()))
-        }
+            if err.trim().is_empty() {
+                Ok(out)
+            } else {
+                Err(RoundErr::Sql(err.trim_end().to_string()))
+            }
+        };
+        // Tell a still-sleeping watchdog (the round finished well inside
+        // its timeout) that there's nothing left for it to kill.
+        round_done.store(true, Ordering::SeqCst);
+        result
     }
 
     /// stderr's remaining lines, once the CLI is gone.
@@ -1710,6 +1803,13 @@ fn render_dashboard_page(
             .and_then(Locale::from_tag)
             .unwrap_or_default(),
         theme: Arc::new(t.clone()),
+        // #315/sec-review-342 L2: no script on this page ever reads
+        // `data-warnings`, and it's otherwise the one place a successful
+        // render can still carry diagnostic text drawn from the panel's
+        // own rows. Never attaching it (rather than stripping it back out
+        // afterwards) covers every SVG a render produces — a title bar's
+        // chart, each ::TRACK, each contract row — not just the first one.
+        record_warnings: false,
         ..RenderOptions::default()
     };
 
@@ -1736,10 +1836,6 @@ fn render_dashboard_page(
                     );
                     PANEL_RENDER_ERROR_HTML.to_string()
                 });
-                // #315: no script on this page ever reads `data-warnings`,
-                // and it's the one place a successful render can still
-                // carry diagnostic text drawn from the panel's own rows.
-                let svg = anofox_visualization::without_root_attr(&svg, "data-warnings");
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
             }
             continue;
@@ -1776,8 +1872,6 @@ fn render_dashboard_page(
             );
             PANEL_RENDER_ERROR_HTML.to_string()
         });
-        // #315: see the matching note on the contract-panel path above.
-        let svg = anofox_visualization::without_root_attr(&svg, "data-warnings");
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
@@ -1887,7 +1981,7 @@ mod tests {
             eprintln!("skipped authoring_session_keeps_state_and_restarts: no `duckdb` on PATH");
             return;
         }
-        let mut s = AuthoringSession::new(":memory:".into());
+        let mut s = AuthoringSession::new(":memory:".into(), Duration::from_secs(120));
         s.run("SET VARIABLE x = 42").unwrap();
         let out = s.run("SELECT getvariable('x') AS v").unwrap();
         assert!(out.contains("\"v\":42"), "{out}");

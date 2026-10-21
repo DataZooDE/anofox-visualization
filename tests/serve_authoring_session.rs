@@ -232,6 +232,84 @@ fn authoring_session_persists_state() {
     assert!(body.contains("\"five\":5"), "{body}");
 }
 
+/// sec-review-342 L1: `reads_stdin` is a cheap, best-effort fast path — it
+/// cannot see a path built at query time. The structural backstop is the
+/// per-round timeout (`--query-timeout`): a round that doesn't finish in
+/// time gets its `duckdb` child killed, the client gets a clear error
+/// within that timeout (not a hang until someone kills the process), and
+/// the next query starts a fresh session that works normally.
+#[test]
+fn authoring_session_recovers_from_an_unblocked_stdin_read_via_the_round_timeout() {
+    if !have_duckdb("authoring_session_recovers_from_an_unblocked_stdin_read_via_the_round_timeout")
+    {
+        return;
+    }
+    let s = Scratch::new("timeout");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut child = Kill(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg(s.0.join("a.duckdb"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--no-open",
+                "--query-timeout",
+                "2",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut out = BufReader::new(child.0.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let tok = line
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(_) => break,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    }
+
+    // A path built at query time (string concatenation): `reads_stdin`
+    // cannot see this is `/dev/stdin`, so it reaches the CLI and blocks —
+    // confirmed in sec-review-342 as a real bypass of the fast path.
+    let t0 = Instant::now();
+    let (st, body) = q(port, &tok, "SELECT * FROM read_csv('/dev/' || 'stdin')");
+    let waited = t0.elapsed();
+    assert_eq!(st, 400, "{body}");
+    assert!(
+        body.contains("exceeded") && body.contains("stopped"),
+        "{body}"
+    );
+    // It took roughly the configured timeout, not instantly (it really
+    // went through the CLI and hung) and not "until someone kills -9 the
+    // process" (it recovered on its own).
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(15),
+        "{waited:?}"
+    );
+
+    // The session works normally afterwards: a fresh child, fresh state.
+    let (st, body) = q(port, &tok, "SELECT 1 AS ok");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"ok\":1"), "{body}");
+}
+
 /// #304: the authoring session's private staging directory
 /// (`anofox-session-*`, holding each round's `q.sql`) is removed even when
 /// the process is killed with SIGTERM instead of exiting normally — before

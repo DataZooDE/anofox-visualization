@@ -1152,18 +1152,89 @@ pub fn has_dot_command(sql: &str) -> bool {
     sql.lines().any(|l| l.trim_start().starts_with('.'))
 }
 
-/// Does this body try to read the authoring session's own stdin (`#304`,
-/// `/dev/stdin`, `/dev/fd/0`)? The long-lived `duckdb` CLI's stdin is the
-/// same pipe the server writes every round's staged-query script to; a
-/// statement that reads it (`read_csv('/dev/stdin')`, `COPY … FROM
-/// '/dev/stdin'`, …) blocks forever waiting for more of that pipe, wedging
-/// the only authoring worker until the CLI is killed. Checked case-
-/// insensitively, quote-agnostic, against the plain bytes of the path (a
-/// literal elsewhere in the body, e.g. in a string value, is refused too —
-/// this fails closed like [`has_dot_command`], not a sandbox).
+/// Does this body try to read the authoring session's own stdin, by one of
+/// the *literal* ways DuckDB can reach it (`#304`; hardened per
+/// sec-review-342 L1)? The long-lived `duckdb` CLI's stdin is the same pipe
+/// the server writes every round's staged-query script to; a statement that
+/// reads it (`read_csv('/dev/stdin')`, `COPY t FROM STDIN`, …) blocks
+/// forever waiting for more of that pipe.
+///
+/// **This is a cheap, best-effort fast path only — it is not the real
+/// guarantee.** It cannot see a path built at query time (string
+/// concatenation, `getvariable`, …), so it cannot catch every way to reach
+/// the same hang. The actual bound is the per-round timeout in
+/// `Live::round_with` (`src/bin/serve.rs`, `--query-timeout`, default
+/// 120s): a round that doesn't finish in time gets its `duckdb` child
+/// killed and the next query starts a fresh session, regardless of *why*
+/// the round hung. Checked case-insensitively against:
+/// - `/dev/stdin` or `/dev/fd/0`, with repeated `/` and `/./` path segments
+///   collapsed first, so `/dev//stdin`, `/dev/./stdin`, … are caught too;
+/// - `/proc/self/fd/0`, `/proc/thread-self/fd/0` or `/proc/<pid>/fd/0`
+///   (a numeric pid);
+/// - a bare `FROM STDIN` (`COPY … FROM STDIN`, which DuckDB reads as
+///   `/dev/stdin`), matched as its own tokens, not as a substring of a
+///   longer identifier.
+///
+/// Checked against the plain bytes of the body (a literal elsewhere, e.g.
+/// in an unrelated string value, is refused too — this fails closed like
+/// [`has_dot_command`], not a sandbox).
 pub fn reads_stdin(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
-    lower.contains("/dev/stdin") || lower.contains("/dev/fd/0")
+    let segs: Vec<&str> = lower
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    // Every segment but the match's last is bounded by `/` on both sides
+    // (an exact-equality check is enough); the last one often isn't — the
+    // path sits inside a quoted literal with no `/` before the closing
+    // punctuation (`'/dev/stdin'`), so its segment is `stdin'` or `stdin')`,
+    // not `stdin`. `ends(seg, word)` allows that trailing non-identifier
+    // junk without matching `stdinner` as `stdin`.
+    segs.windows(2)
+        .any(|w| w[0] == "dev" && ends(w[1], "stdin"))
+        || segs
+            .windows(3)
+            .any(|w| w[0] == "dev" && w[1] == "fd" && ends(w[2], "0"))
+        || segs.windows(4).any(|w| {
+            w[0] == "proc"
+                && (w[1] == "self"
+                    || w[1] == "thread-self"
+                    || w[1].bytes().all(|b| b.is_ascii_digit()))
+                && w[2] == "fd"
+                && ends(w[3], "0")
+        })
+        || contains_from_stdin(&lower)
+}
+
+/// `seg` is exactly `word`, or starts with `word` followed by a character
+/// that can't continue an identifier — the trailing quote/paren/`;` after a
+/// matched path's last segment (`'/dev/stdin')` splits into a `stdin')`
+/// segment). `stdinner` is not `stdin` either way.
+fn ends(seg: &str, word: &str) -> bool {
+    match seg.strip_prefix(word) {
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_'),
+        None => false,
+    }
+}
+
+/// Does `lower` (already lowercased) contain a bare `FROM STDIN` — as two
+/// adjacent word tokens, so `from_stdin_table` (one identifier) doesn't
+/// match?
+fn contains_from_stdin(lower: &str) -> bool {
+    let mut prev_was_from = false;
+    for tok in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if tok.is_empty() {
+            continue;
+        }
+        if prev_was_from && tok == "stdin" {
+            return true;
+        }
+        prev_was_from = tok == "from";
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1661,5 +1732,52 @@ mod tests {
         );
         assert!(!reads_stdin("SELECT * FROM read_csv('data.csv')"));
         assert!(!reads_stdin("SELECT 'stdin is just a word here' AS note"));
+    }
+
+    /// sec-review-342 L1: every bypass the review found against the old
+    /// literal-substring check.
+    #[test]
+    fn stdin_reads_bypasses() {
+        assert!(
+            reads_stdin("COPY t FROM STDIN;"),
+            "FROM STDIN (no path at all — DuckDB reads /dev/stdin)"
+        );
+        assert!(
+            reads_stdin("copy t from \tstdin ;"),
+            "FROM STDIN, any whitespace, case-insensitive"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/self/fd/0')"),
+            "/proc/self/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/thread-self/fd/0')"),
+            "/proc/thread-self/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/1234/fd/0')"),
+            "/proc/<pid>/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/dev//stdin')"),
+            "a repeated slash"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_text('/dev/./stdin')"),
+            "a /./ segment"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/dev/.//./stdin')"),
+            "several repeated/./ segments"
+        );
+        // Not bypasses (unchanged from before): a computed path is out of
+        // scope for this fast path (the round timeout covers it), and a
+        // word that merely contains "from"/"stdin" as part of a longer
+        // identifier must not false-positive.
+        assert!(!reads_stdin("SELECT * FROM read_csv('/dev/' || 'stdin')"));
+        assert!(!reads_stdin("SELECT * FROM from_stdin_table"));
+        assert!(!reads_stdin("SELECT * FROM read_csv('-')"));
+        assert!(!reads_stdin("SELECT * FROM read_csv('/dev/std[i]n')"));
+        assert!(!reads_stdin("SELECT /proc_stats FROM t")); // no /fd/0 at all
     }
 }

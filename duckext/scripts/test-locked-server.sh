@@ -78,7 +78,7 @@ start() {
     # too and broke out of the loop before the next `curl` could see the
     # server come up (flaky: "a database with foreign keys could not be
     # served", seen on #314 and #341's CI, neither of which touch serving).
-    grep -qE '^[A-Za-z][A-Za-z ]*Error:' "$T/out" 2>/dev/null && break
+    grep -qE '^([A-Za-z][A-Za-z ]* )?Error:' "$T/out" 2>/dev/null && break
     sleep 0.2
   done
   [ -n "${QUIET:-}" ] || cat "$T/out" >&2

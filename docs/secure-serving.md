@@ -68,13 +68,21 @@ so the protection is about making sure *only you* can send it:
   for a clean session. The database file stays open, and locked, while
   `serve` runs. If the CLI exits, the next query starts a new session and
   the error says so.
-- **No reading the session's own stdin** (`serve <db>`, #304). The one
-  long-lived CLI's stdin is the pipe the server writes every round's staged
-  query to; a body that reads it (`read_csv('/dev/stdin')`, `COPY … FROM
-  '/dev/fd/0'`, any case) would otherwise block forever waiting for more of
-  that pipe, wedging the single authoring worker until the `duckdb` process
-  is killed. Such a body is refused (`400`) before it reaches the CLI, the
-  same way a dot-command is.
+- **A round that doesn't finish in `--query-timeout` (default 120 s)
+  restarts the session** (`serve <db>`, #304). The one long-lived CLI's
+  stdin is the pipe the server writes every round's staged query to, so a
+  body that reads it (`read_csv('/dev/stdin')`, `COPY … FROM '/dev/fd/0'`,
+  `COPY … FROM STDIN`, any case) would otherwise block forever waiting for
+  more of that pipe — and so would any other query that simply hangs. Past
+  the timeout the `duckdb` child is killed and the next query starts a
+  fresh session (ATTACH, TEMP objects and variables are gone), the same
+  recovery as the CLI exiting on its own. A literal `/dev/stdin`,
+  `/dev/fd/0`, `/proc/<pid|self|thread-self>/fd/0` or a bare `FROM STDIN`
+  — case-insensitively, with repeated `/` and `/./` path segments collapsed
+  — is refused up front (`400`) before it ever reaches the CLI, the same
+  way a dot-command is; this fast path is best-effort only (a path built at
+  query time, e.g. string concatenation, is not caught by it) and the
+  timeout is what actually bounds the hang either way.
 - **The private session directory is cleaned up even if `serve` is
   killed** (`#304`). `anofox-session-*` (its staged queries) is removed on
   a normal exit as before, and now also on SIGINT/SIGTERM (Ctrl-C, `kill`):
