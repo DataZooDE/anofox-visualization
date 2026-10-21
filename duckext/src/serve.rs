@@ -1384,7 +1384,8 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
     if out.is_empty() {
         return Err(format!("no .sql dashboards found in '{}'", dir.display()));
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
+    // #301: ascending `-- @order`, unordered dashboards after, then by id.
+    out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
     loads.sort();
     loads.dedup();
     Ok((out, loads))
@@ -1435,6 +1436,12 @@ fn copy_database(
         .into_iter()
         .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
         .collect();
+    // #299: one duckdb_columns() scan for the whole database, grouped here,
+    // instead of one scan per table (while `live`'s lock is held) — with
+    // 3,000 FK tables that turned the loop below into ~3,000 full scans of
+    // the database's column catalog.
+    let columns = columns_by_table(live, src)?;
+    let empty = Vec::new();
     for i in fk_order(&tables, &edges) {
         let (schema, table) = &tables[i];
         let qual = |db: &str| {
@@ -1446,11 +1453,17 @@ fn copy_database(
             )
         };
         let (from, to) = (qual(src), qual(dst));
-        let cols = insertable_columns(live, src, &to, schema, table)?
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let cols = insertable_columns(
+            live,
+            &to,
+            columns
+                .get(&(schema.clone(), table.clone()))
+                .unwrap_or(&empty),
+        )?
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
         let Err(e) = live.exec(&format!(
             "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
         )) else {
@@ -1477,38 +1490,59 @@ fn copy_database(
     Ok(())
 }
 
-/// The columns of `schema.table` (in `src`) an INSERT into `to` can name: all
-/// but generated ones. duckdb_columns() doesn't mark those, so a column with
-/// an expression is tried on its own: `INSERT … SELECT NULL WHERE false`
-/// binds (and fails for a generated column) but writes nothing.
-fn insertable_columns(
-    live: &Conn,
-    src: &str,
-    to: &str,
-    schema: &str,
-    table: &str,
-) -> Result<Vec<String>, String> {
+/// `(schema, table) -> [(column, has_default), …]`, a table's own columns in
+/// `column_index` order — what [`columns_by_table`] groups a database's
+/// `duckdb_columns()` scan into.
+type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
+
+/// Every table's columns of database `src`, read in one `duckdb_columns()`
+/// scan (#299) instead of one scan per table.
+fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
     let rows = live
         .query(&format!(
-            "SELECT column_name::VARCHAR, (column_default IS NOT NULL)::VARCHAR FROM duckdb_columns() \
-             WHERE database_name = {} AND schema_name = {} AND table_name = {} ORDER BY column_index",
-            sql_string_literal(src), sql_string_literal(schema), sql_string_literal(table)
+            "SELECT schema_name::VARCHAR, table_name::VARCHAR, column_name::VARCHAR, \
+             (column_default IS NOT NULL)::VARCHAR FROM duckdb_columns() \
+             WHERE database_name = {} ORDER BY schema_name, table_name, column_index",
+            sql_string_literal(src)
         ))?
-        .string_rows(100_000)?;
-    let mut out = Vec::new();
+        .string_rows(1_000_000)?;
+    let mut out: ColumnsByTable = BTreeMap::new();
     for r in rows {
-        let Some(c) = r[0].clone() else { continue };
-        if r[1].as_deref() == Some("true")
+        let (Some(schema), Some(table), Some(col)) = (r[0].clone(), r[1].clone(), r[2].clone())
+        else {
+            continue;
+        };
+        let has_default = r[3].as_deref() == Some("true");
+        out.entry((schema, table))
+            .or_default()
+            .push((col, has_default));
+    }
+    Ok(out)
+}
+
+/// The columns of `columns` (a table's own `(column, has_default)` list, from
+/// [`columns_by_table`]) an INSERT into `to` can name: all but generated
+/// ones. duckdb_columns() doesn't mark those, so a column with a default is
+/// tried on its own: `INSERT … SELECT NULL WHERE false` binds (and fails for
+/// a generated column) but writes nothing.
+fn insertable_columns(
+    live: &Conn,
+    to: &str,
+    columns: &[(String, bool)],
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (c, has_default) in columns {
+        if *has_default
             && live
                 .exec(&format!(
                     "INSERT INTO {to} ({}) SELECT NULL WHERE false",
-                    quote_ident(&c)
+                    quote_ident(c)
                 ))
                 .is_err()
         {
             continue;
         }
-        out.push(c);
+        out.push(c.clone());
     }
     Ok(out)
 }
@@ -2699,6 +2733,28 @@ mod tests {
         assert_eq!(
             fk_order(&ab, &[e("main", "a", "b"), e("main", "b", "a")]),
             vec![0, 1]
+        );
+    }
+
+    /// #301: `load_dashboards` orders by `-- @order` ascending, not by file
+    /// name — the issue's own repro (`zzz_first.sql` intended #1, etc.),
+    /// plus an unordered file sorting after every explicitly ordered one.
+    #[test]
+    fn load_dashboards_follows_order_header_not_file_name() {
+        let dir = std::env::temp_dir().join(format!("anofox-order-test-{}", sv::random_token()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("zzz_first.sql"), "-- @order 1\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("aaa_second.sql"), "-- @order 2\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("mmm_third.sql"), "-- @order 3\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("zzz_unordered.sql"), "SELECT 1;").unwrap();
+        let (dashboards, _) = load_dashboards(&dir).unwrap();
+        let ids: Vec<&str> = dashboards.iter().map(|d| d.id.as_str()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            ids,
+            ["zzz_first", "aaa_second", "mmm_third", "zzz_unordered"],
+            "explicit @order wins over alphabetical file-name order; the \
+             unordered file still sorts last, by id, as before #301"
         );
     }
 

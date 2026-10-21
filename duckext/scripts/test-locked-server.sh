@@ -68,7 +68,17 @@ start() {
   printf "LOAD %s;\n%s\n" "$(q "$EXT")" "$sql" >&3
   for _ in $(seq 100); do
     curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && return 0
-    grep -q "Error" "$T/out" 2>/dev/null && break
+    # A genuine fatal CLI error (the LOAD or the SELECT itself failed) is its
+    # own top-level line, flush at column 0: "<Words> Error: <message>". A
+    # *successful* FK snapshot's own banner can still contain the substring
+    # "Error" — e.g. "... copied without its constraints and indexes:
+    # Constraint Error: Violates foreign key constraint ..." (#283) — but
+    # always embedded mid-line inside the query result's box-drawn output,
+    # never at column 0. A bare `grep -q "Error"` matched that benign case
+    # too and broke out of the loop before the next `curl` could see the
+    # server come up (flaky: "a database with foreign keys could not be
+    # served", seen on #314 and #341's CI, neither of which touch serving).
+    grep -qE '^([A-Za-z][A-Za-z ]* )?Error:' "$T/out" 2>/dev/null && break
     sleep 0.2
   done
   [ -n "${QUIET:-}" ] || cat "$T/out" >&2

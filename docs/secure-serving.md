@@ -68,6 +68,38 @@ so the protection is about making sure *only you* can send it:
   for a clean session. The database file stays open, and locked, while
   `serve` runs. If the CLI exits, the next query starts a new session and
   the error says so.
+- **A round that doesn't finish in `--query-timeout` (default 120 s)
+  restarts the session** (`serve <db>`, #304). The one long-lived CLI's
+  stdin is the pipe the server writes every round's staged query to, so a
+  body that reads it (`read_csv('/dev/stdin')`, `COPY … FROM '/dev/fd/0'`,
+  `COPY … FROM STDIN`, any case) would otherwise block forever waiting for
+  more of that pipe — and so would any other query that simply hangs. Past
+  the timeout the `duckdb` child is killed and the next query starts a
+  fresh session (ATTACH, TEMP objects and variables are gone), the same
+  recovery as the CLI exiting on its own. A literal `/dev/stdin`,
+  `/dev/fd/0`, `/proc/<pid|self|thread-self>/fd/0` or a bare `FROM STDIN`
+  — case-insensitively, with repeated `/` and `/./` path segments collapsed
+  — is refused up front (`400`) before it ever reaches the CLI, the same
+  way a dot-command is; this fast path is best-effort only (a path built at
+  query time, e.g. string concatenation, is not caught by it) and the
+  timeout is what actually bounds the hang either way. The watchdog that
+  enforces it waits on a channel rather than sleeping the full timeout, so
+  a fast round's watchdog thread exits (and is joined) right away instead
+  of staying parked — a query loop doesn't build up one thread per round —
+  and the session's `duckdb` child is never reaped elsewhere while a
+  watchdog that might still signal it is still running. Unix only: `serve`
+  has no watchdog on Windows (best-effort there, see the deployment notes),
+  so a hang's only backstop there is the fast path above. `--query-timeout`
+  applies to authoring only; passing it with `--dashboards` is a usage
+  error (that server's own `--timeout` bounds a query there instead).
+- **The private session directory is cleaned up even if `serve` is
+  killed** (`#304`). `anofox-session-*` (its staged queries) is removed on
+  a normal exit as before, and now also on SIGINT/SIGTERM (Ctrl-C, `kill`):
+  a signal handler sets a flag a background thread polls, which removes the
+  directory and exits — the default "just die" disposition never ran the
+  Rust destructor that did this, so every kill used to leave the directory
+  (and, if one was in flight, that round's query text) behind. Best-effort;
+  a `kill -9` or a crash still cannot run any cleanup code.
 - Body limit 4 MiB; authoring results are capped at 1,000,000 rows.
 
 `SELECT anofox_serve_stop(port)` stops an extension server.

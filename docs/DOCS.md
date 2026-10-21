@@ -1893,14 +1893,16 @@ with the browser through wasm):
 | `-- @description <text>` | One line on what the dashboard answers: the line under its title on a server's landing page, and part of the tooltip in the builder's sidebar and the served nav. Several `@description` lines are joined. |
 | `-- @owner <text>` | Who looks after it — a name, a team, an address. Shown as a small line under the name in the builder's sidebar, in the tooltip of a served nav link and on the `/` list. |
 | `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
+| `-- @order N` | Where it sits, ascending, among its siblings (same group, or ungrouped) in the served nav bar and the `/` start page's card grid — the server's default is alphabetical by file name, which ignores `blueprint.json`'s own `dashboards[]` order. `N` is a plain integer (ties, and dashboards without `@order`, keep sorting by id afterwards). |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
 `dashboard --check` warns about an empty `@group` (`header/empty-group`), one
 longer than 80 characters (`header/long-group`), more than 10 tags
-(`header/too-many-tags`), an empty `@owner` (`header/empty-owner`) and a
-`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`) and a
+(`header/too-many-tags`), an empty `@owner` (`header/empty-owner`), a
+`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`), an
+`@order` that isn't a plain integer (`header/bad-order`) and a
 `@description` over 160 characters (`header/long-description`), reported as
 statement 0. `dashboard --check <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
@@ -3186,6 +3188,10 @@ policy and path rules don't change); the header comments group it. The nav
 only the dashboards the viewer's scope allows) shows the ungrouped dashboards
 first, then each `-- @group` under its name; a certified one carries ✓, and
 the owner, the certification date and the tags are in the link's tooltip.
+Within a group (and among the ungrouped dashboards), the order is `-- @order
+N` ascending; dashboards without it sort after every explicitly ordered one,
+alphabetically by id — the server's old (and still the default) behaviour.
+This is also the order the start page's cards use, below.
 From 9 dashboards on, the nav is one button naming the open dashboard; it
 opens the grouped list with a search field (Enter opens it, Esc closes it).
 **The landing page.** `/` on the locked server and on `serve --dashboards` is

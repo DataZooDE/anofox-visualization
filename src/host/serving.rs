@@ -28,6 +28,15 @@ pub fn html_escape(s: &str) -> String {
     crate::format::escape_xml(s)
 }
 
+/// Like [`html_escape`], but for an attribute value a browser's own form
+/// submission reads back (#340 finding A): delegates to
+/// [`crate::format::escape_xml_attr_roundtrip`], which represents a control
+/// character the XML-safe escaper would otherwise replace with U+FFFD as a
+/// numeric character reference instead, so the value round-trips.
+pub fn html_escape_attr_roundtrip(s: &str) -> String {
+    crate::format::escape_xml_attr_roundtrip(s)
+}
+
 /// Serialise JSON for embedding inside an inline `<script>`: escapes `<`, `>`,
 /// `&` and the JS line separators so the payload can never close the script
 /// element (`</script>`) or open a comment (`<!--`).
@@ -878,6 +887,12 @@ pub struct DashboardMeta {
     /// `-- @certified <YYYY-MM-DD>`: the day it was last checked; `None` when
     /// missing or not a valid date.
     pub certified: Option<String>,
+    /// `-- @order N`: where it sits in the served nav bar and the start
+    /// page's card grid, ascending, among its siblings (same group, or
+    /// ungrouped); `None` when missing or not a plain integer — such
+    /// dashboards sort after every explicitly ordered one, alphabetically by
+    /// id among themselves. See [`DashboardMeta::order_key`].
+    pub order: Option<i64>,
 }
 
 impl DashboardMeta {
@@ -888,6 +903,19 @@ impl DashboardMeta {
             "id": id, "title": self.title, "group": self.group, "tags": self.tags,
             "description": self.description, "owner": self.owner, "certified": self.certified,
         })
+    }
+
+    /// The sort key both `load_dashboards` (`serve` bin and the extension)
+    /// order their dashboards by (#301): ascending `-- @order`, with an
+    /// unordered dashboard (`None`) placed after every explicitly ordered
+    /// one and broken by `id` — the same tie-break used when no dashboard
+    /// sets `@order` at all, so existing (unordered) folders keep today's
+    /// alphabetical-by-file-name order. This single key is what both the
+    /// served nav bar and the start page's card grid end up sorted by,
+    /// since both render dashboards in this same vec order (within a
+    /// group/sub-group, which is otherwise sorted by name).
+    pub fn order_key<'a>(&self, id: &'a str) -> (i64, &'a str) {
+        (self.order.unwrap_or(i64::MAX), id)
     }
 }
 
@@ -978,9 +1006,9 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
 /// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`,
-/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`
-/// header comments (a repeated `@group` wins over the earlier one; `@tags`
-/// lines add up). A `@param` or
+/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`,
+/// `-- @order N` header comments (a repeated `@group` wins over the earlier
+/// one; `@tags` lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
@@ -1005,6 +1033,8 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.owner = Some(r.to_string()).filter(|o| !o.is_empty());
         } else if let Some(r) = header_value(l, "certified") {
             m.certified = Some(r.to_string()).filter(|d| valid_iso_date(d));
+        } else if let Some(r) = header_value(l, "order") {
+            m.order = r.parse::<i64>().ok();
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -1120,6 +1150,91 @@ pub fn content_type(path: &str) -> &'static str {
 /// `.output`, `.read`, …). SQL never needs a line that starts with `.`.
 pub fn has_dot_command(sql: &str) -> bool {
     sql.lines().any(|l| l.trim_start().starts_with('.'))
+}
+
+/// Does this body try to read the authoring session's own stdin, by one of
+/// the *literal* ways DuckDB can reach it (`#304`; hardened per
+/// sec-review-342 L1)? The long-lived `duckdb` CLI's stdin is the same pipe
+/// the server writes every round's staged-query script to; a statement that
+/// reads it (`read_csv('/dev/stdin')`, `COPY t FROM STDIN`, …) blocks
+/// forever waiting for more of that pipe.
+///
+/// **This is a cheap, best-effort fast path only — it is not the real
+/// guarantee.** It cannot see a path built at query time (string
+/// concatenation, `getvariable`, …), so it cannot catch every way to reach
+/// the same hang. The actual bound is the per-round timeout in
+/// `Live::round_with` (`src/bin/serve.rs`, `--query-timeout`, default
+/// 120s): a round that doesn't finish in time gets its `duckdb` child
+/// killed and the next query starts a fresh session, regardless of *why*
+/// the round hung. Checked case-insensitively against:
+/// - `/dev/stdin` or `/dev/fd/0`, with repeated `/` and `/./` path segments
+///   collapsed first, so `/dev//stdin`, `/dev/./stdin`, … are caught too;
+/// - `/proc/self/fd/0`, `/proc/thread-self/fd/0` or `/proc/<pid>/fd/0`
+///   (a numeric pid);
+/// - a bare `FROM STDIN` (`COPY … FROM STDIN`, which DuckDB reads as
+///   `/dev/stdin`), matched as its own tokens, not as a substring of a
+///   longer identifier.
+///
+/// Checked against the plain bytes of the body (a literal elsewhere, e.g.
+/// in an unrelated string value, is refused too — this fails closed like
+/// [`has_dot_command`], not a sandbox).
+pub fn reads_stdin(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    let segs: Vec<&str> = lower
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    // Every segment but the match's last is bounded by `/` on both sides
+    // (an exact-equality check is enough); the last one often isn't — the
+    // path sits inside a quoted literal with no `/` before the closing
+    // punctuation (`'/dev/stdin'`), so its segment is `stdin'` or `stdin')`,
+    // not `stdin`. `ends(seg, word)` allows that trailing non-identifier
+    // junk without matching `stdinner` as `stdin`.
+    segs.windows(2)
+        .any(|w| w[0] == "dev" && ends(w[1], "stdin"))
+        || segs
+            .windows(3)
+            .any(|w| w[0] == "dev" && w[1] == "fd" && ends(w[2], "0"))
+        || segs.windows(4).any(|w| {
+            w[0] == "proc"
+                && (w[1] == "self"
+                    || w[1] == "thread-self"
+                    || w[1].bytes().all(|b| b.is_ascii_digit()))
+                && w[2] == "fd"
+                && ends(w[3], "0")
+        })
+        || contains_from_stdin(&lower)
+}
+
+/// `seg` is exactly `word`, or starts with `word` followed by a character
+/// that can't continue an identifier — the trailing quote/paren/`;` after a
+/// matched path's last segment (`'/dev/stdin')` splits into a `stdin')`
+/// segment). `stdinner` is not `stdin` either way.
+fn ends(seg: &str, word: &str) -> bool {
+    match seg.strip_prefix(word) {
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_'),
+        None => false,
+    }
+}
+
+/// Does `lower` (already lowercased) contain a bare `FROM STDIN` — as two
+/// adjacent word tokens, so `from_stdin_table` (one identifier) doesn't
+/// match?
+fn contains_from_stdin(lower: &str) -> bool {
+    let mut prev_was_from = false;
+    for tok in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if tok.is_empty() {
+            continue;
+        }
+        if prev_was_from && tok == "stdin" {
+            return true;
+        }
+        prev_was_from = tok == "from";
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1479,6 +1594,50 @@ mod tests {
         assert_eq!(m.owner.as_deref(), Some("Finance team <fin@example.com>"));
         assert_eq!(m.certified.as_deref(), Some("2026-10-15"));
         let j = m.nav_json("s");
+        // #301: an explicit nav/start-page order
+        let m = parse_dashboard_meta("s", "-- @order -3\nSELECT 1;");
+        assert_eq!(m.order, Some(-3));
+        assert_eq!(m.order_key("s"), (-3, "s"));
+        for bad in [
+            "-- @order\n",
+            "-- @order  \n",
+            "-- @order one\n",
+            "-- @order 1.5\n",
+        ] {
+            let m = parse_dashboard_meta("s", bad);
+            assert_eq!(m.order, None, "{bad:?}");
+            assert_eq!(m.order_key("s"), (i64::MAX, "s"));
+        }
+        // ties and unordered dashboards break on id
+        let mut ds = ["z", "a", "m"]
+            .iter()
+            .map(|id| (parse_dashboard_meta(id, "-- @order 1\nSELECT 1;"), *id))
+            .collect::<Vec<_>>();
+        ds.sort_by(|(am, aid), (bm, bid)| am.order_key(aid).cmp(&bm.order_key(bid)));
+        assert_eq!(
+            ds.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ["a", "m", "z"]
+        );
+        let mut mixed = [
+            ("zzz_first", Some(1)),
+            ("aaa_second", Some(2)),
+            ("mmm_third", None),
+        ]
+        .iter()
+        .map(|(id, order)| {
+            let script = match order {
+                Some(n) => format!("-- @order {n}\nSELECT 1;"),
+                None => "SELECT 1;".to_string(),
+            };
+            (parse_dashboard_meta(id, &script), *id)
+        })
+        .collect::<Vec<_>>();
+        mixed.sort_by(|(am, aid), (bm, bid)| am.order_key(aid).cmp(&bm.order_key(bid)));
+        assert_eq!(
+            mixed.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ["zzz_first", "aaa_second", "mmm_third"],
+            "explicit @order wins over file-name order; unordered sorts last"
+        );
         assert_eq!(j["owner"], "Finance team <fin@example.com>");
         assert_eq!(j["certified"], "2026-10-15");
         assert!(j["group"].is_null() && j["tags"].as_array().unwrap().is_empty());
@@ -1558,5 +1717,67 @@ mod tests {
         assert!(has_dot_command(".shell id"));
         assert!(has_dot_command("SELECT 1;\n  .read x"));
         assert!(!has_dot_command("SELECT 1.5, t.x FROM t"));
+    }
+
+    #[test]
+    fn stdin_reads() {
+        assert!(reads_stdin("SELECT * FROM read_csv('/dev/stdin')"));
+        assert!(
+            reads_stdin("select * from READ_CSV('/DEV/STDIN')"),
+            "case-insensitive"
+        );
+        assert!(
+            reads_stdin("COPY t FROM '/dev/fd/0'"),
+            "the /dev/fd/0 alias"
+        );
+        assert!(!reads_stdin("SELECT * FROM read_csv('data.csv')"));
+        assert!(!reads_stdin("SELECT 'stdin is just a word here' AS note"));
+    }
+
+    /// sec-review-342 L1: every bypass the review found against the old
+    /// literal-substring check.
+    #[test]
+    fn stdin_reads_bypasses() {
+        assert!(
+            reads_stdin("COPY t FROM STDIN;"),
+            "FROM STDIN (no path at all — DuckDB reads /dev/stdin)"
+        );
+        assert!(
+            reads_stdin("copy t from \tstdin ;"),
+            "FROM STDIN, any whitespace, case-insensitive"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/self/fd/0')"),
+            "/proc/self/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/thread-self/fd/0')"),
+            "/proc/thread-self/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/proc/1234/fd/0')"),
+            "/proc/<pid>/fd/0"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/dev//stdin')"),
+            "a repeated slash"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_text('/dev/./stdin')"),
+            "a /./ segment"
+        );
+        assert!(
+            reads_stdin("SELECT * FROM read_csv('/dev/.//./stdin')"),
+            "several repeated/./ segments"
+        );
+        // Not bypasses (unchanged from before): a computed path is out of
+        // scope for this fast path (the round timeout covers it), and a
+        // word that merely contains "from"/"stdin" as part of a longer
+        // identifier must not false-positive.
+        assert!(!reads_stdin("SELECT * FROM read_csv('/dev/' || 'stdin')"));
+        assert!(!reads_stdin("SELECT * FROM from_stdin_table"));
+        assert!(!reads_stdin("SELECT * FROM read_csv('-')"));
+        assert!(!reads_stdin("SELECT * FROM read_csv('/dev/std[i]n')"));
+        assert!(!reads_stdin("SELECT /proc_stats FROM t")); // no /fd/0 at all
     }
 }

@@ -69,7 +69,7 @@ pub struct Diagnostic {
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Header comments ([`header_diags`], warnings): `header/empty-group` |
     /// `header/long-group` | `header/too-many-tags` | `header/empty-owner` |
-    /// `header/bad-certified` | `header/long-description`. A served folder ([`folder_diags`], warnings):
+    /// `header/bad-certified` | `header/bad-order` | `header/long-description`. A served folder ([`folder_diags`], warnings):
     /// `folder/duplicate-title` | `folder/bad-id`.
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
@@ -1570,11 +1570,11 @@ pub fn check_policy(
 pub const MAX_DESCRIPTION_CHARS: usize = 160;
 
 /// The header comments that place and describe a dashboard (`-- @group`,
-/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`): an empty or
-/// over-long group, more tags than are kept, a description over
+/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order`):
+/// an empty or over-long group, more tags than are kept, a description over
 /// [`MAX_DESCRIPTION_CHARS`], an empty owner, a certification date that
-/// isn't `YYYY-MM-DD`. Reported as statement 0 (the header comes before the first
-/// statement).
+/// isn't `YYYY-MM-DD`, an `@order` that isn't a plain integer. Reported as
+/// statement 0 (the header comes before the first statement).
 pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     use crate::host::serving::{
         header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_TAGS,
@@ -1638,6 +1638,21 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                     "`-- @certified {d}` is not a date written YYYY-MM-DD (e.g. 2026-10-17) — \
                      the dashboard is shown as not certified"
                 ),
+                line,
+            );
+        } else if let Some(o) = header_value(line, "order").filter(|o| o.parse::<i64>().is_err()) {
+            warn(
+                "header/bad-order",
+                if o.is_empty() {
+                    "`-- @order` has no value — the dashboard sorts after every explicitly \
+                     ordered one, alphabetically by id"
+                        .into()
+                } else {
+                    format!(
+                        "`-- @order {o}` is not a plain integer — the dashboard sorts after every \
+                         explicitly ordered one, alphabetically by id"
+                    )
+                },
                 line,
             );
         } else if let Some(t) = header_value(line, "tags") {
@@ -3704,6 +3719,11 @@ mod design_tests {
             ["header/bad-certified"]
         );
         assert_eq!(codes("-- @certified\n"), ["header/bad-certified"]);
+        assert!(codes("-- @order 1\nSELECT 1;").is_empty());
+        assert!(codes("-- @order -3\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @order\n"), ["header/bad-order"]);
+        assert_eq!(codes("-- @order one\n"), ["header/bad-order"]);
+        assert_eq!(codes("-- @order 1.5\n"), ["header/bad-order"]);
         assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
         let long = format!(
             "-- @description {}\n-- @description {}\n",
