@@ -552,6 +552,9 @@ fn authoring_mode(o: &Opts) {
     if o.open_browser {
         let _ = open::that(&url);
     }
+    // #304: clean up the session's private staging directory even if we're
+    // killed (Ctrl-C, `kill`) rather than exiting normally.
+    install_cleanup_on_signal();
     let session = Mutex::new(AuthoringSession::new(db.clone()));
     run_workers(server, 1, move |req| {
         handle_authoring(&guard, &session, req)
@@ -595,6 +598,18 @@ fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, m
         // ever sees the text.
         if sv::has_dot_command(&sql) {
             return text(req, 400, "CLI dot-commands are not allowed");
+        }
+        // #304: a read of the CLI's own stdin blocks forever (it's the pipe
+        // this session writes staged queries to), wedging the only
+        // authoring worker until the duckdb process is killed and
+        // restarted. Refuse before the CLI ever sees it.
+        if sv::reads_stdin(&sql) {
+            return text(
+                req,
+                400,
+                "reading /dev/stdin is not allowed here (it is this session's own query pipe \
+                 and would hang); read a file instead",
+            );
         }
         return match session.lock().unwrap_or_else(|p| p.into_inner()).run(&sql) {
             Ok(body) => {
@@ -646,6 +661,47 @@ fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, m
 
 // ---------- the authoring session (#275) ----------
 
+/// The current `AuthoringSession`'s private staging directory (`#304`), so a
+/// SIGINT/SIGTERM handler — which cannot safely reach a `Mutex<AuthoringSession>`
+/// a signal might land while it's locked — can still remove it. Set once at
+/// [`AuthoringSession::new`], cleared by [`Drop for AuthoringSession`] on a
+/// normal exit, and otherwise removed (once) by [`cleanup_on_signal`].
+static SESSION_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Install a SIGINT/SIGTERM handler that removes [`SESSION_DIR`] before the
+/// process exits (`#304`): without one, `Drop for AuthoringSession` never
+/// runs on a kill (the default disposition terminates the process without
+/// unwinding), and every Ctrl-C or `kill` leaves an `anofox-session-*`
+/// directory — 0700, but possibly still holding an in-flight query's text —
+/// behind in the temp directory. The handler itself only sets a flag
+/// (signal-safe); a background thread polls it and does the actual cleanup,
+/// since taking a mutex or touching the filesystem from inside a signal
+/// handler is not guaranteed safe. Unix only (`serve` is best-effort on
+/// Windows, #275 I3); on Windows the directory is left as before.
+#[cfg(unix)]
+fn install_cleanup_on_signal() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_: libc::c_int) {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    std::thread::spawn(|| loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            if let Some(dir) = SESSION_DIR.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            std::process::exit(130); // 128 + SIGINT, the shell's usual convention
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    });
+}
+#[cfg(not(unix))]
+fn install_cleanup_on_signal() {}
+
 /// One long-lived `duckdb` CLI process for the builder's `/query`s, so what a
 /// statement leaves in the session — ATTACH, TEMP tables / views / macros,
 /// SET VARIABLE, LOAD, SET, USE — is there for the next one (as in DuckDB-Wasm
@@ -685,6 +741,9 @@ impl AuthoringSession {
             );
             std::process::exit(1);
         }
+        // #304: a signal handler cleans this up if the process is killed
+        // before `Drop` ever runs.
+        *SESSION_DIR.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir.clone());
         AuthoringSession {
             db,
             dir,
@@ -730,6 +789,12 @@ impl Drop for AuthoringSession {
             let _ = l.child.wait();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
+        // #304: a clean exit removed it already; don't let the signal
+        // handler remove a *later* session's directory by mistake.
+        let mut g = SESSION_DIR.lock().unwrap_or_else(|p| p.into_inner());
+        if g.as_deref() == Some(self.dir.as_path()) {
+            *g = None;
+        }
     }
 }
 

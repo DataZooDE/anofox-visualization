@@ -1143,6 +1143,20 @@ pub fn has_dot_command(sql: &str) -> bool {
     sql.lines().any(|l| l.trim_start().starts_with('.'))
 }
 
+/// Does this body try to read the authoring session's own stdin (`#304`,
+/// `/dev/stdin`, `/dev/fd/0`)? The long-lived `duckdb` CLI's stdin is the
+/// same pipe the server writes every round's staged-query script to; a
+/// statement that reads it (`read_csv('/dev/stdin')`, `COPY … FROM
+/// '/dev/stdin'`, …) blocks forever waiting for more of that pipe, wedging
+/// the only authoring worker until the CLI is killed. Checked case-
+/// insensitively, quote-agnostic, against the plain bytes of the path (a
+/// literal elsewhere in the body, e.g. in a string value, is refused too —
+/// this fails closed like [`has_dot_command`], not a sandbox).
+pub fn reads_stdin(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("/dev/stdin") || lower.contains("/dev/fd/0")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1623,5 +1637,20 @@ mod tests {
         assert!(has_dot_command(".shell id"));
         assert!(has_dot_command("SELECT 1;\n  .read x"));
         assert!(!has_dot_command("SELECT 1.5, t.x FROM t"));
+    }
+
+    #[test]
+    fn stdin_reads() {
+        assert!(reads_stdin("SELECT * FROM read_csv('/dev/stdin')"));
+        assert!(
+            reads_stdin("select * from READ_CSV('/DEV/STDIN')"),
+            "case-insensitive"
+        );
+        assert!(
+            reads_stdin("COPY t FROM '/dev/fd/0'"),
+            "the /dev/fd/0 alias"
+        );
+        assert!(!reads_stdin("SELECT * FROM read_csv('data.csv')"));
+        assert!(!reads_stdin("SELECT 'stdin is just a word here' AS note"));
     }
 }

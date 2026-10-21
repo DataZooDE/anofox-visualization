@@ -68,6 +68,21 @@ so the protection is about making sure *only you* can send it:
   for a clean session. The database file stays open, and locked, while
   `serve` runs. If the CLI exits, the next query starts a new session and
   the error says so.
+- **No reading the session's own stdin** (`serve <db>`, #304). The one
+  long-lived CLI's stdin is the pipe the server writes every round's staged
+  query to; a body that reads it (`read_csv('/dev/stdin')`, `COPY … FROM
+  '/dev/fd/0'`, any case) would otherwise block forever waiting for more of
+  that pipe, wedging the single authoring worker until the `duckdb` process
+  is killed. Such a body is refused (`400`) before it reaches the CLI, the
+  same way a dot-command is.
+- **The private session directory is cleaned up even if `serve` is
+  killed** (`#304`). `anofox-session-*` (its staged queries) is removed on
+  a normal exit as before, and now also on SIGINT/SIGTERM (Ctrl-C, `kill`):
+  a signal handler sets a flag a background thread polls, which removes the
+  directory and exits — the default "just die" disposition never ran the
+  Rust destructor that did this, so every kill used to leave the directory
+  (and, if one was in flight, that round's query text) behind. Best-effort;
+  a `kill -9` or a crash still cannot run any cleanup code.
 - Body limit 4 MiB; authoring results are capped at 1,000,000 rows.
 
 `SELECT anofox_serve_stop(port)` stops an extension server.
