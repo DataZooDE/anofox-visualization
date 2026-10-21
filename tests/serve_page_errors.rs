@@ -222,3 +222,149 @@ fn panel_render_error_is_redacted() {
     );
     assert!(stderr.contains("hunter2_panel_sentinel_285"), "{stderr}");
 }
+
+/// #315 (sec-review-314 I1): the contract arm (`anofox_plot_*` macro panels)
+/// is the chart arm's twin, redacted by the same three-line change, but only
+/// the chart arm (above) had a test. A `tests` contract call whose row is
+/// missing every column the schema needs fails with `RenderError::BadSpec`
+/// naming the columns it *does* have — so a column named after a sentinel
+/// reaches that error text exactly the way a data value reaches `::ABLINE`'s,
+/// and must be redacted the same way.
+#[test]
+fn contract_panel_render_error_is_redacted() {
+    if !have_duckdb("contract_panel_render_error_is_redacted") {
+        return;
+    }
+    let s = Scratch::new("contract");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("sentinel.sql"),
+        "SELECT anofox_plot_tests(t) FROM (SELECT 1 AS hunter2_contract_sentinel_315) t;\n\
+         SELECT x::XAXIS, y::BARCHART FROM t;\n",
+    )
+    .unwrap();
+    let init = s.0.join("init.sql");
+    std::fs::write(
+        &init,
+        "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS x, 2 AS y;\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut conn = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        conn,
+        "GET /d/sentinel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut resp = String::new();
+    conn.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(!body.contains("hunter2_contract_sentinel_315"), "{body}");
+    assert!(body.contains("this panel could not be drawn"), "{body}");
+
+    let out = server.finish();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[anofox-serve] dashboard 'sentinel' panel render failed:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("hunter2_contract_sentinel_315"), "{stderr}");
+}
+
+/// #315 (sec-review-314 I2): `data-warnings` on a *successful* contract
+/// render can name the panel's own data (`anofox_plot_compare`'s "not in
+/// `<factor>`" warning) — the one place diagnostic text that isn't drawn
+/// still reached the script-free page. No script there reads it, so it's
+/// now stripped.
+#[test]
+fn contract_panel_data_warnings_are_stripped() {
+    if !have_duckdb("contract_panel_data_warnings_are_stripped") {
+        return;
+    }
+    let s = Scratch::new("warn");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("cmp.sql"),
+        "SELECT anofox_plot_compare(r, value := 'y', factor := 'g', \
+         tests := [{'group1': 'a', 'group2': 'hunter2_warn_sentinel_315', 'p_adj': 0.01}]) \
+         FROM (VALUES ('a', 1.0), ('a', 1.4), ('b', 2.1), ('b', 2.6)) r(g, y);\n",
+    )
+    .unwrap();
+    // `--db` is opened `-readonly`, which requires the file to already
+    // exist; the dashboard above needs no table of its own, so `--init`
+    // just creates the (otherwise unused) database file.
+    let init = s.0.join("init.sql");
+    std::fs::write(&init, "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS x;\n").unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut conn = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        conn,
+        "GET /d/cmp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut resp = String::new();
+    conn.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(body.contains("<svg"), "{body}");
+    assert!(!body.contains("data-warnings"), "{body}");
+    assert!(!body.contains("hunter2_warn_sentinel_315"), "{body}");
+    drop(server);
+}

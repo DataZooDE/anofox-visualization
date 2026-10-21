@@ -1608,6 +1608,68 @@ pub(crate) fn with_root_attr(mut svg: String, name: &str, value: &str) -> String
     svg
 }
 
+/// The inverse of [`with_root_attr`]: remove `name="…"` from the SVG's root
+/// start tag, if present. A no-op when the attribute isn't there, or `svg`
+/// doesn't start with `<svg`. Used to drop `data-warnings` on the script-free
+/// served page (#315), where no script ever reads it, so it would otherwise
+/// be the one place that page carries diagnostic text drawn from a panel's
+/// own rows (`anofox_plot_compare`'s "not in `<factor>`" warning) without
+/// being shown.
+pub fn without_root_attr(svg: &str, name: &str) -> String {
+    if !svg.starts_with("<svg") {
+        return svg.to_string();
+    }
+    let Some(tag_end) = svg.find('>') else {
+        return svg.to_string();
+    };
+    let needle = format!(" {name}=\"");
+    let Some(attr_start) = svg[..tag_end].find(&needle) else {
+        return svg.to_string();
+    };
+    let value_start = attr_start + needle.len();
+    // `escape_xml` escapes `"` inside the value, so the first raw `"` after
+    // it is always the attribute's own closing quote.
+    let Some(rel_close) = svg[value_start..tag_end].find('"') else {
+        return svg.to_string();
+    };
+    let attr_end = value_start + rel_close + 1;
+    let mut out = String::with_capacity(svg.len() - (attr_end - attr_start));
+    out.push_str(&svg[..attr_start]);
+    out.push_str(&svg[attr_end..]);
+    out
+}
+
+#[cfg(test)]
+mod without_root_attr_tests {
+    use super::without_root_attr;
+
+    #[test]
+    fn removes_the_attribute_and_nothing_else() {
+        let svg = r#"<svg data-warnings="[&quot;a&quot;]" data-x="1">…</svg>"#;
+        assert_eq!(
+            without_root_attr(svg, "data-warnings"),
+            r#"<svg data-x="1">…</svg>"#
+        );
+        // order doesn't matter, and the chosen attribute's value can hold an
+        // escaped `"` without the removal stopping short
+        let svg = r#"<svg data-x="1" data-warnings="[&quot;not in &quot;x&quot;&quot;]">…</svg>"#;
+        assert_eq!(
+            without_root_attr(svg, "data-warnings"),
+            r#"<svg data-x="1">…</svg>"#
+        );
+    }
+
+    #[test]
+    fn a_missing_attribute_or_a_non_svg_is_a_no_op() {
+        let svg = r#"<svg data-x="1">…</svg>"#;
+        assert_eq!(without_root_attr(svg, "data-warnings"), svg);
+        assert_eq!(
+            without_root_attr("<pre>this panel could not be drawn</pre>", "data-warnings"),
+            "<pre>this panel could not be drawn</pre>"
+        );
+    }
+}
+
 /// Like [`render_with`], but renders a nested `<svg x y width height
 /// viewBox>` fragment (no `xmlns`) positioned at `(x, y)` in a parent SVG —
 /// for composing dashboards without string surgery. (ggplot-rs reports no

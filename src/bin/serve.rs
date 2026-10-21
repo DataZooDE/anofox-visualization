@@ -1728,6 +1728,10 @@ fn render_dashboard_page(
                     );
                     PANEL_RENDER_ERROR_HTML.to_string()
                 });
+                // #315: no script on this page ever reads `data-warnings`,
+                // and it's the one place a successful render can still
+                // carry diagnostic text drawn from the panel's own rows.
+                let svg = anofox_visualization::without_root_attr(&svg, "data-warnings");
                 panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
             }
             continue;
@@ -1764,6 +1768,8 @@ fn render_dashboard_page(
             );
             PANEL_RENDER_ERROR_HTML.to_string()
         });
+        // #315: see the matching note on the contract-panel path above.
+        let svg = anofox_visualization::without_root_attr(&svg, "data-warnings");
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
     }
 
