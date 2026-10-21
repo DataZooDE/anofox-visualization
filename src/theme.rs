@@ -1126,6 +1126,30 @@ impl ResolvedTheme {
     /// Text the plotting engine writes in its generic `sans-serif` (geom
     /// labels, legends) or the extension's own `system-ui,sans-serif` takes
     /// the theme's font family.
+    ///
+    /// #326 evaluated replacing this with ggplot-rs's `Theme::element_geom`
+    /// (`ElementGeom::with_ink`/`with_paper`, sipemu/ggplot-rs#156 — 0.21.1
+    /// extended it from a handful of geoms to nearly all of them). It
+    /// doesn't fit: `element_geom` only recolours a geom's *built-in*
+    /// default — a layer configured through `geom_*_with(...)` is gated out
+    /// entirely (an `explicit_style` check in the build pipeline, not a
+    /// value comparison, so it can't tell our deliberate explicit colour
+    /// from one nobody set). Every builder in this crate calls `geom_*_with`
+    /// and sets its own colour on purpose — brand, status
+    /// (ok/warn/fail), category palette slot, or (for the quiet dashed
+    /// reference rules this remap also has to cover) the theme's own
+    /// `chart_text()` — none of which is "ggplot2's hard-coded black/white
+    /// default nobody touched", the one case `element_geom` targets. Even
+    /// for the few geoms where the colour *is* just `chart_text()`
+    /// (reference lines), switching would mean dropping the explicit
+    /// `color:` field and adding a whole-plot `.theme(Theme { geom: …,
+    /// ..})` instead — and `remap_neutrals` would still be needed
+    /// regardless, for the legend/axis/grid text and the DataZoo-palette
+    /// swap above, neither of which `element_geom` (geom marks only, not
+    /// `Theme`-level panel/axis/legend elements) covers. Annotations
+    /// (`annotate_text`/`segment`/`rect`) don't honour `element_geom` at
+    /// all yet (sipemu/ggplot-rs#157, open) — a second reason a partial
+    /// switch couldn't be complete. `remap_neutrals` stays.
     pub fn finish_svg(&self, svg: String) -> String {
         let svg = self.with_font(svg);
         let dz = self.palette.as_slice() == DZ_PALETTE.as_slice();
