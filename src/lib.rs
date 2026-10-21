@@ -736,6 +736,15 @@ pub struct RenderOptions {
     /// Line the plot area and x window up with other panels (a chart and
     /// its `::TRACK`s, see [`track::render_stack`]); `None` = the panel's own.
     pub align: Option<track::Align>,
+    /// Record the plotting engine's build warnings on the SVG root as
+    /// `data-warnings` (see [`render_with_warnings`])? Default `true`. A
+    /// host with no script that reads it — the script-free served page
+    /// (#315/sec-review-342 L2) — sets this `false` so a warning naming the
+    /// panel's own data (e.g. `anofox_plot_compare`'s "not in `<factor>`")
+    /// is simply never attached, on every SVG a render produces (a title
+    /// bar's chart, each `::TRACK`, each contract row) — not stripped back
+    /// out of some of them after the fact.
+    pub record_warnings: bool,
 }
 
 impl Default for RenderOptions {
@@ -748,6 +757,7 @@ impl Default for RenderOptions {
             theme: theme::default_light(),
             locale: format::Locale::EN_US,
             align: None,
+            record_warnings: true,
         }
     }
 }
@@ -1280,7 +1290,7 @@ fn render_titled(
         open = svg_open(Place::Doc, w, body_h + TITLE_BAR_H),
         text = title_bar_text(title, o),
     );
-    Ok(with_warnings_attr(svg, &warnings))
+    Ok(with_warnings_attr(svg, &warnings, o.record_warnings))
 }
 
 /// The `::TITLE` bar's text as a dashboard card draws it
@@ -1339,7 +1349,7 @@ pub fn render_with_title(
 /// itself (0.21, B2-1): `draw_line` splits runs at a non-finite vertex and
 /// `draw_quadratic`/arrows drop a non-finite path outright.
 pub(crate) fn finish_contract_svg(svg: String, warnings: &[String], o: &RenderOptions) -> String {
-    with_warnings_attr(o.theme.finish_svg(svg), warnings)
+    with_warnings_attr(o.theme.finish_svg(svg), warnings, o.record_warnings)
 }
 
 /// Render a panel from a JSON spec (see [`render_spec_checked`]). Returns the
@@ -1575,16 +1585,21 @@ pub fn render_with_warnings(
 ) -> Result<Rendered, RenderError> {
     let (svg, warnings) = render_placed(cols, Place::Doc, width, height, o)?;
     Ok(Rendered {
-        svg: with_warnings_attr(svg, &warnings),
+        svg: with_warnings_attr(svg, &warnings, o.record_warnings),
         warnings,
     })
 }
 
-/// Record `warnings` on the SVG root as `data-warnings="[…]"` (escaped JSON).
-/// The root start tag ends at the first `>`: every writer escapes `>` inside
+/// Record `warnings` on the SVG root as `data-warnings="[…]"` (escaped
+/// JSON), unless `record` is `false` (`RenderOptions::record_warnings`,
+/// #315/sec-review-342 L2) — a host with no script that ever reads the
+/// attribute, such as the script-free served page, then never gets it on
+/// any SVG a render produces, instead of it being stripped back out of
+/// some of them (a title bar's chart, `::TRACK`s, …) after the fact. The
+/// root start tag ends at the first `>`: every writer escapes `>` inside
 /// attribute values.
-fn with_warnings_attr(svg: String, warnings: &[String]) -> String {
-    if warnings.is_empty() {
+fn with_warnings_attr(svg: String, warnings: &[String], record: bool) -> String {
+    if !record || warnings.is_empty() {
         return svg;
     }
     let json = serde_json::to_string(warnings).unwrap_or_default();
@@ -1606,68 +1621,6 @@ pub(crate) fn with_root_attr(mut svg: String, name: &str, value: &str) -> String
         svg.insert_str(at, &format!(" {name}=\"{}\"", format::escape_xml(value)));
     }
     svg
-}
-
-/// The inverse of [`with_root_attr`]: remove `name="…"` from the SVG's root
-/// start tag, if present. A no-op when the attribute isn't there, or `svg`
-/// doesn't start with `<svg`. Used to drop `data-warnings` on the script-free
-/// served page (#315), where no script ever reads it, so it would otherwise
-/// be the one place that page carries diagnostic text drawn from a panel's
-/// own rows (`anofox_plot_compare`'s "not in `<factor>`" warning) without
-/// being shown.
-pub fn without_root_attr(svg: &str, name: &str) -> String {
-    if !svg.starts_with("<svg") {
-        return svg.to_string();
-    }
-    let Some(tag_end) = svg.find('>') else {
-        return svg.to_string();
-    };
-    let needle = format!(" {name}=\"");
-    let Some(attr_start) = svg[..tag_end].find(&needle) else {
-        return svg.to_string();
-    };
-    let value_start = attr_start + needle.len();
-    // `escape_xml` escapes `"` inside the value, so the first raw `"` after
-    // it is always the attribute's own closing quote.
-    let Some(rel_close) = svg[value_start..tag_end].find('"') else {
-        return svg.to_string();
-    };
-    let attr_end = value_start + rel_close + 1;
-    let mut out = String::with_capacity(svg.len() - (attr_end - attr_start));
-    out.push_str(&svg[..attr_start]);
-    out.push_str(&svg[attr_end..]);
-    out
-}
-
-#[cfg(test)]
-mod without_root_attr_tests {
-    use super::without_root_attr;
-
-    #[test]
-    fn removes_the_attribute_and_nothing_else() {
-        let svg = r#"<svg data-warnings="[&quot;a&quot;]" data-x="1">…</svg>"#;
-        assert_eq!(
-            without_root_attr(svg, "data-warnings"),
-            r#"<svg data-x="1">…</svg>"#
-        );
-        // order doesn't matter, and the chosen attribute's value can hold an
-        // escaped `"` without the removal stopping short
-        let svg = r#"<svg data-x="1" data-warnings="[&quot;not in &quot;x&quot;&quot;]">…</svg>"#;
-        assert_eq!(
-            without_root_attr(svg, "data-warnings"),
-            r#"<svg data-x="1">…</svg>"#
-        );
-    }
-
-    #[test]
-    fn a_missing_attribute_or_a_non_svg_is_a_no_op() {
-        let svg = r#"<svg data-x="1">…</svg>"#;
-        assert_eq!(without_root_attr(svg, "data-warnings"), svg);
-        assert_eq!(
-            without_root_attr("<pre>this panel could not be drawn</pre>", "data-warnings"),
-            "<pre>this panel could not be drawn</pre>"
-        );
-    }
 }
 
 /// Like [`render_with`], but renders a nested `<svg x y width height

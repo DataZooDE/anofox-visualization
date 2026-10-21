@@ -507,3 +507,106 @@ fn engine_warnings_are_surfaced() {
     let r = render_with_warnings(&ok, 400, 300, &RenderOptions::default()).unwrap();
     assert!(r.warnings.is_empty() && !r.svg.contains("data-warnings"));
 }
+
+/// sec-review-342 L2: `render_with_title` (a `::TITLE` panel) and
+/// `track::render_stack` (a `::TRACK`) each produce more than one top-level
+/// `<svg>` document in one string/`Vec`. `RenderOptions::record_warnings =
+/// false` (the script-free served page, #315) must keep `data-warnings` off
+/// of *every* one of them, not just the first — the gap the PR's original
+/// string-surgery fix (`without_root_attr`, now replaced by this option)
+/// left open.
+#[test]
+fn record_warnings_off_covers_every_top_level_svg_not_just_the_first() {
+    use anofox_visualization::{render_with_title, track};
+    // The exact recipe from `engine_warnings_are_surfaced` above: a density
+    // chart with one point per category reliably gives one ggplot-rs build
+    // warning.
+    let warned = || {
+        vec![
+            Column::new(
+                "c",
+                Role::Category,
+                vec![Value::Str("a".into()), Value::Str("b".into())],
+            ),
+            Column::new(
+                "v",
+                Role::Value(Kind::Density),
+                vec![Value::Float(1.0), Value::Float(1.0)],
+            ),
+        ]
+    };
+    let titled = || {
+        let mut cols = warned();
+        cols.push(Column::new(
+            "t",
+            Role::Title,
+            vec![Value::Str("My Chart".into())],
+        ));
+        cols
+    };
+    let clean = vec![
+        Column::new("x", Role::X, vec![Value::Float(1.0), Value::Float(2.0)]),
+        Column::new(
+            "y",
+            Role::Value(Kind::Line),
+            vec![Value::Float(1.0), Value::Float(2.0)],
+        ),
+    ];
+    let off = RenderOptions {
+        record_warnings: false,
+        ..RenderOptions::default()
+    };
+
+    // A ::TITLE panel: `render_with_title` returns two sibling SVGs (the
+    // title bar, then the chart) concatenated in one string. The warning
+    // lives on the chart's.
+    let on_svg = render_with_title(&titled(), &[], 460, 300, &RenderOptions::default()).unwrap();
+    assert_eq!(
+        on_svg.matches("<svg").count(),
+        2,
+        "sanity: a title bar + a chart, {on_svg}"
+    );
+    assert!(
+        on_svg.contains("data-warnings"),
+        "sanity: the recipe does warn: {on_svg}"
+    );
+    let off_svg = render_with_title(&titled(), &[], 460, 300, &off).unwrap();
+    assert!(!off_svg.contains("data-warnings"), "{off_svg}");
+
+    // A ::TRACK: the chart above is clean, but its own strip warns —
+    // `render_with_title`'s track branch goes through
+    // `track::render_stack`, which `without_root_attr` never touched
+    // (sec-review-342 L2) because it only edited the *first* `<svg>`.
+    let on_svg = render_with_title(
+        &clean,
+        &[(warned(), 0)],
+        460,
+        300,
+        &RenderOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        on_svg.matches("<svg").count(),
+        2,
+        "sanity: a chart + one track, {on_svg}"
+    );
+    assert!(
+        on_svg.contains("data-warnings"),
+        "sanity: the track does warn: {on_svg}"
+    );
+    let off_svg = render_with_title(&clean, &[(warned(), 0)], 460, 300, &off).unwrap();
+    assert!(!off_svg.contains("data-warnings"), "{off_svg}");
+
+    // Same check one level down, directly on `track::render_stack`.
+    let on_svgs = track::render_stack(
+        &clean,
+        &[(warned(), 0)],
+        460,
+        300,
+        &RenderOptions::default(),
+    )
+    .unwrap();
+    assert!(on_svgs.iter().any(|s| s.contains("data-warnings")));
+    let off_svgs = track::render_stack(&clean, &[(warned(), 0)], 460, 300, &off).unwrap();
+    assert!(off_svgs.iter().all(|s| !s.contains("data-warnings")));
+}

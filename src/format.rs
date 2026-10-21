@@ -252,10 +252,20 @@ pub fn escape_xml(s: &str) -> String {
 /// HTML5 parser (unlike strict XML) decodes back to the exact original code
 /// point. Everything else is escaped the same way as [`escape_xml`].
 ///
-/// The one input this still can't carry is U+0000 (NUL): HTML5's own
-/// numeric-character-reference algorithm defines `&#0;` as U+FFFD, so no
-/// attribute encoding can round-trip it — the same pre-existing limitation a
-/// literal NUL already has in every HTML parser (and in [`escape_xml`]).
+/// Three inputs still can't round-trip (sec-review-342 I2), and all three
+/// fail closed — the allow-list check simply rejects the resubmitted value,
+/// as before this escaper existed:
+/// - **U+0000 (NUL).** HTML5's own numeric-character-reference algorithm
+///   defines `&#0;` as U+FFFD, so no attribute encoding can carry it — the
+///   same pre-existing limitation a literal NUL already has in every HTML
+///   parser (and in [`escape_xml`]).
+/// - **CR and LF.** The browser's HTML parser itself normalizes a raw `\r`
+///   (and `\r\n`) in an attribute value to `\n` during input preprocessing,
+///   before this escaper's numeric reference would even apply; a `&#13;`
+///   reference survives that step, but `application/x-www-form-urlencoded`
+///   submission then normalizes every lone `\n` or `\r` it carries to
+///   `\r\n`. Either way, an allowed value containing a bare CR or LF comes
+///   back changed.
 ///
 /// Use this only for an attribute a browser's own form submission reads
 /// back (a served `<option value="…">`); for everything else — including
