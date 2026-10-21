@@ -3619,8 +3619,9 @@ fn render_heatmap(
             None => Value::Na,
         })
         .collect();
+    let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
     let data = vec![
-        ("x".to_string(), x.values.clone()),
+        ("x".to_string(), x_data.clone()),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
         ("label".to_string(), tips),
@@ -3638,10 +3639,16 @@ fn render_heatmap(
             ..Default::default()
         });
     let mut plot = fill.scale(plot, o, &fmt).theme(th);
-    if let Some(levels) = str_levels(&x.values) {
-        plot = plot.scale_x_discrete(
-            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
-        );
+    if let Some(levels) = &x_levels {
+        let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
+        let thinned = x_thin.is_some();
+        if let Some(thin) = x_thin {
+            sx = sx.with_labels(thin);
+        }
+        plot = plot.scale_x_discrete(sx);
+        if thinned {
+            plot = flat_date_labels(plot);
+        }
     }
     if let Some(mut levels) = str_levels(&y.values) {
         levels.reverse();
@@ -3694,7 +3701,7 @@ fn render_heatmap(
                     ..Default::default()
                 })
                 .layer_data(vec![
-                    ("x".to_string(), pick(&x.values)),
+                    ("x".to_string(), pick(&x_data)),
                     ("y".to_string(), pick(&y.values)),
                     (
                         "cell".to_string(),
@@ -3734,8 +3741,9 @@ fn render_heatmap_categorical(
 ) -> Result<Panel, String> {
     let x = find_role(cols, Role::X).ok_or("heatmap needs an XAXIS column")?;
     let y = find_role(cols, Role::Y).ok_or("heatmap needs a YAXIS column")?;
+    let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
     let data = vec![
-        ("x".to_string(), x.values.clone()),
+        ("x".to_string(), x_data),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
     ];
@@ -3753,10 +3761,16 @@ fn render_heatmap_categorical(
     let mut plot = plot
         .scale_fill(category_scale(o, Aesthetic::Fill, value, cols))
         .theme(th);
-    if let Some(levels) = str_levels(&x.values) {
-        plot = plot.scale_x_discrete(
-            ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
-        );
+    if let Some(levels) = &x_levels {
+        let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
+        let thinned = x_thin.is_some();
+        if let Some(thin) = x_thin {
+            sx = sx.with_labels(thin);
+        }
+        plot = plot.scale_x_discrete(sx);
+        if thinned {
+            plot = flat_date_labels(plot);
+        }
     }
     if let Some(mut levels) = str_levels(&y.values) {
         levels.reverse();
@@ -3810,6 +3824,110 @@ fn str_levels(values: &[Value]) -> Option<Vec<String>> {
         }
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// The sorted distinct days of a date/timestamp column, each formatted the
+/// way a reference line's date label is (`xline_date_text`) — `None` unless
+/// every value is a `Value::DateTime` (so a plain numeric column keeps its
+/// continuous axis).
+fn date_levels(values: &[Value]) -> Option<Vec<String>> {
+    let mut secs: Vec<i64> = Vec::new();
+    for v in values {
+        match v {
+            Value::DateTime(s) => secs.push(*s),
+            Value::Na => {}
+            _ => return None,
+        }
+    }
+    secs.sort_unstable();
+    secs.dedup();
+    (!secs.is_empty()).then(|| secs.into_iter().map(xline_date_text).collect())
+}
+
+/// #332 follow-up: ggplot-rs 0.22's own axis-fit auto-rotates crowded
+/// discrete x labels (45°, or 90° if even that doesn't fit) — but its
+/// crowding estimate divides the panel width by *every* grid column
+/// (`Scale::breaks().len()`), not just the ones [`thin_labels`] actually
+/// printed a label for, so it still sees "9 columns, a 10-char label" and
+/// rotates even though the 5 *visible* labels comfortably fit flat (the
+/// reservation this plan already sized them for). There is no public way to
+/// tell it "an explicit angle, don't auto-tune" — `axis_text_x_angle(0.0)`
+/// reads as unset, the same as never calling it, since the auto-tune only
+/// skips when `angle.abs() >= 1.0`. Filed as a ggplot-rs upstream gap
+/// (sipemu/ggplot-rs#<TBD>: `Scale::breaks()` undercounts a thinned
+/// discrete axis's real label density); until it lands, an angle too small
+/// to see (`0.01°`) opts out without any visible tilt — this is a real
+/// theme parameter, not text patched into the rendered SVG. The angle must
+/// clear the auto-tune's own `angle.abs() < 1.0` "still unset" check but
+/// stay under its separate `angle.abs() > 10.0` "now rotated" one (which
+/// would right-anchor the text and reserve drop height for a tilted line) —
+/// 2° reads as flat to the eye either way.
+fn flat_date_labels(plot: GGPlot) -> GGPlot {
+    plot.axis_text_x_angle(2.0)
+}
+
+/// Every Nth label kept, the rest blanked (""), so a `ScaleDiscrete`'s
+/// `breaks()` still positions every grid column but a crowded axis only
+/// *prints* a readable handful (`with_labels`, which `breaks()` checks
+/// before falling back to the level string — an empty override prints
+/// nothing, not the level's name). `None` when `levels` already fits
+/// without thinning.
+fn thin_labels(levels: &[String], max: usize) -> Option<Vec<String>> {
+    if levels.len() <= max {
+        return None;
+    }
+    let stride = levels.len().div_ceil(max);
+    Some(
+        levels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if i % stride == 0 {
+                    l.clone()
+                } else {
+                    String::new()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// #332: `::HEATMAP`'s x axis, discretized — one grid column per distinct
+/// value, text in first-seen order or a date/timestamp sorted
+/// chronologically — so `GeomTile` sizes every tile to its full column
+/// (`width / breaks`) instead of ggplot2/ggplot-rs's own continuous-axis
+/// `resolution()` (the smallest gap *anywhere in the whole column*): on a
+/// date x with more than one `::YAXIS` row at different, interleaved
+/// cadences, that global minimum can be much narrower than any one row's
+/// own spacing, so a row's tiles fill only a fraction of the gap to their
+/// neighbour instead of the whole cell. Returns the data column to actually
+/// plot (text already *is* the label; a date/timestamp is replaced with its
+/// formatted label, the same device the discrete `::YAXIS` already uses),
+/// the axis's levels (`None`: a genuinely continuous numeric x, unchanged),
+/// and — a date axis only, where "every distinct day" can be far more than
+/// `width` (px) can label — the thinned labels to print instead of all of
+/// them (a date label like `2026-09-01` runs ~70px at the axis font size;
+/// below that many labels, this is `None` — all of them print, as before).
+fn heatmap_x_axis(
+    values: &[Value],
+    width: u32,
+) -> (Vec<Value>, Option<Vec<String>>, Option<Vec<String>>) {
+    if let Some(levels) = str_levels(values) {
+        return (values.to_vec(), Some(levels), None);
+    }
+    if let Some(levels) = date_levels(values) {
+        let data = values
+            .iter()
+            .map(|v| match v {
+                Value::DateTime(s) => Value::Str(xline_date_text(*s)),
+                other => other.clone(),
+            })
+            .collect();
+        let max_labels = ((width as f64 / 70.0).floor() as usize).max(2);
+        let thinned = thin_labels(&levels, max_labels);
+        return (data, Some(levels), thinned);
+    }
+    (values.to_vec(), None, None)
 }
 
 /// The number of distinct (non-missing) values.
