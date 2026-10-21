@@ -455,6 +455,24 @@ impl Database {
     pub fn connect(&self) -> Result<Conn, String> {
         Conn::connect(self.0)
     }
+
+    /// A throwaway `:memory:` staging instance for a Quack source build
+    /// (#352): extension autoload/autoinstall and community extensions are
+    /// off, so nothing loads here except `quack` itself, loaded explicitly
+    /// right after by the caller. `LOAD quack` on the result fails clearly
+    /// ("install it first: INSTALL quack") when it isn't on disk yet, rather
+    /// than DuckDB's generic "extension not found" — autoinstall is off on
+    /// purpose, so a staging build never reaches out to a repository itself.
+    pub fn open_quack_staging() -> Result<Database, String> {
+        Database::open(
+            ":memory:",
+            &[
+                ("autoinstall_known_extensions", "false"),
+                ("autoload_known_extensions", "false"),
+                ("allow_community_extensions", "false"),
+            ],
+        )
+    }
 }
 
 impl Drop for Database {

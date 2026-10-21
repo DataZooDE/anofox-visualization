@@ -4,17 +4,30 @@
 //! session, so a locked dashboard can serve data that lives on another
 //! DuckDB 2.0 process.
 //!
-//! **Quack never enters the serving instance or the user's session.** A
-//! dedicated staging instance does the copy (`copy_from_quack`, added next);
-//! this module is just its options and the token handling: parsing
-//! `options.source`, reading the token fresh per build (never cached, never
-//! logged — every error is passed through [`redact`] first), and
-//! [`SourceOpts`]'s `Debug`, which never prints the token itself (only the
-//! *name* of the env var / file it comes from). See `docs/secure-serving.md`,
-//! "Quack source".
+//! **Quack never enters the serving instance or the user's session.** Every
+//! build opens its own, throwaway staging instance (`Database::open`,
+//! extension autoload/autoinstall off): `LOAD quack`, a `CREATE TEMPORARY
+//! SECRET` (never `ATTACH … (TOKEN …)`, which leaks the token into
+//! `duckdb_databases().options`), `ATTACH '<uri>' AS …`, then the snapshot
+//! file itself `(READ_WRITE)`. Both are `DETACH`ed and the secret is dropped
+//! (best effort) before the staging instance closes; the snapshot file then
+//! goes through the existing `READ_ONLY` + `lock_configuration` path exactly
+//! like a local database (`build_snapshot` in `serve.rs`). The locked,
+//! serving instance itself never loads `quack` — see
+//! `docs/secure-serving.md`, "Quack source".
+//!
+//! The token is read fresh for every build (`read_token`), never cached and
+//! never logged: every error on the way out is passed through [`redact`]
+//! first, and [`SourceOpts`]'s `Debug` never prints it (only the *name* of
+//! the env var / file it comes from).
+//!
+//! `copy_from_quack` below has no timeout or cancellation yet (#352 step 3);
+//! those land in the next step, alongside the watchdog.
 
-use anofox_visualization::host::serving::valid_ident;
-use std::path::PathBuf;
+use crate::db::{Conn, Database};
+use crate::serve::{columns_by_table, fk_order, insertable_columns};
+use anofox_visualization::host::serving::{quote_ident, sql_string_literal, valid_ident};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Remote views: materialise them as tables in the snapshot (Quack exposes no
@@ -230,6 +243,258 @@ pub fn redact(err: &str, token: &str) -> String {
     } else {
         err.replace(token, "<redacted>")
     }
+}
+
+/// Build the snapshot file for a Quack source: a dedicated staging instance
+/// that `LOAD`s `quack`, attaches the source under a temporary secret,
+/// attaches the new snapshot file, copies schema + data (+ materialised
+/// views), then tears both attachments and the secret down.
+///
+/// `dir`: the snapshot's own private directory (the file is created inside
+/// it). No timeout or cancellation yet (#352 step 3) — a slow or wedged
+/// remote query blocks the build; the watchdog lands in the next step.
+///
+/// Returns the database name to attach the file under (`opts.as`), the file
+/// path, and non-fatal warnings (lost FKs/macros/sequences, skipped views,
+/// schemas the source exposes but `options.source.schemas` didn't ask for).
+pub fn copy_from_quack(
+    dir: &Path,
+    opts: &SourceOpts,
+) -> Result<(String, PathBuf, Vec<String>), String> {
+    let token = read_token(opts)?;
+    build(dir, opts, &token).map_err(|e| redact(&e, &token))
+}
+
+fn build(
+    dir: &Path,
+    opts: &SourceOpts,
+    token: &str,
+) -> Result<(String, PathBuf, Vec<String>), String> {
+    let mut warnings = Vec::new();
+    // 1. A throwaway staging instance: nothing auto-loads or auto-installs,
+    // and only `quack` (loaded explicitly, next) may load at all.
+    let db = Database::open_quack_staging()?;
+    let stg = db.connect()?;
+    stg.exec("LOAD quack").map_err(|e| {
+        format!(
+            "could not LOAD quack in the staging instance — install it first (INSTALL quack \
+             from the repository; it is never autoloaded or autoinstalled here): {}",
+            e.lines().next().unwrap_or("")
+        )
+    })?;
+
+    // 2. A named TEMPORARY SECRET (never `ATTACH … (TOKEN …)`, which leaks
+    // the token into duckdb_databases().options) + the remote attachment.
+    let alias = format!("__anofox_src_{}", sv_random());
+    stg.exec(&format!(
+        "CREATE TEMPORARY SECRET {} (TYPE quack, TOKEN {})",
+        quote_ident(&alias),
+        sql_string_literal(token)
+    ))?;
+    stg.exec(&format!(
+        "ATTACH {} AS {}",
+        sql_string_literal(&opts.uri),
+        quote_ident(&alias)
+    ))?;
+
+    // 3. The snapshot file, attached READ_WRITE (dropped/detached below
+    // regardless of outcome; the caller only sees it on success).
+    let file = dir.join(format!("db_quack_{}.duckdb", sv_random()));
+    let f = file.to_string_lossy().into_owned();
+    let dst_alias = "__anofox_quack_dst";
+    let result = stg
+        .exec(&format!(
+            "ATTACH {} AS {} (READ_WRITE)",
+            sql_string_literal(&f),
+            dst_alias
+        ))
+        .and_then(|_| copy_schema_and_data(&stg, &alias, dst_alias, opts, &mut warnings));
+
+    // 4. Best-effort teardown either way: DETACH both, DROP the secret.
+    let _ = stg.exec(&format!("DETACH {dst_alias}"));
+    let _ = stg.exec(&format!("DETACH {}", quote_ident(&alias)));
+    let _ = stg.exec(&format!("DROP SECRET {}", quote_ident(&alias)));
+
+    result?;
+    warnings.push(format!(
+        "quack source '{}': Quack exposes no foreign keys, indexes, macros or sequences — none are copied",
+        opts.r#as
+    ));
+    Ok((opts.r#as.clone(), file, warnings))
+}
+
+/// `(SCHEMA)` copy (a bare `COPY FROM DATABASE` fails on a Quack source:
+/// "Multiple streaming scans … not implemented", #352 fact 1), then one
+/// `INSERT` per table (reusing the local-database helpers: Quack has no
+/// foreign keys, so `fk_order` is just the given order). Views are
+/// materialised or skipped per `opts.views` (fact 1: `(SCHEMA)` doesn't copy
+/// them). `opts.schemas` restricts what ends up in `dst`: any other schema
+/// the source exposes is dropped after the `(SCHEMA)` copy.
+fn copy_schema_and_data(
+    stg: &Conn,
+    src: &str,
+    dst: &str,
+    opts: &SourceOpts,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    stg.exec("BEGIN")?;
+    let r = (|| -> Result<(), String> {
+        stg.exec(&format!(
+            "COPY FROM DATABASE {} TO {} (SCHEMA)",
+            quote_ident(src),
+            dst
+        ))?;
+        if !opts.schemas.is_empty() {
+            drop_unwanted_schemas(stg, dst, &opts.schemas, warnings)?;
+        }
+        let tables = list(stg, src, "duckdb_tables()", "table_name", &opts.schemas)?;
+        let columns = columns_by_table(stg, src)?;
+        let edges: Vec<(String, String, String)> = Vec::new(); // Quack exposes no FKs.
+        let empty = Vec::new();
+        for i in fk_order(&tables, &edges) {
+            let (schema, table) = &tables[i];
+            let qual = |db: &str| format!("{}.{}.{}", db, quote_ident(schema), quote_ident(table));
+            let (from, to) = (qual(src), qual(dst));
+            let cols = insertable_columns(
+                stg,
+                &to,
+                columns
+                    .get(&(schema.clone(), table.clone()))
+                    .unwrap_or(&empty),
+            )?
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+            stg.exec(&format!(
+                "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
+            ))
+            .map_err(|e| format!("{schema}.{table}: {}", e.lines().next().unwrap_or("")))?;
+        }
+        let views = list(stg, src, "duckdb_views()", "view_name", &opts.schemas)?;
+        for (schema, view) in views {
+            match opts.views {
+                Views::Skip => warnings.push(format!(
+                    "quack source '{}': view {schema}.{view} skipped (options.source.views = \"skip\")",
+                    opts.r#as
+                )),
+                Views::Materialize => {
+                    let from = format!(
+                        "{}.{}.{}",
+                        quote_ident(src),
+                        quote_ident(&schema),
+                        quote_ident(&view)
+                    );
+                    let to = format!("{}.{}.{}", dst, quote_ident(&schema), quote_ident(&view));
+                    stg.exec(&format!("CREATE TABLE {to} AS SELECT * FROM {from}"))
+                        .map_err(|e| {
+                            format!("view {schema}.{view}: {}", e.lines().next().unwrap_or(""))
+                        })?;
+                    warnings.push(format!(
+                        "quack source '{}': view {schema}.{view} materialised as a table (its definition is not replayed)",
+                        opts.r#as
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })();
+    match r {
+        Ok(()) => stg.exec("COMMIT"),
+        Err(e) => {
+            let _ = stg.exec("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// `(schema, name)` pairs of `src`'s tables or views, restricted to
+/// `schemas` when non-empty.
+fn list(
+    stg: &Conn,
+    src: &str,
+    from: &str,
+    name_col: &str,
+    schemas: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    let lit = sql_string_literal(src);
+    let rows = stg
+        .query(&format!(
+            "SELECT schema_name::VARCHAR, {name_col}::VARCHAR FROM {from} \
+             WHERE database_name = {lit} AND NOT internal ORDER BY 1, 2"
+        ))?
+        .string_rows(100_000)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
+        .filter(|(s, _)| schemas.is_empty() || schemas.iter().any(|w| w.eq_ignore_ascii_case(s)))
+        .collect())
+}
+
+/// Drop every schema of `dst` that isn't in `wanted` (the source may expose
+/// more than `options.source.schemas` asked for; `(SCHEMA)` already copied
+/// all of them, so anything not wanted is removed again before any data
+/// moves — never served, never a path around a policy on the wanted ones).
+fn drop_unwanted_schemas(
+    stg: &Conn,
+    dst: &str,
+    wanted: &[String],
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let rows = stg
+        .query(&format!(
+            "SELECT schema_name::VARCHAR FROM duckdb_schemas() \
+             WHERE database_name = {} AND NOT internal AND schema_name <> 'main'",
+            sql_string_literal(dst)
+        ))?
+        .string_rows(10_000)?;
+    for r in rows {
+        let Some(name) = r.first().cloned().flatten() else {
+            continue;
+        };
+        if wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        stg.exec(&format!(
+            "DROP SCHEMA {}.{} CASCADE",
+            dst,
+            quote_ident(&name)
+        ))?;
+        warnings.push(format!(
+            "quack source: schema '{name}' is not in options.source.schemas — dropped from the snapshot, never served"
+        ));
+    }
+    // "main" itself, if not wanted: drop its tables individually (DuckDB
+    // keeps one "main" schema per attached database; it cannot be dropped).
+    if !wanted.iter().any(|w| w.eq_ignore_ascii_case("main")) {
+        let tables = stg
+            .query(&format!(
+                "SELECT table_name::VARCHAR FROM duckdb_tables() WHERE database_name = {} AND schema_name = 'main'",
+                sql_string_literal(dst)
+            ))?
+            .string_rows(10_000)?;
+        let mut any = false;
+        for r in tables {
+            if let Some(t) = r.first().cloned().flatten() {
+                stg.exec(&format!("DROP TABLE {}.main.{}", dst, quote_ident(&t)))?;
+                any = true;
+            }
+        }
+        if any {
+            warnings.push(
+                "quack source: schema 'main' is not in options.source.schemas — its tables were dropped from the snapshot"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A short random suffix for staging names (aliases, file names) — delegates
+/// to the serving module's CSPRNG-backed token so this module doesn't need
+/// its own randomness source.
+fn sv_random() -> String {
+    anofox_visualization::host::serving::random_token()
 }
 
 #[cfg(test)]

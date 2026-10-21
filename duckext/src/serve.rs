@@ -25,6 +25,10 @@
 //!   (`policy`, [`anofox_visualization::host::policy`]) rewrites every
 //!   dashboard statement to read per-viewer views (row filters, column
 //!   masks) and refuses to start on anything that could get around them.
+//!   `options.source` (#352 prototype, [`crate::source`]) builds (part of)
+//!   the snapshot from a live DuckDB 2.0 Quack server instead of (or
+//!   alongside) the local session, through a dedicated staging instance —
+//!   `quack` is never loaded into this serving instance.
 //! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
@@ -1501,11 +1505,11 @@ fn copy_database(
 /// `(schema, table) -> [(column, has_default), …]`, a table's own columns in
 /// `column_index` order — what [`columns_by_table`] groups a database's
 /// `duckdb_columns()` scan into.
-type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
+pub(crate) type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
 
 /// Every table's columns of database `src`, read in one `duckdb_columns()`
 /// scan (#299) instead of one scan per table.
-fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
+pub(crate) fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
     let rows = live
         .query(&format!(
             "SELECT schema_name::VARCHAR, table_name::VARCHAR, column_name::VARCHAR, \
@@ -1533,7 +1537,7 @@ fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
 /// ones. duckdb_columns() doesn't mark those, so a column with a default is
 /// tried on its own: `INSERT … SELECT NULL WHERE false` binds (and fails for
 /// a generated column) but writes nothing.
-fn insertable_columns(
+pub(crate) fn insertable_columns(
     live: &Conn,
     to: &str,
     columns: &[(String, bool)],
@@ -1559,7 +1563,10 @@ fn insertable_columns(
 /// keys reference (`edges`: schema, child, parent; DuckDB keeps an FK within
 /// one schema). Self-references are ignored; ties, and a cycle, go in the
 /// given order. Names match case-insensitively, like DuckDB's.
-fn fk_order(tables: &[(String, String)], edges: &[(String, String, String)]) -> Vec<usize> {
+pub(crate) fn fk_order(
+    tables: &[(String, String)],
+    edges: &[(String, String, String)],
+) -> Vec<usize> {
     let key = |s: &str, t: &str| (s.to_lowercase(), t.to_lowercase());
     let idx: BTreeMap<(String, String), usize> = tables
         .iter()
@@ -1663,8 +1670,33 @@ fn build_snapshot(
             });
         }
     }
+    // `options.source` (#352): a Quack source build runs in its own staging
+    // instance (never this one) and lands here as one more attached database
+    // — `as` is the default unless `options.search_path` names something else.
+    let mut default_db = opts
+        .search_path
+        .first()
+        .map_or_else(|| current.clone(), |(db, _)| db.clone());
+    if let Some(src) = &opts.source {
+        if copied
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(&src.r#as))
+        {
+            return Err(format!(
+                "options.source.as: '{}' clashes with an existing attached database",
+                src.r#as
+            ));
+        }
+        let (name, file, w) = crate::source::copy_from_quack(&dir.0, src)
+            .map_err(|e| format!("options.source: {e}"))?;
+        warnings.extend(w);
+        if opts.search_path.is_empty() {
+            default_db = name.clone();
+        }
+        copied.push((name, file));
+    }
     let enter = match opts.search_path.split_first() {
-        None => format!("USE {}", quote_ident(&current)),
+        None => format!("USE {}", quote_ident(&default_db)),
         Some(((db, schema), rest)) => {
             let qualified = |db: &String, schema: &Option<String>| match schema {
                 Some(s) => format!("{}.{}", quote_ident(db), quote_ident(s)),
@@ -1805,10 +1837,7 @@ fn build_snapshot(
     Ok((
         Snapshot {
             db,
-            default_db: opts
-                .search_path
-                .first()
-                .map_or(current, |(db, _)| db.clone()),
+            default_db,
             enter,
             policy: None,
             deps: Vec::new(),
