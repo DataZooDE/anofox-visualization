@@ -29,12 +29,15 @@ jobs:
   # builds every PR against v2.0.0 by default (a v1.5.6 build needs the
   # separate `variegata` field, see duckext/DISTRIBUTING.md). Our own release
   # pin (`.duckdb-version`) stays at v1.5.6 until ~2.0.1 (owner decision), so
-  # this job is non-blocking for now: it tells us as soon as csrc/ or
-  # CMakeLists.txt stop compiling against 2.0, without failing CI on it.
-  # Drops osx_amd64, which the community repo itself has dropped for 2.0.
+  # this job tells us as soon as csrc/ or CMakeLists.txt stop compiling
+  # against 2.0 — but non-blocking: `continue-on-error` is not a valid key on
+  # a job that calls a reusable workflow (GitHub Actions rejects the whole
+  # file with it), so "non-blocking for now" here means this job is simply
+  # not added as a required status check in branch protection, not that it
+  # soft-fails on its own. Drops osx_amd64, which the community repo itself
+  # has dropped for 2.0.
   duckdb-2-0-build:
     name: Build extension binaries (DuckDB 2.0, non-blocking)
-    continue-on-error: true
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
       duckdb_version: v2.0.0
