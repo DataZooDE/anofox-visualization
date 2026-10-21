@@ -377,7 +377,7 @@ fn render_values_opts(
         let note = format!("{macro_name}() ships with the next anofox-visualization release");
         return crate::note_svg(None, &note, width, height)
             .finish(crate::Place::Doc)
-            .map(|(svg, _)| opts.theme.finish_svg(svg))
+            .map(|(svg, _)| opts.theme.finish_svg(opts.theme.with_font(svg)))
             .map_err(RenderError::Render);
     }
     let mut options = Map::new();

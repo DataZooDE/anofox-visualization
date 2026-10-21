@@ -41,13 +41,23 @@ fn x_labels(cols: &[Column]) -> Option<Vec<String>> {
         .map(|c| c.values.iter().map(value_str).collect())
 }
 
-/// The value-axis formatter (`::YFORMAT`) as a continuous scale.
-fn value_scale(cols: &[Column], o: &RenderOptions) -> ScaleContinuous {
+/// The value-axis formatter (`::YFORMAT`) as a continuous scale, plus
+/// (B2-4) the same spec's `data-fvalue` formatter — see `cartesian`'s
+/// matching comment — so ggplot-rs's native `svg_formatted_values` writes
+/// exactly what the old string-surgery `with_formatted_values` used to.
+fn value_scale(
+    cols: &[Column],
+    kind: Kind,
+    values: &[Value],
+    o: &RenderOptions,
+) -> ScaleContinuous {
     let mut s = ScaleContinuous::new();
     if let Some(f) = role_fmt(cols, Role::YFormat).and_then(|s| axis_formatter(&s, &o.locale)) {
         s = s.with_label_formatter(f);
     }
-    s
+    let vfmt = value_fmt(cols, kind, values);
+    let locale = o.locale;
+    s.with_value_formatter(move |n: f64| vfmt.full(n, &locale))
 }
 
 /// Distinct labels in first-seen order (a discrete axis keeps the SQL order).
@@ -246,7 +256,7 @@ pub(crate) fn render_waterfall(
         .scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels(&names).iter().map(String::as_str).collect()),
         )
-        .scale_y_continuous(value_scale(cols, o))
+        .scale_y_continuous(value_scale(cols, Kind::Waterfall, &value.values, o))
         .xlab("")
         .ylab("")
         .theme(chart_theme(o, 11.0))
@@ -421,7 +431,7 @@ pub(crate) fn render_bullet(
         .scale_x_discrete(
             ScaleDiscrete::new().with_limits(order.iter().map(String::as_str).collect()),
         )
-        .scale_y_continuous(value_scale(cols, o))
+        .scale_y_continuous(value_scale(cols, Kind::Bullet, &value.values, o))
         .coord_flip()
         .xlab("")
         .ylab("")
@@ -517,11 +527,16 @@ pub(crate) fn render_funnel(
             ScaleDiscrete::new().with_limits(order.iter().map(String::as_str).collect()),
         )
         // Room on the right for the labels; centred bars stay centred.
-        .scale_y_continuous(
+        // B2-4: the stage's own `data-fvalue` (`::YFORMAT`) — the same
+        // `fmt` the `dlab` text layer already uses above — see
+        // `cartesian`'s matching comment.
+        .scale_y_continuous({
+            let locale = o.locale;
             ScaleContinuous::new()
                 .with_limits(-max * 0.5, max * 0.95)
-                .with_expand(0.0, 0.0),
-        )
+                .with_expand(0.0, 0.0)
+                .with_value_formatter(move |n: f64| fmt.full(n, &locale))
+        })
         .coord_flip()
         .xlab("")
         .ylab("")
