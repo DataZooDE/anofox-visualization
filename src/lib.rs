@@ -1476,9 +1476,20 @@ impl Panel {
         }
     }
 
+    /// Every `GGPlot` panel, wherever it's built, turns on ggplot-rs's own
+    /// per-mark `data-fvalue`/`data-fx` (B2-4, `svg_formatted_values`) right
+    /// here — the one place every builder funnels through — instead of each
+    /// caller remembering to (#326, C2 of #318). A builder that wants a
+    /// custom `data-fvalue` (`::YFORMAT`, a percent kind, …) wires
+    /// `Scale::with_value_formatter` on its own value scale; one that
+    /// doesn't still gets ggplot-rs's plain formatted number for free. A
+    /// scale whose aesthetic can't carry a custom formatter yet
+    /// (gradient/colour-continuous fills — `::HEATMAP`/`::CALENDAR`,
+    /// sipemu/ggplot-rs#164) keeps the string-surgery fallback in
+    /// `with_formatted_values`.
     pub(crate) fn plot(plot: GGPlot, width: u32, height: u32) -> Panel {
         Panel::Plot {
-            plot: Box::new(plot),
+            plot: Box::new(plot.svg_formatted_values(true)),
             width,
             height,
             attrs: Vec::new(),
@@ -1687,45 +1698,16 @@ fn render_placed(
         } else {
             o.theme.finish_svg(svg)
         };
-        let svg = with_xline_dates(svg, &cols);
+        // `::XLINE` dates and every mark's `data-fvalue`/`data-fx` are now
+        // ggplot-rs's own job (B2-4 `svg_formatted_values`, on for every
+        // `GGPlot` panel since `Panel::plot`, plus the `Value::DateTime`
+        // reflines now carry through `xline_values`). `with_formatted_values`
+        // below only still runs for a map's hand-drawn marks and a
+        // gradient-fill measure ggplot-rs can't give a custom formatter yet.
         let svg = with_motion_attrs(with_formatted_values(svg, &cols, o), &cols);
+        let svg = without_xline_prefix(svg);
         Ok((svg, warnings))
     })
-}
-
-/// A date `::XLINE` is drawn at its epoch seconds; its tooltip and `data-x`
-/// say the date it was given (`2026-10-12`), not `x = 1791763200`.
-fn with_xline_dates(mut svg: String, cols: &[Column]) -> String {
-    let Some(c) = find_role(cols, Role::VLine) else {
-        return svg;
-    };
-    for v in &c.values {
-        let (e, d) = match v {
-            Value::DateTime(e) => (*e, xline_date_text(*e)),
-            Value::Str(s) => {
-                let s = s.trim();
-                if s.parse::<f64>().is_ok() {
-                    continue;
-                }
-                let Some(e) = sql::parse_iso_epoch(s) else {
-                    continue;
-                };
-                (e, s.strip_suffix(" 00:00:00").unwrap_or(s).to_string())
-            }
-            _ => continue,
-        };
-        let d = format::escape_xml(&d);
-        svg = svg
-            .replace(
-                &format!(" data-x=\"{e}\" data-value=\"{e}\">"),
-                &format!(" data-x=\"{d}\">"),
-            )
-            .replace(
-                &format!("<title>x = {e}</title>"),
-                &format!("<title>{d}</title>"),
-            );
-    }
-    svg
 }
 
 /// Epoch seconds as `2026-10-12` (or `2026-10-12 08:30:00` off midnight).
@@ -1845,12 +1827,50 @@ fn story_steps(cols: &[Column]) -> Option<String> {
     serde_json::to_string(&json).ok()
 }
 
-/// Give every hoverable mark its value as the panel formats it: the
-/// plotting engine writes the raw measure (`data-value="1234.5"`); this adds
-/// `data-fvalue="$1,234.50"` per the panel's `::YFORMAT` (or a percent kind)
-/// and the dashboard locale, and — when the axis formats x (`::XFORMAT`, a
-/// `::LOCALE` date order) — `data-fx` beside `data-x`. Hosts show these in
-/// tooltips; the raw attributes stay for selection and filtering.
+/// An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
+/// `x = 2026-10-12`: `geom_vline`/`geom_hline` don't implement B2-5 tooltip
+/// templates (`GGPlot::tooltip`) — `Geom::consumes_tooltips` has no
+/// `geom/refline.rs` override, so a template silently has no effect and
+/// warns — so there is no public way to replace the hard-coded `"x = "`
+/// prefix `geom/refline.rs`'s `mark_line` always writes (sipemu/ggplot-rs#165).
+/// The date itself is ggplot-rs's own now (B2-4 `svg_formatted_values` + the
+/// `Value::DateTime` reflines `xline_values` keeps): only this prefix is
+/// still string surgery, and only for `::XLINE` (a `::REFLINE`/`::YLINE`'s
+/// `"y = "` was never stripped, before or after #326).
+fn without_xline_prefix(svg: String) -> String {
+    svg.replace(
+        "data-geom=\"vline\"><title>x = ",
+        "data-geom=\"vline\"><title>",
+    )
+}
+
+/// Give every hoverable mark its value as the panel formats it:
+/// `data-fvalue="$1,234.50"` per the panel's `::YFORMAT` (or a percent
+/// kind) and the dashboard locale, and — when the axis formats x
+/// (`::XFORMAT`, or a `::LOCALE` date order) — `data-fx` beside `data-x`.
+///
+/// `data-fvalue` on an ordinary `GGPlot` mark is ggplot-rs's own job now
+/// (B2-4 `svg_formatted_values`, on since `Panel::plot`, through each
+/// scale's `Scale::format_value` — `with_value_formatter`, wired per
+/// builder, keeps the text identical to what this function used to write
+/// by hand); this pass only still replaces it — overriding whatever
+/// ggplot-rs already wrote natively, since there's no per-mark opt-out —
+/// for the two cases that can't go through a `Scale` at all:
+///  - a map's own hand-drawn marks (`Panel::Own`, never a `GGPlot`);
+///  - a Fill-mapped measure (`::HEATMAP`/`::CALENDAR`): ggplot-rs's
+///    gradient/colour-continuous scales have no `with_value_formatter` hook
+///    yet (sipemu/ggplot-rs#164), so a non-default `::YFORMAT` still needs
+///    this to override the plain grouped number ggplot-rs wrote on its own.
+///
+/// `data-fx`, though, stays unconditional: a date x column rendered on a
+/// *discrete* axis (`::XAXIS` on a bar/category chart whose values happen
+/// to be dates, like a map's) is a plain `ScaleDiscrete` — ggplot-rs has no
+/// date-aware formatting for it at all, native or otherwise — so the
+/// `::LOCALE`/`::XFORMAT` fallback below is still the only thing that can
+/// write `data-fx` for it. On a *continuous* date x (`ScaleDateTime`)
+/// ggplot-rs already wrote the right `data-fx` natively; this just
+/// recomputes the identical string and replaces it, which costs a little
+/// work but changes nothing.
 fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> String {
     let Some(value) = cols.iter().find(|c| matches!(c.role, Role::Value(_))) else {
         return svg;
@@ -1858,14 +1878,32 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
     let Role::Value(kind) = value.role else {
         return svg;
     };
+    let do_fvalue = map::is_map(cols) || matches!(kind, Kind::Heatmap | Kind::Calendar);
+    let xfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
+    if !do_fvalue && xfmt.is_none() && o.locale.is_default() {
+        return svg;
+    }
     if !svg.contains(" data-value=\"") {
         return svg;
     }
     let fmt = value_fmt(cols, kind, &value.values);
-    let xfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
     let attr = |tag: &str, name: &str| -> Option<String> {
         let k = tag.find(&format!(" {name}=\""))? + name.len() + 3;
         Some(tag[k..k + tag[k..].find('"')?].to_string())
+    };
+    // Drop an existing `name="…"` attribute from `tag` (ggplot-rs's own
+    // native pass may already have written a plain-formatted one — this
+    // pass's own value replaces it rather than duplicating the attribute).
+    let strip = |tag: &str, name: &str| -> String {
+        let needle = format!(" {name}=\"");
+        let Some(k) = tag.find(&needle) else {
+            return tag.to_string();
+        };
+        let val_start = k + needle.len();
+        let Some(rel) = tag[val_start..].find('"') else {
+            return tag.to_string();
+        };
+        format!("{}{}", &tag[..k], &tag[val_start + rel + 1..])
     };
     let mut out = String::with_capacity(svg.len() + svg.len() / 8);
     let mut rest = svg.as_str();
@@ -1876,13 +1914,30 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
             break;
         };
         let tag = &rest[start..end];
-        out.push_str(&rest[..end]);
+        let self_closing = tag.ends_with('/');
+        let body = if self_closing {
+            &tag[..tag.len() - 1]
+        } else {
+            tag
+        };
+        // Only strip (and recompute) `data-fvalue` when this pass means to
+        // write it — otherwise leave whatever ggplot-rs wrote natively
+        // alone (B2-4), rather than stripping it with nothing to replace
+        // it with.
+        let body = if do_fvalue {
+            strip(body, "data-fvalue")
+        } else {
+            body.to_string()
+        };
+        let body = strip(&body, "data-fx");
         let mut extra = String::new();
-        if let Some(v) = attr(tag, "data-value").and_then(|v| v.parse::<f64>().ok()) {
-            extra.push_str(&format!(
-                " data-fvalue=\"{}\"",
-                format::escape_xml(&fmt.full(v, &o.locale))
-            ));
+        if do_fvalue {
+            if let Some(v) = attr(tag, "data-value").and_then(|v| v.parse::<f64>().ok()) {
+                extra.push_str(&format!(
+                    " data-fvalue=\"{}\"",
+                    format::escape_xml(&fmt.full(v, &o.locale))
+                ));
+            }
         }
         if let Some(x) = attr(tag, "data-x") {
             let fx = match (&xfmt, x.parse::<f64>()) {
@@ -1894,13 +1949,11 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
                 extra.push_str(&format!(" data-fx=\"{}\"", format::escape_xml(&fx)));
             }
         }
-        // Before a self-closing `/`.
-        if out.ends_with('/') {
-            out.pop();
-            out.push_str(&extra);
+        out.push_str(&rest[..start]);
+        out.push_str(&body);
+        out.push_str(&extra);
+        if self_closing {
             out.push('/');
-        } else {
-            out.push_str(&extra);
         }
         rest = &rest[end..];
     }
@@ -2042,7 +2095,7 @@ fn render_inner(
             return render_candlestick(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
-        Kind::Sparkline => return render_sparkline(o, value, width, height),
+        Kind::Sparkline => return render_sparkline(o, value, cols, width, height),
         Kind::Waterfall => {
             return variance::render_waterfall(o, value, cols, title.as_deref(), width, height)
         }
@@ -3154,18 +3207,18 @@ fn cartesian(
         let Some(c) = find_role(cols, role) else {
             continue;
         };
-        let vals = if vertical {
-            xline_nums(&c.values)
+        let vals: Vec<Value> = if vertical {
+            xline_values(&c.values)
         } else {
             distinct_nums(&c.values)
+                .into_iter()
+                .map(Value::Float)
+                .collect()
         };
         if vals.is_empty() {
             continue;
         }
-        let frame = vec![(
-            col.to_string(),
-            vals.into_iter().map(Value::Float).collect(),
-        )];
+        let frame = vec![(col.to_string(), vals)];
         // A quiet dashed rule in the chart text colour (not ggplot's black).
         let ink = o.theme.chart_text();
         plot = if vertical {
@@ -3314,7 +3367,14 @@ fn cartesian(
     let y_tr = role_str(cols, Role::YScale)
         .map(|s| axis_transform(&s, Role::YScale))
         .transpose()?;
-    if y_fmt.is_some() || y_tr.is_some() {
+    // B2-4: the measure's own `data-fvalue` (`::YFORMAT`/a percent kind,
+    // same locale) — wired unconditionally so ggplot-rs's native
+    // `svg_formatted_values` (on since `Panel::plot`) writes exactly what
+    // the old string-surgery `with_formatted_values` used to, byte for byte,
+    // even in the plain (no `::YFORMAT`) case.
+    let vfmt = value_fmt(cols, kind, &value.values);
+    let locale = o.locale;
+    {
         let mut s = ScaleContinuous::new();
         if let Some(f) = y_fmt {
             s = s.with_label_formatter(f);
@@ -3322,6 +3382,7 @@ fn cartesian(
         if let Some(t) = y_tr {
             s = s.with_transform(t);
         }
+        s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
         plot = plot.scale_y_continuous(s);
     }
     // An x formatter/transform only makes sense on a continuous x (numeric/date),
@@ -3335,13 +3396,21 @@ fn cartesian(
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
-        if x_fmt.is_some() || x_tr.is_some() {
+        // B2-4: `data-fx` for a custom `::XFORMAT` — the only case the old
+        // pass ever set it for a numeric x (a date x already formats its
+        // own `data-x`/`data-fx` natively through `ScaleDateTime`).
+        let x_vfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
+        if x_fmt.is_some() || x_tr.is_some() || x_vfmt.is_some() {
             let mut s = ScaleContinuous::new();
             if let Some(f) = x_fmt {
                 s = s.with_label_formatter(f);
             }
             if let Some(t) = x_tr {
                 s = s.with_transform(t);
+            }
+            if let Some(vfmt) = x_vfmt {
+                let locale = o.locale;
+                s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
             }
             plot = plot.scale_x_continuous(s);
         }
@@ -4389,6 +4458,14 @@ fn render_candlestick(
         .xlab("")
         .ylab("")
         .house_theme(o);
+    // B2-4: the close's own `data-fvalue` (`::YFORMAT`), same as every other
+    // measure — see `cartesian`'s matching comment.
+    let vfmt = value_fmt(cols, Kind::Candlestick, &value.values);
+    let locale = o.locale;
+    plot = plot.scale_y_continuous(
+        ggplot_rs::scale::continuous::ScaleContinuous::new()
+            .with_value_formatter(move |n: f64| vfmt.full(n, &locale)),
+    );
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -4471,6 +4548,14 @@ fn render_radar(
             .scale_color(dz_scale(o, Aesthetic::Color, cat))
             .scale_fill(dz_scale(o, Aesthetic::Fill, cat));
     }
+    // B2-4: the measure's own `data-fvalue` (`::YFORMAT`) — see
+    // `cartesian`'s matching comment.
+    let vfmt = value_fmt(cols, Kind::Radar, &value.values);
+    let locale = o.locale;
+    plot = plot.scale_y_continuous(
+        ggplot_rs::scale::continuous::ScaleContinuous::new()
+            .with_value_formatter(move |n: f64| vfmt.full(n, &locale)),
+    );
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -4486,6 +4571,7 @@ fn rgba((r, g, b): (u8, u8, u8)) -> ggplot_rs::scale::color::RGBAColor {
 fn render_sparkline(
     o: &RenderOptions,
     value: &Column,
+    cols: &[Column],
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
@@ -4528,9 +4614,15 @@ fn render_sparkline(
             alpha: 1.0,
         })
         .layer_data(end) // restrict the point layer to just the endpoint
-        .scale_y_continuous(
-            ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.1, 0.0),
-        )
+        .scale_y_continuous({
+            // B2-4: the measure's own `data-fvalue` (`::YFORMAT`) — see
+            // `cartesian`'s matching comment.
+            let vfmt = value_fmt(cols, Kind::Sparkline, &value.values);
+            let locale = o.locale;
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_expand(0.1, 0.0)
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+        })
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
@@ -4795,25 +4887,51 @@ fn annotation_top(kind: Kind, cols: &[Column], data: &[(String, Vec<Value>)]) ->
     max(&mut ycols.chain(extra).filter_map(Value::as_f64))
 }
 
-/// An `::XLINE`'s positions (a DATE arrives as epoch seconds, text as is): numbers as they
-/// are, a date / timestamp (`DATE '2026-06-30'::XLINE`, "Today" on a date
-/// axis) as its epoch seconds — the unit a date x is drawn in.
-fn xline_nums(vals: &[Value]) -> Vec<f64> {
-    let nums = distinct_nums(vals);
-    if !nums.is_empty() {
-        return nums;
+/// An `::XLINE`'s distinct positions, in first-seen order (capped like
+/// [`distinct_nums`]): a date / timestamp (`DATE '2026-06-30'::XLINE`,
+/// "Today" on a date axis) keeps its [`Value::DateTime`] rather than
+/// collapsing to a plain number, so ggplot-rs's own reference-line code
+/// (`geom_vline`'s `mark_line`, via [`Value::as_f64`] for the position but
+/// [`Value::is_datetime`]-aware formatting for the tooltip and `data-x`)
+/// draws it as the date it was given (`2026-06-30`), not `x = 1791763200` —
+/// a plain number stays [`Value::Float`].
+fn xline_values(vals: &[Value]) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Value> = Vec::new();
+    for v in vals {
+        let parsed = match v {
+            Value::DateTime(secs) => Some(Value::DateTime(*secs)),
+            Value::Str(s) => {
+                let s = s.trim();
+                match s.parse::<f64>() {
+                    Ok(f) => Some(Value::Float(f)),
+                    Err(_) => sql::parse_iso_epoch(s).map(Value::DateTime),
+                }
+            }
+            v => v.as_f64().map(Value::Float),
+        };
+        let Some(pv) = parsed.filter(|v| v.as_f64().is_some_and(f64::is_finite)) else {
+            continue;
+        };
+        let f = pv.as_f64().expect("just checked finite");
+        let key = if f == 0.0 { 0u64 } else { f.to_bits() };
+        if seen.insert(key) {
+            out.push(pv);
+            if out.len() >= 64 {
+                break;
+            }
+        }
     }
-    let parsed: Vec<Value> = vals
+    out
+}
+
+/// [`xline_values`]'s positions as plain numbers (epoch seconds for a date),
+/// for callers that only need the number (e.g. a `'reveal'::ANIMATE` start).
+fn xline_nums(vals: &[Value]) -> Vec<f64> {
+    xline_values(vals)
         .iter()
-        .filter_map(|v| {
-            let s = v.as_str()?.trim();
-            s.parse::<f64>()
-                .ok()
-                .or_else(|| sql::parse_iso_epoch(s).map(|t| t as f64))
-        })
-        .map(Value::Float)
-        .collect();
-    distinct_nums(&parsed)
+        .filter_map(Value::as_f64)
+        .collect()
 }
 
 /// Distinct finite numeric values from a column, in first-seen order — used to
@@ -5200,10 +5318,20 @@ fn render_pie(
         })
         .position(PositionStack)
         .scale_fill(dz_scale(o, Aesthetic::Fill, category))
-        // No y-axis padding, so the stack maps to a full 360° (closes the pie).
-        .scale_y_continuous(
-            ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.0, 0.0),
-        )
+        // No y-axis padding, so the stack maps to a full 360° (closes the
+        // pie). B2-4: the slice's own `data-fvalue` (`::YFORMAT`) — see
+        // `cartesian`'s matching comment.
+        .scale_y_continuous({
+            let kind = match value.role {
+                Role::Value(k) => k,
+                _ => Kind::Pie,
+            };
+            let vfmt = value_fmt(cols, kind, &value.values);
+            let locale = o.locale;
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_expand(0.0, 0.0)
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+        })
         .coord_polar_with(
             ggplot_rs::coord::polar::CoordPolar::new()
                 .theta("y")

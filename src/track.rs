@@ -475,11 +475,18 @@ fn measure(
     };
     match crate::render_cartesian(o, kind, value, cols, None, width, height)? {
         Panel::Plot { plot, .. } => {
+            // This y scale (the lane name as its one break label) replaces
+            // `cartesian`'s own — ggplot-rs keeps only the last one set per
+            // aesthetic — so its `data-fvalue` formatter (B2-4, `::YFORMAT`)
+            // has to come along too, or a track measure would lose it.
+            let vfmt = crate::value_fmt(cols, kind, &value.values);
+            let locale = o.locale;
             let plot = plot
                 .scale_y_continuous(
                     ggplot_rs::scale::continuous::ScaleContinuous::new()
                         .with_breaks(vec![mid])
-                        .with_labels(vec![name.to_string()]),
+                        .with_labels(vec![name.to_string()])
+                        .with_value_formatter(move |n: f64| vfmt.full(n, &locale)),
                 )
                 .theme_update(track_theme(!name.is_empty()));
             Ok(track_panel(plot, width, height))
