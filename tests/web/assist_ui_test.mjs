@@ -496,4 +496,46 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   assert.equal(enabled.remember, false);
 }
 
+// G15 (Info-11, sec-review-272-rereview seventh pass, #336): the proposal's
+// own `heldTexts` entry — the one `host.hold.arm()` adds — is pinned, so
+// the ~50-entry eviction below can never drop it, and an explicit
+// confirmation of that exact text clears the pin again.
+{
+  assert.match(appClean, /function heldTextsAdd\(sql, pin\)/, "heldTextsAdd takes a pin flag");
+  assert.match(appClean, /if \(pin\) pinnedHeldText = sql;/);
+  assert.match(appClean, /if \(oldest === pinnedHeldText\) continue;/, "eviction must skip the pinned entry");
+  assert.match(appClean, /hold: \{ arm: \(sql\) => heldTextsAdd\(sql, true\) \}/, "host.hold.arm() pins the proposal's own entry");
+  const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
+  assert.match(confirmBody, /pinnedHeldText === v\) pinnedHeldText = null/, "a confirmed match releases the pin");
+}
+
+// G16 (Info-9, sec-review-272-rereview seventh pass, #336): the dark-toggle
+// MutationObserver that redraws Explore's own charts must skip the redraw
+// outright while a preview is active, and route whatever it does run as
+// page work (`pv: null`) rather than falling through to the live,
+// possibly-preview `runPreviewToken`.
+{
+  const mo = appClean.match(/new MutationObserver\(\(\) => \{[\s\S]*?\}\)\.observe\(document\.body/);
+  assert.ok(mo, "the dark-toggle chart-redraw MutationObserver not found");
+  assert.match(mo[0], /if \(preview\) return;/, "Info-9: skip the redraw while a preview is active");
+  assert.match(mo[0], /xpDrawChart\(c\.holder, c\.sql, null\)/, "Info-9: route the redraw as page work (pv: null)");
+}
+
+// G17 (Info-10, sec-review-272-rereview fifth pass, #336 follow-up):
+// assistDeps()'s extensions/files/prepareFiles must read `assistEditorBasis()`
+// — the last text the viewer actually confirmed while a proposal is held
+// — never `$("sql").value` (the model's own unconfirmed text) directly.
+{
+  assert.match(appClean, /function assistEditorBasis\(\) \{\s*return applyHold \? heldBasisSql : \$\("sql"\)\.value;\s*\}/, "assistEditorBasis falls back to heldBasisSql while held");
+  const depsBody = stripComments(grabFn(appJs, "assistDeps"));
+  assert.match(depsBody, /editorNeeds: neededExtensions\(assistEditorBasis\(\)\)/);
+  assert.match(depsBody, /editorFileNames\(assistEditorBasis\(\)\)/);
+  assert.match(depsBody, /const s = assistEditorBasis\(\);/);
+  assert.doesNotMatch(depsBody, /neededExtensions\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
+  assert.doesNotMatch(depsBody, /editorFileNames\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
+  // the one place `heldBasisSql` is captured for a FRESH hold, right
+  // before apply() (assist-ui.js) overwrites the editor with the proposal.
+  assert.match(appClean, /heldBasisSql = \$\("sql"\)\.value;\s*\n\s*armHold\(\);/);
+}
+
 console.log("assist_ui_test: ok");

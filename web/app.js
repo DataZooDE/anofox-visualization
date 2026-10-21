@@ -1420,12 +1420,51 @@ let applyHold = false;
 // explicit run of a text that ISN'T a member (that only clears
 // `applyHold`, see clearApplyHold()).
 let heldTexts = new Set();
-function heldTextsAdd(sql) {
+// Info-11 (sec-review-272-rereview seventh pass, #336): the ONE entry
+// `host.hold.arm()` itself adds — the actual proposal text, never a typed
+// variant — pinned so the ~50-entry LRU cap below can never evict it. Set
+// only by the `pin` callers (host.hold.arm() and previewExit()'s `hold`
+// branch, both arming a FRESH, just-applied proposal); cleared the moment
+// that exact text is explicitly confirmed (confirmHeldIfMatch()) or the
+// set itself is wiped (loadDash()) — a confirmed text is no longer "the
+// held proposal" to protect, and a different dashboard's hold has nothing
+// to pin.
+let pinnedHeldText = null;
+function heldTextsAdd(sql, pin) {
   heldTexts.delete(sql); // re-insert at the end (most-recently-seen), cheap no-op if absent
   heldTexts.add(sql);
-  if (heldTexts.size > 50) heldTexts.delete(heldTexts.values().next().value); // evict the oldest
+  if (pin) pinnedHeldText = sql;
+  if (heldTexts.size > 50) {
+    // Evict the oldest entry that ISN'T the pinned one — a 50+ run of
+    // distinct typed/undone variants must still make room for itself
+    // without ever dropping the proposal's own entry (Info-11).
+    for (const oldest of heldTexts) {
+      if (oldest === pinnedHeldText) continue;
+      heldTexts.delete(oldest);
+      break;
+    }
+  }
 }
 let previewRefreshSaved = null; // sec-review-272 H-1/L-2: the viewer's own #refresh value, while a RELOAD role in the preview's own SQL overwrites it
+// Info-10 (sec-review-272-rereview fifth pass, #336 follow-up): the page's
+// own, actually-running dashboard text, captured by previewExit()'s `hold`
+// branch right before a FRESH "Apply, don't run" writes the model's
+// proposal into the editor. assistDeps() (below) reads this instead of the
+// live editor text while `applyHold` is set, so a second Send made while a
+// proposal is held builds the assistant's engine (extensions, allow-listed
+// `data/…` files) off the dashboard the viewer actually confirmed, never
+// off the unconfirmed model text sitting in the editor. This is a
+// same-origin, local-only allow-list either way (#204 M-1) — nothing the
+// model's proposal names can leave the origin or run unconfirmed SQL — so
+// this is a minimal hardening, not a close of an exploitable gap.
+// Deliberately NOT reset by clearApplyHold(): once a hold clears, nothing
+// reads this until the NEXT hold re-arms, and a re-arm that isn't a fresh
+// "Apply, don't run" (the #sql input/run() belt-and-braces paths, or the
+// `pend` branch's re-arm of an already-held proposal) has no newer,
+// actually-confirmed text to replace it with — a slightly stale prior
+// dashboard is still never the model's text, so it's never less safe to
+// leave in place than to blank out.
+let heldBasisSql = "";
 function clearApplyHold() {
   if (!applyHold) return;
   applyHold = false;
@@ -1466,7 +1505,9 @@ function armHold() {
 // run is no longer "unconfirmed"; everything else stays exactly as
 // unconfirmed as before.
 function confirmHeldIfMatch() {
-  heldTexts.delete($("sql").value);
+  const v = $("sql").value;
+  heldTexts.delete(v);
+  if (pinnedHeldText === v) pinnedHeldText = null; // Info-11: a confirmed text is no longer "the held proposal" to pin
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see
@@ -1780,6 +1821,14 @@ function editorFileNames(sql) {
 // tests/web/assist_engine_test.mjs item 12): the module that opens the
 // panel imports this directly. `null` on a live backend, on a served page,
 // or before DuckDB-Wasm itself has booted.
+// Info-10 (sec-review-272-rereview fifth pass, #336 follow-up): the text
+// assistDeps() below trusts for the engine's extension/file allow-list —
+// the live editor text normally, but the dashboard the viewer last
+// actually confirmed (`heldBasisSql`) while a proposal is held, never the
+// model's own unconfirmed text. See `heldBasisSql`'s own comment above.
+function assistEditorBasis() {
+  return applyHold ? heldBasisSql : $("sql").value;
+}
 function assistDeps() {
   if (backend === "live" || servedMode || !duckdbMod) return null;
   return {
@@ -1791,12 +1840,12 @@ function assistDeps() {
       return d;
     },
     page: guardPage(pageAdapter(db, { handles: xpHandles })),
-    extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions($("sql").value) }),
-    files: () => [...new Set([...editorFileNames($("sql").value), ...xpHandles.keys()])],
+    extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions(assistEditorBasis()) }),
+    files: () => [...new Set([...editorFileNames(assistEditorBasis()), ...xpHandles.keys()])],
     // #244: also the forecast parquet (ensureForecast's own memoised
     // registration) — editor text only, never the model's SQL (M-1).
     prepareFiles: async () => {
-      const s = $("sql").value;
+      const s = assistEditorBasis();
       await ensureDataFiles(s);
       if (/m5_monthly/i.test(s)) await ensureForecast("m5_monthly");
     },
@@ -1888,7 +1937,7 @@ function assistHost() {
     // braces alongside the #sql `input` handler's own generic "record
     // every text shown while held" logic (L-7), which already adds this
     // exact value too, since editorReplace() dispatches that same event.
-    hold: { arm: (sql) => heldTextsAdd(sql) },
+    hold: { arm: (sql) => heldTextsAdd(sql, true) }, // Info-11: this is the proposal's own entry — pin it
     // sec-review-272 H-1: assist-ui only calls this from Apply's "run"
     // choice and Undo — both a direct, confirmed user action — so it clears
     // the hold and runs explicitly, same as the #run button.
@@ -3766,6 +3815,8 @@ function loadDash(name, sql, key) {
     if (preview) await previewExit({ rerun: false });
     clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
     heldTexts.clear(); // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): and releases every text recorded while held — a different dashboard's own undo/redo stack has nothing to do with it
+    pinnedHeldText = null; // Info-11: and whatever that hold's own proposal entry was pinned to
+    heldBasisSql = ""; // Info-10: a new dashboard makes any earlier hold's basis stale
     closeSideMenu();
     curDash = key || null;
     if (key) rememberDash(key);
@@ -3954,6 +4005,18 @@ async function previewExit({ rerun = true, hold = false } = {}) {
     // writes the proposal into the editor, which hasn't happened yet at
     // this point in THIS function, and belt-and-braces by
     // host.hold.arm().
+    //
+    // Info-10 (sec-review-272-rereview fifth pass, #336 follow-up):
+    // capture the editor's CURRENT text — the dashboard actually running
+    // on the page right now — as the trusted basis assistDeps() falls
+    // back to while held, BEFORE apply() (assist-ui.js) overwrites
+    // $("sql").value with the model's proposal moments from now (see the
+    // comment above: that write happens strictly after this exit
+    // resolves). Only ever set here, for a FRESH hold — a later re-arm of
+    // the SAME hold (the `pend` branch below, or the #sql input/run()
+    // belt-and-braces paths) leaves it alone, since the text it should
+    // point at hasn't changed.
+    heldBasisSql = $("sql").value;
     armHold();
   } else if (pend !== null && !applyHold) {
     // H-1R2: honoured now, exactly as if it had just been pressed —
@@ -4575,8 +4638,18 @@ function wireExplore() {
     const d = document.body.classList.contains("dark");
     if (d === dark) return;
     dark = d;
+    // Info-9 (sec-review-272-rereview seventh pass, #336): this fires on
+    // every `body` class change, dark toggle included, regardless of
+    // whether an assistant preview is active — a stale Explore chart left
+    // registered in `xpState.charts` must never have its (the viewer's
+    // OWN, local) SQL re-run through the guarded preview session, or into
+    // a dead one mid-exit. Skip the redraw outright while a preview is up
+    // (`!preview`), and pass `pv: null` explicitly either way so the call
+    // can never fall through to `runPreviewToken` by accident — belt-and-
+    // braces, since this is page work, never the assistant's.
+    if (preview) return;
     xpState.charts = xpState.charts.filter((c) => c.holder.isConnected);
-    for (const c of xpState.charts) xpDrawChart(c.holder, c.sql).catch(() => {});
+    for (const c of xpState.charts) xpDrawChart(c.holder, c.sql, null).catch(() => {});
   }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 }
 
@@ -4962,10 +5035,15 @@ function xpMini(c) {
 // ---- charts: a live preview of an annotated statement ----
 const xpCtx = () => JSON.stringify({ theme: "", variant: document.body.classList.contains("dark") ? "dark" : "light" });
 const CHART_ROLE = /^(BARCHART|LINECHART|AREACHART|SCATTER|HISTOGRAM|BOXPLOT)/;
-async function xpDrawChart(holder, sql) {
+async function xpDrawChart(holder, sql, pv) {
   const s = JSON.parse(plan(sql)).find((x) => !x.setup);
   if (!s) throw new Error("no chart statement");
-  const rowsJson = await runSql(s.sql);
+  // Info-9: `pv` is `undefined` for every direct, user-driven call (the
+  // Explore catalog's own chart builder, below) — runSql()'s existing
+  // fallback to `runPreviewToken` there is unchanged. The dark-toggle
+  // redraw above passes `null` explicitly, which is page work regardless
+  // of `runPreviewToken`'s live value.
+  const rowsJson = await runSql(s.sql, undefined, undefined, undefined, undefined, pv);
   const rows = JSON.parse(rowsJson);
   const w = Math.round(Math.max(300, Math.min(960, holder.clientWidth || 640)));
   holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), w, 300, xpCtx(), "");
