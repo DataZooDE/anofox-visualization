@@ -3666,14 +3666,10 @@ fn render_heatmap(
     let mut plot = fill.scale(plot, o, &fmt).theme(th);
     if let Some(levels) = &x_levels {
         let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
-        let thinned = x_thin.is_some();
         if let Some(thin) = x_thin {
             sx = sx.with_labels(thin);
         }
         plot = plot.scale_x_discrete(sx);
-        if thinned {
-            plot = flat_date_labels(plot);
-        }
     }
     if let Some(mut levels) = str_levels(&y.values) {
         levels.reverse();
@@ -3788,14 +3784,10 @@ fn render_heatmap_categorical(
         .theme(th);
     if let Some(levels) = &x_levels {
         let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
-        let thinned = x_thin.is_some();
         if let Some(thin) = x_thin {
             sx = sx.with_labels(thin);
         }
         plot = plot.scale_x_discrete(sx);
-        if thinned {
-            plot = flat_date_labels(plot);
-        }
     }
     if let Some(mut levels) = str_levels(&y.values) {
         levels.reverse();
@@ -3867,28 +3859,6 @@ fn date_levels(values: &[Value]) -> Option<Vec<String>> {
     secs.sort_unstable();
     secs.dedup();
     (!secs.is_empty()).then(|| secs.into_iter().map(xline_date_text).collect())
-}
-
-/// #332 follow-up: ggplot-rs 0.22's own axis-fit auto-rotates crowded
-/// discrete x labels (45°, or 90° if even that doesn't fit) — but its
-/// crowding estimate divides the panel width by *every* grid column
-/// (`Scale::breaks().len()`), not just the ones [`thin_labels`] actually
-/// printed a label for, so it still sees "9 columns, a 10-char label" and
-/// rotates even though the 5 *visible* labels comfortably fit flat (the
-/// reservation this plan already sized them for). There is no public way to
-/// tell it "an explicit angle, don't auto-tune" — `axis_text_x_angle(0.0)`
-/// reads as unset, the same as never calling it, since the auto-tune only
-/// skips when `angle.abs() >= 1.0`. Filed as a ggplot-rs upstream gap
-/// (sipemu/ggplot-rs#<TBD>: `Scale::breaks()` undercounts a thinned
-/// discrete axis's real label density); until it lands, an angle too small
-/// to see (`0.01°`) opts out without any visible tilt — this is a real
-/// theme parameter, not text patched into the rendered SVG. The angle must
-/// clear the auto-tune's own `angle.abs() < 1.0` "still unset" check but
-/// stay under its separate `angle.abs() > 10.0` "now rotated" one (which
-/// would right-anchor the text and reserve drop height for a tilted line) —
-/// 2° reads as flat to the eye either way.
-fn flat_date_labels(plot: GGPlot) -> GGPlot {
-    plot.axis_text_x_angle(2.0)
 }
 
 /// Every Nth label kept, the rest blanked (""), so a `ScaleDiscrete`'s
