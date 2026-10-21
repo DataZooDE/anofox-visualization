@@ -2013,7 +2013,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 return 200;
             }
             let gen = st.current.get();
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "status": "ok",
                 "version": anofox_visualization::BUILD_VERSION,
                 "dashboards": st.dashboards.len(),
@@ -2025,6 +2025,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 "refresh_failed": st.current.last_failed(),
                 "limits": limits_json(st),
             });
+            // #352: only with a Quack source configured — numbers/booleans
+            // only, never the source's URI, its token env/file name or any
+            // error text (those stay in the server's own stderr).
+            if st.opts.source.is_some() {
+                if let Some(map) = body.as_object_mut() {
+                    map.insert(
+                        "source_ok".into(),
+                        serde_json::json!(!st.current.last_failed()),
+                    );
+                    map.insert(
+                        "consecutive_failures".into(),
+                        serde_json::json!(st.current.consecutive_failures()),
+                    );
+                }
+            }
             respond(req, 200, "application/json", body.to_string().into_bytes());
             200
         }
