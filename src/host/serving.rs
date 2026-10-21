@@ -878,6 +878,12 @@ pub struct DashboardMeta {
     /// `-- @certified <YYYY-MM-DD>`: the day it was last checked; `None` when
     /// missing or not a valid date.
     pub certified: Option<String>,
+    /// `-- @order N`: where it sits in the served nav bar and the start
+    /// page's card grid, ascending, among its siblings (same group, or
+    /// ungrouped); `None` when missing or not a plain integer — such
+    /// dashboards sort after every explicitly ordered one, alphabetically by
+    /// id among themselves. See [`DashboardMeta::order_key`].
+    pub order: Option<i64>,
 }
 
 impl DashboardMeta {
@@ -888,6 +894,19 @@ impl DashboardMeta {
             "id": id, "title": self.title, "group": self.group, "tags": self.tags,
             "description": self.description, "owner": self.owner, "certified": self.certified,
         })
+    }
+
+    /// The sort key both `load_dashboards` (`serve` bin and the extension)
+    /// order their dashboards by (#301): ascending `-- @order`, with an
+    /// unordered dashboard (`None`) placed after every explicitly ordered
+    /// one and broken by `id` — the same tie-break used when no dashboard
+    /// sets `@order` at all, so existing (unordered) folders keep today's
+    /// alphabetical-by-file-name order. This single key is what both the
+    /// served nav bar and the start page's card grid end up sorted by,
+    /// since both render dashboards in this same vec order (within a
+    /// group/sub-group, which is otherwise sorted by name).
+    pub fn order_key<'a>(&self, id: &'a str) -> (i64, &'a str) {
+        (self.order.unwrap_or(i64::MAX), id)
     }
 }
 
@@ -978,9 +997,9 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 
 /// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
 /// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`,
-/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`
-/// header comments (a repeated `@group` wins over the earlier one; `@tags`
-/// lines add up). A `@param` or
+/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`,
+/// `-- @order N` header comments (a repeated `@group` wins over the earlier
+/// one; `@tags` lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
@@ -1005,6 +1024,8 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.owner = Some(r.to_string()).filter(|o| !o.is_empty());
         } else if let Some(r) = header_value(l, "certified") {
             m.certified = Some(r.to_string()).filter(|d| valid_iso_date(d));
+        } else if let Some(r) = header_value(l, "order") {
+            m.order = r.parse::<i64>().ok();
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -1479,6 +1500,50 @@ mod tests {
         assert_eq!(m.owner.as_deref(), Some("Finance team <fin@example.com>"));
         assert_eq!(m.certified.as_deref(), Some("2026-10-15"));
         let j = m.nav_json("s");
+        // #301: an explicit nav/start-page order
+        let m = parse_dashboard_meta("s", "-- @order -3\nSELECT 1;");
+        assert_eq!(m.order, Some(-3));
+        assert_eq!(m.order_key("s"), (-3, "s"));
+        for bad in [
+            "-- @order\n",
+            "-- @order  \n",
+            "-- @order one\n",
+            "-- @order 1.5\n",
+        ] {
+            let m = parse_dashboard_meta("s", bad);
+            assert_eq!(m.order, None, "{bad:?}");
+            assert_eq!(m.order_key("s"), (i64::MAX, "s"));
+        }
+        // ties and unordered dashboards break on id
+        let mut ds = ["z", "a", "m"]
+            .iter()
+            .map(|id| (parse_dashboard_meta(id, "-- @order 1\nSELECT 1;"), *id))
+            .collect::<Vec<_>>();
+        ds.sort_by(|(am, aid), (bm, bid)| am.order_key(aid).cmp(&bm.order_key(bid)));
+        assert_eq!(
+            ds.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ["a", "m", "z"]
+        );
+        let mut mixed = [
+            ("zzz_first", Some(1)),
+            ("aaa_second", Some(2)),
+            ("mmm_third", None),
+        ]
+        .iter()
+        .map(|(id, order)| {
+            let script = match order {
+                Some(n) => format!("-- @order {n}\nSELECT 1;"),
+                None => "SELECT 1;".to_string(),
+            };
+            (parse_dashboard_meta(id, &script), *id)
+        })
+        .collect::<Vec<_>>();
+        mixed.sort_by(|(am, aid), (bm, bid)| am.order_key(aid).cmp(&bm.order_key(bid)));
+        assert_eq!(
+            mixed.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ["zzz_first", "aaa_second", "mmm_third"],
+            "explicit @order wins over file-name order; unordered sorts last"
+        );
         assert_eq!(j["owner"], "Finance team <fin@example.com>");
         assert_eq!(j["certified"], "2026-10-15");
         assert!(j["group"].is_null() && j["tags"].as_array().unwrap().is_empty());

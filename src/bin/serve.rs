@@ -906,7 +906,8 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
             }
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
+    // #301: ascending `-- @order`, unordered dashboards after, then by id.
+    out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
     out
 }
 
@@ -1816,6 +1817,27 @@ mod tests {
         assert!(e.contains("session ended"), "{e}");
         let out = s.run("SELECT getvariable('x') AS v").unwrap();
         assert!(out.contains("\"v\":null"), "{out}");
+    }
+
+    /// #301: the static-render `load_dashboards` also orders by `-- @order`
+    /// ascending, not by file name.
+    #[test]
+    fn load_dashboards_follows_order_header_not_file_name() {
+        let dir = std::env::temp_dir().join(format!("anofox-order-test-{}", sv::random_token()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("zzz_first.sql"), "-- @order 1\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("aaa_second.sql"), "-- @order 2\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("mmm_third.sql"), "-- @order 3\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("zzz_unordered.sql"), "SELECT 1;").unwrap();
+        let dashboards = load_dashboards(&dir);
+        let ids: Vec<&str> = dashboards.iter().map(|d| d.id.as_str()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            ids,
+            ["zzz_first", "aaa_second", "mmm_third", "zzz_unordered"],
+            "explicit @order wins over alphabetical file-name order; the \
+             unordered file still sorts last, by id, as before #301"
+        );
     }
 
     #[test]

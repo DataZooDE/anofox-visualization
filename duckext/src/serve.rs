@@ -1384,7 +1384,8 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
     if out.is_empty() {
         return Err(format!("no .sql dashboards found in '{}'", dir.display()));
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
+    // #301: ascending `-- @order`, unordered dashboards after, then by id.
+    out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
     loads.sort();
     loads.dedup();
     Ok((out, loads))
@@ -2699,6 +2700,28 @@ mod tests {
         assert_eq!(
             fk_order(&ab, &[e("main", "a", "b"), e("main", "b", "a")]),
             vec![0, 1]
+        );
+    }
+
+    /// #301: `load_dashboards` orders by `-- @order` ascending, not by file
+    /// name — the issue's own repro (`zzz_first.sql` intended #1, etc.),
+    /// plus an unordered file sorting after every explicitly ordered one.
+    #[test]
+    fn load_dashboards_follows_order_header_not_file_name() {
+        let dir = std::env::temp_dir().join(format!("anofox-order-test-{}", sv::random_token()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("zzz_first.sql"), "-- @order 1\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("aaa_second.sql"), "-- @order 2\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("mmm_third.sql"), "-- @order 3\nSELECT 1;").unwrap();
+        std::fs::write(dir.join("zzz_unordered.sql"), "SELECT 1;").unwrap();
+        let (dashboards, _) = load_dashboards(&dir).unwrap();
+        let ids: Vec<&str> = dashboards.iter().map(|d| d.id.as_str()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            ids,
+            ["zzz_first", "aaa_second", "mmm_third", "zzz_unordered"],
+            "explicit @order wins over alphabetical file-name order; the \
+             unordered file still sorts last, by id, as before #301"
         );
     }
 
