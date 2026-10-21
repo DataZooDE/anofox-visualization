@@ -91,7 +91,7 @@ jobs:
           pip install "duckdb==1.5.6" -e ".[test]" pingouin lifelines statsforecast nbclient ipykernel
           pytest -q -rs
 
-  duckdb-2.0-smoke:
+  duckdb-2-0-smoke:
     # #352: non-blocking. DuckDB 2.0 LTS shipped 2026-10-21; our release pin
     # (`.duckdb-version`) stays at v1.5.6 until ~2.0.1, but research found the
     # Rust C-API cdylib (C_STRUCT, C-API v1.2.0) built for 1.5.6 loads
