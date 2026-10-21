@@ -1710,15 +1710,20 @@ fn heatmap_date_x_tiles_fill_their_column_width() {
     // The axis prints clean dates, not a half-day continuous-axis artefact.
     assert!(s.contains(">2026-09-"), "{s}");
     assert!(!s.contains("12:00:00"), "{s}");
-    // #332 follow-up: thinning the printed labels (9 distinct days, this
-    // panel only fits a handful) must not trip ggplot-rs 0.22's own
-    // crowded-axis auto-rotate — it estimates spacing from *every* grid
-    // column, not just the ones that got a label, so it still thinks this
-    // is too crowded to sit flat and rotates to 45°, which `flat_date_labels`
-    // (`axis_text_x_angle`, a real theme parameter) opts out of. The kept
-    // labels stay centred under their tick (`text-anchor="middle"`), not
-    // right-anchored the way a genuinely rotated label is.
+    // #332 follow-up: thinning the printed labels (9 distinct days down to
+    // 5 drawn ones in this 480px panel) must not trip ggplot-rs's crowded-
+    // axis auto-rotate. Before ggplot-rs 0.22.1 (sipemu/ggplot-rs#162) the
+    // auto-rotate estimated spacing from *every* grid column
+    // (`Scale::breaks().len()`), not just the ones that got a label, so it
+    // still thought this was too crowded to sit flat and rotated to 45° —
+    // this is why #341 carried a local `axis_text_x_angle` workaround.
+    // 0.22.1 counts only the drawn labels, correctly sees 5 labels fit flat
+    // in 480px, and leaves them unrotated — no theme override needed any
+    // more. The kept labels stay centred under their tick
+    // (`text-anchor="middle"`), not right-anchored the way a genuinely
+    // rotated label is.
     assert!(!s.contains("rotate(45.0"), "{s}");
+    assert!(!s.contains("rotate(-45.0"), "{s}");
     assert!(!s.contains("rotate(90.0"), "{s}");
     assert!(!s.contains("rotate(270.0"), "{s}");
     let before_label = &s[..s.find(">2026-09-01<").unwrap()];
