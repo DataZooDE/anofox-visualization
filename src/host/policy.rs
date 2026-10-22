@@ -55,10 +55,16 @@ pub const CTE_PREFIX: &str = "__anofox_cte_";
 /// files or a SQL text of its own outside the policy's views
 /// (`json_serialize_plan`, `stats`, `current_setting`, `query`, …, #105).
 /// `tests/policy_duckdb.rs` fails when the pinned DuckDB has a function the
-/// list doesn't classify.
+/// list doesn't classify. Reclassified against DuckDB 2.0's function list too
+/// (#357): each function 2.0 added gets its own reviewed `allow`/`deny` line
+/// below, including every `collate_<locale>` name individually (only
+/// `icu_collate_*` stays a wildcard, pre-dating #357), so a genuinely new
+/// function still has to be reviewed by name (sec-review-362.md L-1).
 pub const FUNCTION_LIST: &str = include_str!("policy_functions.txt");
 
-/// The DuckDB version [`FUNCTION_LIST`] was reviewed against (and CI pins).
+/// The DuckDB version [`FUNCTION_LIST`] was first reviewed against (and the
+/// release CI pins). Also reclassified against v2.0.0 (#357); see the
+/// comment on [`FUNCTION_LIST`].
 pub const PINNED_DUCKDB: &str = "v1.5.6";
 
 /// The keyed hash behind the `hash` mask: `__anofox_policy_hash(<column id>,
@@ -97,9 +103,16 @@ pub fn functions() -> &'static FunctionList {
             }
             let (spec, reason) = line.split_once('#').unwrap_or((line, ""));
             let mut w = spec.split_whitespace();
-            let (Some(kind), Some(verdict), Some(name)) = (w.next(), w.next(), w.next()) else {
+            let (Some(kind), Some(verdict)) = (w.next(), w.next()) else {
                 continue;
             };
+            // Usually one word, but DuckDB 2.0 exposes a few comparison
+            // operators as named, space-containing functions ("is distinct
+            // from", #357): join the rest of the line (before any `#`).
+            let name = w.collect::<Vec<_>>().join(" ");
+            if name.is_empty() {
+                continue;
+            }
             entries.insert(
                 (kind == "table", name.to_ascii_lowercase()),
                 (verdict == "allow", reason.trim().to_string()),
@@ -111,7 +124,7 @@ pub fn functions() -> &'static FunctionList {
 
 /// File readers a policy may allow (`"table_functions"`). Files have no row
 /// or column policy; DuckDB still confines them to the server's data folder.
-const FILE_READERS: [&str; 13] = [
+const FILE_READERS: [&str; 16] = [
     "read_csv",
     "read_csv_auto",
     "read_parquet",
@@ -125,6 +138,10 @@ const FILE_READERS: [&str; 13] = [
     "read_blob",
     "read_xlsx",
     "glob",
+    // DuckDB 2.0's single-file variants (#357).
+    "read_single_csv_file",
+    "read_single_json_file",
+    "read_single_parquet_file",
 ];
 
 /// What a viewer outside a column's allow list gets.
@@ -519,6 +536,34 @@ fn s<'v>(o: &'v Map<String, Value>, k: &str) -> &'v str {
     o.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
+/// A `FUNCTION` call's single string-literal argument, if it has exactly one
+/// argument and that argument is a string constant — across both
+/// `json_serialize_sql` shapes:
+/// * DuckDB ≤1.x: `"children": [{"value": {"type": {"id": "VARCHAR"},
+///   "value": "<s>"}}]`;
+/// * DuckDB 2.0: `"arguments": [{"expression": {"literal": {"kind":
+///   "STRING", "text": "<s>"}}}]` (#357).
+///
+/// `None` for anything else (no argument, more than one, a non-string, or a
+/// shape from neither version), so a caller using this fails closed.
+fn single_string_argument(o: &Map<String, Value>) -> Option<&str> {
+    if let Some(c) = o.get("children").and_then(Value::as_array) {
+        let [one] = c.as_slice() else { return None };
+        let v = one.get("value")?;
+        return (v.pointer("/type/id").and_then(Value::as_str) == Some("VARCHAR"))
+            .then(|| v.get("value").and_then(Value::as_str))
+            .flatten();
+    }
+    if let Some(a) = o.get("arguments").and_then(Value::as_array) {
+        let [one] = a.as_slice() else { return None };
+        let lit = one.get("expression")?.get("literal")?;
+        return (lit.get("kind").and_then(Value::as_str) == Some("STRING"))
+            .then(|| lit.get("text").and_then(Value::as_str))
+            .flatten();
+    }
+    None
+}
+
 impl Walker<'_> {
     fn new<'a>(mode: Mode, enf: &'a Enforcer, temps: &'a HashSet<String>) -> Walker<'a> {
         Walker {
@@ -670,8 +715,14 @@ impl Walker<'_> {
             }
             // In its own body a CTE is itself only when it is recursive;
             // otherwise its name is the table (`WITH sales AS (FROM sales)`).
-            let recursive = e.pointer("/value/query/node/type").and_then(Value::as_str)
-                == Some("RECURSIVE_CTE_NODE");
+            // DuckDB ≤1.x nests the bound query as `value.query.node`; 2.0
+            // flattened that to `value.query_node` directly (#357).
+            let recursive = [
+                e.pointer("/value/query/node/type"),
+                e.pointer("/value/query_node/type"),
+            ]
+            .into_iter()
+            .any(|t| t.and_then(Value::as_str) == Some("RECURSIVE_CTE_NODE"));
             let mut visible = frame.clone();
             if !recursive {
                 visible.remove(i);
@@ -719,6 +770,17 @@ impl Walker<'_> {
             o.insert("catalog_name".into(), Value::String(catalog.into()));
             o.insert("schema_name".into(), Value::String(schema.into()));
             o.insert("table_name".into(), Value::String(table.into()));
+            // DuckDB 2.0's `json_deserialize_sql` builds the printed table
+            // reference from `qualified_name.path` when present, and ignores
+            // `catalog_name`/`schema_name`/`table_name` — which are the only
+            // fields this rewrite updates. Left in place, a stale
+            // `qualified_name` makes 2.0 print the *original* table name
+            // instead of the view we just renamed to, so the reparsed,
+            // unrewritten reference then fails `Mode::Verify` ("internal:
+            // rewrite left table", #357). Dropping it makes 2.0 fall back to
+            // the three fields above; on 1.x the key doesn't exist and this
+            // is a no-op.
+            o.remove("qualified_name");
         };
         match self.mode {
             Mode::Verify => {
@@ -809,7 +871,13 @@ impl Walker<'_> {
                     "'{name}()' is not allowed under the access policy ({why})"
                 ))
             }
-            // ICU's per-locale collations differ between builds.
+            // ICU's per-locale collations differ between builds. DuckDB 2.0
+            // added a second, unprefixed name (`collate_de`, …) for the same
+            // functions alongside the original `icu_collate_de`, … (#357);
+            // all 141 are listed explicitly in policy_functions.txt, so
+            // there is no wildcard for the unprefixed form — an unlisted
+            // `collate_<x>` (a future locale, or anything else) still fails
+            // closed through the `None` arm below (sec-review-362.md L-1).
             None if lower.starts_with("icu_collate_") => {}
             None if self.enf.policy.functions.contains(&lower) => {}
             None => {
@@ -819,15 +887,7 @@ impl Walker<'_> {
             }
         }
         if self.mode == Mode::Rows && lower == "getvariable" {
-            let arg = o
-                .get("children")
-                .and_then(Value::as_array)
-                .filter(|c| c.len() == 1)
-                .and_then(|c| c[0].get("value"))
-                .filter(|v| v.pointer("/type/id").and_then(Value::as_str) == Some("VARCHAR"))
-                .and_then(|v| v.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let arg = single_string_argument(o).unwrap_or("");
             if !arg.to_ascii_lowercase().starts_with(CLAIM_PREFIX) {
                 return Err(
                     "a row filter may only read claims: getvariable('__claim_…') with a literal name"
@@ -1476,6 +1536,85 @@ mod tests {
         assert_eq!(w.used.iter().copied().collect::<Vec<_>>(), vec![0]);
     }
 
+    /// #357: DuckDB 2.0's `json_deserialize_sql` prints a table reference
+    /// from `qualified_name.path`, ignoring `catalog_name`/`schema_name`/
+    /// `table_name`. A rename that left a stale `qualified_name` in place
+    /// would make 2.0 print the *original* table, which then fails
+    /// `Mode::Verify` ("internal: rewrite left table") once reparsed. The
+    /// rewrite must drop it so only the fields it actually updates survive.
+    #[test]
+    fn rewrite_drops_a_stale_qualified_name_on_rename() {
+        let enf = enforcer(r#"{"tables": {"sales": {"rows": true}}}"#);
+        let temps = HashSet::new();
+        let mut t = base("sales");
+        t["qualified_name"] = serde_json::json!({"path": ["sales"]});
+        Walker::new(Mode::Rewrite, &enf, &temps)
+            .walk(&mut t)
+            .unwrap();
+        assert_eq!(t["table_name"], "__anofox_rls_0");
+        assert!(
+            t.get("qualified_name").is_none(),
+            "a stale qualified_name survived the rename: {t:?}"
+        );
+        // Renaming to a CTE or a dashboard's own temp object must drop it too.
+        let temps: HashSet<String> = ["mine".to_string()].into_iter().collect();
+        let mut t = base("mine");
+        t["qualified_name"] = serde_json::json!({"path": ["mine"]});
+        Walker::new(Mode::Rewrite, &enf, &temps)
+            .walk(&mut t)
+            .unwrap();
+        assert!(t.get("qualified_name").is_none(), "{t:?}");
+    }
+
+    /// #357: DuckDB 2.0 flattened a recursive CTE's bound query from
+    /// `value.query.node` to `value.query_node`. `Walker::ctes` detected
+    /// "is this CTE recursive" (so it can see itself inside its own body) by
+    /// pointing at the first shape only, so on 2.0 every recursive CTE
+    /// looked non-recursive and its self-reference failed ("recursive CTE
+    /// 'r' outside its WITH" from `object()`'s own `RECURSIVE_CTE_NODE`
+    /// check, or — for a plain self-reference typed as `BASE_TABLE`, as
+    /// `tests/policy_duckdb.rs` exercises against a real DuckDB — "table …
+    /// has no access policy").
+    #[test]
+    fn recursive_ctes_see_themselves_on_both_json_serialize_sql_shapes() {
+        let enf = enforcer(r#"{"tables": {"sales": {"rows": true}}}"#);
+        let temps = HashSet::new();
+        // WITH RECURSIVE r AS (FROM sales UNION ALL FROM r) FROM r
+        let node = serde_json::json!({"type": "RECURSIVE_CTE_NODE", "cte_name": "r",
+            "cte_map": {"map": []}, "modifiers": [],
+            "left": base("sales"), "right": base("r")});
+        // DuckDB 2.0: `value.query_node` is the node directly. DuckDB ≤1.x:
+        // `value.query.node` wraps it in `{named_param_map, node}`.
+        let shapes = [
+            ("query_node", serde_json::json!(node)),
+            (
+                "query",
+                serde_json::json!({"named_param_map": [], "node": node}),
+            ),
+        ];
+        for (query_key, value) in shapes {
+            let mut ast = serde_json::json!({"type": "SELECT_NODE", "modifiers": [],
+                "cte_map": {"map": [{"key": "r", "value": {query_key: value}}]},
+                "from_table": base("r")});
+            Walker::new(Mode::Rewrite, &enf, &temps)
+                .walk(&mut ast)
+                .unwrap_or_else(|e| panic!("{query_key}: {e}"));
+            let node_path = if query_key == "query_node" {
+                ast["cte_map"]["map"][0]["value"]["query_node"].clone()
+            } else {
+                ast["cte_map"]["map"][0]["value"]["query"]["node"].clone()
+            };
+            assert_eq!(
+                node_path["right"]["table_name"], "__anofox_cte_1",
+                "{query_key}"
+            );
+            assert_eq!(
+                ast["from_table"]["table_name"], "__anofox_cte_1",
+                "{query_key}"
+            );
+        }
+    }
+
     #[test]
     fn walk_fails_closed() {
         let enf = enforcer(r#"{"tables": {"sales": {"rows": true}}}"#);
@@ -1505,6 +1644,25 @@ mod tests {
         let call = serde_json::json!({"class": "FUNCTION", "type": "FUNCTION",
             "function_name": "PG_GET_VIEWDEF", "children": []});
         assert!(run(call).unwrap_err().contains("macro"));
+        // sec-review-362.md L-1: unlike `icu_collate_*`, there is no
+        // `collate_*` wildcard — every `collate_<locale>` DuckDB 2.0 added
+        // (#357) is listed individually in policy_functions.txt, so a
+        // locale that isn't listed still fails closed through the ordinary
+        // "not on the reviewed function list" path.
+        let scalar = |f: &str| {
+            serde_json::json!({"class": "FUNCTION", "type": "FUNCTION",
+                "function_name": f, "children": []})
+        };
+        assert!(
+            run(scalar("collate_zzz"))
+                .unwrap_err()
+                .contains("reviewed function list"),
+            "an unlisted collate_<locale> must be denied, not fall through a wildcard"
+        );
+        assert!(
+            run(scalar("collate_de")).is_ok(),
+            "but a locale this file does list is allowed"
+        );
         let show = serde_json::json!({"type": "SHOW_REF", "alias": "", "sample": null,
             "table_name": "\"tables\"", "query": null});
         assert!(run(show).is_err());
@@ -1568,6 +1726,20 @@ mod tests {
             serde_json::json!({"type": {"id": "INTEGER"}, "value": 1})
         ))
         .is_err());
+        // DuckDB 2.0's shape (#357): "children" → "arguments" of
+        // {"expression": …}, and the constant's "value" → "literal".
+        let gv2 = |text: &str| {
+            serde_json::json!({"class": "FUNCTION", "type": "FUNCTION", "function_name": "getvariable",
+                "arguments": [{"name": "", "expression": {"class": "CONSTANT",
+                    "type": "VALUE_CONSTANT", "literal": {"kind": "STRING", "text": text}}}]})
+        };
+        assert!(run(gv2("__claim_user")).is_ok());
+        assert!(run(gv2("region")).is_err(), "a viewer variable");
+        let gv2_int = serde_json::json!({"class": "FUNCTION", "type": "FUNCTION",
+            "function_name": "getvariable", "arguments": [{"name": "", "expression": {
+                "class": "CONSTANT", "type": "VALUE_CONSTANT",
+                "literal": {"kind": "INTEGER", "text": "1"}}}]});
+        assert!(run(gv2_int).is_err(), "not a string literal");
         // Plain table names in a row filter point at the snapshot.
         let mut t = base("user_regions");
         run(t.clone()).unwrap();
