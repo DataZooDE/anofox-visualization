@@ -1,12 +1,16 @@
 // #258 (a follow-up to #200): scratchRunner's timeout against a real,
 // uncooperative query in the real DuckDB-Wasm Worker — no mocked
 // connection (tests/web/lint_test.mjs's mock proves the cleanup *logic*
-// deterministically; this proves DuckDB-Wasm actually honours the cancel).
-// A late query must really be interrupted — the call settles near its
-// timeout, not after the query would finish on its own — and the scratch
+// deterministically; this proves DuckDB-Wasm actually honours the cancel
+// and that the cleanup doesn't depend on cancelSent()'s own answer). A
+// late query must really be interrupted — the call settles near its
+// timeout, not after the query would finish on its own; the scratch
 // session must be usable right after: a fresh scratchRunner call against
-// the same page database must answer promptly, not queued behind whatever
-// was left of the cancelled one (web/lint.js's scratchRunner, #258).
+// the same page database must answer promptly; and the scratch database
+// scratchRunner attached must be gone afterwards, in all three of
+// cancelSent()'s real-world answers: "real" (whatever the browser's own
+// cancelSent() says), "false" (idle/mid-batch-fetch — the common case,
+// not a sign anything is still running) and "throw".
 //
 //   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   python3 serve_nocache.py 8947 &          # serves web/
@@ -58,11 +62,15 @@ try {
     await page.waitForFunction(() => !!window.__e2e, null, { timeout: 60000 });
     await page.evaluate(() => window.__e2e.makePageDb());
 
-    const r = await page.evaluate(() => window.__e2e.scratchCancel());
-    check(/took longer.*cancelled/.test(r.rejected || ""), `the late query is rejected by a real cancel (${r.rejected})`);
-    check(r.cancelMs < 5000, `the call settled near the timeout (${Math.round(r.cancelMs)} ms), not after a ~2×10^11-row cross join would finish on its own`);
-    check(JSON.stringify(r.after) === JSON.stringify([{ ok: 1 }]), `the page database answers a fresh query right after (${JSON.stringify(r.after)})`);
-    check(r.afterMs < 3000, `…promptly: not queued behind the cancelled query (${Math.round(r.afterMs)} ms)`);
+    for (const cancelBehavior of ["real", "false", "throw"]) {
+      const r = await page.evaluate((b) => window.__e2e.scratchCancel(b), cancelBehavior);
+      const tag = `cancelSent() ${cancelBehavior}`;
+      check(/took longer.*cancelled/.test(r.rejected || ""), `${tag}: the late query is rejected by a real cancel (${r.rejected})`);
+      check(r.cancelMs < 5000, `${tag}: the call settled near the timeout (${Math.round(r.cancelMs)} ms), not after a ~2×10^11-row cross join would finish on its own`);
+      check(JSON.stringify(r.after) === JSON.stringify([{ ok: 1 }]), `${tag}: the page database answers a fresh query right after (${JSON.stringify(r.after)})`);
+      check(r.afterMs < 3000, `${tag}: …promptly: not queued behind the cancelled query (${Math.round(r.afterMs)} ms)`);
+      check(r.leaked === 0, `${tag}: no anofox_lint_% database left attached (leaked=${r.leaked})`);
+    }
     check(!pageErrors.length, `no page errors${pageErrors.length ? ": " + pageErrors.join(" | ") : ""}`);
   } finally {
     await browser.close();
