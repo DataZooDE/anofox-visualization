@@ -77,4 +77,14 @@ assert.equal(
   info({ "data-series": "pm", "data-value": "7.5", "data-fvalue": "$7.50", "data-x": "Mon" }, "Mon, pm: $7.50").detail,
   ""
 );
+// ruleRow: the crosshair's "Reference line" row. A date ::XLINE (geom_vline)
+// shows its formatted date, not the raw epoch seconds in data-value (#365);
+// a ::REFLINE (geom_hline) still shows its value.
+const { ruleRow } = new Function(
+  `${grab("escapeHtml")}\n${grab("fmtTipValue")}\n${grab("markInfo")}\n${grab("ruleRow")}\nreturn { ruleRow };`
+)();
+const vline = ruleRow(el({ "data-geom": "vline", "data-value": "1781481600", "data-fx": "2026-06-15", "data-tip": "2026-06-15" }));
+assert.ok(vline.includes("<b>2026-06-15</b>"), vline);
+const hline = ruleRow(el({ "data-geom": "hline", "data-value": "100", "data-fvalue": "$100.00", "data-tip": "100" }));
+assert.ok(hline.includes("<b>$100.00</b>"), hline);
 console.log("web svg attribute tests: ok");
