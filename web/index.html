@@ -451,7 +451,9 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
 .dp-head .dp-logo-acts{display:flex;gap:.4rem}
 .dp-head .dp-logo-err{flex-basis:100%;font-size:.78rem;font-weight:600;color:var(--ui-err)}
 .dp-head .dp-logo-err:empty{display:none}
-/* MotherDuck connect dialog */
+/* Modal dialog chrome, shared by dpDialog()'s own veil/card/note/actions
+   (the .md- names predate #380, which removed the first dialog to use
+   them; dpDialog() still relies on them). */
 .md-dialog{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:var(--ui-veil);backdrop-filter:blur(3px)}
 .md-dialog[hidden]{display:none}
 .md-card{background:var(--ui-card);border-radius:16px;padding:1.4rem 1.5rem;width:min(440px,92vw);box-shadow:var(--ui-shadow-hi);color:var(--ui-ink)}
@@ -461,12 +463,8 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
 .md-card label{display:flex;flex-direction:column;gap:.3rem;font-size:.8rem;font-weight:600;color:var(--ui-muted);margin-bottom:.8rem}
 .md-card input{font:inherit;font-size:.9rem;font-weight:500;color:var(--ui-ink);background:var(--ui-input-bg);border:1px solid var(--ui-line);border-radius:10px;padding:.55rem .7rem}
 .md-card input:focus{outline:none;border-color:var(--ui-accent);box-shadow:var(--ui-focus)}
-.md-status{font-size:.82rem;font-weight:600;min-height:1.2rem;margin-bottom:.6rem}
-.md-status.ok{color:var(--ui-ok)}.md-status.err{color:var(--ui-err)}
 .md-actions{display:flex;align-items:center;gap:.5rem}
 .md-actions button{cursor:pointer}
-#md-connect{background:linear-gradient(135deg,var(--ui-accent),var(--ui-accent2));color:var(--ui-on-accent);border:0;border-radius:10px;padding:.5rem 1.1rem;font-weight:600;font-size:.85rem}
-#md.connected{border-color:var(--ui-accent);color:var(--ui-accent)}
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-thumb{background:var(--ui-scroll);border-radius:8px;border:3px solid transparent;background-clip:padding-box}
 ::-webkit-scrollbar-thumb:hover{background:var(--ui-scroll-hover)}
@@ -500,7 +498,6 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
   <span class="tag" id="app-tag">Dashboards from SQL</span>
   <button id="more" class="btn2 icon more-btn" aria-expanded="false" aria-controls="actions" aria-label="More actions" title="more actions">⋯</button>
   <div class="actions" id="actions">
-    <button id="md" class="btn2" title="connect a MotherDuck database">☁ MotherDuck</button>
     <button id="share" class="btn2" title="copy a shareable link (the SQL is encoded in the URL)">Share</button>
     <button id="dlhtml" class="btn2" title="download the dashboard as a standalone HTML file">⤓ HTML</button>
     <select id="refresh" title="auto-refresh interval">
@@ -514,21 +511,6 @@ body.mode-view .dp-hedit,body.mode-view .dp-head-blank{display:none}
   <span class="status" id="status">booting…</span>
 </header>
 
-<div id="md-dialog" class="md-dialog" hidden>
-  <div class="md-card">
-    <h3>Connect MotherDuck</h3>
-    <p class="md-note">Runs <code>ATTACH 'md:…'</code> with your service token. The token is stored only in this browser (localStorage) — it is never put in the SQL, the share link, or the exported HTML.</p>
-    <label>Service token<input id="md-token" type="password" placeholder="paste your MotherDuck token" autocomplete="off"></label>
-    <label>Database (optional)<input id="md-db" type="text" placeholder="e.g. my_db  →  ATTACH 'md:my_db'"></label>
-    <div class="md-status" id="md-status"></div>
-    <div class="md-actions">
-      <button id="md-disconnect" class="btn2">Disconnect</button>
-      <span style="flex:1"></span>
-      <button id="md-cancel" class="btn2">Cancel</button>
-      <button id="md-connect">Connect</button>
-    </div>
-  </div>
-</div>
 <div class="shell">
   <aside class="sidebar" id="sidebar" aria-label="Dashboards">
     <button id="side-new" class="side-new">＋ New dashboard</button>

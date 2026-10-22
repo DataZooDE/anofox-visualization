@@ -2368,21 +2368,12 @@ async function boot() {
     if (s > 0) dpTimer = setInterval(run, s * 1000);
   };
 
-
-  // MotherDuck connect dialog + auto-connect from a stored token.
-  $("md").onclick = mdOpen;
-  $("md-cancel").onclick = () => ($("md-dialog").hidden = true);
-  $("md-connect").onclick = mdDoConnect;
-  $("md-disconnect").onclick = mdDisconnect;
-  const saved = mdSaved();
-  if (saved && saved.token) {
-    try {
-      await mdConnect(saved.token, saved.db);
-      mdMark(true, saved.db);
-    } catch (e) {
-      mdMark(false);
-    }
-  }
+  // #380: the MotherDuck connect button/dialog is gone; clear any token a
+  // previous visit stored under the old key so it doesn't linger in the
+  // viewer's browser.
+  try {
+    localStorage.removeItem(MD_KEY);
+  } catch (_) {}
 
   $("run").disabled = false;
   $("run").onclick = () => {
@@ -2655,7 +2646,7 @@ function initHeaderMenu() {
   };
   more.onclick = () => open(!isOpen());
   // A finished action closes the menu; focus returns to ⋯ unless the action
-  // moved it on (the MotherDuck dialog).
+  // moved it on (e.g. to a dialog opened from a menu button).
   actions.addEventListener("click", (e) => {
     if (!isOpen() || !e.target.closest("button")) return;
     const el = document.activeElement;
@@ -3978,7 +3969,7 @@ const previewExitListeners = new Set();
 // isn't in the editor). Each button's own `disabled`/`title` is restored on
 // exit. The dark toggle and the refresh select stay enabled: a re-run of the
 // preview stays in the engine (runSqlInner dispatches to it regardless).
-const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "md", "lint-run", "side-new"];
+const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "lint-run", "side-new"];
 let previewToolbarPrev = null;
 function previewToolbar(on) {
   if (on) {
@@ -4085,8 +4076,8 @@ async function previewExit({ rerun = true, hold = false } = {}) {
   // for a still-active preview's lazy tab jobs after `runOnce` returns
   // (never reset it from runOnce itself). Once nothing is active, though,
   // a stale token left pointing at this now-dead preview would otherwise
-  // misroute the page's own Explore, add-file and MotherDuck queries
-  // (none of which come from a render) into the dead session's `.run`,
+  // misroute the page's own Explore and add-file queries (neither of which
+  // comes from a render) into the dead session's `.run`,
   // which reads a `null` S.session and fails — functionally broken, not
   // a security issue (nothing reaches the page database either way), but
   // worth closing: `run()`'s own `finally` below is the other half.
@@ -4837,7 +4828,7 @@ function renderCatalog() {
   const tree = $("cat-tree");
   tree.removeAttribute("aria-busy");
   if (!xpState.tables.length) {
-    tree.innerHTML = '<div class="cat-empty">No tables yet. Add a file below, create one in Edit mode, or connect MotherDuck.</div>';
+    tree.innerHTML = '<div class="cat-empty">No tables yet. Add a file below, or create one in Edit mode.</div>';
     return;
   }
   tree.innerHTML = "";
@@ -6075,85 +6066,9 @@ function openTableAsDashboard(e, cards) {
   $("dash-name").value = e.t;
 }
 
-// ---------- MotherDuck ----------
+// #380: the MotherDuck connect button/dialog is gone; the key is kept only
+// so boot() can clear a token a previous visit stored under it (above).
 const MD_KEY = "dp_md";
-function mdSaved() {
-  try {
-    return JSON.parse(localStorage.getItem(MD_KEY) || "null");
-  } catch (_) {
-    return null;
-  }
-}
-// Attach an md: database. Token/db are substituted here (never in the dashboard
-// SQL), so they stay out of the share link and exported HTML.
-async function mdConnect(token, db) {
-  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
-  for (const stmt of ["INSTALL motherduck", "LOAD motherduck"]) {
-    try {
-      await runSql(stmt);
-    } catch (_) {
-      /* autoloaded on some builds */
-    }
-  }
-  await runSql(`SET motherduck_token=${q(token)}`);
-  try {
-    await runSql(db ? `ATTACH ${q("md:" + db)}` : "ATTACH 'md:'");
-  } catch (e) {
-    if (!/already attached|already exists/i.test(String(e))) throw e;
-  }
-}
-function mdMark(ok, db) {
-  const btn = $("md");
-  btn.classList.toggle("connected", ok);
-  btn.textContent = ok ? `☁ ${db || "MotherDuck"} ✓` : "☁ MotherDuck";
-}
-function mdOpen() {
-  const s = mdSaved() || {};
-  $("md-token").value = s.token || "";
-  $("md-db").value = s.db || "";
-  const st = $("md-status");
-  st.textContent = "";
-  st.className = "md-status";
-  $("md-dialog").hidden = false;
-  $("md-token").focus();
-}
-async function mdDoConnect() {
-  const token = $("md-token").value.trim();
-  const db = $("md-db").value.trim();
-  const st = $("md-status");
-  if (!token) {
-    st.textContent = "Please paste a token.";
-    st.className = "md-status err";
-    return;
-  }
-  st.textContent = "Connecting…";
-  st.className = "md-status";
-  try {
-    await mdConnect(token, db);
-    localStorage.setItem(MD_KEY, JSON.stringify({ token, db }));
-    mdMark(true, db);
-    st.textContent = "Connected ✓";
-    st.className = "md-status ok";
-    setTimeout(() => ($("md-dialog").hidden = true), 700);
-    run();
-  } catch (e) {
-    st.textContent = "Failed: " + String(e).replace(/^Error:\s*/, "");
-    st.className = "md-status err";
-  }
-}
-async function mdDisconnect() {
-  const s = mdSaved();
-  localStorage.removeItem(MD_KEY);
-  if (s && s.db) {
-    try {
-      await runSql(`DETACH ${s.db.replace(/[^A-Za-z0-9_]/g, "")}`); // detach by name
-    } catch (_) {}
-  }
-  mdMark(false);
-  const st = $("md-status");
-  st.textContent = "Disconnected — reload the page for a fully clean session.";
-  st.className = "md-status";
-}
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
