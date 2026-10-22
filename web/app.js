@@ -13990,7 +13990,10 @@ function tipRow(info, fill) {
 // (its formatted value, or the date / x it was drawn at).
 function ruleRow(el) {
   const info = markInfo((k) => el.getAttribute(k), el.getAttribute("data-tip") || "");
-  return `<div class="tip-row"><span><span class="tip-rule"></span>Reference line</span><b>${escapeHtml(info.value || info.x)}</b></div>`;
+  // A geom_vline (::XLINE) sits at an x: ggplot-rs writes its raw position
+  // (epoch seconds for a date) to `data-value` and only formats `data-fx` (#365).
+  const v = el.getAttribute("data-geom") === "vline" ? info.x || info.value : info.value || info.x;
+  return `<div class="tip-row"><span><span class="tip-rule"></span>Reference line</span><b>${escapeHtml(v)}</b></div>`;
 }
 
 // ECharts-style toolbox: a hover-reveal toolbar per chart panel — chart-type
