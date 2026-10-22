@@ -62,7 +62,18 @@ pub struct SourceOpts {
     /// `tls.fingerprint` — reserved for a non-local source (open question:
     /// not enforced by this prototype; see docs/secure-serving.md).
     pub tls_fingerprint: Option<String>,
+    /// `max_rows` — per-table row budget (security review L1/L3): a hostile
+    /// or careless source cannot push an unbounded table into the snapshot.
+    pub max_rows: u64,
+    /// `max_bytes` — cumulative snapshot-file size budget, checked after
+    /// each table/view (L3): bounds disk use during a build.
+    pub max_bytes: u64,
 }
+
+/// `options.source.max_rows` default: generous, but not unbounded.
+const DEFAULT_MAX_ROWS: u64 = 50_000_000;
+/// `options.source.max_bytes` default: 10 GiB.
+const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 impl std::fmt::Debug for SourceOpts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,6 +86,8 @@ impl std::fmt::Debug for SourceOpts {
             .field("views", &matches!(self.views, Views::Materialize))
             .field("timeout", &self.timeout)
             .field("tls_fingerprint_set", &self.tls_fingerprint.is_some())
+            .field("max_rows", &self.max_rows)
+            .field("max_bytes", &self.max_bytes)
             .finish()
     }
 }
@@ -88,6 +101,7 @@ pub fn parse(val: &serde_json::Value) -> Result<SourceOpts, String> {
     let (mut uri, mut token_env, mut token_file, mut as_name) = (None, None, None, None);
     let (mut schemas, mut views, mut tls_fingerprint) = (Vec::new(), Views::Materialize, None);
     let mut timeout = Duration::from_secs(600);
+    let (mut max_rows, mut max_bytes) = (DEFAULT_MAX_ROWS, DEFAULT_MAX_BYTES);
     for (k, v) in m {
         match k.as_str() {
             "uri" => {
@@ -164,6 +178,18 @@ pub fn parse(val: &serde_json::Value) -> Result<SourceOpts, String> {
                     .ok_or("options.source.timeout_s must be a positive integer")?;
                 timeout = Duration::from_secs(n.min(86_400));
             }
+            "max_rows" => {
+                max_rows = v
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or("options.source.max_rows must be a positive integer")?;
+            }
+            "max_bytes" => {
+                max_bytes = v
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or("options.source.max_bytes must be a positive integer")?;
+            }
             "tls" => {
                 let t = v
                     .as_object()
@@ -179,7 +205,7 @@ pub fn parse(val: &serde_json::Value) -> Result<SourceOpts, String> {
             other => {
                 return Err(format!(
                     "options.source: unknown key '{other}' (uri, token_env, token_file, as, \
-                     schemas, views, timeout_s, tls)"
+                     schemas, views, timeout_s, tls, max_rows, max_bytes)"
                 ))
             }
         }
@@ -208,45 +234,77 @@ pub fn parse(val: &serde_json::Value) -> Result<SourceOpts, String> {
         views,
         timeout,
         tls_fingerprint,
+        max_rows,
+        max_bytes,
     })
 }
 
 /// Read the source token fresh (never cached across builds): the env var, or
-/// the file (trimmed; refuses an empty file).
+/// the file (trimmed; refuses an empty file). Refuses a token containing a
+/// control character or a single quote (security review I1): such a token
+/// would appear quote-doubled in the `CREATE TEMPORARY SECRET` literal, and
+/// [`redact`] only reliably strips the raw form.
 pub fn read_token(opts: &SourceOpts) -> Result<String, String> {
-    if let Some(name) = &opts.token_env {
-        return std::env::var(name).map_err(|_| {
-            format!("options.source.token_env: environment variable '{name}' is not set")
-        });
-    }
-    if let Some(path) = &opts.token_file {
+    let (t, where_) = if let Some(name) = &opts.token_env {
+        (
+            std::env::var(name).map_err(|_| {
+                format!("options.source.token_env: environment variable '{name}' is not set")
+            })?,
+            format!("options.source.token_env ('{name}')"),
+        )
+    } else if let Some(path) = &opts.token_file {
         let raw = std::fs::read_to_string(path).map_err(|e| {
             format!(
                 "options.source.token_file: cannot read '{}': {e}",
                 path.display()
             )
         })?;
-        let t = raw.trim();
-        if t.is_empty() {
-            return Err(format!(
-                "options.source.token_file: '{}' is empty",
-                path.display()
-            ));
-        }
-        return Ok(t.to_string());
+        (
+            raw,
+            format!("options.source.token_file ('{}')", path.display()),
+        )
+    } else {
+        return Err("options.source: no token source configured".into());
+    };
+    let t = t.trim();
+    if t.is_empty() {
+        return Err(format!("{where_} is empty"));
     }
-    Err("options.source: no token source configured".into())
+    if t.chars().any(|c| c.is_control() || c == '\'') {
+        return Err(format!(
+            "{where_}: the token must not contain a control character or a single quote"
+        ));
+    }
+    Ok(t.to_string())
 }
 
 /// Replace every occurrence of `token` in `err` — the token must never reach
 /// stderr, the request log, `/healthz`, a page, a panel or an app-config
-/// (`docs/secure-serving.md`, "Quack source").
+/// (`docs/secure-serving.md`, "Quack source"). Also strips the quote-doubled
+/// form the token takes inside the `CREATE TEMPORARY SECRET` SQL literal (in
+/// case a raw-form replace above already changed the string and left the
+/// literal's own escaping visible), and the longest prefix of the token that
+/// still appears — DuckDB's `LINE 1: …` error context can cut a long literal
+/// short, leaving only a prefix of the token in an otherwise-redacted message
+/// (security review I1).
 pub fn redact(err: &str, token: &str) -> String {
     if token.is_empty() {
-        err.to_string()
-    } else {
-        err.replace(token, "<redacted>")
+        return err.to_string();
     }
+    let mut out = err.replace(token, "<redacted>");
+    let quoted = token.replace('\'', "''");
+    if quoted != token {
+        out = out.replace(&quoted, "<redacted>");
+    }
+    if token.len() >= 8 {
+        for n in (8..token.len()).rev() {
+            if out.contains(&token[..n]) {
+                out = out.replace(&token[..n], "<redacted>");
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Build the snapshot file for a Quack source: a dedicated staging instance
@@ -339,7 +397,7 @@ fn build(
                     intr.interrupt();
                 }
             });
-            let r = copy_schema_and_data(&stg, &alias, dst_alias, opts, &mut warnings);
+            let r = copy_schema_and_data(&stg, &alias, dst_alias, &file, opts, &mut warnings);
             finished.store(true, Ordering::SeqCst);
             r
         })
@@ -352,7 +410,9 @@ fn build(
 
     result?;
     warnings.push(format!(
-        "quack source '{}': Quack exposes no foreign keys, indexes, macros or sequences — none are copied",
+        "quack source '{}': every table is materialised by CREATE TABLE … AS SELECT — foreign \
+         keys, indexes, macros, sequences, primary keys, NOT NULL and generated-column formulas \
+         are not copied (irrelevant for a READ_ONLY snapshot; values still match)",
         opts.r#as
     ));
     Ok((opts.r#as.clone(), file, warnings))
@@ -402,54 +462,52 @@ fn cancel_remote(stg2: &Conn, alias: &str) {
     ));
 }
 
-/// `(SCHEMA)` copy (a bare `COPY FROM DATABASE` fails on a Quack source:
-/// "Multiple streaming scans … not implemented", #352 fact 1), then one
-/// `INSERT` per table (reusing the local-database helpers: Quack has no
-/// foreign keys, so `fk_order` is just the given order). Views are
-/// materialised or skipped per `opts.views` (fact 1: `(SCHEMA)` doesn't copy
-/// them). `opts.schemas` restricts what ends up in `dst`: any other schema
-/// the source exposes is dropped after the `(SCHEMA)` copy.
+/// One `CREATE TABLE … AS SELECT *` per table (security review L1): never
+/// `COPY FROM DATABASE … (SCHEMA)`, which would replay the source's DDL
+/// verbatim — including a generated column's *expression*, which DuckDB
+/// evaluates lazily on every read. Replayed into the **serving** instance,
+/// that expression would run there, past any access policy's
+/// `policy_functions.txt` denylist (the policy only ever sees the panel SQL
+/// calling it, never a generated column doing so). CTAS instead materialises
+/// every column's *current value*, generated or not: the serving instance
+/// never evaluates a source-chosen expression. The trade-off: primary keys,
+/// `NOT NULL`, indexes, foreign keys, macros and sequences are not carried
+/// over — irrelevant for a READ_ONLY snapshot, documented in
+/// secure-serving.md. `opts.max_rows` / `opts.max_bytes` bound a hostile or
+/// oversized source (L3): checked per table / after each table and view.
 fn copy_schema_and_data(
     stg: &Conn,
     src: &str,
     dst: &str,
+    dst_file: &Path,
     opts: &SourceOpts,
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     stg.exec("BEGIN")?;
     let r = (|| -> Result<(), String> {
-        stg.exec(&format!(
-            "COPY FROM DATABASE {} TO {} (SCHEMA)",
-            quote_ident(src),
-            dst
-        ))?;
-        if !opts.schemas.is_empty() {
-            drop_unwanted_schemas(stg, dst, &opts.schemas, warnings)?;
-        }
         let tables = list(stg, src, "duckdb_tables()", "table_name", &opts.schemas)?;
         let edges: Vec<(String, String, String)> = Vec::new(); // Quack exposes no FKs.
+        let mut schemas_created = std::collections::BTreeSet::new();
         for i in fk_order(&tables, &edges) {
             let (schema, table) = &tables[i];
+            if !schema.eq_ignore_ascii_case("main") && schemas_created.insert(schema.clone()) {
+                stg.exec(&format!(
+                    "CREATE SCHEMA IF NOT EXISTS {dst}.{}",
+                    quote_ident(schema)
+                ))?;
+            }
+            let n = row_count(stg, src, schema, table)?;
+            if n > opts.max_rows {
+                return Err(format!(
+                    "{schema}.{table}: {n} rows exceeds options.source.max_rows ({})",
+                    opts.max_rows
+                ));
+            }
             let qual = |db: &str| format!("{}.{}.{}", db, quote_ident(schema), quote_ident(table));
             let (from, to) = (qual(src), qual(dst));
-            // Not `insertable_columns` (serve.rs): that probes each defaulted
-            // column with its own throwaway `INSERT ... WHERE false` and
-            // swallows a failure (a generated column) to skip it — fine in
-            // autocommit, but DuckDB has no SAVEPOINT to isolate a failed
-            // statement from the rest, so inside our explicit BEGIN (needed
-            // for one consistent remote view, #352 fact 3) that failure would
-            // abort the whole transaction before any real INSERT runs. A 2.0
-            // host's `duckdb_columns().is_generated` says so directly instead
-            // (unlike 1.5.x, so this helper is quack-only, not shared).
-            let cols = generated_free_columns(stg, src, schema, table)?
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            stg.exec(&format!(
-                "INSERT INTO {to} ({cols}) SELECT {cols} FROM {from}"
-            ))
-            .map_err(|e| format!("{schema}.{table}: {}", e.lines().next().unwrap_or("")))?;
+            stg.exec(&format!("CREATE TABLE {to} AS SELECT * FROM {from}"))
+                .map_err(|e| format!("{schema}.{table}: {}", e.lines().next().unwrap_or("")))?;
+            check_max_bytes(dst_file, opts.max_bytes, &format!("table {schema}.{table}"))?;
         }
         let views = list(stg, src, "duckdb_views()", "view_name", &opts.schemas)?;
         for (schema, view) in views {
@@ -459,6 +517,13 @@ fn copy_schema_and_data(
                     opts.r#as
                 )),
                 Views::Materialize => {
+                    if !schema.eq_ignore_ascii_case("main") && schemas_created.insert(schema.clone())
+                    {
+                        stg.exec(&format!(
+                            "CREATE SCHEMA IF NOT EXISTS {dst}.{}",
+                            quote_ident(&schema)
+                        ))?;
+                    }
                     let from = format!(
                         "{}.{}.{}",
                         quote_ident(src),
@@ -470,6 +535,7 @@ fn copy_schema_and_data(
                         .map_err(|e| {
                             format!("view {schema}.{view}: {}", e.lines().next().unwrap_or(""))
                         })?;
+                    check_max_bytes(dst_file, opts.max_bytes, &format!("view {schema}.{view}"))?;
                     warnings.push(format!(
                         "quack source '{}': view {schema}.{view} materialised as a table (its definition is not replayed)",
                         opts.r#as
@@ -486,6 +552,39 @@ fn copy_schema_and_data(
             Err(e)
         }
     }
+}
+
+/// `SELECT count(*)` of `src.schema.table`, checked against `max_rows`
+/// *before* copying it (security review L3).
+fn row_count(stg: &Conn, src: &str, schema: &str, table: &str) -> Result<u64, String> {
+    let q = format!(
+        "SELECT count(*)::VARCHAR FROM {}.{}.{}",
+        quote_ident(src),
+        quote_ident(schema),
+        quote_ident(table)
+    );
+    stg.query(&q)?
+        .string_rows(1)?
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("{schema}.{table}: could not read its row count"))
+}
+
+/// The snapshot file's on-disk size, checked against `max_bytes` after every
+/// table/view (security review L3) — a hostile or oversized source cannot
+/// fill the disk the snapshot directory lives on.
+fn check_max_bytes(dst_file: &Path, max_bytes: u64, after: &str) -> Result<(), String> {
+    let size = std::fs::metadata(dst_file)
+        .map(|m| m.len())
+        .map_err(|e| format!("could not stat the snapshot file after {after}: {e}"))?;
+    if size > max_bytes {
+        return Err(format!(
+            "the snapshot file reached {size} bytes after {after}, exceeding options.source.max_bytes ({max_bytes})"
+        ));
+    }
+    Ok(())
 }
 
 /// `(schema, name)` pairs of `src`'s tables or views, restricted to
@@ -509,94 +608,6 @@ fn list(
         .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
         .filter(|(s, _)| schemas.is_empty() || schemas.iter().any(|w| w.eq_ignore_ascii_case(s)))
         .collect())
-}
-
-/// `src.schema.table`'s own column names, in `column_index` order, excluding
-/// generated columns (`duckdb_columns().is_generated` — a 2.0 host only; see
-/// the call site in [`copy_schema_and_data`] for why this doesn't reuse the
-/// probe-based `insertable_columns` the local-database path uses).
-fn generated_free_columns(
-    stg: &Conn,
-    src: &str,
-    schema: &str,
-    table: &str,
-) -> Result<Vec<String>, String> {
-    stg.query(&format!(
-        "SELECT column_name::VARCHAR FROM duckdb_columns() \
-         WHERE database_name = {} AND schema_name = {} AND table_name = {} \
-         AND NOT is_generated ORDER BY column_index",
-        sql_string_literal(src),
-        sql_string_literal(schema),
-        sql_string_literal(table)
-    ))?
-    .string_rows(10_000)?
-    .into_iter()
-    .map(|r| {
-        r.into_iter()
-            .next()
-            .flatten()
-            .ok_or_else(|| "NULL column_name".to_string())
-    })
-    .collect()
-}
-
-/// Drop every schema of `dst` that isn't in `wanted` (the source may expose
-/// more than `options.source.schemas` asked for; `(SCHEMA)` already copied
-/// all of them, so anything not wanted is removed again before any data
-/// moves — never served, never a path around a policy on the wanted ones).
-fn drop_unwanted_schemas(
-    stg: &Conn,
-    dst: &str,
-    wanted: &[String],
-    warnings: &mut Vec<String>,
-) -> Result<(), String> {
-    let rows = stg
-        .query(&format!(
-            "SELECT schema_name::VARCHAR FROM duckdb_schemas() \
-             WHERE database_name = {} AND NOT internal AND schema_name <> 'main'",
-            sql_string_literal(dst)
-        ))?
-        .string_rows(10_000)?;
-    for r in rows {
-        let Some(name) = r.first().cloned().flatten() else {
-            continue;
-        };
-        if wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
-        stg.exec(&format!(
-            "DROP SCHEMA {}.{} CASCADE",
-            dst,
-            quote_ident(&name)
-        ))?;
-        warnings.push(format!(
-            "quack source: schema '{name}' is not in options.source.schemas — dropped from the snapshot, never served"
-        ));
-    }
-    // "main" itself, if not wanted: drop its tables individually (DuckDB
-    // keeps one "main" schema per attached database; it cannot be dropped).
-    if !wanted.iter().any(|w| w.eq_ignore_ascii_case("main")) {
-        let tables = stg
-            .query(&format!(
-                "SELECT table_name::VARCHAR FROM duckdb_tables() WHERE database_name = {} AND schema_name = 'main'",
-                sql_string_literal(dst)
-            ))?
-            .string_rows(10_000)?;
-        let mut any = false;
-        for r in tables {
-            if let Some(t) = r.first().cloned().flatten() {
-                stg.exec(&format!("DROP TABLE {}.main.{}", dst, quote_ident(&t)))?;
-                any = true;
-            }
-        }
-        if any {
-            warnings.push(
-                "quack source: schema 'main' is not in options.source.schemas — its tables were dropped from the snapshot"
-                    .to_string(),
-            );
-        }
-    }
-    Ok(())
 }
 
 /// A short random suffix for staging names (aliases, file names) — delegates
@@ -723,6 +734,64 @@ mod tests {
         .unwrap();
         assert_eq!(read_token(&opts_padded).unwrap(), "topsecret");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_token_refuses_a_quote_or_a_control_character() {
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-src-token-ctrl-test-{}",
+            anofox_visualization::host::serving::random_token()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        for (name, content) in [("quote", "has'quote"), ("ctrl", "has\ncontrol")] {
+            let p = dir.join(name);
+            std::fs::write(&p, content).unwrap();
+            let opts = src(&format!(
+                r#"{{"uri":"quack:h:1","token_file":{:?}}}"#,
+                p.to_string_lossy()
+            ))
+            .unwrap();
+            let err = read_token(&opts).unwrap_err();
+            assert!(
+                err.contains("control character") || err.contains("single quote"),
+                "{err}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn redact_strips_the_quote_doubled_and_truncated_forms_too() {
+        // security review I1: the token is embedded as a SQL string literal
+        // (`'` doubled), and DuckDB's `LINE 1: ...` context can cut a long
+        // literal short, leaving only a prefix of the token visible.
+        let token = "s3cr'3t-token-with-a-quote";
+        let quoted = token.replace('\'', "''");
+        let err = format!("CREATE TEMPORARY SECRET x (TYPE quack, TOKEN '{quoted}')");
+        let r = redact(&err, token);
+        assert!(!r.contains(&quoted), "{r}");
+        assert!(!r.contains(token), "{r}");
+
+        let long_token = "a-very-long-token-value-that-gets-cut-short-by-duckdb";
+        let truncated = &long_token[..30];
+        let err2 = format!("LINE 1: ...TOKEN '{truncated}");
+        let r2 = redact(&err2, long_token);
+        assert!(!r2.contains(truncated), "{r2}");
+    }
+
+    #[test]
+    fn max_rows_and_max_bytes_have_sensible_defaults_and_are_validated() {
+        let o = src(r#"{"uri":"quack:h:1","token_env":"T"}"#).unwrap();
+        assert!(o.max_rows > 0);
+        assert!(o.max_bytes > 0);
+        let o2 =
+            src(r#"{"uri":"quack:h:1","token_env":"T","max_rows":5,"max_bytes":100}"#).unwrap();
+        assert_eq!(o2.max_rows, 5);
+        assert_eq!(o2.max_bytes, 100);
+        let err = src(r#"{"uri":"quack:h:1","token_env":"T","max_rows":0}"#).unwrap_err();
+        assert!(err.contains("max_rows"), "{err}");
+        let err2 = src(r#"{"uri":"quack:h:1","token_env":"T","max_bytes":0}"#).unwrap_err();
+        assert!(err2.contains("max_bytes"), "{err2}");
     }
 
     #[test]

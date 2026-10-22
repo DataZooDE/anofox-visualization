@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -100,19 +100,26 @@ pub fn stop(port: u16) -> Result<String, String> {
             "anofox-visualization: nothing is serving on port {port}"
         ));
     };
+    // #352 I2: `Locked.stop` (if this is a locked server) is the SAME Arc,
+    // so a Quack build's watchdog sees this instantly as its cancel signal
+    // too — no separate flag, no window where the request could be missed.
     r.stop.store(true, Ordering::SeqCst);
-    // #352: a Quack source build in progress (the startup build, or a
-    // `refresh_s` rebuild) is cancelled the same way a timeout would —
-    // otherwise `r.workers.drain(..).join()` below could wait on it forever.
-    if let Some(locked) = &r.locked {
-        locked.source_cancel.store(true, Ordering::SeqCst);
-    }
     for _ in 0..r.workers.len() {
         r.server.unblock();
     }
-    for w in r.workers.drain(..) {
-        let _ = w.join();
-    }
+    // #352 M1 fix 3: bounded — a worker stuck in a Quack build (the
+    // `refresh_s` thread, most likely) that is already past its own
+    // timeout_s + grace returns promptly on its own; give it that same
+    // budget here rather than potentially waiting forever. Anything still
+    // running past the budget is left to finish in the background.
+    let join_budget = r
+        .locked
+        .as_ref()
+        .and_then(|l| l.opts.source.as_ref())
+        .map(|s| s.timeout.saturating_add(SOURCE_BUILD_GRACE))
+        .unwrap_or(Duration::from_secs(10))
+        + Duration::from_secs(5);
+    join_bounded(std::mem::take(&mut r.workers), join_budget);
     Ok(format!(
         "anofox-visualization: stopped the {} server on port {port}",
         r.kind
@@ -965,6 +972,95 @@ fn deps_tag(ds: &[Deps]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Extra time a Quack source build gets beyond `options.source.timeout_s`
+/// before the caller gives up on it (security review M1): `timeout_s` is
+/// the deadline the build's own internal watchdog uses to try a remote
+/// `quack_cancel`; this grace gives that attempt a chance to land before
+/// the caller stops waiting.
+const SOURCE_BUILD_GRACE: Duration = Duration::from_secs(10);
+
+/// Run `src`'s Quack copy on a detached thread, never touching `ctx.conn`
+/// (security review M1, fix 1) and never blocking the caller for longer than
+/// `src.timeout + SOURCE_BUILD_GRACE` (fix 2) — covering `LOAD`, the remote
+/// `ATTACH` and teardown too, not only the data copy the build's own
+/// watchdog already bounds. `stop` is the *server's* stop flag, passed
+/// straight through as the build's cancel signal: `anofox_serve_stop`
+/// setting it cancels a build in flight immediately, with no separate
+/// per-build flag to race against (security review I2 — a fresh flag
+/// created only when a build starts has a window, right before it's
+/// created, where an already-in-flight `stop` would be missed).
+///
+/// `abandoned` tracks whether a previous attempt is still running past its
+/// deadline: at most one such orphaned thread is tolerated per server. While
+/// it's set, a new attempt fails fast instead of piling up threads; the
+/// orphaned thread clears the flag itself whenever it finally returns
+/// (fix 2's "left to finish, the slot stays busy").
+fn run_source_build(
+    src: &Arc<crate::source::SourceOpts>,
+    dir: &Path,
+    stop: &Arc<AtomicBool>,
+    abandoned: &Arc<AtomicBool>,
+) -> Result<(String, PathBuf, Vec<String>), String> {
+    if abandoned.load(Ordering::SeqCst) {
+        return Err(
+            "options.source: a previous build is still running past its timeout_s — refusing a \
+             new attempt until it finishes"
+                .into(),
+        );
+    }
+    let budget = src.timeout.saturating_add(SOURCE_BUILD_GRACE);
+    let (tx, rx) = mpsc::channel();
+    let (src, dir, stop, abandoned_done) = (
+        src.clone(),
+        dir.to_path_buf(),
+        stop.clone(),
+        abandoned.clone(),
+    );
+    std::thread::spawn(move || {
+        let r = crate::source::copy_from_quack(&dir, &src, &stop);
+        // In case this finishes late (after the caller already gave up and
+        // marked it abandoned below): let the NEXT attempt through again.
+        abandoned_done.store(false, Ordering::SeqCst);
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(budget) {
+        Ok(r) => r,
+        Err(_) => {
+            abandoned.store(true, Ordering::SeqCst);
+            Err(format!(
+                "options.source: build timed out after {:.0}s (timeout_s + a {:.0}s grace) — \
+                 it may still be running in the background and has been left to finish",
+                budget.as_secs_f64(),
+                SOURCE_BUILD_GRACE.as_secs_f64()
+            ))
+        }
+    }
+}
+
+/// Join every handle, but never for longer than `budget` in total (security
+/// review M1, fix 3): a worker — most likely the `refresh_s` thread, which
+/// can be in the middle of a Quack build — that is still running when the
+/// budget runs out is left to finish on its own (its `JoinHandle` is simply
+/// dropped, not joined) instead of blocking `anofox_serve_stop`.
+fn join_bounded(handles: Vec<JoinHandle<()>>, budget: Duration) {
+    let (tx, rx) = mpsc::channel();
+    let n = handles.len();
+    for h in handles {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = h.join();
+            let _ = tx.send(());
+        });
+    }
+    let deadline = Instant::now() + budget;
+    for _ in 0..n {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if rx.recv_timeout(remaining).is_err() {
+            break;
+        }
+    }
+}
+
 struct Locked {
     port: u16,
     dashboards: Vec<Dash>,
@@ -982,9 +1078,13 @@ struct Locked {
     queries: Queries,
     /// Recent `-- @requires` answers (see [`requires_met`]).
     requires_cache: rq::ExistsCache,
-    /// `options.source` (#352): set to cancel a Quack source build in
-    /// progress — `anofox_serve_stop` sets it; a new build clears it first.
-    source_cancel: Arc<AtomicBool>,
+    /// The server's own stop flag (shared with `Running.stop`): also used as
+    /// a Quack build's cancel signal (security review I2 — see
+    /// [`run_source_build`]).
+    stop: Arc<AtomicBool>,
+    /// `options.source` (#352 M1): true while a previous build's thread is
+    /// still running past its deadline; `/healthz`'s `build_overdue`.
+    source_build_abandoned: Arc<AtomicBool>,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -993,10 +1093,24 @@ use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
-        self.source_cancel.store(false, Ordering::SeqCst);
+        // #352 M1: the Quack copy runs BEFORE ctx.conn is taken (it never
+        // touches it) and is bounded, so a source that stops answering can
+        // no longer stall every other locked server, the authoring
+        // console, or a new `anofox_serve_dashboards` sharing this host
+        // database's connection.
+        let dir = SnapshotDir::create()?;
+        let source_result = match &self.opts.source {
+            Some(src) => Some(run_source_build(
+                src,
+                &dir.0,
+                &self.stop,
+                &self.source_build_abandoned,
+            )?),
+            None => None,
+        };
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-            build_snapshot(&conn, &self.opts, &self.loads, &self.source_cancel)?
+            build_snapshot(&conn, &self.opts, &self.loads, dir, source_result)?
         };
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(&mut snap, &self.dashboards, p, k)?;
@@ -1092,13 +1206,26 @@ pub fn start_locked(
         // silently get there.
         return Err("anofox-visualization: `auth` is set but no access policy was found (options.policy, or policy.json in the dashboard folder) — pass \"policy\": \"none\" to serve with per-panel claim filters only".into());
     }
-    // The startup build must succeed (fail closed, #352): no `source_cancel`
-    // is wired up yet (nothing can refresh before the server is registered),
-    // so a fresh, never-fired flag is enough here.
-    let startup_cancel = AtomicBool::new(false);
+    // The startup build must succeed (fail closed, #352) — and, like every
+    // other build, is bounded (M1): the server isn't registered yet, so
+    // nothing can call `anofox_serve_stop` on it; a throwaway stop flag
+    // (never set) is enough here, the Quack copy's own `timeout_s` still
+    // applies.
+    let startup_dir = SnapshotDir::create()?;
+    let startup_stop = Arc::new(AtomicBool::new(false));
+    let startup_abandoned = Arc::new(AtomicBool::new(false));
+    let source_result = match &opts.source {
+        Some(src) => Some(run_source_build(
+            src,
+            &startup_dir.0,
+            &startup_stop,
+            &startup_abandoned,
+        )?),
+        None => None,
+    };
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &opts, &loads, &startup_cancel)?
+        build_snapshot(&conn, &opts, &loads, startup_dir, source_result)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(&mut snap, &dashboards, p, k)?;
@@ -1157,6 +1284,10 @@ pub fn start_locked(
         Inflight::new(opts.max_inflight),
         Queries::new(opts.max_queries),
     );
+    // Created before `Locked` (security review I2): `Locked.stop` shares
+    // this same flag, so a Quack build's cancel signal always exists and a
+    // `stop()` racing a build's own startup can never find it missing.
+    let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Locked {
         port,
         dashboards,
@@ -1169,7 +1300,8 @@ pub fn start_locked(
         queries,
         // A few seconds: files appear live, a rescan per request is avoided.
         requires_cache: rq::ExistsCache::new(Duration::from_secs(5), 4096),
-        source_cancel: Arc::new(AtomicBool::new(false)),
+        stop: stop.clone(),
+        source_build_abandoned: Arc::new(AtomicBool::new(false)),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -1193,7 +1325,6 @@ pub fn start_locked(
         ),
         None => String::new(),
     };
-    let stop = Arc::new(AtomicBool::new(false));
     let st = state.clone();
     let mut workers = spawn_workers(
         &server,
@@ -1626,11 +1757,11 @@ fn build_snapshot(
     live: &Conn,
     opts: &LockedOptions,
     extra_loads: &[String],
-    source_cancel: &AtomicBool,
+    dir: SnapshotDir,
+    source_result: Option<(String, PathBuf, Vec<String>)>,
 ) -> Result<(Snapshot, Vec<String>), String> {
     let attach_all = opts.attach;
     let mut warnings = Vec::new();
-    let dir = SnapshotDir::create()?;
     let current = live
         .query("SELECT current_database()::VARCHAR")?
         .string_rows(1)?
@@ -1687,24 +1818,20 @@ fn build_snapshot(
         }
     }
     // `options.source` (#352): a Quack source build runs in its own staging
-    // instance (never this one) and lands here as one more attached database
-    // — `as` is the default unless `options.search_path` names something else.
+    // instance (never this one), and already ran before `live` was even
+    // locked (M1 fix 1) — the result (or its error) just lands here as one
+    // more attached database. `as` is the default unless
+    // `options.search_path` names something else.
     let mut default_db = opts
         .search_path
         .first()
         .map_or_else(|| current.clone(), |(db, _)| db.clone());
-    if let Some(src) = &opts.source {
-        if copied
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case(&src.r#as))
-        {
+    if let Some((name, file, w)) = source_result {
+        if copied.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
             return Err(format!(
-                "options.source.as: '{}' clashes with an existing attached database",
-                src.r#as
+                "options.source.as: '{name}' clashes with an existing attached database"
             ));
         }
-        let (name, file, w) = crate::source::copy_from_quack(&dir.0, src, source_cancel)
-            .map_err(|e| format!("options.source: {e}"))?;
         warnings.extend(w);
         if opts.search_path.is_empty() {
             default_db = name.clone();
@@ -2042,15 +2169,22 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             // only, never the source's URI, its token env/file name or any
             // error text (those stay in the server's own stderr).
             if st.opts.source.is_some() {
+                // M1 fix 4: a build still running past its own deadline
+                // (abandoned, left to finish in the background) also counts
+                // as `source_ok: false`, on top of the last *completed*
+                // attempt's own result — a stuck build must not look healthy
+                // just because nothing has come back to report failure yet.
+                let overdue = st.source_build_abandoned.load(Ordering::SeqCst);
                 if let Some(map) = body.as_object_mut() {
                     map.insert(
                         "source_ok".into(),
-                        serde_json::json!(!st.current.last_failed()),
+                        serde_json::json!(!st.current.last_failed() && !overdue),
                     );
                     map.insert(
                         "consecutive_failures".into(),
                         serde_json::json!(st.current.consecutive_failures()),
                     );
+                    map.insert("build_overdue".into(), serde_json::json!(overdue));
                 }
             }
             respond(req, 200, "application/json", body.to_string().into_bytes());
@@ -2777,6 +2911,40 @@ fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #352 M1 fix 3: `join_bounded` returns once every handle has finished
+    /// (fast case), and gives up — without panicking or hanging the test —
+    /// once its budget runs out on a handle that never finishes, leaving it
+    /// to run in the background.
+    #[test]
+    fn join_bounded_waits_for_fast_handles_and_gives_up_on_a_stuck_one() {
+        let t0 = Instant::now();
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let fast = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            d.store(true, Ordering::SeqCst);
+        });
+        join_bounded(vec![fast], Duration::from_secs(5));
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the fast handle should have joined"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "join_bounded should not have waited the full budget for a fast handle"
+        );
+
+        let t1 = Instant::now();
+        let stuck = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        join_bounded(vec![stuck], Duration::from_millis(100));
+        assert!(
+            t1.elapsed() < Duration::from_secs(2),
+            "join_bounded must not block on a handle stuck past its budget"
+        );
+    }
 
     fn dash(id: &str, script: &str) -> Dash {
         Dash {

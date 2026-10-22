@@ -115,7 +115,7 @@ wait_for() { # wait_for <tag> <grep pattern>
 open_fifo src "$T/src.duckdb" ""
 send src "LOAD quack;" \
   "CREATE TABLE suppliers(supplier_id VARCHAR PRIMARY KEY, name VARCHAR);" \
-  "CREATE TABLE materials(material_id VARCHAR PRIMARY KEY, supplier_id VARCHAR REFERENCES suppliers(supplier_id), price DOUBLE, price2 DOUBLE GENERATED ALWAYS AS (price * 2));" \
+  "CREATE TABLE materials(material_id VARCHAR PRIMARY KEY, supplier_id VARCHAR REFERENCES suppliers(supplier_id), price DOUBLE, price2 DOUBLE GENERATED ALWAYS AS (price * 2), g2 VARCHAR GENERATED ALWAYS AS (current_setting('temp_directory')));" \
   "INSERT INTO suppliers SELECT 'SUP-' || i, 's' || i FROM range(5) r(i);" \
   "INSERT INTO materials (material_id, supplier_id, price) SELECT 'M-' || i, 'SUP-' || (i % 5), i FROM range(20) r(i);" \
   "CREATE VIEW cheap AS SELECT * FROM materials WHERE price < 5;" \
@@ -136,6 +136,7 @@ SELECT sum(price2)::BIGINT AS s ::METRIC FROM src.main.materials;
 SELECT count(*)::BIGINT AS n ::METRIC FROM src.main.cheap;
 SELECT tags[1] AS t ::TABLE, info.b AS b FROM src.main.nested;
 SELECT count(*)::BIGINT AS n ::METRIC FROM src.main.a JOIN src.main.b USING (id);
+SELECT any_value(g2) AS g2 ::TABLE FROM src.main.materials;
 SQL
 src_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src')" "$SRC_PORT" "$(q "$T/token")"; }
 serve() { printf "SELECT anofox_serve_dashboards(%s, %s, json_object('source', %s));" "$(q "$T/dash")" "$PORT" "$(src_opts)"; }
@@ -155,6 +156,22 @@ wait_for host 'locked, read-only dashboard' || fail "server with options.source 
 [ "$(panel 2)" = 200 ] && grep -qE '"c0":[0-9]' "$T/body" || fail "view panel: $(cat "$T/body")"
 [ "$(panel 3)" = 200 ] && grep -q '"t":"x"' "$T/body" && grep -q '"b":"hi"' "$T/body" || fail "nested types: $(cat "$T/body")"
 echo "OK: panels read FK, generated-column, view and nested-type data through options.source"
+
+# security review L1: a generated column's expression must run at the
+# SOURCE (as part of answering the copy's own SELECT), never replayed into
+# the serving instance — verified by checking the materialised value
+# against the source's OWN current_setting('temp_directory'), fetched
+# directly from its session: if the snapshot instead carried the DDL and
+# evaluated it locally, this would be the SERVING instance's temp
+# directory (a different, newly-created one) instead.
+before=$(wc -l < "$T/out_src")
+send src "SELECT current_setting('temp_directory');"
+for _ in $(seq 50); do [ "$(wc -l < "$T/out_src")" -gt "$before" ] && break; sleep 0.2; done
+src_tempdir="$(tail -n +"$((before + 1))" "$T/out_src" | grep -oE '/[^│ ]+' | tail -1)"
+[ -n "$src_tempdir" ] || fail "could not read the source's own temp_directory: $(tail -n +"$((before + 1))" "$T/out_src")"
+[ "$(panel 5)" = 200 ] || fail "generated-column current_setting panel: $(cat "$T/body")"
+grep -qF "$src_tempdir" "$T/body" || fail "L1: the generated column's value does not match the source's own temp_directory ($src_tempdir): $(cat "$T/body") — it may have been evaluated in the serving instance instead"
+echo "OK: a generated column's expression runs at the source, not replayed into the serving instance (L1)"
 
 send src "INSERT INTO suppliers VALUES ('SUP-NEW', 'new');" \
          "INSERT INTO materials (material_id, supplier_id, price) VALUES ('M-NEW', 'SUP-NEW', 999);"
@@ -236,6 +253,75 @@ for _ in $(seq 50); do [ "$(wc -l < "$T/out_src2")" -gt "$before" ] && break; sl
 active="$(tail -n +"$((before + 1))" "$T/out_src2" | grep -oE '[0-9]+' | tail -1)"
 [ "$active" = "0" ] || fail "quack_active_connections() on the source after the timeout: ${active:-<none>} (expected 0 — the watchdog's quack_cancel should have reached the remote side)"
 echo "OK: timeout_s:2 fails the build within ${elapsed}s and quack_active_connections() on the source is empty afterwards"
+
+# --------------------------------------------- 4b. M1: an unresponsive source --
+# A source that never answers at all (a black-hole listener: accepts a TCP
+# connection and never replies) must not hang ATTACH forever — the old
+# per-copy watchdog never even started, since ATTACH itself never returned.
+BLACKHOLE_PORT=$((SRC_PORT + 50))
+python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BLACKHOLE_PORT))
+s.listen(5)
+while True:
+    conn, _ = s.accept()
+" &
+BLACKHOLE_PID=$!
+PIDS+=("$BLACKHOLE_PID")
+sleep 0.3
+mkdir -p "$T/bhdash"
+printf 'SELECT 1::BIGINT AS one ::METRIC;\n' > "$T/bhdash/b.sql"
+bh_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src', 'timeout_s', 2)" "$BLACKHOLE_PORT" "$(q "$T/token")"; }
+t0=$(date +%s)
+if "$DUCKDB2" -no-agent -unsigned "$T/bh.duckdb" -c "LOAD $(q "$EXT"); SELECT anofox_serve_dashboards($(q "$T/bhdash"), $((SLOW_PORT + 200)), json_object('source', $(bh_opts)));" > "$T/bh_out" 2>&1; then
+  fail "a black-hole source and timeout_s:2 should refuse to start: $(cat "$T/bh_out")"
+fi
+t1=$(date +%s)
+bh_elapsed=$((t1 - t0))
+grep -qi "timed out" "$T/bh_out" || fail "black-hole timeout error text: $(cat "$T/bh_out")"
+[ "$bh_elapsed" -le 20 ] || fail "black-hole source: startup took ${bh_elapsed}s to give up (expected ~12s: timeout_s + grace)"
+echo "OK: a black-hole source (ATTACH that never returns) fails startup within ${bh_elapsed}s instead of hanging forever"
+kill -9 "$BLACKHOLE_PID" 2>/dev/null || true
+wait "$BLACKHOLE_PID" 2>/dev/null || true
+
+# A source that answered once but has since frozen (kill -STOP: the process
+# still exists and holds its listening socket, but never replies to the
+# in-flight connection) is the probe that found M1 in the first place. Its
+# own refresh must fail within timeout_s + grace too, and the OLD snapshot
+# must keep serving throughout (never an outage).
+open_fifo frozen "$T/frozen.duckdb" ""
+send frozen "LOAD quack;" "CREATE TABLE t AS SELECT 1 AS x;" "SELECT * FROM quack_serve('quack:127.0.0.1:$((SRC_PORT + 51))', token := '$TOKEN');"
+wait_for frozen 'listen_uri' || fail "frozen-source fixture did not start: $(cat "$T/out_frozen")"
+mkdir -p "$T/frozendash"
+printf 'SELECT count(*)::BIGINT AS n ::METRIC FROM src.main.t;\n' > "$T/frozendash/f.sql"
+frozen_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src', 'timeout_s', 2)" "$((SRC_PORT + 51))" "$(q "$T/token")"; }
+open_fifo frozenhost "$T/frozenhost.duckdb" "-unsigned"
+send frozenhost "LOAD $(q "$EXT");" "SELECT anofox_serve_dashboards($(q "$T/frozendash"), $((SLOW_PORT + 201)), json_object('source', $(frozen_opts)));"
+wait_for frozenhost 'locked, read-only dashboard' || fail "frozen-source server did not start: $(cat "$T/out_frozenhost")"
+[ "$(curl -s -o "$T/fbody" -w '%{http_code}' -X POST "http://127.0.0.1:$((SLOW_PORT + 201))/api/panel" -d '{"dashboard":"f","panel":0,"vars":{}}')" = 200 ] \
+  && grep -q '"c0":1' "$T/fbody" || fail "frozen-source server, before freezing: $(cat "$T/fbody")"
+kill -STOP "${FIFOPID[frozen]}"
+t0=$(date +%s)
+send frozenhost "SELECT anofox_serve_refresh($((SLOW_PORT + 201)));"
+for i in $(seq 100); do
+  h=$(curl -s "http://127.0.0.1:$((SLOW_PORT + 201))/healthz")
+  [[ "$h" == *'"source_ok":false'* ]] && break
+  [ "$i" -eq 100 ] && fail "SIGSTOP'd source: /healthz never showed source_ok:false (healthz: $h)"
+  sleep 0.3
+done
+t1=$(date +%s)
+stop_elapsed=$((t1 - t0))
+[ "$stop_elapsed" -le 20 ] || fail "SIGSTOP'd source: refresh took ${stop_elapsed}s to fail (expected ~12s: timeout_s + grace)"
+# the OLD snapshot must still be serving throughout — never an outage.
+[ "$(curl -s -o "$T/fbody" -w '%{http_code}' -X POST "http://127.0.0.1:$((SLOW_PORT + 201))/api/panel" -d '{"dashboard":"f","panel":0,"vars":{}}')" = 200 ] \
+  && grep -q '"c0":1' "$T/fbody" || fail "frozen-source server stopped serving while the source was stuck: $(cat "$T/fbody")"
+echo "OK: a SIGSTOP'd (frozen) source fails its refresh within ${stop_elapsed}s, source_ok goes false, and the old snapshot keeps serving (no outage)"
+kill -CONT "${FIFOPID[frozen]}" 2>/dev/null || true
+send frozenhost "SELECT anofox_serve_stop($((SLOW_PORT + 201)));"
+close_fifo frozenhost
+close_fifo frozen
 
 # ---------------------------------------------------------- 5. 5M-row timing --
 # `send` only writes the FIFO; it does not wait for src2 to finish running

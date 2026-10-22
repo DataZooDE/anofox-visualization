@@ -366,6 +366,17 @@ points:
               "token_file": "/run/anofox/quack-token", "as": "warehouse"}}
   ```
 
+- **Run it in a process that does not also run `anofox_serve` authoring**
+  (security review L2). `token_file` keeps the token out of the serving
+  session's own `getenv`, but the *authoring* console (`anofox_serve(port)`)
+  runs on that same host session and accepts arbitrary SQL from whoever
+  reaches it — `read_text('/run/anofox/quack-token')` there reads the token
+  exactly as `getenv` would have. The authoring console is loopback-only and
+  token/Origin-guarded, but it is still a live, full-SQL endpoint: don't rely
+  on `token_file` alone to keep a source's credential away from it. Start a
+  source-backed `anofox_serve_dashboards` from a session (`serve <db>` or a
+  dedicated `duckdb` process) that never also calls `anofox_serve`.
+
 - **A non-local source needs TLS**, either via `tls.fingerprint` (not yet
   enforced by this prototype — see its open questions) or, preferred until
   that lands, by putting the Quack server itself behind a TLS-terminating
