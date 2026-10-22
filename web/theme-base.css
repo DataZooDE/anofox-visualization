@@ -175,6 +175,9 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg.dp-emph-fade [data-series],.panel svg.dp-emph-fade [data-x]{transition:opacity .25s,filter .12s}
 @media print{.dp-story{display:none}}
 .panel svg .dp-ghost{pointer-events:none}
+/* A decorative mark (a boxplot's mean dot, ggplot-rs `decorative()`) has no
+   tooltip of its own: let the pointer through to the mark it annotates. */
+.panel svg [data-part="decorative"]{pointer-events:none}
 @media (prefers-reduced-motion: reduce){.panel.dp-in,.dp-skel i,.dp-lazy i{animation:none}.panel.dp-pending::after{animation:dp-veil-in .01s .15s forwards;background:var(--ax-veil)}}
 .panel-title{position:relative;font-family:var(--ax-font-display);font-size:.92rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:-.1rem 0 .7rem;padding-bottom:.55rem;border-bottom:1px solid var(--ax-line)}
 .panel-title::after{content:"";position:absolute;left:0;bottom:-1px;width:38px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
