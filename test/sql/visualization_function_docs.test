@@ -18,15 +18,16 @@ LOAD anofox_visualization
 # functions it forgets to mention stay undocumented.
 # ============================================================================
 
-query I
-SELECT count(*) FROM duckdb_functions()
+# Lists the offenders (an empty result passes), so a failure names them.
+query TT
+SELECT function_name, function_type FROM duckdb_functions()
 WHERE function_name LIKE 'anofox_%'
   AND (description IS NULL OR description = ''
        OR len(examples) = 0
        OR len(categories) = 0
-       OR list_contains(parameters, 'col0'));
+       OR list_contains(parameters, 'col0'))
+ORDER BY ALL;
 ----
-0
 
 # Two scalars (anofox_render, anofox_contract_version), six column macros and
 # sixteen contract plot macros.
