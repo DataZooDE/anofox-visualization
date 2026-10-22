@@ -61,6 +61,39 @@ fn http_body(resp: &str) -> String {
     out
 }
 
+/// GET `path` from the test server on `port` (#358, as #305 did for the same
+/// flake in `static_title_pages.rs`): connect, send and read the whole
+/// exchange, retried from scratch while the server is starting up or has
+/// already closed — a refused or reset connection, or an empty answer — for
+/// up to 20 s. A single `TcpStream::connect` that then succeeds once is not
+/// enough: the OS can complete the handshake before the server's accept loop
+/// is actually ready to read a request, and a connection made just as the
+/// test's `Kill` tears the server down can read back nothing or a reset.
+fn http_get(port: u16, path: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let attempt = (|| -> std::io::Result<String> {
+            let mut conn = TcpStream::connect(("127.0.0.1", port))?;
+            conn.set_read_timeout(Some(Duration::from_secs(60)))?;
+            write!(
+                conn,
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )?;
+            let mut resp = String::new();
+            conn.read_to_string(&mut resp)?;
+            Ok(resp)
+        })();
+        match attempt {
+            Ok(r) if !r.is_empty() => return r,
+            Ok(_) | Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Ok(_) => panic!("serve on {port} answered nothing"),
+            Err(e) => panic!("serve on {port}: {e}"),
+        }
+    }
+}
+
 /// Kills the child on drop (so an early panic never leaks the server); `finish`
 /// kills it, then returns its full output (including the stderr piped above),
 /// for the test's own assertions.
@@ -115,23 +148,7 @@ fn serve_page_hides_duckdb_errors() {
             .spawn()
             .unwrap(),
     ));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/broken HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/broken");
     assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
     let body = http_body(&resp);
     assert_eq!(
@@ -192,23 +209,7 @@ fn panel_render_error_is_redacted() {
             .spawn()
             .unwrap(),
     ));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/sentinel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/sentinel");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     let body = http_body(&resp);
     assert!(!body.contains("hunter2_panel_sentinel_285"), "{body}");
@@ -269,23 +270,7 @@ fn contract_panel_render_error_is_redacted() {
             .spawn()
             .unwrap(),
     ));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/sentinel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/sentinel");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     let body = http_body(&resp);
     assert!(!body.contains("hunter2_contract_sentinel_315"), "{body}");
@@ -344,23 +329,7 @@ fn contract_panel_data_warnings_are_stripped() {
             .spawn()
             .unwrap(),
     ));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut conn = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    };
-    conn.set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
-    write!(
-        conn,
-        "GET /d/cmp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    let resp = http_get(port, "/d/cmp");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     let body = http_body(&resp);
     assert!(body.contains("<svg"), "{body}");
