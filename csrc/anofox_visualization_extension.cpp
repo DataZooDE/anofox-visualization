@@ -225,8 +225,20 @@ void LoadInternal(ExtensionLoader &loader) {
 	// Guarded: anofox_render is the single user-facing entry point. Every
 	// anofox_bar/_line/_scatter/_area/_xy/_xyc macro below expands to a call to
 	// it, so one guard puts the issue link on a failure from any of them.
+#if __has_include("duckdb/parser/token_iterator.hpp")
+	// DuckDB 2.0 (see AnofoxParseExpressionList): parameters carry their own
+	// names, and duckdb_functions() prefers those over the description's
+	// parameter_names, so an unnamed one would show up as `col0` (#372).
+	ScalarFunction render("anofox_render", {FunctionParameter("spec", LogicalType::VARCHAR)}, LogicalType::VARCHAR,
+	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
+#else
 	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
+#endif
+	// A bad spec is a real SQL error (InvalidInputException). DuckDB 2.0
+	// turns an error from a function not marked fallible into an INTERNAL
+	// error (#372); SetErrorMode exists on 1.5.6 and 2.0 alike.
+	render.SetErrorMode(FunctionErrors::CAN_THROW_RUNTIME_ERROR);
 	{
 		CreateScalarFunctionInfo info(std::move(render));
 		FunctionDescription desc;
