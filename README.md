@@ -1,5 +1,12 @@
 # Anofox Visualization - DuckDB Extension
 
+<a href="https://datazoode.github.io/anofox-visualization/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/readme-hero-dark.png">
+    <img alt="A sales cockpit built from SQL: period filters, KPI tiles with deltas and sparklines, weekly revenue against the prior year, and a channel-mix donut" src="docs/img/readme-hero-light.png">
+  </picture>
+</a>
+
 Charts & dashboards for DuckDB — the grammar of graphics, straight from SQL. You
 write ordinary DuckDB SQL and tag output columns with `::ROLE` casts; each
 annotated `SELECT` becomes a panel (chart / KPI / table / input), rendered to
