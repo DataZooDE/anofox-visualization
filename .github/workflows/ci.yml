@@ -238,6 +238,16 @@ jobs:
       - name: Telemetry e2e (no request to a telemetry or unexpected host)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/telemetry-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/toolbar-e2e.mjs (#354 follow-up): ::TOOLBAR's per-part gating
+      # in a real browser (totals row vs its toggle button, excluded parts'
+      # saved search/filter/hidden-column state, the Pages|Scroll segment,
+      # the hover ⤓ CSV fallback and its ::SPARKLINE false-positive, the
+      # 'none' + multi-select chip exception) — reuses the :8947 server and
+      # Chromium above.
+      - name: Table toolbar e2e (::TOOLBAR gating)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/toolbar-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
