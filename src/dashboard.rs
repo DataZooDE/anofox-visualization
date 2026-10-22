@@ -1085,9 +1085,16 @@ fn table_svg(
     // ellipsis instead of overlapping the next one (#351); the full text is
     // still there on hover, via `<title>` (only when actually shortened, so
     // a dashboard with no long headers renders byte-identical to before).
+    // The column's own natural width (`nat`) already hugs its header/cell
+    // text with only a little padding, so truncating right up to that same
+    // width would still leave adjacent headers touching edge to edge — an
+    // explicit gutter (one text-size's worth) keeps a visible gap, on
+    // either side, whichever side a right-aligned (numeric) header grows
+    // into.
+    let gutter = 11.0;
     for (k, c) in cols.iter().enumerate() {
         let (x, a) = anchor(k);
-        let avail = (widths[k] - 4.0).max(10.0);
+        let avail = (widths[k] - gutter).max(10.0);
         let short = truncate_header(&c.p.head, 11.0, avail);
         let shown = short.as_deref().unwrap_or(&c.p.head);
         let title = match &short {
