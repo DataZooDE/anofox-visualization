@@ -137,12 +137,28 @@ mod tests {
     /// A fake `duckdb` script that only answers `--version`, to test
     /// `detect_major_version` / `prepare` without needing a real DuckDB
     /// binary of a specific version on the test runner.
+    ///
+    /// Waits until the script can be exec'd (#361): a test on another thread
+    /// that forks while `f` is open inherits the write fd until its child
+    /// execs, and exec'ing a file open for writing fails with ETXTBSY, which
+    /// `detect_major_version` would read as "no CLI".
     fn fake_duckdb(dir: &std::path::Path, version_line: &str) -> std::path::PathBuf {
         let path = dir.join("duckdb");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh\necho '{version_line}'").unwrap();
-        f.set_permissions(std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "#!/bin/sh\necho '{version_line}'").unwrap();
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        const ETXTBSY: i32 = 26;
+        for _ in 0..200 {
+            match Command::new(&path).arg("--version").output() {
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                _ => break,
+            }
+        }
         path
     }
 
