@@ -95,8 +95,8 @@ if(APPLE)
     # CoreFoundation/IOKit: the Rust staticlib's iana_time_zone crate (via chrono)
     # references _CFRelease/_CFStringGetBytes. Rust's framework link directives are
     # NOT propagated when a staticlib is linked by CMake/clang++, so add them here.
-    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation" "-framework Security")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation" "-framework Security")
 endif()
 
 if(WIN32)
