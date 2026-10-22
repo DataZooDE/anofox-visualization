@@ -302,6 +302,58 @@ SELECT anofox_plot_cv(f) LIKE '<svg%1 fold%' FROM (VALUES
 ----
 true
 
+# ── schedule / Gantt (#176) ───────────────────────────────────────────────────
+# One lane per resource, tasks coloured by status; anofox_plot detects it.
+query II
+SELECT anofox_plot_schedule(s) LIKE '<svg%>L2</text>%>L1</text>%',
+       anofox_plot(s) LIKE '<svg%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20),
+  ('L2', 'O3', 0, 15, 'on time', 18)
+) s(resource, task, start, "end", status, due);
+----
+true	true
+
+# A real bar, not an error bar: adjacent tasks on the same resource draw as
+# one continuous run of <rect> marks with a <title> tooltip each (not the
+# ::SCATTER + ::XMIN/::XMAX "whiskers" look this replaces, #171).
+query II
+SELECT anofox_plot_schedule(s) LIKE '%<rect%<rect%',
+       anofox_plot_schedule(s) LIKE '%<title>O1 · L1: 0 – 10 · on time · due 12</title>%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20)
+) s(resource, task, start, "end", status, due);
+----
+true	true
+
+# Several model_id values facet into one panel each, to compare algorithms.
+query II
+SELECT anofox_plot_schedule(s) LIKE '%>exact</text>%' AND anofox_plot_schedule(s) LIKE '%>today</text>%',
+       anofox_plot_schedule(s) LIKE '<svg%due dates marked%' FROM (VALUES
+  ('today', 'L1', 'O1', 0, 10, 12), ('today', 'L1', 'O2', 10, 30, 20),
+  ('exact', 'L1', 'O1', 0, 10, 12), ('exact', 'L1', 'O2', 10, 18, 20)
+) s(model_id, resource, task, start, "end", due);
+----
+true	true
+
+# No status column: every bar is the synthetic `scheduled` level, no legend.
+query I
+SELECT anofox_plot_schedule(s) LIKE '<svg%' AND anofox_plot_schedule(s) NOT LIKE '%>late</text>%' FROM (VALUES
+  ('L1', 'O1', 0, 10), ('L1', 'O2', 10, 25)
+) s(resource, task, start, "end");
+----
+true
+
+statement error
+SELECT anofox_plot_schedule(s) FROM (VALUES ('L1', 0, 10)) s(resource, start, "end");
+----
+needs column(s) task
+
+statement error
+SELECT anofox_plot_schedule(s) FROM (
+  SELECT 'm' || i AS model_id, 'L1' AS resource, 'O1' AS task, 0 AS start, 10 AS "end" FROM range(7) r(i)
+) s;
+----
+GROUP BY model_id
+
 # ── events and integer periods (#66) ─────────────────────────────────────────
 statement ok
 CREATE TABLE alarms AS SELECT * FROM (VALUES

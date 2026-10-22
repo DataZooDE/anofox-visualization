@@ -33,6 +33,7 @@ mod graph;
 mod look;
 mod matrix;
 mod names;
+mod schedule;
 mod stats;
 mod terms;
 
@@ -54,6 +55,7 @@ pub const PLOTS: &[&str] = &[
     "compare",
     "partial",
     "cv",
+    "schedule",
     "decomposition",
     "events",
     "checks",
@@ -185,6 +187,7 @@ fn render_plot(
         "compare" => return direct(&|| stats::compare(&t, options, w, h, o, place)),
         "partial" => return direct(&|| stats::partial(&t, options, w, h, o, place)),
         "cv" => return direct(&|| cv::cv(&t, options, w, h, o, place)),
+        "schedule" => return direct(&|| schedule::schedule(&t, options, w, h, o, place)),
         "decomposition" => {
             return direct(&|| decomposition::decomposition(&t, options, w, h, o, place))
         }
@@ -543,6 +546,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "partial"
     } else if has("fold_id") && (has("split") || has("test_start") || has("train_end")) {
         "cv"
+    } else if has("resource") && has("start") && has("end") {
+        "schedule"
     } else if has("component") && has("value")
         || has("trend") && (has("remainder") || has("residual") || has("seasonal"))
     {
@@ -564,8 +569,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
-             ds), decomposition (ds | period, component, value), matrix (row, col, value) or \
-             events (ds | period, kind){}",
+             ds), schedule (resource, task, start, end), decomposition (ds | period, component, \
+             value), matrix (row, col, value) or events (ds | period, kind){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -598,6 +603,11 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["partial_residual"],
     ),
     ("cv", &["fold_id", "split", "ds"], &["fold_id"]),
+    (
+        "schedule",
+        &["resource", "task", "start", "end"],
+        &["resource"],
+    ),
     (
         "decomposition",
         &["ds", "component", "value"],
@@ -1819,6 +1829,32 @@ mod tests {
             .unwrap(),
             "prediction"
         );
+    }
+
+    const SCHEDULE: &str = r#"[
+        {"model_id":"today","resource":"L1","task":"O1","start":0,"end":40,"due":40,"status":"on time"},
+        {"model_id":"today","resource":"L1","task":"O2","start":40,"end":90,"due":60,"status":"late"},
+        {"model_id":"exact","resource":"L1","task":"O1","start":0,"end":40,"due":40,"status":"on time"},
+        {"model_id":"exact","resource":"L1","task":"O2","start":40,"end":55,"due":60,"status":"on time"}]"#;
+
+    #[test]
+    fn schedule_gantt() {
+        assert_eq!(detect(&rows(SCHEDULE)).unwrap(), "schedule");
+        let svg = go("auto", SCHEDULE, "{}").unwrap();
+        dump("schedule", &svg);
+        assert!(svg.contains(">L1</text>"), "{svg}");
+        // Two algorithms facet into their own panels.
+        assert!(
+            svg.contains(">today</text>") && svg.contains(">exact</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // A table with resource/start/end but no task is the near miss.
+        let e = go("auto", r#"[{"resource":"L1","start":0,"end":10}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs column(s) task"), "{e}");
     }
 
     const DECOMP_LONG: &str = r#"[

@@ -38,8 +38,9 @@ fn fold_label(f: f64) -> String {
 }
 
 /// `YYYY-MM-DD` from seconds since the Unix epoch (UTC, proleptic Gregorian;
-/// Howard Hinnant's `civil_from_days`).
-fn ymd(secs: f64) -> String {
+/// Howard Hinnant's `civil_from_days`). Lifted by `schedule` (#176) for its
+/// own date-or-number axis text.
+pub(super) fn ymd(secs: f64) -> String {
     let days = (secs / 86_400.0).floor() as i64;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -57,7 +58,7 @@ fn ymd(secs: f64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn x_text(v: f64, dates: bool) -> String {
+pub(super) fn x_text(v: f64, dates: bool) -> String {
     if dates {
         ymd(v)
     } else {
@@ -264,9 +265,10 @@ fn signature(spans: &[Span], id: &str) -> Vec<String> {
     sig
 }
 
-/// The fold/test-window bars as one ggplot-rs layer, so #176 (Gantt) can lift
-/// it out later.
-fn lane_rects(
+/// The fold/test-window bars as one ggplot-rs layer; `schedule` (#176) lifts
+/// this for its own resource-lane bars too, writing its (normalized) status
+/// into the same `split`-keyed frame column this draws from.
+pub(super) fn lane_rects(
     frame: Frame,
     levels: Vec<String>,
     palette: Vec<RGBAColor>,
@@ -281,7 +283,11 @@ fn lane_rects(
                 .ymin("ymin")
                 .ymax("ymax")
                 .fill("split")
-                .label("tip"),
+                // `GeomRect` never reads a `label` aes (there is no bar
+                // text); `tooltip` is what actually reaches the `<title>` —
+                // `set_row_extras` writes it whether or not the geom calls
+                // its own `set_mark` (bars don't).
+                .tooltip("tip"),
         )
         .geom_rect_with(GeomRect {
             fill: o.brand(),
