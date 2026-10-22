@@ -11925,9 +11925,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // csvOf's fallback for a table with no export menu of its own (#354
   // follow-up: an excluded `export` part, or no toolbar at all): the same
   // matching, sorted, visible rows/columns its own ⤓ CSV button would export
-  // — never just the one rendered page.
-  t._rows = sortedRows();
-  t._cols = visCols();
+  // — never just the one rendered page. Getters, so a later search, sort or
+  // column change (which doesn't rebuild `t`) is exported as shown.
+  Object.defineProperty(t, "_rows", { get: sortedRows });
+  Object.defineProperty(t, "_cols", { get: visCols });
   const foot = document.createElement("div");
   foot.className = "table-foot";
   wrap.appendChild(foot);
