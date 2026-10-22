@@ -6161,7 +6161,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -8240,7 +8240,7 @@ async function runOnce(fresh = true, pv = preview) {
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
-  let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL → the next table's options
+  let nextTableOpts = {}; // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL / ::TOOLBAR → the next table's options
   let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
   let nextEmpty = ""; // ::EMPTY → the next panel's message for an empty result
   let lastChart = null; // the holder of the chart a ::TRACK right after it goes under
@@ -8881,7 +8881,7 @@ async function runOnce(fresh = true, pv = preview) {
         nextEmpty = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "SELECT_AS" || d === "DRILL") {
         Object.assign(nextIa, dpIa[i] || {});
-      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS"].includes(d)) {
+      } else if (["TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "THRESHOLDS", "TOOLBAR"].includes(d)) {
         nextTableOpts[d.toLowerCase()] = String((await firstValue(s)) ?? "").replace(/^"|"$/g, "");
       } else if (d === "TAB") {
         const name = String((await firstValue(s)) ?? "Tab");
@@ -10347,7 +10347,9 @@ function rowSelectable(selMode, k0) {
 // Rich, readable data table: per-column number formats, slim data bars, soft
 // colour scales, a toolbar (row count, search, filter chips, Filters / Totals /
 // Columns / Pages|Scroll / CSV), a totals row, column statistics on the header,
-// opt-in row selection and a virtualised Scroll view.
+// opt-in row selection and a virtualised Scroll view. `::TOOLBAR` (#354) lets
+// an author drop some or all of that chrome on a small table that never needs
+// it — see parseToolbar / toolbarOn below.
 //
 // `server` = a ::PAGED table: rows are one page (or, in Scroll view, the first
 // block) and sorting, the search, the per-column filters, the totals and the
@@ -10403,6 +10405,20 @@ function parseTotals(spec) {
     else if (m[1].trim()) out.col.push([m[1].trim(), a]);
   }
   return out;
+}
+// ::TOOLBAR 'none' | 'search,filters,export' → the set of toolbar parts a
+// table keeps (#354). No ::TOOLBAR at all (spec == "" / null): every part
+// shows, the toolbar's own thresholds (row count, column count, …) apply as
+// usual — unchanged behaviour. 'none' is the same as an empty list: the whole
+// `.tbl-bar` is left out, not just emptied, so a 2-row lookup table sits under
+// nothing wider than its own columns. Unknown part names are dropped, like an
+// ::TOTALS entry naming no column — never an error, just not applied.
+const TOOLBAR_PARTS = ["search", "filters", "totals", "stats", "columns", "density", "export"];
+function parseToolbar(spec) {
+  const s = String(spec ?? "").trim().toLowerCase();
+  if (!s) return null; // unset: show everything
+  if (s === "none") return new Set();
+  return new Set(s.split(/[,;]/).map((p) => p.trim()).filter((p) => TOOLBAR_PARTS.includes(p)));
 }
 // A column's total without ::TOTALS or a viewer's pick (the Rust
 // table::default_total): Σ for amounts and counts, none for rates and
@@ -10475,6 +10491,11 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const totSpec = { all: totParsed.all, col: {} };
   for (const [name, a] of totParsed.col) if (colNamed(name)) totSpec.col[colNamed(name)] = a;
   const totalsOff = totSpec.all === "none" && !Object.values(totSpec.col).some((a) => a !== "none");
+  // ::TOOLBAR 'none' | 'search,export' (#354): null (no directive) shows every
+  // part, at its usual threshold; otherwise only the named parts render.
+  const toolbarSpec = parseToolbar(opts.toolbar);
+  const toolbarOn = (part) => toolbarSpec == null || toolbarSpec.has(part);
+  const toolbarOff = toolbarSpec != null && toolbarSpec.size === 0;
   // ::COLGROUP 'Backtest: mae, rmse | Holdout: mae_h': a label over adjacent columns
   const groupOf = {};
   for (const part of String(opts.colgroup || "").split("|")) {
@@ -10599,14 +10620,20 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // density: compact rows by default for long tables
   let compact = saved.compact ?? (server ? server.unfiltered ?? server.total : rows.length) > 50;
   let ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
-  let showStats = !!saved.showStats; // the column-stats strip under the header
+  // #354: a part ::TOOLBAR drops stays off even if a saved viewer preference
+  // (or, for filters, a persisted column filter) would otherwise show it —
+  // there is no button left to turn it back on.
+  let showStats = toolbarOn("stats") && !!saved.showStats; // the column-stats strip under the header
   let showFilters =
-    !!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0;
+    toolbarOn("filters") &&
+    (!!saved.showFilters || Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length > 0);
   // Σ for amounts and counts, none for rates and percentages, else the mean (defaultAgg, table_profile)
   const hasAdditive = cols.some((c) => ["MONEY", "COMPACT"].includes(info[c].f));
   const nTotal = () => (server ? server.total : filtered.length);
   let showTotals =
-    !totalsOff && (saved.showTotals ?? (opts.totals ? (server ? server.total : rows.length) >= 2 : (server ? server.total : rows.length) >= 3 && hasAdditive));
+    toolbarOn("totals") &&
+    !totalsOff &&
+    (saved.showTotals ?? (opts.totals ? (server ? server.total : rows.length) >= 2 : (server ? server.total : rows.length) >= 3 && hasAdditive));
   const visCols = () => cols.filter((c) => !hidden.has(c));
 
   // ── filtering + sorting (client tables; a ::PAGED table's happen in SQL) ──
@@ -10779,12 +10806,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     const caret = typing ? search.selectionStart : null;
     barRight.innerHTML = "";
     const many = (server ? server.unfiltered ?? server.total : rows.length) > 10;
-    if (server ? !!search : rows.length > 8) barRight.appendChild(search);
+    if (toolbarOn("search") && (server ? !!search : rows.length > 8)) barRight.appendChild(search);
     if (typing && search.isConnected) {
       search.focus();
       if (caret != null) search.setSelectionRange(caret, caret);
     }
-    if (many) {
+    if (many && toolbarOn("filters")) {
       const nAct = Object.keys(colQ).length + Object.keys(colRange).length + Object.keys(colEq).length;
       barRight.appendChild(
         mkBtn(nAct ? `Filters · ${nAct}` : "Filters", "per-column filters", showFilters, () => {
@@ -10795,7 +10822,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         })
       );
     }
-    if (!totalsOff && cols.some((c) => info[c].numeric && !info[c].label) && nTotal() > 1)
+    if (toolbarOn("totals") && !totalsOff && cols.some((c) => info[c].numeric && !info[c].label) && nTotal() > 1)
       barRight.appendChild(
         mkBtn(
           "Σ Totals",
@@ -10810,7 +10837,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           }
         )
       );
-    if (nTotal() > 1)
+    if (toolbarOn("stats") && nTotal() > 1)
       barRight.appendChild(
         mkBtn("Stats", "column statistics under the header: each number column's distribution, each text column's top values", showStats, () => {
           showStats = !showStats;
@@ -10819,7 +10846,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           renderBar();
         })
       );
-    if (cols.length > 4) barRight.appendChild(columnsMenu());
+    if (toolbarOn("columns") && cols.length > 4) barRight.appendChild(columnsMenu());
     if (many) {
       const seg = document.createElement("span");
       seg.className = "tbl-seg";
@@ -10844,17 +10871,18 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         );
       barRight.appendChild(seg);
     }
-    barRight.appendChild(
-      mkBtn(compact ? "Compact" : "Comfortable", "row density: compact ↔ comfortable", false, () => {
-        compact = !compact;
-        ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
-        t.classList.toggle("compact", compact);
-        persist();
-        if (view === "scroll") body();
-        renderBar();
-      })
-    );
-    barRight.appendChild(exportMenu());
+    if (toolbarOn("density"))
+      barRight.appendChild(
+        mkBtn(compact ? "Compact" : "Comfortable", "row density: compact ↔ comfortable", false, () => {
+          compact = !compact;
+          ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
+          t.classList.toggle("compact", compact);
+          persist();
+          if (view === "scroll") body();
+          renderBar();
+        })
+      );
+    if (toolbarOn("export")) barRight.appendChild(exportMenu());
   }
   function columnsMenu() {
     const d = document.createElement("details");
@@ -11051,7 +11079,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       }
     );
   }
-  wrap.appendChild(bar);
+  // #354: 'none'::TOOLBAR (an empty allow-list) drops the whole bar — not
+  // just every part inside it — so a tiny lookup table sits under nothing
+  // wider than its own columns.
+  if (!toolbarOff) wrap.appendChild(bar);
 
   // ── head: label, sort icon, column statistics on hover ──
   const scroller = document.createElement("div");

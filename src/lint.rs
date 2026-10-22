@@ -858,7 +858,7 @@ where
         }
 
         // ::ROWSELECT / ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL /
-        // ::SELECT_AS / ::DRILL / ::EMPTY are "next panel" layout directives — their
+        // ::TOOLBAR / ::SELECT_AS / ::DRILL / ::EMPTY are "next panel" layout directives — their
         // own preceding statement, the same shape as ::COL/::HEIGHT (#291).
         // Embedded as an extra column on a panel's own SELECT instead, the
         // failure is silent: inside a ::TABLE/::PAGED the cast is stripped
@@ -3834,6 +3834,24 @@ mod design_tests {
         // the table — no warning.
         let d = lint_one(
             "SELECT 'single'::ROWSELECT;\nSELECT 'none'::TOTALS;\nSELECT id AS id ::TABLE, name AS \"Name\" FROM t;",
+            rows(2, |i| json!({ "id": i, "Name": "a" })),
+        );
+        assert!(!has(&d, "layout/next-panel"), "{d:?}");
+
+        // (#354) ::TOOLBAR embedded as an extra column on the table it was
+        // meant to modify is flagged the same way as ::ROWSELECT / ::TOTALS
+        // above; as its own preceding statement, it is not.
+        let d = lint_one(
+            "SELECT id AS id ::TABLE, name AS \"Name\", 'none'::TOOLBAR FROM t;",
+            rows(2, |i| json!({ "id": i, "Name": "a", "c2": "none" })),
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.code == "layout/next-panel" && x.message.contains("::TOOLBAR")),
+            "{d:?}"
+        );
+        let d = lint_one(
+            "SELECT 'none'::TOOLBAR;\nSELECT id AS id ::TABLE, name AS \"Name\" FROM t;",
             rows(2, |i| json!({ "id": i, "Name": "a" })),
         );
         assert!(!has(&d, "layout/next-panel"), "{d:?}");
