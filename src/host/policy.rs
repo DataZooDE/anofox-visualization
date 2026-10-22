@@ -57,8 +57,9 @@ pub const CTE_PREFIX: &str = "__anofox_cte_";
 /// `tests/policy_duckdb.rs` fails when the pinned DuckDB has a function the
 /// list doesn't classify. Reclassified against DuckDB 2.0's function list too
 /// (#357): each function 2.0 added gets its own reviewed `allow`/`deny` line
-/// (the `icu_collate_*`/`collate_*` per-locale collations stay a wildcard,
-/// below), so a genuinely new function still has to be reviewed by name.
+/// below, including every `collate_<locale>` name individually (only
+/// `icu_collate_*` stays a wildcard, pre-dating #357), so a genuinely new
+/// function still has to be reviewed by name (sec-review-362.md L-1).
 pub const FUNCTION_LIST: &str = include_str!("policy_functions.txt");
 
 /// The DuckDB version [`FUNCTION_LIST`] was first reviewed against (and the
@@ -872,8 +873,12 @@ impl Walker<'_> {
             }
             // ICU's per-locale collations differ between builds. DuckDB 2.0
             // added a second, unprefixed name (`collate_de`, …) for the same
-            // functions alongside the original `icu_collate_de`, … (#357).
-            None if lower.starts_with("icu_collate_") || lower.starts_with("collate_") => {}
+            // functions alongside the original `icu_collate_de`, … (#357);
+            // all 141 are listed explicitly in policy_functions.txt, so
+            // there is no wildcard for the unprefixed form — an unlisted
+            // `collate_<x>` (a future locale, or anything else) still fails
+            // closed through the `None` arm below (sec-review-362.md L-1).
+            None if lower.starts_with("icu_collate_") => {}
             None if self.enf.policy.functions.contains(&lower) => {}
             None => {
                 return Err(format!(
@@ -1639,6 +1644,25 @@ mod tests {
         let call = serde_json::json!({"class": "FUNCTION", "type": "FUNCTION",
             "function_name": "PG_GET_VIEWDEF", "children": []});
         assert!(run(call).unwrap_err().contains("macro"));
+        // sec-review-362.md L-1: unlike `icu_collate_*`, there is no
+        // `collate_*` wildcard — every `collate_<locale>` DuckDB 2.0 added
+        // (#357) is listed individually in policy_functions.txt, so a
+        // locale that isn't listed still fails closed through the ordinary
+        // "not on the reviewed function list" path.
+        let scalar = |f: &str| {
+            serde_json::json!({"class": "FUNCTION", "type": "FUNCTION",
+                "function_name": f, "children": []})
+        };
+        assert!(
+            run(scalar("collate_zzz"))
+                .unwrap_err()
+                .contains("reviewed function list"),
+            "an unlisted collate_<locale> must be denied, not fall through a wildcard"
+        );
+        assert!(
+            run(scalar("collate_de")).is_ok(),
+            "but a locale this file does list is allowed"
+        );
         let show = serde_json::json!({"type": "SHOW_REF", "alias": "", "sample": null,
             "table_name": "\"tables\"", "query": null});
         assert!(run(show).is_err());

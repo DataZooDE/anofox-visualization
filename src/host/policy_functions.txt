@@ -8,9 +8,11 @@
 # when the pinned DuckDB has a function that is not listed: classify it here.
 #
 # Also reclassified against DuckDB 2.0.0 (#357): a block near the end of this
-# file covers every function 2.0 added. `collate_<locale>` (a second,
-# unprefixed name 2.0 gives the same per-locale collations as the existing
-# `icu_collate_<locale>`, below) is reviewed as one class, not line by line.
+# file covers every function 2.0 added, including every `collate_<locale>`
+# name (a second, unprefixed name 2.0 gives the same per-locale collations as
+# the existing `icu_collate_<locale>`, below) listed individually — unlike
+# `icu_collate_*`, there is no `collate_*` wildcard in the code, so a locale
+# this file hasn't listed still fails closed (sec-review-362.md L-1).
 #
 # kind verdict name  # reason (name is usually one word; a few DuckDB 2.0
 # comparison operators are exposed as named functions with a space in the
