@@ -26,7 +26,7 @@ import init, {
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
-import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from "./lint.js";
+import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics, splitStatements } from "./lint.js";
 // #204: the tab-wide CSP (whenever an assistant key is stored) and the
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
@@ -1420,12 +1420,165 @@ let applyHold = false;
 // explicit run of a text that ISN'T a member (that only clears
 // `applyHold`, see clearApplyHold()).
 let heldTexts = new Set();
-function heldTextsAdd(sql) {
+// Info-11 (sec-review-272-rereview seventh pass, #336): the ONE entry
+// `host.hold.arm()` itself adds — the actual proposal text, never a typed
+// variant — pinned so the ~50-entry LRU cap below can never evict it. Set
+// only by the `pin` callers (host.hold.arm() and previewExit()'s `hold`
+// branch, both arming a FRESH, just-applied proposal); cleared the moment
+// that exact text is explicitly confirmed (confirmHeldIfMatch()) or the
+// set itself is wiped (loadDash()) — a confirmed text is no longer "the
+// held proposal" to protect, and a different dashboard's hold has nothing
+// to pin.
+let pinnedHeldText = null;
+// M-4 (sec-review-343, Medium, pre-existing since #272): `heldTexts` only
+// ever matches a WHOLE text exactly. Chromium's native redo of a
+// multi-line textarea `insertText` can replay just a FRAGMENT of the
+// proposal (observed: the proposal minus its first statement) — that
+// fragment is never a member of `heldTexts`, so the hold stayed off and
+// the next implicit trigger ran its class-3 statements on the page
+// database. `heldStatements` is the statement-level counterpart: every
+// *normalised* statement (comments stripped, whitespace collapsed — see
+// `normStmt()`) of a proposal actually armed via `host.hold.arm()` (never
+// a typed variant — this is deliberately NOT a "record every edit" set
+// like `heldTexts`, so it stays small and exact). `editorHeldByStatement()`
+// re-arms whenever the CURRENT editor text contains ANY one of them,
+// however it got there: a redo fragment, a reordering, an edit around the
+// held statements — not just an exact whole-text match. No eviction cap:
+// an explicit run only ever removes the statements it actually ran (see
+// `confirmHeldIfMatch()`), so an EARLIER, still-unconfirmed proposal's
+// statements are never dropped just because a LATER one was also armed
+// (Info-12 — sec-review-343's `pinnedHeldText` was a single slot and only
+// ever protected the newest proposal from `heldTexts`' own ~50-entry cap;
+// this set has no such cap to begin with).
+let heldStatements = new Set();
+// Comments stripped (the same tokenizer as splitStatements(), but
+// discarding comments instead of keeping them) and whitespace collapsed —
+// string/dollar-quoted literals are kept byte-for-byte, unlike sqlCode()
+// (which also blanks literals: fine for "does this statement need an
+// extension", wrong here, where two statements that merely share
+// structure but differ in literal content must NOT compare equal). Info-13
+// (sec-review-343 second pass): every OTHER character — keywords,
+// identifiers, punctuation — is upper-cased; cheap hardening, since
+// literals/quoted identifiers are already kept separate from it. A
+// lower-case retype of a held statement is still not held (only the user,
+// never Chromium's own redo, can produce that — see Info-13's own
+// comment) but it costs nothing to close anyway.
+function normStmt(sql) {
+  const s = String(sql);
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    const two = s.slice(i, i + 2);
+    if (c === "'" || c === '"') {
+      const esc = c === "'" && /[Ee]/.test(s[i - 1] || "") && !/[\w$]/.test(s[i - 2] || "");
+      let j = i + 1;
+      for (; j < s.length; j++) {
+        if (esc && s[j] === "\\") j++;
+        else if (s[j] === c) {
+          if (s[j + 1] === c) j++;
+          else break;
+        }
+      }
+      out += s.slice(i, j + 1);
+      i = j;
+    } else if (two === "--") {
+      const j = s.indexOf("\n", i);
+      i = (j < 0 ? s.length : j) - 1;
+    } else if (two === "/*") {
+      const j = s.indexOf("*/", i + 2);
+      i = (j < 0 ? s.length : j + 2) - 1;
+    } else if (c === "$" && /^\$[A-Za-z_]*\$/.test(s.slice(i)) && !/[\w$]/.test(s[i - 1] || "")) {
+      const tag = s.slice(i).match(/^\$[A-Za-z_]*\$/)[0];
+      const j = s.indexOf(tag, i + tag.length);
+      const end = j < 0 ? s.length : j + tag.length;
+      out += s.slice(i, end);
+      i = end - 1;
+    } else {
+      out += c.toUpperCase(); // Info-13
+    }
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+// Every non-empty normalised statement of `sql` — [] on a parse hiccup
+// (never throws: an unmatched quote/comment just reads to the end, same
+// as splitStatements()).
+function normStatementsOf(sql) {
+  try {
+    return splitStatements(sql).map(normStmt).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+// M-5 (sec-review-343 second pass, Medium): every statement AND every
+// line-suffix tail of it (split at newline boundaries, each normalised
+// the same way) — not just the whole statement. Chromium's redo fragment
+// shape is "drop the first N lines" (same as M-4), so a model-crafted
+// MULTI-LINE statement whose tail is itself a complete, harmful statement
+// escapes a whole-statement-only hold: `EXPLAIN\nATTACH '…' AS x;` is ONE
+// harmless statement (`EXPLAIN ATTACH …` runs nothing), but redo can drop
+// the `EXPLAIN` line and leave `ATTACH '…' AS x;` on its own — a
+// DIFFERENT, harmful statement never recorded on its own. Holding every
+// tail closes that: index 0 is the whole statement (already covered),
+// every later index is a shorter, line-aligned suffix of it.
+function heldEntriesOf(sql) {
+  const out = [];
+  try {
+    for (const raw of splitStatements(sql)) {
+      const lines = String(raw).split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const t = normStmt(lines.slice(i).join("\n"));
+        if (t) out.push(t);
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+// M-4/M-5: does the CURRENT editor text contain any statement of an
+// armed, still-unconfirmed proposal — a whole match, a fragment (whole
+// statement or line-suffix tail), a reordering, an edit around it,
+// whatever reached the editor?
+function editorHeldByStatement(sql) {
+  for (const s of normStatementsOf(sql)) if (heldStatements.has(s)) return true;
+  return false;
+}
+function heldTextsAdd(sql, pin) {
   heldTexts.delete(sql); // re-insert at the end (most-recently-seen), cheap no-op if absent
   heldTexts.add(sql);
-  if (heldTexts.size > 50) heldTexts.delete(heldTexts.values().next().value); // evict the oldest
+  if (pin) {
+    pinnedHeldText = sql;
+    for (const s of heldEntriesOf(sql)) heldStatements.add(s); // M-4/M-5: this proposal's statements AND their line-suffix tails
+  }
+  if (heldTexts.size > 50) {
+    // Evict the oldest entry that ISN'T the pinned one — a 50+ run of
+    // distinct typed/undone variants must still make room for itself
+    // without ever dropping the proposal's own entry (Info-11).
+    for (const oldest of heldTexts) {
+      if (oldest === pinnedHeldText) continue;
+      heldTexts.delete(oldest);
+      break;
+    }
+  }
 }
 let previewRefreshSaved = null; // sec-review-272 H-1/L-2: the viewer's own #refresh value, while a RELOAD role in the preview's own SQL overwrites it
+// Info-10 (sec-review-272-rereview fifth pass, #336 follow-up): the page's
+// own, actually-running dashboard text, captured by previewExit()'s `hold`
+// branch right before a FRESH "Apply, don't run" writes the model's
+// proposal into the editor. assistDeps() (below) reads this instead of the
+// live editor text while `applyHold` is set, so a second Send made while a
+// proposal is held builds the assistant's engine (extensions, allow-listed
+// `data/…` files) off the dashboard the viewer actually confirmed, never
+// off the unconfirmed model text sitting in the editor. This is a
+// same-origin, local-only allow-list either way (#204 M-1) — nothing the
+// model's proposal names can leave the origin or run unconfirmed SQL — so
+// this is a minimal hardening, not a close of an exploitable gap.
+// Deliberately NOT reset by clearApplyHold(): once a hold clears, nothing
+// reads this until the NEXT hold re-arms, and a re-arm that isn't a fresh
+// "Apply, don't run" (the #sql input/run() belt-and-braces paths, or the
+// `pend` branch's re-arm of an already-held proposal) has no newer,
+// actually-confirmed text to replace it with — a slightly stale prior
+// dashboard is still never the model's text, so it's never less safe to
+// leave in place than to blank out.
+let heldBasisSql = "";
 function clearApplyHold() {
   if (!applyHold) return;
   applyHold = false;
@@ -1466,7 +1619,27 @@ function armHold() {
 // run is no longer "unconfirmed"; everything else stays exactly as
 // unconfirmed as before.
 function confirmHeldIfMatch() {
-  heldTexts.delete($("sql").value);
+  const v = $("sql").value;
+  heldTexts.delete(v);
+  if (pinnedHeldText === v) pinnedHeldText = null; // Info-11: a confirmed text is no longer "the held proposal" to pin
+  // M-4: an explicit run removes only the FULL statements it ACTUALLY
+  // ran — the ones present in the just-run text, by exact normalised
+  // match — never the whole set: a DIFFERENT, still-unconfirmed
+  // proposal's statements (Info-12: an earlier proposal A, with B now
+  // held) must stay exactly as held as before.
+  //
+  // L-9 (sec-review-343 third pass, Low): deliberately `normStatementsOf`
+  // here, NOT `heldEntriesOf` — a statement's line-suffix TAILS (M-5) are
+  // only ever ADDED at arm time, never released by a run. Releasing them
+  // here too (as an earlier version of this fix did) let running one
+  // statement's EXPLAIN-wrapped, harmless form (`EXPLAIN\nSET x='…';`)
+  // also release a held, never-run statement elsewhere in the SAME
+  // proposal whose own full text happens to equal that tail (`SET
+  // x='…';` on its own) — the ran statement's own tail and the OTHER
+  // statement's whole form can be the identical string. A run only ever
+  // confirms the statement(s) actually typed/visible and run, by their
+  // own full normalised text; a tail is never itself "run" on its own.
+  for (const s of normStatementsOf(v)) heldStatements.delete(s);
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see
@@ -1780,6 +1953,14 @@ function editorFileNames(sql) {
 // tests/web/assist_engine_test.mjs item 12): the module that opens the
 // panel imports this directly. `null` on a live backend, on a served page,
 // or before DuckDB-Wasm itself has booted.
+// Info-10 (sec-review-272-rereview fifth pass, #336 follow-up): the text
+// assistDeps() below trusts for the engine's extension/file allow-list —
+// the live editor text normally, but the dashboard the viewer last
+// actually confirmed (`heldBasisSql`) while a proposal is held, never the
+// model's own unconfirmed text. See `heldBasisSql`'s own comment above.
+function assistEditorBasis() {
+  return applyHold ? heldBasisSql : $("sql").value;
+}
 function assistDeps() {
   if (backend === "live" || servedMode || !duckdbMod) return null;
   return {
@@ -1791,12 +1972,12 @@ function assistDeps() {
       return d;
     },
     page: guardPage(pageAdapter(db, { handles: xpHandles })),
-    extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions($("sql").value) }),
-    files: () => [...new Set([...editorFileNames($("sql").value), ...xpHandles.keys()])],
+    extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions(assistEditorBasis()) }),
+    files: () => [...new Set([...editorFileNames(assistEditorBasis()), ...xpHandles.keys()])],
     // #244: also the forecast parquet (ensureForecast's own memoised
     // registration) — editor text only, never the model's SQL (M-1).
     prepareFiles: async () => {
-      const s = $("sql").value;
+      const s = assistEditorBasis();
       await ensureDataFiles(s);
       if (/m5_monthly/i.test(s)) await ensureForecast("m5_monthly");
     },
@@ -1888,7 +2069,7 @@ function assistHost() {
     // braces alongside the #sql `input` handler's own generic "record
     // every text shown while held" logic (L-7), which already adds this
     // exact value too, since editorReplace() dispatches that same event.
-    hold: { arm: (sql) => heldTextsAdd(sql) },
+    hold: { arm: (sql) => heldTextsAdd(sql, true) }, // Info-11: this is the proposal's own entry — pin it
     // sec-review-272 H-1: assist-ui only calls this from Apply's "run"
     // choice and Undo — both a direct, confirmed user action — so it clears
     // the hold and runs explicitly, same as the #run button.
@@ -2237,7 +2418,11 @@ async function boot() {
     // was cleared in between (Undo, Run of other text…).
     const v = $("sql").value;
     if (applyHold) heldTextsAdd(v);
-    else if (heldTexts.has(v)) armHold();
+    // M-4: re-arm on a whole-text match OR on a statement-level match —
+    // a native redo that only replays a FRAGMENT of the proposal (or any
+    // other reordering/partial reappearance) must re-arm just as surely
+    // as the exact original text.
+    else if (heldTexts.has(v) || editorHeldByStatement(v)) armHold();
     assistUiSync();
   });
   // sec-review-272 H-1: the editor's own explicit "run this" shortcut —
@@ -3766,6 +3951,9 @@ function loadDash(name, sql, key) {
     if (preview) await previewExit({ rerun: false });
     clearApplyHold(); // sec-review-272 H-1: loading any dashboard (incl. a fresh one) always clears a held, unconfirmed Apply
     heldTexts.clear(); // M-3/L-7 (sec-review-272-rereview fifth/sixth pass): and releases every text recorded while held — a different dashboard's own undo/redo stack has nothing to do with it
+    heldStatements.clear(); // M-4 (sec-review-343): ditto, at the statement level
+    pinnedHeldText = null; // Info-11: and whatever that hold's own proposal entry was pinned to
+    heldBasisSql = ""; // Info-10: a new dashboard makes any earlier hold's basis stale
     closeSideMenu();
     curDash = key || null;
     if (key) rememberDash(key);
@@ -3954,6 +4142,28 @@ async function previewExit({ rerun = true, hold = false } = {}) {
     // writes the proposal into the editor, which hasn't happened yet at
     // this point in THIS function, and belt-and-braces by
     // host.hold.arm().
+    //
+    // Info-10 (sec-review-272-rereview fifth pass, #336 follow-up):
+    // capture the editor's CURRENT text — the dashboard actually running
+    // on the page right now — as the trusted basis assistDeps() falls
+    // back to while held, BEFORE apply() (assist-ui.js) overwrites
+    // $("sql").value with the model's proposal moments from now (see the
+    // comment above: that write happens strictly after this exit
+    // resolves). Only ever set here, for a FRESH hold — a later re-arm of
+    // the SAME hold (the `pend` branch below, or the #sql input/run()
+    // belt-and-braces paths) leaves it alone, since the text it should
+    // point at hasn't changed.
+    //
+    // L-8 (sec-review-343): but NOT when the editor is already showing an
+    // EARLIER, still-unconfirmed proposal (A held, and a second Send now
+    // arms B's own hold) — that text is the model's, never a trusted
+    // basis. Guard on `applyHold` (A's hold is already up) AND a direct
+    // membership check (belt-and-braces, in case the two ever desync):
+    // keep whatever basis was captured for A.
+    {
+      const v = $("sql").value;
+      if (!applyHold && !heldTexts.has(v) && !editorHeldByStatement(v)) heldBasisSql = v;
+    }
     armHold();
   } else if (pend !== null && !applyHold) {
     // H-1R2: honoured now, exactly as if it had just been pressed —
@@ -4575,8 +4785,18 @@ function wireExplore() {
     const d = document.body.classList.contains("dark");
     if (d === dark) return;
     dark = d;
+    // Info-9 (sec-review-272-rereview seventh pass, #336): this fires on
+    // every `body` class change, dark toggle included, regardless of
+    // whether an assistant preview is active — a stale Explore chart left
+    // registered in `xpState.charts` must never have its (the viewer's
+    // OWN, local) SQL re-run through the guarded preview session, or into
+    // a dead one mid-exit. Skip the redraw outright while a preview is up
+    // (`!preview`), and pass `pv: null` explicitly either way so the call
+    // can never fall through to `runPreviewToken` by accident — belt-and-
+    // braces, since this is page work, never the assistant's.
+    if (preview) return;
     xpState.charts = xpState.charts.filter((c) => c.holder.isConnected);
-    for (const c of xpState.charts) xpDrawChart(c.holder, c.sql).catch(() => {});
+    for (const c of xpState.charts) xpDrawChart(c.holder, c.sql, null).catch(() => {});
   }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 }
 
@@ -4962,10 +5182,15 @@ function xpMini(c) {
 // ---- charts: a live preview of an annotated statement ----
 const xpCtx = () => JSON.stringify({ theme: "", variant: document.body.classList.contains("dark") ? "dark" : "light" });
 const CHART_ROLE = /^(BARCHART|LINECHART|AREACHART|SCATTER|HISTOGRAM|BOXPLOT)/;
-async function xpDrawChart(holder, sql) {
+async function xpDrawChart(holder, sql, pv) {
   const s = JSON.parse(plan(sql)).find((x) => !x.setup);
   if (!s) throw new Error("no chart statement");
-  const rowsJson = await runSql(s.sql);
+  // Info-9: `pv` is `undefined` for every direct, user-driven call (the
+  // Explore catalog's own chart builder, below) — runSql()'s existing
+  // fallback to `runPreviewToken` there is unchanged. The dark-toggle
+  // redraw above passes `null` explicitly, which is page work regardless
+  // of `runPreviewToken`'s live value.
+  const rowsJson = await runSql(s.sql, undefined, undefined, undefined, undefined, pv);
   const rows = JSON.parse(rowsJson);
   const w = Math.round(Math.max(300, Math.min(960, holder.clientWidth || 640)));
   holder.innerHTML = render_panel(rowsJson, JSON.stringify(s.roles), w, 300, xpCtx(), "");
@@ -7735,8 +7960,11 @@ function run(fresh = true, opts = {}) {
     // hold gets re-armed; catch it here too, right before any
     // non-explicit run would otherwise reach the page database, in case
     // some other path ever changes the editor's text to a member of
-    // `heldTexts` without going through that handler.
-    if (heldTexts.has($("sql").value)) armHold();
+    // `heldTexts` without going through that handler. M-4: the
+    // statement-level check too, for the same reason — a redo fragment
+    // reaching the editor through some other path must be caught here
+    // too.
+    if (heldTexts.has($("sql").value) || editorHeldByStatement($("sql").value)) armHold();
     if (applyHold) {
       $("grid").replaceChildren(notRunCard());
       return;

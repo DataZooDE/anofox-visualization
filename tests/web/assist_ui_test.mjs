@@ -496,4 +496,114 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   assert.equal(enabled.remember, false);
 }
 
+// G15 (Info-11, sec-review-272-rereview seventh pass, #336): the proposal's
+// own `heldTexts` entry — the one `host.hold.arm()` adds — is pinned, so
+// the ~50-entry eviction below can never drop it, and an explicit
+// confirmation of that exact text clears the pin again.
+{
+  assert.match(appClean, /function heldTextsAdd\(sql, pin\)/, "heldTextsAdd takes a pin flag");
+  assert.match(appClean, /if \(pin\) \{\s*pinnedHeldText = sql;/, "pin sets pinnedHeldText");
+  assert.match(appClean, /if \(oldest === pinnedHeldText\) continue;/, "eviction must skip the pinned entry");
+  assert.match(appClean, /hold: \{ arm: \(sql\) => heldTextsAdd\(sql, true\) \}/, "host.hold.arm() pins the proposal's own entry");
+  const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
+  assert.match(confirmBody, /pinnedHeldText === v\) pinnedHeldText = null/, "a confirmed match releases the pin");
+}
+
+// G18 (M-4, sec-review-343, Medium): the hold must be statement-aware, not
+// just text-aware — a native redo (or any other path) that reassembles
+// only a FRAGMENT of a held proposal is never a member of `heldTexts`
+// (a whole-text set), so a separate, uncapped `heldStatements` set (every
+// normalised statement of a proposal actually armed) must also re-arm the
+// hold whenever the editor contains ANY one of them. Also fixes Info-12
+// (only the newest proposal's entry survived `heldTexts`' LRU cap): this
+// set has no cap, so an earlier, still-unconfirmed proposal's statements
+// are never evicted just because a later one was also armed.
+{
+  assert.match(appClean, /let heldStatements = new Set\(\);/, "a statement-level hold set exists");
+  assert.match(appClean, /function normStmt\(sql\)/, "a comment-stripping, whitespace-collapsing normaliser exists");
+  // normStmt must keep string/dollar-quoted literal CONTENT verbatim — a
+  // sqlCode()-style blank-the-literals normaliser would make two
+  // DIFFERENT statements that only share structure compare equal, a false
+  // re-arm risk the other direction (every literal is a hazard, not a
+  // convenience): a dedicated `normStmt` function must exist, never reuse
+  // of `sqlCode(` for this purpose.
+  const normStmtBody = stripComments(grabFn(appJs, "normStmt"));
+  assert.doesNotMatch(normStmtBody, /sqlCode\(/, "normStmt must not blank string literals (sqlCode does; the hold needs exact literal content)");
+  // Info-13 (sec-review-343 second pass): every character outside a
+  // literal/quoted identifier/dollar-quote is upper-cased.
+  assert.match(normStmtBody, /out \+= c\.toUpperCase\(\);/, "normStmt upper-cases non-literal text (Info-13)");
+  assert.match(appClean, /function normStatementsOf\(sql\)/);
+  assert.match(appClean, /function editorHeldByStatement\(sql\)/);
+  // M-5 (sec-review-343 second pass, Medium): a statement's own
+  // line-suffix tails must be held too, not just the whole statement — a
+  // model-crafted multi-line statement (`EXPLAIN\nATTACH …;`, one
+  // harmless statement) can have Chromium's redo fragment (same
+  // drop-the-first-line shape as M-4) land on just its tail
+  // (`ATTACH …;`), a DIFFERENT, harmful statement never otherwise
+  // recorded. `heldEntriesOf` must split on newlines and normalise every
+  // suffix, and the pinned arm must go through it (not the
+  // whole-statement-only `normStatementsOf`).
+  assert.match(appClean, /function heldEntriesOf\(sql\)/, "a tail-expanding entry builder exists");
+  const heldEntriesBody = stripComments(grabFn(appJs, "heldEntriesOf"));
+  assert.match(heldEntriesBody, /lines\.slice\(i\)\.join\("\\n"\)/, "heldEntriesOf holds every line-suffix tail of a statement");
+  const heldTextsAddBody = stripComments(grabFn(appJs, "heldTextsAdd"));
+  assert.match(heldTextsAddBody, /for \(const s of heldEntriesOf\(sql\)\) heldStatements\.add\(s\)/, "a pinned (fresh) arm records every statement AND tail");
+  // L-9 (sec-review-343 third pass, Low): an explicit run must release
+  // only the FULL statements it ran (`normStatementsOf`), never their
+  // line-suffix tails (`heldEntriesOf`) — releasing a ran statement's own
+  // tail could also release a DIFFERENT, never-run statement elsewhere
+  // in the same proposal whose own full text happens to equal that tail.
+  const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
+  assert.match(confirmBody, /for \(const s of normStatementsOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run releases only the full statements it ran, never tails");
+  assert.doesNotMatch(confirmBody, /heldEntriesOf\(v\)/, "confirmHeldIfMatch must not release a ran statement's tails (L-9)");
+  // Both re-arm sites (the #sql input handler, run()'s belt-and-braces
+  // check) must OR the statement-level check onto the whole-text one.
+  assert.match(appClean, /heldTexts\.has\(v\) \|\| editorHeldByStatement\(v\)/, "the #sql input handler's re-arm check");
+  assert.match(appClean, /heldTexts\.has\(\$\("sql"\)\.value\) \|\| editorHeldByStatement\(\$\("sql"\)\.value\)/, "run()'s belt-and-braces re-arm check");
+  assert.match(appClean, /heldStatements\.clear\(\);/, "loadDash releases the statement-level hold too");
+}
+
+// L-8 (sec-review-343): `heldBasisSql` must not capture an EARLIER,
+// still-unconfirmed proposal's text as the engine's trusted basis — only
+// set it for a FRESH hold when the editor isn't already showing a held
+// proposal (by either the whole-text or the statement-level check).
+{
+  const body = stripComments(grabFn(appJs, "previewExit"));
+  assert.match(
+    body,
+    /if \(!applyHold && !heldTexts\.has\(v\) && !editorHeldByStatement\(v\)\) heldBasisSql = v;/,
+    "heldBasisSql is captured only when the editor isn't already held"
+  );
+}
+
+// G16 (Info-9, sec-review-272-rereview seventh pass, #336): the dark-toggle
+// MutationObserver that redraws Explore's own charts must skip the redraw
+// outright while a preview is active, and route whatever it does run as
+// page work (`pv: null`) rather than falling through to the live,
+// possibly-preview `runPreviewToken`.
+{
+  const mo = appClean.match(/new MutationObserver\(\(\) => \{[\s\S]*?\}\)\.observe\(document\.body/);
+  assert.ok(mo, "the dark-toggle chart-redraw MutationObserver not found");
+  assert.match(mo[0], /if \(preview\) return;/, "Info-9: skip the redraw while a preview is active");
+  assert.match(mo[0], /xpDrawChart\(c\.holder, c\.sql, null\)/, "Info-9: route the redraw as page work (pv: null)");
+}
+
+// G17 (Info-10, sec-review-272-rereview fifth pass, #336 follow-up):
+// assistDeps()'s extensions/files/prepareFiles must read `assistEditorBasis()`
+// — the last text the viewer actually confirmed while a proposal is held
+// — never `$("sql").value` (the model's own unconfirmed text) directly.
+{
+  assert.match(appClean, /function assistEditorBasis\(\) \{\s*return applyHold \? heldBasisSql : \$\("sql"\)\.value;\s*\}/, "assistEditorBasis falls back to heldBasisSql while held");
+  const depsBody = stripComments(grabFn(appJs, "assistDeps"));
+  assert.match(depsBody, /editorNeeds: neededExtensions\(assistEditorBasis\(\)\)/);
+  assert.match(depsBody, /editorFileNames\(assistEditorBasis\(\)\)/);
+  assert.match(depsBody, /const s = assistEditorBasis\(\);/);
+  assert.doesNotMatch(depsBody, /neededExtensions\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
+  assert.doesNotMatch(depsBody, /editorFileNames\(\$\("sql"\)\.value\)/, "assistDeps must not read the live editor text directly");
+  // the one place `heldBasisSql` is (conditionally — see L-8 below)
+  // captured for a FRESH hold, right before apply() (assist-ui.js)
+  // overwrites the editor with the proposal.
+  assert.match(appClean, /if \(!applyHold && !heldTexts\.has\(v\) && !editorHeldByStatement\(v\)\) heldBasisSql = v;\s*\n\s*\}\s*\n\s*armHold\(\);/);
+}
+
 console.log("assist_ui_test: ok");

@@ -225,6 +225,11 @@ const pageMsgs = (msgs) => msgs.filter((m) => m.w === 0);
 // is expected around the same window; this isolates the PROPOSAL's own
 // text specifically.
 const w0with = async (page, n0, re) => pageMsgs(await since(page, n0)).filter((m) => m.sql && re.test(m.sql));
+// Info-9 (sec-review-272-rereview seventh pass, #336): messages on ANY
+// worker (page OR an assistant engine) since mark `n0` matching `re` —
+// used where the point is that a redraw must not happen AT ALL while a
+// preview is active, not merely that it's routed to the right worker.
+const anyWith = async (page, n0, re) => (await since(page, n0)).filter((m) => m.sql && re.test(m.sql));
 
 // A default mock handler: turn 1 profiles "sales", turn 2 proposes CLEAN.
 function defaultHandler() {
@@ -830,6 +835,66 @@ if (run("main")) {
     await context.close();
   }
 
+  // Info-9 (sec-review-272-rereview seventh pass, #336): a chart left open
+  // in the Explore catalog — the viewer's own SQL, nothing to do with the
+  // assistant — must not have its MutationObserver-driven dark-toggle
+  // redraw land on ANY worker (the page, or the assistant's own guarded
+  // engine) while a preview is up. Build the chart first, on the page
+  // database as usual, THEN start a Send so a preview appears, and toggle
+  // dark WHILE it's still showing (before Apply/Discard).
+  {
+    const { context, page } = await mainCtx(() =>
+      sse({ content: [toolUse("toolu_info9", "propose_dashboard", { sql: CLEAN, summary: "Info-9 test.", panels: [{ stmt: 0, title: "m", why: "y" }], open_issues: [] })], stop_reason: "tool_use" })
+    );
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#side-explore");
+    await page.waitForSelector("#xq-sql", { timeout: 15000 });
+    await page.fill("#xq-sql", "SELECT 'INFO9MARK' AS tag, count(*) AS n FROM sales GROUP BY tag");
+    await page.focus("#xq-sql");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+    await page.waitForSelector('#xq-tools button:has-text("Chart this result")', { timeout: 15000 });
+    await page.click('#xq-tools button:has-text("Chart this result")');
+    await page.waitForSelector("#xq-chart-slot svg", { timeout: 15000 });
+    // Back to edit mode (#assist-btn only shows there) — the chart stays
+    // registered in `xpState.charts` and its holder stays connected; the
+    // Explore pane is only CSS-hidden, not removed.
+    await page.click("#side-explore");
+    await page.waitForSelector("#assist-btn:not([hidden])", { timeout: 15000 });
+    await page.click("#assist-btn");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.fill("#ai-q", "x");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 });
+    await page.waitForTimeout(400);
+    const n0 = await mark(page);
+    await page.evaluate(() => document.getElementById("dark")?.click());
+    await page.waitForTimeout(1200);
+    const hits = await anyWith(page, n0, /INFO9MARK/);
+    record(
+      "Info-9: the Explore chart's own SQL does not re-run anywhere while a preview is active",
+      hits.length === 0,
+      JSON.stringify(hits.map((m) => ({ w: m.w, sql: String(m.sql).slice(0, 90) })))
+    );
+    // Functionality check: once the preview is gone, the same dark toggle
+    // must still redraw the chart, on the page database — this guard must
+    // not silently break the feature it's protecting.
+    await page.click("#ai-discard");
+    await page.waitForTimeout(600);
+    const n1 = await mark(page);
+    await page.evaluate(() => document.getElementById("dark")?.click());
+    await page.waitForTimeout(1200);
+    const after = await anyWith(page, n1, /INFO9MARK/);
+    record(
+      "Info-9: the same redraw still works once no preview is active",
+      after.some((m) => m.w === 0),
+      JSON.stringify(after.map((m) => ({ w: m.w, sql: String(m.sql).slice(0, 90) })))
+    );
+    await context.close();
+  }
+
   // M9g (sec-review-272-rereview final check, H-1R2): an explicit run
   // (Ctrl/⌘+Enter) pressed ~80 ms into a preview exit (typing, or "Apply,
   // don't run") must not let the proposal's hidden-tab lazy jobs — idle-
@@ -1033,6 +1098,44 @@ if (run("main")) {
         lintDisabled: document.getElementById("lint-run")?.disabled,
         notRun: /Not run yet/.test(document.getElementById("grid")?.textContent || ""),
       }));
+    // M-4 (sec-review-343, Medium): the per-step safety check — either the
+    // editor holds no piece of the proposal at all (nothing to protect),
+    // or the hold must be armed; either way, an implicit trigger (dark
+    // toggle, Esc) must reach 0 proposal statements on w0. `HOLD_RE`
+    // matches a WHOLE OR PARTIAL reappearance (it's an alternation of the
+    // proposal's own marks, not the whole text), so this holds regardless
+    // of which Chromium build is running, and regardless of whether a
+    // given native redo replays the full proposal or only a fragment of
+    // it — the exact browser-build dependency that the removed
+    // `redoUntilProposal` retry papered over (sec-review-343 M-4): it
+    // walked PAST the partial-fragment state instead of checking it.
+    // `re` defaults to HOLD_RE; M9k (M-5) passes a different proposal's
+    // own marker regex, since the whole point is a DIFFERENT proposal
+    // shape (a multi-line statement whose tail is itself a statement).
+    const assertHeldOrClean = async (page, label, re = HOLD_RE) => {
+      const value = await page.inputValue("#sql");
+      const hasPiece = re.test(value);
+      if (hasPiece) {
+        const st = await holdState(page);
+        record(
+          `${label}: a piece of the proposal is in the editor -> the hold is armed`,
+          st.refreshDisabled === true && st.lintDisabled === true && st.notRun,
+          `${JSON.stringify(st)} value=${JSON.stringify(value.slice(0, 120))}`
+        );
+      } else {
+        record(`${label}: no piece of the proposal is in the editor (nothing to hold)`, true, JSON.stringify(value.slice(0, 120)));
+      }
+      const n1 = await mark(page);
+      await page.evaluate(() => document.getElementById("dark")?.click());
+      await page.waitForTimeout(1200);
+      let hits = await w0with(page, n1, re);
+      record(`${label}: zero page-DB messages after a dark-toggle click`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+      const n2 = await mark(page);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(1200);
+      hits = await w0with(page, n2, re);
+      record(`${label}: zero page-DB messages after Esc`, hits.length === 0, JSON.stringify(hits.map((m) => String(m.sql).slice(0, 90))));
+    };
     const implicitTriggersAreSafe = async (page, label) => {
       const n1 = await mark(page);
       await page.evaluate(() => document.getElementById("dark")?.click());
@@ -1076,7 +1179,10 @@ if (run("main")) {
     // Variant 2: Ctrl+Z first (undo apply()'s own edit, back to the
     // pre-apply SQL), an explicit Run of that OTHER text (clears the hold
     // but not `heldSql`), then Ctrl+Shift+Z (redo) brings the proposal
-    // back.
+    // back — checked at EVERY redo keypress (sec-review-343 M-4), not
+    // just whenever it happens to settle on the full text: a Chromium
+    // build that stops at a partial fragment after one press must still
+    // be safe at that exact step.
     {
       const { context, page } = await m9iHeldPage("rerun");
       await page.focus("#sql");
@@ -1088,16 +1194,12 @@ if (run("main")) {
       await page.waitForTimeout(800);
       const afterRun = await holdState(page);
       record("M9i run+redo: the explicit run of other text clears the hold", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
-      await page.keyboard.press("Control+Shift+z"); // redo -> the proposal comes back
-      await page.waitForTimeout(400);
-      const afterRedo = await holdState(page);
-      record("M9i run+redo: the proposal is back in the editor", afterRedo.editorIsProposal, JSON.stringify(afterRedo));
-      record(
-        "M9i run+redo: the hold is re-armed",
-        afterRedo.refreshDisabled === true && afterRedo.lintDisabled === true && afterRedo.notRun,
-        JSON.stringify(afterRedo)
-      );
-      await implicitTriggersAreSafe(page, "M9i run+redo");
+      for (let i = 1; i <= 3; i++) {
+        await page.focus("#sql");
+        await page.keyboard.press("Control+Shift+z");
+        await page.waitForTimeout(300);
+        await assertHeldOrClean(page, `M9i run+redo after redo ${i}`);
+      }
       await context.close();
     }
 
@@ -1106,7 +1208,8 @@ if (run("main")) {
     // (entirely the model's own choice) — the textarea normalises them to
     // LF, so `apply()` must normalise too, or `host.editor.get()` (used
     // to arm the hold) never equals `$("sql").value` and the whole
-    // text-bound hold silently never re-arms for this proposal.
+    // text-bound hold silently never re-arms for this proposal. Same
+    // per-redo-step check as Variant 2 (sec-review-343 M-4).
     {
       const { context, page } = await m9iHeldPage("crlf-redo", HOLD_PROP_CRLF);
       const held0 = await holdState(page);
@@ -1118,12 +1221,138 @@ if (run("main")) {
       await page.waitForTimeout(800);
       const afterRun = await holdState(page);
       record("M9i crlf: the explicit run of other text clears the hold", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
-      await page.keyboard.press("Control+Shift+z"); // redo -> the (CRLF, normalised) proposal comes back
+      for (let i = 1; i <= 3; i++) {
+        await page.focus("#sql");
+        await page.keyboard.press("Control+Shift+z");
+        await page.waitForTimeout(300);
+        await assertHeldOrClean(page, `M9i crlf after redo ${i}`);
+      }
+      await context.close();
+    }
+
+    // M9j (sec-review-343 M-4): a FRAGMENT of the proposal — the exact
+    // shape Chromium (Playwright 1.62.1, chromium-1248) was observed to
+    // replay on a native redo: the proposal minus its first statement —
+    // set directly through execCommand("insertText"), so this case is
+    // deterministic across Chromium builds rather than depending on
+    // native redo actually producing one. The hold is cleared FIRST (an
+    // explicit Run of other text — exactly the real scenario: without
+    // this step `applyHold` is still true from "Apply, don't run" and the
+    // case would pass trivially, armed or not). It must still be held
+    // once the fragment lands: a fragment is not a member of `heldTexts`,
+    // but its statements ARE members of `heldStatements`.
+    {
+      const { context, page } = await m9iHeldPage("m9j");
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SELECT 11 AS other ::METRIC;\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      const afterRun = await holdState(page);
+      record("M9j: the explicit run of other text clears the hold first", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
+      const fragment = HOLD_PROP.replace(/^SELECT 'HOLDMARK' AS m ::METRIC;/, "");
+      await page.evaluate((t) => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, t);
+      }, fragment);
+      await page.waitForTimeout(300);
+      const st = await holdState(page);
+      record(
+        "M9j: a partial-redo-shaped fragment (proposal minus its first statement) is still held",
+        st.refreshDisabled === true && st.lintDisabled === true && st.notRun,
+        JSON.stringify(st)
+      );
+      await implicitTriggersAreSafe(page, "M9j fragment");
+      await context.close();
+    }
+
+    // M9k (sec-review-343 second pass, M-5, Medium): a model-crafted
+    // MULTI-LINE statement whose line-suffix TAIL is itself a complete,
+    // harmful statement. `EXPLAIN\nATTACH ':memory:' AS hold_attach;` is
+    // ONE harmless statement (`EXPLAIN ATTACH …` runs nothing), but
+    // Chromium's redo fragment (the same "drop the first line" shape as
+    // M-4) can leave just `ATTACH ':memory:' AS hold_attach;` — a
+    // DIFFERENT statement that a whole-statement-only hold never
+    // recorded on its own. Two variants: deterministic (execCommand, not
+    // dependent on any particular Chromium build) and real native redo
+    // (checked at every step, same as M9i's Variant 2/3).
+    const EXPLAIN_HOLD = "EXPLAIN\nATTACH ':memory:' AS hold_attach;\n";
+    const EXPLAIN_RE = /EXPLAIN|hold_attach/;
+    {
+      const { context, page } = await m9iHeldPage("m9k-exec", EXPLAIN_HOLD);
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SELECT 11 AS other ::METRIC;\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      // the tail only — drop the first ("EXPLAIN") line.
+      const tailFragment = EXPLAIN_HOLD.replace(/^EXPLAIN/, "");
+      await page.evaluate((t) => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, t);
+      }, tailFragment);
+      await page.waitForTimeout(300);
+      await assertHeldOrClean(page, "M9k exec: EXPLAIN\\nATTACH tail fragment", EXPLAIN_RE);
+      await context.close();
+    }
+    {
+      const { context, page } = await m9iHeldPage("m9k-redo", EXPLAIN_HOLD);
+      await page.focus("#sql");
+      await page.keyboard.press("Control+z");
       await page.waitForTimeout(400);
-      const afterRedo = await holdState(page);
-      record("M9i crlf: the proposal is back in the editor", afterRedo.editorIsProposal, JSON.stringify(afterRedo));
-      record("M9i crlf: the hold is re-armed", afterRedo.refreshDisabled === true && afterRedo.lintDisabled === true && afterRedo.notRun, JSON.stringify(afterRedo));
-      await implicitTriggersAreSafe(page, "M9i crlf");
+      await page.keyboard.press("Control+Enter"); // explicit run of the (now old, non-held) editor text
+      await page.waitForTimeout(800);
+      for (let i = 1; i <= 3; i++) {
+        await page.focus("#sql");
+        await page.keyboard.press("Control+Shift+z");
+        await page.waitForTimeout(300);
+        await assertHeldOrClean(page, `M9k redo after redo ${i}`, EXPLAIN_RE);
+      }
+      await context.close();
+    }
+
+    // M9l (sec-review-343 third pass, L-9): an explicit run of an
+    // EXPLAIN-wrapped, harmless copy of one of the PROPOSAL'S OWN held
+    // statements (`EXPLAIN\nSET memory_limit='3GB';` — HOLD_PROP's own
+    // `SET memory_limit='3GB';` is its last statement) must release ONLY
+    // that typed, EXPLAIN-wrapped text — never the proposal's own,
+    // never-actually-run `SET memory_limit='3GB';`, which happens to
+    // equal that text's own line-suffix tail. Releasing a confirmed
+    // statement's tails too (an earlier version of the M-5 fix did this)
+    // let this escape: the proposal's real SET then reached the page
+    // database unheld the next time it resurfaced (a redo fragment, a
+    // paste — the mechanism doesn't matter here; this reproduces it
+    // directly).
+    {
+      const { context, page } = await m9iHeldPage("m9l");
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "EXPLAIN\nSET memory_limit='3GB';\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      // Just the proposal's own bare SET — the fragment the real leak
+      // would resurface.
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SET memory_limit='3GB';\n");
+      });
+      await page.waitForTimeout(300);
+      await assertHeldOrClean(page, "M9l: the proposal's own SET, after running an EXPLAIN-wrapped copy of it");
       await context.close();
     }
 
@@ -1182,6 +1411,59 @@ if (run("main")) {
       record(`M9i L-7 ${tag}: the edited version is back in the editor`, afterUndo.editorIsProposal, JSON.stringify(afterUndo));
       record(`M9i L-7 ${tag}: the hold is re-armed for the edited version too`, afterUndo.refreshDisabled === true && afterUndo.lintDisabled === true && afterUndo.notRun, JSON.stringify(afterUndo));
       await implicitTriggersAreSafe(page, `M9i L-7 ${tag}`);
+      await context.close();
+    }
+
+    // Info-11 (sec-review-272-rereview seventh pass, #336): `heldTexts`'
+    // ~50-entry LRU cap must never evict the ORIGINAL proposal's own
+    // entry — the one `host.hold.arm()` itself added when "Apply, don't
+    // run" was pressed. 60 keystrokes typed while held, each one a
+    // distinct `$("sql").value` (same method as the reviewer's own
+    // probe13.mjs `evict60`), push the set well past the 50-entry cap —
+    // in the old, unfixed code the original proposal's entry is evicted
+    // long before this loop ends, and native undo back to it would then
+    // leave it unheld. Run other text (clears the hold), then walk back
+    // with native undo — however many Ctrl+Z the browser's own coalescing
+    // needs (probe13 saw "up to six" for 57 keystrokes) — until the
+    // editor shows the EXACT, pristine proposal text again. The hold must
+    // re-arm there.
+    {
+      const { context, page } = await m9iHeldPage("info11");
+      const pristine = await page.inputValue("#sql");
+      await page.focus("#sql");
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      });
+      await page.keyboard.type("0123456789".repeat(6), { delay: 5 }); // 60 distinct keystrokes, well past the 50-entry cap
+      await page.waitForTimeout(300);
+      const afterEdits = await holdState(page);
+      record("M9i Info-11: still held after 60 distinct keystrokes (way past the 50-entry cap)", afterEdits.refreshDisabled === true && afterEdits.lintDisabled === true, JSON.stringify(afterEdits));
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SELECT 22 AS other ::METRIC;\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      const afterRun = await holdState(page);
+      record("M9i Info-11: the explicit run of other text clears the hold", afterRun.refreshDisabled === false, JSON.stringify(afterRun));
+      await page.focus("#sql");
+      let reached = false;
+      for (let i = 0; i < 80 && !reached; i++) {
+        await page.keyboard.press("Control+z");
+        await page.waitForTimeout(60);
+        reached = (await page.inputValue("#sql")) === pristine;
+      }
+      record("M9i Info-11: native undo reaches the ORIGINAL (pre-edit) proposal text", reached, `reached=${reached}`);
+      const afterUndo = await holdState(page);
+      record(
+        "M9i Info-11: the hold re-arms for the original proposal even after 60+ evicting edits (pinned entry)",
+        afterUndo.editorIsProposal && afterUndo.refreshDisabled === true && afterUndo.lintDisabled === true && afterUndo.notRun,
+        JSON.stringify(afterUndo)
+      );
+      await implicitTriggersAreSafe(page, "M9i Info-11");
       await context.close();
     }
   }

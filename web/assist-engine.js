@@ -373,8 +373,12 @@ function dbStatus(row) {
 // read inherited properties too — ownOpts first, same as everywhere else.
 // (`limits` itself is buildEngine's job to merge/cap over SNAPSHOT_LIMITS
 // before it ever reaches here; see buildEngine.)
+// #268: `limits` is ownOpts'd here too — belt-and-braces, since buildEngine
+// is the only caller today, but this function must not depend on every
+// future caller re-deriving that same discipline.
 export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, opts = {}) {
   const { signal, onProgress } = ownOpts(opts);
+  limits = ownOpts(limits);
   const dbRows = await page.databases(limits.catalogMs);
   const excludedDbs = new Map();
   const includedDbs = new Set();
