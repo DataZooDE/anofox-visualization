@@ -13469,14 +13469,17 @@ function hoverFocus(svg, series) {
 // link or cross-filter, and is excluded from "every series under the
 // cursor" groupings (the hover list, the axis crosshair): a reference rule
 // (geom_vline/geom_hline: ::XLINE, ::REFLINE, thresholds), or a `data-
-// decorative` mark — a mapped `data_attr("decorative", …)` a layer that
-// annotates another mark uses because ggplot-rs has no "decorative, no
-// mark metadata" layer kind of its own yet (a boxplot's mean dot is drawn
-// by a real GeomPoint layer, so it carries a title/data-* like any other
-// point; sipemu/ggplot-rs follow-up filed from #331/#318).
+// decorative` mark — `data-part="decorative"` (ggplot-rs 0.22.2's
+// `GGPlot::decorative()`, #161), a layer that annotates another mark
+// (e.g. a boxplot's mean dot, drawn by its own GeomPoint layer purely to
+// mark the spot the box's own tooltip already names) rather than drawing
+// data of its own. Such a mark carries no `<title>`/`data-x`/`data-value`/
+// `data_attr` at all, so it never reaches `marks`/`.dp-hit` below in the
+// first place — this check still matters for any future consumer that
+// walks marks by a selector other than "has a title".
 function isRuleMark(el) {
   const g = el.getAttribute("data-geom");
-  return g === "vline" || g === "hline" || el.hasAttribute("data-decorative");
+  return g === "vline" || g === "hline" || el.getAttribute("data-part") === "decorative";
 }
 
 function attachHover() {

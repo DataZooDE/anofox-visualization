@@ -92,13 +92,13 @@ const two = (n) => Array.from({ length: n }, (_, i) => (i % 2 ? "a" : "b"));
 assert.equal(seriesFocusable(two(2000)), true, "at the cap");
 assert.equal(seriesFocusable(two(2001)), false, "a dense chart keeps the plain hover");
 
-// A decorative mark (e.g. a boxplot's mean dot: a real GeomPoint layer, so
-// it carries a title/data-* like any other point, mapped with
-// data_attr("decorative", …) since ggplot-rs has no "decorative, no mark
-// metadata" layer kind of its own — ggplot-rs#318 follow-up) is excluded
-// from select/drill/cross-filter and crosshair/hover-list groupings the
-// same way a reference rule (geom_vline/geom_hline) already is, while it
-// still keeps its own hover tooltip.
+// A decorative mark (e.g. a boxplot's mean dot: its own GeomPoint layer,
+// marked with ggplot-rs 0.22.2's `GGPlot::decorative()` — #161 — so it
+// carries `data-part="decorative"` but no title/data-* of its own) is
+// excluded from select/drill/cross-filter and crosshair/hover-list
+// groupings the same way a reference rule (geom_vline/geom_hline) already
+// is. It has no tooltip of its own either way: the box's own tooltip
+// already names the spot.
 {
   const { isRuleMark } = new Function(`${grab("isRuleMark")}\nreturn { isRuleMark };`)();
   const elWith = (a) => ({
@@ -107,7 +107,11 @@ assert.equal(seriesFocusable(two(2001)), false, "a dense chart keeps the plain h
   });
   assert.equal(isRuleMark(elWith({ "data-geom": "vline" })), true);
   assert.equal(isRuleMark(elWith({ "data-geom": "hline" })), true);
-  assert.equal(isRuleMark(elWith({ "data-decorative": "mean" })), true, "a decorative mean dot");
+  assert.equal(
+    isRuleMark(elWith({ "data-geom": "point", "data-part": "decorative" })),
+    true,
+    "a decorative mean dot"
+  );
   assert.equal(isRuleMark(elWith({ "data-geom": "point" })), false, "an ordinary point");
 }
 

@@ -1757,7 +1757,6 @@ fn render_placed(
         // below only still runs for a map's hand-drawn marks and a
         // gradient-fill measure ggplot-rs can't give a custom formatter yet.
         let svg = with_formatted_values(svg, &cols, o);
-        let svg = without_xline_prefix(svg);
         Ok((svg, warnings))
     })
 }
@@ -1887,23 +1886,6 @@ fn story_steps(cols: &[Column]) -> Option<String> {
     serde_json::to_string(&json).ok()
 }
 
-/// An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
-/// `x = 2026-10-12`: `geom_vline`/`geom_hline` don't implement B2-5 tooltip
-/// templates (`GGPlot::tooltip`) — `Geom::consumes_tooltips` has no
-/// `geom/refline.rs` override, so a template silently has no effect and
-/// warns — so there is no public way to replace the hard-coded `"x = "`
-/// prefix `geom/refline.rs`'s `mark_line` always writes (sipemu/ggplot-rs#165).
-/// The date itself is ggplot-rs's own now (B2-4 `svg_formatted_values` + the
-/// `Value::DateTime` reflines `xline_values` keeps): only this prefix is
-/// still string surgery, and only for `::XLINE` (a `::REFLINE`/`::YLINE`'s
-/// `"y = "` was never stripped, before or after #326).
-fn without_xline_prefix(svg: String) -> String {
-    svg.replace(
-        "data-geom=\"vline\"><title>x = ",
-        "data-geom=\"vline\"><title>",
-    )
-}
-
 /// Give every hoverable mark its value as the panel formats it:
 /// `data-fvalue="$1,234.50"` per the panel's `::YFORMAT` (or a percent
 /// kind) and the dashboard locale, and — when the axis formats x
@@ -1915,12 +1897,15 @@ fn without_xline_prefix(svg: String) -> String {
 /// builder, keeps the text identical to what this function used to write
 /// by hand); this pass only still replaces it — overriding whatever
 /// ggplot-rs already wrote natively, since there's no per-mark opt-out —
-/// for the two cases that can't go through a `Scale` at all:
+/// for the cases that can't go through a `Scale` at all:
 ///  - a map's own hand-drawn marks (`Panel::Own`, never a `GGPlot`);
-///  - a Fill-mapped measure (`::HEATMAP`/`::CALENDAR`): ggplot-rs's
-///    gradient/colour-continuous scales have no `with_value_formatter` hook
-///    yet (sipemu/ggplot-rs#164), so a non-default `::YFORMAT` still needs
-///    this to override the plain grouped number ggplot-rs wrote on its own.
+///  - a Fill-mapped measure (`::HEATMAP`/`::CALENDAR`) banded by
+///    `::THRESHOLDS` (`TileFill::Steps`/`StepFill`): a plain discrete
+///    `Scale`, not one of the three gradient scales `with_value_formatter`
+///    (ggplot-rs 0.22.2, sipemu/ggplot-rs#164) was added to. A `::COLORSCALE`
+///    ramp (`TileFill::Ramp`/`FmtGradient`) wires that hook straight into
+///    `ScaleColorGradientN` instead (`FmtGradient::new`) and so no longer
+///    needs this fallback.
 ///
 /// `data-fx`, though, stays unconditional: a date x column rendered on a
 /// *discrete* axis (`::XAXIS` on a bar/category chart whose values happen
@@ -1938,7 +1923,9 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
     let Role::Value(kind) = value.role else {
         return svg;
     };
-    let do_fvalue = map::is_map(cols) || matches!(kind, Kind::Heatmap | Kind::Calendar);
+    let do_fvalue = map::is_map(cols)
+        || (matches!(kind, Kind::Heatmap | Kind::Calendar)
+            && thresholds_of(cols).ok().flatten().is_some());
     let xfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
     if !do_fvalue && xfmt.is_none() && o.locale.is_default() {
         return svg;
@@ -3047,9 +3034,8 @@ fn cartesian(
                 .stat(StatIdentity)
                 .layer_aes(boxstats::layer_aes());
             match find_role(cols, Role::Mean) {
-                Some(mean) => {
-                    let n = mean.values.len();
-                    p.geom_point_with(GeomPoint {
+                Some(mean) => p
+                    .geom_point_with(GeomPoint {
                         size: 2.6,
                         color: o.theme.chart_label(),
                         alpha: 1.0,
@@ -3057,27 +3043,16 @@ fn cartesian(
                     .layer_data(vec![
                         ("x".to_string(), x.values.clone()),
                         ("y".to_string(), mean.values.clone()),
-                        ("btip".to_string(), col_of(&data, "btip")),
-                        // The mean dot is drawn by its own (real) GeomPoint
-                        // layer, so it carries a title/data-* like any other
-                        // point (ggplot-rs has no "decorative, no mark
-                        // metadata" layer kind yet — sipemu/ggplot-rs
-                        // follow-up filed from #331/#318). `data-decorative`
-                        // is a normal mapped `data_attr`, read by
-                        // web/app.js to keep it out of the hover list,
-                        // crosshair grouping and click/select/drill, the
-                        // same way a reference-rule mark already is, while
-                        // it still shows its own (the box's) tooltip.
-                        ("dec".to_string(), vec![Value::Str("mean".into()); n]),
                     ])
-                    .layer_aes(
-                        Aes::new()
-                            .x("x")
-                            .y("y")
-                            .tooltip("btip")
-                            .data_attr("decorative", "dec"),
-                    )
-                }
+                    .layer_aes(Aes::new().x("x").y("y"))
+                    // The mean dot is drawn by its own (real) GeomPoint
+                    // layer purely to mark the spot the box's own tooltip
+                    // already names: `GGPlot::decorative()` (ggplot-rs
+                    // 0.22.2, #161) strips its title/data-* so it carries
+                    // no mark metadata of its own, instead of the old
+                    // mapped `data_attr("decorative", …)` web/app.js had to
+                    // special-case.
+                    .decorative(),
                 None => p,
             }
         }
@@ -3302,6 +3277,17 @@ fn cartesian(
                 },
                 Aes::new().xintercept(col),
             )
+            .layer_data(frame)
+            // An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
+            // `x = 2026-10-12`: `geom_vline` now reads a `.tooltip()`
+            // template (ggplot-rs 0.22.2, sipemu/ggplot-rs#165), replacing
+            // its default `"x = …"` label, instead of the old
+            // `without_xline_prefix` SVG string-surgery. `{xintercept}` is
+            // formatted through the x scale (B2-4), so a `Value::DateTime`
+            // refline still shows its date text, not a raw epoch number.
+            // A `::REFLINE`/`::YLINE`'s default `"y = …"` label is left
+            // untouched, as before #326.
+            .tooltip("{xintercept}")
         } else {
             plot.geom_hline_aes_with(
                 GeomHline {
@@ -3313,8 +3299,8 @@ fn cartesian(
                 },
                 Aes::new().yintercept(col),
             )
-        }
-        .layer_data(frame);
+            .layer_data(frame)
+        };
     }
     plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
     // Threshold lines (`::THRESHOLDS`): one at each bound where the status
@@ -4306,10 +4292,19 @@ pub(crate) struct FmtGradient {
 
 impl FmtGradient {
     pub(crate) fn new(ramp: &Ramp, fmt: format::ValueFmt, locale: format::Locale) -> FmtGradient {
+        // `with_value_formatter` (ggplot-rs 0.22.2, sipemu/ggplot-rs#164)
+        // gives ggplot-rs's own B2-4 `data-fvalue`/tooltip pass the panel's
+        // format directly, the same hook every other continuous scale
+        // already had — replacing the old `with_formatted_values` string-
+        // surgery this heatmap/calendar fill used to need (its `do_fvalue`
+        // check below is now scoped to the `TileFill::Steps` case, which
+        // isn't one of the three gradient scales #164 covers).
+        let value_fmt = fmt.clone();
         let mut inner = ggplot_rs::scale::gradient_n::ScaleColorGradientN::new(
             Aesthetic::Fill,
             ramp.stops.iter().map(|&(p, c)| (p, rgba(c))).collect(),
-        );
+        )
+        .with_value_formatter(move |v| value_fmt.full(v, &locale));
         // Fix the domain to `Ramp::min`/`Ramp::max` — the domain a `matrix`
         // heatmap's `domain :=` option asks for (e.g. a correlation's fixed
         // −1..1, even when the data itself spans a narrower range after
@@ -4371,6 +4366,9 @@ impl ggplot_rs::scale::Scale for FmtGradient {
     }
     fn reset_training(&mut self) {
         self.inner.reset_training()
+    }
+    fn format_value(&self, value: &Value) -> Option<String> {
+        self.inner.format_value(value)
     }
 }
 
