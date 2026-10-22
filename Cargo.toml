@@ -43,9 +43,19 @@ crate-type = ["cdylib", "rlib"]
 # path, text, label, boxplot, smooth — sipemu/ggplot-rs#142 tracks the rest);
 # 0.22.2: `GGPlot::decorative()` (no per-mark metadata, `data-part=
 # "decorative"`), `with_value_formatter` on the colour/fill gradient scales,
-# and `geom_vline`/`geom_hline`/`geom_abline` reading `tooltip()` templates.
+# and `geom_vline`/`geom_hline`/`geom_abline` reading `tooltip()` templates;
+# 0.23.0: per-panel dodge/dodge2/jitter group count+offset (#153),
+# position_stack/position_fill splitting a group's positive/negative
+# values into independent stacks (#154), auto-wrap/grid for every
+# simultaneous discrete legend plus PlotGrid collected-legend wrap
+# (#155), and a too-tall vertical legend grid reducing columns then
+# truncating labels with an ellipsis + `<title>` tooltip before warning
+# (#159) — the truncated label is a plain text run, not a `gg-mark`.
+# `PositionParams` gained `group_order` (breaking for struct-literal
+# builders; we use `..Default::default()`). `guide::legend::draw_legend`
+# is deprecated, unused by us.
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.22.2", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.23.0", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

@@ -29,6 +29,13 @@ fn web_reads_svg_metadata() {
     run_node("svg_attrs_test.mjs");
 }
 
+/// #368: a ggplot-rs 0.23.0 truncated legend label's <title> must not make
+/// attachHover treat it as a hoverable/selectable/drillable data mark.
+#[test]
+fn web_legend_label_titles_are_not_marks() {
+    run_node("legend_hover_test.mjs");
+}
+
 #[test]
 fn web_contract_plot_glue() {
     run_node("contract_test.mjs");
