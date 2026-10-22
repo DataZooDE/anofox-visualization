@@ -340,7 +340,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SUBTOTAL", &["SUBTOTALS", "GROUP_TOTAL"], R::TableOpt(TableOpt::Subtotal), "layout", false,
       "next table: a subtotal row after each group of a column — 'region' (not for ::PAGED)"),
     e("TOOLBAR", &[], R::TableOpt(TableOpt::Toolbar), "layout", false,
-      "next table's toolbar: 'none' hides it entirely, or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' (e.g. 'export' on a small lookup table that needs no paging, search or column tricks but still wants a CSV button)"),
+      "next table's toolbar: 'none' hides it entirely (row count and chips too; a multi-select's \"N selected\" chip stays), or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' ('totals' only hides its toggle button, not the row; 'density' covers Pages|Scroll too; each kept part still needs its own row/column threshold); an excluded 'export' still gets a small hover CSV button"),
     e("SELECT_AS", &["SELECTAS", "SELECTION"], R::SelectAs, "layout", false,
       "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
     e("EMPTY", &["EMPTY_MESSAGE", "NODATA"], R::Empty, "layout", false,

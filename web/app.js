@@ -8352,6 +8352,14 @@ async function runOnce(fresh = true, pv = preview) {
         const rowSelect = nextRowSelect;
         const tableOpts = nextTableOpts;
         const emptyMsg = nextEmpty;
+        // #354 follow-up: an excluded `search` / `filters` ::TOOLBAR part
+        // must not keep a stale dpFilterText / colState filter in the SQL
+        // request either — there is no visible box or chip left to see or
+        // clear it by. renderTable applies the same gating to its own
+        // (shared, for a ::PAGED table) colState below; this is belt and
+        // suspenders against the one request that runs before it does.
+        const tbSpec = parseToolbar(tableOpts.toolbar);
+        const tbOn = (part) => tbSpec == null || tbSpec.has(part);
         const titleHolder = document.createElement("div");
         const holder = document.createElement("div");
         fig.append(titleHolder, holder);
@@ -8359,7 +8367,7 @@ async function runOnce(fresh = true, pv = preview) {
         filterInput.className = "tbl-search";
         filterInput.type = "search";
         filterInput.placeholder = "Search all rows…";
-        filterInput.value = dpFilterText[idx] || "";
+        filterInput.value = tbOn("search") ? dpFilterText[idx] || "" : "";
         // Every reload rebuilds the table and its toolbar, where the search box
         // lives; detaching it drops the focus. Typing in it marks it as in use,
         // so a rebuild hands the focus back (unless the user moved elsewhere).
@@ -8389,9 +8397,9 @@ async function runOnce(fresh = true, pv = preview) {
           const page = { ...extra };
           if (infoR && !withInfo) page.omit = [INFO_COLUMN];
           if (withFilters) {
-            const q = (dpFilterText[idx] || "").trim();
+            const q = tbOn("search") ? (dpFilterText[idx] || "").trim() : "";
             if (q) page.filter = q;
-            const fl = colFilters();
+            const fl = tbOn("filters") ? colFilters() : [];
             if (fl.length) page.filters = fl;
           }
           if (servedMode) return JSON.parse(await runSql(base, { base, ...page }, kind && kind + inst, undefined, idx, pv));
@@ -8426,7 +8434,7 @@ async function runOnce(fresh = true, pv = preview) {
               stats = cols.length ? (await pageReq({ stats: cols.slice(0, 64) }, true, "load"))[0] || { n: 0 } : (await pageReq({ count: true }, true, "load"))[0];
               stats._cols = cols.slice(0, 64);
             }
-            const filtering = (dpFilterText[idx] || "").trim() || colFilters().length;
+            const filtering = (tbOn("search") && (dpFilterText[idx] || "").trim()) || (tbOn("filters") && colFilters().length);
             if (unfiltered == null || !filtering)
               unfiltered = filtering ? Number((await pageReq({ count: true }, false, "load"))[0].n) : Number(stats.n);
           } catch (e) {
@@ -10411,8 +10419,14 @@ function parseTotals(spec) {
 // shows, the toolbar's own thresholds (row count, column count, …) apply as
 // usual — unchanged behaviour. 'none' is the same as an empty list: the whole
 // `.tbl-bar` is left out, not just emptied, so a 2-row lookup table sits under
-// nothing wider than its own columns. Unknown part names are dropped, like an
-// ::TOTALS entry naming no column — never an error, just not applied.
+// nothing wider than its own columns (the row count and any filter chips
+// show whenever the bar itself is drawn — they aren't a part of their own).
+// Unknown part names are dropped, like an ::TOTALS entry naming no column —
+// never an error, just not applied. `totals` only hides the Σ Totals
+// *button*: the row itself still follows the author's ::TOTALS or the
+// automatic default (only a viewer's saved toggle is ignored, since the
+// button to set it is gone). `density` also covers the Pages|Scroll view
+// switcher, not just Compact|Comfortable row height.
 const TOOLBAR_PARTS = ["search", "filters", "totals", "stats", "columns", "density", "export"];
 function parseToolbar(spec) {
   const s = String(spec ?? "").trim().toLowerCase();
@@ -10457,6 +10471,15 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   }
   const t = document.createElement("table");
   t.className = "dp-table";
+  // ::TOOLBAR 'none' | 'search,export' (#354): null (no directive) shows every
+  // part, at its usual threshold; otherwise only the named parts render. An
+  // excluded part's saved / persisted viewer state is cleared below, right
+  // after it is read — a filter, a hidden column or a search term with no
+  // visible control left to see or clear it must never silently keep
+  // changing what the table shows.
+  const toolbarSpec = parseToolbar(opts.toolbar);
+  const toolbarOn = (part) => toolbarSpec == null || toolbarSpec.has(part);
+  const toolbarOff = toolbarSpec != null && toolbarSpec.size === 0;
   // UI state: a client table keeps it per panel across cross-filter re-runs
   // (dpTableUI); a ::PAGED table's lives with its caller (server.colState), which
   // also turns the column filters into SQL.
@@ -10473,6 +10496,13 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const aggPick = server ? (saved.agg ||= {}) : { ...(saved.agg || {}) }; // the viewer's totals aggregation per column
   let q = server ? "" : saved.q || ""; // client search (a ::PAGED table's is server.search)
   const hidden = new Set(saved.hidden || []);
+  if (!toolbarOn("search")) q = "";
+  if (!toolbarOn("filters")) {
+    for (const k of Object.keys(colQ)) delete colQ[k];
+    for (const k of Object.keys(colRange)) delete colRange[k];
+    for (const k of Object.keys(colEq)) delete colEq[k];
+  }
+  if (!toolbarOn("columns")) hidden.clear();
   const allKeys = rows.length ? Object.keys(rows[0]) : server.statCols || [];
   const colFmt = {}; // column key -> format role
   for (const [idx, f] of Object.entries(fmtByIdx)) colFmt[allKeys[idx]] = f;
@@ -10491,11 +10521,6 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const totSpec = { all: totParsed.all, col: {} };
   for (const [name, a] of totParsed.col) if (colNamed(name)) totSpec.col[colNamed(name)] = a;
   const totalsOff = totSpec.all === "none" && !Object.values(totSpec.col).some((a) => a !== "none");
-  // ::TOOLBAR 'none' | 'search,export' (#354): null (no directive) shows every
-  // part, at its usual threshold; otherwise only the named parts render.
-  const toolbarSpec = parseToolbar(opts.toolbar);
-  const toolbarOn = (part) => toolbarSpec == null || toolbarSpec.has(part);
-  const toolbarOff = toolbarSpec != null && toolbarSpec.size === 0;
   // ::COLGROUP 'Backtest: mae, rmse | Holdout: mae_h': a label over adjacent columns
   const groupOf = {};
   for (const part of String(opts.colgroup || "").split("|")) {
@@ -10617,12 +10642,14 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // page); a longer one pages by 10.
   let pageSize = server ? server.pageSize : saved.pageSize || (rows.length <= 20 ? 20 : 10);
   let view = server ? server.view || "pages" : saved.view || "pages";
-  // density: compact rows by default for long tables
-  let compact = saved.compact ?? (server ? server.unfiltered ?? server.total : rows.length) > 50;
+  // density: compact rows by default for long tables. #354: no `density` →
+  // ignore a saved viewer preference (there is no Compact/Comfortable button
+  // left to have set it with) and fall back to the automatic default.
+  const compactAuto = (server ? server.unfiltered ?? server.total : rows.length) > 50;
+  let compact = toolbarOn("density") ? saved.compact ?? compactAuto : compactAuto;
   let ROW_H = compact ? ROW_H_COMPACT : ROW_H_COMFY;
-  // #354: a part ::TOOLBAR drops stays off even if a saved viewer preference
-  // (or, for filters, a persisted column filter) would otherwise show it —
-  // there is no button left to turn it back on.
+  // #354: an excluded part's saved viewer preference is ignored — there is
+  // no button left to have set it, or to turn it back off.
   let showStats = toolbarOn("stats") && !!saved.showStats; // the column-stats strip under the header
   let showFilters =
     toolbarOn("filters") &&
@@ -10630,10 +10657,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // Σ for amounts and counts, none for rates and percentages, else the mean (defaultAgg, table_profile)
   const hasAdditive = cols.some((c) => ["MONEY", "COMPACT"].includes(info[c].f));
   const nTotal = () => (server ? server.total : filtered.length);
-  let showTotals =
-    toolbarOn("totals") &&
-    !totalsOff &&
-    (saved.showTotals ?? (opts.totals ? (server ? server.total : rows.length) >= 2 : (server ? server.total : rows.length) >= 3 && hasAdditive));
+  // #354: excluding `totals` drops only the Σ Totals *button* (below) — the
+  // row itself still follows the author's ::TOTALS, or the automatic
+  // n>=3-and-additive default; only a viewer's saved toggle is ignored,
+  // since there is no button left to have set it with.
+  const totalsAuto = opts.totals ? (server ? server.total : rows.length) >= 2 : (server ? server.total : rows.length) >= 3 && hasAdditive;
+  let showTotals = !totalsOff && (toolbarOn("totals") ? saved.showTotals ?? totalsAuto : totalsAuto);
   const visCols = () => cols.filter((c) => !hidden.has(c));
 
   // ── filtering + sorting (client tables; a ::PAGED table's happen in SQL) ──
@@ -10847,7 +10876,10 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         })
       );
     if (toolbarOn("columns") && cols.length > 4) barRight.appendChild(columnsMenu());
-    if (many) {
+    // Pages|Scroll is view density, not a filter/export control, so it rides
+    // on the same `density` part as Compact|Comfortable rather than adding
+    // an eighth part name (#354 review).
+    if (many && toolbarOn("density")) {
       const seg = document.createElement("span");
       seg.className = "tbl-seg";
       for (const [v, label, tip] of [
@@ -11081,8 +11113,15 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   }
   // #354: 'none'::TOOLBAR (an empty allow-list) drops the whole bar — not
   // just every part inside it — so a tiny lookup table sits under nothing
-  // wider than its own columns.
-  if (!toolbarOff) wrap.appendChild(bar);
+  // wider than its own columns. Exception: a ::ROWSELECT 'multi' table with
+  // an active selection keeps the bar for just the "N selected" chip — its
+  // own × is the only way to clear a multi-select, and the whole point of
+  // selecting rows (reading them elsewhere via getvariable()) still works
+  // under 'none'. A click re-renders the panel from scratch (`run`), so this
+  // is re-decided fresh on every selection change, same as the rest of the
+  // bar.
+  const hasSelectionChip = selMode === "multi" && Array.isArray(dpXf[cols[0]]) && dpXf[cols[0]].length > 0;
+  if (!toolbarOff || hasSelectionChip) wrap.appendChild(bar);
 
   // ── head: label, sort icon, column statistics on hover ──
   const scroller = document.createElement("div");
@@ -11883,8 +11922,12 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   }
 
   // ── pager (Pages view) / position (Scroll view) ──
-  t._rows = rows;
-  t._cols = cols;
+  // csvOf's fallback for a table with no export menu of its own (#354
+  // follow-up: an excluded `export` part, or no toolbar at all): the same
+  // matching, sorted, visible rows/columns its own ⤓ CSV button would export
+  // — never just the one rendered page.
+  t._rows = sortedRows();
+  t._cols = visCols();
   const foot = document.createElement("div");
   foot.className = "table-foot";
   wrap.appendChild(foot);
@@ -12922,9 +12965,15 @@ function svgToPng(svg, name) {
 function addExportButtons() {
   document.querySelectorAll(".panel").forEach((fig) => {
     if (fig.querySelector(".dl")) return;
-    const svg = fig.querySelector("svg");
     const table = fig.querySelector(".dp-table");
-    if (svg || !table || fig.querySelector(".tbl-bar")) return; // tables export from their toolbar
+    // A ::SPARKLINE column draws a tiny <svg> per cell (#354 follow-up):
+    // that is table content, not a chart's own svg, so only an svg *outside*
+    // the table marks this panel as a chart.
+    const svg = [...fig.querySelectorAll("svg")].find((s) => !table || !table.contains(s));
+    // A table keeps this hover button whenever it has no export menu of its
+    // own to use instead — no toolbar at all (pre-#354), or `export`
+    // excluded from a ::TOOLBAR allow-list.
+    if (svg || !table || fig.querySelector(".tbl-export")) return;
     fig.style.position = "relative";
     const btn = document.createElement("button");
     btn.className = "dl";

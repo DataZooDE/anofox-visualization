@@ -197,7 +197,7 @@ terminal.
 | `::FLAG` | `::THRESHOLD` | layout | next table: flag cells meeting a condition with ⚠ — 'mape > 0.2, bias < -5' |
 | `::HIGHLIGHT` | `::TOPN` | layout | next table: emphasise the top / bottom n of a column — 'Revenue: top 3, Margin: bottom 2' |
 | `::SUBTOTAL` | `::SUBTOTALS`, `::GROUP_TOTAL` | layout | next table: a subtotal row after each group of a column — 'region' (not for ::PAGED) |
-| `::TOOLBAR` |  | layout | next table's toolbar: 'none' hides it entirely, or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' (e.g. 'export' on a small lookup table that needs no paging, search or column tricks but still wants a CSV button) |
+| `::TOOLBAR` |  | layout | next table's toolbar: 'none' hides it entirely (row count and chips too; a multi-select's "N selected" chip stays), or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' ('totals' only hides its toggle button, not the row; 'density' covers Pages\|Scroll too; each kept part still needs its own row/column threshold); an excluded 'export' still gets a small hover CSV button |
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
 | `::EMPTY` | `::EMPTY_MESSAGE`, `::NODATA` | layout | next panel's message when its result is empty: 'No orders in range — widen the dates' |
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
@@ -2556,7 +2556,7 @@ by their raw name or their header, case-insensitive):
 | `::FLAG` (`::THRESHOLD`) | `'mape > 0.2, bias < -5, status = breach'` | cells meeting a condition (`>` `>=` `<` `<=` `=` `!=`) get a ⚠ and the warning tint — never colour alone |
 | `::HIGHLIGHT` (`::TOPN`) | `'Revenue: top 3, Margin: bottom 2'` (`'top 3'` alone: the first numeric column) | the top / bottom n values in bold with their rank (#1, #2 / ↓1, ↓2); a `::PAGED` table ranks within the page |
 | `::SUBTOTAL` (`::SUBTOTALS`, `::GROUP_TOTAL`) | `'region'` | the rows grouped by that column (groups in the order of their first row; sorting by the column orders the groups, any other column sorts within them), the group's value shown once, and a subtotal row after each group — each numeric column with the aggregation its total uses. A `::TABLE` only (a `::PAGED` table holds one page). |
-| `::TOOLBAR` | `'none'`, or an allow-list of the parts to keep — `'search'`, `'filters'`, `'totals'`, `'stats'`, `'columns'`, `'density'`, `'export'` (comma- or semicolon-separated, e.g. `'search,export'`) | `'none'` drops the whole `.tbl-bar` — row count, search, Filters, Σ Totals, Stats, Columns, Compact/Comfortable and ⤓ Export — not just empties it; a small lookup table next to a chart (a handful of rows, 2–3 columns) that can never need paging, column search or filtering sits under nothing wider than its own columns. An allow-list keeps only the named parts and hides the rest, regardless of each part's own row/column threshold (e.g. `'export'` keeps just the ⤓ Export menu). Unrecognised part names are dropped, never an error (like an `::TOTALS` entry naming no column). No `::TOOLBAR` at all: every part shows, at its own threshold — unchanged. #354 |
+| `::TOOLBAR` | `'none'`, or an allow-list of the parts to keep — `'search'`, `'filters'`, `'totals'`, `'stats'`, `'columns'`, `'density'`, `'export'` (comma- or semicolon-separated, e.g. `'search,export'`) | `'none'` drops the whole `.tbl-bar` — row count, search, Filters, Σ Totals, Stats, Columns, Compact/Comfortable, Pages\|Scroll and ⤓ Export — not just empties it; a small lookup table next to a chart (a handful of rows, 2–3 columns) that can never need paging, column search or filtering sits under nothing wider than its own columns. The one exception: a `::ROWSELECT 'multi'` table with an active selection keeps the bar for just its "N selected" chip. An allow-list keeps only the named parts and hides the rest; each kept part still shows only past its own usual row/column threshold (e.g. `'filters'` on a 3-row table still shows no Filters button — that needs > 10 rows, same as without `::TOOLBAR`). The row count and any active filter chips are not a part of their own: they show whenever the bar is drawn at all, under any allow-list. `'totals'` governs only the Σ Totals *toggle button* — the totals row itself keeps following the author's `::TOTALS` or the automatic default either way, since hiding data a viewer never asked to hide would be a bigger change than hiding a button; only a viewer's own saved on/off pick is ignored once the button is gone. `'density'` also covers the Pages\|Scroll view switcher, not just Compact\|Comfortable row height. Excluding `'export'` (or `'none'`) still leaves a small hover ⤓ CSV button on the panel — see below. Unrecognised part names are dropped, never an error (like an `::TOTALS` entry naming no column). No `::TOOLBAR` at all: every part shows, at its own threshold — unchanged. #354 |
 
 ```sql
 SELECT 'revenue: sum, margin: mean, accuracy: median'::TOTALS;
@@ -2572,11 +2572,13 @@ SELECT 'none'::TOOLBAR;
 SELECT metric::TABLE, value FROM (VALUES ('Plan', 4050), ('Actual', 4220.75)) t(metric, value);
 ```
 
-A table with `'none'::TOOLBAR` still gets a small hover ⤓ CSV button (the same
-fallback a table with no toolbar at all gets from `addExportButtons`, `web/app.js`);
-add `::DOWNLOAD_CSV` / `::DOWNLOAD_XLSX` / `::DOWNLOAD_PDF` as their own panel
-for a bigger, explicit export button when the table's own export menu is
-suppressed but downloading still matters.
+A table excluding `'export'` (including `'none'`) still gets a small hover ⤓
+CSV button — the same fallback any table with no export menu of its own gets
+(`addExportButtons`, `web/app.js`) — exporting the same matching, sorted,
+visible rows and columns its own ⤓ CSV button would (never just the page on
+screen). Add `::DOWNLOAD_CSV` / `::DOWNLOAD_XLSX` / `::DOWNLOAD_PDF` as their
+own panel for a bigger, explicit export button when the table's own export
+menu is suppressed but downloading still matters.
 
 `dashboard --check` notes `totals/summed-rate` when a `'sum'::TOTALS` (or a bare
 `sum` in the list) would also sum a rate or percentage column the value does
