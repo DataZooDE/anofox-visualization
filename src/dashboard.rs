@@ -854,6 +854,27 @@ fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> S
     )
 }
 
+/// Shorten a table header that's wider than its own column to an ellipsis
+/// (#351) — `None` when it already fits `avail_px`, so the caller can skip
+/// the hover `<title>` too. Uses ggplot-rs's own (Hanken Grotesk) text-width
+/// estimate (the same heuristic `axis_text_x_check_overlap` measures tick
+/// labels with), nudged up a little for the header's semibold weight, which
+/// is a touch wider than the regular weight the table estimates.
+fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
+    let fits = |s: &str| ggplot_rs::render::text::text_width(s, size) * 1.08 <= avail_px;
+    if fits(head) {
+        return None;
+    }
+    let chars: Vec<char> = head.chars().collect();
+    for n in (0..chars.len()).rev() {
+        let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
+        if fits(&cand) {
+            return Some(cand);
+        }
+    }
+    Some("\u{2026}".to_string())
+}
+
 /// The headless table: the browser table's formatting decisions (shared
 /// [`crate::table`] module — humanised headers, one unit per money / compact
 /// column moved into the header, aligned decimals, a true minus sign, ids and
@@ -1060,12 +1081,22 @@ fn table_svg(
             esc(t)
         ));
     }
-    // header
+    // header — a header wider than its own column is shortened to an
+    // ellipsis instead of overlapping the next one (#351); the full text is
+    // still there on hover, via `<title>` (only when actually shortened, so
+    // a dashboard with no long headers renders byte-identical to before).
     for (k, c) in cols.iter().enumerate() {
         let (x, a) = anchor(k);
+        let avail = (widths[k] - 4.0).max(10.0);
+        let short = truncate_header(&c.p.head, 11.0, avail);
+        let shown = short.as_deref().unwrap_or(&c.p.head);
+        let title = match &short {
+            Some(_) => format!("<title>{}</title>", esc(&c.p.head)),
+            None => String::new(),
+        };
         s.push_str(&format!(
-            "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}</text>",
-            esc(&c.p.head),
+            "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}{title}</text>",
+            esc(shown),
             y = top + 16.0
         ));
     }
@@ -1401,15 +1432,14 @@ fn md_metric_fmt(spec: &str) -> Option<crate::MetricFmt> {
     })
 }
 
-/// Marks a word of a formula in [`markdown_lines`] (drawn monospace).
-const MATH_WORD: char = '\u{E002}';
 /// A forced line break in [`markdown_lines`]' word list (around `$$…$$`).
 const MD_BREAK: &str = "\u{E003}";
 
 /// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
 /// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
-/// separated by an empty line. A `$…$` formula keeps its TeX source, each
-/// word marked with [`MATH_WORD`]; a `$$…$$` one gets lines of its own.
+/// separated by an empty line. A formula is rendered to plain text by
+/// [`crate::math::tex_to_text`] (#351: this has no KaTeX) — a `$$…$$` one
+/// gets lines of its own.
 fn markdown_lines(md: &str, w: f64) -> Vec<String> {
     let max = (((w - 28.0) / 6.6).floor() as usize).max(10);
     let mut out: Vec<String> = Vec::new();
@@ -1445,7 +1475,11 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
                     if display {
                         words.push(MD_BREAK.into());
                     }
-                    words.extend(tex.split_whitespace().map(|w| format!("{MATH_WORD}{w}")));
+                    words.extend(
+                        crate::math::tex_to_text(&tex)
+                            .split_whitespace()
+                            .map(str::to_string),
+                    );
                     if display {
                         words.push(MD_BREAK.into());
                     }
@@ -1461,7 +1495,7 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
         let mut line = String::new();
         let mut len = 0;
         for wd in words {
-            let n = wd.chars().filter(|&c| c != MATH_WORD).count();
+            let n = wd.chars().count();
             if wd == MD_BREAK || (!line.is_empty() && len + 1 + n > max) {
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
@@ -1485,36 +1519,11 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
     out
 }
 
-/// One [`markdown_lines`] line as SVG text content: formula words in a
-/// monospace `<tspan>`, the rest as is (escaped).
+/// One [`markdown_lines`] line as SVG text content (escaped). Formula words
+/// are now already plain text ([`crate::math::tex_to_text`], #351), so this
+/// is no longer anything more than that.
 fn markdown_line_svg(line: &str) -> String {
-    let mut out = String::new();
-    let mut math_run: Vec<&str> = Vec::new();
-    let flush = |run: &mut Vec<&str>, out: &mut String| {
-        if !run.is_empty() {
-            out.push_str(&format!(
-                "<tspan class=\"md-tex\" font-family=\"ui-monospace, Menlo, Consolas, monospace\" font-size=\"12\">{}</tspan>",
-                esc(&run.join(" "))
-            ));
-            run.clear();
-        }
-    };
-    for (k, wd) in line.split(' ').enumerate() {
-        if let Some(m) = wd.strip_prefix(MATH_WORD) {
-            if math_run.is_empty() && k > 0 {
-                out.push(' ');
-            }
-            math_run.push(m);
-        } else {
-            flush(&mut math_run, &mut out);
-            if k > 0 {
-                out.push(' ');
-            }
-            out.push_str(&esc(wd));
-        }
-    }
-    flush(&mut math_run, &mut out);
-    out
+    esc(line)
 }
 
 #[cfg(test)]
@@ -1533,21 +1542,23 @@ mod md_tests {
     }
 
     #[test]
-    fn formulas_keep_their_tex_in_monospace() {
+    fn formulas_render_to_plain_text() {
+        // #351: headless output has no KaTeX, so a formula used to show its
+        // raw TeX source (`\hat{y}_t = \alpha y_t`) verbatim. The simple
+        // parts (Greek letters, subscripts) now read as text; `\hat{…}` (an
+        // accent) is outside this small converter's scope and is left as
+        // TeX source — safe, not wrong, just not spelled out.
         let l = super::markdown_lines(
             "Smoothing $\\hat{y}_t = \\alpha y_t$ for $5 and $10:\n$$ \\sum_i x_i $$\nafter",
             400.0,
         );
         assert_eq!(l.len(), 3, "{l:?}");
+        assert!(l[0].contains("\\hat{y}ₜ = α yₜ"), "{l:?}");
         assert!(l[0].contains("$5 and $10"), "{l:?}");
-        assert!(l[1].contains("\\sum_i"), "{l:?}");
+        assert!(l[1].contains("Σᵢ xᵢ"), "{l:?}");
         let svg = super::markdown_line_svg(&l[0]);
-        assert!(
-            svg.contains("Smoothing <tspan class=\"md-tex\"")
-                && svg.contains(">\\hat{y}_t = \\alpha y_t</tspan> for"),
-            "{svg}"
-        );
-        assert!(!svg.contains('\u{E002}'), "{svg}");
+        assert!(!svg.contains("<tspan") && !svg.contains("md-tex"), "{svg}");
+        assert!(svg.contains("Smoothing \\hat{y}ₜ = α yₜ for"), "{svg}");
     }
 }
 
