@@ -92,26 +92,14 @@ export function scratchRunner(db, opts = {}) {
     const name = `anofox_lint_${++scratchSeq}`;
     let home = null;
     let timer;
-    // #258: cleanup always runs USE/DETACH on `c`, timeout or not — an
-    // earlier version of this comment worried that a timeout's
-    // cancelSent() not confirming the cancel would leave `c` "still
-    // running" the old query, so a later USE/DETACH *on `c`* would queue
-    // behind it and hang. Measured against a real DuckDB-Wasm connection,
-    // that premise doesn't hold: a connection never queues a *new*
-    // statement behind one it still considers outstanding — sending
-    // USE/DETACH (or just closing) a "busy" connection kills the pending
-    // statement itself (~150 ms for USE+DETACH, ~5 ms for close(), both
-    // measured directly). cancelSent() resolving false isn't a sign
-    // anything is still running either — it's the common case whenever
-    // the connection was already idle (the query had already settled) or
-    // mid-batch-fetch; skipping the DETACH on that signal (a version of
-    // this file once did) leaked an `anofox_lint_N` database into the
-    // page's DuckDB for the rest of the session, every time.
-    // The one real failure mode is `c` itself erroring on the cleanup
-    // (unrelated to busy-ness — a closed/broken connection, say). Then
-    // DETACH is retried on a brand new connection instead: ATTACH/DETACH
-    // are catalog-level, not connection-scoped, so this still succeeds
-    // (~100 ms measured, even while the original `c` was busy).
+    // Cleanup always runs USE/DETACH on `c`, even after a timeout (#258).
+    // In DuckDB-Wasm a new statement on a busy connection interrupts the
+    // pending one instead of queueing behind it (USE+DETACH ~150 ms,
+    // close() ~5 ms, measured), and cancelSent() resolving false is the
+    // normal answer for an idle or fetching connection, so skipping the
+    // DETACH on it would leak `anofox_lint_N` for the rest of the session.
+    // If `c` itself fails the cleanup, DETACH again from a fresh connection:
+    // ATTACH/DETACH are catalog-level, not per connection.
     const detachAndClose = async () => {
       try {
         if (home) {
