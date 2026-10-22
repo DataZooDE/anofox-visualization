@@ -63,6 +63,125 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
   assert.equal(countsText([]), "");
 }
 
+// ---- 1b. scratchRunner's cleanup after a timeout, whatever cancelSent()
+// answers (#258, a follow-up to #200). A real DuckDB-Wasm connection does
+// not queue a later statement behind one it still considers outstanding:
+// sending it a new statement (even just USE/DETACH, or closing it) kills
+// the pending one instead — measured directly against a real browser
+// (scripts/scratch-cancel-e2e.mjs): ~150 ms for USE+DETACH, ~5 ms for
+// close(), both on a "busy" connection. cancelSent() resolving false isn't
+// a sign anything is still running either — that's its answer whenever the
+// connection is idle (the query already settled) or mid-batch-fetch, which
+// is the common case. The fake connection below models exactly that: ANY
+// new query/prepare/send sent while "busy" interrupts the pending one,
+// regardless of what cancelSent() itself says. The test proves the cleanup
+// doesn't depend on cancelSent()'s answer: true, false or throwing all
+// settle promptly and all still DETACH (no leaked anofox_lint_N).
+{
+  function fakeScratchConn(cancelBehavior) {
+    let busy = false; // a "heavy" statement is outstanding on this connection
+    let waiters = [];
+    const interrupt = () => {
+      // mirrors DuckDB: a *new* statement on a busy connection kills
+      // whatever was pending, it does not queue behind it
+      busy = false;
+      waiters.splice(0).forEach((r) => r());
+    };
+    const calls = [];
+    const row = (o) => ({ toArray: () => [{ toJSON: () => o }] });
+    return {
+      calls,
+      async query(sql) {
+        calls.push(["query", sql]);
+        if (busy) interrupt();
+        return row(/current_database/i.test(sql) ? { d: "memory" } : {});
+      },
+      async prepare(sql) {
+        calls.push(["prepare", sql]);
+        if (busy) interrupt();
+        return { close: async () => {} };
+      },
+      async send(sql) {
+        calls.push(["send", sql]);
+        if (busy) interrupt();
+        if (!/heavy/.test(sql)) {
+          return { schema: { fields: [] }, [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) };
+        }
+        busy = true; // outstanding until a later statement interrupts it
+        return {
+          schema: { fields: [] },
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                if (!busy) return { done: true, value: undefined }; // already interrupted
+                await new Promise((res) => waiters.push(res));
+                throw new Error("INTERRUPT Query interrupted");
+              },
+            };
+          },
+        };
+      },
+      async cancelSent() {
+        calls.push(["cancelSent"]);
+        // real DuckDB-Wasm: false whenever idle or mid-batch-fetch, not a
+        // sign the statement is still running — it never actually frees
+        // `busy` here either way; a later statement is what does that.
+        if (cancelBehavior === "throw") throw new Error("cancel failed");
+        return cancelBehavior === "true";
+      },
+      async close() {
+        calls.push(["close"]);
+        if (busy) interrupt();
+      },
+    };
+  }
+  const withTimeout = (p, ms, label) =>
+    Promise.race([
+      p.then((v) => ({ v }), (e) => ({ e })),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}: still pending after ${ms} ms`)), ms)),
+    ]);
+  const home = (sql) => /^USE "/.test(sql); // the cleanup's `USE` back to the real database, not setup's `USE anofox_lint_N`
+
+  for (const cancelBehavior of ["true", "false", "throw"]) {
+    const conn = fakeScratchConn(cancelBehavior);
+    const run = scratchRunner({ connect: async () => conn }, { timeoutMs: 50 });
+    const settled = await withTimeout(run("SELECT 1 AS heavy"), 1000, `cancelSent() ${cancelBehavior}`);
+    assert.ok(settled.e && /took longer/.test(settled.e.message), `cancelSent() ${cancelBehavior}: the timeout error surfaces promptly (${settled.e?.message || JSON.stringify(settled.v)})`);
+    assert.ok(conn.calls.some(([k, sql]) => k === "query" && home(sql)), `cancelSent() ${cancelBehavior}: USE back to the real database ran`);
+    assert.ok(conn.calls.some(([k, sql]) => k === "query" && /^DETACH/.test(sql)), `cancelSent() ${cancelBehavior}: DETACH ran (no leaked anofox_lint_N)`);
+    assert.ok(conn.calls.some(([k]) => k === "close"), `cancelSent() ${cancelBehavior}: the connection was closed`);
+  }
+
+  // The fallback: if `c` itself fails the USE/DETACH (anything, not just
+  // the busy case above, which never throws), the DETACH is retried on a
+  // brand new connection — ATTACH/DETACH are catalog-level, not
+  // connection-scoped — instead of leaving `name` attached.
+  {
+    const conn = fakeScratchConn("true");
+    const realQuery = conn.query.bind(conn);
+    conn.query = async (sql) => {
+      if (home(sql)) throw new Error("c is wedged");
+      return realQuery(sql);
+    };
+    let connectCalls = 0;
+    const fresh = [];
+    const db = {
+      connect: async () => {
+        connectCalls++;
+        if (connectCalls === 1) return conn;
+        const c2 = fakeScratchConn("true");
+        fresh.push(c2);
+        return c2;
+      },
+    };
+    const run = scratchRunner(db, { timeoutMs: 50 });
+    const settled = await withTimeout(run("SELECT 1 AS heavy"), 1000, "c wedged");
+    assert.ok(settled.e && /took longer/.test(settled.e.message), "c wedged: the timeout error still surfaces");
+    assert.equal(connectCalls, 2, "c wedged: a fresh connection was opened for the retry");
+    assert.ok(fresh[0]?.calls.some(([k, sql]) => k === "query" && /^DETACH/.test(sql)), "c wedged: DETACH ran on the fresh connection instead (no leak)");
+  }
+}
+
 // ---- 2. DuckDB-Wasm against the CLI ----
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");

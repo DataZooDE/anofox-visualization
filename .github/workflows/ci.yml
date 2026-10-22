@@ -238,6 +238,14 @@ jobs:
       - name: Telemetry e2e (no request to a telemetry or unexpected host)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/telemetry-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scratchRunner's timeout against a real, uncancelled-looking query
+      # in the real DuckDB-Wasm Worker (#258, a follow-up to #200): the
+      # unit tests (tests/web/lint_test.mjs) prove the cleanup logic with a
+      # mock connection; this proves DuckDB-Wasm actually honours the
+      # cancel and the page database works again right after.
+      - name: Scratch cancel e2e (a late query is really cancelled in the Worker)
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/scratch-cancel-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
