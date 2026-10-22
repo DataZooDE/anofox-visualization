@@ -1,5 +1,5 @@
 # name: test/sql/anofox_plot_contract.test
-# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_decomposition/_events/_checks/_matrix, anofox_plot, anofox_contract_version) render SVG and reject bad input
+# description: contract plot macros (anofox_plot_terms/_prediction/_curve/_summary/_obs/_diagnostics/_tests/_compare/_partial/_cv/_decomposition/_events/_checks/_matrix/_assignment/_distribution, anofox_plot, anofox_contract_version) render SVG and reject bad input
 # group: [anofox_visualization]
 
 require anofox_visualization
@@ -443,6 +443,58 @@ statement error
 SELECT anofox_plot_matrix(m) FROM (VALUES ('a', 'b', 1), ('a', 'b', 2)) m(row, col, value);
 ----
 one row per cell
+
+# ── assignment (#177) ────────────────────────────────────────────────────────
+statement ok
+CREATE TABLE bins AS SELECT * FROM (VALUES
+  ('first_fit_decreasing', 1, 'c01', 4, 10), ('first_fit_decreasing', 1, 'c02', 5, 10),
+  ('first_fit_decreasing', 2, 'c03', 7, 10),
+  ('best_of', 1, 'c01', 4, 10), ('best_of', 1, 'c02', 5, 10), ('best_of', 1, 'c03', 1, 10)
+) t(model_id, bin, item, size, capacity);
+
+# Items stacked per bin (data-series one per item), the capacity as a quiet
+# reference line, several model_id's faceted.
+query II
+SELECT anofox_plot_assignment(b) LIKE '%data-series="c01"%data-geom="hline"%', anofox_plot(b) LIKE '<svg%'
+FROM bins b;
+----
+true	true
+
+# Pick-wave batching (wave instead of bin), a single model: no facet.
+query I
+SELECT anofox_plot_assignment(w) LIKE '%data-series="o1"%' FROM (VALUES
+  (1, 'o1', 3, 20), (1, 'o2', 4, 20), (2, 'o3', 6, 20)
+) w(wave, item, size, capacity);
+----
+true
+
+statement error
+SELECT anofox_plot_assignment(t) FROM (VALUES ('a', 1)) t(item, size);
+----
+bin
+
+# ── distribution (#181) ──────────────────────────────────────────────────────
+# One id: a plain bar per option.
+query II
+SELECT anofox_plot_distribution(d) LIKE '%data-geom="col"%', anofox_plot(d) LIKE '<svg%' FROM (VALUES
+  ('q1', 'yes', 0.7), ('q1', 'no', 0.3)
+) d(id, option, probability);
+----
+true	true
+
+# Several ids (decide_table's distribution MAP, unnested with
+# unnest(map_entries(distribution))): a 100% stacked bar per id.
+query I
+SELECT anofox_plot_distribution(d) LIKE '%data-series="yes"%data-series="no"%' FROM (VALUES
+  ('q1', 'yes', 0.7), ('q1', 'no', 0.3), ('q2', 'yes', 0.4), ('q2', 'no', 0.6)
+) d(id, option, probability);
+----
+true
+
+statement error
+SELECT anofox_plot_distribution(t) FROM (VALUES ('q1', 'yes')) t(id, option);
+----
+probability
 
 # ── contract version ─────────────────────────────────────────────────────────
 query I

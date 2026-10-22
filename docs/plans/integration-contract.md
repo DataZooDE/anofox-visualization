@@ -39,6 +39,8 @@ Principles
 | `graph` (nodes + edges) | nodes: **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq, upstream; edges (a LIST passed as `edges :=`): **source, target**, value, label, style, status — Grafana node-graph names; also read: `stage`, `label`, `from_stage`, `to_stage`, `count`, … | pipeline run manifests (inventory-rs#28 `run_manifest` + `run_edges`), lineage, process mining | node/edge diagram (`anofox_plot_diagram(n, edges := (SELECT list(e) FROM run_edges e))`), the `::DIAGRAM` panel |
 | `decomposition` (provisional) | **id, ds \| period, component, value** (`observed`, `level`, `trend`, `seasonal`, `seasonal_<period>`, `remainder`), model_id; also read wide (one column per component) and as LISTs | anofox-forecast `ts_mstl_decomposition_by`, `ts_forecast_explain_by` (as they come, no ds); anofox-orchestration `decomposition` (wide, `t`) | stacked panels, shared x, own y (`anofox_plot_decomposition`) |
 | `matrix` | **row, col, value**, model_id — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`), and `pearson` / `spearman` / `kendall` / `correlation` / `corr` / `count` / `n` as the value | anofox-tabular `profile_correlations` (as it comes; a pair list is mirrored), correlation / confusion / setup matrices | heatmap, diverging around 0, −1…1 for correlations (`anofox_plot_matrix`) |
+| `assignment` | one row per item: **bin \| wave, item, size**, capacity, model_id | anofox-optimize bin packing (`pack_*`) and pick-wave batching (`wave_*`), via a long-form bridge (anofox-optimize#6 proposes a tagged producer) | items stacked per bin/wave, capacity as a quiet reference line, the fill level visible; `model_id` faceted to compare algorithms (`anofox_plot_assignment`) |
+| `distribution` | one row per option: **id, option, probability**, model_id | anofox-decide `decide_choice_distribution` (a MAP, unnested) and `decide_table.distribution` | bars per id, or a 100% stacked bar per id over several ids; `model_id` faceted to compare models (`anofox_plot_distribution`) |
 
 Provisional: the long-form names are to be agreed with anofox-orchestration
 (DataZooDE/anofox-orchestration#539) and anofox-forecast
@@ -60,11 +62,12 @@ names*), so outside tables plot without a reshaping step — this does not
 change contract version `1`. Nor do the readers for an interval held in one
 `[low, high]` column (`conf_int`, pingouin's `CI95%`), statsforecast's wide
 `<model>-lo-<L>` / `-hi-<L>` forecast, `level` 95 vs 0.95, the `period`
-x key, the `events` schema, the `check` schema, the `decomposition` schema
-and the `matrix` schema: all are additions (new optional columns, a new
-schema, more accepted spellings) and no column changed name, type or
-meaning, so the version stays `1`. A version bump is reserved for a renamed,
-re-typed or re-interpreted column.
+x key, the `events` schema, the `check` schema, the `decomposition` schema,
+the `matrix` schema, the `assignment` schema and the `distribution` schema:
+all are additions (new optional columns, a new schema, more accepted
+spellings) and no column changed name, type or meaning, so the version stays
+`1`. A version bump is reserved for a renamed, re-typed or re-interpreted
+column.
 
 ### anofox-tabular producers
 

@@ -9,8 +9,12 @@
 //! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
 //! `events` (alarms, parameter changes), a correlation-style heatmap
 //! (`matrix`: row, col, value; anofox-tabular's `profile_correlations` as it
-//! comes, mirrored to the full matrix) and an `auto` dispatch on the column
-//! signature.
+//! comes, mirrored to the full matrix), an optimizer's item → bin/wave
+//! `assignment` (anofox-optimize's `pack_*` / `wave_*`: items stacked per
+//! bin/wave with the capacity as a reference line), a categorical
+//! `distribution` (anofox-decide's choice/score distributions: bars per id,
+//! or a 100% stacked bar over several ids) and an `auto` dispatch on the
+//! column signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -24,10 +28,12 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod assignment;
 mod checks;
 mod curves;
 mod cv;
 mod decomposition;
+mod distribution;
 mod events;
 mod graph;
 mod look;
@@ -59,6 +65,8 @@ pub const PLOTS: &[&str] = &[
     "checks",
     "matrix",
     "diagram",
+    "assignment",
+    "distribution",
     "auto",
 ];
 
@@ -195,6 +203,8 @@ fn render_plot(
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
         "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
+        "assignment" => assignment::columns(&t, options),
+        "distribution" => distribution::columns(&t),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
             obs(&t, &kind, label_top(options))
@@ -553,6 +563,10 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "tests"
     } else if (has("row") && has("col")) || (has("column_a") && has("column_b")) {
         "matrix"
+    } else if has("item") && has("size") && (has("bin") || has("wave")) {
+        "assignment"
+    } else if has("option") && has("probability") {
+        "distribution"
     } else {
         let keys: Vec<&str> = rows
             .first()
@@ -564,8 +578,9 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              (curve_type, x, y), summary (model_id, metric, value), obs (fitted, residual), \
              test (p_value / statistic, method), partial residuals (term, x, \
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
-             ds), decomposition (ds | period, component, value), matrix (row, col, value) or \
-             events (ds | period, kind){}",
+             ds), decomposition (ds | period, component, value), matrix (row, col, value), \
+             events (ds | period, kind), assignment (bin | wave, item, size) or distribution \
+             (id, option, probability){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -610,16 +625,27 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["row", "col", "value"],
         &["column_a", "column_b"],
     ),
+    ("assignment", &["bin", "item", "size"], &["item"]),
+    (
+        "distribution",
+        &["id", "option", "probability"],
+        // `probability` alone is too generic a name (anofox-decide's own
+        // per-row `decide_probability` output is not a distribution table):
+        // only `option` identifies it (#180).
+        &["option"],
+    ),
 ];
 
 /// Columns [`detect`] also reads in place of a required one: `events` takes
 /// `period` for `ds` and `severity` for `kind`; `matrix` takes a pair list's
-/// `column_a` / `column_b` for `row` / `col`.
+/// `column_a` / `column_b` for `row` / `col`; `assignment` takes `wave` for
+/// `bin` (pick-wave batching, not bin packing).
 const STAND_INS: &[(&str, &str)] = &[
     ("ds", "period"),
     ("kind", "severity"),
     ("row", "column_a"),
     ("col", "column_b"),
+    ("bin", "wave"),
 ];
 
 /// Does the near miss `k` of the identifying column `c` point at its schema
@@ -1933,6 +1959,87 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("closest: matrix, missing col"), "{e}");
+    }
+
+    #[test]
+    fn assignment_stacks_items_with_capacity_and_facets_models() {
+        // pack_*-shaped rows: one row per item, bin, size, capacity.
+        const BINS: &str = r#"[
+            {"model_id":"first_fit_decreasing","bin":1,"item":"c01","size":4,"capacity":10},
+            {"model_id":"first_fit_decreasing","bin":1,"item":"c02","size":5,"capacity":10},
+            {"model_id":"first_fit_decreasing","bin":2,"item":"c03","size":7,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c01","size":4,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c02","size":5,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c03","size":1,"capacity":10}]"#;
+        assert_eq!(detect(&rows(BINS)).unwrap(), "assignment");
+        let svg = go("auto", BINS, "{}").unwrap();
+        dump("assignment_bins", &svg);
+        // Items stacked (one `data-series` rect per item), the capacity as a
+        // quiet hline, and the two models faceted.
+        assert!(svg.contains("data-series=\"c01\""), "{svg}");
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(
+            svg.contains(">best_of</text>") && svg.contains(">first_fit_decreasing</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // wave_*-shaped rows (pick-wave batching): a single model, no facet.
+        const WAVES: &str = r#"[
+            {"wave":1,"item":"o1","size":3,"capacity":20},
+            {"wave":1,"item":"o2","size":4,"capacity":20},
+            {"wave":2,"item":"o3","size":6,"capacity":20}]"#;
+        assert_eq!(detect(&rows(WAVES)).unwrap(), "assignment");
+        let svg = go("assignment", WAVES, "{}").unwrap();
+        dump("assignment_waves", &svg);
+        assert!(svg.contains("data-series=\"o1\""), "{svg}");
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        let e = go("assignment", r#"[{"item":"a","size":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("bin") && e.contains("wave"), "{e}");
+    }
+
+    #[test]
+    fn distribution_bars_and_stacked_percent() {
+        // One id: a plain bar per option.
+        const ONE: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":"no","probability":0.3}]"#;
+        assert_eq!(detect(&rows(ONE)).unwrap(), "distribution");
+        let svg = go("auto", ONE, "{}").unwrap();
+        dump("distribution_one_id", &svg);
+        assert_eq!(svg.matches("data-geom=\"col\"").count(), 2, "{svg}");
+        assert!(
+            svg.contains(">yes</text>") && svg.contains(">no</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // Several ids (decide_table's MAP, unnested): a 100% stacked bar.
+        const MANY: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":"no","probability":0.3},
+            {"id":"q2","option":"yes","probability":0.4},
+            {"id":"q2","option":"no","probability":0.6}]"#;
+        let svg = go("distribution", MANY, "{}").unwrap();
+        dump("distribution_many_ids", &svg);
+        assert!(
+            svg.contains("data-series=\"yes\"") && svg.contains("data-series=\"no\""),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        let e = go("distribution", r#"[{"id":"q1"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("option") && e.contains("probability"), "{e}");
     }
 
     #[test]
