@@ -25,6 +25,10 @@
 //!   (`policy`, [`anofox_visualization::host::policy`]) rewrites every
 //!   dashboard statement to read per-viewer views (row filters, column
 //!   masks) and refuses to start on anything that could get around them.
+//!   `options.source` (#352 prototype, [`crate::source`]) builds (part of)
+//!   the snapshot from a live DuckDB 2.0 Quack server instead of (or
+//!   alongside) the local session, through a dedicated staging instance —
+//!   `quack` is never loaded into this serving instance.
 //! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
@@ -52,7 +56,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -73,7 +77,20 @@ struct Running {
     kind: &'static str,
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
+    /// HTTP request-handling workers. Each request is already bounded on
+    /// its own (a locked server's `timeout_ms` cancels a running panel
+    /// query; authoring serialises on a single worker), so `stop()` fully
+    /// joins these rather than racing the port's unbind against whatever
+    /// time a legitimate, already-in-flight request still has left (#356
+    /// C1 — a flat stop budget applied here left the port bound for up to
+    /// `timeout_ms` after `anofox_serve_stop` had already reported success).
     workers: Vec<JoinHandle<()>>,
+    /// The `refresh_s` thread for a locked server, if any. Unlike the HTTP
+    /// workers, this has no bound of its own: an *abandoned* Quack build
+    /// (past its own `timeout_s` + grace, #352 M1/R2) can still be running
+    /// in the background with nothing else to wait on, so only this thread
+    /// gets `stop()`'s short, fixed join budget (#356 I6).
+    refresher: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -96,12 +113,31 @@ pub fn stop(port: u16) -> Result<String, String> {
             "anofox-visualization: nothing is serving on port {port}"
         ));
     };
+    // #352 I2: `Locked.stop` (if this is a locked server) is the SAME Arc,
+    // so a Quack build's watchdog sees this instantly as its cancel signal
+    // too — no separate flag, no window where the request could be missed.
     r.stop.store(true, Ordering::SeqCst);
     for _ in 0..r.workers.len() {
         r.server.unblock();
     }
-    for w in r.workers.drain(..) {
-        let _ = w.join();
+    // #356 C1: the HTTP workers are fully joined, not budget-capped — each
+    // one handles at most one request at a time, and that request is
+    // already bounded (a locked server's own `timeout_ms` cancels a running
+    // panel query; authoring's single worker serialises on the live
+    // connection the same way it always has). A flat cap here previously
+    // let `anofox_serve_stop` report success while a legitimate, still
+    // in-flight request kept the port bound underneath it.
+    for h in std::mem::take(&mut r.workers) {
+        let _ = h.join();
+    }
+    // #352 M1 fix 3 / I6: the refresh_s thread, in contrast, has no bound of
+    // its own — it can be in the middle of an *abandoned* Quack build (past
+    // its own `timeout_s` + grace) left running in the background (#352
+    // M1/R2) with nothing else to wait on. Only this one thread gets a
+    // short, fixed stop budget, regardless of the build's own `timeout_s`.
+    const STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
+    if let Some(h) = r.refresher.take() {
+        join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     Ok(format!(
         "anofox-visualization: stopped the {} server on port {port}",
@@ -322,6 +358,7 @@ pub fn start_authoring(
             server,
             stop,
             workers,
+            refresher: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -501,6 +538,10 @@ pub struct LockedOptions {
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
+    /// `source`: build (part of) the snapshot from a live Quack server
+    /// instead of (or alongside) the local session (#352 prototype) — see
+    /// `duckext/src/source.rs` and docs/secure-serving.md, "Quack source".
+    pub source: Option<Arc<crate::source::SourceOpts>>,
 }
 
 /// The `hash` mask's HMAC key. Never printed.
@@ -542,6 +583,7 @@ impl Default for LockedOptions {
             search_path: Vec::new(),
             app: None,
             home: None,
+            source: None,
         }
     }
 }
@@ -675,7 +717,10 @@ impl LockedOptions {
                     let h = val.as_str().map(str::trim).filter(|h| sv::valid_dashboard_id(h)).ok_or("options.home must be a dashboard id (its file name without .sql)")?;
                     o.home = Some(h.to_string());
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home)")),
+                "source" => {
+                    o.source = Some(Arc::new(crate::source::parse(val)?));
+                }
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.
@@ -947,6 +992,184 @@ fn deps_tag(ds: &[Deps]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Extra time a Quack source build gets beyond `options.source.timeout_s`
+/// before the caller gives up on it (security review M1): `timeout_s` is
+/// the deadline the build's own internal watchdog uses to try a remote
+/// `quack_cancel`; this grace gives that attempt a chance to land before
+/// the caller stops waiting.
+const SOURCE_BUILD_GRACE: Duration = Duration::from_secs(5);
+
+/// Process-wide cap on Quack source build threads running at once, counting
+/// both ones a caller is still waiting on and abandoned ones left running in
+/// the background (security review R2): a repeatedly-retried failed startup
+/// against a dead or hostile source otherwise leaks one staging instance's
+/// threads (~100 of them, observed) per attempt, without limit. Shared by
+/// every locked server in this process — `start_locked`'s *startup* build
+/// has no persistent per-server state to track its own abandonment across
+/// calls, so only a global cap bounds it.
+const MAX_CONCURRENT_SOURCE_BUILDS: usize = 2;
+static GLOBAL_SOURCE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Per-server Quack-build bookkeeping for `/healthz`'s `build_overdue`
+/// (security review R1): `in_flight` is true from just before the build
+/// thread is spawned until that thread — including a drop guard that runs
+/// even if it panics — clears it; `deadline` is the instant by which it
+/// should have returned. "Overdue" is `in_flight` true and `deadline`
+/// passed: no separate "abandoned" boolean that a panic could leave stuck
+/// (the review's R1: the old design cleared it only via an explicit
+/// `store(false, ..)` on the thread's *normal* path, so a panic — or losing
+/// the race against the caller's own timeout — left it set forever).
+struct SourceBuildState {
+    in_flight: AtomicBool,
+    deadline: Mutex<Option<Instant>>,
+}
+
+impl SourceBuildState {
+    fn new() -> Arc<Self> {
+        Arc::new(SourceBuildState {
+            in_flight: AtomicBool::new(false),
+            deadline: Mutex::new(None),
+        })
+    }
+
+    fn overdue(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
+            && self
+                .deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some_and(|d| Instant::now() > d)
+    }
+}
+
+/// Releases this process's global build slot on drop — including when the
+/// build thread panics (security review R1/R2).
+struct ReleaseSlotOnDrop;
+impl Drop for ReleaseSlotOnDrop {
+    fn drop(&mut self) {
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Run `src`'s Quack copy on a detached thread, never touching `ctx.conn`
+/// (security review M1, fix 1) and never blocking the caller for longer than
+/// `src.timeout + SOURCE_BUILD_GRACE` (fix 2) — covering `LOAD`, the remote
+/// `ATTACH` and teardown too, not only the data copy the build's own
+/// watchdog already bounds. `stop` is the *server's* stop flag, passed
+/// straight through as the build's cancel signal: `anofox_serve_stop`
+/// setting it cancels a build in flight immediately, with no separate
+/// per-build flag to race against (security review I2 — a fresh flag
+/// created only when a build starts has a window, right before it's
+/// created, where an already-in-flight `stop` would be missed).
+///
+/// `state.in_flight` tolerates at most one build running past its deadline
+/// per server: while it's set, a new attempt fails fast instead of piling
+/// up threads, and a drop guard *inside* the thread clears it — on a normal
+/// return or a panic alike (R1) — whenever it finally finishes (fix 2's
+/// "left to finish, the slot stays busy"). `GLOBAL_SOURCE_BUILDS` additionally
+/// caps how many such threads can exist across the whole process (R2).
+fn run_source_build(
+    src: &Arc<crate::source::SourceOpts>,
+    dir: &Path,
+    stop: &Arc<AtomicBool>,
+    state: &Arc<SourceBuildState>,
+) -> Result<(String, PathBuf, Vec<String>), String> {
+    if state.in_flight.swap(true, Ordering::SeqCst) {
+        return Err(
+            "options.source: a previous build is still running past its timeout_s — refusing a \
+             new attempt until it finishes"
+                .into(),
+        );
+    }
+    // The in_flight flag is this server's own; from here on a failure to
+    // proceed must clear it again before returning.
+    if GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_SOURCE_BUILDS {
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        state.in_flight.store(false, Ordering::SeqCst);
+        return Err(format!(
+            "options.source: {MAX_CONCURRENT_SOURCE_BUILDS} Quack source builds are already \
+             running or abandoned across this process — refusing a new attempt until one finishes"
+        ));
+    }
+    let budget = src.timeout.saturating_add(SOURCE_BUILD_GRACE);
+    *state.deadline.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now() + budget);
+    let (tx, rx) = mpsc::channel();
+    let (src, dir, stop, state_for_thread) =
+        (src.clone(), dir.to_path_buf(), stop.clone(), state.clone());
+    // #356 C2: both release guards are created HERE, before the thread
+    // exists, and only then moved into its closure (not constructed inside
+    // the closure body once it's already running). `Builder::spawn`
+    // returns a `Result` instead of panicking on a failed OS thread
+    // creation, so if it fails, the closure — and the guards captured in
+    // it — are simply dropped back in THIS thread, still releasing the
+    // in-flight marker and the global slot. With the old
+    // `std::thread::spawn` plus guards constructed only once the new
+    // thread's body started running, a failed spawn left both stuck
+    // forever (nothing to ever drop them).
+    let release_slot = ReleaseSlotOnDrop;
+    let clear_in_flight = ClearInFlightOnDrop(state_for_thread);
+    if let Err(e) = std::thread::Builder::new().spawn(move || {
+        let _release_slot = release_slot;
+        let _clear_in_flight = clear_in_flight;
+        let r = crate::source::copy_from_quack(&dir, &src, &stop);
+        let _ = tx.send(r);
+    }) {
+        return Err(format!(
+            "options.source: could not start the build thread: {e}"
+        ));
+    }
+    match rx.recv_timeout(budget) {
+        // The thread is finishing up (or already has) — its own drop guard
+        // clears `in_flight` and releases the global slot; nothing to do here.
+        Ok(r) => r,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "options.source: build timed out after {:.0}s (timeout_s + a {:.0}s grace) — \
+             it may still be running in the background and has been left to finish",
+            budget.as_secs_f64(),
+            SOURCE_BUILD_GRACE.as_secs_f64()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+            "options.source: the build thread ended unexpectedly (likely a panic) before \
+             returning a result"
+                .into(),
+        ),
+    }
+}
+
+/// Clears `state.in_flight` on drop — including when the build thread
+/// panics (security review R1).
+struct ClearInFlightOnDrop(Arc<SourceBuildState>);
+impl Drop for ClearInFlightOnDrop {
+    fn drop(&mut self) {
+        self.0.in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Join every handle, but never for longer than `budget` in total (security
+/// review M1, fix 3): a worker — most likely the `refresh_s` thread, which
+/// can be in the middle of a Quack build — that is still running when the
+/// budget runs out is left to finish on its own (its `JoinHandle` is simply
+/// dropped, not joined) instead of blocking `anofox_serve_stop`.
+fn join_bounded(handles: Vec<JoinHandle<()>>, budget: Duration) {
+    let (tx, rx) = mpsc::channel();
+    let n = handles.len();
+    for h in handles {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = h.join();
+            let _ = tx.send(());
+        });
+    }
+    let deadline = Instant::now() + budget;
+    for _ in 0..n {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if rx.recv_timeout(remaining).is_err() {
+            break;
+        }
+    }
+}
+
 struct Locked {
     port: u16,
     dashboards: Vec<Dash>,
@@ -964,6 +1187,13 @@ struct Locked {
     queries: Queries,
     /// Recent `-- @requires` answers (see [`requires_met`]).
     requires_cache: rq::ExistsCache,
+    /// The server's own stop flag (shared with `Running.stop`): also used as
+    /// a Quack build's cancel signal (security review I2 — see
+    /// [`run_source_build`]).
+    stop: Arc<AtomicBool>,
+    /// `options.source` (#352 M1/R1): this server's Quack-build bookkeeping
+    /// for `/healthz`'s `build_overdue`.
+    source_build: Arc<SourceBuildState>,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -972,9 +1202,24 @@ use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
     fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
+        // #352 M1: the Quack copy runs BEFORE ctx.conn is taken (it never
+        // touches it) and is bounded, so a source that stops answering can
+        // no longer stall every other locked server, the authoring
+        // console, or a new `anofox_serve_dashboards` sharing this host
+        // database's connection.
+        let dir = SnapshotDir::create()?;
+        let source_result = match &self.opts.source {
+            Some(src) => Some(run_source_build(
+                src,
+                &dir.0,
+                &self.stop,
+                &self.source_build,
+            )?),
+            None => None,
+        };
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-            build_snapshot(&conn, &self.opts, &self.loads)?
+            build_snapshot(&conn, &self.opts, &self.loads, dir, source_result)?
         };
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(&mut snap, &self.dashboards, p, k)?;
@@ -1070,9 +1315,26 @@ pub fn start_locked(
         // silently get there.
         return Err("anofox-visualization: `auth` is set but no access policy was found (options.policy, or policy.json in the dashboard folder) — pass \"policy\": \"none\" to serve with per-panel claim filters only".into());
     }
+    // The startup build must succeed (fail closed, #352) — and, like every
+    // other build, is bounded (M1): the server isn't registered yet, so
+    // nothing can call `anofox_serve_stop` on it; a throwaway stop flag
+    // (never set) is enough here, the Quack copy's own `timeout_s` still
+    // applies.
+    let startup_dir = SnapshotDir::create()?;
+    let startup_stop = Arc::new(AtomicBool::new(false));
+    let startup_build_state = SourceBuildState::new();
+    let source_result = match &opts.source {
+        Some(src) => Some(run_source_build(
+            src,
+            &startup_dir.0,
+            &startup_stop,
+            &startup_build_state,
+        )?),
+        None => None,
+    };
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &opts, &loads)?
+        build_snapshot(&conn, &opts, &loads, startup_dir, source_result)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(&mut snap, &dashboards, p, k)?;
@@ -1131,6 +1393,10 @@ pub fn start_locked(
         Inflight::new(opts.max_inflight),
         Queries::new(opts.max_queries),
     );
+    // Created before `Locked` (security review I2): `Locked.stop` shares
+    // this same flag, so a Quack build's cancel signal always exists and a
+    // `stop()` racing a build's own startup can never find it missing.
+    let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Locked {
         port,
         dashboards,
@@ -1143,6 +1409,8 @@ pub fn start_locked(
         queries,
         // A few seconds: files appear live, a rescan per request is avoided.
         requires_cache: rq::ExistsCache::new(Duration::from_secs(5), 4096),
+        stop: stop.clone(),
+        source_build: SourceBuildState::new(),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -1166,18 +1434,20 @@ pub fn start_locked(
         ),
         None => String::new(),
     };
-    let stop = Arc::new(AtomicBool::new(false));
     let st = state.clone();
-    let mut workers = spawn_workers(
+    let workers = spawn_workers(
         &server,
         &stop,
         threads,
         Arc::new(move |req| handle_locked(&st, req)),
     );
-    if let Some(every) = refresh {
+    // #356 C1: the refresh_s thread is tracked separately from the HTTP
+    // workers (see `Running::refresher`) so `stop()` can fully join the
+    // latter while only budget-capping this one.
+    let refresher_handle = refresh.map(|every| {
         let (st, stop) = (state.clone(), stop.clone());
-        workers.push(std::thread::spawn(move || refresher(&st, &stop, every)));
-    }
+        std::thread::spawn(move || refresher(&st, &stop, every))
+    });
     servers.insert(
         port,
         Running {
@@ -1185,6 +1455,7 @@ pub fn start_locked(
             server,
             stop,
             workers,
+            refresher: refresher_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
@@ -1493,11 +1764,11 @@ fn copy_database(
 /// `(schema, table) -> [(column, has_default), …]`, a table's own columns in
 /// `column_index` order — what [`columns_by_table`] groups a database's
 /// `duckdb_columns()` scan into.
-type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
+pub(crate) type ColumnsByTable = BTreeMap<(String, String), Vec<(String, bool)>>;
 
 /// Every table's columns of database `src`, read in one `duckdb_columns()`
 /// scan (#299) instead of one scan per table.
-fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
+pub(crate) fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
     let rows = live
         .query(&format!(
             "SELECT schema_name::VARCHAR, table_name::VARCHAR, column_name::VARCHAR, \
@@ -1525,7 +1796,7 @@ fn columns_by_table(live: &Conn, src: &str) -> Result<ColumnsByTable, String> {
 /// ones. duckdb_columns() doesn't mark those, so a column with a default is
 /// tried on its own: `INSERT … SELECT NULL WHERE false` binds (and fails for
 /// a generated column) but writes nothing.
-fn insertable_columns(
+pub(crate) fn insertable_columns(
     live: &Conn,
     to: &str,
     columns: &[(String, bool)],
@@ -1551,7 +1822,10 @@ fn insertable_columns(
 /// keys reference (`edges`: schema, child, parent; DuckDB keeps an FK within
 /// one schema). Self-references are ignored; ties, and a cycle, go in the
 /// given order. Names match case-insensitively, like DuckDB's.
-fn fk_order(tables: &[(String, String)], edges: &[(String, String, String)]) -> Vec<usize> {
+pub(crate) fn fk_order(
+    tables: &[(String, String)],
+    edges: &[(String, String, String)],
+) -> Vec<usize> {
     let key = |s: &str, t: &str| (s.to_lowercase(), t.to_lowercase());
     let idx: BTreeMap<(String, String), usize> = tables
         .iter()
@@ -1596,10 +1870,11 @@ fn build_snapshot(
     live: &Conn,
     opts: &LockedOptions,
     extra_loads: &[String],
+    dir: SnapshotDir,
+    source_result: Option<(String, PathBuf, Vec<String>)>,
 ) -> Result<(Snapshot, Vec<String>), String> {
     let attach_all = opts.attach;
     let mut warnings = Vec::new();
-    let dir = SnapshotDir::create()?;
     let current = live
         .query("SELECT current_database()::VARCHAR")?
         .string_rows(1)?
@@ -1655,8 +1930,29 @@ fn build_snapshot(
             });
         }
     }
+    // `options.source` (#352): a Quack source build runs in its own staging
+    // instance (never this one), and already ran before `live` was even
+    // locked (M1 fix 1) — the result (or its error) just lands here as one
+    // more attached database. `as` is the default unless
+    // `options.search_path` names something else.
+    let mut default_db = opts
+        .search_path
+        .first()
+        .map_or_else(|| current.clone(), |(db, _)| db.clone());
+    if let Some((name, file, w)) = source_result {
+        if copied.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+            return Err(format!(
+                "options.source.as: '{name}' clashes with an existing attached database"
+            ));
+        }
+        warnings.extend(w);
+        if opts.search_path.is_empty() {
+            default_db = name.clone();
+        }
+        copied.push((name, file));
+    }
     let enter = match opts.search_path.split_first() {
-        None => format!("USE {}", quote_ident(&current)),
+        None => format!("USE {}", quote_ident(&default_db)),
         Some(((db, schema), rest)) => {
             let qualified = |db: &String, schema: &Option<String>| match schema {
                 Some(s) => format!("{}.{}", quote_ident(db), quote_ident(s)),
@@ -1754,6 +2050,19 @@ fn build_snapshot(
             if !sv::valid_ident(e) {
                 continue;
             }
+            // #352: `quack` must never be loaded into the serving instance —
+            // only the throwaway staging one `copy_from_quack` opens for
+            // itself. This closes every path that could otherwise get it
+            // loaded here: the live session already having it loaded, a
+            // dashboard's own `-- @load quack`, or `options.load`.
+            if e.eq_ignore_ascii_case("quack") {
+                return Err(
+                    "the 'quack' extension may not be loaded into a locked server (the live \
+                     session has it loaded, a dashboard has `-- @load quack`, or options.load \
+                     names it) — a live Quack source is configured with options.source instead"
+                        .into(),
+                );
+            }
             if let Err(err) = c.exec(&format!("LOAD {}", quote_ident(e))) {
                 let first = err.lines().next().unwrap_or("").to_string();
                 warnings.push(format!("LOAD {e}: {first}"));
@@ -1797,10 +2106,7 @@ fn build_snapshot(
     Ok((
         Snapshot {
             db,
-            default_db: opts
-                .search_path
-                .first()
-                .map_or(current, |(db, _)| db.clone()),
+            default_db,
             enter,
             policy: None,
             deps: Vec::new(),
@@ -1960,7 +2266,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 return 200;
             }
             let gen = st.current.get();
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "status": "ok",
                 "version": anofox_visualization::BUILD_VERSION,
                 "dashboards": st.dashboards.len(),
@@ -1972,6 +2278,28 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 "refresh_failed": st.current.last_failed(),
                 "limits": limits_json(st),
             });
+            // #352: only with a Quack source configured — numbers/booleans
+            // only, never the source's URI, its token env/file name or any
+            // error text (those stay in the server's own stderr).
+            if st.opts.source.is_some() {
+                // M1 fix 4: a build still running past its own deadline
+                // (abandoned, left to finish in the background) also counts
+                // as `source_ok: false`, on top of the last *completed*
+                // attempt's own result — a stuck build must not look healthy
+                // just because nothing has come back to report failure yet.
+                let overdue = st.source_build.overdue();
+                if let Some(map) = body.as_object_mut() {
+                    map.insert(
+                        "source_ok".into(),
+                        serde_json::json!(!st.current.last_failed() && !overdue),
+                    );
+                    map.insert(
+                        "consecutive_failures".into(),
+                        serde_json::json!(st.current.consecutive_failures()),
+                    );
+                    map.insert("build_overdue".into(), serde_json::json!(overdue));
+                }
+            }
             respond(req, 200, "application/json", body.to_string().into_bytes());
             200
         }
@@ -2696,6 +3024,94 @@ fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #352 R1: `in_flight` must clear even when the build thread panics —
+    /// not just on a normal return — or a source build is refused forever
+    /// after the first unrelated panic (the review's exact repro, via a
+    /// non-ASCII token that made the old `redact` panic). `thread::spawn`'s
+    /// child panicking does not crash this test process (the default panic
+    /// strategy unwinds), so `ClearInFlightOnDrop`'s `Drop` runs during that
+    /// unwind exactly as it would on a normal return.
+    #[test]
+    fn in_flight_clears_even_if_the_build_thread_panics() {
+        let state = SourceBuildState::new();
+        assert!(!state.in_flight.swap(true, Ordering::SeqCst));
+        let s = state.clone();
+        let h = std::thread::spawn(move || {
+            let _guard = ClearInFlightOnDrop(s);
+            panic!("simulated build-thread panic");
+        });
+        assert!(h.join().is_err(), "the thread should have panicked");
+        assert!(
+            !state.in_flight.load(Ordering::SeqCst),
+            "in_flight must be cleared by the drop guard even on a panic"
+        );
+    }
+
+    /// #352 R2: the process-wide cap's own arithmetic, pinned down directly.
+    /// `GLOBAL_SOURCE_BUILDS` isn't touched by any other test, so this is
+    /// safe to manipulate here; a real end-to-end repro needs two Quack
+    /// builds genuinely overlapping in time, which — tried against both a
+    /// bare black-hole listener (its ATTACH was observed to error out on
+    /// its own after a while, plausibly a lower-level connect/keepalive
+    /// timeout, closing the overlap window before a 3rd attempt could see
+    /// it) and a SIGSTOP'd real source (reliable, used in
+    /// test-quack-source.sh instead) — depends on timing this shell test
+    /// doesn't need to reproduce.
+    #[test]
+    fn global_source_build_cap_refuses_once_reached() {
+        let saved = GLOBAL_SOURCE_BUILDS.swap(0, Ordering::SeqCst);
+        for _ in 0..MAX_CONCURRENT_SOURCE_BUILDS {
+            assert!(
+                GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst) < MAX_CONCURRENT_SOURCE_BUILDS
+            );
+        }
+        // Mirrors run_source_build's own check-then-rollback exactly.
+        let prior = GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            prior >= MAX_CONCURRENT_SOURCE_BUILDS,
+            "a build attempted once the cap is reached must see it"
+        );
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        for _ in 0..MAX_CONCURRENT_SOURCE_BUILDS {
+            GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        }
+        GLOBAL_SOURCE_BUILDS.store(saved, Ordering::SeqCst);
+    }
+
+    /// #352 M1 fix 3: `join_bounded` returns once every handle has finished
+    /// (fast case), and gives up — without panicking or hanging the test —
+    /// once its budget runs out on a handle that never finishes, leaving it
+    /// to run in the background.
+    #[test]
+    fn join_bounded_waits_for_fast_handles_and_gives_up_on_a_stuck_one() {
+        let t0 = Instant::now();
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let fast = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            d.store(true, Ordering::SeqCst);
+        });
+        join_bounded(vec![fast], Duration::from_secs(5));
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the fast handle should have joined"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "join_bounded should not have waited the full budget for a fast handle"
+        );
+
+        let t1 = Instant::now();
+        let stuck = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        join_bounded(vec![stuck], Duration::from_millis(100));
+        assert!(
+            t1.elapsed() < Duration::from_secs(2),
+            "join_bounded must not block on a handle stuck past its budget"
+        );
+    }
 
     fn dash(id: &str, script: &str) -> Dash {
         Dash {

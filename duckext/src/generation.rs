@@ -8,8 +8,17 @@
 //! takes an `Arc` to it once, at its start, and runs entirely on that one; a
 //! swap only changes what the *next* request gets. The old generation (and its
 //! database) is dropped when the last request using it ends.
+//!
+//! [`Current::consecutive_failures`] (#352) counts failed rebuild attempts
+//! in a row (0 after any success; a *skipped* refresh, one already running,
+//! is never an attempt) — `serve.rs` surfaces it in `/healthz` alongside
+//! `source_ok` when `options.source` is configured, since a Quack source is
+//! the prototype's first way for a refresh to keep failing indefinitely
+//! (the source down, the token rotated, …) while the last good snapshot
+//! keeps serving.
 
 use crate::panel_cache::PanelCache;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -31,6 +40,11 @@ pub struct Current<S> {
     rebuild: Mutex<()>,
     /// Did the last rebuild fail? (The old snapshot stays in service.)
     failed: Mutex<bool>,
+    /// Consecutive failed rebuilds (0 after any success; `/healthz`'s
+    /// `consecutive_failures`, #352). A *skipped* refresh (the interval
+    /// refresher yielding to one already running, `rebuild(false, ..)` ->
+    /// `Ok(None)`) never touches this — it isn't an attempt.
+    consecutive_failures: AtomicU32,
 }
 
 impl<S> Current<S> {
@@ -45,6 +59,7 @@ impl<S> Current<S> {
             cache_bytes,
             rebuild: Mutex::new(()),
             failed: Mutex::new(false),
+            consecutive_failures: AtomicU32::new(0),
         }
     }
 
@@ -74,6 +89,11 @@ impl<S> Current<S> {
         };
         let built = build();
         *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = built.is_err();
+        if built.is_err() {
+            self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.consecutive_failures.store(0, Ordering::SeqCst);
+        }
         let snap = built?;
         let mut w = self.gen.write().unwrap_or_else(|p| p.into_inner());
         let new = Arc::new(Generation {
@@ -97,6 +117,11 @@ impl<S> Current<S> {
 
     pub fn last_failed(&self) -> bool {
         *self.failed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Consecutive failed rebuild attempts (0 right after any success).
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures.load(Ordering::SeqCst)
     }
 }
 
@@ -191,6 +216,35 @@ mod tests {
         let d = dropped.clone();
         cur.rebuild(true, || Ok(snap(2, &d))).unwrap();
         assert!(!cur.last_failed());
+    }
+
+    #[test]
+    fn consecutive_failures_resets_on_success_and_ignores_skips() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let cur = Arc::new(Current::new(snap(1, &dropped), 1 << 20));
+        assert_eq!(cur.consecutive_failures(), 0);
+        assert!(cur.rebuild(true, || Err("boom".into())).is_err());
+        assert_eq!(cur.consecutive_failures(), 1);
+        assert!(cur.rebuild(true, || Err("boom again".into())).is_err());
+        assert_eq!(cur.consecutive_failures(), 2);
+        // A skipped refresh (one already running) is not an attempt.
+        let (c2, d2) = (cur.clone(), dropped.clone());
+        let t = std::thread::spawn(move || {
+            c2.rebuild(true, || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(snap(2, &d2))
+            })
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        let d = dropped.clone();
+        assert!(cur.rebuild(false, || Ok(snap(99, &d))).unwrap().is_none());
+        assert_eq!(
+            cur.consecutive_failures(),
+            2,
+            "a skipped refresh is not an attempt"
+        );
+        t.join().unwrap().unwrap();
+        assert_eq!(cur.consecutive_failures(), 0, "reset by the success above");
     }
 
     #[test]

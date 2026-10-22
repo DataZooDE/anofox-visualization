@@ -577,3 +577,66 @@ jobs:
             --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" \
             --dashboard target/release/dashboard \
             --workdir "$RUNNER_TEMP/skills-sql" --jobs 4
+
+  quack-source:
+    # #352 prototype, not yet security-reviewed: options.source builds a
+    # locked server's snapshot from a live DuckDB 2.0 Quack source.
+    # duckext/scripts/test-quack-source.sh (end-to-end + the security pass:
+    # dashboard SQL reaching for Quack/getenv/duckdb_secrets()/
+    # duckdb_databases() is refused, the token never leaks, quack is never
+    # loaded into the serving instance). Needs a DuckDB 2.0 host — unlike
+    # every other job here, which targets the pinned 1.5.6 — so it is kept
+    # non-blocking (continue-on-error) until that review lands.
+    name: Quack source (DuckDB 2.0 host, non-blocking prototype, #352)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install DuckDB 2.0 CLI
+        run: |
+          d="$HOME/.local/duckdb-2.0.0"
+          mkdir -p "$d"
+          curl -fsSL --retry 3 -o duckdb2.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz
+          tar -xzf duckdb2.tar.gz -C "$d"
+          chmod +x "$d/duckdb"
+          "$d/duckdb" --version
+          echo "DUCKDB2=$d/duckdb" >> "$GITHUB_ENV"
+
+      # build-native.sh's own smoke test needs A DuckDB CLI too (any version
+      # works for that — it only loads the extension and runs a plot), and
+      # defaults to ~/.local/bin/duckdb when $DUCKDB isn't set. The pinned
+      # 1.5.6 CLI the main CI job already installs is the obvious one to
+      # reuse here; exporting $DUCKDB (build-native.sh's own override) is
+      # simpler than relying on PATH resolution order against DUCKDB2.
+      - name: Cache DuckDB CLI (pinned, for build-native.sh's smoke test)
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/duckdb-1.5.6
+          key: duckdb-cli-1.5.6-linux-amd64
+
+      - name: Install DuckDB CLI (pinned, for build-native.sh's smoke test)
+        run: |
+          d="$HOME/.local/duckdb-1.5.6"
+          if [ ! -x "$d/duckdb" ]; then
+            mkdir -p "$d"
+            curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+            unzip -q duckdb.zip -d "$d"
+            chmod +x "$d/duckdb"
+          fi
+          "$d/duckdb" --version
+          echo "DUCKDB=$d/duckdb" >> "$GITHUB_ENV"
+
+      - name: Build the native extension (runs fine on a 1.5.6-targeted Rust build; only the host needs to be 2.0)
+        run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
+
+      - name: Install quack (a repository extension; only reachable from the 2.0 host)
+        run: $DUCKDB2 -c "INSTALL quack; LOAD quack;"
+
+      - name: Quack source end to end + security (test-quack-source.sh)
+        run: duckext/scripts/test-quack-source.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

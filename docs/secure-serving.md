@@ -1262,6 +1262,200 @@ other claims (`__claim_tenant`, …) can drive row filters only. `hash` is
 pseudonymisation, not encryption: a viewer who knows a value and sees it next
 to its hash elsewhere can match them.
 
+## Quack source (prototype, #352)
+
+**Status: prototype, not yet security-reviewed.** `options.source` builds (part
+of) a locked server's snapshot from a live **DuckDB 2.0 Quack** server
+instead of (or alongside) the local session — serving data that lives on
+another DuckDB 2.0 process, over Quack's own remote-query protocol. It needs
+a **DuckDB 2.0 host** for the extension itself (Quack is a 2.0 feature); the
+`duckext/` Rust build runs unchanged, csrc/ is not involved.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "source": {
+    "uri": "quack:warehouse.internal:9494",
+    "token_file": "/etc/anofox/quack-token",
+    "as": "warehouse",
+    "schemas": ["sales"],
+    "views": "materialize",
+    "timeout_s": 120
+  }
+}');
+```
+
+| `source` key | Default | Meaning |
+|---|---|---|
+| `uri` | (required) | `quack:host:port` (`quack://` is rejected with a hint) |
+| `token_env` / `token_file` | exactly one required | Where the source's auth token comes from; re-read fresh on every build, never cached. Prefer `token_file` (0600) — `token_env` is readable by any SQL that runs in the host session before the lock |
+| `token` | refused | A literal token in the SQL would end up in shell history and query logs |
+| `as` | `"source"` | The database name the copy is attached under; the default database unless `options.search_path` is set; a clash with another attached database refuses to start. **With an access policy**, this silently changes which database a policy's table names resolve against (a policy always resolves against the default database) — adding a source to a dashboard that already has a `policy.json` can make the policy's own (local) tables unreachable by their unqualified names. This fails closed (a database-qualified name is refused under a policy), but double-check `options.search_path` or the policy's table names after adding a source (security review I3) |
+| `schemas` | every schema the source exposes | Restricts the copy; anything else the source exposes is dropped from the snapshot again, never served |
+| `views` | `"materialize"` | `"materialize"`: copy a remote view's current rows into a table (its definition is not replayed — Quack exposes no view DDL to replay, only query results). `"skip"`: leave it out, with a warning |
+| `timeout_s` | `600` | A deadline for the *whole* build (schema + every table + every materialised view); the caller never waits longer than `timeout_s` plus a 5s grace, even if `LOAD`/`ATTACH`/teardown hang (see "Timeout and cancel") |
+| `max_rows` | `50,000,000` | Per-table row budget, checked before copying each table — a hostile or oversized source fails the build instead of filling the snapshot |
+| `max_bytes` | 10 GiB | Cumulative snapshot-file size budget, checked after each table/view |
+| `tls.fingerprint` | — | Reserved for a non-local source (open question below: not enforced by this prototype) |
+
+**How the build works.** Quack never enters the serving instance or the
+user's session, and the build never holds the host session's connection
+(`ctx.conn`) — it runs *before* that lock is taken, so a stuck source can
+never stall another locked server sharing the same host database, the
+authoring console, or a new `anofox_serve_dashboards` call (security review
+M1). Per build, a throwaway staging DuckDB instance (extension
+autoload/autoinstall off), on its own detached thread, does the work: `LOAD
+quack`; a `CREATE TEMPORARY SECRET (TYPE quack, TOKEN …)` — **never**
+`ATTACH … (TOKEN …)`, which would leak the token into
+`duckdb_databases().options`; `ATTACH '<uri>' AS …`; attach the new
+snapshot file `READ_WRITE`; one `BEGIN … COMMIT` around one `CREATE TABLE …
+AS SELECT *` per table (never `COPY FROM DATABASE … (SCHEMA)`, which would
+replay the source's DDL — see "Generated columns" below) and one per
+materialised view; `DETACH` both attachments and drop the secret. The
+resulting file then goes through the **existing** `READ_ONLY` +
+`enable_external_access = false` + `lock_configuration = true` path
+unchanged — the same path a local database takes. The serving snapshot
+itself never loads `quack`: a dashboard's `-- @load quack`, `options.load`,
+or the live session already having it loaded are all refused at startup
+(`the 'quack' extension may not be loaded into a locked server`).
+
+**Generated columns (security review L1).** `COPY FROM DATABASE … (SCHEMA)`
+would replay the source's DDL verbatim, including a generated column's
+*expression* — DuckDB evaluates that lazily, on every read, so replayed into
+the serving instance it would run there, past any access policy's
+`policy_functions.txt` denylist (the policy only ever sees a panel calling a
+denied function directly, never a generated column doing so on its behalf).
+`CREATE TABLE … AS SELECT *` sidesteps this: it materialises every column's
+*current value*, generated or not, so the serving instance never evaluates a
+source-chosen expression. The trade-off: foreign keys, indexes, macros,
+sequences, primary keys and `NOT NULL` are **not** carried over (irrelevant
+for a READ_ONLY snapshot — nothing writes to it — but worth knowing if a
+dashboard's SQL relies on a `PRIMARY KEY` existing). Nested types (`LIST`,
+`STRUCT`, `MAP`, `ENUM`, …) still survive, since CTAS copies their values
+like any other column's.
+
+**Refresh and failure.** The *startup* build must succeed — fail closed, like
+every other snapshot, and under the same bounded deadline as a refresh (no
+special-casing: a hung source can't hang startup indefinitely either).
+After that, a Quack source build runs through the existing `refresh_s` /
+`anofox_serve_refresh` path (`Current::rebuild`, single-flight): a failed
+refresh leaves the last good snapshot in service, same as any other refresh
+failure. `/healthz` gains `source_ok` (did the *last* build succeed, and is
+no build currently stuck past its deadline), `consecutive_failures` (resets
+to 0 on any success) and `build_overdue` (a build the caller gave up
+waiting on is still running in the background) — but only when
+`options.source` is configured, and as numbers/booleans only: the source's
+URI, its token env/file name and any error text never appear there (they go
+to the server's own stderr, as usual).
+
+**Timeout and cancel (security review M1).** The whole build — `LOAD`,
+`ATTACH`, the copy and teardown, not only the data copy — runs on a
+dedicated thread; the caller waits on a channel for at most `timeout_s` plus
+a 5s grace, whether or not the remote side ever answers. If that budget
+runs out, the caller gives up: the build counts as failed (`source_ok:
+false`, `consecutive_failures` incremented) and the thread is left running
+in the background (`build_overdue: true`) rather than blocking anything —
+DuckDB has no way to abort a stuck network wait from the outside, and the
+remote side may still be the one holding things up. At most **one**
+orphaned build per server is tolerated locally (while `build_overdue` is
+set, a new attempt on *that* server — another refresh, or the next
+`refresh_s` tick — fails fast instead of piling up threads; the orphaned
+thread clears it for itself whenever it finally returns), and at most
+**two, process-wide, across every locked server sharing this process**
+(security review R2): once that many builds are running or abandoned
+anywhere in the process, a further attempt on *any* server is refused
+immediately with a clear error, instead of leaking another staging
+instance's threads without bound. This is a process-wide resource cap, not
+a per-server one — **two stuck sources are enough to pause source
+refreshes for every locked server in the process**, not just their own:
+existing snapshots keep serving (an outage-free degradation, not a
+failure), but every affected server's data goes stale and shows
+`source_ok: false` until one of the stuck builds finally returns (at its
+own deadline) and frees a slot. Independently of the deadline, a watchdog thread on a
+**second** staging connection (the first is busy running the copy) also
+reacts to `anofox_serve_stop` being called on this server: cancelling the
+server cancels a build in flight immediately (there is no separate per-build
+cancel flag to race against the server's own stop signal — I2). When it
+fires, the watchdog runs `quack_cancel(catalog, quack_connection_id(alias))`
+from that second connection, then `duckdb_interrupt`s the first —
+interrupting the client's own connection does **not**, by itself, stop a
+query already running on the remote side, so the watchdog always tries the
+remote cancel first. That cancel can only reach a remote operation that has
+actually started (an `ATTACH` that never completes — e.g. a source that
+accepts a connection and never answers — has no cancellable handle yet, so
+only the outer deadline above ever un-wedges the caller in that case; the
+thread itself may still be stuck).
+
+`anofox_serve_stop` never waits indefinitely on a stuck `refresh_s` build
+either: that one thread gets a short, fixed 5s join budget, with anything
+still running past it left to finish on its own, so stopping a server is
+never itself turned into an outage by an unresponsive source. The HTTP
+request-handling workers are a separate matter and are joined in full
+(security review C1): each one handles at most one request at a time, and
+that request is already bounded on its own (a locked server's own
+`timeout_ms` cancels a running panel query), so there is no reason to cut
+that join short — doing so previously let `anofox_serve_stop` report
+success while a legitimate, still in-flight request kept the port bound
+underneath it for however long that request had left to run.
+
+**Threat model delta — the review this prototype still needs:**
+
+- The host process holds a credential with **full SQL access to the
+  source's session** for the duration of a build: Quack has no server-side
+  read-only mode, and a client's `READ_ONLY` intent isn't enforced by the
+  protocol. Mitigations already in place: the token lives only in the
+  throwaway staging instance; a temporary secret, never `ATTACH … (TOKEN
+  …)`; redaction on every error on the way out; the serving instance itself
+  never loads `quack` (enforced at startup, not just by `enable_external_access`
+  — belt and suspenders, since even a quack-loaded-but-locked instance
+  refuses every quack call too, "file system operations are disabled").
+- `token_env` is readable by any SQL that runs in the **host session**
+  before the server locks it down (`getenv(name)`); `token_file` is not —
+  **use `token_file`** for anything that isn't a throwaway test. But
+  `token_file` is **only as safe as the process it's read from**: the
+  authoring console's `/query` (`anofox_serve(port)`) runs on this same
+  host session, which is unlocked SQL, and `read_text('<token_file>')`
+  works there exactly as `getenv` would — so anyone who can reach that
+  console (loopback, token- and Origin-guarded, but still a live, full-SQL
+  endpoint) can read the token either way (security review L2). **Run a
+  source-backed locked server in a process that does not also run
+  `anofox_serve` authoring**, and make the token file `0600`, owned by the
+  service user. This is a process-separation concern, not a `token_file`
+  vs. `token_env` one — moving to `token_file` alone does not close it.
+- A source can feed **arbitrary schemas and data** into the snapshot:
+  `options.source.schemas` restricts what is copied, but a reviewer must
+  confirm the materialised names and types can't get around
+  `policy_functions.txt` or the access-policy rewrites (#49) — a policy
+  resolves names in the snapshot's catalog, which now includes
+  whatever the source chose to call its tables.
+- Holding the token also lets the **same credential cancel any other
+  client's query** on the source (`quack_cancel` has no authorization
+  scoping beyond the token). A least-privilege Quack server, or an
+  authorization hook upstream of it, is recommended — this prototype
+  doesn't add one.
+- A **non-local source** needs a TLS fingerprint or a proxy in front of it;
+  this prototype does not enforce `tls.fingerprint` (see the open question).
+- The live session already having `quack` loaded, a dashboard's `-- @load
+  quack`, and `options.load: ["quack"]` are all refused at startup — a
+  reviewer should still re-check this denylist whenever extension loading
+  changes.
+
+**Open questions** (not resolved by this prototype):
+
+- Replay a remote view's/macro's DDL instead of materialising it, once Quack
+  exposes one?
+- A `max_stale_s` setting that answers `503` instead of serving data older
+  than that, given a Quack source can go stale for longer than a typical
+  `refresh_s`?
+- Is `tls.fingerprint` enough for a non-local source, or should the
+  prototype require a TLS-terminating proxy instead and refuse a bare
+  non-loopback `quack:` URI?
+- Incremental refresh — Quack has no change-tracking today, so every
+  refresh re-copies every row.
+- Does a 1.5.x-built host, not just 2.0, ever need to talk to a Quack
+  server? (Not supported here; the prototype requires a 2.0 host.)
+- What `heartbeat_timeout` (a `quack_query` parameter this prototype does
+  not set) is appropriate for a production deployment?
+
 ## Deployment
 
 [`deployment.md`](deployment.md) covers deploying a locked server: one process

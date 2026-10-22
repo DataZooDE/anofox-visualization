@@ -339,6 +339,52 @@ ones. Without an in-place refresh, the alternative is a rolling restart
 (`docker compose restart dash1`, wait until it is healthy, then `dash2`). The
 health check keeps traffic off a replica until its snapshot is ready.
 
+## 5b. A Quack source (prototype, #352)
+
+`options.source` builds (part of) the snapshot from a live DuckDB 2.0 Quack
+server instead of a local file — see [`secure-serving.md`](secure-serving.md#quack-source-prototype-352)
+for the full option reference and threat model. Three deployment-specific
+points:
+
+- **This host must run DuckDB 2.0** (the extension itself; Quack is a 2.0
+  feature). The `anofox_visualization.duckdb_extension` build doesn't
+  change — same artifact, same `INSTALL`/`LOAD`, just run it under a 2.0
+  `duckdb` binary instead of 1.5.x.
+- **Use `token_file`, not `token_env`**, in production: an environment
+  variable is readable by any SQL that runs in the serving session *before*
+  the lock takes effect (`getenv(name)`), while a file (`0600`, owned by the
+  service account) is not. Mount it the same way as any other secret:
+
+  ```yaml
+  # docker-compose.yml — token_file next to the control FIFO
+  volumes:
+    - /etc/anofox/quack-token:/run/anofox/quack-token:ro
+  ```
+
+  ```json
+  {"source": {"uri": "quack:warehouse.internal:9494",
+              "token_file": "/run/anofox/quack-token", "as": "warehouse"}}
+  ```
+
+- **Run it in a process that does not also run `anofox_serve` authoring**
+  (security review L2). `token_file` keeps the token out of the serving
+  session's own `getenv`, but the *authoring* console (`anofox_serve(port)`)
+  runs on that same host session and accepts arbitrary SQL from whoever
+  reaches it — `read_text('/run/anofox/quack-token')` there reads the token
+  exactly as `getenv` would have. The authoring console is loopback-only and
+  token/Origin-guarded, but it is still a live, full-SQL endpoint: don't rely
+  on `token_file` alone to keep a source's credential away from it. Start a
+  source-backed `anofox_serve_dashboards` from a session (`serve <db>` or a
+  dedicated `duckdb` process) that never also calls `anofox_serve`.
+
+- **A non-local source needs TLS**, either via `tls.fingerprint` (not yet
+  enforced by this prototype — see its open questions) or, preferred until
+  that lands, by putting the Quack server itself behind a TLS-terminating
+  proxy on the same host it runs on and pointing `options.source.uri` at
+  `127.0.0.1` (loopback-to-loopback, same trust boundary as §3's reverse
+  proxy in front of this server). Never point `options.source.uri` at a
+  bare, non-loopback `quack:host:port` over an untrusted network.
+
 ## 6. Resource limits
 
 **Memory.** Peak RSS of a server is about:
