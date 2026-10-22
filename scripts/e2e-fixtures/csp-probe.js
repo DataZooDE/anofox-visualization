@@ -246,6 +246,30 @@ window.__e2e = {
       engine.close();
     }
   },
+  // #258 (follow-up to #200): a real cancel in the real DuckDB-Wasm
+  // Worker — no mocked connection (tests/web/lint_test.mjs's mock proves
+  // the *logic* deterministically; this proves DuckDB-Wasm actually
+  // honours it). scratchRunner's own timeoutMs races a genuinely slow
+  // query — the same cross-join shape heavyViewTimeout above already
+  // shows is cancellable in this browser within a few hundred ms. The
+  // call must settle near timeoutMs (not after the query would finish on
+  // its own), and a fresh scratchRunner call against the very same
+  // pageDb right after must answer promptly — not queued behind whatever
+  // was left of the cancelled one, which was #258's bug.
+  async scratchCancel() {
+    const t0 = performance.now();
+    let rejected = null;
+    try {
+      await scratchRunner(pageDb, { timeoutMs: 200 })("SELECT count(*) AS n FROM range(200000000) a, range(1000) b");
+    } catch (e) {
+      rejected = String(e?.message || e);
+    }
+    const cancelMs = performance.now() - t0;
+    const t1 = performance.now();
+    const after = JSON.parse(await scratchRunner(pageDb, {})("SELECT 1 AS ok"));
+    const afterMs = performance.now() - t1;
+    return { rejected, cancelMs, after, afterMs };
+  },
   // H-1: the proposal preview runs in the locked engine, never on the
   // page — a legitimate proposal (reads only `sales`, which the gate
   // allows) is previewed while a spy wraps the harness's page connection;

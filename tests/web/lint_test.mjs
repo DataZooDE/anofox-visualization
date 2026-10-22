@@ -63,6 +63,102 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
   assert.equal(countsText([]), "");
 }
 
+// ---- 1b. scratchRunner's timeout cleanup must not itself hang behind a
+// query that failed to actually cancel (#258, a follow-up to #200). A fake
+// connection models DuckDB's own rule — one outstanding statement at a time
+// *per connection*, independent of the Worker's message queue — via a
+// `busy` flag that only a confirmed cancelSent() clears. Before the fix,
+// scratchRunner's `finally` ran its cleanup USE/DETACH on that same
+// connection unconditionally, so when cancelSent() failed to confirm
+// (busy stays true forever here, as a genuinely stuck query would) those
+// queries — and the whole call — never settled. withTimeout turns that
+// into a failed assertion instead of a hung test process.
+{
+  function fakeScratchConn({ cancelWorks }) {
+    let busy = false; // a "heavy" statement is outstanding on this connection
+    let waiters = [];
+    const waitFree = () => (busy ? new Promise((res) => waiters.push(res)) : Promise.resolve());
+    const markFree = () => {
+      busy = false;
+      waiters.splice(0).forEach((r) => r());
+    };
+    const calls = [];
+    const row = (o) => ({ toArray: () => [{ toJSON: () => o }] });
+    return {
+      calls,
+      async query(sql) {
+        calls.push(["query", sql]);
+        await waitFree();
+        return row(/current_database/i.test(sql) ? { d: "memory" } : {});
+      },
+      async prepare(sql) {
+        calls.push(["prepare", sql]);
+        await waitFree();
+        return { close: async () => {} };
+      },
+      async send(sql) {
+        calls.push(["send", sql]);
+        await waitFree();
+        if (!/heavy/.test(sql)) {
+          return { schema: { fields: [] }, [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) };
+        }
+        busy = true; // mirrors DuckDB: this connection now has exactly one outstanding statement
+        return {
+          schema: { fields: [] },
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                await waitFree(); // resolves only once markFree() runs (a confirmed cancel)
+                throw new Error("INTERRUPT Query interrupted");
+              },
+            };
+          },
+        };
+      },
+      async cancelSent() {
+        calls.push(["cancelSent"]);
+        if (!cancelWorks) return false; // the statement genuinely keeps running
+        markFree();
+        return true;
+      },
+      async close() {
+        calls.push(["close"]);
+        await waitFree();
+      },
+    };
+  }
+  const withTimeout = (p, ms, label) =>
+    Promise.race([
+      p.then((v) => ({ v }), (e) => ({ e })),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}: still pending after ${ms} ms`)), ms)),
+    ]);
+  const home = (sql) => /^USE "/.test(sql); // the cleanup's `USE` back to the real database, not setup's `USE anofox_lint_N`
+
+  // A confirmed cancel: `c` is actually free afterwards, so the cleanup
+  // runs USE/DETACH on it as usual.
+  {
+    const conn = fakeScratchConn({ cancelWorks: true });
+    const run = scratchRunner({ connect: async () => conn }, { timeoutMs: 50 });
+    const settled = await withTimeout(run("SELECT 1 AS heavy"), 2000, "confirmed cancel");
+    assert.ok(settled.e, "still rejects (the query was cancelled)");
+    assert.ok(conn.calls.some(([k, sql]) => k === "query" && home(sql)), "USE back to the real database ran: the cleanup used `c` as usual");
+    assert.ok(conn.calls.some(([k, sql]) => k === "query" && /^DETACH/.test(sql)), "DETACH ran");
+  }
+
+  // An unconfirmed cancel: cancelSent() reports failure and the query
+  // genuinely never frees the connection (busy never clears). Before #258's
+  // fix this call would never settle — withTimeout makes that a failure
+  // instead of a hang.
+  {
+    const conn = fakeScratchConn({ cancelWorks: false });
+    const run = scratchRunner({ connect: async () => conn }, { timeoutMs: 50 });
+    const settled = await withTimeout(run("SELECT 1 AS heavy"), 2000, "unconfirmed cancel");
+    assert.ok(settled.e && /took longer/.test(settled.e.message), "the timeout error surfaces promptly, not after the still-running query");
+    assert.ok(!conn.calls.some(([k, sql]) => k === "query" && home(sql)), "no USE back to the real database was attempted on the still-busy connection");
+    assert.ok(!conn.calls.some(([k, sql]) => k === "query" && /^DETACH/.test(sql)), "no DETACH was attempted either");
+  }
+}
+
 // ---- 2. DuckDB-Wasm against the CLI ----
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = path.resolve(here, "../..");

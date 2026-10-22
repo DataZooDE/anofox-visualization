@@ -92,37 +92,18 @@ export function scratchRunner(db, opts = {}) {
     const name = `anofox_lint_${++scratchSeq}`;
     let home = null;
     let timer;
-    try {
-      home = `"${String((await c.query("SELECT current_database() AS d")).toArray()[0].toJSON().d).replace(/"/g, '""')}"`;
-      await c.query(`ATTACH ':memory:' AS ${name}`);
-      await c.query(`USE ${name}`);
-      await c.query(`SET search_path = '${name}.main,${home.replace(/'/g, "''")}.main'`);
-      const pieces = splitStatements(sql);
-      if (guard) {
-        const ctx = { query: async (q) => rowsJson(await runOne(c, q)), state: {} };
-        for (const piece of pieces) await guard(piece, ctx);
-      }
-      if (prepare) await prepare(sql);
-      const work = (async () => {
-        let last = null;
-        for (const piece of pieces) last = await runOne(c, piece);
-        return toRows(last || { schema: { fields: [] }, toArray: () => [] });
-      })();
-      if (!timeoutMs) return await work;
-      // A query past its time is cancelled in the worker (the page's later
-      // queries would wait behind it), not just abandoned.
-      const late = new Promise((_, reject) => {
-        timer = setTimeout(async () => {
-          try {
-            await c.cancelSent?.();
-          } catch (_) {}
-          reject(new Error(`the query took longer than ${timeoutMs / 1000} s and was cancelled`));
-        }, timeoutMs);
-      });
-      work.catch(() => {}); // (rejects after a cancel; the timeout error wins)
-      return await Promise.race([work, late]);
-    } finally {
-      clearTimeout(timer);
+    // #258: USE/DETACH below only ever run *on `c`* once we're sure no
+    // statement is still outstanding on it. DuckDB serialises one
+    // statement at a time per connection — underneath the Worker's own
+    // message queue, at the connection itself — so a timeout only stops
+    // *us* from awaiting `work` any longer; it does not by itself free
+    // `c`. Only a confirmed `cancelSent()` (or `work` settling on its
+    // own) does that. Sending USE/DETACH on `c` while that is still
+    // unconfirmed would queue them behind whatever DuckDB still thinks is
+    // running there, which can wait exactly as long as that query does —
+    // silently turning "cancelled after Xs" into "hangs forever" (the
+    // bug this call guards against, see the two branches below).
+    const detachAndClose = async () => {
       try {
         if (home) {
           await c.query(`USE ${home}`);
@@ -132,6 +113,78 @@ export function scratchRunner(db, opts = {}) {
         /* the connection is closed next anyway */
       }
       await c.close();
+    };
+    let pieces;
+    try {
+      home = `"${String((await c.query("SELECT current_database() AS d")).toArray()[0].toJSON().d).replace(/"/g, '""')}"`;
+      await c.query(`ATTACH ':memory:' AS ${name}`);
+      await c.query(`USE ${name}`);
+      await c.query(`SET search_path = '${name}.main,${home.replace(/'/g, "''")}.main'`);
+      pieces = splitStatements(sql);
+      if (guard) {
+        const ctx = { query: async (q) => rowsJson(await runOne(c, q)), state: {} };
+        for (const piece of pieces) await guard(piece, ctx);
+      }
+      if (prepare) await prepare(sql);
+    } catch (e) {
+      // Nothing above sends a statement that could outlive this call —
+      // the ATTACH/USE/SET search_path always settle, and guard/prepare
+      // run before `work` below ever starts — so `c` is free; clean it
+      // up the normal way.
+      await detachAndClose().catch(() => {});
+      throw e;
+    }
+    const work = (async () => {
+      let last = null;
+      for (const piece of pieces) last = await runOne(c, piece);
+      return toRows(last || { schema: { fields: [] }, toArray: () => [] });
+    })();
+    if (!timeoutMs) {
+      try {
+        return await work;
+      } finally {
+        await detachAndClose();
+      }
+    }
+    // A query past its time is cancelled in the worker (the page's later
+    // queries would wait behind it), not just abandoned.
+    let timedOut = false;
+    let cancelConfirmed = false;
+    const late = new Promise((_, reject) => {
+      timer = setTimeout(async () => {
+        timedOut = true;
+        try {
+          cancelConfirmed = (await c.cancelSent?.()) === true;
+        } catch (_) {}
+        reject(new Error(`the query took longer than ${timeoutMs / 1000} s and was cancelled`));
+      }, timeoutMs);
+    });
+    work.catch(() => {}); // (rejects after a cancel; the timeout error wins)
+    try {
+      const result = await Promise.race([work, late]);
+      clearTimeout(timer);
+      await detachAndClose(); // `work` won on its own: `c` settled, so it's free
+      return result;
+    } catch (e) {
+      clearTimeout(timer);
+      if (!timedOut || cancelConfirmed) {
+        // Either `work` rejected on its own before the timer even fired
+        // (so `c` is free regardless of any cancel), or the timer fired
+        // and the cancel landed — DuckDB confirmed `c`'s statement is
+        // actually gone. Either way the USE/DETACH below run on a
+        // connection nothing is still using.
+        await detachAndClose();
+      } else {
+        // The timer fired and cancelSent() couldn't confirm the
+        // statement is gone (it returned false, threw, or there is no
+        // cancelSent at all) — `c` may genuinely still be executing it.
+        // Don't queue more statements behind that (see the comment above
+        // detachAndClose); drop the connection instead. The cost is an
+        // orphaned ATTACHed ':memory:' and an unclosed handle, not a
+        // scratch run that never settles.
+        c.close().catch(() => {});
+      }
+      throw e;
     }
   };
 }
