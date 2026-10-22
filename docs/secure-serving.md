@@ -1292,7 +1292,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 | `as` | `"source"` | The database name the copy is attached under; the default database unless `options.search_path` is set; a clash with another attached database refuses to start. **With an access policy**, this silently changes which database a policy's table names resolve against (a policy always resolves against the default database) — adding a source to a dashboard that already has a `policy.json` can make the policy's own (local) tables unreachable by their unqualified names. This fails closed (a database-qualified name is refused under a policy), but double-check `options.search_path` or the policy's table names after adding a source (security review I3) |
 | `schemas` | every schema the source exposes | Restricts the copy; anything else the source exposes is dropped from the snapshot again, never served |
 | `views` | `"materialize"` | `"materialize"`: copy a remote view's current rows into a table (its definition is not replayed — Quack exposes no view DDL to replay, only query results). `"skip"`: leave it out, with a warning |
-| `timeout_s` | `600` | A deadline for the *whole* build (schema + every table + every materialised view); the caller never waits longer than `timeout_s` plus a 10s grace, even if `LOAD`/`ATTACH`/teardown hang (see "Timeout and cancel") |
+| `timeout_s` | `600` | A deadline for the *whole* build (schema + every table + every materialised view); the caller never waits longer than `timeout_s` plus a 5s grace, even if `LOAD`/`ATTACH`/teardown hang (see "Timeout and cancel") |
 | `max_rows` | `50,000,000` | Per-table row budget, checked before copying each table — a hostile or oversized source fails the build instead of filling the snapshot |
 | `max_bytes` | 10 GiB | Cumulative snapshot-file size budget, checked after each table/view |
 | `tls.fingerprint` | — | Reserved for a non-local source (open question below: not enforced by this prototype) |
@@ -1350,7 +1350,7 @@ to the server's own stderr, as usual).
 **Timeout and cancel (security review M1).** The whole build — `LOAD`,
 `ATTACH`, the copy and teardown, not only the data copy — runs on a
 dedicated thread; the caller waits on a channel for at most `timeout_s` plus
-a 10s grace, whether or not the remote side ever answers. If that budget
+a 5s grace, whether or not the remote side ever answers. If that budget
 runs out, the caller gives up: the build counts as failed (`source_ok:
 false`, `consecutive_failures` incremented) and the thread is left running
 in the background (`build_overdue: true`) rather than blocking anything —

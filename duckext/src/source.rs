@@ -275,6 +275,12 @@ pub fn read_token(opts: &SourceOpts) -> Result<String, String> {
             "{where_}: the token must not contain a control character or a single quote"
         ));
     }
+    // security review R1: redact()'s partial-prefix match is simplest (and
+    // provably panic-free) on single-byte characters; Quack tokens are
+    // ASCII in practice, so refuse anything else outright.
+    if !t.is_ascii() {
+        return Err(format!("{where_}: the token must be ASCII"));
+    }
     Ok(t.to_string())
 }
 
@@ -296,8 +302,17 @@ pub fn redact(err: &str, token: &str) -> String {
     if quoted != token {
         out = out.replace(&quoted, "<redacted>");
     }
+    // security review R1: `&token[..n]` on a byte offset panics if it lands
+    // inside a multi-byte character — iterate char boundaries instead of
+    // bytes. (`read_token` also refuses a non-ASCII token outright, so this
+    // is belt and suspenders: `char_indices` costs nothing extra either way.)
     if token.len() >= 8 {
-        for n in (8..token.len()).rev() {
+        let boundaries: Vec<usize> = token
+            .char_indices()
+            .map(|(i, _)| i)
+            .filter(|&i| i >= 8)
+            .collect();
+        for &n in boundaries.iter().rev() {
             if out.contains(&token[..n]) {
                 out = out.replace(&token[..n], "<redacted>");
                 break;
@@ -380,19 +395,40 @@ fn build(
         dst_alias
     ));
 
+    let size_fired = AtomicBool::new(false);
     let result = attach_dst.and_then(|_| {
         // 4. The watchdog: a SECOND connection on the same staging instance
         // (`Conn` is `Send`, not `Sync` — owned by the watchdog thread, not
-        // borrowed, since a `duckdb_connection` is one-at-a-time).
+        // borrowed, since a `duckdb_connection` is one-at-a-time). It also
+        // polls the snapshot file's size every interval (security review
+        // R3): checking `max_bytes` only *between* tables let a single huge
+        // table or view overshoot it by gigabytes before the build noticed.
         let stg2 = db.connect()?;
         let intr = stg.interrupter();
         let deadline = Instant::now() + opts.timeout;
         let finished = AtomicBool::new(false);
         let watchdog_alias = alias.clone();
+        let (max_bytes, file_for_check, size_fired_ref) =
+            (opts.max_bytes, file.clone(), &size_fired);
         std::thread::scope(|scope| {
             let finished_ref = &finished;
             scope.spawn(move || {
-                if wait_for_fire(finished_ref, cancel, deadline, Duration::from_millis(50)) {
+                let size_exceeded = || {
+                    let over = std::fs::metadata(&file_for_check)
+                        .map(|m| m.len() > max_bytes)
+                        .unwrap_or(false);
+                    if over {
+                        size_fired_ref.store(true, Ordering::SeqCst);
+                    }
+                    over
+                };
+                if wait_for_fire(
+                    finished_ref,
+                    cancel,
+                    deadline,
+                    Duration::from_millis(50),
+                    &size_exceeded,
+                ) {
                     cancel_remote(&stg2, &watchdog_alias);
                     intr.interrupt();
                 }
@@ -408,6 +444,13 @@ fn build(
     let _ = stg.exec(&format!("DETACH {}", quote_ident(&alias)));
     let _ = stg.exec(&format!("DROP SECRET {}", quote_ident(&alias)));
 
+    if size_fired.load(Ordering::SeqCst) {
+        let _ = result; // the interrupt's own error is less useful than this.
+        return Err(format!(
+            "options.source.max_bytes ({}) exceeded during the copy — cancelled",
+            opts.max_bytes
+        ));
+    }
     result?;
     warnings.push(format!(
         "quack source '{}': every table is materialised by CREATE TABLE … AS SELECT — foreign \
@@ -419,20 +462,23 @@ fn build(
 }
 
 /// Poll every `interval` until either `finished` is set (the copy returned on
-/// its own: no need to cancel, returns `false`) or `cancel` is set / `deadline`
-/// passes (the watchdog must fire: returns `true`). Pure timing logic, kept
-/// free of any DuckDB call so it can be unit-tested without a host API.
+/// its own: no need to cancel, returns `false`) or `cancel` is set, `deadline`
+/// passes, or `extra_fire` says to (the watchdog must fire: returns `true`).
+/// `extra_fire` is the `max_bytes` file-size check (security review R3) when
+/// called from [`build`]; pure timing logic otherwise, kept free of any
+/// DuckDB call so it can be unit-tested without a host API.
 fn wait_for_fire(
     finished: &AtomicBool,
     cancel: &AtomicBool,
     deadline: Instant,
     interval: Duration,
+    extra_fire: &dyn Fn() -> bool,
 ) -> bool {
     loop {
         if finished.load(Ordering::SeqCst) {
             return false;
         }
-        if cancel.load(Ordering::SeqCst) || Instant::now() >= deadline {
+        if cancel.load(Ordering::SeqCst) || Instant::now() >= deadline || extra_fire() {
             return true;
         }
         std::thread::sleep(interval);
@@ -531,11 +577,24 @@ fn copy_schema_and_data(
                         quote_ident(&view)
                     );
                     let to = format!("{}.{}.{}", dst, quote_ident(&schema), quote_ident(&view));
-                    stg.exec(&format!("CREATE TABLE {to} AS SELECT * FROM {from}"))
+                    // A view has no row count to check up front (it's a
+                    // query, not a table) — security review R3: LIMIT it to
+                    // one more than max_rows and refuse if that extra row
+                    // actually came back, so a view can't be used to get
+                    // around the table row budget.
+                    let limit = opts.max_rows.saturating_add(1);
+                    stg.exec(&format!("CREATE TABLE {to} AS SELECT * FROM {from} LIMIT {limit}"))
                         .map_err(|e| {
                             format!("view {schema}.{view}: {}", e.lines().next().unwrap_or(""))
                         })?;
                     check_max_bytes(dst_file, opts.max_bytes, &format!("view {schema}.{view}"))?;
+                    let copied = row_count(stg, dst, &schema, &view)?;
+                    if copied > opts.max_rows {
+                        return Err(format!(
+                            "view {schema}.{view}: at least {copied} rows exceeds options.source.max_rows ({})",
+                            opts.max_rows
+                        ));
+                    }
                     warnings.push(format!(
                         "quack source '{}': view {schema}.{view} materialised as a table (its definition is not replayed)",
                         opts.r#as
@@ -761,6 +820,37 @@ mod tests {
     }
 
     #[test]
+    fn read_token_refuses_a_non_ascii_token() {
+        // security review R1's own repro token.
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-src-token-ascii-test-{}",
+            anofox_visualization::host::serving::random_token()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let p = dir.join("token");
+        std::fs::write(&p, "tok-deadbeefö").unwrap();
+        let opts = src(&format!(
+            r#"{{"uri":"quack:h:1","token_file":{:?}}}"#,
+            p.to_string_lossy()
+        ))
+        .unwrap();
+        let err = read_token(&opts).unwrap_err();
+        assert!(err.contains("ASCII"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn redact_does_not_panic_on_a_non_ascii_token_even_if_called_directly() {
+        // security review R1: `redact` itself must never panic, even though
+        // `read_token` now refuses a non-ASCII token before anything reaches
+        // here — defense in depth for the function the review's repro hit.
+        let token = "tok-deadbeefö-rest-of-it-is-long-enough-to-truncate";
+        let err = format!("some error mentioning {token} partially cut off at byte 17ish");
+        let r = redact(&err, token); // must not panic
+        assert!(!r.contains(token), "{r}");
+    }
+
+    #[test]
     fn redact_strips_the_quote_doubled_and_truncated_forms_too() {
         // security review I1: the token is embedded as a SQL string literal
         // (`'` doubled), and DuckDB's `LINE 1: ...` context can cut a long
@@ -811,7 +901,8 @@ mod tests {
                 &finished,
                 &cancel,
                 deadline,
-                Duration::from_millis(5)
+                Duration::from_millis(5),
+                &|| false
             ));
         });
         assert!(
@@ -827,7 +918,8 @@ mod tests {
             &finished,
             &cancel,
             deadline,
-            Duration::from_millis(5)
+            Duration::from_millis(5),
+            &|| false
         ));
         let elapsed = t0.elapsed();
         assert!(
@@ -848,11 +940,32 @@ mod tests {
             &finished,
             &cancel,
             far,
-            Duration::from_millis(5)
+            Duration::from_millis(5),
+            &|| false
         ));
         assert!(
             t0.elapsed() < Duration::from_millis(500),
             "cancel should fire promptly"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_also_fires_when_extra_fire_says_so() {
+        // security review R3: the max_bytes file-size poll plugs in here.
+        let finished = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        let far = Instant::now() + Duration::from_secs(600);
+        let t0 = Instant::now();
+        assert!(wait_for_fire(
+            &finished,
+            &cancel,
+            far,
+            Duration::from_millis(5),
+            &|| true
+        ));
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "extra_fire should fire promptly, well before the far deadline"
         );
     }
 }

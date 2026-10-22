@@ -107,19 +107,16 @@ pub fn stop(port: u16) -> Result<String, String> {
     for _ in 0..r.workers.len() {
         r.server.unblock();
     }
-    // #352 M1 fix 3: bounded — a worker stuck in a Quack build (the
-    // `refresh_s` thread, most likely) that is already past its own
-    // timeout_s + grace returns promptly on its own; give it that same
-    // budget here rather than potentially waiting forever. Anything still
-    // running past the budget is left to finish in the background.
-    let join_budget = r
-        .locked
-        .as_ref()
-        .and_then(|l| l.opts.source.as_ref())
-        .map(|s| s.timeout.saturating_add(SOURCE_BUILD_GRACE))
-        .unwrap_or(Duration::from_secs(10))
-        + Duration::from_secs(5);
-    join_bounded(std::mem::take(&mut r.workers), join_budget);
+    // #352 M1 fix 3 / I6: bounded, with a short, fixed budget regardless of
+    // the build's own `timeout_s` — a worker stuck in an *abandoned* Quack
+    // build returns almost immediately (the review measured 0.13s), and the
+    // refresher thread is never joined again later either way, so there is
+    // no reason to make a caller of `anofox_serve_stop` wait anywhere near
+    // `timeout_s` for a build that is merely still in flight (not yet past
+    // its own deadline). Anything still running past the budget is left to
+    // finish in the background.
+    const STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
+    join_bounded(std::mem::take(&mut r.workers), STOP_JOIN_BUDGET);
     Ok(format!(
         "anofox-visualization: stopped the {} server on port {port}",
         r.kind
@@ -977,7 +974,60 @@ fn deps_tag(ds: &[Deps]) -> String {
 /// the deadline the build's own internal watchdog uses to try a remote
 /// `quack_cancel`; this grace gives that attempt a chance to land before
 /// the caller stops waiting.
-const SOURCE_BUILD_GRACE: Duration = Duration::from_secs(10);
+const SOURCE_BUILD_GRACE: Duration = Duration::from_secs(5);
+
+/// Process-wide cap on Quack source build threads running at once, counting
+/// both ones a caller is still waiting on and abandoned ones left running in
+/// the background (security review R2): a repeatedly-retried failed startup
+/// against a dead or hostile source otherwise leaks one staging instance's
+/// threads (~100 of them, observed) per attempt, without limit. Shared by
+/// every locked server in this process — `start_locked`'s *startup* build
+/// has no persistent per-server state to track its own abandonment across
+/// calls, so only a global cap bounds it.
+const MAX_CONCURRENT_SOURCE_BUILDS: usize = 2;
+static GLOBAL_SOURCE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Per-server Quack-build bookkeeping for `/healthz`'s `build_overdue`
+/// (security review R1): `in_flight` is true from just before the build
+/// thread is spawned until that thread — including a drop guard that runs
+/// even if it panics — clears it; `deadline` is the instant by which it
+/// should have returned. "Overdue" is `in_flight` true and `deadline`
+/// passed: no separate "abandoned" boolean that a panic could leave stuck
+/// (the review's R1: the old design cleared it only via an explicit
+/// `store(false, ..)` on the thread's *normal* path, so a panic — or losing
+/// the race against the caller's own timeout — left it set forever).
+struct SourceBuildState {
+    in_flight: AtomicBool,
+    deadline: Mutex<Option<Instant>>,
+}
+
+impl SourceBuildState {
+    fn new() -> Arc<Self> {
+        Arc::new(SourceBuildState {
+            in_flight: AtomicBool::new(false),
+            deadline: Mutex::new(None),
+        })
+    }
+
+    fn overdue(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
+            && self
+                .deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some_and(|d| Instant::now() > d)
+    }
+}
+
+/// Releases this process's global build slot on drop — including when the
+/// build thread panics (security review R1/R2).
+struct ReleaseSlotOnDrop;
+impl Drop for ReleaseSlotOnDrop {
+    fn drop(&mut self) {
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Run `src`'s Quack copy on a detached thread, never touching `ctx.conn`
 /// (security review M1, fix 1) and never blocking the caller for longer than
@@ -990,50 +1040,70 @@ const SOURCE_BUILD_GRACE: Duration = Duration::from_secs(10);
 /// created only when a build starts has a window, right before it's
 /// created, where an already-in-flight `stop` would be missed).
 ///
-/// `abandoned` tracks whether a previous attempt is still running past its
-/// deadline: at most one such orphaned thread is tolerated per server. While
-/// it's set, a new attempt fails fast instead of piling up threads; the
-/// orphaned thread clears the flag itself whenever it finally returns
-/// (fix 2's "left to finish, the slot stays busy").
+/// `state.in_flight` tolerates at most one build running past its deadline
+/// per server: while it's set, a new attempt fails fast instead of piling
+/// up threads, and a drop guard *inside* the thread clears it — on a normal
+/// return or a panic alike (R1) — whenever it finally finishes (fix 2's
+/// "left to finish, the slot stays busy"). `GLOBAL_SOURCE_BUILDS` additionally
+/// caps how many such threads can exist across the whole process (R2).
 fn run_source_build(
     src: &Arc<crate::source::SourceOpts>,
     dir: &Path,
     stop: &Arc<AtomicBool>,
-    abandoned: &Arc<AtomicBool>,
+    state: &Arc<SourceBuildState>,
 ) -> Result<(String, PathBuf, Vec<String>), String> {
-    if abandoned.load(Ordering::SeqCst) {
+    if state.in_flight.swap(true, Ordering::SeqCst) {
         return Err(
             "options.source: a previous build is still running past its timeout_s — refusing a \
              new attempt until it finishes"
                 .into(),
         );
     }
+    // The in_flight flag is this server's own; from here on a failure to
+    // proceed must clear it again before returning.
+    if GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_SOURCE_BUILDS {
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        state.in_flight.store(false, Ordering::SeqCst);
+        return Err(format!(
+            "options.source: {MAX_CONCURRENT_SOURCE_BUILDS} Quack source builds are already \
+             running or abandoned across this process — refusing a new attempt until one finishes"
+        ));
+    }
     let budget = src.timeout.saturating_add(SOURCE_BUILD_GRACE);
+    *state.deadline.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now() + budget);
     let (tx, rx) = mpsc::channel();
-    let (src, dir, stop, abandoned_done) = (
-        src.clone(),
-        dir.to_path_buf(),
-        stop.clone(),
-        abandoned.clone(),
-    );
+    let (src, dir, stop, state_for_thread) =
+        (src.clone(), dir.to_path_buf(), stop.clone(), state.clone());
     std::thread::spawn(move || {
+        let _release_slot = ReleaseSlotOnDrop;
+        let _clear_in_flight = ClearInFlightOnDrop(state_for_thread);
         let r = crate::source::copy_from_quack(&dir, &src, &stop);
-        // In case this finishes late (after the caller already gave up and
-        // marked it abandoned below): let the NEXT attempt through again.
-        abandoned_done.store(false, Ordering::SeqCst);
         let _ = tx.send(r);
     });
     match rx.recv_timeout(budget) {
+        // The thread is finishing up (or already has) — its own drop guard
+        // clears `in_flight` and releases the global slot; nothing to do here.
         Ok(r) => r,
-        Err(_) => {
-            abandoned.store(true, Ordering::SeqCst);
-            Err(format!(
-                "options.source: build timed out after {:.0}s (timeout_s + a {:.0}s grace) — \
-                 it may still be running in the background and has been left to finish",
-                budget.as_secs_f64(),
-                SOURCE_BUILD_GRACE.as_secs_f64()
-            ))
-        }
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "options.source: build timed out after {:.0}s (timeout_s + a {:.0}s grace) — \
+             it may still be running in the background and has been left to finish",
+            budget.as_secs_f64(),
+            SOURCE_BUILD_GRACE.as_secs_f64()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+            "options.source: the build thread ended unexpectedly (likely a panic) before \
+             returning a result"
+                .into(),
+        ),
+    }
+}
+
+/// Clears `state.in_flight` on drop — including when the build thread
+/// panics (security review R1).
+struct ClearInFlightOnDrop(Arc<SourceBuildState>);
+impl Drop for ClearInFlightOnDrop {
+    fn drop(&mut self) {
+        self.0.in_flight.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1082,9 +1152,9 @@ struct Locked {
     /// a Quack build's cancel signal (security review I2 — see
     /// [`run_source_build`]).
     stop: Arc<AtomicBool>,
-    /// `options.source` (#352 M1): true while a previous build's thread is
-    /// still running past its deadline; `/healthz`'s `build_overdue`.
-    source_build_abandoned: Arc<AtomicBool>,
+    /// `options.source` (#352 M1/R1): this server's Quack-build bookkeeping
+    /// for `/healthz`'s `build_overdue`.
+    source_build: Arc<SourceBuildState>,
 }
 
 // `anofox_data`: the `SET VARIABLE` that tells panels where `options.data`
@@ -1104,7 +1174,7 @@ impl Locked {
                 src,
                 &dir.0,
                 &self.stop,
-                &self.source_build_abandoned,
+                &self.source_build,
             )?),
             None => None,
         };
@@ -1213,13 +1283,13 @@ pub fn start_locked(
     // applies.
     let startup_dir = SnapshotDir::create()?;
     let startup_stop = Arc::new(AtomicBool::new(false));
-    let startup_abandoned = Arc::new(AtomicBool::new(false));
+    let startup_build_state = SourceBuildState::new();
     let source_result = match &opts.source {
         Some(src) => Some(run_source_build(
             src,
             &startup_dir.0,
             &startup_stop,
-            &startup_abandoned,
+            &startup_build_state,
         )?),
         None => None,
     };
@@ -1301,7 +1371,7 @@ pub fn start_locked(
         // A few seconds: files appear live, a rescan per request is avoided.
         requires_cache: rq::ExistsCache::new(Duration::from_secs(5), 4096),
         stop: stop.clone(),
-        source_build_abandoned: Arc::new(AtomicBool::new(false)),
+        source_build: SourceBuildState::new(),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -2174,7 +2244,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 // as `source_ok: false`, on top of the last *completed*
                 // attempt's own result — a stuck build must not look healthy
                 // just because nothing has come back to report failure yet.
-                let overdue = st.source_build_abandoned.load(Ordering::SeqCst);
+                let overdue = st.source_build.overdue();
                 if let Some(map) = body.as_object_mut() {
                     map.insert(
                         "source_ok".into(),
@@ -2911,6 +2981,60 @@ fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #352 R1: `in_flight` must clear even when the build thread panics —
+    /// not just on a normal return — or a source build is refused forever
+    /// after the first unrelated panic (the review's exact repro, via a
+    /// non-ASCII token that made the old `redact` panic). `thread::spawn`'s
+    /// child panicking does not crash this test process (the default panic
+    /// strategy unwinds), so `ClearInFlightOnDrop`'s `Drop` runs during that
+    /// unwind exactly as it would on a normal return.
+    #[test]
+    fn in_flight_clears_even_if_the_build_thread_panics() {
+        let state = SourceBuildState::new();
+        assert!(!state.in_flight.swap(true, Ordering::SeqCst));
+        let s = state.clone();
+        let h = std::thread::spawn(move || {
+            let _guard = ClearInFlightOnDrop(s);
+            panic!("simulated build-thread panic");
+        });
+        assert!(h.join().is_err(), "the thread should have panicked");
+        assert!(
+            !state.in_flight.load(Ordering::SeqCst),
+            "in_flight must be cleared by the drop guard even on a panic"
+        );
+    }
+
+    /// #352 R2: the process-wide cap's own arithmetic, pinned down directly.
+    /// `GLOBAL_SOURCE_BUILDS` isn't touched by any other test, so this is
+    /// safe to manipulate here; a real end-to-end repro needs two Quack
+    /// builds genuinely overlapping in time, which — tried against both a
+    /// bare black-hole listener (its ATTACH was observed to error out on
+    /// its own after a while, plausibly a lower-level connect/keepalive
+    /// timeout, closing the overlap window before a 3rd attempt could see
+    /// it) and a SIGSTOP'd real source (reliable, used in
+    /// test-quack-source.sh instead) — depends on timing this shell test
+    /// doesn't need to reproduce.
+    #[test]
+    fn global_source_build_cap_refuses_once_reached() {
+        let saved = GLOBAL_SOURCE_BUILDS.swap(0, Ordering::SeqCst);
+        for _ in 0..MAX_CONCURRENT_SOURCE_BUILDS {
+            assert!(
+                GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst) < MAX_CONCURRENT_SOURCE_BUILDS
+            );
+        }
+        // Mirrors run_source_build's own check-then-rollback exactly.
+        let prior = GLOBAL_SOURCE_BUILDS.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            prior >= MAX_CONCURRENT_SOURCE_BUILDS,
+            "a build attempted once the cap is reached must see it"
+        );
+        GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        for _ in 0..MAX_CONCURRENT_SOURCE_BUILDS {
+            GLOBAL_SOURCE_BUILDS.fetch_sub(1, Ordering::SeqCst);
+        }
+        GLOBAL_SOURCE_BUILDS.store(saved, Ordering::SeqCst);
+    }
 
     /// #352 M1 fix 3: `join_bounded` returns once every handle has finished
     /// (fast case), and gives up — without panicking or hanging the test —

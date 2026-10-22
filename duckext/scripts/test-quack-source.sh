@@ -451,6 +451,121 @@ curl -s "http://127.0.0.1:$PORT/" | grep -q "$TOKEN" && fail "the token leaked i
 curl -s "http://127.0.0.1:$PORT/d/q" | grep -q "$TOKEN" && fail "the token leaked into /d/q"
 echo "OK: the token appears nowhere in the extension's own output, /healthz, / or /d/q"
 
+# ------------------------------------------------- 7. R1: non-ASCII token --
+# read_token refuses a non-ASCII token outright (security review R1's own
+# repro token was tok-<hex>ö) — closing the panic at its source, not just in
+# redact() (unit-tested separately).
+echo -n "tok-deadbeefö" > "$T/token_nonascii"
+nonascii_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src')" "$SRC_PORT" "$(q "$T/token_nonascii")"; }
+if "$DUCKDB2" -no-agent -unsigned "$T/nonascii.duckdb" -c "LOAD $(q "$EXT"); SELECT anofox_serve_dashboards($(q "$T/dash"), $((SLOW_PORT + 300)), json_object('source', $(nonascii_opts)));" > "$T/nonascii_out" 2>&1; then
+  fail "a non-ASCII token should be refused at startup: $(cat "$T/nonascii_out")"
+fi
+grep -qi "ASCII" "$T/nonascii_out" || fail "non-ASCII token error text: $(cat "$T/nonascii_out")"
+echo "OK: a non-ASCII token is refused outright (R1)"
+
+# -------------------------------------- 8. R2: a process-wide build cap --
+# Repeated failed startups against an unresponsive source must not leak an
+# unbounded number of staging-instance threads (security review R2): once
+# MAX_CONCURRENT_SOURCE_BUILDS (2) builds are outstanding (abandoned, past
+# their own timeout_s + grace) in this ONE process, a further attempt is
+# refused immediately instead of spawning yet another one. A real quack
+# source frozen with SIGSTOP (not a bare black-hole listener, which was
+# observed to have its ATTACH error out on its own after some tens of
+# seconds here — plausibly a lower-level connect/keepalive timeout — giving
+# an unreliable overlap window) stays genuinely unresponsive for as long as
+# it's stopped, matching section 4's frozen-source probe.
+open_fifo capsrc "$T/capsrc.duckdb" ""
+send capsrc "LOAD quack;" "CREATE TABLE t AS SELECT 1 AS x;" "SELECT * FROM quack_serve('quack:127.0.0.1:$((SRC_PORT + 60))', token := '$TOKEN');"
+wait_for capsrc 'listen_uri' || fail "R2 fixture source did not start: $(cat "$T/out_capsrc")"
+kill -STOP "${FIFOPID[capsrc]}"
+mkdir -p "$T/capdash"
+printf 'SELECT 1::BIGINT AS one ::METRIC;\n' > "$T/capdash/c.sql"
+cap_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src', 'timeout_s', 2)" "$((SRC_PORT + 60))" "$(q "$T/token")"; }
+open_fifo caphost "$T/caphost.duckdb" "-unsigned"
+send caphost "LOAD $(q "$EXT");"
+threads_of() { awk '/^Threads:/{print $2}' "/proc/${FIFOPID[caphost]}/status" 2>/dev/null || echo 0; }
+t_before=$(threads_of)
+cap_hit=0
+t_after_2=0
+# Attempts 1 and 2 should each proceed (the cap isn't reached yet) and time
+# out (the frozen source never answers); attempts 3-5 should see the cap
+# already at its limit — both of the earlier builds' threads are still
+# genuinely stuck — and refuse immediately instead of spawning a 3rd, 4th or
+# 5th. A real staging build costs on the order of ~100-150 OS threads (the
+# review's own measurement; our threads=1 staging config narrows this only
+# a little), so the absolute ceiling below is calibrated to 2 real builds'
+# worth of threads plus slack, NOT to "per-build leak is tiny" — the actual
+# guarantee R2 gives is that growth PLATEAUS once the cap starts refusing,
+# which attempts 3-5 below prove directly by showing no further growth past
+# attempt 2.
+for i in 1 2 3 4 5; do
+  t0=$(date +%s)
+  before=$(wc -l < "$T/out_caphost")
+  send caphost "SELECT anofox_serve_dashboards($(q "$T/capdash"), $((SLOW_PORT + 300 + i)), json_object('source', $(cap_opts)));"
+  for _ in $(seq 100); do [ "$(wc -l < "$T/out_caphost")" -gt "$before" ] && break; sleep 0.3; done
+  t1=$(date +%s)
+  line="$(tail -n +"$((before + 1))" "$T/out_caphost")"
+  echo "cap attempt $i: $((t1 - t0))s, output: $line" >&2
+  echo "$line" | grep -qi "already running or abandoned" && cap_hit=1
+  if [ "$i" -eq 2 ]; then
+    t_after_2=$(threads_of)
+  fi
+done
+kill -CONT "${FIFOPID[capsrc]}" 2>/dev/null || true
+[ "$cap_hit" -eq 1 ] || fail "R2: the process-wide build cap never fired across 5 sequential attempts against a frozen source"
+echo "OK: the process-wide build cap refuses concurrent abandoned builds beyond the cap (R2)"
+t_after=$(threads_of)
+if [ "$t_before" -gt 0 ] && [ "$t_after" -gt 0 ] && [ "$t_after_2" -gt 0 ]; then
+  growth=$((t_after - t_before))
+  plateau_growth=$((t_after - t_after_2))
+  # Absolute ceiling: at most 2 concurrent real builds' worth of threads
+  # (observed ~100-150 each), plus generous slack — this bounds the TOTAL
+  # leak regardless of how it's split between the two proceeding attempts.
+  [ "$growth" -le 400 ] || fail "R2: host process threads grew by $growth over 5 attempts against a frozen source (before=$t_before after=$t_after) — expected the cap (max 2 concurrent) to keep this bounded to roughly 2 real builds' worth of threads"
+  # Plateau check: attempts 3, 4 and 5 are all refused by the cap WITHOUT
+  # spawning a new staging instance, so thread count after attempt 5 must
+  # be essentially unchanged from right after attempt 2 (the last attempt
+  # that actually proceeded).
+  [ "$plateau_growth" -le 20 ] || fail "R2: thread count grew by $plateau_growth AFTER the cap engaged (attempts 3-5, which should all be refused without spawning new staging instances; after attempt 2=$t_after_2, after attempt 5=$t_after)"
+  echo "OK: host process threads grew by $growth over 5 attempts (2 proceeding + 3 refused by the cap) and did not grow further ($plateau_growth) once the cap engaged (R2)"
+else
+  echo "SKIP: R2 thread-count check (/proc not available) — the cap refusal was still verified"
+fi
+close_fifo caphost
+close_fifo capsrc
+
+# ------------------------------------- 9. R3: max_bytes/max_rows mid-copy --
+# A single huge table or view must be cancelled DURING its own copy, not
+# only checked between objects (security review R3): with a small
+# max_bytes and a long timeout_s, failing quickly (not after writing
+# gigabytes, and not waiting for the timeout) proves the watchdog's
+# in-progress size poll fired.
+send src2 "CREATE TABLE huge(id BIGINT, pad VARCHAR);" \
+          "INSERT INTO huge SELECT i, repeat('x', 2000) FROM range(200000) r(i);" \
+          "CREATE VIEW hugeview AS SELECT i AS id, repeat('y', 2000) AS pad FROM range(200000) t(i);"
+before=$(wc -l < "$T/out_src2")
+send src2 "SELECT count(*) FROM huge;"
+for _ in $(seq 100); do [ "$(wc -l < "$T/out_src2")" -gt "$before" ] && break; sleep 0.2; done
+mkdir -p "$T/hugedash"
+printf 'SELECT 1::BIGINT AS one ::METRIC;\n' > "$T/hugedash/h.sql"
+huge_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src', 'max_bytes', 1000000, 'timeout_s', 120)" "$SRC_PORT" "$(q "$T/token")"; }
+t0=$(date +%s)
+if "$DUCKDB2" -no-agent -unsigned "$T/huge.duckdb" -c "LOAD $(q "$EXT"); SELECT anofox_serve_dashboards($(q "$T/hugedash"), $((SLOW_PORT + 400)), json_object('source', $(huge_opts)));" > "$T/huge_out" 2>&1; then
+  fail "a table exceeding max_bytes should refuse to start: $(cat "$T/huge_out")"
+fi
+t1=$(date +%s)
+huge_elapsed=$((t1 - t0))
+grep -qi "max_bytes" "$T/huge_out" || fail "max_bytes (table) error text: $(cat "$T/huge_out")"
+[ "$huge_elapsed" -le 15 ] || fail "R3 (table): took ${huge_elapsed}s to refuse (expected a few seconds, not close to timeout_s:120 — the mid-copy poll should have caught it)"
+echo "OK: a huge table is cancelled during its own copy once max_bytes is exceeded, in ${huge_elapsed}s, not after timeout_s (R3)"
+
+huge_view_opts() { printf "json_object('uri', 'quack:127.0.0.1:%s', 'token_file', %s, 'as', 'src', 'max_rows', 10, 'schemas', ['main'], 'timeout_s', 120)" "$SRC_PORT" "$(q "$T/token")"; }
+if "$DUCKDB2" -no-agent -unsigned "$T/hugeview.duckdb" -c "LOAD $(q "$EXT"); SELECT anofox_serve_dashboards($(q "$T/hugedash"), $((SLOW_PORT + 401)), json_object('source', $(huge_view_opts)));" > "$T/hugeview_out" 2>&1; then
+  fail "a view exceeding max_rows should refuse to start: $(cat "$T/hugeview_out")"
+fi
+grep -qi "max_rows" "$T/hugeview_out" || fail "max_rows (view) error text: $(cat "$T/hugeview_out")"
+echo "OK: a materialised view exceeding max_rows is refused (R3)"
+
 send host3 "SELECT anofox_serve_stop($PORT);"
 close_fifo host3
 close_fifo src2

@@ -470,6 +470,12 @@ impl Database {
                 ("autoinstall_known_extensions", "false"),
                 ("autoload_known_extensions", "false"),
                 ("allow_community_extensions", "false"),
+                // Security review R2: this instance only ever drives one
+                // remote Quack stream at a time; DuckDB's default thread
+                // count otherwise means an abandoned build (left running
+                // past its deadline, #352 M1) leaks on the order of 100
+                // threads instead of a handful.
+                ("threads", "2"),
             ],
         )
     }
