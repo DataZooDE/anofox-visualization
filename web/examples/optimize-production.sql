@@ -124,13 +124,14 @@ SELECT ('**' || pp_line() || '**, ' || pp_vol() || ', ' || pp_co() || '. Each ba
 
 -- A real Gantt (anofox_plot_schedule, #176) — one lane per line (here just
 -- pp_line(), since this panel already drills into one), a bar per order
--- coloured by status, a dot at its truck slot, faceted by model_id (today
--- vs. the selected rule) to compare the two run orders directly. Replaces
--- the ::SCATTER + ::XMIN/::XMAX "error bars" this used to draw (#171).
+-- coloured by status, a late order's connector to its truck slot, faceted
+-- by model_id (today vs. the selected rule) to compare the two run orders
+-- directly. Replaces the ::SCATTER + ::XMIN/::XMAX "error bars" this used
+-- to draw (#171).
 SELECT 12::COL;
 SELECT 460::HEIGHT;
 WITH g AS (SELECT * FROM pp_run() WHERE line = pp_line() AND rule IN (pp_today(), pp_rule()))
-SELECT anofox_plot_schedule(s),
+SELECT anofox_plot_schedule(s, x_label := 'hours after Mon 06:00'),
        ('Run plan: ' || pp_line() || ', today''s due-date order vs. ' || pp_rule())::TITLE
 FROM (
     SELECT CASE WHEN rule = pp_today() THEN '1 today: due-date order' ELSE '2 ' || rule END AS model_id,

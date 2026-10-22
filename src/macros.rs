@@ -307,8 +307,8 @@ UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f",
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
         body: contract_body!("schedule", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Gantt chart of a `schedule` table: one lane per resource, a bar per task from \
-start to end, coloured by status (on_time/late, else muted), a dot at due when it is present, \
-faceted by model_id (algorithm) when there are several (up to 6; else GROUP BY model_id or \
+start to end, coloured by status (on time/late, else muted), a late task's connector to its due \
+date, faceted by model_id (algorithm) when there are several (up to 6; else GROUP BY model_id or \
 WHERE model_id = ...). Columns: resource, task, start, end, model_id, due, status — one row per \
 task. Replaces drawing a schedule as a scatter with xmin/xmax error bars.",
         example: "SELECT anofox_plot_schedule(s) FROM (VALUES ('L1', 'O1', 0, 10, 'on time'), \

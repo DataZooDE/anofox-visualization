@@ -632,11 +632,23 @@ const STAND_INS: &[(&str, &str)] = &[
     ("col", "column_b"),
 ];
 
+/// Identifying columns that skip the long-name shortcut below despite being
+/// 6+ characters: `resource` sits within edit distance 2 of the ordinary
+/// word `source` (`names::near`'s threshold for a 6+ char spelling), so a
+/// plain node/edge table (`source, target, value`) would otherwise read as
+/// a schedule's near miss (#378 review of #176).
+const STRICT_SUFFIX_ONLY: &[&str] = &["resource"];
+
 /// Does the near miss `k` of the identifying column `c` point at its schema
 /// on its own? A long name's does (`estimat`, `curve_typ`); a short one
 /// (`term`, `yhat`) is one letter from everyday words (`team`, `that`), so
-/// only `c` with a suffix counts (`terms`, `yhat_1`) (#255).
+/// only `c` with a suffix counts (`terms`, `yhat_1`) (#255); `resource` is
+/// long but still only counts with a suffix, for the same reason (`source`
+/// is itself an everyday word, not a typo of `resource`).
 fn identifies(c: &str, k: &str) -> bool {
+    if STRICT_SUFFIX_ONLY.contains(&c) {
+        return names::norm(k).starts_with(c);
+    }
     c.len() >= 6 || names::norm(k).starts_with(c)
 }
 
@@ -1855,6 +1867,17 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("needs column(s) task"), "{e}");
+    }
+
+    #[test]
+    fn source_is_no_false_hint_for_resource() {
+        // A node/edge table (`source, target, value`) is close to `resource`
+        // by edit distance (#378 review of #176: `resource` = `re` +
+        // `source`), but is an everyday word, not a typo — no schedule hint.
+        let e = go("auto", r#"[{"source":"a","target":"b","value":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("closest: schedule"), "{e}");
     }
 
     const DECOMP_LONG: &str = r#"[
