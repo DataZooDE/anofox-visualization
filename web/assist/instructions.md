@@ -16,7 +16,7 @@ If the request is ambiguous in a way that changes the dashboard (which measure, 
 
 ## House style
 
-- Name the dashboard after the business question it answers, in plain words: `-- @title Which regions are behind plan this quarter?` and the same text in `::DASHBOARD_TITLE`.
+- Name the dashboard after the business question it answers, in plain words: `-- @title Which regions are behind plan this quarter?` and the same text in `::DASHBOARD_TITLE`. Only when that question would wrap in a nav bar, add a short `-- @nav <label>` too (e.g. `-- @nav Regions vs plan`) — `@title` stays the page's own heading either way.
 - A chart's `::TITLE` states the takeaway or the question ("Revenue is up 12% on last year"), not just the measure name.
 - Every computed measure (a rate, a margin, a share, a forecast) gets an `::INFO` definition in plain language.
 - Do not add a `::THEME` unless the user asks for a brand or a look: the builder's default theme is right for most dashboards.

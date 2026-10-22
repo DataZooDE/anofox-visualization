@@ -45,6 +45,11 @@ for (const q of ["monthly", "weekly apac"]) assert.ok(!dashMatches(e, searchTerm
 assert.ok(dashMatches(e, [], ["kpi"]));
 assert.ok(dashMatches(e, [], ["kpi", "weekly"]));
 assert.ok(!dashMatches(e, [], ["kpi", "forecast"]), "all selected tags");
+// a `-- @nav` short label is searched too (#355), even when it names
+// something the full title doesn't
+const n = { ...e, nav: "Risk board" };
+assert.ok(dashMatches(n, searchTerms("risk"), []));
+assert.ok(!dashMatches(e, searchTerms("risk"), []), "no @nav: not found by it");
 // owner is searched; "certified only" needs a certification
 const c = { ...e, owner: "Finance Team", certified: "2026-10-15" };
 assert.ok(dashMatches(c, searchTerms("finance"), []));

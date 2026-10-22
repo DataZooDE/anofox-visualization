@@ -1569,15 +1569,16 @@ pub fn check_policy(
 /// takes without a warning.
 pub const MAX_DESCRIPTION_CHARS: usize = 160;
 
-/// The header comments that place and describe a dashboard (`-- @group`,
-/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order`):
-/// an empty or over-long group, more tags than are kept, a description over
+/// The header comments that place and describe a dashboard (`-- @nav`,
+/// `-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`,
+/// `-- @order`): an empty `@nav`, an over-long `@nav`, an empty or
+/// over-long group, more tags than are kept, a description over
 /// [`MAX_DESCRIPTION_CHARS`], an empty owner, a certification date that
 /// isn't `YYYY-MM-DD`, an `@order` that isn't a plain integer. Reported as
 /// statement 0 (the header comes before the first statement).
 pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     use crate::host::serving::{
-        header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_TAGS,
+        header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_NAV_CHARS, MAX_TAGS,
     };
     let mut diags = Vec::new();
     let mut warn = |code, message: String, line: &str| {
@@ -1593,7 +1594,27 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     let mut tags_line = "";
     let (mut desc, mut desc_warned) = (0usize, false);
     for line in script.lines() {
-        if let Some(g) = header_value(line, "group") {
+        if header_value(line, "nav") == Some("") {
+            warn(
+                "header/empty-nav",
+                "`-- @nav` has no label — the nav bar and start-page card fall back to \
+                 `-- @title`, or drop the line"
+                    .into(),
+                line,
+            );
+        } else if let Some(n) =
+            header_value(line, "nav").filter(|n| n.chars().count() > MAX_NAV_CHARS)
+        {
+            warn(
+                "header/long-nav",
+                format!(
+                    "`-- @nav` is {} characters long — keep it to {MAX_NAV_CHARS} or fewer \
+                     (it is a nav bar / card label, `-- @title` can stay the long form)",
+                    n.chars().count()
+                ),
+                line,
+            );
+        } else if let Some(g) = header_value(line, "group") {
             if g.split('/').all(|p| p.trim().is_empty()) {
                 warn(
                     "header/empty-group",
@@ -3714,6 +3735,13 @@ mod design_tests {
         };
         assert!(codes("-- @owner Finance\n-- @certified 2026-10-15\nSELECT 1;").is_empty());
         assert_eq!(codes("-- @owner \nSELECT 1;"), ["header/empty-owner"]);
+        assert!(codes("-- @nav Weekly sales\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @nav \nSELECT 1;"), ["header/empty-nav"]);
+        assert_eq!(
+            codes(&format!("-- @nav {}\n", "x".repeat(41))),
+            ["header/long-nav"]
+        );
+        assert!(codes(&format!("-- @nav {}\n", "x".repeat(40))).is_empty());
         assert_eq!(
             codes("-- @certified 2026-02-30\n"),
             ["header/bad-certified"]

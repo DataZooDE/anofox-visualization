@@ -438,24 +438,26 @@ pub fn threshold_rules(spec: &str) -> String {
     crate::thresholds::table_json(spec)
 }
 
-/// A dashboard's header comments as `{"title","group","tags","refresh",
+/// A dashboard's header comments as `{"title","nav","group","tags","refresh",
 /// "description","owner","certified"}`,
 /// read by the parser the servers use
 /// ([`crate::host::serving::parse_dashboard_meta`]), so the builder's sidebar
 /// and a served folder place a dashboard alike. `title` is "" without
-/// `-- @title`, `group` is null without `-- @group`.
+/// `-- @title`, `nav` and `group` are null without `-- @nav` / `-- @group`
+/// (a reader shows `nav || title` as the compact nav/card label).
 #[wasm_bindgen]
 pub fn dashboard_meta(script: &str) -> String {
     guard(|| {
         let m = crate::host::serving::parse_dashboard_meta("", script);
         Ok(serde_json::json!({
-            "title": m.title, "group": m.group, "tags": m.tags, "refresh": m.refresh,
-            "description": m.description, "owner": m.owner, "certified": m.certified,
+            "title": m.title, "nav": m.nav, "group": m.group, "tags": m.tags,
+            "refresh": m.refresh, "description": m.description, "owner": m.owner,
+            "certified": m.certified,
         })
         .to_string())
     })
     .unwrap_or_else(|_| {
-        r#"{"title":"","group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null}"#.into()
+        r#"{"title":"","nav":null,"group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null}"#.into()
     })
 }
 

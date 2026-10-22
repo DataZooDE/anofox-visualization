@@ -3,14 +3,26 @@
 // list — the ungrouped first, then the groups by name — and keeps the
 // server's order inside a group. The nav turns into a searchable menu from
 // SERVED_NAV_MENU_MIN dashboards, the same threshold as the list page
-// (src/page.rs LIST_SEARCH_MIN).
+// (src/page.rs LIST_SEARCH_MIN). Also navLabel (#355): the compact
+// `-- @nav` label a nav link, a start-page card and the examples sidebar
+// all fall back through the same way.
 import { readFileSync } from "fs";
 import assert from "assert/strict";
 
 const src = readFileSync(new URL("../../web/app.js", import.meta.url), "utf8");
-const m = src.match(/^function servedNavGroups\([\s\S]*?^}/m);
-assert.ok(m, "servedNavGroups not found in app.js");
-const { servedNavGroups } = new Function(`${m[0]}\nreturn { servedNavGroups };`)();
+const fn = (name) => {
+  const m = src.match(new RegExp(`^function ${name}\\([\\s\\S]*?^}`, "m"));
+  assert.ok(m, `function ${name} not found in app.js`);
+  return m[0];
+};
+const { servedNavGroups, navLabel } = new Function(`${fn("servedNavGroups")}\n${fn("navLabel")}\nreturn { servedNavGroups, navLabel };`)();
+
+// -- @nav when set, else the title, else the fallback (the file id, or "")
+assert.equal(navLabel("Supplier risk", "Which products depend on this supplier?", "s"), "Supplier risk");
+assert.equal(navLabel(undefined, "Which products depend on this supplier?", "s"), "Which products depend on this supplier?");
+assert.equal(navLabel(undefined, undefined, "s"), "s");
+assert.equal(navLabel(undefined, undefined, undefined), "");
+assert.equal(navLabel("", "", ""), "");
 
 const nav = [
   { id: "a", title: "A", group: "sales" },

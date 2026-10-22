@@ -2990,7 +2990,9 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
 }
 
 /// The served nav: the dashboards the viewer may read (`scope`), each
-/// `{id, title, group, tags, owner, certified}` — the client groups them.
+/// `{id, title, nav, group, tags, owner, certified}` — the client groups
+/// them and shows `nav` (`-- @nav`, a short label) in place of `title` when
+/// it is set (#355).
 fn nav_json(dashboards: &[Dash], scope: Option<&Scope>) -> Vec<serde_json::Value> {
     dashboards
         .iter()
@@ -3179,7 +3181,7 @@ mod tests {
         let ds = vec![
             dash(
                 "sales",
-                "-- @title Weekly sales\n-- @group Sales / EMEA\n-- @tags kpi, weekly\n\
+                "-- @title Weekly sales\n-- @nav Sales\n-- @group Sales / EMEA\n-- @tags kpi, weekly\n\
                  -- @owner Finance\n-- @certified 2026-10-15\n-- @description Per store.\nSELECT 1;",
             ),
             dash("ops", "-- @group Ops\nSELECT 1;"),
@@ -3189,13 +3191,15 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(
             all[0],
-            serde_json::json!({"id": "sales", "title": "Weekly sales", "group": "Sales / EMEA",
+            // #355: `-- @nav` rides along as its own field, next to `title`
+            // (a reader shows `nav || title`), not instead of it.
+            serde_json::json!({"id": "sales", "title": "Weekly sales", "nav": "Sales", "group": "Sales / EMEA",
                 "tags": ["kpi", "weekly"], "description": "Per store.", "owner": "Finance",
                 "certified": "2026-10-15"})
         );
         assert_eq!(
             all[2],
-            serde_json::json!({"id": "plain", "title": "plain", "group": null, "tags": [],
+            serde_json::json!({"id": "plain", "title": "plain", "nav": null, "group": null, "tags": [],
                 "description": null, "owner": null, "certified": null})
         );
         // a scoped viewer sees only their dashboards — with their groups intact
@@ -3208,6 +3212,7 @@ mod tests {
         assert_eq!(ids, ["sales", "plain"]);
         assert_eq!(some[0]["group"], "Sales / EMEA");
         assert_eq!(some[0]["certified"], "2026-10-15");
+        assert_eq!(some[0]["nav"], "Sales");
         let none = Scope {
             dashboards: Some(vec![]),
             vars: vec![],
