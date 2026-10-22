@@ -74,6 +74,12 @@ jobs:
       - name: Locked server end to end (read-only session, search_path, limits)
         run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # #357: the access policy's hash-mask key never reaches a panel, an
+      # error, the dashboard page, /healthz, stderr or the request log, and
+      # SQL that could reveal it is refused at start.
+      - name: Access policy key e2e (hash mask key never leaks)
+        run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # The Python helper (python/), the snippets of docs/python-r.md and the
       # example notebook (examples/python), rendered through the extension
       # built above.
@@ -129,11 +135,23 @@ jobs:
           "$d/duckdb" --version
           echo "$d" >> "$GITHUB_PATH"
 
+      # #357: the access policy's rewrite (src/host/policy.rs) depends on
+      # `json_serialize_sql`'s exact shape, which 2.0's PEG parser changed;
+      # this runs tests/policy_duckdb.rs (and `every_duckdb_function_is_
+      # classified`, which fails if 2.0 adds a function src/host/
+      # policy_functions.txt doesn't yet classify) against the real 2.0 CLI
+      # now first on PATH, alongside the rest of the suite.
+      - name: test (core incl. serve and the access policy suite), against DuckDB 2.0
+        run: cargo test --locked --features serve
+
       - name: Build the C-API extension (Rust cdylib)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
 
       - name: Locked server end to end, against DuckDB 2.0
         run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Access policy key e2e, against DuckDB 2.0
+        run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
   web:
     # The browser-side tests (tests/web/*.mjs): app.js against the wasm build —

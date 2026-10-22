@@ -7,7 +7,15 @@
 # extension functions per policy (`functions`). tests/policy_duckdb.rs fails
 # when the pinned DuckDB has a function that is not listed: classify it here.
 #
-# kind verdict name  # reason
+# Also reclassified against DuckDB 2.0.0 (#357): a block near the end of this
+# file covers every function 2.0 added. `collate_<locale>` (a second,
+# unprefixed name 2.0 gives the same per-locale collations as the existing
+# `icu_collate_<locale>`, below) is reviewed as one class, not line by line.
+#
+# kind verdict name  # reason (name is usually one word; a few DuckDB 2.0
+# comparison operators are exposed as named functions with a space in the
+# name, e.g. "is distinct from" — the rest of the line up to any `#` is the
+# name, so only one word of actual reason text needs a `#`)
 #
 # Built in to the parser (not in duckdb_functions()):
 scalar allow unnest
@@ -920,3 +928,243 @@ table deny test_vector_types  # reads tables, files, the catalog or runs SQL
 table deny truncate_duckdb_logs  # reads tables, files, the catalog or runs SQL
 table allow unnest
 table deny which_secret  # reads tables, files, the catalog or runs SQL
+#
+# DuckDB 2.0.0 additions (#357), reviewed one by one against duckdb_functions():
+#
+# Comparison operators 2.0 exposes as named functions (parsed from
+# `=`/`<`/… and `IS [NOT] DISTINCT FROM`); pure, like the operators above.
+scalar allow !=
+scalar allow <
+scalar allow <=
+scalar allow =
+scalar allow >
+scalar allow >=
+scalar allow __between
+scalar allow is distinct from
+scalar allow is not distinct from
+#
+# Pure value-in, value-out functions: no catalog, settings, file or SQL-text
+# access.
+scalar allow binom
+scalar allow bitstring_byte_comparable
+scalar allow hive_partition_component  # parses a given path string; does not touch the filesystem
+scalar allow json_deep_merge
+scalar allow json_insert
+scalar allow json_merge_patch_diff
+scalar allow json_normalize
+scalar allow json_remove
+scalar allow json_replace
+scalar allow json_set
+scalar allow json_strip_nulls
+scalar allow overlay
+scalar allow path_join  # joins given path strings; does not touch the filesystem
+scalar allow st_asgeojson
+scalar allow st_geomfromgeojson
+scalar allow variant_array_length
+scalar allow variant_comparator
+scalar allow variant_contains
+scalar allow variant_exists
+scalar allow variant_extract_string
+scalar allow variant_keys
+scalar allow variant_type
+aggregate allow variant_group_object
+macro allow variant_group_array
+aggregate allow lttb  # downsampling aggregate over given rows; no catalog access
+macro allow if  # ternary, like iif
+macro allow assert_true  # raises on a given condition; no catalog access
+#
+# Internal: inserted by the optimizer/physical planner, never by the parser,
+# so none of these can appear in a dashboard's `json_serialize_sql` output —
+# denying them costs nothing. Same review as the pre-existing
+# `__internal_*` entries above.
+scalar deny __cast  # internal
+scalar deny __internal_barrier  # internal
+scalar deny __internal_compress_geometry_point  # internal
+scalar deny __internal_compressed_materialization_cast  # internal
+scalar deny __internal_decompress_geometry_point  # internal
+scalar deny __internal_json_copy_to_geojson  # internal
+scalar deny __internal_json_copy_to_json  # internal
+scalar deny __internal_tablefilter_bloom_filter  # internal
+scalar deny __internal_tablefilter_dynamic  # internal
+scalar deny __internal_tablefilter_optional  # internal
+scalar deny __internal_tablefilter_prefix_range  # internal
+scalar deny __internal_tablefilter_selectivity_optional  # internal
+scalar deny index_key  # internal storage/index helper
+scalar deny to_aggregate_state  # internal aggregate state
+aggregate deny combine_aggr  # internal parallel-aggregation helper
+aggregate deny decimal_average  # internal arithmetic rewrite helper
+scalar deny decimal_division  # internal arithmetic rewrite helper
+macro deny json_copy_strftime_if_date  # internal COPY/EXPORT helper
+macro deny json_copy_strftime_if_timestamp  # internal COPY/EXPORT helper
+#
+# Reviewed and denied: catalog/system state, or an unreviewed capability.
+scalar deny duckdb_format_sql  # formats arbitrary SQL text; no established need, review before allowing
+scalar deny invoke  # calls a function by name dynamically; would bypass this list
+scalar deny setval  # sequences (catalog)
+scalar deny vertex_extract  # unclear semantics; review before allowing
+#
+# Table functions: new `duckdb_*()` catalog/system introspection, same
+# review as the pre-existing `duckdb_*()` entries above.
+table deny duckdb_available_metrics  # reads tables, files, the catalog or runs SQL
+table deny duckdb_dialects  # reads tables, files, the catalog or runs SQL
+table deny duckdb_eviction_queues  # reads tables, files, the catalog or runs SQL
+table deny duckdb_extension_repositories  # reads tables, files, the catalog or runs SQL
+table deny duckdb_external_resource_types  # reads tables, files, the catalog or runs SQL
+table deny duckdb_external_resources  # reads tables, files, the catalog or runs SQL
+table deny duckdb_grammar_extensions  # reads tables, files, the catalog or runs SQL
+table deny duckdb_secret_type_parameters  # reads tables, files, the catalog or runs SQL
+table deny duckdb_triggers  # reads tables, files, the catalog or runs SQL
+table deny shell_history  # reads the CLI session's command history
+table deny sql_tokenize  # no established need, review before allowing
+table deny create_external_resource  # manages external resources (catalog/system state)
+table deny deregister_external_resource  # manages external resources (catalog/system state)
+table deny destroy_external_resource  # manages external resources (catalog/system state)
+table deny register_external_resource  # manages external resources (catalog/system state)
+table deny register_external_resource_type  # manages external resources (catalog/system state)
+#
+# File readers: single-file variants of read_csv/read_json/read_parquet,
+# added to FILE_READERS so a policy can allow them like their siblings.
+table deny read_single_csv_file  # reads tables, files, the catalog or runs SQL
+table deny read_single_json_file  # reads tables, files, the catalog or runs SQL
+table deny read_single_parquet_file  # reads tables, files, the catalog or runs SQL
+scalar allow collate_aa  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_af  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_am  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ar  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ar_sa  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_as  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_az  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_bal  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_be  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_bg  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_blo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_bn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_bo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_br  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_bs  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ca  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ceb  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_chr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_cs  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_cu  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_cy  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_da  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_de  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_de_at  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_dsb  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_dz  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ee  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_el  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_en  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_en_us  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_eo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_es  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_et  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fa  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fa_af  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ff  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fi  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fil  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fr_ca  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_fy  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ga  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_gl  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_gu  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ha  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_haw  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_he  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_he_il  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_hi  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_hr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_hsb  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_hu  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_hy  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_id  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_id_id  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ig  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_is  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_it  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ja  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ka  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_kk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_kl  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_km  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_kn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ko  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_kok  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ku  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ky  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lb  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lij  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lkt  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ln  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lt  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_lv  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_mk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ml  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_mn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_mr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ms  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_mt  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_my  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_nb  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_nb_no  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ne  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_nl  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_nn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_no  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_noaccent  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_nso  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_om  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_or  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_pa  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_pa_in  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_pl  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ps  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_pt  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ro  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ru  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sa  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_se  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sgs  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_si  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sl  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_smn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sq  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sr_ba  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sr_me  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sr_rs  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ssy  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_st  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sv  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_sw  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ta  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_te  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_th  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_tk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_tn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_to  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_tr  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ug  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_uk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_ur  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_uz  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_vi  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_vo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_wae  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_wo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_xh  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_yi  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_yo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh_cn  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh_hk  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh_mo  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh_sg  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zh_tw  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+scalar allow collate_zu  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
