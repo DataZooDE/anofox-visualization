@@ -144,3 +144,11 @@ fn web_assistant_core() {
 fn web_view_switcher_url_state() {
     run_node("views_test.mjs");
 }
+
+/// The exported standalone HTML's tab/sub-tab switcher (#381): each
+/// `.tabbar`/`.subtabbar` wires up scoped to its own wrap's panes, so a
+/// sub-tab click never indexes into an unrelated bar's panes.
+#[test]
+fn web_export_wires_each_tab_group_independently() {
+    run_node("subtabs_export_test.mjs");
+}
