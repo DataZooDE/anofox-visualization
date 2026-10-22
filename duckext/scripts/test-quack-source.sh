@@ -570,4 +570,55 @@ send host3 "SELECT anofox_serve_stop($PORT);"
 close_fifo host3
 close_fifo src2
 
+# ------------------------ 10. C1: stop() frees the port in full --
+# A regression affecting every locked server, not only a Quack-sourced one
+# (security review #356 C1): the flat 5s join budget `anofox_serve_stop`
+# applies to a stuck `refresh_s`/source-build thread used to apply to
+# EVERY worker, including the HTTP ones — so stop() could report success
+# while a worker still legitimately busy on a slow (but bounded by
+# timeout_ms) panel query kept the port bound underneath it. No Quack
+# source is involved here; this is a plain locked server.
+mkdir -p "$T/slowpaneldash"
+cat > "$T/slowpaneldash/p.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM range(6000000000) r(i) WHERE i % 7 = 3;
+SQL
+C1_PORT=$((SLOW_PORT + 500))
+open_fifo c1host "$T/c1host.duckdb" "-unsigned"
+send c1host "LOAD $(q "$EXT");" "SELECT anofox_serve_dashboards($(q "$T/slowpaneldash"), $C1_PORT);"
+wait_for c1host 'locked, read-only dashboard' || fail "C1 fixture server did not start: $(cat "$T/out_c1host")"
+# ~15-20s on this machine (no interrupt before the default 30s timeout_ms)
+# — comfortably past the old 5s stop budget and comfortably under the
+# default timeout, so the worker finishes the query naturally.
+curl -s -o "$T/c1_body" -w '%{http_code}' -X POST "http://127.0.0.1:$C1_PORT/api/panel" \
+  -d '{"dashboard":"p","panel":0,"vars":{}}' > "$T/c1_curl_code" &
+CURL_PID=$!
+sleep 1
+t0=$(date +%s)
+send c1host "SELECT anofox_serve_stop($C1_PORT);"
+for _ in $(seq 200); do grep -q "stopped the locked server" "$T/out_c1host" 2>/dev/null && break; sleep 0.2; done
+t1=$(date +%s)
+stop_elapsed=$((t1 - t0))
+grep -q "stopped the locked server" "$T/out_c1host" || fail "anofox_serve_stop did not report success within 40s: $(cat "$T/out_c1host")"
+[ "$stop_elapsed" -ge 5 ] || fail "C1: anofox_serve_stop returned in only ${stop_elapsed}s while a panel query was still in flight — it should have waited for that worker, not applied the refresher's 5s budget to it too"
+# The port must be free the instant stop() returns: bind a throwaway
+# listener on it immediately. "Address already in use" would mean the HTTP
+# worker (and its Arc<Server> clone) was still alive underneath the
+# claimed-successful stop.
+if ! python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.1', $C1_PORT))
+except OSError as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
+s.close()
+"; then
+  fail "C1: the port stayed bound after anofox_serve_stop reported success (stopped in ${stop_elapsed}s)"
+fi
+echo "OK: anofox_serve_stop waited ${stop_elapsed}s for the HTTP worker running a slow panel query, and the port was free the instant it returned (C1)"
+wait "$CURL_PID" 2>/dev/null || true
+close_fifo c1host
+
 echo "ALL OK: options.source (Quack source, #352 prototype)"

@@ -1355,11 +1355,22 @@ runs out, the caller gives up: the build counts as failed (`source_ok:
 false`, `consecutive_failures` incremented) and the thread is left running
 in the background (`build_overdue: true`) rather than blocking anything —
 DuckDB has no way to abort a stuck network wait from the outside, and the
-remote side may still be the one holding things up. At most **one** such
-orphaned build is tolerated per server: while `build_overdue` is set, a new
-attempt (another refresh, or the next `refresh_s` tick) fails fast instead
-of piling up threads; the orphaned thread clears it for itself whenever it
-finally returns. Independently of the deadline, a watchdog thread on a
+remote side may still be the one holding things up. At most **one**
+orphaned build per server is tolerated locally (while `build_overdue` is
+set, a new attempt on *that* server — another refresh, or the next
+`refresh_s` tick — fails fast instead of piling up threads; the orphaned
+thread clears it for itself whenever it finally returns), and at most
+**two, process-wide, across every locked server sharing this process**
+(security review R2): once that many builds are running or abandoned
+anywhere in the process, a further attempt on *any* server is refused
+immediately with a clear error, instead of leaking another staging
+instance's threads without bound. This is a process-wide resource cap, not
+a per-server one — **two stuck sources are enough to pause source
+refreshes for every locked server in the process**, not just their own:
+existing snapshots keep serving (an outage-free degradation, not a
+failure), but every affected server's data goes stale and shows
+`source_ok: false` until one of the stuck builds finally returns (at its
+own deadline) and frees a slot. Independently of the deadline, a watchdog thread on a
 **second** staging connection (the first is busy running the copy) also
 reacts to `anofox_serve_stop` being called on this server: cancelling the
 server cancels a build in flight immediately (there is no separate per-build
@@ -1374,10 +1385,17 @@ accepts a connection and never answers — has no cancellable handle yet, so
 only the outer deadline above ever un-wedges the caller in that case; the
 thread itself may still be stuck).
 
-`anofox_serve_stop` never waits indefinitely on a stuck build either: it
-joins the server's worker threads with the same bounded budget and leaves
-anything still running past it to finish on its own, so stopping a server is
-never itself turned into an outage by an unresponsive source.
+`anofox_serve_stop` never waits indefinitely on a stuck `refresh_s` build
+either: that one thread gets a short, fixed 5s join budget, with anything
+still running past it left to finish on its own, so stopping a server is
+never itself turned into an outage by an unresponsive source. The HTTP
+request-handling workers are a separate matter and are joined in full
+(security review C1): each one handles at most one request at a time, and
+that request is already bounded on its own (a locked server's own
+`timeout_ms` cancels a running panel query), so there is no reason to cut
+that join short — doing so previously let `anofox_serve_stop` report
+success while a legitimate, still in-flight request kept the port bound
+underneath it for however long that request had left to run.
 
 **Threat model delta — the review this prototype still needs:**
 

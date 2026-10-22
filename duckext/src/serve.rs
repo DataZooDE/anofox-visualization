@@ -77,7 +77,20 @@ struct Running {
     kind: &'static str,
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
+    /// HTTP request-handling workers. Each request is already bounded on
+    /// its own (a locked server's `timeout_ms` cancels a running panel
+    /// query; authoring serialises on a single worker), so `stop()` fully
+    /// joins these rather than racing the port's unbind against whatever
+    /// time a legitimate, already-in-flight request still has left (#356
+    /// C1 — a flat stop budget applied here left the port bound for up to
+    /// `timeout_ms` after `anofox_serve_stop` had already reported success).
     workers: Vec<JoinHandle<()>>,
+    /// The `refresh_s` thread for a locked server, if any. Unlike the HTTP
+    /// workers, this has no bound of its own: an *abandoned* Quack build
+    /// (past its own `timeout_s` + grace, #352 M1/R2) can still be running
+    /// in the background with nothing else to wait on, so only this thread
+    /// gets `stop()`'s short, fixed join budget (#356 I6).
+    refresher: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -107,16 +120,25 @@ pub fn stop(port: u16) -> Result<String, String> {
     for _ in 0..r.workers.len() {
         r.server.unblock();
     }
-    // #352 M1 fix 3 / I6: bounded, with a short, fixed budget regardless of
-    // the build's own `timeout_s` — a worker stuck in an *abandoned* Quack
-    // build returns almost immediately (the review measured 0.13s), and the
-    // refresher thread is never joined again later either way, so there is
-    // no reason to make a caller of `anofox_serve_stop` wait anywhere near
-    // `timeout_s` for a build that is merely still in flight (not yet past
-    // its own deadline). Anything still running past the budget is left to
-    // finish in the background.
+    // #356 C1: the HTTP workers are fully joined, not budget-capped — each
+    // one handles at most one request at a time, and that request is
+    // already bounded (a locked server's own `timeout_ms` cancels a running
+    // panel query; authoring's single worker serialises on the live
+    // connection the same way it always has). A flat cap here previously
+    // let `anofox_serve_stop` report success while a legitimate, still
+    // in-flight request kept the port bound underneath it.
+    for h in std::mem::take(&mut r.workers) {
+        let _ = h.join();
+    }
+    // #352 M1 fix 3 / I6: the refresh_s thread, in contrast, has no bound of
+    // its own — it can be in the middle of an *abandoned* Quack build (past
+    // its own `timeout_s` + grace) left running in the background (#352
+    // M1/R2) with nothing else to wait on. Only this one thread gets a
+    // short, fixed stop budget, regardless of the build's own `timeout_s`.
     const STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
-    join_bounded(std::mem::take(&mut r.workers), STOP_JOIN_BUDGET);
+    if let Some(h) = r.refresher.take() {
+        join_bounded(vec![h], STOP_JOIN_BUDGET);
+    }
     Ok(format!(
         "anofox-visualization: stopped the {} server on port {port}",
         r.kind
@@ -336,6 +358,7 @@ pub fn start_authoring(
             server,
             stop,
             workers,
+            refresher: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -1074,12 +1097,28 @@ fn run_source_build(
     let (tx, rx) = mpsc::channel();
     let (src, dir, stop, state_for_thread) =
         (src.clone(), dir.to_path_buf(), stop.clone(), state.clone());
-    std::thread::spawn(move || {
-        let _release_slot = ReleaseSlotOnDrop;
-        let _clear_in_flight = ClearInFlightOnDrop(state_for_thread);
+    // #356 C2: both release guards are created HERE, before the thread
+    // exists, and only then moved into its closure (not constructed inside
+    // the closure body once it's already running). `Builder::spawn`
+    // returns a `Result` instead of panicking on a failed OS thread
+    // creation, so if it fails, the closure — and the guards captured in
+    // it — are simply dropped back in THIS thread, still releasing the
+    // in-flight marker and the global slot. With the old
+    // `std::thread::spawn` plus guards constructed only once the new
+    // thread's body started running, a failed spawn left both stuck
+    // forever (nothing to ever drop them).
+    let release_slot = ReleaseSlotOnDrop;
+    let clear_in_flight = ClearInFlightOnDrop(state_for_thread);
+    if let Err(e) = std::thread::Builder::new().spawn(move || {
+        let _release_slot = release_slot;
+        let _clear_in_flight = clear_in_flight;
         let r = crate::source::copy_from_quack(&dir, &src, &stop);
         let _ = tx.send(r);
-    });
+    }) {
+        return Err(format!(
+            "options.source: could not start the build thread: {e}"
+        ));
+    }
     match rx.recv_timeout(budget) {
         // The thread is finishing up (or already has) — its own drop guard
         // clears `in_flight` and releases the global slot; nothing to do here.
@@ -1396,16 +1435,19 @@ pub fn start_locked(
         None => String::new(),
     };
     let st = state.clone();
-    let mut workers = spawn_workers(
+    let workers = spawn_workers(
         &server,
         &stop,
         threads,
         Arc::new(move |req| handle_locked(&st, req)),
     );
-    if let Some(every) = refresh {
+    // #356 C1: the refresh_s thread is tracked separately from the HTTP
+    // workers (see `Running::refresher`) so `stop()` can fully join the
+    // latter while only budget-capping this one.
+    let refresher_handle = refresh.map(|every| {
         let (st, stop) = (state.clone(), stop.clone());
-        workers.push(std::thread::spawn(move || refresher(&st, &stop, every)));
-    }
+        std::thread::spawn(move || refresher(&st, &stop, every))
+    });
     servers.insert(
         port,
         Running {
@@ -1413,6 +1455,7 @@ pub fn start_locked(
             server,
             stop,
             workers,
+            refresher: refresher_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
