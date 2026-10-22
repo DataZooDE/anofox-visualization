@@ -13486,11 +13486,20 @@ function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
   // mark has given its <title> up already.
+  //
+  // A non-empty <title> alone isn't enough: ggplot-rs 0.23's vertical-legend
+  // truncation (#159) gives a too-long legend label its own <title> (the
+  // untruncated text, for a hover tooltip) without making the label a data
+  // mark — `gg-mark`/`data-geom` are only set while an actual geom layer is
+  // drawing, never for legend text. Require `gg-mark` too, so a legend
+  // label can never slip into hover/select/drill as if it were a point/bar.
   const marks = [
     ...document.querySelectorAll(
       ".panel svg:not([data-hw]) rect,.panel svg:not([data-hw]) circle,.panel svg:not([data-hw]) polygon,.panel svg:not([data-hw]) polyline,.panel svg[data-map]:not([data-hw]) path"
     ),
-  ].filter((el) => el.querySelector("title") && el.querySelector("title").textContent.trim());
+  ].filter(
+    (el) => el.classList.contains("gg-mark") && el.querySelector("title") && el.querySelector("title").textContent.trim()
+  );
   document.querySelectorAll(".panel svg:not([data-hw])").forEach((svg) => svg.setAttribute("data-hw", ""));
 
   // Dim non-selected marks (the shared emphasis state's "select" layer), but
