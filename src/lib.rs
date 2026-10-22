@@ -572,20 +572,25 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
     roles::lookup(annotation).map(|s| s.role)
 }
 
-fn value_str(v: &Value) -> String {
+pub(crate) fn value_str(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
         Value::Na => String::new(),
-        _ => v
-            .as_f64()
-            // A non-finite number (`f64::INFINITY`/`NAN`, e.g. from a 0-divide
-            // upstream) must never reach `format!("{}", ..)`, which prints the
-            // literal `inf`/`NaN` — that string then ends up verbatim in a
-            // `data-label`/category key (map markers' `label_of`, #319).
-            // Treat it like missing data, the same as `Value::Na` above.
-            .filter(|f| f.is_finite())
-            .map(|f| format!("{}", (f * 1000.0).round() / 1000.0))
-            .unwrap_or_default(),
+        _ => match v.as_f64() {
+            None => String::new(),
+            // A non-finite number (`f64::INFINITY`/`NAN`, e.g. from a
+            // 0-divide upstream) must never reach `format!("{}", ..)`, which
+            // prints the literal `inf`/`NaN` — that string then ends up
+            // verbatim in a `data-label`/category key (map markers'
+            // `label_of`, #319). Spell it out instead of folding it into
+            // the same blank level as missing data (#340 D): a discrete
+            // axis, facet or group key keeps `∞`/`−∞`/`NaN` as its own
+            // visible level rather than silently merging it with `Na`.
+            Some(f) if f.is_nan() => "NaN".to_string(),
+            Some(f) if f == f64::INFINITY => "\u{221E}".to_string(),
+            Some(f) if f == f64::NEG_INFINITY => "\u{2212}\u{221E}".to_string(),
+            Some(f) => format!("{}", (f * 1000.0).round() / 1000.0),
+        },
     }
 }
 
@@ -2464,7 +2469,17 @@ fn cartesian(
     // honour it too (ggplot-rs#318 B3-4), so ::DATALABELS dodges the same way.
     let dodge_width = if bar { 0.9 } else { 0.6 };
     let dodge = x_levels.is_some();
-    let xvals = x.values.clone();
+    // On a discrete x, normalise every value to the same `value_str` text
+    // the facet/radar levels already use, rather than handing ggplot-rs a
+    // mixed Value column — e.g. a non-finite level `downsample::prepare`
+    // kept as its own `∞`/`−∞`/`NaN` text (#340 D) is a `Value::Str`
+    // already, but a `Value::Na` gap on the same axis isn't, and a mixed
+    // column would otherwise make ggplot-rs guess the column's type.
+    let xvals = if x_discrete {
+        x.values.iter().map(|v| Value::Str(value_str(v))).collect()
+    } else {
+        x.values.clone()
+    };
     let yvals = match kind {
         Kind::BarPercent => percent_shares(&x.values, &value.values, category.is_some()),
         // Each segment's share of its bar, so the hover value and the data

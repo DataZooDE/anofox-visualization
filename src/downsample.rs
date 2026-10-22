@@ -2,11 +2,15 @@
 //!
 //! 1. **Shape**: pad every column to the longest one with missing values, so
 //!    row-indexed renderers can never index out of bounds.
-//! 2. **Sanitise**: non-finite floats (NaN/±inf) become missing; control
-//!    characters (other than tab/LF/CR) are dropped from strings so the
-//!    extension's own SVG/HTML text stays well-formed XML. Quotes are kept
-//!    verbatim: every writer escapes them (`format::escape_xml`, and ggplot-rs
-//!    ≥ 0.16 escapes `"`/`'` in attributes).
+//! 2. **Sanitise**: non-finite floats (NaN/±inf) become missing — except on
+//!    a discrete grouping column (`::CATEGORY`/`::FACET`/`::FACET_FREE`, or
+//!    an `::XAXIS` that already carries a text level), where one instead
+//!    becomes its own `∞`/`−∞`/`NaN` text level, kept apart from a missing
+//!    value's blank one (#340 D). Control characters (other than tab/LF/CR)
+//!    are dropped from strings so the extension's own SVG/HTML text stays
+//!    well-formed XML. Quotes are kept verbatim: every writer escapes them
+//!    (`format::escape_xml`, and ggplot-rs ≥ 0.16 escapes `"`/`'` in
+//!    attributes).
 //! 3. **Category cap**: a discrete x axis (bars, box/violin/jitter) or a
 //!    `::CATEGORY` with more than [`RenderOptions::max_categories`] levels
 //!    keeps the largest `max − 1` (by total |measure|, or row count for
@@ -42,7 +46,17 @@ pub(crate) fn prepare(cols: &[Column], o: &RenderOptions) -> Vec<Column> {
     let mut out: Vec<Column> = cols
         .iter()
         .map(|c| {
-            let mut values: Vec<Value> = c.values.iter().map(sanitize).collect();
+            // A discrete grouping role — `::CATEGORY`/`::FACET`/`::FACET_FREE`
+            // always, an `::XAXIS` only when it already carries a text level
+            // (so a genuinely continuous x, where a non-finite value has no
+            // sensible position, still drops it as missing) — keeps a
+            // non-finite float as its own `∞`/`−∞`/`NaN` level instead of
+            // folding it into the same blank level as a missing value
+            // (#340 D): otherwise indistinguishable once this pass turns it
+            // into `Value::Na` below.
+            let discrete = matches!(c.role, Role::Category | Role::Facet | Role::FacetFree)
+                || (c.role == Role::X && c.values.iter().any(|v| matches!(v, Value::Str(_))));
+            let mut values: Vec<Value> = c.values.iter().map(|v| sanitize(v, discrete)).collect();
             values.resize(n, Value::Na);
             Column::new(c.name.clone(), resolve(c.role), values)
         })
@@ -63,8 +77,9 @@ pub(crate) fn prepare(cols: &[Column], o: &RenderOptions) -> Vec<Column> {
     out
 }
 
-fn sanitize(v: &Value) -> Value {
+fn sanitize(v: &Value, discrete: bool) -> Value {
     match v {
+        Value::Float(f) if !f.is_finite() && discrete => Value::Str(crate::value_str(v)),
         Value::Float(f) if !f.is_finite() => Value::Na,
         Value::Str(s) => {
             if s.chars()

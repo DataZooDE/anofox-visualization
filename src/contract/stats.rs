@@ -1260,6 +1260,37 @@ pub(super) fn partial(
                     plot.scale_x_continuous(ScaleContinuous::new().with_breaks(distinct_x.clone()));
             }
         }
+        if !few {
+            // A genuinely continuous x (residuals, not a binary dummy):
+            // ggplot-rs's own default scale picks its "nice" breaks (the
+            // same extended-Wilkinson algorithm as `extended_breaks` below)
+            // for a fixed target count, regardless of how narrow this
+            // panel's own grid cell will be, and leans on `check_overlap`
+            // alone to thin them back — which, at the house font's size on
+            // a several-term `added_variable`/`component` grid, can leave
+            // adjacent labels (e.g. "0" and "0.5") only ~1-2px apart (#346).
+            // Pick the break count for the width this panel will actually
+            // get instead, so there's real spacing, not a razor's-edge fit.
+            let (xmin, xmax) = idx
+                .iter()
+                .filter_map(|&i| fin(&xs[i]))
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+                    (lo.min(x), hi.max(x))
+                });
+            if xmin.is_finite() && xmax > xmin {
+                let cell_w = w as f64 / grid_cols(terms.len(), 3) as f64;
+                let target = ((cell_w / 56.0).floor() as usize).clamp(2, 5);
+                let breaks = ggplot_rs::scale::util::extended_breaks(xmin, xmax, target);
+                if breaks.len() > 1 {
+                    let labels = breaks.iter().map(|&b| fmt_num(b)).collect();
+                    plot = plot.scale_x_continuous(
+                        ScaleContinuous::new()
+                            .with_breaks(breaks)
+                            .with_labels(labels),
+                    );
+                }
+            }
+        }
         let mut panel_title = term.clone();
         if av {
             // Least squares through the origin, per series.

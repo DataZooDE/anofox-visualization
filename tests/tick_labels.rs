@@ -119,3 +119,59 @@ fn wide_charts_keep_every_label() {
         }
     }
 }
+
+/// #346: the "Fit checks → Added-variable plots" grid (several `partial`
+/// term panels, `kind := 'added_variable'`) at narrow dashboard widths
+/// (≤ 390px full width, so each grid cell is much narrower still) — its
+/// continuous x-residual axis picks the same breaks regardless of how
+/// narrow its own cell ends up, and used to rely on ggplot-rs's
+/// `check_overlap` alone to thin them back down, which cut it too close
+/// for this house font at this size.
+#[test]
+fn added_variable_grid_keeps_x_labels_apart_at_390px() {
+    // An asymmetric residual spread (not centred on 0): the real case this
+    // was found on (a forecast staffing dashboard's "What sets the price
+    // of a home?" showcase) has ggplot-rs's default 5 "nice" breaks
+    // (-1, -0.5, 0, 0.5, 1) overlapping right around "0"/"0.5" once
+    // `check_overlap` has already dropped "-0.5" for crowding "-1".
+    let xrs = [-1.0, -0.5, 0.0, 0.3, 0.6, 0.9, 1.1, 1.3];
+    let rows: Vec<serde_json::Value> = xrs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &xr)| {
+            ["x1", "x2", "x3"].iter().map(move |term| {
+                serde_json::json!({
+                    "term": term,
+                    "x_residual": xr,
+                    "y_residual": xr * 0.6 + 0.02 * i as f64,
+                })
+            })
+        })
+        .collect();
+    let spec = serde_json::json!({
+        "plot": "partial",
+        "rows": rows,
+        "options": {"kind": "added_variable"},
+        "width": 390,
+        "height": 260,
+    });
+    let svg = anofox_visualization::render_spec_checked(&spec.to_string()).unwrap();
+    let labels = x_tick_labels(&svg);
+    // At least 2 ticks per panel (6 total): fewer, legible breaks are the
+    // fix here, not a specific count.
+    assert!(labels.len() >= 6, "{} x labels: {svg}", labels.len());
+    // `x_tick_labels` flattens every panel's ticks in document order, left
+    // to right within a panel, so a reset back to a smaller `x` marks the
+    // start of the next grid cell — only compare labels within one panel.
+    for p in labels.windows(2) {
+        if p[1].x <= p[0].x {
+            continue;
+        }
+        assert!(
+            !p[0].overlaps(&p[1]),
+            "added_variable grid @ 390px: {:?} overlaps {:?}",
+            p[0].text,
+            p[1].text
+        );
+    }
+}
