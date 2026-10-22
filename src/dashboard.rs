@@ -1285,32 +1285,39 @@ fn url_encode_component(s: &str) -> String {
 /// whole. `None` when there is nothing safe or useful to link to (another
 /// scheme, or a bare `#Tab` with no variable to set).
 fn headless_link_href(url: &str) -> Option<String> {
-    // A backslash, control character or whitespace anywhere in the part we
-    // actually emit lets a browser reinterpret the URL (e.g. `/\evil.example`
-    // is read as `//evil.example`, an off-site, protocol-relative link) even
-    // though the checks below see a safe-looking prefix.
+    // A backslash, control character or non-space whitespace anywhere in the
+    // part we actually emit lets a browser reinterpret the URL (e.g.
+    // `/\evil.example` is read as `//evil.example`, an off-site,
+    // protocol-relative link; a tab/LF/CR is stripped by the WHATWG URL
+    // parser, which can smuggle a scheme change past this prefix check) even
+    // though the checks below see a safe-looking prefix. A literal ASCII
+    // space has none of those effects — a URL parser percent-encodes it in
+    // place rather than stripping or reinterpreting it — so it is encoded
+    // below instead of failing the whole link (#340 C).
     let has_unsafe_char = |s: &str| {
         s.chars()
-            .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+            .any(|c| c == '\\' || (c.is_whitespace() && c != ' ') || c.is_control())
     };
+    let encode_space = |s: &str| s.replace(' ', "%20");
     let url = url.trim();
     if let Some(rest) = url.strip_prefix('#') {
         // The tab name before `?` is discarded headless (see the doc
         // comment) and may legitimately contain spaces (`#Stock & pipeline`),
         // so only the emitted query string needs the unsafe-char check.
         let q = rest.find('?')?;
-        let qs = &rest[q..];
-        return (qs.len() > 1 && !has_unsafe_char(qs)).then(|| qs.to_string());
+        let qs = encode_space(&rest[q..]);
+        return (qs.len() > 1 && !has_unsafe_char(&qs)).then_some(qs);
     }
-    if has_unsafe_char(url) {
+    let url = encode_space(url);
+    if has_unsafe_char(&url) {
         return None;
     }
     if url.starts_with('?') || (url.starts_with('/') && !url.starts_with("//")) {
-        return Some(url.to_string());
+        return Some(url);
     }
     let low = url.to_ascii_lowercase();
     if low.starts_with("http://") || low.starts_with("https://") {
-        return Some(url.to_string());
+        return Some(url);
     }
     None
 }
@@ -1627,10 +1634,26 @@ mod link_tests {
         // though it starts with a single `/`.
         assert_eq!(headless_link_href("/\\evil.example"), None);
         assert_eq!(headless_link_href("?v.x=1\\2"), None);
-        // Control characters and whitespace are refused the same way.
+        // Control characters and non-space whitespace are refused.
         assert_eq!(headless_link_href("?v.x=1\u{0}2"), None);
-        assert_eq!(headless_link_href("?v.x=1 2"), None);
         assert_eq!(headless_link_href("?v.x=1\n2"), None);
+        // A literal space in an author's template isn't a bypass (a URL
+        // parser percent-encodes it in place, it never gets stripped or
+        // reinterpreted the way backslash/tab/LF/CR can), so it's encoded
+        // rather than refusing the whole link (#340 C) — the browser app
+        // would still have followed it.
+        assert_eq!(
+            headless_link_href("?v.x=1 2"),
+            Some("?v.x=1%202".to_string())
+        );
+        assert_eq!(
+            headless_link_href("/d/other name?v.x=1"),
+            Some("/d/other%20name?v.x=1".to_string())
+        );
+        assert_eq!(
+            headless_link_href("#Stock & pipeline?v.sku=SKU 1"),
+            Some("?v.sku=SKU%201".to_string())
+        );
     }
 
     #[test]

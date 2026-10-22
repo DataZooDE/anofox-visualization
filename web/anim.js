@@ -270,10 +270,31 @@ export function animKit(win) {
     return m ? Date.parse(`${m[1]}T${m[2] || "00:00"}Z`) / 1000 : NaN;
   };
   const EPOCH = /^-?\d{9,11}$/;
+  // Whether a code point is a valid XML 1.0 character — the same predicate
+  // `format::is_xml_valid_char` uses in Rust. Mirrored here so a `data-story`
+  // step key (JSON round-trips exactly, so it still carries the raw
+  // character) can be compared against a mark's `data-x` (written through
+  // `escape_xml`, which already replaced it with U+FFFD) without the stray
+  // character making an otherwise-matching step look unmatched (#340 B).
+  const xmlValidCp = (cp) =>
+    cp === 0x9 ||
+    cp === 0xa ||
+    cp === 0xd ||
+    (cp >= 0x20 && cp <= 0xd7ff) ||
+    (cp >= 0xe000 && cp <= 0xfffd) ||
+    (cp >= 0x10000 && cp <= 0x10ffff);
+  // Replace every XML-invalid character with U+FFFD, exactly like
+  // `format::escape_xml` (minus the `&<>"'` entity encoding, which is moot
+  // here: these are decoded DOM/JSON strings, not serialized markup).
+  const xmlSafeKey = (s) => (typeof s === "string" ? [...s].map((ch) => (xmlValidCp(ch.codePointAt(0)) ? ch : "�")).join("") : s);
   // Same x? Exact text, else equal numbers / dates (a date key "2026-10-12"
   // against a mark's "2026-10-12 00:00:00", or an older SVG's epoch-seconds
-  // key "1791763200" against a mark's "2026-10-12").
+  // key "1791763200" against a mark's "2026-10-12"). Both sides are
+  // normalised the same way first, so a stray control character that the
+  // renderer had to replace with U+FFFD on one side still matches.
   function sameX(a, b) {
+    a = xmlSafeKey(a);
+    b = xmlSafeKey(b);
     if (a === b) return true;
     if (a == null || b == null) return false;
     const n = Number(a);

@@ -2566,3 +2566,43 @@ fn stacked_data_labels_stay_centred_under_a_wrapped_legend() {
         );
     }
 }
+
+/// #340 D: ±Infinity/NaN on a discrete x used to all fold into the same
+/// blank level as a missing (`Na`) category (they share `""`); each keeps
+/// its own visible `∞` / `−∞` / `NaN` level now, same as `value_str`'s
+/// `#319` fix already kept them off the raw `inf`/`NaN` text.
+#[test]
+fn non_finite_x_levels_are_shown_not_merged_with_blank() {
+    let cols = vec![
+        Column::new(
+            "x",
+            Role::X,
+            vec![
+                Value::Str("a".to_string()),
+                Value::Float(f64::INFINITY),
+                Value::Float(f64::NEG_INFINITY),
+                Value::Float(f64::NAN),
+                Value::Na,
+            ],
+        ),
+        Column::new(
+            "n",
+            Role::Value(Kind::Bar),
+            nums(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+        ),
+    ];
+    let s = svg(cols);
+    assert!(s.contains("data-x=\"a\""), "{s}");
+    assert!(
+        s.contains("data-x=\"\u{221E}\""),
+        "missing +Infinity level: {s}"
+    );
+    assert!(
+        s.contains("data-x=\"\u{2212}\u{221E}\""),
+        "missing -Infinity level: {s}"
+    );
+    assert!(s.contains("data-x=\"NaN\""), "missing NaN level: {s}");
+    // Five distinct bars: "a", "∞", "−∞", "NaN" and the blank `Na` level —
+    // none of the four non-"a" levels collapsed into one.
+    assert_eq!(s.matches("data-geom=\"col\"").count(), 5, "{s}");
+}
