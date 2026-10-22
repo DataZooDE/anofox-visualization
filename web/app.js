@@ -1622,13 +1622,24 @@ function confirmHeldIfMatch() {
   const v = $("sql").value;
   heldTexts.delete(v);
   if (pinnedHeldText === v) pinnedHeldText = null; // Info-11: a confirmed text is no longer "the held proposal" to pin
-  // M-4/M-5: an explicit run removes only the statements (and their
-  // line-suffix tails) it ACTUALLY ran — the ones present in the
-  // just-run text, by exact normalised match — never the whole set: a
-  // DIFFERENT, still-unconfirmed proposal's statements (Info-12: an
-  // earlier proposal A, with B now held) must stay exactly as held as
-  // before.
-  for (const s of heldEntriesOf(v)) heldStatements.delete(s);
+  // M-4: an explicit run removes only the FULL statements it ACTUALLY
+  // ran — the ones present in the just-run text, by exact normalised
+  // match — never the whole set: a DIFFERENT, still-unconfirmed
+  // proposal's statements (Info-12: an earlier proposal A, with B now
+  // held) must stay exactly as held as before.
+  //
+  // L-9 (sec-review-343 third pass, Low): deliberately `normStatementsOf`
+  // here, NOT `heldEntriesOf` — a statement's line-suffix TAILS (M-5) are
+  // only ever ADDED at arm time, never released by a run. Releasing them
+  // here too (as an earlier version of this fix did) let running one
+  // statement's EXPLAIN-wrapped, harmless form (`EXPLAIN\nSET x='…';`)
+  // also release a held, never-run statement elsewhere in the SAME
+  // proposal whose own full text happens to equal that tail (`SET
+  // x='…';` on its own) — the ran statement's own tail and the OTHER
+  // statement's whole form can be the identical string. A run only ever
+  // confirms the statement(s) actually typed/visible and run, by their
+  // own full normalised text; a tail is never itself "run" on its own.
+  for (const s of normStatementsOf(v)) heldStatements.delete(s);
 }
 // sec-review-272-rereview H-1R: the preview a run() call started under,
 // captured synchronously in run() (never read live mid-run — see

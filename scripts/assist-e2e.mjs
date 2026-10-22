@@ -1321,6 +1321,41 @@ if (run("main")) {
       await context.close();
     }
 
+    // M9l (sec-review-343 third pass, L-9): an explicit run of an
+    // EXPLAIN-wrapped, harmless copy of one of the PROPOSAL'S OWN held
+    // statements (`EXPLAIN\nSET memory_limit='3GB';` — HOLD_PROP's own
+    // `SET memory_limit='3GB';` is its last statement) must release ONLY
+    // that typed, EXPLAIN-wrapped text — never the proposal's own,
+    // never-actually-run `SET memory_limit='3GB';`, which happens to
+    // equal that text's own line-suffix tail. Releasing a confirmed
+    // statement's tails too (an earlier version of the M-5 fix did this)
+    // let this escape: the proposal's real SET then reached the page
+    // database unheld the next time it resurfaced (a redo fragment, a
+    // paste — the mechanism doesn't matter here; this reproduces it
+    // directly).
+    {
+      const { context, page } = await m9iHeldPage("m9l");
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "EXPLAIN\nSET memory_limit='3GB';\n");
+      });
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      // Just the proposal's own bare SET — the fragment the real leak
+      // would resurface.
+      await page.evaluate(() => {
+        const ta = document.getElementById("sql");
+        ta.focus();
+        ta.select();
+        document.execCommand("insertText", false, "SET memory_limit='3GB';\n");
+      });
+      await page.waitForTimeout(300);
+      await assertHeldOrClean(page, "M9l: the proposal's own SET, after running an EXPLAIN-wrapped copy of it");
+      await context.close();
+    }
+
     // The Undo test (M-3R): a CRLF proposal must not defeat panel Undo
     // either — `S.hist`'s own `after` is now the normalised text, so
     // `host.editor.get() !== e.after` (undo()'s own staleness guard) must

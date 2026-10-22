@@ -541,15 +541,21 @@ assert.match(appClean, /fetch\(new URL\("app-config\.json",\s*import\.meta\.url\
   // drop-the-first-line shape as M-4) land on just its tail
   // (`ATTACH …;`), a DIFFERENT, harmful statement never otherwise
   // recorded. `heldEntriesOf` must split on newlines and normalise every
-  // suffix, and both the pinned arm and an explicit confirmation must go
-  // through it (not the whole-statement-only `normStatementsOf`).
+  // suffix, and the pinned arm must go through it (not the
+  // whole-statement-only `normStatementsOf`).
   assert.match(appClean, /function heldEntriesOf\(sql\)/, "a tail-expanding entry builder exists");
   const heldEntriesBody = stripComments(grabFn(appJs, "heldEntriesOf"));
   assert.match(heldEntriesBody, /lines\.slice\(i\)\.join\("\\n"\)/, "heldEntriesOf holds every line-suffix tail of a statement");
   const heldTextsAddBody = stripComments(grabFn(appJs, "heldTextsAdd"));
   assert.match(heldTextsAddBody, /for \(const s of heldEntriesOf\(sql\)\) heldStatements\.add\(s\)/, "a pinned (fresh) arm records every statement AND tail");
+  // L-9 (sec-review-343 third pass, Low): an explicit run must release
+  // only the FULL statements it ran (`normStatementsOf`), never their
+  // line-suffix tails (`heldEntriesOf`) — releasing a ran statement's own
+  // tail could also release a DIFFERENT, never-run statement elsewhere
+  // in the same proposal whose own full text happens to equal that tail.
   const confirmBody = stripComments(grabFn(appJs, "confirmHeldIfMatch"));
-  assert.match(confirmBody, /for \(const s of heldEntriesOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run releases every statement AND tail it ran");
+  assert.match(confirmBody, /for \(const s of normStatementsOf\(v\)\) heldStatements\.delete\(s\)/, "an explicit run releases only the full statements it ran, never tails");
+  assert.doesNotMatch(confirmBody, /heldEntriesOf\(v\)/, "confirmHeldIfMatch must not release a ran statement's tails (L-9)");
   // Both re-arm sites (the #sql input handler, run()'s belt-and-braces
   // check) must OR the statement-level check onto the whole-text one.
   assert.match(appClean, /heldTexts\.has\(v\) \|\| editorHeldByStatement\(v\)/, "the #sql input handler's re-arm check");
