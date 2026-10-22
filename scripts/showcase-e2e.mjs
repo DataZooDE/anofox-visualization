@@ -343,6 +343,11 @@ const shoot = async (name) => {
   for (const t of found.tiny) problems.push(`${name}: chart text too small in "${t}"`);
   for (const t of found.clipped) problems.push(`${name}: x tick label ${t}`);
   if (found.hasCreditEl) problems.push(`${name}: a .dp-credit element still exists`);
+  // The assistant's "Preview — not applied" bar only shows during a
+  // proposal; a `display` rule overriding its `hidden` once showed it on
+  // every dashboard.
+  if (await page.$eval("#preview-bar", (el) => getComputedStyle(el).display !== "none").catch(() => false))
+    problems.push(`${name}: the assistant's preview bar is shown without a proposal`);
   const file = path.join(out, `${slug(name)}.png`);
   await page.screenshot({ path: file, fullPage: true });
   console.log(`${name}: ${found.panels} panels → ${file}`);
