@@ -16,10 +16,10 @@ crate-type = ["cdylib"]
 [dependencies]
 # `auth`: the locked server's built-in login (JWT/OIDC, embed links, API keys).
 anofox-visualization = { path = "..", features = ["auth"] }
-# Same version as the core crate (both must resolve to one ggplot-rs).
-# 0.23.0: per-panel dodge/stacking, legend wrap/grid, vertical legend
-# truncation — see the core Cargo.toml comment for the full list.
-ggplot-rs = { version = "0.23.0", default-features = false }
+# Same version as the core crate (must resolve to one ggplot-rs).
+# 0.24.0: geom_col/geom_area default to position_stack(), legend-width
+# fixes — see the core Cargo.toml comment for the full list.
+ggplot-rs = { version = "0.24.0", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"

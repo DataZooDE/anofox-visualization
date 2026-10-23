@@ -92,6 +92,37 @@ export function scratchRunner(db, opts = {}) {
     const name = `anofox_lint_${++scratchSeq}`;
     let home = null;
     let timer;
+    // Cleanup always runs USE/DETACH on `c`, even after a timeout (#258).
+    // In DuckDB-Wasm a new statement on a busy connection interrupts the
+    // pending one instead of queueing behind it (USE+DETACH ~150 ms,
+    // close() ~5 ms, measured), and cancelSent() resolving false is the
+    // normal answer for an idle or fetching connection, so skipping the
+    // DETACH on it would leak `anofox_lint_N` for the rest of the session.
+    // If `c` itself fails the cleanup, DETACH again from a fresh connection:
+    // ATTACH/DETACH are catalog-level, not per connection.
+    const detachAndClose = async () => {
+      try {
+        if (home) {
+          await c.query(`USE ${home}`);
+          await c.query(`DETACH DATABASE IF EXISTS ${name}`);
+        }
+        await c.close();
+      } catch (_) {
+        await c.close().catch(() => {});
+        if (home) {
+          try {
+            const c2 = await db.connect();
+            try {
+              await c2.query(`DETACH DATABASE IF EXISTS ${name}`);
+            } finally {
+              await c2.close();
+            }
+          } catch (_) {
+            /* best effort: `name` stays attached if even this fails */
+          }
+        }
+      }
+    };
     try {
       home = `"${String((await c.query("SELECT current_database() AS d")).toArray()[0].toJSON().d).replace(/"/g, '""')}"`;
       await c.query(`ATTACH ':memory:' AS ${name}`);
@@ -123,15 +154,7 @@ export function scratchRunner(db, opts = {}) {
       return await Promise.race([work, late]);
     } finally {
       clearTimeout(timer);
-      try {
-        if (home) {
-          await c.query(`USE ${home}`);
-          await c.query(`DETACH DATABASE IF EXISTS ${name}`);
-        }
-      } catch (_) {
-        /* the connection is closed next anyway */
-      }
-      await c.close();
+      await detachAndClose();
     }
   };
 }

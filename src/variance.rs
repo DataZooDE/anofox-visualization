@@ -243,7 +243,15 @@ pub(crate) fn render_waterfall(
                     .map(|c| (c.to_string(), pick(c)))
                     .to_vec(),
             )
-            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"));
+            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"))
+            // Each step is a floating bar (`lo`..`hi`, not 0..`hi`) — one row
+            // per x per layer, so ggplot-rs 0.24's new `geom_col()` default
+            // (`position_stack()`, #169) is a no-op height-wise where it
+            // only ever mattered for >1 group sharing an x, but it also
+            // *recomputes* `ymin` from `y` alone (baseline 0), discarding the
+            // explicit floating `lo` we mapped. Keep identity so the bar
+            // still spans `lo`..`hi`.
+            .position(PositionIdentity);
     }
     plot = plot
         .geom_text_with(GeomText {
@@ -376,7 +384,12 @@ pub(crate) fn render_bullet(
                     })),
                 ),
             ])
-            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"));
+            // Each band segment is a floating bar (its own `lo`..`hi`, one
+            // per x per layer) — see the waterfall loop above for why 0.24's
+            // stacking default (which recomputes `ymin` from `y`/baseline 0)
+            // needs an explicit identity to keep it.
+            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"))
+            .position(PositionIdentity);
     }
     plot = plot
         .geom_col_with(GeomCol {
@@ -421,7 +434,10 @@ pub(crate) fn render_bullet(
                     ),
                 ),
             ])
-            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"));
+            // A floating band across the measure (`g - eps`..`g + eps`), same
+            // reasoning as the waterfall/band layers above.
+            .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"))
+            .position(PositionIdentity);
     }
     // Flipped, the first discrete level sits at the bottom: reverse so the
     // first row reads on top.
@@ -515,7 +531,10 @@ pub(crate) fn render_funnel(
             width: 0.82,
             ..card_col(o)
         })
+        // A centred floating bar (`-value/2`..`value/2`), same reasoning as
+        // the waterfall/bullet layers above (variance.rs module docs).
         .layer_aes(Aes::new().x("x").y("hi").ymin("lo").label("tip").group("x"))
+        .position(PositionIdentity)
         .geom_text_with(GeomText {
             size: 11.0,
             color: o.theme.chart_label(),
