@@ -13021,13 +13021,32 @@ const SNAPSHOT_JS = `(function(){
     el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
     el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
   });
-  var wrap=document.querySelector('.tabwrap');
-  document.querySelectorAll('.tab-btn').forEach(function(btn,i){
-    btn.addEventListener('click',function(){
-      wrap.querySelectorAll('.tabpane').forEach(function(p){p.style.display='none';});
-      document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active');});
-      wrap.querySelectorAll('.tabpane')[i].style.display=''; btn.classList.add('active');
+  // Top-level tabs (.tabbar/.tabwrap/.tabpane) and every nested sub-tab group
+  // (.subtabbar/.subtabwrap/.subtabpane, one pair per top tab that has any)
+  // each wire up on their own bar+wrap pair — app.js appends a bar right
+  // before its wrap as siblings, so bar.nextElementSibling is always its own
+  // wrap. A single global '.tab-btn' list (sub-tab buttons carry that class
+  // too) mismatched against one single top-level wrap used to break every
+  // sub-tab click (#381): fixed by scoping each bar to its own wrap/panes.
+  function wireTabs(bar,wrap,paneSel){
+    var btns=[].slice.call(bar.children), panes=wrap.querySelectorAll(paneSel);
+    btns.forEach(function(btn,i){
+      btn.addEventListener('click',function(e){
+        e.stopPropagation();
+        panes.forEach(function(p){p.style.display='none';});
+        btns.forEach(function(b){b.classList.remove('active');});
+        if(panes[i])panes[i].style.display='';
+        btn.classList.add('active');
+      });
     });
+  }
+  document.querySelectorAll('.tabbar').forEach(function(bar){
+    var wrap=bar.nextElementSibling;
+    if(wrap&&wrap.classList.contains('tabwrap'))wireTabs(bar,wrap,'.tabpane');
+  });
+  document.querySelectorAll('.subtabbar').forEach(function(bar){
+    var wrap=bar.nextElementSibling;
+    if(wrap&&wrap.classList.contains('subtabwrap'))wireTabs(bar,wrap,'.subtabpane');
   });
   // ::VIEW switcher (#214): every group's buttons/panes, scoped to its own
   // .dp-views container so clicking one group never touches another.
