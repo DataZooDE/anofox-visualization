@@ -190,6 +190,7 @@ fn render_plot(
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
             "km" => return direct(&|| stats::km(&t, options, w, h, o, place)),
             "lambda_cv" => return direct(&|| stats::lambda_cv(&t, options, w, h, o, place)),
+            "nested_cv" => return direct(&|| stats::nested_cv(&t, options, w, h, o, place)),
             "roc" => return direct(&|| curves::roc(&t, options, w, h, o, place)),
             "pr" => return direct(&|| curves::pr(&t, options, w, h, o, place)),
             "calibration" => return direct(&|| curves::calibration(&t, options, w, h, o, place)),
@@ -942,7 +943,7 @@ fn curve_type(t: &Table) -> Result<String, String> {
 
 /// `curve` types drawn by the role renderer: qq (points + identity +
 /// envelope), null_dist / pdp / lift / lowess (line ± band). roc, pr, calibration,
-/// acf / pacf ([`curves`]), km and lambda_cv ([`stats`]) are drawn directly.
+/// acf / pacf ([`curves`]), km, lambda_cv and nested_cv ([`stats`]) are drawn directly.
 fn curve(t: &Table) -> Result<Vec<Column>, String> {
     let ty = curve_type(t)?;
     let yv = t.num("y")?;
@@ -963,8 +964,8 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         }
         other => {
             return Err(format!(
-                "unknown curve_type '{other}' (roc, pr, calibration, lambda_cv, km, acf, \
-                 pacf, qq, null_dist, pdp, lift, lowess)"
+                "unknown curve_type '{other}' (roc, pr, calibration, lambda_cv, nested_cv, km, \
+                 acf, pacf, qq, null_dist, pdp, lift, lowess)"
             ))
         }
     }
@@ -1486,6 +1487,27 @@ mod tests {
             {"curve_type":"lambda_cv","x":10.0,"y":3.0,"y_low":2.7,"y_high":3.3,"is_min":false,"is_1se":false}]"#;
         let svg = go("curve", cv, "{}").unwrap();
         assert!(svg.contains("λ.min") && svg.contains("λ.1se"));
+    }
+
+    #[test]
+    fn nested_cv_folds_and_mean() {
+        let rows = r#"[{"curve_type":"nested_cv","series":"fold","x":1,"y":0.60,"fold":1,"lambda":16.0,"inner_cv_mean":0.71,"metric":"mse"},
+            {"curve_type":"nested_cv","series":"fold","x":2,"y":0.53,"fold":2,"lambda":12.7,"inner_cv_mean":0.68,"metric":"mse"},
+            {"curve_type":"nested_cv","series":"fold","x":3,"y":0.62,"fold":3,"lambda":16.9,"inner_cv_mean":0.76,"metric":"mse"},
+            {"curve_type":"nested_cv","series":"mean","x":null,"y":0.583,"y_low":0.52,"y_high":0.65,"metric":"mse"}]"#;
+        let svg = go("curve", rows, "{}").unwrap();
+        assert!(svg.contains("fold 3: test MSE 0.62"), "{svg}");
+        assert!(
+            svg.contains("λ = 16.9") && svg.contains("inner CV 0.76"),
+            "{svg}"
+        );
+        assert!(svg.contains("mean ± SE"), "{svg}");
+
+        // No mean row → just the fold points, no band/line and no "mean" text.
+        let folds_only = r#"[{"curve_type":"nested_cv","series":"fold","x":1,"y":0.60,"fold":1,"metric":"mse"},
+            {"curve_type":"nested_cv","series":"fold","x":2,"y":0.53,"fold":2,"metric":"mse"}]"#;
+        let svg = go("curve", folds_only, "{}").unwrap();
+        assert!(!svg.contains("mean"), "{svg}");
     }
 
     #[test]

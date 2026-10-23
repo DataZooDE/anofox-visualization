@@ -80,6 +80,8 @@ SELECT 'kaplan_meier' AS name, anofox_plot_curve(c) AS svg
 FROM kaplan_meier_by('d', grp, time, event) c;
 SELECT 'lambda_cv' AS name, anofox_plot_curve(c) AS svg
 FROM ridge_cv_by('d', grp, y, [x1, x2]) c WHERE grp = 'A';
+SELECT 'nested_cv' AS name, anofox_plot_curve(c) AS svg
+FROM ridge_nested_cv_by('d', grp, y, [x1, x2]) c WHERE grp = 'A';
 SELECT 'acf' AS name, anofox_plot_curve(c, height := 520) AS svg
 FROM acf_by('d', grp, y, id) c;
 
