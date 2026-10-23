@@ -1319,6 +1319,9 @@ mod fit_ref {
     pub const BAR_H: f64 = 70.0;
 }
 
+/// A statement's `::VIEW` (group, alternative), if any.
+type ViewAlt = Option<(usize, usize)>;
+
 /// One statement of a `::FIT` scope as the row estimate sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FitItem {
@@ -1479,7 +1482,7 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     let mut at: Vec<(Option<usize>, Option<usize>, Option<FitItem>)> = Vec::new();
     // each statement's ::VIEW alternative and its item even when that
     // alternative is not the shown one (for a ::FIT inside it)
-    let mut raw: Vec<(Option<(usize, usize)>, Option<FitItem>)> = Vec::new();
+    let mut raw: Vec<(ViewAlt, Option<FitItem>)> = Vec::new();
     for (i, p) in plan.iter().enumerate() {
         let mut item = None;
         if !p.setup {
