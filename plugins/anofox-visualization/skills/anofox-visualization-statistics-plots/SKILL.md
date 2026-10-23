@@ -49,13 +49,13 @@ description: >
   from_prophet, plot), pandas / polars DataFrames in-process through the
   duckdb package, Jupyter, R broom tables, and Parquet files into a
   dashboard.
-version: 2026.10.21
+version: 2026.10.23
 user-invocable: false
 ---
 
 # Anofox Visualization — Statistics Plots (contract macros) Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.21) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast`, `anofox_tabular` | **DuckDB:** v1.5.6
+**Extension:** `anofox_visualization` (CalVer 2026.10.23) | **Contract:** `anofox_contract_version()` = `'1'` | **Producers:** `anofox_statistics` v0.11, `anofox_forecast`, `anofox_tabular` | **DuckDB:** v1.5.6
 
 anofox-statistics and anofox-forecast return plot-ready **long tables** with fixed columns (the anofox integration contract: `terms`, `summary`, `obs`, `prediction`, `curve`, `test`, `events`). One macro per schema renders such a table to SVG. The schemas and their producers are documented in the **anofox-statistics-plotting** skill of the anofox-statistics plugin; this skill is the consumer side.
 
