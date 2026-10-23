@@ -20,7 +20,7 @@
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `en-IE` (English, €) `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one; a plain `DATE` reads as a calendar day, with no time and no time-zone shift) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name (else the bare column name), for an input it is the variable name, in a table the header. Without a `::CATEGORY`, several columns of the *same* chart kind (`events::LINECHART, failures::LINECHART`; `events::BARCHART, failures::BARCHART`) get a real legend named by column; a *mixed* overlay (bars + a different-kind line/area) instead keeps the base in the brand colour with no legend, each overlay just a distinct palette colour.
@@ -332,6 +332,34 @@ The three alternatives share one segmented switcher (button labels "Lines" /
 runs — switching views re-runs just that one, never all three up front. The
 group's id for the URL (`?view.layout=Bars`) comes from the `layout` alias on
 its first marker.
+
+### Fit to screen (`::FIT`)
+
+For a wall display or a one-screen overview, put `SELECT 'fit'::FIT;` right after the `::TAB` (or `::SUBTAB` / `::VIEW`) that should fill the browser window: its rows of panels share the height under the app and tab bars in their `::HEIGHT` ratio, charts are redrawn at that size, tables / `::PAGED` scroll inside their panel, KPI tiles keep ~96 px. Only that section fits, only while it is shown; tabs without `::FIT` scroll as usual. With no tabs, a `::FIT` anywhere fits the whole dashboard. `?fit=1` fits the shown tab without `::FIT`, `?fit=0` never fits; phones (< 600 px) ignore it.
+
+```sql dashboard
+-- A one-screen overview tab (no page scroll) beside a detail tab that scrolls
+CREATE TABLE sales AS
+SELECT DATE '2024-01-01' + INTERVAL (i) DAY AS day, (ARRAY['EU', 'US', 'APAC'])[1 + i % 3] AS region,
+       100 + (hash(i) % 50)::INTEGER AS amount
+FROM range(90) r(i);
+
+SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;                         -- this tab fills the window; rows keep their ::HEIGHT ratio
+SELECT 'Totals'::GROUP;
+SELECT sum(amount)::MONEY, 'Revenue'::LABEL FROM sales;
+SELECT count(*)::METRIC, 'Orders'::LABEL FROM sales;
+SELECT 1::ENDGROUP;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT region::XAXIS, sum(amount)::BARCHART, 'EU leads on revenue'::TITLE FROM sales GROUP BY 1 ORDER BY 2 DESC;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT day::XAXIS, sum(amount)::LINECHART, 'Daily revenue holds steady'::TITLE FROM sales GROUP BY 1 ORDER BY 1;
+SELECT 'Detail'::TAB;                      -- no ::FIT: scrolls as usual
+SELECT region AS "Region" ::TABLE, sum(amount) AS "Revenue" ::MONEY, 'Revenue by region'::TITLE
+FROM sales GROUP BY region ORDER BY "Revenue" DESC;
+```
+
+Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
 
 ## Design contract
 
