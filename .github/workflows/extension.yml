@@ -7,6 +7,13 @@ name: Release full toolkit
 #       with the builder UI (web/pkg, wasm-pack) embedded; unsigned
 #   anofox-visualization-cli-<tag>-<rust target>.tar.gz (.zip on Windows)
 #       the `dashboard` and `serve` binaries + README.md + LICENSE
+#   anofox-visualization-web-<tag>.tar.gz (one platform only — it's pure
+#       web/js/wasm, built once: see scripts/release/build-web.sh)
+#       web/pkg (wasm-pack) + web/localext (pinned DuckDB-Wasm extensions) +
+#       the rest of web/ — `dashboard --site` (#417) embeds it into a
+#       published static site; a GitHub Pages workflow fetches it with
+#       `gh release download`, same as pages.yml builds the app for its own
+#       Pages deploy.
 #   SHA256SUMS
 # Each platform builds and smoke-tests on its own runner against the DuckDB CLI
 # pinned in .duckdb-version. The logic lives in scripts/release/ (runnable
@@ -90,6 +97,11 @@ jobs:
 
       - name: Build + smoke-test + package the CLI (dashboard, serve)
         run: scripts/release/package-cli.sh
+
+      # Platform-independent (pure web/js/wasm): built once, on this leg only.
+      - name: Package the web app (#417 — dashboard --site's --app)
+        if: matrix.platform == 'linux_amd64'
+        run: scripts/release/build-web.sh
 
       - uses: actions/upload-artifact@v4
         with:
