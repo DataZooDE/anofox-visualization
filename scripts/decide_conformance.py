@@ -202,13 +202,14 @@ STATISTICS = {
 GAPS = {
     "decide_table": "SELECT anofox_plot(t) FROM decide_table('Please refund me.', '" + QUESTIONS + "', 'stub') t",
     "decide_answers": "SELECT anofox_plot(t) FROM answers t WHERE id = 3",
-    "decide_choice_distribution": "SELECT anofox_plot(t) FROM (SELECT id, unnest(map_keys(team_dist)) AS option, "
-                                  "unnest(map_values(team_dist)) AS probability FROM runs WHERE id = 3) t",
 }
 GAP_ERROR = NO_SCHEMA
 # …with no "closest" hint: decide's generic columns (kind, probability, …)
 # are no near miss of any schema (#180).
 GAP_NO_HINT = "; closest:"
+
+CHOICE_DIST = ("SELECT id, unnest(map_keys(team_dist)) AS option, "
+               "unnest(map_values(team_dist)) AS probability FROM runs WHERE id = 3")
 
 # Extra cases: grouping, options.
 EXTRA = {
@@ -219,6 +220,10 @@ EXTRA = {
     "calibration_group_a": "SELECT anofox_plot_curve(t) FROM (" + CALIBRATION.format(where=" WHERE grp = 'A'") + ") t",
     "pr_base_rate": "SELECT anofox_plot_curve(t, base_rate := (SELECT avg(refund::INTEGER) FROM tickets)) FROM ("
                     + PR + ") t",
+    # decide_choice_distribution's MAP, unnested, is a `distribution` table
+    # (#181): anofox_plot picks it, and so does the specific macro.
+    "choice_distribution.auto": "SELECT anofox_plot(t) FROM (" + CHOICE_DIST + ") t",
+    "choice_distribution.specific": "SELECT anofox_plot_distribution(t) FROM (" + CHOICE_DIST + ") t",
     "contract_version": "SELECT CASE WHEN anofox_contract_version() = '1' THEN '<svg>ok</svg>' END AS v",
 }
 
