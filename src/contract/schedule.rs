@@ -28,7 +28,13 @@ struct Task {
     resource: String,
     task: String,
     start: f64,
+    /// The task's real end, as given — reported as-is in the tooltip and
+    /// "N tasks" facts, even when the bar itself is widened (`draw_end`).
     end: f64,
+    /// What the bar's `xmax` (and the due connector's start) actually draws:
+    /// `end`, unless `start = end` widened it to a minimum visible sliver.
+    /// Kept apart so a widened bar never reports a false `end` (#378 review).
+    draw_end: f64,
     due: Option<f64>,
     status_raw: Option<String>,
 }
@@ -205,6 +211,7 @@ pub(super) fn schedule(
                 task: text_of(&task_v[i]).unwrap_or_else(|| format!("task {}", i + 1)),
                 start,
                 end,
+                draw_end: end,
                 due: due_v.as_ref().and_then(|v| fin(&v[i])),
                 status_raw: status_v.as_ref().and_then(|v| text_of(&v[i])),
             })
@@ -232,7 +239,7 @@ pub(super) fn schedule(
     let mut n_widened = 0usize;
     for tk in tasks.iter_mut() {
         if (tk.end - tk.start).abs() < 1e-9 {
-            tk.end = tk.start + min_width;
+            tk.draw_end = tk.start + min_width;
             n_widened += 1;
         }
     }
@@ -311,7 +318,7 @@ pub(super) fn schedule(
             .unwrap_or(0);
         let slot = stats::slot(idx, n);
         xmin.push(mk(tk.start));
-        xmax.push(mk(tk.end));
+        xmax.push(mk(tk.draw_end));
         ymin.push(Value::Float(slot - 0.32));
         ymax.push(Value::Float(slot + 0.32));
         let st = status_key(tk);
@@ -343,10 +350,14 @@ pub(super) fn schedule(
     plot = plot.scale_y_continuous(stats::label_axis(&resources));
 
     // A due-date connector for late tasks only: a short segment from the
-    // bar's actual end to `due`, on that task's own lane, in the late
-    // colour. On-time tasks keep `due` in their tooltip alone — a dot at
-    // `due` for every task, on a lane several tasks may share, cannot be
-    // matched back to the task it belongs to (#378 review).
+    // bar's actual (drawn) end to `due`, plus a small vertical end tick at
+    // `due` itself, on that task's own lane. On-time tasks keep `due` in
+    // their tooltip alone — a dot at `due` for every task, on a lane several
+    // tasks may share, cannot be matched back to the task it belongs to
+    // (#378 review). A late task's `due` is almost always inside its own red
+    // bar (or, when very late, under an earlier bar on the same lane), so
+    // the connector is drawn in ink, not the status red, to stay visible
+    // against both — plain `negative` on `negative` was nearly invisible.
     let late_due: Vec<&Task> = tasks
         .iter()
         .filter(|tk| status_key(tk) == "late" && tk.due.is_some())
@@ -358,6 +369,11 @@ pub(super) fn schedule(
         let mut seg_y = Vec::new();
         let mut seg_tip = Vec::new();
         let mut seg_model = Vec::new();
+        let mut tick_x = Vec::new();
+        let mut tick_y = Vec::new();
+        let mut tick_yend = Vec::new();
+        let mut tick_tip = Vec::new();
+        let mut tick_model = Vec::new();
         for tk in &late_due {
             let idx = resources
                 .iter()
@@ -365,16 +381,25 @@ pub(super) fn schedule(
                 .unwrap_or(0);
             let slot = stats::slot(idx, n);
             let due = tk.due.expect("filtered");
-            seg_x.push(mk(tk.end));
-            seg_xend.push(mk(due));
-            seg_y.push(Value::Float(slot));
-            seg_tip.push(s(format!(
+            let due_tip = s(format!(
                 "{}: due {}",
                 tk.task,
                 x_text_sched(due, dates, with_time)
-            )));
+            ));
+            seg_x.push(mk(tk.draw_end));
+            seg_xend.push(mk(due));
+            seg_y.push(Value::Float(slot));
+            seg_tip.push(due_tip.clone());
+            // The cap: a vertical tick through `due`, a little taller than
+            // the bar, so it reads as a mark at a point, not just a line end.
+            tick_x.push(mk(due));
+            tick_y.push(Value::Float(slot - 0.42));
+            tick_yend.push(Value::Float(slot + 0.42));
+            tick_tip.push(due_tip);
             if facet {
-                seg_model.push(s(model_label(tk)));
+                let m = s(model_label(tk));
+                seg_model.push(m.clone());
+                tick_model.push(m);
             }
         }
         let mut seg_frame: Frame = vec![
@@ -383,14 +408,22 @@ pub(super) fn schedule(
             ("seg_y".into(), seg_y),
             ("seg_tip".into(), seg_tip),
         ];
+        let mut tick_frame: Frame = vec![
+            ("tick_x".into(), tick_x),
+            ("tick_y".into(), tick_y),
+            ("tick_yend".into(), tick_yend),
+            ("tick_tip".into(), tick_tip),
+        ];
         if facet {
             seg_frame.push(("model".into(), seg_model));
+            tick_frame.push(("model".into(), tick_model));
         }
+        let ink = o.theme.colors.ink;
         plot = plot
             .geom_segment_with(GeomSegment {
-                color: o.theme.colors.negative,
-                width: 2.2,
-                alpha: 0.9,
+                color: ink,
+                width: 2.0,
+                alpha: 0.95,
                 ..Default::default()
             })
             .layer_data(seg_frame)
@@ -401,6 +434,21 @@ pub(super) fn schedule(
                     .y("seg_y")
                     .yend("seg_y")
                     .tooltip("seg_tip"),
+            )
+            .geom_segment_with(GeomSegment {
+                color: ink,
+                width: 2.6,
+                alpha: 0.95,
+                ..Default::default()
+            })
+            .layer_data(tick_frame)
+            .layer_aes(
+                Aes::new()
+                    .x("tick_x")
+                    .xend("tick_x")
+                    .y("tick_y")
+                    .yend("tick_yend")
+                    .tooltip("tick_tip"),
             );
     }
 
@@ -594,23 +642,46 @@ mod tests {
         assert!(!svg.contains("data-geom=\"segment\""), "{svg}");
         assert!(svg.contains("due 12"), "{svg}");
 
-        // late with a due date: a connector from the bar's end (10) to due (8),
-        // labelled with the task it belongs to.
+        // late with a due date: a connector from the bar's end (10) to due
+        // (8) plus a vertical end tick at due — two segment marks, both in
+        // ink, not the status red (a connector over its own red bar in red
+        // would be nearly invisible, #378 review), labelled with the task.
         let r =
             rows(r#"[{"resource":"L1","task":"O1","start":0,"end":10,"status":"late","due":8}]"#);
         let (svg, _) = render(&r);
-        assert!(svg.contains("data-geom=\"segment\""), "{svg}");
+        assert_eq!(svg.matches("data-geom=\"segment\"").count(), 2, "{svg}");
         assert!(svg.contains("<title>O1: due 8</title>"), "{svg}");
+        let o = RenderOptions::default();
+        let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02X}{g:02X}{b:02X}");
+        assert!(svg.contains(&hex(o.theme.colors.ink)), "{svg}");
+        assert!(
+            !svg.contains(&format!("stroke=\"{}\"", hex(o.theme.colors.negative))),
+            "{svg}"
+        );
 
         // Two tasks share a lane: the connector belongs to the one it names,
-        // not to whichever bar happens to sit under its y.
+        // not to whichever bar happens to sit under its y (one task's worth
+        // of marks: a connector + its end tick, two in total).
         let r = rows(
             r#"[{"resource":"L1","task":"O1","start":0,"end":10,"status":"on time","due":30},
                 {"resource":"L1","task":"O2","start":10,"end":20,"status":"late","due":15}]"#,
         );
         let (svg, _) = render(&r);
-        assert_eq!(svg.matches("data-geom=\"segment\"").count(), 1, "{svg}");
+        assert_eq!(svg.matches("data-geom=\"segment\"").count(), 2, "{svg}");
         assert!(svg.contains("<title>O2: due 15</title>"), "{svg}");
+    }
+
+    #[test]
+    fn widened_bar_tooltip_reports_the_true_end() {
+        // start = end (20 – 20) is widened to a minimum visible bar, but the
+        // tooltip must still say "20 – 20", not the widened draw_end (#378
+        // review: the tooltip was built from the already-widened end).
+        let r = rows(
+            r#"[{"resource":"L1","task":"O1","start":0,"end":10},
+                {"resource":"L1","task":"O2","start":20,"end":20}]"#,
+        );
+        let (svg, _) = render(&r);
+        assert!(svg.contains("<title>O2 · L1: 20 – 20</title>"), "{svg}");
     }
 
     #[test]
