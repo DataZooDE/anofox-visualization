@@ -1297,8 +1297,8 @@ mod fit_ref {
     pub const VIEWPORT_H: f64 = 768.0;
     /// What sits above and below a fitted tab's panels there: the app bar,
     /// the toolbar, the tab bar and the page padding (measured in the
-    /// browser at 1366×768, rounded up).
-    pub const CHROME_H: f64 = 230.0;
+    /// browser at 1366×768: 211 px above the tab pane, 42 below).
+    pub const CHROME_H: f64 = 255.0;
     /// The smallest panel the browser fits; anything smaller falls back to
     /// scrolling (web/app.js FIT_MIN_PANEL).
     pub const PANEL_MIN: f64 = 120.0;

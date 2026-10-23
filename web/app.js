@@ -2315,6 +2315,9 @@ async function boot() {
   renderServedNav(served);
   // Opt-in chart zoom (off by default; ?zoom=1 enables).
   if (params.get("zoom") === "1") document.body.classList.add("dp-zoom");
+  // Fit-to-screen override for a kiosk (#400): ?fit=1 fits the shown tab even
+  // without ::FIT, ?fit=0 never fits (phones never do either way).
+  if (["0", "1"].includes(params.get("fit"))) dpFitParam = params.get("fit");
   // Start on the dashboard (View); ✎ Edit — or ?mode=edit — opens the editor.
   setMode(params.get("mode") === "edit" ? "edit" : "view");
   const servedSql = served && typeof served.sql === "string" ? served.sql : null;
@@ -6105,7 +6108,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -7805,6 +7808,7 @@ async function lazyRunJob(job, inline = false) {
   // Wired at once (hover, a11y summary, toolbox…): a panel is never on the
   // page without its summary.
   const t0 = performance.now();
+  fitScreen(); // a fitted tab re-fits around its newly arrived panels (#400)
   fitCharts(true); // drawn at their shown width, and watched (a hidden pane: once it shows)
   wireCharts();
   addExportButtons();
@@ -7868,6 +7872,7 @@ async function lazyFlushAll() {
 // A pane was just shown: play the entrance of its panels rendered while it
 // was hidden, size its scrolling tables, and render its waiting panels.
 function lazyShown(pane) {
+  refit(); // the newly shown tab / sub-tab / view: fitted if it asks for it, else back to scrolling (#400)
   animateIn([...pane.querySelectorAll(".panel")].filter((p) => p._dpEnter));
   requestAnimationFrame(keyboardScrollers);
   dpLazy.wake?.();
@@ -8828,6 +8833,11 @@ async function runOnce(fresh = true, pv = preview) {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {
         nextHeight = parseInt(await firstValue(s)) || 0;
+      } else if (d === "FIT") {
+        // 'fit'::FIT (#400): the section it is in (a tab / sub-tab / view
+        // pane; with no tabs the dashboard's grid) fits the window while it
+        // is shown — see fitScreen(). The value is only a marker.
+        curGrid.setAttribute("data-dp-fit", "");
       } else if (d === "ROWSELECT") {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
@@ -9162,6 +9172,7 @@ async function runOnce(fresh = true, pv = preview) {
     const old = new Map();
     for (const p of document.querySelectorAll(".dash .panel[data-stmt]")) if (!old.has(p.dataset.stmt)) old.set(p.dataset.stmt, p);
     grid.replaceChildren(...newGrid.childNodes);
+    grid.toggleAttribute("data-dp-fit", newGrid.hasAttribute("data-dp-fit")); // a top-level ::FIT
     dash.querySelectorAll(".tabbar,.tabwrap").forEach((e) => e.remove());
     if (tabBar) dash.append(tabBar, tabWrap);
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
@@ -9193,6 +9204,7 @@ async function runOnce(fresh = true, pv = preview) {
     bar.appendChild(b);
     dash.prepend(bar);
   }
+  fitScreen(); // a ::FIT tab: every panel (patched-in ones too) at its fitted size, before the charts draw
   fitCharts(true);
   const tWire = performance.now();
   wireCharts();
@@ -9275,6 +9287,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
   holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
   widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, renderCtx(), zoom));
+  markFitted(holder, ph);
   markAnim(holder, roles);
   performance.measure("dp:render", { start: t0 });
 }
@@ -9299,7 +9312,7 @@ function widenDiagram(holder, w, draw) {
 function addTrack(holder, track) {
   (holder._tracks = holder._tracks || []).push(track);
   const dp = holder.closest(".panel")?._dp;
-  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, fitWidth(holder, dp.rw), dp.ph);
+  if (dp) renderChart(holder, dp.rows, dp.drawn || dp.roles, ...chartSize(holder, dp));
 }
 
 // A track's name (its ::TRACK value), for summaries and table captions.
@@ -9341,11 +9354,14 @@ function fitWidth(holder, rw) {
   return w > 0 && matchMedia(FIT_TO_PANEL).matches ? Math.max(240, w) : rw;
 }
 
-// Redraw every chart whose fitted width changed (after a run, and debounced on
+// Redraw every chart whose fitted size changed (after a run, and debounced on
 // resize / orientation change / a tab coming into view), and re-fold the
-// toolboxes (foldTools). True when a chart was redrawn: follow with
-// wireCharts(). `watch` (after a run) re-points the resize observer at the
-// fresh charts.
+// toolboxes (foldTools). The width is fitWidth's, the height its authored
+// one — or, in a fitted (::FIT, #400) panel, both the size fitScreen()
+// worked out (panel._dpFit), so the chart is drawn again by ggplot-rs at its
+// real pixel size, never stretched. True when a chart was redrawn: follow
+// with wireCharts(). `watch` (after a run) re-points the resize observer at
+// the fresh charts.
 let dpFitObs = null,
   dpFitTimer = 0;
 function fitCharts(watch = false) {
@@ -9358,18 +9374,290 @@ function fitCharts(watch = false) {
     if (!dp || !holder) return;
     if (watch) dpFitObs?.observe(holder);
     const svg = holder.querySelector(":scope > svg");
-    const w = fitWidth(holder, dp.rw);
+    const fit = panel._dpFit;
+    const w = fit ? fit.w : fitWidth(holder, dp.rw);
+    const h = fit ? fit.h : dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph;
     // hidden (a tab not shown, charts as tables): fitted once it shows
-    if (!svg || !holder.clientWidth || Math.abs(w - (svg._dpAskW ?? svg.viewBox.baseVal.width)) < 2) return;
+    if (!svg || !holder.clientWidth) return;
+    // a fitted chart: redrawn when its height changed too; one no longer
+    // fitted: redrawn at its authored size
+    const sameH = fit ? Math.abs(h - (svg._dpAskH ?? svg.viewBox.baseVal.height)) < 2 : !svg._dpFitted;
+    if (Math.abs(w - (svg._dpAskW ?? svg.viewBox.baseVal.width)) < 2 && sameH) return;
     if (dp.contract) {
-      holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, dp.ph, renderCtx());
-      widenDiagram(holder, w, (ww) => render_contract(dp.contract.macro, dp.rows, dp.contract.args, ww, dp.ph, renderCtx()));
+      holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, h, renderCtx());
+      widenDiagram(holder, w, (ww) => render_contract(dp.contract.macro, dp.rows, dp.contract.args, ww, h, renderCtx()));
+      markFitted(holder, h);
     }
-    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph, holder._zoom || "");
+    else renderChart(holder, dp.rows, dp.drawn || dp.roles, w, h, holder._zoom || "");
     changed = true;
   });
   return changed;
 }
+// The size a chart in `holder` is drawn at now: its fitted size in a ::FIT
+// panel (#400), else fitWidth × its authored height.
+function chartSize(holder, dp) {
+  const fit = holder.closest(".panel")?._dpFit;
+  return fit ? [fit.w, fit.h] : [fitWidth(holder, dp.rw), dp.ph];
+}
+// Remember the height a chart was asked for and whether it was drawn at a
+// fitted size (fitCharts compares against both).
+function markFitted(holder, h) {
+  const svg = holder.querySelector(":scope > svg");
+  if (!svg) return;
+  svg._dpAskH = h;
+  svg._dpFitted = !!holder.closest(".panel")?._dpFit;
+}
+
+// ---- Fit-to-screen (#400) ----------------------------------------------
+// A section with 'fit'::FIT (a ::TAB / ::SUBTAB / ::VIEW pane; with no tabs
+// the dashboard's grid) fills the window while it is the one shown: no page
+// scroll. The height left for the dashboard is measured — the window minus
+// everything above the .dash content (app bar, toolbar) and its bottom
+// padding; inside it, what is not a panel (the tab bar, sub-tab and view
+// bars, headings, group titles, gaps) is measured as well, never assumed.
+// The panels' rows share the rest in proportion to their authored heights
+// (::HEIGHT, else the default), every chart is drawn again at its new pixel
+// size through fitCharts → renderChart (ggplot-rs scales its text and lines;
+// nothing is stretched), tables / ::PAGED / text scroll inside their panel,
+// KPI tiles keep at least FIT_MIN_KPI. A panel that would end up under
+// FIT_MIN_PANEL means the view does not fit: it scrolls as usual and a small
+// notice says why (dashboard --check: layout/fit-too-many). ?fit=1 / ?fit=0
+// override the SQL; under FIT_MIN_WIDTH (phones) it never fits.
+const FIT_MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
+const FIT_MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption and the tile's padding
+const FIT_MIN_WIDTH = 600; // px
+let dpFitParam = null; // "1" | "0" from ?fit=, else null (the SQL decides)
+let dpFitWait = 0;
+
+// Is the shown view a fitted one?
+function fitWanted() {
+  if (window.innerWidth < FIT_MIN_WIDTH || dpFitParam === "0") return false;
+  if (document.body.classList.contains("mode-explore")) return false;
+  if (dpFitParam === "1") return true;
+  return [...document.querySelectorAll(".dash [data-dp-fit]")].some((el) => paneShown(el) && el.getClientRects().length > 0);
+}
+
+// The panels on screen a fit sizes: every shown, top-level panel.
+function fitLeaves() {
+  return [...document.querySelectorAll(".dash .panel")].filter(
+    (p) => !p.matches(".placeholder, .dp-skel") && !p.parentElement.closest(".panel") && p.getClientRects().length > 0
+  );
+}
+
+function fitClear(p) {
+  if (p._dpFitStyle) {
+    [p.style.height, p.style.minHeight] = p._dpFitStyle;
+    p._dpFitStyle = null;
+  }
+  p.classList.remove("dp-fit", "dp-fit-scroll");
+  p._dpFit = null;
+}
+
+function fitSet(p, h, kind) {
+  if (!p._dpFitStyle) p._dpFitStyle = [p.style.height, p.style.minHeight];
+  p.style.height = h + "px";
+  p.style.minHeight = "0px";
+  p.classList.toggle("dp-fit", kind !== "box");
+  p.classList.toggle("dp-fit-scroll", kind === "box");
+}
+
+// How a panel fits (measured at its authored size): `w` its authored height
+// (the row-ratio weight), `min` the least it may get, `chrome` what is not
+// the chart (title, padding, ::TRACK strips).
+function fitKind(p) {
+  const r = p.getBoundingClientRect();
+  const dp = p._dp;
+  const holder = p.querySelector(":scope > .panel-svg");
+  const box = (el) => {
+    const cs = getComputedStyle(el);
+    return ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"].reduce((a, k) => a + parseFloat(cs[k]), 0);
+  };
+  if (dp && holder && holder.getClientRects().length && holder.querySelector(":scope > svg")) {
+    // the panel's own content around the chart (its box may be stretched
+    // to its row's height): padding, title, crumbs, ::TRACK strips
+    let chrome = box(p);
+    for (const c of p.children) {
+      const cs = getComputedStyle(c);
+      if (cs.position === "absolute" || cs.position === "fixed" || !c.getClientRects().length) continue;
+      chrome += (c === holder ? 0 : c.getBoundingClientRect().height) + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
+    }
+    return { kind: "chart", w: dp.ph + chrome, min: 0, chrome, holder };
+  }
+  if (p.matches(".metric, .dp-skel-kpi")) {
+    // a tile's own content (it may be stretched to its row's height)
+    const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
+    const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
+    const own = content + box(p);
+    const min = Math.max(FIT_MIN_KPI, Math.ceil(own));
+    return { kind: "kpi", w: min, min };
+  }
+  // a table / ::PAGED table: its ::HEIGHT, else a default chart's (never
+  // its row count, so a cross-filter re-run keeps the sizes); a text or
+  // Markdown box, an error card, a panel still loading: its ::HEIGHT, else
+  // its own height up to a default chart's
+  const authored = parseFloat(p.style.minHeight || "0"); // (cleared of any fit by now)
+  const table = !!p.querySelector(".dp-table, .tbl-search");
+  return { kind: "box", w: authored || (table ? 300 : Math.min(r.height, 300)), min: 0 };
+}
+
+// Fit the shown view, or put it back to its authored sizes. Sets
+// document.body.dataset.dpFit to "on" / "skipped" / "off". Charts are drawn
+// at their new size by the fitCharts() that follows.
+function fitScreen() {
+  // Measured synchronously: no CSS transition may hold an old size (the
+  // reduced-motion rule makes every property transition for 0.01 ms).
+  document.body.classList.add("dp-fit-measuring");
+  try {
+    fitScreenNow();
+  } finally {
+    document.querySelectorAll(".dash > .dp-fit-end").forEach((e) => e.remove());
+    void document.body.offsetHeight;
+    document.body.classList.remove("dp-fit-measuring");
+  }
+}
+function fitScreenNow() {
+  const dash = document.querySelector(".dash");
+  const leaves = dash ? fitLeaves() : [];
+  const want = !!dash && fitWanted() && leaves.length > 0;
+  for (const p of document.querySelectorAll(".dash .panel")) if (p._dpFitStyle || p._dpFit) fitClear(p);
+  const off = (state, note) => {
+    for (const p of leaves) fitClear(p);
+    document.body.classList.remove("dp-fit-on");
+    for (const el of document.querySelectorAll(".shell > .sidebar, .shell > .side-resizer")) el.style.removeProperty("top"), el.style.removeProperty("height");
+    document.body.dataset.dpFit = state;
+    fitNote(note);
+  };
+  if (!want) return off("off", null);
+  // The app bar's measured height: the sticky sidebar under it is sized to
+  // the rest of the window (its default assumes a 57 px bar), so it never
+  // makes the page taller than the window.
+  const appBar = document.querySelector("body > header");
+  const barH = appBar && appBar.getClientRects().length ? appBar.getBoundingClientRect().height : 0;
+  for (const el of document.querySelectorAll(".shell > .sidebar, .shell > .side-resizer")) {
+    el.style.top = barH + "px";
+    el.style.height = window.innerHeight - barH + "px";
+  }
+  document.body.classList.add("dp-fit-on");
+  // Measured: where the dashboard's content starts (under the app bar and
+  // toolbar) and the padding under it.
+  const dcs = getComputedStyle(dash);
+  const top = dash.getBoundingClientRect().top + window.scrollY + parseFloat(dcs.paddingTop);
+  const avail = window.innerHeight - top - parseFloat(dcs.paddingBottom);
+  // The content's height: down to a marker after the dash's last child (so
+  // a tab pane's bottom margin, collapsed through its wrapper, counts).
+  const end = document.createElement("div");
+  end.className = "dp-fit-end";
+  end.style.cssText = "height:0;margin:0;padding:0;border:0;clear:both";
+  dash.appendChild(end);
+  const used = () => end.getBoundingClientRect().top - (top - window.scrollY);
+  // Rows: panels whose boxes overlap vertically (a grid row, a KPI strip
+  // beside a chart, a ::GROUP box's tiles) share one height.
+  const items = leaves.map((p) => {
+    const r = p.getBoundingClientRect();
+    return { p, top: r.top, bottom: r.bottom, ...fitKind(p) };
+  });
+  items.sort((a, b) => a.top - b.top);
+  const rows = [];
+  for (const it of items) {
+    const row = rows[rows.length - 1];
+    if (row && it.top < row.bottom - 1) {
+      row.items.push(it);
+      row.bottom = Math.max(row.bottom, it.bottom);
+    } else rows.push({ items: [it], top: it.top, bottom: it.bottom });
+  }
+  for (const row of rows) {
+    row.w = Math.max(...row.items.map((i) => i.w));
+    row.min = Math.max(...row.items.map((i) => i.min));
+    row.kpiOnly = row.items.every((i) => i.kind === "kpi");
+  }
+  // Heights summing to `total`, in the rows' authored ratio; a row whose
+  // share is under its minimum (KPI tiles) keeps the minimum.
+  const share = (total) => {
+    const hs = new Map();
+    let free = rows.slice();
+    let left = total;
+    while (free.length) {
+      const k = left / free.reduce((a, r) => a + r.w, 0);
+      const pin = free.filter((r) => r.w * k < r.min);
+      if (!pin.length) {
+        free.forEach((r) => hs.set(r, Math.floor(r.w * k)));
+        break;
+      }
+      pin.forEach((r) => (hs.set(r, r.min), (left -= r.min)));
+      free = free.filter((r) => !pin.includes(r));
+    }
+    return hs;
+  };
+  const apply = (hs) => rows.forEach((r) => r.items.forEach((it) => fitSet(it.p, Math.max(0, hs.get(r)), it.kind)));
+  // What is not a row (bars, headings, gaps) is whatever the content needs
+  // beyond them: measured, then corrected until the content fills `avail`.
+  const fixed = used() - rows.reduce((a, r) => a + (r.bottom - r.top), 0);
+  let total = avail - fixed;
+  let hs = share(total);
+  for (let pass = 0; pass < 4 && total > 0; pass++) {
+    apply(hs);
+    const over = used() - avail;
+    if (over <= 0.5 && over > -2) break;
+    total -= Math.ceil(over);
+    hs = share(total);
+  }
+  apply(hs);
+  // a page that still scrolls (rounding, a min-height elsewhere): take it off the rows
+  const spill = document.documentElement.scrollHeight - window.innerHeight;
+  if (spill > 0 && total > 0) {
+    total -= spill;
+    hs = share(total);
+    apply(hs);
+  }
+  end.remove();
+  const small = total <= 0 || rows.some((r) => !r.kpiOnly && hs.get(r) < FIT_MIN_PANEL);
+  if (small || document.documentElement.scrollHeight > window.innerHeight + 1)
+    return off("skipped", "Too many panels to fit this view on the screen — scrolling instead.");
+  // each chart's new pixel size: the holder's width, the panel's height
+  // minus its title / padding / tracks
+  for (const it of items) if (it.kind === "chart") it.p._dpFit = { w: Math.round(it.holder.clientWidth), h: Math.max(40, Math.floor(hs.get(rows.find((r) => r.items.includes(it))) - it.chrome)) };
+  document.body.dataset.dpFit = "on";
+  fitNote(null);
+}
+
+// The small notice when a ::FIT view falls back to scrolling (never inside
+// the dashboard's own DOM, so a re-run's patch is unaffected).
+function fitNote(msg) {
+  let el = document.getElementById("dp-fit-note");
+  if (!msg) return el?.remove();
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dp-fit-note";
+    el.className = "dp-fit-note";
+    el.setAttribute("role", "status");
+    const t = document.createElement("span");
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "dp-fit-note-x";
+    x.setAttribute("aria-label", "Dismiss");
+    x.textContent = "×";
+    x.onclick = () => (el.hidden = true);
+    el.append(t, x);
+    document.body.appendChild(el);
+  }
+  el.firstChild.textContent = msg;
+}
+
+// Fit (or un-fit) the shown view now and redraw the charts whose size changed.
+function refit() {
+  if (!document.querySelector(".dash .panel")) return;
+  fitScreen();
+  if (fitCharts()) wireCharts();
+}
+// …debounced, for a resize / rotation / entering or leaving full screen.
+function refitSoon() {
+  clearTimeout(dpFitWait);
+  dpFitWait = setTimeout(refit, 200);
+}
+window.addEventListener("resize", refitSoon);
+window.addEventListener("orientationchange", refitSoon);
+document.addEventListener("fullscreenchange", refitSoon);
+
 // Fold a panel's toolbox behind its "⋯" button (.dp-narrow) where the full
 // bar would cover the title: narrow panels, touch screens (no hover to hide
 // it), and a title long enough to run under it. Elsewhere it stays the
@@ -14159,7 +14447,7 @@ function toggleMagicType(panel) {
     use = dp.roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
   }
   dp.drawn = use; // the roles on screen (the summary names the chart kind shown)
-  renderChart(holder, dp.rows, use, fitWidth(holder, dp.rw), dp.ph);
+  renderChart(holder, dp.rows, use, ...chartSize(holder, dp));
   wireCharts();
 }
 
@@ -14796,7 +15084,8 @@ function attachCartZoom(holder, rowsJson, roles, ph) {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
       const W = holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the chart is drawn at
-      renderChart(holder, rowsJson, roles, W, ph, zoom);
+      const H = holder.closest(".panel")?._dpFit?.h || ph; // … and its height (a fitted panel's, #400)
+      renderChart(holder, rowsJson, roles, W, H, zoom);
       wireCharts();
       syncSlider();
     });
