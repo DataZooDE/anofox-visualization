@@ -91,6 +91,9 @@ fn theme_default() -> Option<&'static str> {
 
 /// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
 static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The pages' CSP `frame-ancestors` (#252): `'none'`, or empty (no directive)
+/// with an `embed` login, whose links are meant to be framed.
+static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
@@ -298,6 +301,15 @@ fn main() {
     let mut o = parse_args();
     let _ = THEME.set(o.theme.clone());
     let _ = APP.set(o.app.script());
+    let embed = o
+        .auth
+        .as_ref()
+        .is_some_and(|a| a.methods().contains(&"embed"));
+    let _ = FRAME.set(if embed {
+        String::new()
+    } else {
+        "'none'".into()
+    });
     match o.dashboards_dir.clone() {
         Some(dir) => serve_dashboards(&dir, &mut o),
         None => authoring_mode(&o),
@@ -465,13 +477,24 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    let mut body = body.into();
+    // An HTML page gets its CSP header and nonces (#252).
+    let csp = ctype.starts_with("text/html").then(|| {
+        let frame = FRAME.get().map_or("'none'", String::as_str);
+        let (html, csp) = sv::csp_page(&String::from_utf8_lossy(&body), frame);
+        body = html.into_bytes();
+        csp
+    });
     // same-origin: a page URL can carry an embed page session.
-    let resp = Response::from_data(body.into())
+    let mut resp = Response::from_data(body)
         .with_status_code(status)
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
         .with_header(header("Cache-Control", "no-store"))
         .with_header(header("Referrer-Policy", "same-origin"));
+    if let Some(csp) = csp {
+        resp = resp.with_header(header("Content-Security-Policy", &csp));
+    }
     let _ = req.respond(resp);
 }
 

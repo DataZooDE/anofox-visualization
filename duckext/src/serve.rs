@@ -198,52 +198,23 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
-    let resp = Response::from_data(body.into())
+    let mut body = body.into();
+    // An HTML page (the authoring builder's index.html) gets its CSP header
+    // and nonces (#252): authoring is loopback-only and never framed.
+    let csp = ctype.starts_with("text/html").then(|| {
+        let (html, csp) = sv::csp_page(&String::from_utf8_lossy(&body), "'none'");
+        body = html.into_bytes();
+        csp
+    });
+    let mut resp = Response::from_data(body)
         .with_status_code(status)
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
         .with_header(header("Cache-Control", "no-store"));
-    let _ = req.respond(resp);
-}
-
-/// The pages' Content-Security-Policy (#252), as a response header: the
-/// policy of `assistCsp()` (web/assist-csp.js) with `'self'` for the app's
-/// own files, plus a per-response nonce for the server's own inline
-/// `<script>`s and `frame-ancestors`. `base-uri 'self'`: the dashboard page
-/// sets `<base href="/">`.
-fn page_csp(nonce: &str, frame_ancestors: &str) -> String {
-    let mut p = format!(
-        "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' {CDN_DUCKDB_WASM} {CDN_KATEX}; \
-         worker-src blob:; connect-src 'self' {CDN_DUCKDB_WASM} {DUCKDB_EXT} {USGS}; img-src 'self' data: blob:; \
-         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {CDN_KATEX}; \
-         font-src 'self' data: https://fonts.gstatic.com {CDN_KATEX}; manifest-src 'self'; media-src 'none'; \
-         object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'"
-    );
-    if !frame_ancestors.is_empty() {
-        p.push_str("; frame-ancestors ");
-        p.push_str(frame_ancestors);
+    if let Some(csp) = csp {
+        resp = resp.with_header(header("Content-Security-Policy", &csp));
     }
-    p
-}
-
-// The third-party origins of `assistCsp()` (web/assist-csp.js; a test keeps
-// them equal).
-const CDN_DUCKDB_WASM: &str = "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/";
-const CDN_KATEX: &str = "https://cdn.jsdelivr.net/npm/katex@0.19.0/";
-const DUCKDB_EXT: &str = "https://extensions.duckdb.org/v1.5.6/";
-const USGS: &str = "https://earthquake.usgs.gov/earthquakes/feed/";
-
-/// `https://host[:port]`, `'self'` or `'none'`.
-fn valid_frame_ancestor(o: &str) -> bool {
-    o == "'self'"
-        || o == "'none'"
-        || o.strip_prefix("https://").is_some_and(|h| {
-            !h.is_empty()
-                && h.split_once(':')
-                    .is_none_or(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-                && h.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b))
-        })
+    let _ = req.respond(resp);
 }
 
 /// The `frame-ancestors` value for these options ("" = no directive).
@@ -266,9 +237,8 @@ fn frame_ancestors(opts: &LockedOptions) -> String {
 /// they are a bare `<script>`: viewer and dashboard text is escaped,
 /// external scripts carry `src`) get this response's nonce.
 fn with_csp(html: &str, opts: &LockedOptions) -> (Vec<u8>, String) {
-    let nonce = anofox_visualization::host::auth::session::random_b64(18);
-    let body = html.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
-    (body.into_bytes(), page_csp(&nonce, &frame_ancestors(opts)))
+    let (body, csp) = sv::csp_page(html, &frame_ancestors(opts));
+    (body.into_bytes(), csp)
 }
 
 /// An HTML page with its CSP header (see [`with_csp`]).
@@ -288,7 +258,14 @@ fn respond_page(req: Request, html: &str, opts: &LockedOptions, extra: &[(&str, 
 
 /// Send a reply of the login (redirects, cookies, login pages).
 fn send(req: Request, r: auth::Reply) -> u16 {
-    let mut resp = Response::from_data(r.body)
+    // A login page gets its CSP header and nonces too (#252); never framed.
+    let (body, csp) = if r.content_type.starts_with("text/html") {
+        let (html, csp) = sv::csp_page(&String::from_utf8_lossy(&r.body), "'none'");
+        (html.into_bytes(), Some(csp))
+    } else {
+        (r.body, None)
+    };
+    let mut resp = Response::from_data(body)
         .with_status_code(r.status)
         .with_header(header("Content-Type", r.content_type))
         .with_header(header("X-Content-Type-Options", "nosniff"))
@@ -298,6 +275,9 @@ fn send(req: Request, r: auth::Reply) -> u16 {
         if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
             resp.add_header(h);
         }
+    }
+    if let Some(csp) = csp {
+        resp = resp.with_header(header("Content-Security-Policy", &csp));
     }
     let _ = req.respond(resp);
     r.status
@@ -705,7 +685,7 @@ impl LockedOptions {
                     let mut out = Vec::new();
                     for o in list {
                         let o = o.as_str().ok_or("options.frame_ancestors must be an array of origins")?;
-                        if !valid_frame_ancestor(o) {
+                        if !sv::valid_frame_ancestor(o) {
                             return Err(format!("options.frame_ancestors: '{o}' is not an origin (https://host[:port], 'self' or 'none')"));
                         }
                         out.push(o.to_string());
@@ -4692,22 +4672,6 @@ mod tests {
 
     // #252: the pages' CSP header.
     #[test]
-    fn csp_matches_assist_csp_origins() {
-        let js = include_str!("../../web/assist-csp.js");
-        for (name, v) in [
-            ("DUCKDB_WASM", CDN_DUCKDB_WASM),
-            ("KATEX", CDN_KATEX),
-            ("DUCKDB_EXT", DUCKDB_EXT),
-            ("USGS", USGS),
-        ] {
-            assert!(
-                js.contains(&format!("export const {name} = \"{v}\";")),
-                "{name} differs from web/assist-csp.js"
-            );
-        }
-    }
-
-    #[test]
     fn csp_nonces_every_inline_script() {
         let opts = LockedOptions::default();
         let html = "<head><script>window.__served={};</script><script type=\"module\" src=\"./app.js\"></script></head><body><script>x()</script>";
@@ -4739,7 +4703,7 @@ mod tests {
         o.frame_ancestors = Some(vec!["https://app.example.com".into(), "'self'".into()]);
         assert_eq!(frame_ancestors(&o), "https://app.example.com 'self'");
         for ok in ["https://a.b", "https://a.b:8443", "'self'", "'none'"] {
-            assert!(valid_frame_ancestor(ok), "{ok}");
+            assert!(sv::valid_frame_ancestor(ok), "{ok}");
         }
         for bad in [
             "http://a.b",
@@ -4751,7 +4715,7 @@ mod tests {
             "data:",
             "https://a.b;script-src *",
         ] {
-            assert!(!valid_frame_ancestor(bad), "{bad}");
+            assert!(!sv::valid_frame_ancestor(bad), "{bad}");
         }
     }
 }

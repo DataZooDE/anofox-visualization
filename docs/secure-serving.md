@@ -336,13 +336,16 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   `@requires` check counts only matches inside the folder, see above.)
 
 **Content-Security-Policy header (#252).** Every HTML page of the locked server
-(the dashboard page, the `/` list, the login pages) carries a
+(the dashboard page, the `/` list, the login pages), of `dashboard serve` and
+of the authoring servers carries a
 `Content-Security-Policy` response header, not just a meta tag:
 - `default-src 'none'`;
 - scripts only from the server itself, the pinned DuckDB-Wasm and KaTeX CDN
   paths, and the server's own inline scripts, each with a fresh random nonce
   per response;
-- `object-src`, `frame-src` and `form-action` are `'none'`; `base-uri 'self'`.
+- images also from any `https:` URL (a dashboard's images, the app logo);
+- `object-src` and `frame-src` are `'none'`; `base-uri` and `form-action`
+  are `'self'` (sign-out and the script-free pages' forms post to the server).
 - `frame-ancestors`: `'none'` (no framing) unless an `embed` login is
   configured. Embed links are meant to be framed, so with `embed` the server
   sends no `frame-ancestors` unless you list the sites that may frame the
