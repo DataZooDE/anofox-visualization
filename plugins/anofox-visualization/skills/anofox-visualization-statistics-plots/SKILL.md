@@ -14,6 +14,8 @@ description: >
   anofox_plot_compare (box / violin / points with significance brackets),
   anofox_plot_partial (component + residual, added-variable),
   anofox_plot_cv (cross-validation fold timeline, provisional),
+  anofox_plot_schedule (Gantt chart: one lane per resource, bars coloured by
+  status, a due-date mark, faceted by model_id to compare algorithms),
   forecast), anofox_plot_checks (anofox-tabular data-quality checks: a band
   of pass/warn/fail dots against their acceptance range, or a status strip
   over time), anofox_plot_decomposition (time-series decomposition panels:
@@ -87,11 +89,12 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_compare(r, …)` | the raw rows | **`value := '<numeric col>'`, `factor := '<group col>'`**, `tests :=` a LIST of test STRUCTs (`(SELECT list(t) FROM tukey_hsd_by(…) t WHERE …)`, `tukey_hsd_agg(y, g)`, a two-sample STRUCT such as `t_test_agg(y, g)`), `kind := 'box'` \| `'violin'` \| `'points'`, `hide_ns :=` (drop p > 0.05; default true above 3 groups), `label := 'stars'` (default) \| `'p'` \| a template (`'{p.signif}'`, `'p = {p.adj}'`) |
 | `anofox_plot_partial(p, …)` | **term, x, partial_residual** (+ component) or **term, x_residual, y_residual** | `kind := 'component'` \| `'added_variable'` |
 | `anofox_plot_cv(f, …)` (provisional) | **fold_id, split** (`train`/`test`), **ds \| period \| x**, id; or **fold_id**, train_start, train_end, test_start, test_end | `x := '<col>'`; one lane per fold, train/test windows as bars, a caption with the fold count and whether test windows overlap or leave gaps. Identical folds across ids drawn once; up to 6 different ones get a panel per id (default 640 × 260) |
+| `anofox_plot_schedule(s, …)` | **resource, task, start, end**, model_id, due, status | a Gantt chart: one lane per resource, bars from start to end coloured by status (`on time` green / `late` red, else muted); a late task gets a connector to its `due` date (on-time tasks keep `due` in their tooltip), a caption with the task/resource counts and how many are late. Faceted by `model_id` when there are several algorithms (up to 6, else an error) |
 | `anofox_plot_matrix(m, …)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n` | `domain := [lo, hi]` (fill scale; default −1..1 for a correlation measure, else the data range), `mirror := false` (keep a pair list as given; default: mirror to the full matrix with a diagonal of 1), `labels := false` \| `true` (cell values; default: on up to 144 cells), `value := 'spearman'` (another measure). One tile per cell, a diverging scale around 0 (default 520 × 440) |
 | `anofox_plot_diagram(n, …)` | **id** (or `stage`), title \| label, mainstat, status, group, lane, story, x, y, sparkline, seq | `edges :=` a LIST of **source, target** (or `from_stage` / `to_stage`), value \| count, label, style, status; `mainstat := '<col>'`, `format := 'compact'`, `direction := 'LR'` \| `'TB'`, `style :=` (default edge style). The `::DIAGRAM` panel from two tables (dashboards skill → *Diagrams*); 800 × 400 |
 | `anofox_plot_assignment(a, …)` | one row per item: **bin \| wave, item, size**, capacity, model_id | `x := '<col>'` (names the bin/wave column when both are present); items stacked per bin/wave (`::CATEGORY` = item, `::BARCHART_STACKED` = size), the capacity as a quiet reference line so the fill level is visible; several `model_id`s faceted to compare algorithms (anofox-optimize `pack_*` / `wave_*`) |
 | `anofox_plot_distribution(d, …)` | one row per option: **id, option, probability**, model_id | one `id`: a plain bar per option; several `id`s: a 100% stacked bar per id (`::CATEGORY` = option); several `model_id`s faceted to compare models (anofox-decide's `decide_choice_distribution` MAP / `decide_table.distribution`, unnested — see *Without anofox_statistics* below) |
-| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold + status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, component+value \| trend → decomposition, p_value / test_id → tests, row+col \| column_a+column_b → matrix, kind \| severity + ds \| period → events, (bin \| wave)+item+size → assignment, option+probability → distribution. Only the common options |
+| `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold + status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, resource+start+end → schedule, component+value \| trend → decomposition, p_value / test_id → tests, row+col \| column_a+column_b → matrix, kind \| severity + ds \| period → events, (bin \| wave)+item+size → assignment, option+probability → distribution. Only the common options |
 
 Every macro also takes `theme :=` (a built-in name, `'a+b'`, or theme JSON) and `locale :=` (`'de-DE'`, …); unset they default to `getvariable('anofox_theme')` / `getvariable('anofox_locale')`, so `SET VARIABLE anofox_theme = 'dark';` restyles every plot of a session. Model colours keep their palette *slot* (ols = slot 0) in every theme.
 
@@ -253,6 +256,7 @@ Converters: `from_statsmodels` (OLS, GLM, Logit, linearmodels; Tukey HSD), `from
 | statsforecast `sf.forecast(…, level=[80, 95])` | prediction (wide, melted on read) | `anofox_plot_prediction(f)` — a line per model, nested fan |
 | `ts_cv_folds_by`, `ts_cv_split_by` (anofox-forecast) | cv (provisional, long: `id, ds, fold_id, split`) | `anofox_plot_cv(f)` — as they come |
 | `ts_cv_split_folds_by` (anofox-forecast) | cv (provisional, span: `fold_id, train_start, train_end, test_start, test_end`) | `anofox_plot_cv(f)` — as it comes |
+| `schedule_*` solvers (anofox-optimize; a long-form `*_by`, DataZooDE/anofox-optimize#6) | schedule | `anofox_plot_schedule(s)` / `anofox_plot(s)` |
 | twin alarms / parameter changes (inventory-rs) | events | `anofox_plot_events(e)`, or `anofox_plot_prediction(p, events := (SELECT list(e) FROM alarms e))` |
 | `anofox_tab_run_checks`, `anofox_tab_agg_check` (anofox-tabular) | check (as it comes) | `anofox_plot_checks(t)` / `anofox_plot(t)` |
 | the other anofox-tabular checks (`null_rate`, `compliance`, `distinct_count`, …) | check (measure → `value`, bounds → `lower_threshold` / `upper_threshold`) | `anofox_plot_checks(t)` over the renamed columns |
@@ -381,6 +385,21 @@ SELECT store AS id, (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP AS ds,
 FROM (VALUES ('north', 50.0)) s(store, base), range(70) r(i);
 
 SELECT anofox_plot_cv(f) FROM ts_cv_folds_by('sales', id, ds, y, 3, 7, MAP{}) f WHERE id = 'north';
+```
+
+## Schedules (Gantt, anofox-optimize)
+
+`anofox_plot_schedule(s)` draws one row-per-task `schedule` table (**resource, task, start, end**, optional `model_id`, `due`, `status`) as a real Gantt: one lane per resource (natural order: `L2` before `L10`), bars coloured by status (`on time`/`late`, else muted); a late task gets a connector from where it finished to its `due` date (an on-time task keeps `due` in its tooltip only — a dot for every task on a lane several tasks share couldn't be matched back to one), faceted by `model_id` when there are several algorithms to compare (up to 6). NULL start/end is dropped, `end` before `start` is dropped, `start = end` is widened to a minimum visible bar — each warned about; a NULL `resource` draws on its own "(unassigned)" lane. anofox-optimize's `schedule_*` solvers (e.g. `opt_schedule_atcs`) return only `STRUCT("order" UBIGINT[], total_weighted_tardiness DOUBLE, makespan DOUBLE)` today — build start/end from the job order plus your own processing times and setups (a long-form `*_by` producer emitting this shape directly is proposed upstream, DataZooDE/anofox-optimize#6). This replaces drawing a schedule as a scatter with xmin/xmax ("error bars").
+
+```sql
+-- start/end built from a solved job order (processing_min, cumulative)
+CREATE TABLE sched AS SELECT * FROM (VALUES
+    ('line 1', 'job 1', 0, 40, 'on time'),
+    ('line 1', 'job 2', 40, 65, 'on time'),
+    ('line 1', 'job 3', 65, 130, 'late')
+) s(resource, task, start, "end", status);
+
+SELECT anofox_plot_schedule(s) FROM sched s;
 ```
 
 ## In dashboards and the browser builder

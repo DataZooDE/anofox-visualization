@@ -16,9 +16,10 @@ ways:
 * `auto` / `summary`: its objectives as the contract `summary` schema
   (`model_id` = the algorithm, `metric`, `value`) through `anofox_plot(...)`
   and `anofox_plot_summary(...)`;
-* `view`: the family's decision view through `anofox_render` with the roles
-  the optimize examples use (a Gantt of the schedule, stacked bins and
-  waves, the route on a `::MAP`, selections and weights as bars).
+* `view`: the family's decision view — a real Gantt for `schedule`
+  (`anofox_plot_schedule`, #176), `anofox_render` with the roles the other
+  optimize examples use for everything else (stacked bins and waves, the
+  route on a `::MAP`, selections and weights as bars).
 
 Every plot must return an SVG with no SQL error and no unexpected render
 warning. Every SVG is written to the output directory, plus a PNG montage
@@ -230,11 +231,13 @@ def view_sql(fam: str) -> str:
                "UNION ALL SELECT 1 + node, 'POINT(' || lon || ' ' || lat || ')', 'stop' FROM stops")
         return role_svg([("wkt", "MAP"), ("series", "CATEGORY")], src, "k")
     if fam == "schedule":
-        # one range bar per job: x = time, y = position in the sequence
-        return GANTT + ";" + role_svg(
-            [("(b + e) / 2", "XAXIS"), ("pos", "SCATTER"), ("b", "XMIN"), ("e", "XMAX"),
-             ("CASE WHEN e > due THEN 'late' ELSE 'on time' END", "CATEGORY"), ("'reverse'", "YSCALE")],
-            "SELECT * FROM gantt", "pos")
+        # a real Gantt (#176): one resource (the single machine), a bar per
+        # job coloured by status, a dot at its due date — was SCATTER +
+        # XMIN/XMAX "error bars" (#171).
+        return GANTT + ("; SELECT anofox_plot_schedule(g) FROM ("
+                        "SELECT 'line' AS resource, 'job ' || job AS task, b AS start, e AS \"end\", "
+                        "due, CASE WHEN e > due THEN 'late' ELSE 'on time' END AS status FROM gantt"
+                        ") g")
     raise KeyError(fam)
 
 

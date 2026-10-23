@@ -88,6 +88,11 @@ pub(super) const COLUMNS: &[&str] = &[
     "remainder",
     "row",
     "col",
+    "resource",
+    "task",
+    "start",
+    "end",
+    "due",
 ];
 
 /// Other common spellings of a contract column, as [`norm`] writes them

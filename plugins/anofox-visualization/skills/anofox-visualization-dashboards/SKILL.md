@@ -14,7 +14,7 @@ description: >
   ::BUTTONS, ::TOGGLE, dates) bound to getvariable(), cross-filter,
   ::SELECT_AS, ::DRILL / ::LINK drill-down and drill-through, URL state,
   ::ROWSELECT tables (toolbar, ::TOTALS, ::COLGROUP, ::FLAG, ::HIGHLIGHT,
-  ::SUBTOTAL, ::PAGED), ::DIAGRAM pipelines / lineage / process flows
+  ::SUBTOTAL, ::TOOLBAR, ::PAGED), ::DIAGRAM pipelines / lineage / process flows
   (::UPSTREAM, ::EDGES, ::LANE, flow styles), motion (::ANIMATE, ::STORY,
   ::TRANSITION, ::LINESTYLE 'flow'), Markdown with {{col:fmt}} values and
   $LaTeX$, ::INFO / ::CALLOUT, ::ASOF, ::EMPTY / -- @requires panel states,
@@ -22,7 +22,7 @@ description: >
   panels, the Explore data page, the `dashboard --describe` / `--check`
   generate-validate-repair loop with its lint codes, the design contract
   and the gotchas that silently break a panel.
-version: 2026.10.21
+version: 2026.10.22
 user-invocable: false
 ---
 
@@ -85,7 +85,7 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Modifiers | `1::FLIP` · `'€'::YFORMAT` / `::XFORMAT` (`'$'`, `'percent'`, `'comma'`, `' kg'`) · `'log10' \| 'sqrt' \| 'reverse'::XSCALE` / `::YSCALE` · `'lm' \| 'gam' \| 'loess'::SMOOTH_METHOD` · `::ALPHA` · `'routes'::SYNC_ZOOM` (maps with the same value zoom together) · map `'auto'::PROJECTION` (`'equal-earth'`, `'conic'`, `'utm'`, `'mercator'`, `'none'` for planar x/y), `'quantile 5'::CLASSES` (`'jenks 5'`, `'equal 5'`, `'0,10,50'`), `0::MIDPOINT`, `'lo,hi'::RANGE`, `'de-districts'::BOUNDARIES` (force the layer), `'auto'::HEXBIN` (`'25 km'`) on point maps, `8::LABEL_TOP` / `''::DATALABELS` (region names on the map) · gauge `'0,100'::RANGE`, `'#a,#b'::COLORS`, `'low,high'::LABELS` |
 | KPI and text | `::METRIC` · `::MONEY` · `::PERCENT` (the value in percent, 0–100: `12.5` → 12.5%; a fraction × 100 — also `'percent'::YFORMAT` and `{{x:percent}}`) · `::COMPACT` (1.2K) · `::DELTA` (comparison → arrow + %, up = green) · `::DELTA_LOWER_GOOD` (the same, but a rise is red: churn, cost, errors) · `::DELTA_FORMAT` (`'pct'`/`'abs'`/`'both'`: `▲ 12% (+$1,200)`, `+2.3 pp` for a `::PERCENT`) · `::DELTA_LABEL` (`'vs last month'`, `getvariable('p_prev_label')`) · in a KPI: `list(v ORDER BY d)::SPARKLINE` (trend line), `::GOAL` (progress bar) · `::TEXT_SMALL` / `_MEDIUM` / `_LARGE` · `::MARKDOWN` · `'warning'::CALLOUT` beside a `::MARKDOWN` (`note` / `warning` / `success` box) · `'Net of returns; source: ERP'::INFO` on any panel (an ⓘ with the definition on its title bar — use it instead of a footnote box) · numbers inside Markdown: `'Grew {{growth:pct}} to {{revenue:money}}'::MARKDOWN, … AS growth, … AS revenue` (the same row; `money` `percent` `compact` `metric` `date` `text`, locale-formatted — never build the text with `||`) · formulas in Markdown: `$\hat{y}_t$` inline, `$$…$$` display (KaTeX; `\$` = a literal dollar, `$5 and $10` stays text; `{{col}}` works inside; `--check` → `markdown/bad-math`) |
 | Tables | `::TABLE` (one marker per panel) · `::PAGED` (SQL-paginated) · per column `::MONEY` `::PERCENT` `::COMPACT` `::METRIC` `::TREND` `::COLORSCALE` (low = good) `::COLORSCALE_HIGH_GOOD` `::COLORSCALE_DIVERGING` (around 0) `::BADGE` `::SPARKLINE` (a `list()` column) `::PLAIN` · `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` |
-| Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) · `'region'::SUBTOTAL` — see *Tables* |
+| Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) · `'region'::SUBTOTAL` · `'none' \| 'search,filters,totals,stats,columns,density,export'::TOOLBAR` (drop the toolbar on a tiny table) — see *Tables* |
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
@@ -140,6 +140,7 @@ Directives for the **next** table (columns named by raw name or header, case-ins
 | `::FLAG` | `'margin < 12, status = breach'` (`>` `>=` `<` `<=` `=` `!=`) | ⚠ + warning tint on matching cells |
 | `::HIGHLIGHT` | `'revenue: top 2, margin: bottom 1'` (`'top 3'` = first numeric column) | bold + rank on the top / bottom n (a `::PAGED` table: within the page) |
 | `::SUBTOTAL` | `'region'` | rows grouped by that column, a subtotal row after each group (each column's total aggregation); `::TABLE` only, not `::PAGED` |
+| `::TOOLBAR` | `'none'`, or an allow-list of parts to keep — `'search,filters,totals,stats,columns,density,export'` | `'none'`: drop the whole toolbar — row count and filter chips too (a tiny lookup table that can never need paging, search or column tricks); a `::ROWSELECT 'multi'` table with an active selection keeps just its "N selected" chip. Otherwise keep only the named parts; each kept part still needs its own usual row/column threshold (e.g. `'filters'` on a 3-row table still shows no Filters button). `'totals'` only hides its toggle *button* — the totals row still follows `::TOTALS` / the automatic default either way. `'density'` covers Pages\|Scroll too, not just Compact\|Comfortable. No `::TOOLBAR` at all: every part shows, at its usual threshold — unchanged. Excluding `'export'` (or `'none'`) still gets a small hover ⤓ CSV button (exporting the same matching/sorted/visible rows as the toolbar's own would); add `::DOWNLOAD_CSV` / `_XLSX` / `_PDF` for a bigger, explicit export button beside it |
 
 ```sql dashboard
 CREATE TABLE regions AS SELECT * FROM (VALUES
@@ -160,6 +161,13 @@ WHERE COALESCE(getvariable('region'), '') IN ('', region);
 ```
 
 `::PAGED` runs everything in DuckDB — page, sort, search, column filters, totals, column statistics and filter values — so it suits Parquet on S3, MotherDuck or a served database; `::TABLE` loads the whole result (up to ~10k rows). A theme's `chrome.negatives` (`"minus"` default, `"red"`, `"parens"`) and `chrome.zero` (`"muted"` default, `"dash"`) set how tables show negatives and zeros.
+
+A couple of rows and columns next to a chart never need the full toolbar — it only reads as "this is a big dataset":
+
+```sql dashboard
+SELECT 'none'::TOOLBAR;
+SELECT name::TABLE, value FROM (VALUES ('Alpha', 1), ('Beta', 2)) AS t(name, value);
+```
 
 ## Heatmaps
 
