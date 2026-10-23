@@ -84,11 +84,16 @@ def producer_sql(name: str) -> str | None:
     if m:
         model, kind = m.groups()
         y = response(model)
+        if model == "glmm":
+            # glmm_{tidy,glance,augment}_by take a required positional
+            # re_group after x_cols (#406); the demo table's `subj` column.
+            names = ", names := ['trend', 'cycle']" if kind == "tidy" else ""
+            return f"{name}('d', grp, {y}, {X}, subj{names})"
         if kind == "prediction":
             if model == "isotonic":
                 return f"isotonic_prediction_by('d', grp, x1, y)"
             extra = ", w" if model == "wls" else ""
-            return f"{name}('d', grp, id, {y}, {X}{extra}, split := CASE WHEN id > 50 THEN 'test' END)"
+            return f"{name}('d', grp, id, {y}, {X}{extra}, split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END)"
         if kind == "rolling_tidy":
             extra = ", w" if model == "wls" else ""
             return f"{name}('d', grp, id, {y}, {X}{extra}, window_size := 15)"
@@ -98,6 +103,10 @@ def producer_sql(name: str) -> str | None:
         return f"{name}('d', grp, {y}, {X}{extra}{names})"
     if name == "quantile_process_by":
         return "quantile_process_by('d', grp, y, [x1, x2])"
+    if name == "ols_anova_by":
+        return "ols_anova_by('d', grp, y, x_reduced := [x1], x_full := [x1, x2])"
+    if name == "mediation_by":
+        return "mediation_by('d', grp, g2, x2, y)"
     if name in ("acf_by", "pacf_by"):
         return f"{name}('d', grp, y, id)"
     if name in ("roc_curve_by", "pr_curve_by"):
@@ -121,6 +130,7 @@ AGG_ARGS = {
     "chisq_gof_agg": "n, 1.0 / 3", "chisq_test_agg": "r3, c3", "fisher_exact_agg": "b1::INTEGER, b2::INTEGER",
     "g_test_agg": "r3::BIGINT, c3::BIGINT", "mcnemar_agg": "b1, b2", "cohen_kappa_agg": "b1, b2",
     "icc_agg": "y, subj, rater",
+    "ols_anova_agg": "y, [x1], [x1, x2]",
     "clark_west_agg": "y, f1, f2", "diebold_mariano_agg": "y, f1, f2",
     "dagostino_k2_agg": "y", "jarque_bera_agg": "y", "shapiro_wilk_agg": "y",
     "pearson_agg": "x1, y", "spearman_agg": "x1, y", "kendall_agg": "x1, y",
@@ -197,7 +207,7 @@ EXTRA = {
     "summary_metrics": "SELECT anofox_plot_summary(t, metrics := ['r_squared', 'aic']) FROM (SELECT * FROM ols_glance_by('d', grp, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_glance_by('d', grp, y, [x1, x2])) t",
     "prediction_two_models": "SELECT anofox_plot_prediction(t) FROM (SELECT * FROM ols_prediction_by('d', grp, id, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_prediction_by('d', grp, id, y, [x1, x2])) t WHERE grp = 'A'",
     "prediction_two_models_facets": "SELECT anofox_plot_prediction(t) FROM (SELECT * FROM ols_prediction_by('d', grp, id, y, [x1, x2]) UNION ALL BY NAME SELECT * FROM huber_prediction_by('d', grp, id, y, [x1, x2])) t",
-    "prediction_future": "CREATE TABLE dfut AS SELECT * REPLACE (CASE WHEN id > 54 THEN NULL ELSE y END AS y) FROM d; SELECT anofox_plot_prediction(t) FROM ols_prediction_by('dfut', grp, id, y, [x1, x2], split := CASE WHEN id BETWEEN 49 AND 54 THEN 'test' END) t",
+    "prediction_future": "CREATE TABLE dfut AS SELECT * REPLACE (CASE WHEN id > 54 THEN NULL ELSE y END AS y) FROM d; SELECT anofox_plot_prediction(t) FROM ols_prediction_by('dfut', grp, id, y, [x1, x2], split := CASE WHEN id BETWEEN 49 AND 54 THEN 'test' WHEN y IS NULL THEN NULL ELSE 'train' END) t",
     "fit_predict_by": "SELECT anofox_plot_prediction(t, x := 'x1', facet := 'grp') FROM ols_fit_predict_by('d', grp, y, [x1, x2]) t",
     "obs_leverage": "SELECT anofox_plot_obs(t, kind := 'leverage') FROM ols_augment_by('d', grp, y, [x1, x2]) t WHERE grp = 'A'",
     "obs_cooks": "SELECT anofox_plot_obs(t, kind := 'cooks') FROM ols_augment_by('d', grp, y, [x1, x2]) t WHERE grp = 'A'",
