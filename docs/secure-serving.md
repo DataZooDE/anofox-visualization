@@ -366,6 +366,12 @@ so switching pages doesn't fall back to the target's own default:
   `-- @vars` is the one exception: list the path variable there too, or a
   carried-over value is silently dropped for that dashboard, same as any
   other viewer input it doesn't allow.)
+- **A `path_vars` name a scoped credential locks (an embed link's `vars`) is
+  never carried** (security review of #410, M1): `window.__served.pathVars`
+  leaves it out (`served_index`, `var_locked`). Its value always wins over
+  whatever a nav link, the viewer or `nav_picker` would otherwise set
+  (`Scope::lock_vars`, `locked_panel`), so carrying it would be pointless —
+  and, for `nav_picker` below, worse than pointless.
 - `serve --dashboards` (the script-free static render, mode B) has no
   `path_vars` or `data` folder at all — it whitelists literal `-- @param`
   values instead, a different mechanism — and no persistent cross-dashboard
@@ -418,6 +424,24 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
   inlined into every served page (`window.__served.navPicker`), not fetched
   lazily; a longer result refuses the server start (keep the picker's list
   short, or filter it in `sql`).
+- **`nav_picker`'s option list is the same for every viewer who can open a
+  page with it on — there is no per-viewer filtering of it, by claims or
+  otherwise** (`nav_picker.sql` runs once per snapshot, before any viewer's
+  request even exists — see above). Don't use `nav_picker` on a variable
+  whose *values themselves* are confidential per viewer beyond what a
+  credential's own scope already covers (e.g. one tenant's model names that
+  another tenant must never see): filter that in the dashboards' own SQL via
+  the claims instead, or leave that variable off `nav_picker` and keep its
+  own `::DROPDOWN`/`::BUTTONS`, which *is* data the request already decided
+  this viewer may read.
+- **`nav_picker` is omitted entirely for a credential that locks its `var`**
+  (security review of #410, M1 — an embed link's `vars`): the locked value
+  always overrides whatever the picker would otherwise set
+  (`Scope::lock_vars`, `locked_panel`), so showing it would both do nothing
+  for that viewer *and* disclose every other option's value — e.g. every
+  tenant's model name — to a credential that can only ever end up on its one
+  locked tenant. `served_index` checks this (`var_locked`) the same way it
+  decides whether to carry the variable on a nav link, above.
 - The nav renders it with `document.createElement` / `textContent`
   (`renderNavPicker`, `web/app.js`) — never `innerHTML` — so a label can
   hold arbitrary text without needing its own escaping, and the CSP header

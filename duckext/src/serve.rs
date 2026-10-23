@@ -1832,10 +1832,40 @@ fn valid_path_value_text(v: &str) -> bool {
     (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())) || sv::valid_dashboard_id(v)
 }
 
+/// Does `scope` (an embed link's or API key's credential) fix variable
+/// `name` (`Scope::lock_vars`, case-insensitive — DuckDB names are)? Used by
+/// `served_index` (security review of #410, M1) to decide whether a
+/// `path_vars` name is worth carrying on a nav link, and whether
+/// `nav_picker` may be shown at all: a locked variable's viewer-facing value
+/// never changes no matter what the page sends, so carrying it is pointless,
+/// and showing every `nav_picker` option would disclose values (e.g. every
+/// tenant's model) this credential's viewer can never actually choose.
+fn var_locked(scope: Option<&Scope>, name: &str) -> bool {
+    scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
+}
+
 /// `nav_picker.sql`'s options are inlined into every served page: cap how
 /// many rows it may return and how long one label may be.
 const NAV_PICKER_MAX_OPTIONS: usize = 2_000;
 const NAV_PICKER_MAX_LABEL: usize = 200;
+
+/// `sql` (the author's `nav_picker.sql`, already checked read-only) wrapped
+/// so every column comes back as text: `COLUMNS(*)::VARCHAR` casts whatever
+/// type the author's query gives a column, so `string_rows` (which reads
+/// VARCHAR vectors only) can read it regardless.
+///
+/// Security review of #410, L1: the closing `)` is on its own line, after a
+/// newline — never appended right after `sql`'s own text — so a `sql` that
+/// ends in a `-- comment` with no newline of its own (a line comment runs to
+/// end of line) can never swallow it and produce a confusing "missing )"
+/// parse error at server start instead of the real refusal from
+/// `read_only_statement`.
+fn wrap_nav_picker_sql(sql: &str) -> String {
+    format!(
+        "SELECT COLUMNS(*)::VARCHAR FROM (\n{}\n) AS __anofox_nav_picker",
+        sql.trim().trim_end_matches(';')
+    )
+}
 
 /// Run and validate `options.nav_picker.sql` against the snapshot just built
 /// on `c` (startup, or every refresh): classified read-only by the same
@@ -1860,13 +1890,7 @@ fn build_nav_picker(
             sql_string_literal(&data.to_string_lossy())
         ))?;
     }
-    // `COLUMNS(*)::VARCHAR`: every column back as text, whatever type the
-    // author's query gives it, so `string_rows` (which reads VARCHAR vectors
-    // only) can read it regardless.
-    let wrapped = format!(
-        "SELECT COLUMNS(*)::VARCHAR FROM ({}) AS __anofox_nav_picker",
-        np.sql.trim().trim_end_matches(';')
-    );
+    let wrapped = wrap_nav_picker_sql(&np.sql);
     let rows = c
         .query(&wrapped)
         .and_then(|mut r| r.string_rows(NAV_PICKER_MAX_OPTIONS + 1))
@@ -3466,20 +3490,39 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
     // the page can carry their current values on every nav link. Part 3: the
     // nav-bar picker's options, computed once per snapshot (never from the
     // viewer, never per-request) by `build_nav_picker`.
-    if !st.opts.path_vars.is_empty() {
-        cfg["pathVars"] = serde_json::json!(st.opts.path_vars);
+    //
+    // Security review of #410, M1: a scoped credential (an embed link, an
+    // API key) that locks one of these variables (`Scope::lock_vars`) always
+    // wins — the viewer's (or the picker's, or a carried-over nav link's)
+    // value is dropped and the locked one set instead (`locked_panel`). A
+    // locked `path_vars` name is therefore pointless to carry (its value on
+    // the link is simply ignored), and `nav_picker`'s full option list would
+    // otherwise disclose every other value this credential can never
+    // actually choose (e.g. every tenant's model name to a credential locked
+    // to one tenant). So: never carry a locked path_vars name, and omit
+    // `navPicker` entirely when its variable is locked.
+    let path_vars: Vec<&String> = st
+        .opts
+        .path_vars
+        .iter()
+        .filter(|p| !var_locked(scope, p))
+        .collect();
+    if !path_vars.is_empty() {
+        cfg["pathVars"] = serde_json::json!(path_vars);
     }
     // What each statement depends on (#210): the page re-requests a panel
     // only when one of its variables changed.
     let gen = st.current.get();
     if let Some(np) = &st.opts.nav_picker {
-        cfg["navPicker"] = serde_json::json!({
-            "var": np.var,
-            "label": np.label,
-            "options": gen.snap.nav_picker_options.iter()
-                .map(|(v, l)| serde_json::json!({"value": v, "label": l}))
-                .collect::<Vec<_>>(),
-        });
+        if !var_locked(scope, &np.var) {
+            cfg["navPicker"] = serde_json::json!({
+                "var": np.var,
+                "label": np.label,
+                "options": gen.snap.nav_picker_options.iter()
+                    .map(|(v, l)| serde_json::json!({"value": v, "label": l}))
+                    .collect::<Vec<_>>(),
+            });
+        }
     }
     if let Some(di) = st.dashboards.iter().position(|d| d.id == dash.id) {
         if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
@@ -4275,6 +4318,35 @@ mod tests {
         assert_eq!(out[0].1.chars().count(), NAV_PICKER_MAX_LABEL);
     }
 
+    /// Security review of #410, M1: `var_locked` is what `served_index` asks
+    /// before carrying a `path_vars` name on a nav link or showing
+    /// `nav_picker` at all — a scoped credential's locked variable (an embed
+    /// link) always overrides whatever the page would otherwise send
+    /// (`Scope::lock_vars`, `locked_panel`), so neither is worth exposing
+    /// for it: carrying a locked value is a no-op, and showing the full
+    /// `nav_picker` option list to a credential that can only ever end up
+    /// with one of them discloses the others (every tenant's model name to
+    /// a credential locked to one tenant, say).
+    #[test]
+    fn var_locked_matches_scoped_credentials_case_insensitively() {
+        assert!(!var_locked(None, "model"));
+        let scope = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("Model".into(), "'acme'".into())],
+        };
+        assert!(var_locked(Some(&scope), "model"));
+        assert!(var_locked(Some(&scope), "MODEL"));
+        assert!(var_locked(Some(&scope), "Model"));
+        assert!(!var_locked(Some(&scope), "other"));
+        // A scope with no locked variables at all (e.g. an api_keys
+        // credential, which only ever scopes `dashboards`) locks nothing.
+        let dashboards_only = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: Vec::new(),
+        };
+        assert!(!var_locked(Some(&dashboards_only), "model"));
+    }
+
     #[test]
     fn policy_option() {
         let dir = SnapshotDir::create().unwrap();
@@ -4460,6 +4532,46 @@ mod tests {
         assert!(read_only_statement("SELECT 1", false, &mut none).is_err());
         let mut garbage = |_: &str| Ok::<_, String>(vec![vec![Some("not json".to_string())]]);
         assert!(read_only_statement("SELECT 1", false, &mut garbage).is_err());
+    }
+
+    /// Security review of #410, L1: `wrap_nav_picker_sql`'s closing `)` is
+    /// on its own line, so a `nav_picker.sql` ending in a `-- comment` (a
+    /// line comment with no newline of its own) can't swallow it — checked
+    /// structurally (no DuckDB needed) and, where a `duckdb` CLI is
+    /// available, by actually running the wrapped query.
+    #[test]
+    fn nav_picker_wrapped_sql_survives_a_trailing_line_comment() {
+        let sql = "SELECT 1 -- trailing comment, no newline of its own";
+        let wrapped = wrap_nav_picker_sql(sql);
+        assert!(
+            wrapped.contains("\n)"),
+            "the wrapper's closing paren must be on its own line: {wrapped}"
+        );
+        assert!(wrapped.trim_end().ends_with("AS __anofox_nav_picker"));
+        match cli_serialize("SELECT 1") {
+            Some(Ok(out)) if out.contains("\"error\":false") => {}
+            _ if std::env::var_os("CI").is_some() => {
+                panic!("CI needs a working `duckdb` CLI on PATH (json_serialize_sql) for this test")
+            }
+            _ => {
+                eprintln!("skipped: no working duckdb CLI");
+                return;
+            }
+        }
+        assert_eq!(
+            cli_rows(&wrapped).as_deref(),
+            Ok(&[vec![Some("1".to_string())]][..]),
+            "the trailing comment must not comment out the wrapper's closing paren"
+        );
+        // A comment on its own line (a real-world multi-line query) already
+        // worked before this fix — still does.
+        let multiline =
+            "SELECT model_id AS value, title AS label -- a real column comment\nFROM models";
+        assert!(cli_rows(&format!(
+            "CREATE TEMP TABLE models AS SELECT 'm1' AS model_id, 'Model one' AS title; {}",
+            wrap_nav_picker_sql(multiline)
+        ))
+        .is_ok());
     }
 
     #[test]
