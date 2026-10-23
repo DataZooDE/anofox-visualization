@@ -9409,238 +9409,247 @@ function markFitted(holder, h) {
 }
 
 // ---- Fit-to-screen (#400) ----------------------------------------------
-// A section with 'fit'::FIT (a ::TAB / ::SUBTAB / ::VIEW pane; with no tabs
-// the dashboard's grid) fills the window while it is the one shown: no page
-// scroll. The height left for the dashboard is measured — the window minus
-// everything above the .dash content (app bar, toolbar) and its bottom
-// padding; inside it, what is not a panel (the tab bar, sub-tab and view
-// bars, headings, group titles, gaps) is measured as well, never assumed.
-// The panels' rows share the rest in proportion to their authored heights
-// (::HEIGHT, else the default), every chart is drawn again at its new pixel
-// size through fitCharts → renderChart (ggplot-rs scales its text and lines;
-// nothing is stretched), tables / ::PAGED / text scroll inside their panel,
-// KPI tiles keep at least FIT_MIN_KPI. A panel that would end up under
-// FIT_MIN_PANEL means the view does not fit: it scrolls as usual and a small
-// notice says why (dashboard --check: layout/fit-too-many). ?fit=1 / ?fit=0
-// override the SQL; under FIT_MIN_WIDTH (phones) it never fits.
-const FIT_MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
-const FIT_MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption and the tile's padding
-const FIT_MIN_WIDTH = 600; // px
+// 'fit'::FIT marks the pane it is in. A ::TAB pane (or, with no tabs, the
+// dashboard's grid) fits the whole shown dashboard to the window: no page
+// scroll. A ::SUBTAB / ::VIEW pane fits only its own panels: they share the
+// window height left under the (sticky) app bar and its own sub-tab / view
+// bar; the parent tab's panels above it keep their authored size, and the
+// page may scroll to bring the fitted region into view.
+// Everything is measured — the app bar, toolbar, tab / sub-tab / view bars,
+// headings, group boxes and gaps — never assumed. The panels' rows (panels
+// whose boxes overlap vertically) share the height in the ratio of their
+// authored heights (::HEIGHT, else the default, plus title and padding);
+// tables / ::PAGED / text scroll inside their panel; KPI tiles keep at least
+// 96 px (or their own content). A panel under 120 px means the region does
+// not fit: it scrolls as usual and a small notice says so (dashboard --check:
+// layout/fit-too-many). ?fit=1 fits the shown dashboard as a whole, ?fit=0
+// never fits; under 600 px wide (phones) it never fits.
+// fitDash() is self-contained: the downloaded snapshot (downloadHtml) embeds
+// its source and runs it too. The live page redraws every chart at its new
+// pixel size with ggplot-rs (env.chart → panel._dpFit → fitCharts); the
+// snapshot has no wasm, so it scales its pre-rendered SVGs instead.
 let dpFitParam = null; // "1" | "0" from ?fit=, else null (the SQL decides)
 let dpFitWait = 0;
 
-// Is the shown view a fitted one?
-function fitWanted() {
-  if (window.innerWidth < FIT_MIN_WIDTH || dpFitParam === "0") return false;
-  if (document.body.classList.contains("mode-explore")) return false;
-  if (dpFitParam === "1") return true;
-  return [...document.querySelectorAll(".dash [data-dp-fit]")].some((el) => paneShown(el) && el.getClientRects().length > 0);
-}
-
-// The panels on screen a fit sizes: every shown, top-level panel.
-function fitLeaves() {
-  return [...document.querySelectorAll(".dash .panel")].filter(
-    (p) => !p.matches(".placeholder, .dp-skel") && !p.parentElement.closest(".panel") && p.getClientRects().length > 0
-  );
-}
-
-function fitClear(p) {
-  if (p._dpFitStyle) {
-    [p.style.height, p.style.minHeight] = p._dpFitStyle;
-    p._dpFitStyle = null;
-  }
-  p.classList.remove("dp-fit", "dp-fit-scroll");
-  p._dpFit = null;
-}
-
-function fitSet(p, h, kind) {
-  if (!p._dpFitStyle) p._dpFitStyle = [p.style.height, p.style.minHeight];
-  p.style.height = h + "px";
-  p.style.minHeight = "0px";
-  p.classList.toggle("dp-fit", kind !== "box");
-  p.classList.toggle("dp-fit-scroll", kind === "box");
-}
-
-// How a panel fits (measured at its authored size): `w` its authored height
-// (the row-ratio weight), `min` the least it may get, `chrome` what is not
-// the chart (title, padding, ::TRACK strips).
-function fitKind(p) {
-  const r = p.getBoundingClientRect();
-  const dp = p._dp;
-  const holder = p.querySelector(":scope > .panel-svg");
-  const box = (el) => {
-    const cs = getComputedStyle(el);
-    return ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"].reduce((a, k) => a + parseFloat(cs[k]), 0);
-  };
-  if (dp && holder && holder.getClientRects().length && holder.querySelector(":scope > svg")) {
-    // the panel's own content around the chart (its box may be stretched
-    // to its row's height): padding, title, crumbs, ::TRACK strips
-    let chrome = box(p);
-    for (const c of p.children) {
-      const cs = getComputedStyle(c);
-      if (cs.position === "absolute" || cs.position === "fixed" || !c.getClientRects().length) continue;
-      chrome += (c === holder ? 0 : c.getBoundingClientRect().height) + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
-    }
-    return { kind: "chart", w: dp.ph + chrome, min: 0, chrome, holder };
-  }
-  if (p.matches(".metric, .dp-skel-kpi")) {
-    // a tile's own content (it may be stretched to its row's height)
-    const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
-    const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
-    const own = content + box(p);
-    const min = Math.max(FIT_MIN_KPI, Math.ceil(own));
-    return { kind: "kpi", w: min, min };
-  }
-  // a table / ::PAGED table: its ::HEIGHT, else a default chart's (never
-  // its row count, so a cross-filter re-run keeps the sizes); a text or
-  // Markdown box, an error card, a panel still loading: its ::HEIGHT, else
-  // its own height up to a default chart's
-  const authored = parseFloat(p.style.minHeight || "0"); // (cleared of any fit by now)
-  const table = !!p.querySelector(".dp-table, .tbl-search");
-  return { kind: "box", w: authored || (table ? 300 : Math.min(r.height, 300)), min: 0 };
-}
-
-// Fit the shown view, or put it back to its authored sizes. Sets
-// document.body.dataset.dpFit to "on" / "skipped" / "off". Charts are drawn
-// at their new size by the fitCharts() that follows.
 function fitScreen() {
-  // Measured synchronously: no CSS transition may hold an old size (the
-  // reduced-motion rule makes every property transition for 0.01 ms).
-  document.body.classList.add("dp-fit-measuring");
-  try {
-    fitScreenNow();
-  } finally {
-    document.querySelectorAll(".dash > .dp-fit-end").forEach((e) => e.remove());
-    void document.body.offsetHeight;
-    document.body.classList.remove("dp-fit-measuring");
-  }
-}
-function fitScreenNow() {
   const dash = document.querySelector(".dash");
-  const leaves = dash ? fitLeaves() : [];
-  const want = !!dash && fitWanted() && leaves.length > 0;
-  for (const p of document.querySelectorAll(".dash .panel")) if (p._dpFitStyle || p._dpFit) fitClear(p);
-  const off = (state, note) => {
-    for (const p of leaves) fitClear(p);
-    document.body.classList.remove("dp-fit-on");
-    for (const el of document.querySelectorAll(".shell > .sidebar, .shell > .side-resizer")) el.style.removeProperty("top"), el.style.removeProperty("height");
-    document.body.dataset.dpFit = state;
-    fitNote(note);
-  };
-  if (!want) return off("off", null);
-  // The app bar's measured height: the sticky sidebar under it is sized to
-  // the rest of the window (its default assumes a 57 px bar), so it never
-  // makes the page taller than the window.
-  const appBar = document.querySelector("body > header");
-  const barH = appBar && appBar.getClientRects().length ? appBar.getBoundingClientRect().height : 0;
-  for (const el of document.querySelectorAll(".shell > .sidebar, .shell > .side-resizer")) {
-    el.style.top = barH + "px";
-    el.style.height = window.innerHeight - barH + "px";
-  }
-  document.body.classList.add("dp-fit-on");
-  // Measured: where the dashboard's content starts (under the app bar and
-  // toolbar) and the padding under it.
-  const dcs = getComputedStyle(dash);
-  const top = dash.getBoundingClientRect().top + window.scrollY + parseFloat(dcs.paddingTop);
-  const avail = window.innerHeight - top - parseFloat(dcs.paddingBottom);
-  // The content's height: down to a marker after the dash's last child (so
-  // a tab pane's bottom margin, collapsed through its wrapper, counts).
-  const end = document.createElement("div");
-  end.className = "dp-fit-end";
-  end.style.cssText = "height:0;margin:0;padding:0;border:0;clear:both";
-  dash.appendChild(end);
-  const used = () => end.getBoundingClientRect().top - (top - window.scrollY);
-  // Rows: panels whose boxes overlap vertically (a grid row, a KPI strip
-  // beside a chart, a ::GROUP box's tiles) share one height.
-  const items = leaves.map((p) => {
-    const r = p.getBoundingClientRect();
-    return { p, top: r.top, bottom: r.bottom, ...fitKind(p) };
+  if (!dash) return;
+  fitDash(dash, {
+    param: dpFitParam,
+    explore: document.body.classList.contains("mode-explore"),
+    chart: (p, w, h) => (p._dpFit = { w, h }),
+    unchart: (p) => (p._dpFit = null),
   });
-  items.sort((a, b) => a.top - b.top);
-  const rows = [];
-  for (const it of items) {
-    const row = rows[rows.length - 1];
-    if (row && it.top < row.bottom - 1) {
-      row.items.push(it);
-      row.bottom = Math.max(row.bottom, it.bottom);
-    } else rows.push({ items: [it], top: it.top, bottom: it.bottom });
-  }
-  for (const row of rows) {
-    row.w = Math.max(...row.items.map((i) => i.w));
-    row.min = Math.max(...row.items.map((i) => i.min));
-    row.kpiOnly = row.items.every((i) => i.kind === "kpi");
-  }
-  // Heights summing to `total`, in the rows' authored ratio; a row whose
-  // share is under its minimum (KPI tiles) keeps the minimum.
-  const share = (total) => {
-    const hs = new Map();
-    let free = rows.slice();
-    let left = total;
-    while (free.length) {
-      const k = left / free.reduce((a, r) => a + r.w, 0);
-      const pin = free.filter((r) => r.w * k < r.min);
-      if (!pin.length) {
-        free.forEach((r) => hs.set(r, Math.floor(r.w * k)));
-        break;
-      }
-      pin.forEach((r) => (hs.set(r, r.min), (left -= r.min)));
-      free = free.filter((r) => !pin.includes(r));
-    }
-    return hs;
-  };
-  const apply = (hs) => rows.forEach((r) => r.items.forEach((it) => fitSet(it.p, Math.max(0, hs.get(r)), it.kind)));
-  // What is not a row (bars, headings, gaps) is whatever the content needs
-  // beyond them: measured, then corrected until the content fills `avail`.
-  const fixed = used() - rows.reduce((a, r) => a + (r.bottom - r.top), 0);
-  let total = avail - fixed;
-  let hs = share(total);
-  for (let pass = 0; pass < 4 && total > 0; pass++) {
-    apply(hs);
-    const over = used() - avail;
-    if (over <= 0.5 && over > -2) break;
-    total -= Math.ceil(over);
-    hs = share(total);
-  }
-  apply(hs);
-  // a page that still scrolls (rounding, a min-height elsewhere): take it off the rows
-  const spill = document.documentElement.scrollHeight - window.innerHeight;
-  if (spill > 0 && total > 0) {
-    total -= spill;
-    hs = share(total);
-    apply(hs);
-  }
-  end.remove();
-  const small = total <= 0 || rows.some((r) => !r.kpiOnly && hs.get(r) < FIT_MIN_PANEL);
-  if (small || document.documentElement.scrollHeight > window.innerHeight + 1)
-    return off("skipped", "Too many panels to fit this view on the screen — scrolling instead.");
-  // each chart's new pixel size: the holder's width, the panel's height
-  // minus its title / padding / tracks
-  for (const it of items) if (it.kind === "chart") it.p._dpFit = { w: Math.round(it.holder.clientWidth), h: Math.max(40, Math.floor(hs.get(rows.find((r) => r.items.includes(it))) - it.chrome)) };
-  document.body.dataset.dpFit = "on";
-  fitNote(null);
 }
 
-// The small notice when a ::FIT view falls back to scrolling (never inside
-// the dashboard's own DOM, so a re-run's patch is unaffected).
-function fitNote(msg) {
-  let el = document.getElementById("dp-fit-note");
-  if (!msg) return el?.remove();
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "dp-fit-note";
-    el.className = "dp-fit-note";
-    el.setAttribute("role", "status");
-    const t = document.createElement("span");
-    const x = document.createElement("button");
-    x.type = "button";
-    x.className = "dp-fit-note-x";
-    x.setAttribute("aria-label", "Dismiss");
-    x.textContent = "×";
-    x.onclick = () => (el.hidden = true);
-    el.append(t, x);
-    document.body.appendChild(el);
+// Fit `dash`'s shown view (see above). `env`: {param: ?fit= value, explore:
+// bool, chart(panel, w, h): draw a fitted chart at w×h, unchart(panel): back
+// to its authored size}. Sets document.body.dataset.dpFit: "on" | "skipped" |
+// "off".
+function fitDash(dash, env) {
+  const MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
+  const MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption, the tile's padding
+  const MIN_WIDTH = 600; // px: phones keep the scrolling column
+  const body = document.body;
+  const shown = (el) => {
+    for (let e = el; e; e = e.parentElement) if (e.style && e.style.display === "none") return false;
+    return el.getClientRects().length > 0;
+  };
+  const px = (el, ks) => {
+    const cs = getComputedStyle(el);
+    return ks.reduce((a, k) => a + (parseFloat(cs[k]) || 0), 0);
+  };
+  const sides = () => document.querySelectorAll(".shell > .sidebar, .shell > .side-resizer");
+  const clear = (p) => {
+    if (p._dpFitStyle) {
+      [p.style.height, p.style.minHeight] = p._dpFitStyle;
+      p._dpFitStyle = null;
+    }
+    p.classList.remove("dp-fit", "dp-fit-scroll");
+    env.unchart(p);
+  };
+  const set = (p, h, kind) => {
+    if (!p._dpFitStyle) p._dpFitStyle = [p.style.height, p.style.minHeight];
+    p.style.height = h + "px";
+    p.style.minHeight = "0px";
+    p.classList.toggle("dp-fit", kind !== "box");
+    p.classList.toggle("dp-fit-scroll", kind === "box");
+  };
+  const leavesIn = (root) => [...root.querySelectorAll(".panel")].filter((p) => !p.matches(".placeholder, .dp-skel") && !p.parentElement.closest(".panel") && shown(p));
+  // How a panel fits, measured at its authored size: `w` its authored height
+  // (the row weight), `min` the least it may get, `chrome` what is not the
+  // chart (padding, title, crumbs, ::TRACK strips).
+  const kind = (p) => {
+    const holder = p.querySelector(":scope > .panel-svg");
+    if (holder && shown(holder) && holder.querySelector(":scope > svg")) {
+      let chrome = px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]);
+      for (const c of p.children) {
+        const cs = getComputedStyle(c);
+        if (cs.position === "absolute" || cs.position === "fixed" || !c.getClientRects().length) continue;
+        chrome += (c === holder ? 0 : c.getBoundingClientRect().height) + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+      }
+      const ph = (p._dp && p._dp.ph) || +p.dataset.dpPh || 300;
+      return { kind: "chart", w: ph + chrome, min: 0, chrome, holder };
+    }
+    if (p.matches(".metric, .dp-skel-kpi")) {
+      // its own content (the tile may be stretched to its row's height)
+      const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
+      const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
+      const min = Math.max(MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
+      return { kind: "kpi", w: min, min };
+    }
+    // a table / ::PAGED: its ::HEIGHT, else a default chart's (never its row
+    // count, so a cross-filter re-run keeps the sizes); a text / Markdown box,
+    // an error card, a panel still loading: its ::HEIGHT, else its own height
+    // up to a default chart's
+    const authored = parseFloat(p.style.minHeight || "0");
+    const table = !!p.querySelector(".dp-table, .tbl-search");
+    return { kind: "box", w: authored || (table ? 300 : Math.min(p.getBoundingClientRect().height, 300)), min: 0 };
+  };
+  // Size `leaves` so the content `used()` measures is `avail` tall (less what
+  // `spill()` reports on top). Returns whether every panel kept ≥ MIN_PANEL.
+  const region = (leaves, avail, used, spill) => {
+    if (!leaves.length) return false;
+    const items = leaves.map((p) => {
+      const r = p.getBoundingClientRect();
+      return { p, top: r.top, bottom: r.bottom, ...kind(p) };
+    });
+    items.sort((a, b) => a.top - b.top);
+    const rows = [];
+    for (const it of items) {
+      const row = rows[rows.length - 1];
+      if (row && it.top < row.bottom - 1) {
+        row.items.push(it);
+        row.bottom = Math.max(row.bottom, it.bottom);
+      } else rows.push({ items: [it], top: it.top, bottom: it.bottom });
+    }
+    for (const r of rows) {
+      r.w = Math.max(...r.items.map((i) => i.w));
+      r.min = Math.max(...r.items.map((i) => i.min));
+      r.kpiOnly = r.items.every((i) => i.kind === "kpi");
+    }
+    // heights summing to `total` in the rows' ratio; a row whose share is
+    // under its minimum (KPI tiles) keeps the minimum
+    const share = (total) => {
+      const hs = new Map();
+      let free = rows.slice();
+      let left = total;
+      while (free.length) {
+        const k = left / free.reduce((a, r) => a + r.w, 0);
+        const pin = free.filter((r) => r.w * k < r.min);
+        if (!pin.length) {
+          free.forEach((r) => hs.set(r, Math.floor(r.w * k)));
+          break;
+        }
+        pin.forEach((r) => (hs.set(r, r.min), (left -= r.min)));
+        free = free.filter((r) => !pin.includes(r));
+      }
+      return hs;
+    };
+    const apply = (hs) => rows.forEach((r) => r.items.forEach((it) => set(it.p, Math.max(0, hs.get(r)), it.kind)));
+    // what is not a row (bars, headings, gaps): measured, then corrected
+    // until the content is exactly `avail` tall
+    let total = avail - (used() - rows.reduce((a, r) => a + (r.bottom - r.top), 0));
+    let hs = share(total);
+    for (let pass = 0; pass < 4 && total > 0; pass++) {
+      apply(hs);
+      const over = used() - avail;
+      if (over <= 0.5 && over > -2) break;
+      total -= Math.ceil(over);
+      hs = share(total);
+    }
+    apply(hs);
+    const more = spill ? spill() : 0;
+    if (more > 0 && total > 0) {
+      total -= more;
+      hs = share(total);
+      apply(hs);
+    }
+    if (total <= 0 || rows.some((r) => !r.kpiOnly && hs.get(r) < MIN_PANEL)) return false;
+    for (const r of rows) for (const it of r.items) if (it.kind === "chart") env.chart(it.p, Math.round(it.holder.clientWidth), Math.max(40, Math.floor(hs.get(r) - it.chrome)));
+    return true;
+  };
+  // The whole shown dashboard: the window minus what is above the content
+  // (app bar, toolbar) and its bottom padding; the page does not scroll.
+  const whole = () => {
+    const bar = document.querySelector("body > header");
+    const barH = bar && shown(bar) ? bar.getBoundingClientRect().height : 0;
+    // the sticky sidebar under the app bar: sized to the rest of the window
+    // (its CSS assumes a 57 px bar)
+    for (const el of sides()) (el.style.top = barH + "px"), (el.style.height = window.innerHeight - barH + "px");
+    body.classList.add("dp-fit-on");
+    const top = dash.getBoundingClientRect().top + window.scrollY + px(dash, ["paddingTop"]);
+    const avail = window.innerHeight - top - px(dash, ["paddingBottom"]);
+    // a marker after the last child: a tab pane's bottom margin, collapsed
+    // through its wrapper, counts too
+    const end = document.createElement("div");
+    end.className = "dp-fit-end";
+    end.style.cssText = "height:0;margin:0;padding:0;border:0;clear:both";
+    dash.appendChild(end);
+    const used = () => end.getBoundingClientRect().top - (top - window.scrollY);
+    const leaves = leavesIn(dash);
+    const ok = region(leaves, avail, used, () => document.documentElement.scrollHeight - window.innerHeight) && document.documentElement.scrollHeight <= window.innerHeight + 1;
+    end.remove();
+    if (!ok) {
+      leaves.forEach(clear);
+      body.classList.remove("dp-fit-on");
+      for (const el of sides()) el.style.removeProperty("top"), el.style.removeProperty("height");
+    }
+    return ok;
+  };
+  // A ::SUBTAB / ::VIEW pane: its own panels share the window height under
+  // the sticky app bar and its own bar; the parent's panels are not touched.
+  const scoped = (pane) => {
+    const bar = pane.matches(".subtabpane") ? pane.parentElement.previousElementSibling : pane.parentElement.querySelector(":scope > .dp-viewbar");
+    const head = document.querySelector("body > header");
+    const headH = head && shown(head) && getComputedStyle(head).position === "sticky" ? head.getBoundingClientRect().height : 0;
+    const avail = window.innerHeight - headH - px(dash, ["paddingBottom"]);
+    // the region: from the bar's top (its margin, the grid gap under it,
+    // all measured) to the pane's bottom
+    const from = () => (bar && shown(bar) ? bar.getBoundingClientRect().top - px(bar, ["marginTop"]) : pane.getBoundingClientRect().top);
+    const leaves = leavesIn(pane);
+    const ok = region(leaves, avail, () => pane.getBoundingClientRect().bottom - from(), null);
+    if (!ok) leaves.forEach(clear);
+    return ok;
+  };
+  body.classList.add("dp-fit-measuring"); // no CSS transition may hold an old size
+  try {
+    dash.querySelectorAll(".panel").forEach(clear);
+    body.classList.remove("dp-fit-on");
+    for (const el of sides()) el.style.removeProperty("top"), el.style.removeProperty("height");
+    const off = window.innerWidth < MIN_WIDTH || env.param === "0" || env.explore;
+    const marked = off ? [] : [...dash.querySelectorAll("[data-dp-fit]")].filter(shown);
+    const all = !off && (env.param === "1" || marked.some((el) => !el.matches(".subtabpane, .dp-viewpane")));
+    let panes = all || off ? [] : marked;
+    panes = panes.filter((el) => !panes.some((o) => o !== el && o.contains(el))); // an outer one covers an inner one
+    const done = all ? [whole()] : panes.map(scoped);
+    body.dataset.dpFit = !done.length ? "off" : done.some(Boolean) ? "on" : "skipped";
+    // the notice when a fitted view falls back to scrolling (outside the
+    // dashboard's own DOM, so a re-run's patch is unaffected)
+    let note = document.getElementById("dp-fit-note");
+    if (!done.some((d) => !d)) note?.remove();
+    else {
+      if (!note) {
+        note = document.createElement("div");
+        note.id = "dp-fit-note";
+        note.className = "dp-fit-note";
+        note.setAttribute("role", "status");
+        const x = document.createElement("button");
+        x.type = "button";
+        x.className = "dp-fit-note-x";
+        x.setAttribute("aria-label", "Dismiss");
+        x.textContent = "×";
+        x.onclick = () => (note.hidden = true);
+        note.append(document.createElement("span"), x);
+        body.appendChild(note);
+      }
+      note.firstChild.textContent = "Too many panels to fit this view on the screen — scrolling instead.";
+    }
+  } finally {
+    dash.querySelectorAll(":scope > .dp-fit-end").forEach((e) => e.remove());
+    void body.offsetHeight;
+    body.classList.remove("dp-fit-measuring");
   }
-  el.firstChild.textContent = msg;
 }
 
 // Fit (or un-fit) the shown view now and redraw the charts whose size changed.
@@ -13362,6 +13371,16 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  // ::FIT (#400): the snapshot fits itself on load (SNAPSHOT_JS) — each panel
+  // goes back to its authored size and keeps its authored chart height
+  // (data-dp-ph, the row weight).
+  const livePanels = [...document.querySelectorAll(".dash .panel")];
+  snap.querySelectorAll(".panel").forEach((c, k) => {
+    const p = livePanels[k];
+    if (p && p._dp) c.dataset.dpPh = p._dp.ph;
+    if (p && p._dpFitStyle) [c.style.height, c.style.minHeight] = p._dpFitStyle;
+    c.classList.remove("dp-fit", "dp-fit-scroll");
+  });
   const math = snap.querySelector(".katex") ? await katexCssInline() : "";
   // no KaTeX stylesheet to embed: the formulas' MathML alone (drawn natively)
   if (!math) snap.querySelectorAll(".katex-html").forEach((el) => el.remove());
@@ -13412,6 +13431,20 @@ function snapshotMotion() {
 
 // Self-contained hover + tab switching for the exported snapshot.
 const SNAPSHOT_JS = `(function(){
+  // ::FIT (#400): fitDash() is app.js's own (its source, one implementation).
+  // A snapshot has no wasm / ggplot-rs to draw a chart again at its fitted
+  // size, so it scales the pre-rendered SVG instead: the <svg> keeps its
+  // viewBox and gets the fitted height (width stays 100%), so the browser
+  // scales the vector drawing uniformly (preserveAspectRatio "xMidYMid
+  // meet": crisp, never distorted, centred where the aspect differs) — not a
+  // CSS transform. Its text and lines scale with it rather than keeping
+  // their size as a real re-render would: acceptable for an offline copy.
+  var fitDash=${fitDash};
+  function scaleSvg(p,w,h){var s=p.querySelector('.panel-svg > svg');if(!s)return;if(s._h0===undefined)s._h0=s.getAttribute('height');s.setAttribute('height',h);s.style.height=h+'px';s.setAttribute('data-dp-scaled','');}
+  function unscale(p){var s=p.querySelector('.panel-svg > svg[data-dp-scaled]');if(!s)return;if(s._h0==null)s.removeAttribute('height');else s.setAttribute('height',s._h0);s.style.height='';s.removeAttribute('data-dp-scaled');}
+  function refit(){var d=document.querySelector('.dash');if(d)fitDash(d,{param:null,explore:false,chart:scaleSvg,unchart:unscale});}
+  var fitT=0;function refitSoon(){clearTimeout(fitT);fitT=setTimeout(refit,200);}
+  window.addEventListener('resize',refitSoon);window.addEventListener('orientationchange',refitSoon);document.addEventListener('fullscreenchange',refitSoon);
   var tip=document.getElementById('dp-tip');
   document.querySelectorAll('.dp-hit').forEach(function(el){
     var t=el.getAttribute('data-tip'); if(!t)return;
@@ -13438,6 +13471,7 @@ const SNAPSHOT_JS = `(function(){
         btns.forEach(function(b){b.classList.remove('active');});
         if(panes[i])panes[i].style.display='';
         btn.classList.add('active');
+        refit();
       });
     });
   }
@@ -13458,7 +13492,7 @@ const SNAPSHOT_JS = `(function(){
     [].forEach.call(sec.querySelectorAll('.dp-viewpane'),function(p){p.style.display='none';});
     btn.setAttribute('aria-selected','true'); btn.tabIndex=0;
     var pane=document.getElementById(btn.getAttribute('aria-controls'));
-    if(pane)pane.style.display='';
+    if(pane)pane.style.display='';refit();
     btn.focus();
   }
   document.querySelectorAll('.dp-viewbar [role="tab"]').forEach(function(btn){
@@ -13478,6 +13512,7 @@ const SNAPSHOT_JS = `(function(){
       viewActivate(target);
     });
   });
+  refit();
 })();`;
 
 function showError(grid, msg) {
