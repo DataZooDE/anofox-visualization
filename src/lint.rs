@@ -1310,6 +1310,13 @@ mod fit_ref {
     pub const HEADING_H: f64 = 40.0;
     /// A ::GROUP box's padding and title around its tiles.
     pub const GROUP_PAD: f64 = 40.0;
+    /// A ::SUBTAB / ::VIEW ::FIT fits only its own pane, scrolled into view:
+    /// the window minus the sticky app bar and the page's bottom padding
+    /// (measured: 85 px) …
+    pub const SCOPED_CHROME_H: f64 = 85.0;
+    /// … and minus its own sub-tab / view bar with its margin and the grid
+    /// gap under it.
+    pub const BAR_H: f64 = 70.0;
 }
 
 /// One statement of a `::FIT` scope as the row estimate sees it.
@@ -1470,6 +1477,9 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     let (mut pending_span, mut depth) = (0u32, 0i32);
     let (mut tab, mut sub): (Option<usize>, Option<usize>) = (None, None);
     let mut at: Vec<(Option<usize>, Option<usize>, Option<FitItem>)> = Vec::new();
+    // each statement's ::VIEW alternative and its item even when that
+    // alternative is not the shown one (for a ::FIT inside it)
+    let mut raw: Vec<(Option<(usize, usize)>, Option<FitItem>)> = Vec::new();
     for (i, p) in plan.iter().enumerate() {
         let mut item = None;
         if !p.setup {
@@ -1509,9 +1519,12 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                     grouped: depth > 0,
                 });
             }
+            raw.push((p.view.as_ref().map(|v| (v.group, v.alt)), item));
             if hidden_alt && matches!(item, Some(FitItem::Panel { .. } | FitItem::Heading)) {
                 item = None;
             }
+        } else {
+            raw.push((None, None));
         }
         at.push((tab, sub, item));
     }
@@ -1583,11 +1596,32 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     }
 
     // layout/fit-too-many: the panels shown at once under each ::FIT.
-    let budget = VIEWPORT_H - CHROME_H;
-    for &(i, (t, s, _)) in &fits {
+    let scoped_budget = VIEWPORT_H - SCOPED_CHROME_H - BAR_H;
+    for &(i, (t, s, view)) in &fits {
         if has_tabs && t.is_none() {
             continue; // already reported as ambiguous
         }
+        // a ::VIEW alternative's / a ::SUBTAB's ::FIT: only its own panels,
+        // under its own bar (the parent tab's panels are not fitted)
+        let scoped: Option<Vec<FitItem>> = match (view, s) {
+            (Some(v), _) => Some(
+                raw.iter()
+                    .zip(&at)
+                    .filter(|((vv, _), (tt, ss, _))| *vv == Some(v) && *tt == t && *ss == s)
+                    .filter_map(|((_, it), _)| *it)
+                    .collect(),
+            ),
+            (None, Some(sb)) => Some(items_where(&|tt, ss| tt == t && ss == Some(sb))),
+            (None, None) => None,
+        };
+        if let Some(items) = scoped {
+            let need = fit_needed_height(&items);
+            if need.0 > scoped_budget {
+                diags.push(fit_too_many(i, need, scoped_budget, short(i)));
+            }
+            continue;
+        }
+        let budget = VIEWPORT_H - CHROME_H;
         // the sub-tabs whose screens this ::FIT covers
         let subs: Vec<Option<usize>> = match (t, s) {
             (_, Some(s)) => vec![Some(s)],
@@ -1618,26 +1652,30 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
             }
         }
         if worst.0 > budget {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                stmt: i + 1,
-                code: "layout/fit-too-many",
-                message: format!(
-                    "this ::FIT section needs ~{need:.0} px for its {rows} rows of panels at the \
-                     {min:.0} px minimum, more than the ~{budget:.0} px a {w}×{h} screen leaves — \
-                     it falls back to scrolling there; move panels to another ::TAB or put \
-                     more on a row (::COLUMNS / ::COL)",
-                    need = worst.0,
-                    rows = worst.1,
-                    min = PANEL_MIN,
-                    w = 1366,
-                    h = VIEWPORT_H,
-                ),
-                sql: short(i),
-            });
+            diags.push(fit_too_many(i, worst, budget, short(i)));
         }
     }
     diags
+}
+
+/// The `layout/fit-too-many` warning for the ::FIT at plan index `i`.
+fn fit_too_many(i: usize, (need, rows): (f64, usize), budget: f64, sql: String) -> Diagnostic {
+    use fit_ref::*;
+    Diagnostic {
+        severity: Severity::Warning,
+        stmt: i + 1,
+        code: "layout/fit-too-many",
+        message: format!(
+            "this ::FIT section needs ~{need:.0} px for its {rows} rows of panels at the \
+             {min:.0} px minimum, more than the ~{budget:.0} px a {w}×{h} screen leaves — \
+             it falls back to scrolling there; move panels to another ::TAB or put \
+             more on a row (::COLUMNS / ::COL)",
+            min = PANEL_MIN,
+            w = 1366,
+            h = VIEWPORT_H,
+        ),
+        sql,
+    }
 }
 
 /// `::VIEW` group structure checks (#214): see [`Diagnostic::code`] for the
@@ -4335,16 +4373,34 @@ mod design_tests {
         let flat = format!("{}SELECT 'fit'::FIT;\n{}", FIT_CHART, FIT_CHART.repeat(11));
         assert!(has(&fit_codes(&flat), "layout/fit-too-many"));
 
-        // a sub-tab's screen = its tab's own panels + the sub-tab's
-        let sub = format!(
-            "SELECT 'A'::TAB;\n{}SELECT 'S1'::SUBTAB;\nSELECT 'fit'::FIT;\n{}SELECT 'S2'::SUBTAB;\n{}",
-            FIT_CHART.repeat(4),
-            FIT_CHART.repeat(6),
-            FIT_CHART.repeat(30)
+        // a sub-tab's ::FIT counts only the sub-tab's own panels (the
+        // parent tab's above it are not fitted), under its own bar: 8
+        // panels = 4 rows fit 613 px, 10 = 5 rows don't
+        let sub = |own: usize, mine: usize| {
+            format!(
+                "SELECT 'A'::TAB;\n{}SELECT 'S1'::SUBTAB;\nSELECT 'fit'::FIT;\n{}SELECT 'S2'::SUBTAB;\n{}",
+                FIT_CHART.repeat(own),
+                FIT_CHART.repeat(mine),
+                FIT_CHART.repeat(30)
+            )
+        };
+        assert!(
+            fit_codes(&sub(20, 8)).is_empty(),
+            "{:?}",
+            fit_codes(&sub(20, 8))
         );
-        assert!(has(&fit_codes(&sub), "layout/fit-too-many"));
-        let sub_ok = sub.replace(&FIT_CHART.repeat(6), &FIT_CHART.repeat(2));
-        assert!(fit_codes(&sub_ok).is_empty(), "{:?}", fit_codes(&sub_ok));
+        assert!(has(&fit_codes(&sub(0, 10)), "layout/fit-too-many"));
+        // a ::VIEW alternative's ::FIT: only that alternative's panels
+        let view = |mine: usize| {
+            format!(
+                "SELECT 'A'::TAB;\n{}SELECT 'Lines' AS v ::VIEW;\nSELECT 'fit'::FIT;\n{}SELECT 'Bars' AS v ::VIEW;\n{}SELECT 1::ENDVIEW;\n",
+                FIT_CHART.repeat(12),
+                FIT_CHART.repeat(mine),
+                FIT_CHART.repeat(30)
+            )
+        };
+        assert!(fit_codes(&view(6)).is_empty(), "{:?}", fit_codes(&view(6)));
+        assert!(has(&fit_codes(&view(10)), "layout/fit-too-many"));
     }
 
     #[test]
