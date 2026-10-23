@@ -227,6 +227,8 @@ for (const s of ["WFS:http://e.example/x.gpkg", "GPKG:http://e.example/x", "CSV:
 for (const s of ["Depot:neutral; Late stop:bad", "Critical:bad; Watch:warn; OK:good", "g: a > b", "CSV: 3 files", "data:image/svg+xml;base64,AAAA", "EU", "12:30"])
   assert.ok(!A.looksLikePath(s), s);
 assert.equal(A.classifyStatement("SELECT count(*) ::METRIC FROM 'WFS:http://e.example/x.gpkg'").cls, 3);
+// #239 N-4: a query-string part may hold a newline (DuckDB still reads x.csv)
+for (const s of ["x.csv?\nz", "x.parquet?a=1\r\nb", "data.CSV?\n"]) assert.ok(A.looksLikePath(s), JSON.stringify(s));
 // M-1 (sec-review-272): the reason names the target, not just the keyword
 // — first-line truncation in the OLD Apply dialog hid it entirely for a
 // multi-line ATTACH/COPY ("ATTACH — ATTACH" told the viewer nothing).
