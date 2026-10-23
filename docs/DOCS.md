@@ -161,6 +161,7 @@ terminal.
 | `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
 | `::DELTA_FORMAT` | `::DELTAFORMAT` | kpi | how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both' |
 | `::DELTA_LABEL` | `::DELTALABEL`, `::COMPARE_LABEL` | kpi | what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label') |
+| `::KPI_SIZE` | `::KPI_DENSITY` | kpi | KPI tile density: 'compact' (single line, value + label, no ::SPARKLINE/::GOAL) or 'normal' (default); on ::METRIC it sets that tile, on ::GROUP every tile in the box |
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
@@ -392,6 +393,30 @@ more in a row) share one row, sized to the tallest tile. `dashboard --check`
 reports `kpi/bad-delta-format` (an unknown format; the change is shown as a %),
 `kpi/no-delta` (a format or label without a `::DELTA`) and
 `kpi/sparkline-not-list`.
+
+**A denser strip: `::KPI_SIZE`.** The tile above (~96 px) is sized for a
+reader studying one number; a status row of 4-6 KPIs someone just glances at
+— e.g. next to a `::BUTTONS` picker — doesn't need that much. `'compact'::KPI_SIZE`
+on a `::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT` statement packs it onto one
+line (`::LABEL`, the value, the change, in that order) at ~36 px; `::THRESHOLDS`
+colouring, `::DELTA`/`::DELTA_FORMAT` and number formats still apply, but
+`::SPARKLINE` and `::GOAL` are dropped — there's no room for them on one line.
+Put it on the `::GROUP` instead to set every tile in the box at once; a tile's
+own `::KPI_SIZE` (either value) then wins over the box's:
+
+```sql
+SELECT 'Status'::GROUP, 'compact'::KPI_SIZE;
+SELECT 42::METRIC, 'Latest value'::LABEL;
+SELECT 7::METRIC, 'Alerts'::LABEL, '<1:good; <4:warn; bad'::THRESHOLDS;
+SELECT 3::METRIC, 'Drifting inputs'::LABEL, '<1:good; <3:warn; bad'::THRESHOLDS;
+SELECT 91::PERCENT, 'Coverage'::LABEL;
+SELECT 1::ENDGROUP;
+```
+
+`dashboard --check` reports `kpi/bad-kpi-size` (a value that isn't 'compact'
+or 'normal' — treated as 'normal') and `kpi/kpi-size-misplaced` (not on a KPI
+tile or a `::GROUP`). `::FIT` (#400) sizes a compact tile's row at its own,
+lower minimum, not the normal tile's ~96 px floor.
 
 #### Button groups, toggles and the metric / dimension switcher
 
@@ -2035,7 +2060,8 @@ SELECT * ::TABLE FROM orders;
   size, nothing is stretched); a resize, a rotation, entering full screen and
   switching tabs re-fit (cross-filtering keeps the fitted sizes).
 - Tables, `::PAGED` tables and text boxes keep their content and **scroll
-  inside their panel**; KPI tiles keep at least ~96 px.
+  inside their panel**; KPI tiles keep at least ~96 px (`'compact'::KPI_SIZE`
+  tiles, ~36 px).
 - If a panel would get under ~120 px the tab scrolls as usual and a small
   notice says so — `dashboard --check` warns about this ahead of time
   (`layout/fit-too-many`, judged at 1366×768; for a sub-tab / view only its own panels under its own bar), and about a `::FIT` whose

@@ -8736,6 +8736,14 @@ async function runOnce(fresh = true, pv = preview) {
           };
           const fig = mkPanel();
           fig.classList.add("metric");
+          // ::KPI_SIZE (#405): this tile's own value wins over an enclosing
+          // ::GROUP's (CSS: .group-compact .metric, overridden by either class).
+          const sizeVal = String(cell("KPI_SIZE") ?? "")
+            .replace(/^"|"$/g, "")
+            .trim()
+            .toLowerCase();
+          if (sizeVal === "compact") fig.classList.add("metric-size-compact");
+          else if (sizeVal === "normal") fig.classList.add("metric-size-normal");
           let parts = {};
           try {
             parts = JSON.parse(
@@ -8923,9 +8931,22 @@ async function runOnce(fresh = true, pv = preview) {
           defaultSpan = Math.max(1, Math.round(12 / n));
         }
       } else if (d === "GROUP") {
-        const title = await firstValue(s);
+        // ::KPI_SIZE (#405) cascades onto every tile in the box, unless a
+        // tile sets its own — a second column beside the title, so it needs
+        // its own query (firstValue()'s literal shortcut only reads c0).
+        const kr = s.roles.find((r) => r[1] === "KPI_SIZE");
+        let title, sizeVal;
+        if (kr) {
+          const gr = s.roles.find((r) => r[1] === "GROUP");
+          const r0 = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i))[0] || {};
+          title = gr ? r0["c" + gr[0]] : null;
+          sizeVal = r0["c" + kr[0]];
+        } else {
+          title = await firstValue(s);
+        }
+        const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
-        box.className = "group";
+        box.className = "group" + (compact ? " group-compact" : "");
         if (title) {
           const t = document.createElement("div");
           t.className = "group-title";
@@ -9566,6 +9587,7 @@ function fitScreen() {
 function fitDash(dash, env) {
   const MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
   const MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption, the tile's padding
+  const MIN_KPI_COMPACT = 36; // px (lint.rs fit_ref::KPI_MIN_COMPACT, src/kpi.rs): a ::KPI_SIZE 'compact' tile (#405)
   const MIN_WIDTH = 600; // px: phones keep the scrolling column
   const body = document.body;
   const shown = (el) => {
@@ -9612,7 +9634,11 @@ function fitDash(dash, env) {
       // its own content (the tile may be stretched to its row's height)
       const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
       const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
-      const min = Math.max(MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
+      // #405: a ::KPI_SIZE 'compact' tile (its own class, or inherited from
+      // an enclosing ::GROUP unless it overrides back to 'normal') has a
+      // lower floor than a normal KPI tile.
+      const compact = p.classList.contains("metric-size-compact") || (!p.classList.contains("metric-size-normal") && !!p.closest(".group-compact"));
+      const min = Math.max(compact ? MIN_KPI_COMPACT : MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
       return { kind: "kpi", w: min, min };
     }
     // a table / ::PAGED: its ::HEIGHT, else a default chart's (never its row

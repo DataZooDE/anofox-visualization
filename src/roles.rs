@@ -276,6 +276,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both'"),
     e("DELTA_LABEL", &["DELTALABEL", "COMPARE_LABEL"], R::DeltaLabel, "kpi", true,
       "what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label')"),
+    e("KPI_SIZE", &["KPI_DENSITY"], R::KpiSize, "kpi", true,
+      "KPI tile density: 'compact' (single line, value + label, no ::SPARKLINE/::GOAL) or 'normal' (default); on ::METRIC it sets that tile, on ::GROUP every tile in the box"),
     e("TEXT_SMALL", &[], R::Text(TextSize::Small), "kpi", true, "small text card"),
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
@@ -744,6 +746,7 @@ mod tests {
         v.extend([T::Small, T::Medium, T::Large].map(Role::Text));
         v.extend([D::Csv, D::Xlsx, D::Pdf].map(Role::Download));
         v.extend([
+            Role::KpiSize,
             Role::X,
             Role::Y,
             Role::Category,
@@ -908,6 +911,7 @@ mod tests {
                 | Role::Hint
                 | Role::OptionLabel
                 | Role::Text(_)
+                | Role::KpiSize
                 | Role::Placeholder
                 | Role::HeaderImage
                 | Role::FooterLink
