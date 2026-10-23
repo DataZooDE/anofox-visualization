@@ -2350,6 +2350,13 @@ async function boot() {
   if (curDash && !servedSql && !hashSql) rememberDash(curDash);
   $("share").onclick = shareLink;
   $("dlhtml").onclick = downloadHtml;
+  // #401: the "Charts as tables" toggle lives in the toolbar's ⋯ menu so a
+  // screen-reader / keyboard viewer can turn it on even on a dashboard whose
+  // header never shows the in-page bar (that bar is author/install-opt-in —
+  // see astablesBarOn()). It reflects the remembered `dpAsTables` state and
+  // works exactly like the bar's own button (toggleAsTables()).
+  $("astables-toggle").setAttribute("aria-pressed", String(dpAsTables));
+  $("astables-toggle").onclick = toggleAsTables;
   // 🌙: the viewer's light/dark choice — the builder chrome follows it, and so
   // does the dashboard when its theme follows the viewer (mode "auto"). The
   // panels re-render through wasm with the dark theme.
@@ -9190,8 +9197,13 @@ async function runOnce(fresh = true, pv = preview) {
     const drill = motion && motion.drill && n._ia && n._ia.drill && n._ia.drill.prefix === motion.drill ? motion : null;
     tweens.push([n, dpAnim.geom(was), drill]);
   }
-  // Accessibility: swap every chart for its data table (state survives runs).
-  if (!dash.querySelector(".dp-a11y-bar")) {
+  // Accessibility: swap every chart for its data table (state survives
+  // runs). #401: the in-page bar is opt-in — off unless this dashboard's own
+  // header says `-- @astables on` (astablesBarOn()); the toolbar's ⋯ menu
+  // item (#astables-toggle) always toggles the feature either way.
+  const wantBar = astablesBarOn(pv ? pv.sql : $("sql").value);
+  const a11yBar = dash.querySelector(".dp-a11y-bar");
+  if (wantBar && !a11yBar) {
     const bar = document.createElement("div");
     bar.className = "dp-a11y-bar";
     const b = document.createElement("button");
@@ -9203,6 +9215,8 @@ async function runOnce(fresh = true, pv = preview) {
     b.onclick = toggleAsTables;
     bar.appendChild(b);
     dash.prepend(bar);
+  } else if (!wantBar && a11yBar) {
+    a11yBar.remove();
   }
   fitScreen(); // a ::FIT tab: every panel (patched-in ones too) at its fitted size, before the charts draw
   fitCharts(true);
@@ -14011,6 +14025,17 @@ let dpAsTables = (() => {
   }
 })();
 let dpA11yFocus = null; // {stmt, series, x} — the mark ({stmt, chart}: the chart) to refocus after a re-run
+// #401: does this dashboard's own header turn the in-page "Charts as
+// tables" bar on for every viewer (`-- @astables on`)? Off by default — a
+// viewer's own dpAsTables choice (above) is independent of this and still
+// works through the toolbar's ⋯ menu item even when this is false (no bar).
+function astablesBarOn(sql) {
+  try {
+    return JSON.parse(dashboard_meta(sql)).astables === true;
+  } catch (_) {
+    return false;
+  }
+}
 
 const CHART_KINDS = [
   [/^BARCHART|^BAR_/, "Bar chart"],
@@ -14307,12 +14332,15 @@ function chartKey(e, svg, fig) {
 }
 
 // "Charts as tables": every chart panel shows its data table instead.
+// #401: off by default — the in-page bar (.dp-astable-btn) only exists when
+// astablesBarOn() says so, but the toolbar's ⋯ menu item (#astables-toggle)
+// is always there, so the feature itself (and its remembered `dpAsTables`
+// state) is reachable even on a dashboard with no bar.
 function applyAsTables() {
   // a focused mark may just have been hidden (a re-wire alone keeps the tooltip)
   if (document.body.classList.contains("dp-as-tables") !== dpAsTables) $("dp-tip")?.classList.remove("show");
   document.body.classList.toggle("dp-as-tables", dpAsTables);
-  const btn = document.querySelector(".dp-astable-btn");
-  if (btn) btn.setAttribute("aria-pressed", String(dpAsTables));
+  for (const btn of document.querySelectorAll(".dp-astable-btn, #astables-toggle")) btn.setAttribute("aria-pressed", String(dpAsTables));
   for (const fig of document.querySelectorAll(".dash .panel")) {
     const holder = fig.querySelector(".panel-svg");
     if (!holder || !fig._dp) continue;
