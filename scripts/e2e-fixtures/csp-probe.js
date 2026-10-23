@@ -246,6 +246,63 @@ window.__e2e = {
       engine.close();
     }
   },
+  // #258 (follow-up to #200): a real cancel in the real DuckDB-Wasm
+  // Worker — no mocked connection (tests/web/lint_test.mjs's mock proves
+  // the cleanup *logic* deterministically; this proves DuckDB-Wasm itself
+  // behaves the way that logic assumes). scratchRunner's own timeoutMs
+  // races a genuinely slow query — the same cross-join shape
+  // heavyViewTimeout above already shows is cancellable in this browser
+  // within a few hundred ms. `cancelBehavior` ("real" | "false" | "throw")
+  // wraps the connection's own cancelSent() to answer the way a real one
+  // does when there's nothing left to confirm (idle, or mid-batch-fetch)
+  // or when it errors — scratchRunner's cleanup must not depend on that
+  // answer. The call must settle near timeoutMs (not after the query
+  // would finish on its own); a fresh scratchRunner call against the same
+  // pageDb right after must answer promptly; and the scratch database
+  // scratchRunner attached must be gone afterwards — not left behind for
+  // the rest of the session, which is what skipping the DETACH on an
+  // unconfirmed cancel actually did (an earlier version of this fix).
+  async scratchCancel(cancelBehavior = "real") {
+    const db =
+      cancelBehavior === "real"
+        ? pageDb
+        : {
+            connect: async () => {
+              const real = await pageDb.connect();
+              return new Proxy(real, {
+                get: (o, k) =>
+                  k === "cancelSent"
+                    ? cancelBehavior === "throw"
+                      ? async () => {
+                          throw new Error("cancel failed");
+                        }
+                      : async () => false
+                    : typeof o[k] === "function"
+                      ? o[k].bind(o)
+                      : o[k],
+              });
+            },
+          };
+    const t0 = performance.now();
+    let rejected = null;
+    try {
+      await scratchRunner(db, { timeoutMs: 200 })("SELECT count(*) AS n FROM range(200000000) a, range(1000) b");
+    } catch (e) {
+      rejected = String(e?.message || e);
+    }
+    const cancelMs = performance.now() - t0;
+    const t1 = performance.now();
+    const after = JSON.parse(await scratchRunner(pageDb, {})("SELECT 1 AS ok"));
+    const afterMs = performance.now() - t1;
+    const c = await pageDb.connect();
+    let leaked;
+    try {
+      leaked = (await c.query("SELECT CAST(count(*) AS INTEGER) AS n FROM duckdb_databases() WHERE database_name LIKE 'anofox_lint_%'")).toArray()[0].toJSON().n;
+    } finally {
+      await c.close();
+    }
+    return { rejected, cancelMs, after, afterMs, leaked };
+  },
   // H-1: the proposal preview runs in the locked engine, never on the
   // page — a legitimate proposal (reads only `sales`, which the gate
   // allows) is previewed while a spy wraps the harness's page connection;
