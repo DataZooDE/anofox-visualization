@@ -756,7 +756,6 @@ column the contract name already has, or one an option names — `x :=
 | `leverage` | `hat`, `hat_diag` |
 | `cooks_d` | `cooksd`, `cooks_distance`, `cook_d` |
 | `id` | `unique_id`, `question_id` |
-| `model_id` | `model` |
 <!-- contract-aliases:end -->
 
 So `p_t` is statsmodels' `P>|t|`, `pr_t` R's `Pr(>|t|)`, `p_unc` pingouin's

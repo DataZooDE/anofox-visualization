@@ -1450,6 +1450,19 @@ mod tests {
         assert!(e.contains("matches none"), "{e}");
     }
 
+    /// `model` is not a global `model_id` alias (#375 review): a `summary`
+    /// row that already has `model_name` (forecast's own facet key) and an
+    /// unrelated `model` column keeps its two models apart — `model` does
+    /// not rename onto `model_id` and collapse them.
+    #[test]
+    fn unrelated_model_column_does_not_collide_with_model_name() {
+        let glance = r#"[{"model":"x","model_name":"ets","metric":"mape","value":0.12},
+            {"model":"y","model_name":"arima","metric":"mape","value":0.09}]"#;
+        let svg = go("summary", glance, "{}").unwrap();
+        dump("summary_model_vs_model_name", &svg);
+        assert!(svg.contains(">ets<") && svg.contains(">arima<"), "{svg}");
+    }
+
     #[test]
     fn prediction_models_and_curves() {
         let p = r#"[{"x":1,"y":1.0,"yhat":1.1,"yhat_lower":0.8,"yhat_upper":1.4,"model_id":"ols","split":"train"},
@@ -2158,6 +2171,17 @@ mod tests {
         dump("assignment_with_nulls", &svg);
         assert!(svg.contains("data-warnings"), "{svg}");
         assert!(svg.contains("1 row with a NULL `bin` dropped"), "{svg}");
+
+        // Review of #375 round 2: a dropped NULL-bin row's own (different)
+        // capacity must not flip an otherwise-constant table to points —
+        // the constant/varying decision is made over the kept rows.
+        const NULL_BIN_DIFFERENT_CAPACITY: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":1,"item":"b","size":4,"capacity":10},
+            {"bin":null,"item":"z","size":1,"capacity":999}]"#;
+        let svg = go("assignment", NULL_BIN_DIFFERENT_CAPACITY, "{}").unwrap();
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(!svg.contains("data-geom=\"point\""), "{svg}");
     }
 
     #[test]

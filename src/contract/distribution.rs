@@ -6,12 +6,14 @@
 //! `u.key` does not parse — `u` is the unnest's own column, not a struct —
 //! so the unnest needs its own column alias, `u(e)`, one level in):
 //! `SELECT t.question_id AS id, u.e.key AS option, u.e.value AS probability
-//! FROM t, unnest(map_entries(t.distribution)) AS u(e)`. `question_id` and
-//! `model` (decide's own spellings) are read as `id` / `model_id`, so the
-//! bridge can skip the `AS id` / a `model_id` rename too. Drawn as bars per
-//! option (one `id`), or a 100% stacked bar per `id` (several ids,
-//! `::CATEGORY` = option) — several `model_id`s are faceted (`::FACET`) to
-//! compare models.
+//! FROM t, unnest(map_entries(t.distribution)) AS u(e)`. `question_id` is
+//! read as `id` (a global contract alias); `model` (decide's own spelling)
+//! is read as the model key by this schema specifically, after `model_id` /
+//! `model_name` — not a global alias, since `model` is too generic a name
+//! to rename everywhere (see [`model_key`]). So the bridge can skip the `AS
+//! id` / a model rename too. Drawn as bars per option (one `id`), or a 100%
+//! stacked bar per `id` (several ids, `::CATEGORY` = option) — several
+//! `model_id`s are faceted (`::FACET`) to compare models.
 //!
 //! The several-ids stack is percent-normalised (`::BARCHART_STACKED_PERCENT`)
 //! rather than a plain stack on a fixed 0..1 axis: the role renderer has no
@@ -31,6 +33,17 @@ use ggplot_rs::prelude::Value;
 /// says so, but the chart still draws (it is more useful squeezed than not
 /// drawn at all).
 const MANY_IDS_WARN: usize = 40;
+
+/// `model_id`, else `model_name`, else anofox-decide's own `model` column —
+/// kept local to this schema, not the shared contract-wide alias table:
+/// `model` is too generic a name to rename globally (a table that also
+/// carries `model_name`, e.g. forecast's own facet key, would have an
+/// unrelated `model` column collide with it — #375 review).
+fn model_key(t: &Table) -> Option<&'static str> {
+    ["model_id", "model_name", "model"]
+        .into_iter()
+        .find(|k| t.has(k))
+}
 
 /// `anofox_plot_distribution(tbl)`: see the module docs.
 pub(super) fn columns(t: &Table) -> Result<(Vec<Column>, Vec<String>), String> {
@@ -89,7 +102,7 @@ pub(super) fn columns(t: &Table) -> Result<(Vec<Column>, Vec<String>), String> {
             Column::new("probability", Role::Value(Kind::Bar), gather(&prob_v)),
         ]
     };
-    if let Some(m) = t.model_key().filter(|m| t.distinct(m) > 1) {
+    if let Some(m) = model_key(t).filter(|m| t.distinct(m) > 1) {
         cols.push(Column::new(m, Role::Facet, gather(&t.text(m))));
     }
     Ok((cols, warnings))
@@ -150,6 +163,32 @@ mod tests {
         let (cols, _) = columns(&t).unwrap();
         let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
         assert_eq!(facet.name, "model_id");
+    }
+
+    /// `model` (anofox-decide's own spelling) is read as the facet key —
+    /// but only as a last resort, after `model_id` and `model_name` (#375
+    /// review: it is a schema-local fallback, not a global alias, so it
+    /// never shadows a real `model_id` / `model_name`).
+    #[test]
+    fn model_is_read_as_a_fallback_facet_key() {
+        let r = rows(
+            r#"[{"model":"stub","id":"q1","option":"yes","probability":0.7},
+                {"model":"laya","id":"q1","option":"yes","probability":0.6}]"#,
+        );
+        let t = table(&r);
+        let (cols, _) = columns(&t).unwrap();
+        let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
+        assert_eq!(facet.name, "model");
+
+        // model_id present too: it wins over model, as it always did.
+        let r2 = rows(
+            r#"[{"model":"x","model_id":"stub","id":"q1","option":"yes","probability":0.7},
+                {"model":"y","model_id":"laya","id":"q1","option":"yes","probability":0.6}]"#,
+        );
+        let t2 = table(&r2);
+        let (cols2, _) = columns(&t2).unwrap();
+        let facet2 = cols2.iter().find(|c| c.role == Role::Facet).unwrap();
+        assert_eq!(facet2.name, "model_id");
     }
 
     #[test]

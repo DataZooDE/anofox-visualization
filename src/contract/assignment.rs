@@ -318,4 +318,31 @@ mod tests {
         assert_eq!(cap.role, Role::RefLine);
         assert_eq!(cap.values.len(), 2);
     }
+
+    /// #375 review: a NULL-bin row (dropped) with a *different* capacity
+    /// from every surviving row must not count — the capacity column only
+    /// ever carries the kept rows' values, so `contract::take_refs`'s
+    /// constant-vs-varying decision (made over this column, not the raw
+    /// table) sees a single value, not two.
+    #[test]
+    fn a_dropped_null_bin_rows_capacity_does_not_count() {
+        let r = rows(
+            r#"[{"bin":1,"item":"a","size":3,"capacity":10},
+                {"bin":1,"item":"b","size":4,"capacity":10},
+                {"bin":null,"item":"z","size":1,"capacity":999}]"#,
+        );
+        let t = table(&r);
+        let (cols, warnings) = columns(&t, &Row::new()).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let cap = cols
+            .iter()
+            .find(|c| c.name == "capacity")
+            .expect("a capacity column");
+        assert_eq!(cap.values.len(), 2, "only the two kept rows");
+        assert!(
+            cap.values.iter().all(|v| v.as_f64() == Some(10.0)),
+            "the dropped row's 999 must not appear: {:?}",
+            cap.values
+        );
+    }
 }
