@@ -567,3 +567,13 @@ body.dp-static .controls select{margin-left:.3rem}
 /* a drill-through to another served dashboard (/d/<id>) cross-fades instead
    of flashing white, where the browser has cross-document view transitions */
 @media (prefers-reduced-motion: no-preference){@view-transition{navigation:auto}}
+
+/* ---- fit-to-screen (::FIT, #400): a fitted panel's height is set by
+   fitScreen() in web/app.js; a chart is redrawn at it, a table / text box
+   scrolls inside it ---- */
+body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
+.panel.dp-fit,.panel.dp-fit-scroll{box-sizing:border-box}
+.panel.dp-fit{overflow:hidden}
+.panel.dp-fit-scroll{overflow:auto}
+.dp-fit-note{position:fixed;right:16px;bottom:16px;z-index:70;display:flex;gap:.5rem;align-items:center;max-width:min(360px,calc(100vw - 32px));padding:.45rem .5rem .45rem .8rem;border-radius:10px;background:var(--ax-card);color:var(--ax-muted);border:1px solid var(--ax-line);box-shadow:var(--ax-shadow);font-size:.8rem;line-height:1.35}
+.dp-fit-note-x{background:none;border:0;box-shadow:none;color:inherit;font-size:1.05rem;line-height:1;padding:.1rem .3rem;cursor:pointer}

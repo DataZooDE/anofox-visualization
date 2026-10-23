@@ -29,7 +29,8 @@ for (let i = start; i < src.length; i++) {
   }
 }
 assert.ok(end > start, "wireTabs's body braces did not balance");
-const { wireTabs } = new Function(`${src.slice(start, end)}\nreturn { wireTabs };`)();
+// wireTabs calls the snapshot's refit() (#400 ::FIT) after a switch: a no-op here.
+const { wireTabs } = new Function(`function refit() {}\n${src.slice(start, end)}\nreturn { wireTabs };`)();
 
 // A fake button: classList + addEventListener/_fire (the test's stand-in for
 // a real click), nothing more — wireTabs never reads anything else off it.

@@ -270,6 +270,15 @@ jobs:
       - name: Sub-tabs export e2e (every ::TAB / ::SUBTAB page in the downloaded HTML)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/subtabs-export-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/fit-e2e.mjs (#400): a 'fit'::FIT tab fills the window with no
+      # page scroll at 1920x1080 / 1366x768 / 3840x2160, its charts redrawn
+      # at their fitted pixel size (not stretched); a tab without ::FIT, an
+      # overloaded ::FIT tab (fallback + notice), ?fit=0 / ?fit=1, a resize
+      # and a cross-filter re-run — reuses the :8947 server and Chromium above.
+      - name: Fit-to-screen e2e (::FIT tabs)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

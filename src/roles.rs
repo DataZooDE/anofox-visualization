@@ -355,6 +355,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
     e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
       "close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it)"),
+    e("FIT", &["FIT_SCREEN"], R::Fit, "layout", false,
+      "this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide)"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
     e("TRACK", &["STRIP_BELOW", "STRIP_UNDER"], R::Track, "layout", true,
       "a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar"),
@@ -518,6 +520,7 @@ pub fn roles_json() -> String {
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::View | Role::ViewEnd
+                | Role::Fit
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -638,9 +641,23 @@ mod tests {
             "DRILL",
             "VIEW",
             "ENDVIEW",
+            "FIT",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
+    }
+
+    #[test]
+    fn fit_is_a_registered_layout_directive() {
+        // #400: `'fit'::FIT` (alias ::FIT_SCREEN) is a non-rendering layout
+        // directive the browser matches on, like ::TAB / ::HEIGHT.
+        let s = lookup("FIT").expect("::FIT registered");
+        assert_eq!(s.role, Role::Fit);
+        assert_eq!(s.category, "layout");
+        assert!(!s.renders);
+        assert_eq!(parse_role("fit_screen"), Some(Role::Fit));
+        assert_eq!(Role::Fit.token(), "FIT");
+        assert!(is_directive_panel(&[(0, Role::Fit)]));
     }
 
     #[test]
@@ -786,6 +803,7 @@ mod tests {
             Role::SubTab,
             Role::View,
             Role::ViewEnd,
+            Role::Fit,
             Role::Size,
             Role::YFormat,
             Role::XFormat,
@@ -914,6 +932,7 @@ mod tests {
                 | Role::SubTab
                 | Role::View
                 | Role::ViewEnd
+                | Role::Fit
                 | Role::Size
                 | Role::YFormat
                 | Role::XFormat

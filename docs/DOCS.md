@@ -207,6 +207,7 @@ terminal.
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
+| `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
 | `::TRACK` | `::STRIP_BELOW`, `::STRIP_UNDER` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
@@ -1965,6 +1966,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
+| `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -1986,6 +1988,65 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Fit to screen (`::FIT`)
+
+A wall display or a one-screen overview should not scroll. `SELECT 'fit'::FIT;`
+right after a `::TAB` makes **that** tab fill the browser window while it is
+the one shown, with no page scroll; other tabs scroll as usual. With no tabs at
+all, a `::FIT` anywhere fits the whole dashboard (a `::FIT` before the first
+`::TAB` of a tabbed dashboard fits every tab — `layout/fit-ambiguous` warns).
+
+In a `::SUBTAB` or a `::VIEW` alternative, `::FIT` fits **only that pane's own
+panels**: they share the window height under the app bar and the sub-tab /
+view bar. The parent tab's panels above the bar keep their normal height and
+are not counted; the page may scroll to bring the fitted sub-tab / view into
+view, and once there all of its panels are on screen.
+
+```sql
+SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;                       -- this tab fills the window, no page scroll
+SELECT count(*)::METRIC, 'Orders'::LABEL FROM orders;
+SELECT sum(amount)::MONEY, 'Revenue'::LABEL FROM orders;
+SELECT region::XAXIS, sum(amount)::BARCHART FROM orders GROUP BY ALL;
+SELECT 360::HEIGHT;
+SELECT day::XAXIS, sum(amount)::LINECHART FROM orders GROUP BY ALL;
+
+SELECT 'Details'::TAB;                   -- no ::FIT: scrolls as before
+SELECT * ::TABLE FROM orders;
+```
+
+- The height under the app bar and the tab bar is measured, and the rows of
+  panels share it **in the ratio of their heights** (`::HEIGHT`, else the
+  default) — a `360::HEIGHT` row stays taller than a default one.
+- Charts are **drawn again at their new size** (text and lines stay their real
+  size, nothing is stretched); a resize, a rotation, entering full screen and
+  switching tabs re-fit (cross-filtering keeps the fitted sizes).
+- Tables, `::PAGED` tables and text boxes keep their content and **scroll
+  inside their panel**; KPI tiles keep at least ~96 px.
+- If a panel would get under ~120 px the tab scrolls as usual and a small
+  notice says so — `dashboard --check` warns about this ahead of time
+  (`layout/fit-too-many`, judged at 1366×768; for a sub-tab / view only its own panels under its own bar), and about a `::FIT` whose
+  scope is unclear (`layout/fit-ambiguous`: before the first `::TAB` of a
+  tabbed dashboard, twice for one tab, or cast beside a panel's columns).
+- **URL override** (kiosk screens): `?fit=1` fits the shown tab even without
+  `::FIT`; `?fit=0` never fits.
+- Phones (narrower than 600 px) ignore `::FIT` and `?fit=1`: the usual single
+  scrolling column.
+- **Downloaded HTML** (⤓ HTML): the file fits itself the same way on load, on
+  resize and on a tab switch. It has no chart engine, so instead of drawing a
+  chart again it **scales the already drawn SVG** to its fitted panel (its
+  `viewBox` with a new height: crisp and undistorted, centred where the shape
+  differs; text and lines grow or shrink with the chart rather than keeping
+  their size).
+- **Pages without the app** (`dashboard <file.sql> out.html`, the script-free
+  page of `serve --dashboards`): CSS only, best-effort. A `::FIT` that applies
+  to the whole dashboard (no `::TAB` / `::SUBTAB`, not inside a `::VIEW`) makes
+  the page the window tall, with the panels in **equal rows** (not in their
+  `::HEIGHT` ratio) of at least 120 px, each SVG scaled into its panel. With
+  more rows than fit, the page scrolls. These pages show every tab on one
+  page, so a tab's, sub-tab's or view's `::FIT` is ignored there. `dashboard
+  --svg` draws one fixed-size image: `::FIT` has no effect.
 
 ### Alternative views of one panel (`::VIEW`)
 
