@@ -177,8 +177,12 @@ fn render_plot(
     // `extra_warnings`: text the column-building step wants on `data-warnings`
     // (dropped rows, a chart shape adapted to the data) alongside whatever
     // the plotting engine itself reports (empty for every plot but
-    // `assignment` / `distribution` today).
-    let (cols, extra_warnings) = match name {
+    // `assignment` / `distribution` today). `marks`: explicit per-x quiet
+    // markers a schema hands over directly (only `assignment`'s capacity
+    // today, see `assignment::Marks`) — never inferred from a `RefLine`
+    // column's value count, which keeps meaning "shared line(s)" for every
+    // other schema.
+    let (cols, extra_warnings, marks) = match name {
         "terms" => return direct(&|| terms::terms(&t, options, w, h, o, place)),
         "prediction" => return direct(&|| stats::prediction(&t, options, w, h, o, place)),
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
@@ -190,7 +194,7 @@ fn render_plot(
             ty @ ("acf" | "pacf") => {
                 return direct(&|| curves::acf(&t, ty, options, w, h, o, place))
             }
-            _ => curve(&t).map(|c| (c, Vec::new())),
+            _ => curve(&t).map(|c| (c, Vec::new(), None)),
         },
         "summary" => return direct(&|| stats::summary(&t, options, w, h, o, place)),
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
@@ -208,10 +212,10 @@ fn render_plot(
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
         "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
         "assignment" => assignment::columns(&t, options),
-        "distribution" => distribution::columns(&t),
+        "distribution" => distribution::columns(&t).map(|(c, w)| (c, w, None)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
-            obs(&t, &kind, label_top(options)).map(|c| (c, Vec::new()))
+            obs(&t, &kind, label_top(options)).map(|c| (c, Vec::new(), None))
         }
         "diagnostics" => {
             return crate::guard(|| {
@@ -234,7 +238,11 @@ fn render_plot(
         },
         _ => axis_labels(&cols),
     };
-    let refs = take_refs(&cols);
+    let mut refs = take_refs(&cols);
+    if let Some((mname, pairs)) = marks {
+        refs.marks = pairs;
+        refs.marks_name = mname;
+    }
     let cols: Vec<Column> = cols
         .into_iter()
         .filter(|c| !matches!(c.role, Role::RefLine | Role::Identity))
@@ -275,11 +283,13 @@ struct Refs {
     sym_y: Option<(f64, f64)>,
     /// Text above stem tips (Cook's index plot): (x, y, text).
     tips: Vec<(f64, f64, String)>,
-    /// A RefLine that is not one shared value: (x, y) markers, one per x
-    /// (e.g. `assignment`'s capacity when it varies by bin/model) — a
-    /// single hline would misstate most of them, so each x's own value
-    /// draws as a quiet point instead, named by `marks_name` (a caption,
-    /// since it has no legend entry).
+    /// Per-x quiet markers, set directly by a schema that needs them (only
+    /// `assignment`'s capacity today — see
+    /// [`assignment::varying_capacity_marks`]), never inferred from a
+    /// `RefLine` column's value count: `RefLine` keeps meaning "one or more
+    /// *shared* horizontal lines" for every other schema (Cook's cut-offs,
+    /// several thresholds, …), which must stay lines even when there is more
+    /// than one of them.
     marks: Vec<(Value, f64)>,
     marks_name: String,
 }
@@ -289,44 +299,8 @@ fn take_refs(cols: &[Column]) -> Refs {
     for c in cols {
         match c.role {
             Role::RefLine => {
-                let mut distinct: Vec<f64> = Vec::new();
                 for v in &c.values {
                     if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
-                        if !distinct.iter().any(|x: &f64| (x - f).abs() < 1e-12) {
-                            distinct.push(f);
-                        }
-                    }
-                }
-                let xs = cols.iter().find(|c| c.role == Role::X);
-                if distinct.len() > 1 {
-                    if let Some(xs) = xs {
-                        for (i, v) in c.values.iter().enumerate() {
-                            let (Some(f), Some(xv)) =
-                                (v.as_f64().filter(|f| f.is_finite()), xs.values.get(i))
-                            else {
-                                continue;
-                            };
-                            if !r
-                                .marks
-                                .iter()
-                                .any(|(mx, my): &(Value, f64)| mx == xv && (my - f).abs() < 1e-12)
-                            {
-                                r.marks.push((xv.clone(), f));
-                            }
-                        }
-                        r.marks_name = c.name.clone();
-                    } else {
-                        // No x to key a marker by: fall back to the old,
-                        // if-misleading, shared-lines behaviour rather than
-                        // silently dropping the reference.
-                        for f in distinct {
-                            if !r.h.iter().any(|x| (x - f).abs() < 1e-12) {
-                                r.h.push(f);
-                            }
-                        }
-                    }
-                } else {
-                    for f in distinct {
                         if !r.h.iter().any(|x| (x - f).abs() < 1e-12) {
                             r.h.push(f);
                         }

@@ -11,14 +11,16 @@
 //! that axis, so it is dropped; the count is reported as a data-warning.
 //! `item` may be NULL (it still stacks, as its own unlabelled segment).
 //!
-//! Capacity: always a `::REFLINE` column; one value for the whole table
-//! draws once, as a quiet reference line. Several values (it varies by bin
-//! and/or model) would make one shared line misleading, so
-//! `contract::take_refs`/`tweak` draw each row's own capacity as a quiet
-//! point at its own bin instead — in the reference colour (never a palette
-//! slot `::CATEGORY` is already using) and named by a caption, since it has
-//! no legend entry. Still an existing role (`::REFLINE`) and ggplot-rs's own
-//! point geom; no hand-written SVG.
+//! Capacity: a value shared by every (kept) row draws once, as a quiet
+//! `::REFLINE`. One that varies by bin and/or model would make a shared
+//! line misleading, so this module hands `contract::render_plot` explicit
+//! per-bin markers instead (returned alongside the columns, not inferred
+//! from a `RefLine` column's value count — that count means something
+//! different for other schemas, e.g. several threshold lines, which must
+//! stay lines): a quiet point per bin, in the reference colour (never a
+//! palette slot `::CATEGORY` is already using), named by a caption since it
+//! has no legend entry. Still ggplot-rs's own point geom (drawn in
+//! `contract::tweak`); no hand-written SVG.
 
 use super::{opt_str, Row, Table};
 use crate::{Column, Kind, Role};
@@ -93,8 +95,18 @@ fn ordered_rows(t: &Table, key: &str) -> (Vec<usize>, Vec<String>, usize) {
     (kept, labels, dropped)
 }
 
-/// `anofox_plot_assignment(tbl)`: see the module docs.
-pub(super) fn columns(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<String>), String> {
+/// Per-x markers for `contract::Refs::marks` (named by [`columns`]'s doc):
+/// one quiet point per bin — `(x label, y)`, deduped by label, in bin order.
+pub(super) type Marks = (String, Vec<(Value, f64)>);
+
+/// [`columns`]'s return: the role columns, any data-warnings, and —
+/// `Some(("capacity", marks))` exactly when capacity varies across the kept
+/// rows — the per-bin markers `contract::render_plot` draws instead of
+/// relying on `Refs::marks` being inferred from a `RefLine` column.
+pub(super) type Columns = (Vec<Column>, Vec<String>, Option<Marks>);
+
+/// `anofox_plot_assignment(tbl)`: see the module docs and [`Columns`].
+pub(super) fn columns(t: &Table, options: &Row) -> Result<Columns, String> {
     let key = opt_str(options, "x")
         .or_else(|| KEYS.iter().find(|k| t.has(k)).map(|k| k.to_string()))
         .ok_or_else(|| {
@@ -125,27 +137,50 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<Stri
         Column::new(
             key.as_str(),
             Role::X,
-            labels.into_iter().map(Value::Str).collect(),
+            labels.iter().cloned().map(Value::Str).collect(),
         ),
         Column::new("item", Role::Category, gather(&item_v)),
         Column::new("size", Role::Value(Kind::BarStacked), gather(&size_v)),
     ];
 
+    // A value shared by every kept row draws once, as a quiet reference
+    // line; one that varies draws as a marker per bin instead (see the
+    // module doc) — decided here, over the kept (`order`-filtered) rows
+    // only, so a dropped row's own capacity never counts (#375 review).
+    let mut marks = None;
     if t.has("capacity") {
-        // A shared value draws once, as a quiet reference line; one that
-        // varies by bin/model draws as a quiet marker per bin instead (both
-        // in contract.rs's shared `take_refs`/`tweak`, which already knows
-        // the x each row belongs to — see its doc comment on `Refs::marks`).
-        cols.push(Column::new(
-            "capacity",
-            Role::RefLine,
-            gather(&t.num("capacity")?),
-        ));
+        let cap = gather(&t.num("capacity")?);
+        let mut distinct: Vec<f64> = Vec::new();
+        for v in &cap {
+            if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
+                if !distinct.iter().any(|x: &f64| (x - f).abs() < 1e-12) {
+                    distinct.push(f);
+                }
+            }
+        }
+        if distinct.len() == 1 {
+            cols.push(Column::new("capacity", Role::RefLine, cap));
+        } else if distinct.len() > 1 {
+            let mut pairs: Vec<(Value, f64)> = Vec::new();
+            for (label, v) in labels.iter().zip(&cap) {
+                let Some(f) = v.as_f64().filter(|f| f.is_finite()) else {
+                    continue;
+                };
+                let xv = Value::Str(label.clone());
+                if !pairs
+                    .iter()
+                    .any(|(mx, my): &(Value, f64)| *mx == xv && (my - f).abs() < 1e-12)
+                {
+                    pairs.push((xv, f));
+                }
+            }
+            marks = Some(("capacity".to_string(), pairs));
+        }
     }
     if let Some(m) = t.model_key().filter(|m| t.distinct(m) > 1) {
         cols.push(Column::new(m, Role::Facet, gather(&t.text(m))));
     }
-    Ok((cols, warnings))
+    Ok((cols, warnings, marks))
 }
 
 #[cfg(test)]
@@ -168,7 +203,7 @@ mod tests {
                 {"bin":2,"item":"c","size":6,"capacity":10}]"#,
         );
         let t = table(&r);
-        let (cols, warnings) = columns(&t, &Row::new()).unwrap();
+        let (cols, warnings, _) = columns(&t, &Row::new()).unwrap();
         assert_eq!(cols[0].name, "bin");
         assert_eq!(cols[0].role, Role::X);
         assert_eq!(cols[1].role, Role::Category);
@@ -186,7 +221,7 @@ mod tests {
                 {"model_id":"best_of","wave":1,"item":"a","size":2}]"#,
         );
         let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
         assert_eq!(cols[0].name, "wave");
         let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
         assert_eq!(facet.name, "model_id");
@@ -196,7 +231,7 @@ mod tests {
     fn single_model_is_not_faceted() {
         let r = rows(r#"[{"model_id":"as_given","bin":1,"item":"a","size":3}]"#);
         let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
         assert!(cols.iter().all(|c| c.role != Role::Facet));
     }
 
@@ -220,7 +255,7 @@ mod tests {
                 {"bin":0,"item":"z","size":1}]"#,
         );
         let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
         let x = &cols[0];
         let labels: Vec<String> = x
             .values
@@ -242,7 +277,7 @@ mod tests {
                 {"wave":"W1","item":"c","size":1}]"#,
         );
         let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
         let labels: Vec<String> = cols[0]
             .values
             .iter()
@@ -265,7 +300,7 @@ mod tests {
                 {"bin":1,"item":null,"size":2}]"#,
         );
         let t = table(&r);
-        let (cols, warnings) = columns(&t, &Row::new()).unwrap();
+        let (cols, warnings, _) = columns(&t, &Row::new()).unwrap();
         assert_eq!(cols[2].values.len(), 2, "the NULL-bin row was dropped");
         assert_eq!(warnings.len(), 1);
         assert!(
@@ -304,26 +339,47 @@ mod tests {
     /// both cases are covered at the render level
     /// (`assignment_bin_order_capacity_and_nulls` in `contract.rs`).
     #[test]
-    fn capacity_is_always_a_refline_column_one_value_per_row() {
+    fn constant_capacity_is_a_refline_column_no_marks() {
         let r = rows(
             r#"[{"bin":1,"item":"a","size":3,"capacity":10},
-                {"bin":2,"item":"b","size":4,"capacity":20}]"#,
+                {"bin":2,"item":"b","size":4,"capacity":10}]"#,
         );
         let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
+        let (cols, _, marks) = columns(&t, &Row::new()).unwrap();
         let cap = cols
             .iter()
             .find(|c| c.name == "capacity")
             .expect("a capacity column");
         assert_eq!(cap.role, Role::RefLine);
         assert_eq!(cap.values.len(), 2);
+        assert!(marks.is_none());
+    }
+
+    /// A capacity that varies across the kept rows is returned as explicit
+    /// marks (not a `RefLine` column): one `(x, y)` pair per bin, deduped.
+    #[test]
+    fn varying_capacity_is_returned_as_explicit_marks() {
+        let r = rows(
+            r#"[{"bin":1,"item":"a","size":3,"capacity":10},
+                {"bin":2,"item":"b","size":4,"capacity":20}]"#,
+        );
+        let t = table(&r);
+        let (cols, _, marks) = columns(&t, &Row::new()).unwrap();
+        assert!(
+            cols.iter().all(|c| c.name != "capacity"),
+            "a capacity column should not exist when it varies",
+        );
+        let (name, pairs) = marks.expect("marks when capacity varies");
+        assert_eq!(name, "capacity");
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(Value::Str("1".into()), 10.0)));
+        assert!(pairs.contains(&(Value::Str("2".into()), 20.0)));
     }
 
     /// #375 review: a NULL-bin row (dropped) with a *different* capacity
     /// from every surviving row must not count — the capacity column only
-    /// ever carries the kept rows' values, so `contract::take_refs`'s
-    /// constant-vs-varying decision (made over this column, not the raw
-    /// table) sees a single value, not two.
+    /// ever carries the kept rows' values, so a table that is constant among
+    /// the kept rows stays a single RefLine, not marks.
     #[test]
     fn a_dropped_null_bin_rows_capacity_does_not_count() {
         let r = rows(
@@ -332,8 +388,9 @@ mod tests {
                 {"bin":null,"item":"z","size":1,"capacity":999}]"#,
         );
         let t = table(&r);
-        let (cols, warnings) = columns(&t, &Row::new()).unwrap();
+        let (cols, warnings, marks) = columns(&t, &Row::new()).unwrap();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(marks.is_none(), "{marks:?}");
         let cap = cols
             .iter()
             .find(|c| c.name == "capacity")
