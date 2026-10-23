@@ -58,6 +58,61 @@ pub fn json_for_script(v: &serde_json::Value) -> String {
 
 /// A random 128-bit hex token. Seeded from the OS (std's `RandomState` keys are
 /// drawn from the platform CSPRNG), mixed with time + a counter, so no extra
+/// The pages' Content-Security-Policy (#252), as a response header: the
+/// policy of `assistCsp()` (web/assist-csp.js) with `'self'` for the app's
+/// own files, plus a per-response nonce for the server's own inline
+/// `<script>`s and `frame-ancestors`. `base-uri 'self'`: the dashboard page
+/// sets `<base href="/">`. `form-action 'self'`: sign-out and the
+/// script-free pages' parameter forms post to the server itself. `img-src
+/// https:`: a dashboard's images and the app logo are the author's (unlike
+/// the assistant's preview, whose CSP stays exact).
+pub fn page_csp(nonce: &str, frame_ancestors: &str) -> String {
+    let mut p = format!(
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' {CDN_DUCKDB_WASM} {CDN_KATEX}; \
+         worker-src blob:; connect-src 'self' {CDN_DUCKDB_WASM} {DUCKDB_EXT} {USGS}; img-src 'self' data: blob: https:; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {CDN_KATEX}; \
+         font-src 'self' data: https://fonts.gstatic.com {CDN_KATEX}; manifest-src 'self'; media-src 'none'; \
+         object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'"
+    );
+    if !frame_ancestors.is_empty() {
+        p.push_str("; frame-ancestors ");
+        p.push_str(frame_ancestors);
+    }
+    p
+}
+
+// The third-party origins of `assistCsp()` (web/assist-csp.js; a test keeps
+// them equal).
+pub const CDN_DUCKDB_WASM: &str =
+    "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/";
+pub const CDN_KATEX: &str = "https://cdn.jsdelivr.net/npm/katex@0.19.0/";
+pub const DUCKDB_EXT: &str = "https://extensions.duckdb.org/v1.5.6/";
+pub const USGS: &str = "https://earthquake.usgs.gov/earthquakes/feed/";
+
+/// `https://host[:port]`, `'self'` or `'none'`.
+pub fn valid_frame_ancestor(o: &str) -> bool {
+    o == "'self'"
+        || o == "'none'"
+        || o.strip_prefix("https://").is_some_and(|h| {
+            !h.is_empty()
+                && h.split_once(':')
+                    .is_none_or(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                && h.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b))
+        })
+}
+
+/// `html` with a fresh nonce on its bare inline `<script>`s, and the CSP
+/// header that allows them (#252). Only the server's own inline scripts are a
+/// bare `<script>`: viewer and dashboard text is escaped
+/// ([`json_for_script`], XML escaping), external scripts carry `src`.
+#[cfg(feature = "auth")]
+pub fn csp_page(html: &str, frame_ancestors: &str) -> (String, String) {
+    let nonce = super::auth::session::random_b64(18);
+    let body = html.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
+    (body, page_csp(&nonce, frame_ancestors))
+}
+
 /// dependency is needed. On unix `/dev/urandom` is preferred when readable.
 pub fn random_token() -> String {
     #[cfg(unix)]
@@ -1260,6 +1315,22 @@ fn contains_from_stdin(lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csp_origins_match_assist_csp() {
+        let js = include_str!("../../web/assist-csp.js");
+        for (name, v) in [
+            ("DUCKDB_WASM", super::CDN_DUCKDB_WASM),
+            ("KATEX", super::CDN_KATEX),
+            ("DUCKDB_EXT", super::DUCKDB_EXT),
+            ("USGS", super::USGS),
+        ] {
+            assert!(
+                js.contains(&format!("export const {name} = \"{v}\";")),
+                "{name} differs from web/assist-csp.js"
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 
