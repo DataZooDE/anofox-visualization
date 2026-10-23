@@ -312,9 +312,9 @@ dependencies = [
 
 [[package]]
 name = "ggplot-rs"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a256941868826ec426556037d919c6a5f132aefd0a99cbf534023f339ccf6d"
+checksum = "d942df14979713a17d581913d7202d677d4fc5ecc911915cf75ba7844a26f88a"
 dependencies = [
  "indexmap",
 ]

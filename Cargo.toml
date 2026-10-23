@@ -54,8 +54,20 @@ crate-type = ["cdylib", "rlib"]
 # `PositionParams` gained `group_order` (breaking for struct-literal
 # builders; we use `..Default::default()`). `guide::legend::draw_legend`
 # is deprecated, unused by us.
+# 0.24.0: `geom_col()`/`geom_area()` now default to `position_stack()`
+# (ggplot2 parity, #169) — plain (non-dodged, non-stacked) bar/area roles
+# that can have more than one group at a shared x now set
+# `.position(PositionIdentity)` explicitly to keep the old overlap look
+# (see `cartesian`'s `Kind::Bar | Kind::BarPercent` and `Kind::Area`
+# arms); `position_stack`/`position_fill` also skip a missing y (counts
+# as 0) instead of treating it as 0.0 and drawing a real point — no
+# effect here, since GeomCol/GeomArea already drop NaN rows before this
+# stage. Plus a vertical legend's ncol-reduction panel-width reclaim and
+# a bottom/top legend sharing width with a colourbar — neither reachable
+# here (no `Left`/`Right` legend, no simultaneous colourbar + discrete
+# guide on one plot).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.23.0", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.24.0", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
